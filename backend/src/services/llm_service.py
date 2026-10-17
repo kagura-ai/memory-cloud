@@ -12,6 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,8 +34,24 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Where a credential came from (#2019): ``"stored"`` = an ``external_api_keys``
+# row, ``"env"`` = the platform env / settings value.
+KeySource = Literal["stored", "env"]
+
+
 class LLMServiceError(Exception):
-    """Error from LLM service (parse failure, API error, etc.)."""
+    """Error from LLM service (parse failure, API error, etc.).
+
+    ``usage`` (#2019) carries the tokens the failed call still spent — set when
+    at least one attempt got an answer back (a response that would not parse,
+    then a second unparseable answer or an API error on the retry), ``None``
+    when no attempt answered. A cost ledger records it so a failed call's
+    spend is not lost; ``parsed`` is ``{}`` on it.
+    """
+
+    def __init__(self, message: str, *, usage: LLMResponse | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,24 @@ class LLMService:
         self.db = db
         self._self_hosted_provider: SelfHostedProvider | None = None
         self._last_self_hosted_base_url: str | None = None
+        # #2019: where the most recent provider resolution took its credential
+        # (``"stored"`` = an ``external_api_keys`` row, ``"env"`` = the
+        # platform env / settings value). ``resolve_paid_by`` maps it to the
+        # ledger's ``paid_by``, the way ``EmbeddingService._last_key_source``
+        # does. One instance per call site, so it is never shared across
+        # concurrent calls.
+        self._last_key_source: KeySource | None = None
+
+    def resolve_paid_by(self) -> str:
+        """``llm_call_log.paid_by`` for the most recent call (#2019).
+
+        ``"byok"`` when the call used a stored workspace / context key (for
+        ``self_hosted``: a stored base URL — the workspace's own server);
+        ``"platform"`` when it used the platform env / settings credential,
+        including the #1569 managed lane (``platform_only``), which never
+        reads stored keys, and before any call was made.
+        """
+        return "byok" if self._last_key_source == "stored" else "platform"
 
     # -- public API --------------------------------------------------------
 
@@ -236,6 +271,7 @@ class LLMService:
 
         # Retry with higher temperature (no-op on reasoning models that
         # only accept default — the provider omits temperature internally).
+        retry_usage: Usage | None = None
         try:
             response = await provider_instance.complete_json(
                 prompt=prompt,
@@ -263,11 +299,27 @@ class LLMService:
 
         except json.JSONDecodeError as e:
             raise LLMServiceError(
-                f"LLM JSON parse failed after retry ({resolved_provider}/{resolved_model}): {e}"
+                f"LLM JSON parse failed after retry ({resolved_provider}/{resolved_model}): {e}",
+                usage=self._build_response(
+                    parsed={},
+                    first=first_usage,
+                    retry=retry_usage,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                ),
             ) from e
         except Exception as e:
+            # The first attempt answered (unparseable) and was billed; the
+            # retry did not answer, so only the first attempt's usage counts.
             raise LLMServiceError(
-                f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}"
+                f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}",
+                usage=self._build_response(
+                    parsed={},
+                    first=first_usage,
+                    retry=None,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                ),
             ) from e
 
     async def list_models(
@@ -410,6 +462,10 @@ class LLMService:
         _check_key_resolution_flags(
             disallow_env_fallback=disallow_env_fallback, platform_only=platform_only
         )
+        # #2019: the source is recorded only once the credential this call
+        # will actually use is chosen; a resolution that raises leaves no
+        # stale label from an earlier call.
+        self._last_key_source = None
         provider_cls = _PROVIDERS.get(provider_name)
         if provider_cls is None:
             raise ConfigurationError(
@@ -422,14 +478,19 @@ class LLMService:
             # unless the platform lane (#1569) or RESOLVE_STORED_BYOK_KEYS=false
             # rules the stored row out, in which case settings alone decide.
             base_url: str | None = None
+            source: KeySource = "env"
             if not platform_only and not stored_byok_keys_disabled():
                 try:
                     # The self-hosted base URL is stored under provider="self_hosted"
                     # in ExternalAPIKey so the UI can treat it like any other
                     # external key, even though it is a URL rather than a secret.
-                    base_url = await self._get_user_api_key(
+                    resolved, resolved_source = await self._resolve_api_key(
                         user_id, "self_hosted", context_id, workspace_id
                     )
+                    # A blank stored value is not used (the fallbacks below
+                    # serve the call), so it must not label the call byok.
+                    if resolved:
+                        base_url, source = resolved, resolved_source
                 except ConfigurationError:
                     # No DB key for the self-hosted backend — fall through to
                     # env / settings below.
@@ -440,6 +501,7 @@ class LLMService:
                 from config.settings import get_settings
 
                 base_url = get_settings().self_hosted_base_url or None
+            self._last_key_source = source
 
             # Re-use the same provider instance per service so the one-time
             # _verify() health-check does not run on every request.
@@ -448,7 +510,7 @@ class LLMService:
                 self._last_self_hosted_base_url = base_url
             return self._self_hosted_provider
 
-        api_key = await self._get_user_api_key(
+        api_key, source = await self._resolve_api_key(
             user_id,
             provider_name,
             context_id,
@@ -456,6 +518,7 @@ class LLMService:
             disallow_env_fallback=disallow_env_fallback,
             platform_only=platform_only,
         )
+        self._last_key_source = source
         return provider_cls(api_key)
 
     async def _get_user_api_key(
@@ -468,7 +531,33 @@ class LLMService:
         disallow_env_fallback: bool = False,
         platform_only: bool = False,
     ) -> str:
+        """The API key alone; see :meth:`_resolve_api_key` for the contract."""
+        key, _source = await self._resolve_api_key(
+            user_id,
+            provider,
+            context_id,
+            workspace_id,
+            disallow_env_fallback=disallow_env_fallback,
+            platform_only=platform_only,
+        )
+        return key
+
+    async def _resolve_api_key(
+        self,
+        user_id: str,
+        provider: str,
+        context_id: str | None = None,
+        workspace_id: str | None = None,
+        *,
+        disallow_env_fallback: bool = False,
+        platform_only: bool = False,
+    ) -> tuple[str, KeySource]:
         """Resolve the API key for the calling user's workspace context.
+
+        Returns ``(key, source)``: ``source`` is ``"stored"`` for an
+        ``external_api_keys`` row and ``"env"`` for the environment fallback
+        (#2019). It does not record the source itself — ``_get_provider``
+        does, once it knows the value is the one the call uses.
 
         Mirrors EmbeddingService._get_user_api_key — same Issue #385 contract:
         the lookup is workspace-keyed; user_id is for audit logging only.
@@ -496,7 +585,7 @@ class LLMService:
             platform_only: Resolve the platform env credential only; see above.
 
         Returns:
-            Decrypted API key.
+            ``(decrypted API key, source)``.
 
         Raises:
             ConfigurationError: If neither a DB key nor an env var is
@@ -557,7 +646,7 @@ class LLMService:
                 context_id=context_id,
                 workspace_id=workspace_id,
             )
-            return api_key
+            return api_key, "stored"
 
         # #1242 strict BYOK: a paid feature must fail here, BEFORE the env
         # fallback below — os.getenv would silently resolve the platform's
@@ -600,7 +689,7 @@ class LLMService:
         env_key = os.getenv(env_var)
         if env_key:
             logger.debug("llm_api_key_from_env", provider=provider, user_id=user_id)
-            return env_key
+            return env_key, "env"
 
         if workspace_id:
             raise ConfigurationError(

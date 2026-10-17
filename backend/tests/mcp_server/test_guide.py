@@ -150,7 +150,7 @@ def test_every_manual_pointer_names_an_existing_topic():
         "omit month/day for fuzzy timing",
         # review follow-ups: text that left a description must stay reachable
         "BYOK Voyage/Cohere",
-        "['鯖', 'サバ', 'さば']",
+        "['鯖', 'サバ']",  # #2028: kana scripts fold, so one kana form
         "also when no live suggestion existed",
         "guardrails?",
     ],

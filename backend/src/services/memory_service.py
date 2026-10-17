@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
 from db.graph_learning_lock import try_lock_graph_learning
@@ -198,6 +198,16 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
             error=str(exc),
             exc_info=exc,
         )
+
+
+def _is_trusted_recall(request: RecallRequest) -> bool:
+    """Whether a recall runs under ``filters={"trust_tier": "trusted"}`` (#887).
+
+    The one reading of the trusted filter: the row filter, the supersede
+    resolver's connector exclusion and the selection-evidence guard all ask
+    here, so they cannot drift apart.
+    """
+    return (request.filters or {}).get("trust_tier") == "trusted"
 
 
 def location_payload_from_details(details: dict | None) -> dict | None:
@@ -1301,7 +1311,8 @@ class MemoryService:
 
         Two tags are the same tag written differently when
         ``is_mechanical_variant`` holds: ``normalize_tag`` folds them to one
-        form (NFKC, case, separators, a conservative plural strip) AND their
+        form (NFKC, case, hiragana to katakana, separators, one word-final ``ー``
+        after a katakana letter, a conservative plural strip) AND their
         numbers are the same (#1871). The fold alone is the rule recall's
         ``tags_normalize`` filter widens by, but it is not injective on
         numbered tags — ``v0.11.0`` / ``v0.1.10``, ``pr-123`` / ``pr-1-23`` —
@@ -3267,7 +3278,12 @@ class MemoryService:
             return {}, {}
 
     async def _resolve_supersede_candidates(
-        self, memories: Mapping[Any, Memory], *, user_id: str, operation: str
+        self,
+        memories: Mapping[Any, Memory],
+        *,
+        user_id: str,
+        operation: str,
+        trusted_only: bool = False,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
 
@@ -3288,6 +3304,14 @@ class MemoryService:
         ``_apply_supersede_shadowing``'s self-healing liveness JOIN: a suggestion
         whose target is gone silently stops surfacing (the stored value is cleared
         on acceptance at edge-creation time).
+
+        ``trusted_only`` (a recall under ``filters={"trust_tier": "trusted"}``,
+        which every agent-bootstrap recall is) also drops a connector-sourced
+        target, as the recall filter drops a connector-sourced row (#887): the
+        suggestion carries the target's summary, so it must not bring back
+        what the filter kept out. The context half of that filter holds by
+        construction — the target shares the (already trusted) source's
+        context.
 
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
@@ -3360,6 +3384,8 @@ class MemoryService:
                 target = live.get(p["target_id"])
                 if target is None:
                     continue  # self-healing: target gone → drop the suggestion
+                if trusted_only and target.source_type == SOURCE_TYPE_CONNECTOR:
+                    continue  # the trusted filter's connector exclusion (#887)
                 source = p["source"]
                 if (target.workspace_id, target.context_id) != (
                     source.workspace_id,
@@ -4218,7 +4244,7 @@ class MemoryService:
             # Issue #887: trust-tier read filter. ``trusted`` excludes
             # external-origin memories from behaviour-influencing reads (OWASP
             # LLM01/LLM03 — external content is data, not instructions).
-            if request.filters.get("trust_tier") == "trusted":
+            if _is_trusted_recall(request):
                 # Authoritative check: the memory's context must itself be
                 # trusted. ``Context.trust_tier`` is the server-side trust
                 # signal (connector contexts = 'external'), so a non-connector
@@ -4385,7 +4411,10 @@ class MemoryService:
         page = search_results[: request.k]
         page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
         supersede_candidates = await self._resolve_supersede_candidates(
-            page_memories, user_id=user_id, operation="recall"
+            page_memories,
+            user_id=user_id,
+            operation="recall",
+            trusted_only=_is_trusted_recall(request),
         )
 
         responses: list[MemoryResponse] = []
@@ -4433,13 +4462,11 @@ class MemoryService:
 
         Post-commit statistics writes use it so that their row locks and any
         failure stay out of the request transaction. The caller commits.
+        The recipe lives in ``db.base.isolated_session``.
         """
-        bind = getattr(self.db, "bind", None)
-        if isinstance(bind, AsyncEngine):
-            return AsyncSession(bind=bind, expire_on_commit=False)
-        from db.base import _get_session_factory
+        from db.base import isolated_session
 
-        return _get_session_factory()()
+        return isolated_session(self.db)
 
     @staticmethod
     def _promotion_due(memory: Memory, stats: AccessStats) -> bool:
@@ -5114,9 +5141,7 @@ class MemoryService:
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
-        if selection_config is not None and (
-            not request.filters or request.filters.get("trust_tier") != "trusted"
-        ):
+        if selection_config is not None and not _is_trusted_recall(request):
             raise ValueError("selection evidence requires trusted-tier recall")
 
         # #1291: recall does NOT pass through

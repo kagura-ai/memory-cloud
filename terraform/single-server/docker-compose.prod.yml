@@ -12,7 +12,8 @@
 #   ./scripts/deploy.sh
 #
 # Add Ollama (local embeddings) as an override (sets EMBEDDING_PROVIDER=self_hosted):
-#   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
+#   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml \
+#     --env-file .env.prod up -d
 #
 # Build context note: the api / web images are built from the source tree in
 # the same repo. On the VM, `git clone` the repo next to this file, or
@@ -20,15 +21,25 @@
 # =============================================================================
 
 # Container log rotation (#1591) — json-file capped at 50m x 3 on every service
-# this file defines, so the disk is bounded without relying on the host's
+# this file defines (configurable since #2025: LOG_MAX_SIZE / LOG_MAX_FILE,
+# defaults unchanged), so the disk is bounded without relying on the host's
 # daemon.json. Rationale, and how to apply it to a running stack (`logging` is
 # fixed at container creation), are in docker-compose.app.yml / README.md "Logs".
 # YAML anchors are per-file, hence the repeat; log_hygiene_static.bats pins it.
 x-logging: &default-logging
   driver: json-file
   options:
-    max-size: "50m"
-    max-file: "3"
+    max-size: "${LOG_MAX_SIZE:-50m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
+# API colors only (#2025): the API writes most of the log volume, so its
+# rotation has its own knobs — raising API retention does not grow the
+# web / caddy / data logs. Same defaults as x-logging. See README.md "Logs".
+x-api-logging: &api-logging
+  driver: json-file
+  options:
+    max-size: "${API_LOG_MAX_SIZE:-50m}"
+    max-file: "${API_LOG_MAX_FILE:-3}"
 
 # Shared API environment (#1482). api-blue / api-green each merge this map
 # with their own DEPLOY_COLOR, so it is anchored on its own and NOT attached
@@ -56,7 +67,7 @@ x-api-common: &api-common
     context: ../../backend
     dockerfile: Dockerfile
   restart: always
-  logging: *default-logging
+  logging: *api-logging
   env_file:
     - .env.prod
   # #1482: the blue-green marker deploy.sh publishes. Mounted as the single

@@ -58,6 +58,7 @@ import { RefreshCw, BarChart3 } from "lucide-react";
 import { formatLocalDate } from "@/lib/utils/datetime";
 import {
   COST_AGGREGATION_PERIODS,
+  COST_SOURCES,
   type CostAggregationPeriod,
   type CostAggregationResponse,
   type CostAggregationRow,
@@ -151,6 +152,55 @@ export function buildChartData(rows: CostAggregationRow[]): ChartPoint[] {
   return [...buckets.entries()]
     .map(([date, totals]) => ({ date, ...totals }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export interface SourceTotal {
+  source: string;
+  calls: number;
+  cost_usd: number | null;
+  cost_usd_byok: number | null;
+}
+
+/**
+ * Sum ``cost_breakdown_by_source`` across all rows (#2019), so an operator
+ * sees what Sleep, Memory Analysis and the supersede judge each cost over the
+ * selected range. Same sticky-NULL rule as ``buildChartData``. Sorted in
+ * ``COST_SOURCES`` order, unknown sources last.
+ *
+ * Exported for unit testing.
+ */
+export function buildSourceTotals(rows: CostAggregationRow[]): SourceTotal[] {
+  const totals = new Map<string, SourceTotal>();
+  for (const row of rows) {
+    for (const b of row.cost_breakdown_by_source) {
+      const t = totals.get(b.source) ?? {
+        source: b.source,
+        calls: 0,
+        cost_usd: 0,
+        cost_usd_byok: 0,
+      };
+      totals.set(b.source, {
+        source: b.source,
+        calls: t.calls + b.calls,
+        cost_usd:
+          t.cost_usd === null || b.cost_usd === null
+            ? null
+            : t.cost_usd + b.cost_usd,
+        cost_usd_byok:
+          t.cost_usd_byok === null || b.cost_usd_byok === null
+            ? null
+            : t.cost_usd_byok + b.cost_usd_byok,
+      });
+    }
+  }
+  const order = (s: string) => {
+    const i = (COST_SOURCES as readonly string[]).indexOf(s);
+    return i === -1 ? COST_SOURCES.length : i;
+  };
+  return [...totals.values()].sort(
+    (a, b) =>
+      order(a.source) - order(b.source) || a.source.localeCompare(b.source),
+  );
 }
 
 /** Filter shape passed to the fetcher. Same fields both endpoints accept. */
@@ -284,6 +334,11 @@ export function CostDashboard({
   }, [loadCost]);
 
   const chartData = useMemo(() => buildChartData(rows), [rows]);
+  const sourceTotals = useMemo(() => buildSourceTotals(rows), [rows]);
+  const sourceLabel = (source: string) =>
+    (COST_SOURCES as readonly string[]).includes(source)
+      ? t(`source.${source}`)
+      : source;
 
   return (
     <PageContainer>
@@ -424,6 +479,61 @@ export function CostDashboard({
           </div>
         )}
       </Section>
+
+      {rangeError === null && !loading && !error && sourceTotals.length > 0 && (
+        <Section title={t("bySource.title")}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("bySource.source")}</TableHead>
+                  <TableHead className="text-right">
+                    {t("table.calls")}
+                  </TableHead>
+                  <TableHead className="text-right">
+                    {t("table.costPlatform")}
+                  </TableHead>
+                  <TableHead className="text-right">
+                    {t("table.costByok")}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sourceTotals.map((s) => (
+                  <TableRow key={s.source}>
+                    <TableCell className="text-sm" title={s.source}>
+                      {sourceLabel(s.source)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-sm">
+                      {s.calls.toLocaleString()}
+                    </TableCell>
+                    <TableCell
+                      className="text-right font-mono text-sm"
+                      title={
+                        s.cost_usd === null
+                          ? t("table.costUnknownTooltip")
+                          : undefined
+                      }
+                    >
+                      {formatCost(s.cost_usd)}
+                    </TableCell>
+                    <TableCell
+                      className="text-right font-mono text-sm"
+                      title={
+                        s.cost_usd_byok === null
+                          ? t("table.costUnknownTooltip")
+                          : undefined
+                      }
+                    >
+                      {formatCost(s.cost_usd_byok)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </Section>
+      )}
 
       <Section title={t("table.title")}>
         {rangeError !== null ? (

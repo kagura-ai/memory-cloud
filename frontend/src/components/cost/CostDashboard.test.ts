@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import type { CostAggregationRow } from "@/lib/api";
 import {
   buildChartData,
+  buildSourceTotals,
   formatCost,
   MAX_LOOKBACK_DAYS,
   userLabel,
@@ -185,7 +186,10 @@ describe("workspaceLabel", () => {
 describe("userLabel", () => {
   it("prefers the resolved email", () => {
     expect(
-      userLabel({ user_id: "104714482900000", user_email: "alice@example.com" }),
+      userLabel({
+        user_id: "104714482900000",
+        user_email: "alice@example.com",
+      }),
     ).toBe("alice@example.com");
   });
 
@@ -193,5 +197,67 @@ describe("userLabel", () => {
     expect(userLabel({ user_id: "104714482900000", user_email: null })).toBe(
       "uid:10471448",
     );
+  });
+});
+
+describe("buildSourceTotals", () => {
+  it("sums each source across rows, in COST_SOURCES order", () => {
+    const totals = buildSourceTotals([
+      row({
+        cost_breakdown_by_source: [
+          {
+            source: "supersede_verify",
+            calls: 3,
+            cost_usd: 0.01,
+            cost_usd_byok: 0,
+          },
+          { source: "sleep", calls: 1, cost_usd: 0.5, cost_usd_byok: 0 },
+        ],
+      }),
+      row({
+        user_id: "user-2",
+        cost_breakdown_by_source: [
+          {
+            source: "supersede_verify",
+            calls: 2,
+            cost_usd: 0.02,
+            cost_usd_byok: 0.1,
+          },
+        ],
+      }),
+    ]);
+    expect(totals.map((t) => t.source)).toEqual(["sleep", "supersede_verify"]);
+    const judge = totals[1];
+    expect(judge.calls).toBe(5);
+    expect(judge.cost_usd).toBeCloseTo(0.03);
+    expect(judge.cost_usd_byok).toBeCloseTo(0.1);
+  });
+
+  it("keeps cost unknown sticky", () => {
+    const totals = buildSourceTotals([
+      row({
+        cost_breakdown_by_source: [
+          {
+            source: "supersede_verify",
+            calls: 1,
+            cost_usd: null,
+            cost_usd_byok: 0,
+          },
+        ],
+      }),
+      row({
+        user_id: "user-2",
+        cost_breakdown_by_source: [
+          {
+            source: "supersede_verify",
+            calls: 1,
+            cost_usd: 0.02,
+            cost_usd_byok: 0,
+          },
+        ],
+      }),
+    ]);
+    expect(totals[0].cost_usd).toBeNull();
+    expect(totals[0].cost_usd_byok).toBe(0);
   });
 });

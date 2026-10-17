@@ -6,7 +6,7 @@
 # single-host layout) or on a dedicated app host (a split-host layout).
 #
 #   single host : docker-compose.prod.yml includes this file — unchanged topology
-#   app VM      : docker compose -f docker-compose.app.yml up -d
+#   app VM      : docker compose -f docker-compose.app.yml --env-file .env.prod up -d
 #                 with POSTGRES_HOST/QDRANT_HOST/REDIS_HOST pointed at the data VM
 #
 # The data-tier hostnames default to the compose service names, so on a single
@@ -29,6 +29,12 @@
 # not depend on host provisioning. 3 x 50 MB per container bounds the disk and
 # still leaves enough access log for incident triage.
 #
+# #2025: the cap is read from .env.prod (the --env-file deploy.sh passes) —
+# LOG_MAX_SIZE / LOG_MAX_FILE for every service here, API_LOG_MAX_SIZE /
+# API_LOG_MAX_FILE for api-blue / api-green (x-api-logging below). Unset, the
+# values are today's 50m x 3. A compose `logging:` block beats daemon.json, so
+# these variables are the only way to change it for this stack.
+#
 # `logging` is fixed when a container is CREATED. On a running stack it takes
 # effect the next time the container is recreated: deploy.sh does that for the
 # API colors on every run; every other service needs one
@@ -40,8 +46,17 @@
 x-logging: &default-logging
   driver: json-file
   options:
-    max-size: "50m"
-    max-file: "3"
+    max-size: "${LOG_MAX_SIZE:-50m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
+# API colors only (#2025): the API writes most of the log volume, so its
+# rotation has its own knobs — raising API retention does not grow the
+# web / caddy / data logs. Same defaults as x-logging. See README.md "Logs".
+x-api-logging: &api-logging
+  driver: json-file
+  options:
+    max-size: "${API_LOG_MAX_SIZE:-50m}"
+    max-file: "${API_LOG_MAX_FILE:-3}"
 
 # Shared API environment (#1482). api-blue / api-green each merge this map
 # with their own DEPLOY_COLOR, so it is anchored on its own and NOT attached
@@ -70,7 +85,7 @@ x-api-common: &api-common
     context: ../../backend
     dockerfile: Dockerfile
   restart: always
-  logging: *default-logging
+  logging: *api-logging
   env_file:
     - .env.prod
   # #1482: the blue-green marker deploy.sh publishes. Mounted as the single

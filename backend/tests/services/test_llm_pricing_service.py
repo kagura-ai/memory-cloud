@@ -227,3 +227,23 @@ async def test_has_positive_price_shares_the_cache_with_compute_cost_usd():
 
     assert cost == pytest.approx(0.02)
     assert service.lookup.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_exclusion_is_its_own_cache_entry():
+    """#2019: a lookup that excludes ``pricing_model='subscription'`` must not
+    be answered from (or poison) the cache entry of one that does not."""
+    service = _service()
+    service.lookup = AsyncMock(side_effect=[_pricing_row("2", 1_000_000), None])
+    common = {
+        "provider": "ollama_cloud",
+        "model": "m",
+        "unit_type": "input_tokens",
+        "started_at": _STARTED_AT,
+        "units": 1_000_000,
+    }
+    assert await service.compute_cost_usd(**common) == pytest.approx(2.0)
+    assert await service.compute_cost_usd(**common, exclude_subscription=True) is None
+    assert service.lookup.await_count == 2
+    flags = [c.kwargs.get("exclude_subscription", False) for c in service.lookup.await_args_list]
+    assert flags == [False, True]

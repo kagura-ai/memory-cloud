@@ -11,7 +11,12 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import MetaData, create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -243,6 +248,26 @@ def get_sync_session() -> Session:
     """
     factory = _get_sync_session_factory()
     return factory()
+
+
+def isolated_session(db: Any) -> AsyncSession:
+    """A fresh session on ``db``'s engine (#1985; shared since #2019).
+
+    For writes that must commit on their own: their row locks and any failure
+    stay out of ``db``'s transaction, and a write that fails never leaves
+    ``db`` needing a rollback (which would expire every object it holds). The
+    session is ``expire_on_commit=False`` like the app factory's. When ``db``
+    is not bound to an ``AsyncEngine`` (a test double) it falls back to the
+    app session factory. The caller commits and closes it
+    (``async with isolated_session(db) as s: ...``).
+
+    Each call holds a second pooled connection beside ``db``'s for as long as
+    it is open, so keep the block short.
+    """
+    bind = getattr(db, "bind", None)
+    if isinstance(bind, AsyncEngine):
+        return AsyncSession(bind=bind, expire_on_commit=False)
+    return _get_session_factory()()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

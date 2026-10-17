@@ -288,8 +288,14 @@ class Memory(Base):
     # client forge the ``memory_id`` (leaking another memory's summary via the
     # read-path enrichment, bypassing can_access_memory) or silently drop it on a
     # ``details`` replace. Surfaced — liveness-guarded — on recall()/reference(),
-    # and cleared when the suggested supersedes edge is created. NULL = none.
-    supersede_candidate: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # and cleared when the suggested supersedes edge is created. SQL NULL = none:
+    # ``none_as_null`` stores a Python ``None`` as SQL NULL, not the JSON value
+    # ``null`` the default writes (#2022), so ``supersede_candidate IS NULL``
+    # counts the rows without a suggestion. A non-NULL value is always an object
+    # — a candidate, a dismissal tombstone, or both.
+    supersede_candidate: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
 
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field

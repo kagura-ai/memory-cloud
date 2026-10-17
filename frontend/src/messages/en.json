@@ -2840,6 +2840,15 @@
         "costByok": "BYOK (USD)",
         "unknown": "cost unknown"
       },
+      "bySource": {
+        "title": "By Source",
+        "source": "Source"
+      },
+      "source": {
+        "sleep": "Sleep Maintenance",
+        "analysis": "Memory Analysis",
+        "supersede_verify": "Supersede check (on write)"
+      },
       "table": {
         "title": "Per-Period Breakdown",
         "periodStart": "Period",
