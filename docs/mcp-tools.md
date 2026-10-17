@@ -627,7 +627,7 @@ filters={"within": {"polygon": [{"lat": 35.6, "lon": 139.7}, ...]}}  # geofence,
 
 **`explore_hints`.** `include_explore_hints=true` adds up to three seed memories for a follow-up `explore()` — reason `top_result`, `high_centrality` or `unexplored_neighbor`. They bridge recall (precision search) and explore (graph discovery) without mixing their scoring; use them when the user asks "what else is related?".
 
-**`include_superseded`** returns memories shadowed by a `supersedes` edge, annotated with `superseded_by`, for audit and history ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)). **Cross-context recall** (`context_ids`, 2-20 contexts, [#81](https://github.com/kagura-ai/memory-cloud/issues/81)) requires one workspace, one privacy setting and one embedding model across the list.
+**`include_superseded`** returns memories shadowed by a `supersedes` edge, annotated with `superseded_by`, for audit and history ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)). **Cross-context recall** (`context_ids`, 2-20 contexts, [#81](https://github.com/kagura-ai/memory-cloud/issues/81)) requires one workspace, one privacy setting and one embedding model across the list. Content chunk vectors ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015), see [chunking-guide.md](chunking-guide.md)) apply per context: the dense search returns chunk hits only from the listed contexts that have `content_chunks_enabled` on, whatever the first context's setting.
 
 ### `remember`
 

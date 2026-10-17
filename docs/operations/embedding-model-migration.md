@@ -30,6 +30,14 @@ Idempotent by construction: re-running `--reembed` overwrites points by id; `--s
 
 A context migrated before v0.96.0 has label-only vectors for its resource-ingested memories, stored under the memory ids. Ingesting the documents again as newer versions repairs them.
 
+**Content chunk vectors** (#2015). A context with `content_chunks_enabled` on keeps its chunk points through the migration:
+
+- `--plan` prints about how many chunk points the re-embed writes (`content chunks on: the re-embed also writes ~N chunk point(s)`), computed from the content lengths.
+- `--reembed` rebuilds each page's chunk points in the target right after its summary points, with the target model and the same deterministic ids, deleting first (a memory whose content got shorter loses its old chunks). The flag is read again before each page's chunks are deleted and before they are written, so turning it off mid-run stops the chunk writes. A chunk failure stops the run like a summary failure does; re-run `--reembed`. A flag turned **on** after `--plan` is not picked up by that run: `--verify` then reports the memories, and a new `--reembed` fills them.
+- `--verify` compares each live memory's chunk count in the target with what its current content splits into and lists those that differ on a `CHUNKS_MISSING` line. It is a report: the exit code stays `0` and `--run` goes on to the switch, because the memory is still found through its summary point. Re-run `--reembed` to rebuild them. Chunk points of memories that are no longer live are deleted; with the flag off, every chunk point of the context in the target is.
+- `--switch` (and `--rollback-to`) also delete the chunk points of memories forgotten since the re-embed started, in the collection routed to. Re-queued memories rewrite their chunks through the regular sweep. `--purge` / `--purge-source` delete by context, so chunk points go with the rest.
+- Turning the flag off deletes the context's chunk points from **every** collection, so the source and the target never disagree about it.
+
 **What the reconciliation does not cover.** Forgotten memories are found by their tombstone (`deleted_at`). A row that was hard-deleted with no tombstone while the migration ran (the 30-day cleanup of old tombstones, or a manual `DELETE`) leaves its target point behind; a later `--verify` against that context removes it, since verify reconciles every target point that has no live row.
 
 **In-flight embedding workers.** A worker that claimed a memory just before `--switch` embeds it under the old routing. The switch re-queues that row, and the worker only records `success` while it still owns its claim (`embedding_status='processing'`), so the sweep re-embeds the row under the new routing. The log line for that case is `embedding_claim_lost`.
@@ -86,3 +94,5 @@ After every context is switched:
 ## Cost and duration
 
 The re-embed is one embedding request per batch (`--batch-size`, default 64) over every live memory of the context. Nothing is re-summarised or re-read through an LLM; only `summary` is embedded, exactly as on write. Resource-ingested memories are the exception: each is one embedding request of its document text.
+
+With `content_chunks_enabled` on, each memory of 1,500 characters or more adds up to 16 chunk embedding inputs (one per 1,200-character chunk), sent in requests of at most 64 chunks — up to 17 embeddings per long memory instead of one. `--plan` prints the estimate for the context.
