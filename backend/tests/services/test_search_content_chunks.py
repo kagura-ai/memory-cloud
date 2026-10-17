@@ -190,13 +190,48 @@ async def test_chunk_enabled_context_ids_keeps_the_callers_spelling_and_order():
     result.scalars.return_value.all.return_value = [UUID(_CTX2)]
     db = MagicMock()
     db.execute = AsyncMock(return_value=result)
+    db.begin_nested = MagicMock(return_value=_Savepoint())
     ids = await SearchService(db)._chunk_enabled_context_ids([_CTX, _CTX2])
     assert ids == [_CTX2]
     compiled = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
     assert "content_chunks_enabled IS true" in compiled
 
 
-async def test_chunk_enabled_context_ids_fails_closed():
+class _Savepoint:
+    """``db.begin_nested()``: records whether it was rolled back."""
+
+    def __init__(self):
+        self.rolled_back = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.rolled_back = exc_type is not None
+        return False
+
+
+async def test_chunk_enabled_context_ids_fails_closed_inside_a_savepoint():
+    """A failed lookup must not leave the recall's transaction aborted."""
     db = MagicMock()
     db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    savepoint = _Savepoint()
+    db.begin_nested = MagicMock(return_value=savepoint)
     assert await SearchService(db)._chunk_enabled_context_ids([_CTX, _CTX2]) == []
+    assert savepoint.rolled_back
+
+
+async def test_keyword_cross_context_search_reads_no_chunk_flags():
+    service = SearchService(MagicMock())
+    service._get_search_config = AsyncMock(return_value=_config(True))
+    service._chunk_enabled_context_ids = AsyncMock(return_value=[_CTX])
+    with patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])):
+        await service.hybrid_search(
+            query="q",
+            user_id="u",
+            workspace_id=_WS,
+            context_id=[_CTX, _CTX2],
+            k=5,
+            search_mode="keyword",
+        )
+    service._chunk_enabled_context_ids.assert_not_awaited()
