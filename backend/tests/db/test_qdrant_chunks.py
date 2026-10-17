@@ -225,3 +225,13 @@ async def test_chunk_of_index_pass_is_fail_soft(mock_client):
 
     mock_client.get_collections.side_effect = RuntimeError("down")
     assert await ensure_chunk_of_index_on_all() == []
+
+
+async def test_list_context_point_ids_leaves_chunk_points_out(mock_client):
+    """#2015: the embedding-migration verify must not delete chunks as stale."""
+    from db.qdrant import list_context_point_ids
+
+    mock_client.scroll.return_value = ([], None)
+    await list_context_point_ids(WS, CTX, "coll")
+    flt = mock_client.scroll.await_args.kwargs["scroll_filter"]
+    assert any(_is_chunk_exclusion(c) for c in flt.must)

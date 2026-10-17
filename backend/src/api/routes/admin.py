@@ -1749,7 +1749,9 @@ async def recover_context(
             with_payload=True,
             with_vectors=False,
         )
-        all_points.extend(points)
+        # #2015: a content chunk point is part of a memory, not a memory —
+        # recovering it would create a row from a fragment of the body.
+        all_points.extend(p for p in points if not (p.payload or {}).get("chunk_of"))
         if next_offset is None or len(all_points) >= max_points:
             if len(all_points) > max_points:
                 all_points = all_points[:max_points]

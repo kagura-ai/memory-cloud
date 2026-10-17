@@ -85,8 +85,18 @@ class TestRecoverContext:
             "summary": "Memory 2",
         }
 
+        # #2015: a content chunk point is a fragment of a memory, never recovered.
+        chunk_point = MagicMock()
+        chunk_point.id = str(uuid4())
+        chunk_point.payload = {
+            "workspace_id": workspace_id,
+            "user_id": "user1",
+            "summary": "Memory 1",
+            "chunk_of": str(mock_point_1.id),
+        }
+
         mock_client = AsyncMock()
-        mock_client.scroll.return_value = ([mock_point_1, mock_point_2], None)
+        mock_client.scroll.return_value = ([mock_point_1, chunk_point, mock_point_2], None)
 
         # Mock DB: context doesn't exist, no existing memories
         mock_context_result = MagicMock()

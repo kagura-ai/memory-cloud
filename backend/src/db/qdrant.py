@@ -1749,7 +1749,9 @@ async def list_context_point_ids(
     Qdrant only — scrolls by the same ``workspace_id`` + ``context_id`` payload
     filter :func:`delete_context_points` deletes by, without payload or
     vectors. Used by the embedding migration to find points the target
-    collection holds for memories that are no longer live.
+    collection holds for memories that are no longer live. Content chunk
+    points (#2015) are left out: their ids are never memory ids, so the
+    verify pass must not take them for stale points.
 
     Raises:
         QdrantError: If the scroll fails.
@@ -1759,6 +1761,7 @@ async def list_context_point_ids(
         must=[
             FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
             FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+            IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD)),
         ]
     )
     ids: list[str] = []
