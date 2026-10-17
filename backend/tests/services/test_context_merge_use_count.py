@@ -151,7 +151,7 @@ async def test_merge_contexts_copies_memory_without_dropped_use_count():
 # ---------------------------------------------------------------------------
 
 
-def _merge_harness(memories, *, upsert=None, live_count=None):
+def _merge_harness(memories, *, upsert=None, live_count=None, target_chunks=False):
     """Drive the real copy loop over `memories`. Returns (result, added_rows)."""
     user_id = "user-merge"
     source_id = uuid4()
@@ -168,6 +168,20 @@ def _merge_harness(memories, *, upsert=None, live_count=None):
     mock_db = AsyncMock()
     cfg_result = MagicMock()
     cfg_result.scalars.return_value.all.return_value = []
+    if target_chunks:
+        # #2015: the target opted into content chunk vectors (same model as
+        # the settings default the config-less source resolves to).
+        from config.settings import get_settings
+
+        settings = get_settings()
+        cfg_result.scalars.return_value.all.return_value = [
+            MagicMock(
+                context_id=target_id,
+                embedding_model=settings.embedding_model,
+                embedding_dimensions=settings.embedding_dimensions,
+                content_chunks_enabled=True,
+            )
+        ]
     mem_result = MagicMock()
     mem_result.scalars.return_value.all.return_value = [
         m(user_id, source_id) if callable(m) else m for m in memories
@@ -188,9 +202,11 @@ def _merge_harness(memories, *, upsert=None, live_count=None):
     return service, mock_db, source_ctx, target_ctx, source_id, target_id, user_id
 
 
-async def _run_merge(memories, *, upsert=None, delete_source=False, live_count=None):
+async def _run_merge(
+    memories, *, upsert=None, delete_source=False, live_count=None, target_chunks=False
+):
     (service, mock_db, source_ctx, target_ctx, source_id, target_id, user_id) = _merge_harness(
-        memories, live_count=live_count
+        memories, live_count=live_count, target_chunks=target_chunks
     )
     delete_called = AsyncMock()
     with (
@@ -448,3 +464,31 @@ async def test_keeping_the_source_keeps_its_points(vector_store_calls):
     await _run_merge([_source_memory])
 
     remove_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_enabled_target_re_embeds_long_merged_memories():
+    """#2015: copied points are summary points only; a long memory merged into a
+    context with content_chunks_enabled is re-queued so its chunks get built."""
+
+    def long_memory(u, c):
+        m = _source_memory(u, c)
+        m.content = "x" * 5000
+        return m
+
+    _, rows, _, _ = await _run_merge([long_memory, _source_memory], target_chunks=True)
+    statuses = sorted(r.embedding_status for r in rows)
+    assert statuses == ["pending", "success"]
+    long_row = next(r for r in rows if len(r.content) == 5000)
+    assert long_row.embedding_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_target_without_chunks_keeps_merged_memories_embedded():
+    def long_memory(u, c):
+        m = _source_memory(u, c)
+        m.content = "x" * 5000
+        return m
+
+    _, rows, _, _ = await _run_merge([long_memory])
+    assert rows[0].embedding_status == "success"
