@@ -101,26 +101,22 @@ async def test_turning_the_flag_off_purges_the_contexts_chunk_points():
     """#2015 invariant: a context with the flag off has no chunk points."""
     from unittest.mock import patch
 
-    from db.qdrant import get_collection_name
-
     ws, ctx = uuid4(), uuid4()
     config = _flagged_config(True)
     repo, db = _repo_with(config, ws)
     order = []
     db.commit.side_effect = lambda: order.append("commit")
     with patch(
-        "db.qdrant.purge_context_chunk_points",
-        AsyncMock(side_effect=lambda *a: order.append("purge")),
+        "db.qdrant.purge_context_chunk_points_everywhere",
+        AsyncMock(side_effect=lambda *a: order.append("purge") or ["c1", "c2"]),
     ) as purge:
         await repo.update(ctx, ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
     # Before the commit (a failure keeps the flag on) and again after it, for
     # a writer that read "on" in between (self-repairing invariant).
     assert order == ["purge", "commit", "purge"]
-    assert purge.await_args.args == (
-        str(ws),
-        str(ctx),
-        get_collection_name("text-embedding-3-small", 512),
-    )
+    # Every collection, not only the routed one (PR 2a): a migration keeps
+    # the context's points in its source and its target collection.
+    assert purge.await_args.args == (str(ws), str(ctx))
 
 
 @pytest.mark.asyncio
@@ -133,8 +129,8 @@ async def test_turning_the_flag_on_purges_leftovers_before_the_commit():
     order = []
     db.commit.side_effect = lambda: order.append("commit")
     with patch(
-        "db.qdrant.purge_context_chunk_points",
-        AsyncMock(side_effect=lambda *a: order.append("purge")),
+        "db.qdrant.purge_context_chunk_points_everywhere",
+        AsyncMock(side_effect=lambda *a: order.append("purge") or []),
     ):
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
     assert order == ["purge", "commit"]
@@ -146,7 +142,7 @@ async def test_no_purge_without_a_flag_change(before, after):
     from unittest.mock import patch
 
     repo, _ = _repo_with(_flagged_config(before), uuid4())
-    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+    with patch("db.qdrant.purge_context_chunk_points_everywhere", AsyncMock()) as purge:
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=after))
     purge.assert_not_awaited()
 
@@ -160,7 +156,10 @@ async def test_a_failed_purge_keeps_the_flag_on():
     config = _flagged_config(True)
     repo, db = _repo_with(config, uuid4())
     with (
-        patch("db.qdrant.purge_context_chunk_points", AsyncMock(side_effect=RuntimeError("x"))),
+        patch(
+            "db.qdrant.purge_context_chunk_points_everywhere",
+            AsyncMock(side_effect=RuntimeError("x")),
+        ),
         pytest.raises(RuntimeError),
     ):
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
@@ -176,8 +175,8 @@ async def test_a_failed_post_commit_purge_does_not_fail_the_update():
 
     repo, db = _repo_with(_flagged_config(True), uuid4())
     with patch(
-        "db.qdrant.purge_context_chunk_points",
-        AsyncMock(side_effect=[None, RuntimeError("down")]),
+        "db.qdrant.purge_context_chunk_points_everywhere",
+        AsyncMock(side_effect=[[], RuntimeError("down")]),
     ):
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
     db.commit.assert_awaited()
@@ -189,7 +188,7 @@ async def test_reset_to_default_turns_chunks_off_and_purges():
     from unittest.mock import patch
 
     repo, _ = _repo_with(_flagged_config(True), uuid4())
-    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+    with patch("db.qdrant.purge_context_chunk_points_everywhere", AsyncMock()) as purge:
         config = await repo.reset_to_default(uuid4())
     assert config.content_chunks_enabled is False
     assert purge.await_count == 2
