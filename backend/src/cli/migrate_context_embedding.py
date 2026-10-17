@@ -98,8 +98,9 @@ def _print_chunks(verified: VerifyResult) -> None:
         shown = ", ".join(str(memory_id) for memory_id in ids[:20])
         more = f" (+{len(ids) - 20} more)" if len(ids) > 20 else ""
         print(
-            f"  CHUNKS_MISSING {len(ids)} memory(ies) whose content chunks in the target do "
-            "not match their content (recall finds them through their summary meanwhile). "
+            f"  CHUNKS_MISSING {len(ids)} memory(ies) whose number of content chunks in the "
+            "target differs from what their content splits into (recall finds them through "
+            "their summary meanwhile). "
             f"Re-run --reembed to rebuild them: {shown}{more}"
         )
 

@@ -49,6 +49,13 @@ def _result(*, scalar=None, scalars=None, rowcount=0):
     return result
 
 
+def _rows_result(rows):
+    """A result whose ``.all()`` returns ``rows`` (tuples)."""
+    result = MagicMock()
+    result.all = MagicMock(return_value=list(rows))
+    return result
+
+
 def _db(results):
     """A session whose successive ``execute`` calls return ``results`` in order."""
     db = MagicMock()
@@ -183,7 +190,14 @@ class TestPlan:
                 _result(scalar=_context()),
                 _result(scalar=config),
                 _result(scalar=3),
-                _result(scalars=[1500, 2500, 40000]),
+                _rows_result(
+                    [
+                        (_memory(), 1500),
+                        (_memory(), 2500),
+                        (_memory(), 40000),
+                        (_resource_memory(), 9000),  # never chunked
+                    ]
+                ),
             ]
         )
         plan = await svc.plan_context_migration(db, uuid4(), QWEN)
@@ -191,8 +205,7 @@ class TestPlan:
         assert plan.chunk_estimate == 2 + 3 + 16
         lengths_stmt = db.execute.await_args_list[3].args[0]
         compiled = str(lengths_stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "char_length" in compiled
-        assert "resource_id IS NULL" in compiled  # resource rows are never chunked
+        assert "char_length(memories.content) >= 1500" in compiled
 
     @pytest.mark.asyncio
     async def test_a_context_without_content_chunks_has_no_estimate_query(self):
@@ -992,13 +1005,6 @@ class TestListing:
 # ------------------------------------------------------------- content chunks
 
 
-def _rows_result(rows):
-    """A result whose ``.all()`` returns ``rows`` (tuples)."""
-    result = MagicMock()
-    result.all = MagicMock(return_value=list(rows))
-    return result
-
-
 class TestContentChunks:
     """#2015 PR 2a: chunk points of an opted-in context follow the migration."""
 
@@ -1160,6 +1166,31 @@ class TestContentChunks:
         _no_content_chunks["deleted"].assert_awaited_once_with(
             [str(note.id)], "kagura_memories_qwen3_embedding_4b_2560"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_chunk_delete_still_removes_the_forgotten_summary_points(
+        self, _no_content_chunks
+    ):
+        config = _config(SMALL, 512)
+        note = _memory()
+        db = _db(
+            [
+                _result(scalar=config),
+                _result(scalar=config),
+                _result(rowcount=0),
+                _result(scalars=[note]),
+                _result(scalars=[]),
+            ]
+        )
+        _no_content_chunks["deleted"].side_effect = RuntimeError("qdrant busy")
+        with (
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+            pytest.raises(RuntimeError),
+        ):
+            await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+        delete.assert_awaited_once_with([str(note.id)], "kagura_memories_qwen3_embedding_4b_2560")
 
     @pytest.mark.asyncio
     async def test_a_pure_flip_deletes_no_chunks(self, _no_content_chunks):

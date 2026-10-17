@@ -190,9 +190,10 @@ def _log_failure(memory: Memory, collection_name: str, error: Exception) -> None
     )
 
 
-#: Chunk texts per ``embed_batch`` request in :func:`rebuild_content_chunks`
-#: (a page of 64 long memories is up to 1,024 chunks; one request for all of
-#: them would exceed a provider's per-request token limit).
+#: Chunk texts per ``embed_batch`` request (and points per upsert) in
+#: :func:`rebuild_content_chunks` (a page of 64 long memories is up to 1,024
+#: chunks; one request for all of them would exceed a provider's per-request
+#: token limit).
 CHUNK_EMBED_BATCH_SIZE = 64
 
 
@@ -237,40 +238,40 @@ async def rebuild_content_chunks(
     if not enabled:
         logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))
         return 0
-    await delete_chunk_points([memory.id for memory in plain], collection_name)
-    # Every chunk of the page, embedded in runs of one user (embed_batch
-    # takes one user_id for the credential lookup) of at most
-    # CHUNK_EMBED_BATCH_SIZE texts per request.
+    try:
+        await delete_chunk_points([memory.id for memory in plain], collection_name)
+    except Exception as e:
+        _log_failure(plain[0], collection_name, e)
+        raise
+
+    # Every chunk of the page, grouped by user (embed_batch and the upsert
+    # take one user_id), embedded CHUNK_EMBED_BATCH_SIZE texts per request.
     split = [(memory, split_content(memory.content)) for memory in plain]
-    jobs = [(memory, index, text) for memory, chunks in split for index, text in enumerate(chunks)]
-    if not jobs:
+    by_user: dict[str, list[tuple[Memory, int, str]]] = {}
+    for memory, chunks in split:
+        for index, text in enumerate(chunks):
+            by_user.setdefault(memory.user_id, []).append((memory, index, text))
+    if not by_user:
         return 0
     vectors: dict[tuple[Any, int], list[float]] = {}
     current: Memory | None = None
     try:
-        start = 0
-        while start < len(jobs):
-            user_id = jobs[start][0].user_id
-            end = start
-            while (
-                end < len(jobs)
-                and end - start < CHUNK_EMBED_BATCH_SIZE
-                and jobs[end][0].user_id == user_id
-            ):
-                end += 1
-            part = jobs[start:end]
-            current = part[0][0]
-            got = await embed_svc.embed_batch(
-                [text for _, _, text in part],
-                user_id,
-                context_id=str(context_id),
-                workspace_id=str(current.workspace_id),
-            )
-            if len(got) != len(part):
-                raise RuntimeError(f"embed_batch returned {len(got)} vectors for {len(part)} texts")
-            for (memory, index, _), vector in zip(part, got, strict=True):
-                vectors[(memory.id, index)] = vector
-            start = end
+        for user_id, jobs in by_user.items():
+            for start in range(0, len(jobs), CHUNK_EMBED_BATCH_SIZE):
+                part = jobs[start : start + CHUNK_EMBED_BATCH_SIZE]
+                current = part[0][0]
+                got = await embed_svc.embed_batch(
+                    [text for _, _, text in part],
+                    user_id,
+                    context_id=str(context_id),
+                    workspace_id=str(current.workspace_id),
+                )
+                if len(got) != len(part):
+                    raise RuntimeError(
+                        f"embed_batch returned {len(got)} vectors for {len(part)} texts"
+                    )
+                for (memory, index, _), vector in zip(part, got, strict=True):
+                    vectors[(memory.id, index)] = vector
         current = None
         # The flag may have been turned off (and every collection purged)
         # while the chunks were embedded: re-read it fresh.
@@ -280,28 +281,30 @@ async def rebuild_content_chunks(
             logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))
             return 0
         written = 0
-        for memory, chunks in split:
-            if not chunks:
-                continue
-            current = memory
-            base_payload = base_payloads[memory.id]
-            await upsert_chunk_points(
-                [
-                    (
-                        chunk_point_id(memory.id, index),
-                        vectors[(memory.id, index)],
-                        build_chunk_payload(
-                            base_payload, memory_id=memory.id, chunk_index=index, chunk_text=text
-                        ),
-                    )
-                    for index, text in enumerate(chunks)
-                ],
-                user_id=memory.user_id,
-                workspace_id=str(memory.workspace_id),
-                context_id=str(memory.context_id),
-                collection_name=collection_name,
-            )
-            written += len(chunks)
+        for user_id, jobs in by_user.items():
+            for start in range(0, len(jobs), CHUNK_EMBED_BATCH_SIZE):
+                part = jobs[start : start + CHUNK_EMBED_BATCH_SIZE]
+                current = part[0][0]
+                await upsert_chunk_points(
+                    [
+                        (
+                            chunk_point_id(memory.id, index),
+                            vectors[(memory.id, index)],
+                            build_chunk_payload(
+                                base_payloads[memory.id],
+                                memory_id=memory.id,
+                                chunk_index=index,
+                                chunk_text=text,
+                            ),
+                        )
+                        for memory, index, text in part
+                    ],
+                    user_id=user_id,
+                    workspace_id=str(current.workspace_id),
+                    context_id=str(context_id),
+                    collection_name=collection_name,
+                )
+                written += len(part)
     except Exception as e:
         if current is not None:
             _log_failure(current, collection_name, e)

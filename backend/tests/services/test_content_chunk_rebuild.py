@@ -78,15 +78,20 @@ async def test_writes_every_long_memorys_chunks_into_the_target_collection():
     # One request for the whole page's chunks (same user, under the cap).
     svc.embed_batch.assert_awaited_once()
     assert svc.embed_batch.await_args.args[0] == split_content(LONG) + split_content("z" * 2500)
-    # One upsert per memory, ids deterministic, payload without BM25 tokens.
-    assert upsert.await_count == 2
-    first = upsert.await_args_list[0]
-    assert first.kwargs["collection_name"] == TARGET
-    points = first.args[0]
-    assert [p[0] for p in points] == [chunk_point_id(long_a.id, i) for i in range(5)]
-    assert all(p[2][CHUNK_OF_FIELD] == str(long_a.id) for p in points)
+    # One upsert for the user's chunks, ids deterministic, payload without
+    # BM25 tokens, each vector on its own chunk.
+    upsert.assert_awaited_once()
+    call = upsert.await_args
+    assert call.kwargs["collection_name"] == TARGET
+    assert call.kwargs["context_id"] == CTX
+    points = call.args[0]
+    assert [p[0] for p in points] == [chunk_point_id(long_a.id, i) for i in range(5)] + [
+        chunk_point_id(long_b.id, i) for i in range(3)
+    ]
+    assert [p[2][CHUNK_OF_FIELD] for p in points] == [str(long_a.id)] * 5 + [str(long_b.id)] * 3
     assert all("summary_tokens" not in p[2] for p in points)
-    assert [p[1] for p in points] == [[float(len(t))] for t in split_content(LONG)]
+    texts = split_content(LONG) + split_content("z" * 2500)
+    assert [p[1] for p in points] == [[float(len(t))] for t in texts]
     assert n == 5 + 3
 
 
@@ -104,10 +109,29 @@ async def test_embeds_in_runs_of_one_user_capped_per_request(monkeypatch):
         ("b", 1),
     ]
     assert n == 15
-    # Vectors land on the right chunk across request boundaries.
-    for call, memory in zip(upsert.await_args_list, [a1, a2, b1], strict=True):
-        assert [p[1] for p in call.args[0]] == [[float(len(t))] for t in split_content(LONG)]
-        assert call.kwargs["user_id"] == memory.user_id
+    # Upserts follow the same batches; vectors land on the right chunk
+    # across request boundaries.
+    assert [(c.kwargs["user_id"], len(c.args[0])) for c in upsert.await_args_list] == [
+        ("a", 4),
+        ("a", 4),
+        ("a", 2),
+        ("b", 4),
+        ("b", 1),
+    ]
+    a_points = [p for c in upsert.await_args_list[:3] for p in c.args[0]]
+    assert [p[0] for p in a_points] == [chunk_point_id(a1.id, i) for i in range(5)] + [
+        chunk_point_id(a2.id, i) for i in range(5)
+    ]
+    assert [p[1] for p in a_points] == [[float(len(t))] for t in split_content(LONG)] * 2
+
+
+async def test_interleaved_users_are_grouped_across_the_page():
+    """A shared context with alternating authors still fills its requests."""
+    a1, b1, a2 = _memory(LONG, "a"), _memory(LONG, "b"), _memory(LONG, "a")
+    svc = _embed_svc()
+    await _rebuild([a1, b1, a2], embed_svc=svc)
+    calls = svc.embed_batch.await_args_list
+    assert [(c.args[1], len(c.args[0])) for c in calls] == [("a", 10), ("b", 5)]
 
 
 async def test_flag_off_at_the_first_read_touches_nothing():
@@ -145,6 +169,25 @@ async def test_resource_rows_and_short_pages_embed_nothing():
     delete.assert_awaited_once_with([short.id], TARGET)
     svc.embed_batch.assert_not_awaited()
     upsert.assert_not_awaited()
+
+
+async def test_a_failed_delete_is_logged_and_raised():
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "content_chunks_enabled", AsyncMock(return_value=True)),
+        patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
+        patch.object(writer, "_log_failure") as log,
+        pytest.raises(RuntimeError),
+    ):
+        await writer.rebuild_content_chunks(
+            _db(),
+            [_memory(LONG)],
+            base_payloads={},
+            embed_svc=_embed_svc(),
+            collection_name=TARGET,
+            context_id=CTX,
+        )
+    log.assert_called_once()
 
 
 async def test_a_failed_embedding_is_raised_not_swallowed():

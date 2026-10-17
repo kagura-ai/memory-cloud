@@ -1846,8 +1846,8 @@ A context with `content_chunks_enabled` on is migrated with its chunk points:
 `--reembed` rebuilds them in the target collection with the target model (up
 to 16 extra embedding inputs per memory of 1,500 characters or more; `--plan`
 prints the estimate), and a flag turned off while it runs stops the chunk
-writes. `--verify` lists memories whose chunks in the target do not match
-their content on a `CHUNKS_MISSING` line — a report, not a failure: the exit
+writes. `--verify` lists memories whose number of chunk points in the target
+differs from what their content splits into on a `CHUNKS_MISSING` line — a report, not a failure: the exit
 code and the switch only depend on the summary points, and re-running
 `--reembed` rebuilds them. `--verify` and `--switch` also delete the chunk
 points of memories forgotten meanwhile, and with the flag off `--verify`

@@ -41,8 +41,8 @@ routing — the dual-collection shape::
 * Content chunk points (#2015) of a context with ``content_chunks_enabled``
   are rebuilt in the target too: ``reembed`` writes each page's chunks with
   the target model right after its summary points
-  (``rebuild_content_chunks``), ``verify`` reports memories whose chunks do
-  not match their content (without failing ``ok``: re-running the re-embed
+  (``rebuild_content_chunks``), ``verify`` reports memories whose chunk
+  count does not match their content (without failing ``ok``: re-running the re-embed
   fills them) and removes the chunks of memories that are no longer live,
   and ``switch`` removes those of memories forgotten since the re-embed
   started, so a context serves chunk hits right after the switch.
@@ -148,8 +148,11 @@ class VerifyResult:
     chunks_present: int = 0
     """Chunk points the target holds for live memories."""
     chunks_missing: list[UUID] = field(default_factory=list)
-    """Memories whose chunk points in the target do not match their current
-    content (missing, or left from an older content). Reported, not part of
+    """Memories whose number of chunk points in the target differs from what
+    their current content splits into (some missing, or a tail left from a
+    longer content). Counts only: an edit that keeps the count is not seen
+    here (an edit after the re-embed started is re-queued by the switch
+    anyway). Reported, not part of
     ``ok``: a re-run of the re-embed rewrites them, and after the switch the
     memory is still found through its summary point."""
     chunks_stale_removed: int = 0
@@ -254,17 +257,24 @@ async def plan_context_migration(
     chunk_estimate = 0
     if content_chunks_on and source_model == current_model:
         # The re-embed rebuilds chunk points (#2015): one extra embedding
-        # input per chunk. Resource rows are never chunked.
+        # input per chunk. A row that owns a resource point is never chunked
+        # (the rule rebuild_content_chunks and verify apply).
         length = func.char_length(Memory.content)
         lengths = await db.execute(
-            select(length).where(
+            select(Memory, length)
+            .options(load_only(*_POINT_ID_COLUMNS))
+            .where(
                 Memory.context_id == context_id,
                 Memory.deleted_at.is_(None),
-                Memory.resource_id.is_(None),
                 length >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
             )
         )
-        chunk_estimate = sum(expected_chunk_count(int(n)) for n in lengths.scalars().all())
+        chunk_estimate = sum(
+            expected_chunk_count(int(n))
+            for memory, n in lengths.all()
+            if not owns_resource_point(memory)
+        )
+        db.expunge_all()
 
     return MigrationPlan(
         context_id=context_id,
@@ -864,10 +874,6 @@ async def switch_context_embedding(
         forgotten_chunk_owners = sorted(
             str(memory.id) for memory in forgotten_rows if not owns_resource_point(memory)
         )
-        if forgotten_chunk_owners:
-            await delete_chunk_points(
-                forgotten_chunk_owners, get_collection_name(model, dimensions)
-            )
         if forgotten_points:
             # A live row — of this context or of another one sharing the
             # collection — that names the same point keeps it.
@@ -878,6 +884,12 @@ async def switch_context_embedding(
                 get_collection_name(model, dimensions),
             )
             stale_removed = len(forgotten_points)
+        # After the summary points, so a failed chunk delete never keeps a
+        # forgotten memory's summary point in the collection now served.
+        if forgotten_chunk_owners:
+            await delete_chunk_points(
+                forgotten_chunk_owners, get_collection_name(model, dimensions)
+            )
 
     logger.info(
         "context_embedding_switched",
