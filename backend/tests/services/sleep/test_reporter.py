@@ -211,6 +211,31 @@ class TestRunStatusGrading:
         assert report.llm_call_failures == 5
 
     @pytest.mark.asyncio
+    async def test_failed_calls_with_spent_tokens_still_grade_failed(self, reporter):
+        """#2038: a failed call's tokens land in the breakdown with calls=0, so
+        a run whose every judge call raised still grades 'failed'."""
+        from services.sleep.reporter import LLMCallBreakdown
+
+        report = MagicMock()
+        report.id = uuid4()
+        spent = LLMCallBreakdown(
+            provider="self_hosted", model="qwen3.5:9b", input_tokens=80, output_tokens=20
+        )
+        results = [
+            PhaseResult(
+                phase_name="dedup_merge",
+                tokens_used=100,
+                llm_call_failures=2,
+                llm_breakdown=[spent],
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "failed"
+        assert report.llm_tokens_used == 100
+
+    @pytest.mark.asyncio
     async def test_partial_judge_failure_grades_degraded(self, reporter):
         report = MagicMock()
         report.id = uuid4()

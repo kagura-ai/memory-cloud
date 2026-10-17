@@ -1170,6 +1170,18 @@ class ConfigurationError(MemoryCloudException):
         super().__init__(message, status_code=500, error_code="CFG-001")
 
 
+class SelfHostedUnreachableError(ConfigurationError):
+    """The self-hosted inference server could not be reached (500, #2049).
+
+    Raised for a transport error (connect timeout, refused, reset) of the
+    ``/v1/models`` reachability probe, which can be a transient blip. A server
+    that answers with an error status stays a plain ``ConfigurationError``.
+    A subclass, so every existing ``ConfigurationError`` handling holds:
+    CFG-001 on the API path, and the embedding sweep retries it without
+    spending the retry budget; the class name tells the two apart in logs.
+    """
+
+
 class InternalError(MemoryCloudException):
     """Internal server error (500)."""
 

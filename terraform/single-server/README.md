@@ -678,12 +678,37 @@ remain untouched:
 
 ### Migration discipline
 
-Database migrations run **before** the Caddy switch so both old and new
-containers can coexist on the same schema:
+Database migrations run **before the new color starts** (and so before the
+Caddy switch), so both old and new containers can coexist on the same schema.
+The deploy order is:
 
-- **Forward-compatible** (additive columns, new tables): always safe.
-  `deploy.sh` starts the new container, waits for readiness, then runs
-  `alembic upgrade head` on the new container before switching Caddy.
+1. acquire the new image (build, or pull in registry mode)
+2. `alembic upgrade head` in a one-off container from that image
+   (`docker compose run --rm --no-deps -T api-<new>`; no uvicorn, so no
+   startup task runs, and no data-tier service is recreated)
+3. start the new color
+4. wait for its readiness
+5. write the active-color marker
+6. switch Caddy (6b: restart the bridge worker)
+7. drain and stop the old color
+
+The new color's startup tasks therefore never see the old schema
+([#2048](https://github.com/kagura-ai/memory-cloud/issues/2048)). A failing
+migration stops the deploy at step 2, before the new color exists; the old
+color keeps serving (revisions that commit outside the migration transaction,
+such as `CREATE INDEX CONCURRENTLY`, may already have applied, so check
+`alembic current` before re-running). In registry mode, step 2 fails before the
+migration when the image compose would run is missing locally or is not the
+one step 1 tagged, instead of building it from the source tree.
+`--rollback` never runs migrations.
+
+The flip side: the schema now changes before the new image has proved it can
+boot. If the new color then fails readiness (step 4), the deploy aborts with
+the database already migrated and the old color serving on it, which the
+forward-compatible rule below is what makes safe.
+
+- **Forward-compatible** (additive columns, new tables): always safe. The old
+  color keeps serving on the migrated schema from step 2 until the drain.
 - **Backward-incompatible** (drop columns, type changes): require a
   **two-phase deploy**:
   1. First deploy: add new columns/tables, update code to use both old and new

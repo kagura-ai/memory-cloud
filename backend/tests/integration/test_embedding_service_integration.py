@@ -375,6 +375,7 @@ class TestEmbedWithUsageCapGate:
         patch_openai,
         patch_pricing,
         mock_email_service,
+        monkeypatch,
     ):
         """``provider=self_hosted`` short-circuits the cap gate regardless of
         BYOK row presence — self-hosted is local, no real provider cost.
@@ -388,8 +389,12 @@ class TestEmbedWithUsageCapGate:
         # directly so we exercise the self-hosted branch without needing a
         # model registry entry.
         svc.provider = "self_hosted"
-        # Bypass the self-hosted HTTP probe that runs on first use of _get_client.
-        svc._self_hosted_verified = True
+        # Bypass the self-hosted HTTP probe that _get_client runs (#2049: a
+        # process-wide cache now, no per-instance flag).
+        monkeypatch.setattr(
+            "services.llm_providers.self_hosted_provider.ensure_self_hosted_reachable",
+            AsyncMock(),
+        )
 
         # The shared patch_openai fixture replaced ``AsyncOpenAI``, so the
         # self-hosted branch's ``AsyncOpenAI(base_url=..., api_key=...)``

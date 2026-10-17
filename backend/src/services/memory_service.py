@@ -8103,14 +8103,17 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 )
 
                 # #2015: on an opted-in context, a long content is also
-                # embedded as chunk points. Fail-open, and a no-op (no query)
-                # for content too short to split.
+                # embedded as chunk points; a no-op (no query) for content
+                # too short to split. #2049: a chunk failure is raised, not
+                # swallowed, so the row is marked failed and the sweep retries
+                # it instead of stamping `success` with the chunks missing.
                 await write_content_chunks(
                     db,
                     memory,
                     base_payload=payload,
                     embed_svc=embed_svc,
                     collection_name=collection,
+                    fail_open=False,
                 )
 
             # Mark success. Clear the prior embedding_error AND reset

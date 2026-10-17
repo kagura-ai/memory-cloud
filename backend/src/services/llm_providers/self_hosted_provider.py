@@ -9,12 +9,15 @@ without an engine subfield.
 
 from __future__ import annotations
 
+import hashlib
+import time
+
 from openai import AsyncOpenAI, BadRequestError
 
 from config.self_hosted_aliases import resolve_self_hosted_model_id
 from config.settings import get_settings
 from services.llm_providers.base import LLMProvider, ProviderResponse, Usage
-from utils.exceptions import ConfigurationError
+from utils.exceptions import ConfigurationError, SelfHostedUnreachableError
 from utils.logger import get_logger
 
 # The request timeout (Issue #533 silent-hang mitigation; matches the OpenAI
@@ -42,7 +45,10 @@ async def verify_self_hosted_reachable(
     subject in the error message ("LLM backend" vs "inference server").
 
     Raises:
-        ConfigurationError: non-200 response, or any httpx transport error.
+        ConfigurationError: non-200 response (the server answered: it is
+            misconfigured, or rejects the key).
+        SelfHostedUnreachableError: any httpx transport error (#2049) — a
+            ``ConfigurationError`` subclass, so callers keep handling it alike.
     """
     import httpx
 
@@ -64,11 +70,60 @@ async def verify_self_hosted_reachable(
                     f"Self-hosted {label} not responding at {base_url} (HTTP {resp.status_code})"
                 )
     except httpx.HTTPError as err:
-        raise ConfigurationError(
+        raise SelfHostedUnreachableError(
             f"Cannot connect to self-hosted {label} at {base_url}. "
             "Is your inference server running? (e.g. `ollama serve`, or a vLLM "
             "OpenAI-compatible server)"
         ) from err
+
+
+# #2049: how long a successful probe is remembered, per process. At most the
+# embedding retry backoff (``EMBEDDING_RETRY_BACKOFF_SECONDS``, pinned by a
+# test): every retry of a failed embedding then probes again, so a server
+# that went down while the result was cached is reported as unreachable (a
+# configuration failure, no retry budget spent) instead of a provider error
+# that runs the row out of retries.
+REACHABILITY_TTL_SECONDS = 60.0
+
+# {(base_url, api_key fingerprint): expires_at (time.monotonic)}. Only a
+# successful probe is stored; any failure is probed again on the next call.
+_REACHABLE_UNTIL: dict[tuple[str, str], float] = {}
+
+
+def _reachability_key(base_url: str, api_key: str | None) -> tuple[str, str]:
+    fingerprint = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    return base_url, fingerprint
+
+
+async def ensure_self_hosted_reachable(
+    base_url: str, api_key: str | None, *, label: str = "backend"
+) -> None:
+    """``verify_self_hosted_reachable``, remembered per process for a TTL (#2049).
+
+    ``EmbeddingService`` is built per memory and per routed context, so a flag
+    on the instance let the probe run on nearly every cache-miss embed — and
+    an occasional slow TCP connect failed the embed. Keyed by base URL and
+    key, so a changed key is probed again. Only a success is remembered.
+
+    Args:
+        base_url: The server's OpenAI-compatible base URL.
+        api_key: Bearer token, or None for a keyless backend.
+        label: Subject of the error message ("inference server", ...).
+
+    Raises:
+        ConfigurationError: the server answered with an error status.
+        SelfHostedUnreachableError: the probe could not reach the server.
+    """
+    key = _reachability_key(base_url, api_key)
+    if _REACHABLE_UNTIL.get(key, 0.0) > time.monotonic():
+        return
+    await verify_self_hosted_reachable(base_url, api_key, label=label)
+    _REACHABLE_UNTIL[key] = time.monotonic() + REACHABILITY_TTL_SECONDS
+
+
+def clear_self_hosted_reachability_cache() -> None:
+    """Forget every remembered probe (tests)."""
+    _REACHABLE_UNTIL.clear()
 
 
 class SelfHostedProvider(LLMProvider):

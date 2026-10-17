@@ -50,7 +50,7 @@ from models.memory import (
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
-from services.llm_service import LLMService
+from services.llm_service import LLMService, billed_usage
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
@@ -1060,6 +1060,14 @@ class DedupMergePhase:
         except Exception as e:
             self._llm_failures += 1  # #1183
             logger.warning("dedup_llm_judge_failed", error=str(e))
+            if (usage := billed_usage(e)) is not None:
+                # #2038: the failed call still spent these tokens — count them in the
+                # run's totals and budget, but not as a successful call.
+                budget.consume(llm_calls=1)
+                self._tokens_used += usage.total_tokens
+                self._llm_breakdown = accumulate_llm_response(
+                    self._llm_breakdown, usage, count_call=False
+                )
             return []
 
     def _parse_dedup_response(

@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
 from models.memory import Memory, not_pinned_predicate, not_tool_triggered_predicate
-from services.llm_service import LLMService
+from services.llm_service import LLMService, billed_usage
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     IMPORTANCE_REEVAL_SYSTEM,
@@ -301,6 +301,14 @@ class ImportanceReevalPhase:
         except Exception as e:
             self._llm_failures += 1  # #1183
             logger.warning("importance_reeval_llm_failed", error=str(e))
+            if (usage := billed_usage(e)) is not None:
+                # #2038: the failed call still spent these tokens — count them in the
+                # run's totals and budget, but not as a successful call.
+                budget.consume(llm_calls=1)
+                self._tokens_used += usage.total_tokens
+                self._llm_breakdown = accumulate_llm_response(
+                    self._llm_breakdown, usage, count_call=False
+                )
             return {}
 
         # Parse with label validation
