@@ -999,6 +999,8 @@ class TestExecuteOrchestration:
         assert result.details["deferred_clusters"] == 0
         # Higher-importance mem_a is the winner → its id is the changed one.
         assert result.changed_memory_ids == {mem_a.id}
+        # #2015 D5: the winner is reported as a content change too.
+        assert result.content_changed_memory_ids == {mem_a.id}
         dedup_phase._execute_merge.assert_awaited_once()
         # No LLM tokens on the rule path.
         assert result.llm_calls_used == 0

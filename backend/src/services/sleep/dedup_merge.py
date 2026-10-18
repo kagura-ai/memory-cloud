@@ -470,7 +470,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 tally.skipped_pinned += 1
                 continue
             if not shadow_mode:
+                # The winner's content is merged: both sets (#2015 D5).
                 result.changed_memory_ids.add(winner_id)
+                if result.content_changed_memory_ids is not None:
+                    result.content_changed_memory_ids.add(winner_id)
             tally.merged += 1
 
             if audit is None:
@@ -527,7 +530,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         Returns:
             PhaseResult with merge statistics and changed memory IDs
         """
-        result = PhaseResult(phase_name="dedup_merge")
+        # #2015 D5: classified — a merge winner is the only content change.
+        result = PhaseResult(phase_name="dedup_merge", content_changed_memory_ids=set())
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
         # #1183: judge calls that raised (feeds run-status grading).

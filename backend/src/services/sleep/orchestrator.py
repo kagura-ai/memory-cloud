@@ -137,6 +137,9 @@ class SleepOrchestrator:
 
         phase_results: list[PhaseResult] = []
         changed_memory_ids: set[UUID] = set()
+        # #2015 D5: the subset whose content changed (a phase that does not
+        # classify contributes all of its changed ids).
+        content_changed_memory_ids: set[UUID] = set()
 
         # Phase definitions: (name, factory)
         em = embedding_model
@@ -176,6 +179,11 @@ class SleepOrchestrator:
                 )
                 phase_results.append(result)
                 changed_memory_ids.update(result.changed_memory_ids)
+                content_changed_memory_ids.update(
+                    result.changed_memory_ids
+                    if result.content_changed_memory_ids is None
+                    else result.content_changed_memory_ids
+                )
                 budget.consume(memories=result.memories_processed)
 
             # Phase 5: Reindex always runs if there are changes
@@ -186,6 +194,7 @@ class SleepOrchestrator:
                 user_id,
                 workspace_id,
                 context_id,
+                content_changed_memory_ids=content_changed_memory_ids,
             )
             phase_results.append(reindex_result)
 
@@ -351,6 +360,8 @@ class SleepOrchestrator:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
+        *,
+        content_changed_memory_ids: set[UUID] | None = None,
     ) -> PhaseResult:
         """Run reindex phase with error isolation."""
         try:
@@ -359,6 +370,7 @@ class SleepOrchestrator:
                 user_id,
                 workspace_id,
                 context_id,
+                content_changed_memory_ids=content_changed_memory_ids,
             )
         except Exception as e:
             logger.error(

@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
-from services.content_chunk_writer import content_chunks_enabled, write_content_chunks
+from services.content_chunk_writer import (
+    content_chunks_enabled,
+    sync_content_chunk_payload,
+    write_content_chunks,
+)
 from services.embedding_service import EmbeddingService
 from services.resource_indexer import ResourceIndexer, owns_resource_point
 from services.sleep.reporter import PhaseResult
@@ -42,6 +46,8 @@ class ReindexPhase:
         user_id: str,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        content_changed_memory_ids: set[UUID] | None = None,
     ) -> PhaseResult:
         """Re-index all changed memories.
 
@@ -49,6 +55,9 @@ class ReindexPhase:
         1. Fetch current state from PostgreSQL
         2. Re-generate embedding via EmbeddingService
         3. Upsert to Qdrant with updated payload
+        4. Content chunk points (#2015): rewritten (re-embedded) when the
+           memory's content changed; otherwise only their payload is synced
+           from the new summary payload, without an embedding (D5).
 
         Skips individual failures to allow partial success.
 
@@ -57,6 +66,8 @@ class ReindexPhase:
             user_id: User ID for Qdrant isolation
             workspace_id: Workspace ID for Qdrant isolation
             context_id: Context ID for Qdrant isolation
+            content_changed_memory_ids: The subset whose content changed.
+                None = unknown: every changed memory's chunks are rewritten.
 
         Returns:
             PhaseResult with reindex statistics
@@ -74,6 +85,11 @@ class ReindexPhase:
         reindexed = 0
         failed = 0
         failed_ids: list[str] = []
+        # #2015 D5: unknown means changed — an extra embed, never a stale chunk.
+        content_changed = (
+            changed_memory_ids if content_changed_memory_ids is None else content_changed_memory_ids
+        )
+        chunk_rewrites = 0
 
         # Batch-fetch all changed memories in one query (avoid N+1)
         stmt = select(Memory).where(
@@ -156,16 +172,20 @@ class ReindexPhase:
                     sparse_values=sparse_values,
                     collection_name=self.collection_name,
                 )
-                # #2015: the summary point was rewritten from the current
-                # content; rewrite the chunk points too (delete-first).
-                await write_content_chunks(
+                # #2015: a content change rewrites the chunk points
+                # (delete-first, re-embedded). A metadata-only change keeps
+                # their vectors and copies the new payload onto them — a
+                # promotion's scope reaches them only this way; chunks that
+                # could not be updated are rewritten instead.
+                if memory_id in content_changed or not await sync_content_chunk_payload(
                     self.db,
                     memory,
                     base_payload=payload,
-                    embed_svc=self.embedding_service,
                     collection_name=self.collection_name,
                     chunks_enabled=chunks_enabled,
-                )
+                ):
+                    if await self._write_chunks(result, memory, payload, chunks_enabled):
+                        chunk_rewrites += 1
 
                 reindexed += 1
 
@@ -184,6 +204,8 @@ class ReindexPhase:
             "reindexed": reindexed,
             "failed": failed,
             "failed_ids": failed_ids[:20],  # Cap for report size
+            # #2015: memories whose content chunks were re-embedded.
+            "content_chunk_rewrites": chunk_rewrites,
         }
 
         if failed > 0 and reindexed == 0:
@@ -198,6 +220,34 @@ class ReindexPhase:
         )
 
         return result
+
+    async def _write_chunks(
+        self,
+        result: PhaseResult,
+        memory: Memory,
+        payload: dict,
+        chunks_enabled: bool | None,
+    ) -> bool:
+        """Rewrite the memory's chunk points; True when its chunks were embedded.
+
+        The chunk embedding counts as one embedding call with its tokens
+        (#2015), also when the write then failed — the provider billed it.
+        """
+        usage: dict[str, int] = {}
+        try:
+            await write_content_chunks(
+                self.db,
+                memory,
+                base_payload=payload,
+                embed_svc=self.embedding_service,
+                collection_name=self.collection_name,
+                chunks_enabled=chunks_enabled,
+                usage=usage,
+            )
+        finally:
+            if "tokens" in usage:
+                self._account_embedding(result, usage["tokens"])
+        return "tokens" in usage
 
     def _account_embedding(self, result: PhaseResult, tokens: int) -> None:
         """Count one embedding call and its tokens on ``result``."""

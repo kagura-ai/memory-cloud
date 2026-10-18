@@ -438,6 +438,8 @@ class TestExecuteIntegration:
 
         assert result.memories_processed == 1
         assert kw["id"] in result.changed_memory_ids
+        # #2015 D5: an importance change is metadata only.
+        assert result.content_changed_memory_ids == set()
         assert result.details["updated"] == 1
         assert result.details["candidates"] == 1
         assert result.llm_calls_used == 1

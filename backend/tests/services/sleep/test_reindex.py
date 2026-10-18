@@ -319,3 +319,133 @@ class TestReindexResourceRows:
         assert result.success is False
         assert result.embedding_calls_used == 1
         assert result.embedding_tokens == 9
+
+
+class TestReindexContentChangedSplit:
+    """#2015 D5: only a content change re-embeds the chunk points."""
+
+    @staticmethod
+    def _write_with_usage(tokens):
+        async def _write(db, memory, *, usage=None, **kwargs):
+            if usage is not None:
+                usage.update(cached=0, requests=1, tokens=tokens)
+            return 3
+
+        return AsyncMock(side_effect=_write)
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
+    async def test_metadata_only_syncs_the_payload_without_a_chunk_embed(
+        self, mock_sync, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        mock_flag.return_value = True
+        mock_sync.return_value = True
+        meta, edited = _make_memory(importance=0.9), _make_memory()
+        _mock_batch_fetch(mock_db, [meta, edited])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 5))
+        write = self._write_with_usage(40)
+
+        with patch("services.sleep.reindex.write_content_chunks", write):
+            result = await reindex_phase.execute(
+                changed_memory_ids={meta.id, edited.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+                content_changed_memory_ids={edited.id},
+            )
+
+        # The summary is still re-embedded for both (D5 leaves that alone).
+        assert mock_qdrant.await_count == 2
+        # The metadata-only memory: payload synced from the new summary
+        # payload, chunks not rewritten.
+        mock_sync.assert_awaited_once()
+        assert mock_sync.await_args.args[1] is meta
+        assert mock_sync.await_args.kwargs["base_payload"]["importance"] == 0.9
+        assert mock_sync.await_args.kwargs["chunks_enabled"] is True
+        assert [c.args[1] for c in write.await_args_list] == [edited]
+        # Two summary embeds (5 each) and one chunk batch (40).
+        assert result.embedding_calls_used == 3
+        assert result.embedding_tokens == 50
+        assert result.details["content_chunk_rewrites"] == 1
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
+    async def test_unknown_classification_rewrites_every_memorys_chunks(
+        self, mock_sync, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        mock_flag.return_value = True
+        mem1, mem2 = _make_memory(), _make_memory()
+        _mock_batch_fetch(mock_db, [mem1, mem2])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 0))
+        write = self._write_with_usage(7)
+
+        with patch("services.sleep.reindex.write_content_chunks", write):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem1.id, mem2.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        mock_sync.assert_not_awaited()
+        assert write.await_count == 2
+        assert result.embedding_tokens == 14
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
+    async def test_a_failed_payload_sync_falls_back_to_a_rewrite(
+        self, mock_sync, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        """The sync deleted the chunks it could not update: rebuild them."""
+        mock_flag.return_value = True
+        mock_sync.return_value = False
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+        write = self._write_with_usage(9)
+
+        with patch("services.sleep.reindex.write_content_chunks", write):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+                content_changed_memory_ids=set(),
+            )
+
+        write.assert_awaited_once()
+        assert result.details["reindexed"] == 1
+        assert result.embedding_tokens == 10
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    async def test_chunk_tokens_count_when_the_chunk_write_raises(
+        self, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        mock_flag.return_value = True
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 2))
+
+        async def _write(db, memory, *, usage=None, **kwargs):
+            usage.update(cached=0, requests=1, tokens=6)
+            raise RuntimeError("delete failed")
+
+        with patch("services.sleep.reindex.write_content_chunks", AsyncMock(side_effect=_write)):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        assert result.details["failed"] == 1
+        assert result.embedding_tokens == 8
+        assert result.embedding_calls_used == 2

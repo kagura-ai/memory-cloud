@@ -181,6 +181,8 @@ class TestLLMBorderlinePath:
         assert result.details["llm_archived"] == 0
         phase.memory_repo.bulk_promote_to_persistent.assert_awaited_once_with([mem.id])
         assert mem.id in result.changed_memory_ids
+        # #2015 D5: a promotion is metadata only (the reindex syncs its scope).
+        assert result.content_changed_memory_ids == set()
         # tokens + budget consumed by the single batch call.
         assert result.tokens_used == 42
         assert budget.llm_calls_used == 1

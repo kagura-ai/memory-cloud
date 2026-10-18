@@ -77,7 +77,7 @@ class TestSleepOrchestrator:
             # Reindex
             reindex_instance = AsyncMock()
 
-            async def reindex_exec(changed, uid, ws=None, ctx=None):
+            async def reindex_exec(changed, uid, ws=None, ctx=None, **kwargs):
                 phase_names_executed.append("reindex")
                 return PhaseResult(phase_name="reindex")
 
@@ -189,7 +189,7 @@ class TestSleepOrchestrator:
 
             ri_inst = AsyncMock()
 
-            async def ri_exec(changed, uid, ws=None, ctx=None):
+            async def ri_exec(changed, uid, ws=None, ctx=None, **kwargs):
                 phases_completed.append("reindex")
                 return PhaseResult(phase_name="reindex")
 
@@ -214,7 +214,9 @@ class TestSleepOrchestrator:
         config = _make_config()
         mem_id_1 = uuid4()
         mem_id_2 = uuid4()
+        mem_id_3 = uuid4()
         reindex_received = []
+        content_received: set = set()
 
         with (
             patch("services.sleep.orchestrator.LLMService"),
@@ -248,21 +250,31 @@ class TestSleepOrchestrator:
                 return_value=PhaseResult(
                     phase_name="dedup_merge",
                     changed_memory_ids={mem_id_2},
+                    content_changed_memory_ids={mem_id_2},
                 )
             )
             MockDM.return_value = dm
 
-            # Phases 3-4: no changes
-            for MockPhase, name in [(MockIR, "importance_reeval"), (MockCP, "consolidation")]:
-                inst = AsyncMock()
-                inst.execute = AsyncMock(return_value=PhaseResult(phase_name=name))
-                MockPhase.return_value = inst
+            # Phase 3: a metadata-only change (#2015 D5); phase 4: no changes
+            ir = AsyncMock()
+            ir.execute = AsyncMock(
+                return_value=PhaseResult(
+                    phase_name="importance_reeval",
+                    changed_memory_ids={mem_id_3},
+                    content_changed_memory_ids=set(),
+                )
+            )
+            MockIR.return_value = ir
+            cp = AsyncMock()
+            cp.execute = AsyncMock(return_value=PhaseResult(phase_name="consolidation"))
+            MockCP.return_value = cp
 
             # Reindex: capture what it receives
             ri_inst = AsyncMock()
 
-            async def capture_reindex(changed, uid, ws=None, ctx=None):
+            async def capture_reindex(changed, uid, ws=None, ctx=None, **kwargs):
                 reindex_received.extend(changed)
+                content_received.update(kwargs["content_changed_memory_ids"])
                 return PhaseResult(phase_name="reindex")
 
             ri_inst.execute = capture_reindex
@@ -272,8 +284,10 @@ class TestSleepOrchestrator:
             orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
-        assert mem_id_1 in reindex_received
-        assert mem_id_2 in reindex_received
+        assert set(reindex_received) == {mem_id_1, mem_id_2, mem_id_3}
+        # #2015 D5: an unclassified phase (edge_discovery here) counts as a
+        # content change; the importance re-eval's metadata-only id does not.
+        assert content_received == {mem_id_1, mem_id_2}
 
 
 class TestSleepMode:

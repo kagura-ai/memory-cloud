@@ -106,7 +106,9 @@ class ImportanceReevalPhase(LLMSpendTracker):
         report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run importance re-evaluation phase."""
-        result = PhaseResult(phase_name="importance_reeval")
+        # #2015 D5: importance only, no content change (its chunk points
+        # keep their vectors; the reindex syncs their payload).
+        result = PhaseResult(phase_name="importance_reeval", content_changed_memory_ids=set())
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
         # #1183: judge calls that raised (feeds run-status grading).

@@ -165,6 +165,13 @@ class PhaseResult:
     embedding_calls_used: int = 0
     memories_processed: int = 0
     changed_memory_ids: set[UUID] = field(default_factory=set)
+    # #2015 D5: which of ``changed_memory_ids`` had their CONTENT changed (the
+    # Sleep reindex re-embeds only their content chunks; the others get their
+    # chunk payload synced). None = the phase did not classify: all of its
+    # changed ids count as content-changed, so a phase that forgets to report
+    # costs an extra embed, never a stale chunk. A phase that sets it must put
+    # every content change in it — an id left out keeps its old chunk text.
+    content_changed_memory_ids: set[UUID] | None = None
     details: dict | None = None
     # #1183: judge-LLM calls that raised (complete_json failed). First-class so
     # the reporter can grade the RUN (completed/degraded/failed) without

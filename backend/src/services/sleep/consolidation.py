@@ -409,7 +409,8 @@ class ConsolidationPhase(LLMSpendTracker):
         report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run consolidation phase."""
-        result = PhaseResult(phase_name="consolidation")
+        # #2015 D5: promotions change the scope only, never the content.
+        result = PhaseResult(phase_name="consolidation", content_changed_memory_ids=set())
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
         # #1183: judge calls that raised (feeds run-status grading).
