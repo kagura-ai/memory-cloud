@@ -448,7 +448,10 @@ async def update_workspace_plan(
         request: Update plan request with new plan name and optional reason
 
     Returns:
-        Success message
+        ``message``, and ``content_chunks_deactivated``: the ids of the
+        contexts whose content chunk vectors go inactive under the new plan
+        (#2103; their flag and chunk points are kept; empty where
+        CONTENT_CHUNKS_REQUIRE_PLAN is off)
 
     Raises:
         404: Workspace not found
@@ -547,6 +550,26 @@ async def update_workspace_plan(
                     f"for workspace {workspace_id} (plan change to {request.plan_name})"
                 )
 
+        # Issue #2103: the contexts whose content chunk vectors go inactive
+        # under the new plan (it lacks the feature, or its cap is lower).
+        # Reported only: the stored flag and the chunk points are kept, so a
+        # later upgrade makes them active again with no backfill. Empty where
+        # CONTENT_CHUNKS_REQUIRE_PLAN is off.
+        from services.content_chunk_policy import contexts_losing_content_chunks
+
+        chunks_deactivated = await contexts_losing_content_chunks(
+            db, workspace.id, old_plan, request.plan_name
+        )
+        if chunks_deactivated:
+            logger.info(
+                "content_chunks_deactivated_by_plan",
+                workspace_id=workspace_id,
+                old_plan=old_plan,
+                new_plan=request.plan_name,
+                count=len(chunks_deactivated),
+                context_ids=[str(context_id) for context_id in chunks_deactivated],
+            )
+
         await db.commit()
 
         logger.info(
@@ -558,7 +581,10 @@ async def update_workspace_plan(
             reason=request.reason,
         )
 
-        return {"message": f"Plan changed from {old_plan} to {request.plan_name}"}
+        return {
+            "message": f"Plan changed from {old_plan} to {request.plan_name}",
+            "content_chunks_deactivated": [str(context_id) for context_id in chunks_deactivated],
+        }
 
 
 @router.get("/audit", response_model=list[PlanChangeAuditEntry])
