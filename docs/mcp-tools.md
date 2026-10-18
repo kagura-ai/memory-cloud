@@ -2,7 +2,7 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-70 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+71 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
@@ -11,7 +11,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
 | `/mcp` (or `?profile=core`) | The 21 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 40k chars |
-| `/mcp?profile=full` | All 70 tools | ≈ 102k chars (about 2.6× the default) |
+| `/mcp?profile=full` | All 71 tools | ≈ 102k chars (about 2.6× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.103.0, when `create_context`, `update_context` and `delete_context` joined the core profile (≈ 102k / 35k / 15k at v0.93.0); v0.93.0 is when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
@@ -35,7 +35,7 @@ Every definition in `tools/list` carries a human-readable `title` and the standa
 | Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `delete_file`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
 | Destructive, not idempotent | `recall`, `get_agent_bootstrap` (learning writes, below), `update_memory` (`external_id` mode replaces the memory each call), `forget` (`query` mode deletes the next top-k), `merge_contexts`, `ingest_events`, `set_state` (`ttl_seconds` restarts the expiry each call), `secret_put` |
 | Additive writes | `remember`, `remember_batch`, `feedback`, `record_measurement`, `create_context`, `setup_resource`, `setup_connector`, `analyze_context`, `init_file_upload`, `complete_file_upload` (idempotent), `register_agent`, `bind_agent_context`, `secret_register_pubkey` |
-| Read-only | The other 36 tools |
+| Read-only | The other 37 tools |
 
 - **`recall` is destructive.** It runs Hebbian learning over the memories it returns and promotes working memories that reach the promotion threshold; both change later results. The learning pass also overwrites and removes existing edges: it rewrites the weight of each edge it updates, including one you declared with `create_edge`, deletes an edge whose weight decays below the prune threshold, and evicts the weakest automatic edges past the per-memory cap. Under the rule that makes `create_edge` destructive, `recall` is too, and a repeat changes the weights again, so it is not idempotent. `get_agent_bootstrap` runs the same recall when given a `query`. A client that confirms destructive tools asks before these two as well. `reference` and `explore` only bump access counters; `load_pinned`, `load_guardrails`, `recall_upcoming` and `recall_nearby` write only usage and audit rows. All six stay read-only.
 - `create_edge` is destructive because, on a pair that already has an edge, it applies your values over an automatic edge (and over a declared one with `overwrite=true`). `set_state` overwrites the value at its key, and with `ttl_seconds` each call restarts the expiry, so a repeat is not a no-op; `secret_put` revokes the grants the new version does not list. `secret_get` writes an audit entry and nothing else, so it is read-only.
@@ -48,7 +48,7 @@ With an OAuth access token, `tools/call` checks the token's scope before the too
 
 | Scope | Tools |
 |-------|-------|
-| `memory:read` | The 36 read-only tools (`readOnlyHint: true`), plus `recall` and `get_agent_bootstrap`: searches whose only writes are ranking updates |
+| `memory:read` | The 37 read-only tools (`readOnlyHint: true`), plus `recall` and `get_agent_bootstrap`: searches whose only writes are ranking updates |
 | `memory:write` | Every other tool |
 
 - A token without the scope gets HTTP `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…", resource_metadata="…"`. `scope` lists the scopes the token already has plus the missing one, so a client that re-authorizes with it keeps what it had. The body is a JSON-RPC error whose `data` carries `error: "insufficient_scope"`, `required_scope` and `help`; the code is `-32002` on session-based connections and `-32603` on stateless ones. The tool does not run. To recover, reconnect the server in the client and approve the missing scope.
@@ -68,7 +68,7 @@ The 401 challenges, the token audience rule and session handling on `/mcp` are i
 
 The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. `describe_tools` is the same idea for the tools outside the default view. A caller error from any core tool (`validation_error`, `missing_fields`, `invalid_argument`, `context_id_required`) carries `help: 'Manual: guide(["<tool>"])'`, added once in the dispatcher.
 
-## Memory (8)
+## Memory (9)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
@@ -76,7 +76,8 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 | `remember_batch` | Store up to 50 memories in one call, independently or `atomic`; per-item results | Member+ |
 | `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are compact by default (`verbosity="compact"`: the first 160 characters of `summary`, `summary_cut: true` when shortened, no tags or `context_summary`); `verbosity="full"` returns Layers 1-2; `related_tags` is `[{tag, count}]`, absent when there are none, as is an empty `tags` on a result. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
-| `reference` | Get full 3-layer details of a memory | Viewer+ |
+| `reference` | Get full 3-layer details of a memory; `version=N` reads an earlier version | Viewer+ |
+| `list_revisions` | A memory's revision log, newest first: `created` / `updated` (with the fields each edit changed) / `forgotten` / `restored`, each with the version after it ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)). Outside the core profile | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (retention bounded by the deployment's cleanup window, default 30 days) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
@@ -562,6 +563,7 @@ MCP clients cap what a tool result may put in front of the model — about 25k t
 | `list_agents` | `limit` 50, descriptions as 200-character previews | 100 | `has_more` / `next_cursor`, `description_truncated` |
 | `list_analyses` | `limit` 20, `error` as a 300-character preview (`get_analysis` returns it whole); page stops at 20,000 characters | 100, page stops at 20,000 characters | `next_cursor` (resumes after the last run returned), `error_truncated` |
 | `get_cluster` | `limit` 25, page stops at 20,000 characters | 100, page stops at 100,000 characters | `next_cursor`; `tags_omitted` on a member larger than the page |
+| `list_revisions` | `limit` 20, `max_chars` 20,000 | `limit` 100, `max_chars` 100,000 | `has_more` / `next_cursor` (newest first; keyset, so events written meanwhile never shift a page), `truncated` |
 
 Write-side caps keep the stored data these replies carry in proportion. They apply to new writes only; rows stored before them still read back.
 
@@ -726,6 +728,20 @@ reference(memory_id=M, context_id=C, details_offset=0)          # only details c
 ```
 
 Every page is a full `reference()` call: context access and the memory-level permission check run again each time, so a page of a memory you cannot read is refused exactly like the first call (`context_not_found` / `memory_not_found`). Only a call without an offset that selects `content`, `details` or `context` counts as a use of the memory (its access and adoption counts, which feed recall ranking and sleep promotion); continuation pages and `fields=[]` / `fields=["links"]` calls do not, so reading a large memory in many pages counts once.
+
+### `list_revisions` and earlier versions
+
+Every write to a memory leaves an event in its revision log ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)). `list_revisions(memory_id, context_id)` returns them newest first: `{version, kind, at, changed_fields, writer, by_you, agent_id?, session_id?}` per event, plus the memory's `current_version`. `kind` is `created` (version 1), `updated` (an edit that changed at least one versioned field; `changed_fields` names them), `forgotten` or `restored`; `version` is the memory's version right after the event (`forgotten` / `restored` do not move it). `writer` is `api`, or `rollback` for an event written by a session rollback. The log names no member: `by_you` says whether you (or an account linked to you) wrote the event, and only your own events carry their `agent_id` / `session_id`. Paging is a keyset on the event, so `next_cursor` never skips or repeats an event written between pages.
+
+`reference(memory_id, context_id, version=N)` returns version N: the memory as it stood just before the edit that made N+1. Its `summary`, `context_summary`, `content`, `details`, `type`, `importance` and `tags` are rebuilt from the log (each later edit recorded the values it overwrote); `scope`, `context` and provenance are today's; `updated_at` is when version N was written (`created_at` for version 1). The response adds `historical: true` and `current_version`, and leaves out the links and `supersede_candidate`, which describe the memory now. Paging and `max_chars` work as for the current version. `version` equal to `current_version` reads the memory as it is; a version outside `1..current_version` is `validation_error` carrying `current_version`. To revert, send the old values with `update_memory(memory_id, expected_version=<current_version>, ...)` — an ordinary edit, which itself becomes the next version.
+
+What the log can and cannot show:
+
+- Maintenance that never moves the version writes no event and is folded into the version it happened in: Sleep's importance re-evaluation, the tag union of a near-duplicate merge, promotion and archiving, a connector's re-index of a memory it ingested, re-embedding, access statistics. A rebuilt version lays the overwritten values of each later edit over the memory as it is now, so a field no later edit changed reads its current value — including a maintenance change made after version N.
+- Deleting a whole context and a Sleep archive write no `forgotten` event. A memory created before versions existed starts at version 1 with no `created` event.
+- An `external_id` upsert replaces the memory under a new id: the old id's log ends with `forgotten`, the new one starts at `created`.
+- After `forget`, the memory answers `memory_not_found` to both tools; its log stays with the tombstone and goes when the tombstone is purged.
+- Account erasure removes the erased member's overwritten `details` from the log. A rebuilt version whose `details` is affected reads `details: null` and lists it in `unavailable_fields`; it is never filled with a later value.
 
 ### `forget`
 

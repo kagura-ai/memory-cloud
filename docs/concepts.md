@@ -71,7 +71,7 @@ A **Memory** is a single piece of knowledge stored in Kagura Memory Cloud. Each 
 - **scope** — `working` (short-term) or `persistent` (long-term)
 - **version** — 1 on create, +1 for each edit that changes the summary, context summary, content, details, type, importance or tags ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043))
 
-**Versions and the revision log.** Several agents can share a context, so an edit can be made conditional: `update_memory(expected_version=N)` (REST: `PATCH` with `expected_version`) applies only while the memory is still at version N, and otherwise fails with `version_conflict` and the current version — nothing is lost to a concurrent edit. Each versioned edit records the values it overwrote (the changed fields only) and who made it in the memory's revision log, next to `created` and `forgotten` events. Maintenance that is not an edit — `forget`, Sleep's importance re-evaluation and tag merges, promotion, re-embedding, access statistics — never moves the version. The log is not embedded or searchable; it stays with a forgotten memory's tombstone and goes when the memory is purged.
+**Versions and the revision log.** Several agents can share a context, so an edit can be made conditional: `update_memory(expected_version=N)` (REST: `PATCH` with `expected_version`) applies only while the memory is still at version N, and otherwise fails with `version_conflict` and the current version — nothing is lost to a concurrent edit. Each versioned edit records the values it overwrote (the changed fields only) and who made it in the memory's revision log, next to `created` and `forgotten` events. Maintenance that is not an edit — `forget`, Sleep's importance re-evaluation and tag merges, promotion, re-embedding, access statistics — never moves the version. `list_revisions(memory_id)` (REST: `GET /api/v1/memory/{memory_id}/revisions`) lists a memory's events with the fields each edit changed, and `reference(memory_id, version=N)` returns an earlier version rebuilt from them; a revert is an ordinary conditional edit with the old values. The log is not embedded or searchable; it stays with a forgotten memory's tombstone (both reads answer not-found once it is forgotten) and goes when the memory is purged.
 
 ## Hybrid Search
 
@@ -330,11 +330,11 @@ The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound 
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 70 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
+Kagura Memory Cloud exposes 71 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
-| Memory | 8 | `remember`, `remember_batch`, `recall`, `recall_nearby`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
+| Memory | 9 | `remember`, `remember_batch`, `recall`, `recall_nearby`, `reference`, `list_revisions`, `update_memory`, `forget`, `explore` — store / search / discover memories, read a memory's revision history |
 | Agent Substrate | 11 | `load_pinned`, `load_guardrails`, `recall_upcoming`, `set_state`, `get_state`, `record_measurement`, `recall_series`, `feedback`, `list`, `changes_since`, `bootstrap` — delivery-mode-aware retrieval, deterministic listing and change log, one-call session start, agent state lane, measurement series, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
 | Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
