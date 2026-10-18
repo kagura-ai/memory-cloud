@@ -11,7 +11,7 @@ counter only for previously-failed rows.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -271,14 +271,17 @@ def _compiled(stmt: Any) -> str:
 
 
 async def _run_worker(
-    memory_service: ModuleType, db: MagicMock, embed_svc: MagicMock
+    memory_service: ModuleType,
+    db: MagicMock,
+    embed_svc: MagicMock,
+    clock: Any = None,
 ) -> tuple[AsyncMock, AsyncMock, MagicMock]:
     async def _aiter():
         yield db
 
     with (
         patch("db.base.get_db", return_value=_aiter()),
-        patch("utils.datetime.utcnow", return_value=_CLAIM_STAMP),
+        patch("utils.datetime.utcnow", side_effect=clock or (lambda: _CLAIM_STAMP)),
         patch("services.embedding_service.EmbeddingService", MagicMock()),
         patch(
             "services.context_routing.resolve_context_routing",
@@ -346,6 +349,29 @@ async def test_a_reclaimed_run_does_not_stamp_success_on_the_newer_claim():
     events = [c.args[0] for c in log.info.call_args_list]
     assert events == ["embedding_claim_lost"]
     assert log.info.call_args.kwargs["requeued"] is True
+    # #2070: lost while the stamp was fresh — a re-queue, not a reclaim.
+    assert log.info.call_args.kwargs["reason"] == "requeued"
+
+
+@pytest.mark.asyncio
+async def test_a_claim_lost_after_its_stamp_went_stale_is_logged_as_stale():
+    """#2070: a run noticing the loss past the stale cutoff may have been
+    reclaimed (failed renewals, a hung provider) — told apart from a re-queue."""
+    from services import memory_service
+
+    memory_id = uuid4()
+    db = _capturing_db(memory_id, [_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(side_effect=RuntimeError("provider hung"))
+    times = iter([_CLAIM_STAMP])
+
+    def _clock() -> datetime:
+        return next(times, _CLAIM_STAMP + timedelta(seconds=61))
+
+    _, _, log = await _run_worker(memory_service, db, embed_svc, clock=_clock)
+
+    assert log.info.call_args.args[0] == "embedding_claim_lost"
+    assert log.info.call_args.kwargs["reason"] == "stale"
 
 
 @pytest.mark.asyncio

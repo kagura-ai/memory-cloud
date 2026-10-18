@@ -8412,7 +8412,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     from db.base import get_db
     from models.memory import Memory
     from services.context_routing import resolve_context_routing
-    from services.embedding_claim import EmbeddingClaim
+    from services.embedding_claim import STALE_CLAIM_SECONDS, EmbeddingClaim
     from services.embedding_service import EmbeddingService
     from utils.datetime import utcnow as _utcnow
 
@@ -8433,7 +8433,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # Claim: atomically set pending/stale-processing → processing
             # Stale processing: embedding_attempted_at older than 60s (crash
             # recovery)
-            stale_cutoff = now - timedelta(seconds=60)
+            stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
             # #979: a `failed` row is also eligible for auto-retry once its
             # backoff has elapsed and it still has retry budget. The shared
             # clause keeps this gate byte-identical to the sweep prefilter. The
@@ -8569,6 +8569,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     "embedding_claim_lost",
                     memory_id=str(memory_id),
                     collection=collection,
+                    reason=claim.loss_reason(),
                     requeued=await _requeue_after_lost_claim(db, memory_id),
                 )
                 return
@@ -8657,6 +8658,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     "embedding_claim_lost",
                     memory_id=str(memory_id),
                     error=str(e),
+                    reason=claim.loss_reason(),
                     # A run that failed before writing replaced nothing.
                     requeued=wrote_points and await _requeue_after_lost_claim(db, memory_id),
                 )

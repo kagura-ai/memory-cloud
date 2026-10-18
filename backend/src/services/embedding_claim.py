@@ -18,6 +18,11 @@ fenced on the current stamp, in its own session (it never touches the run's
 transaction), and it stops for good once the claim is gone (an edit or a
 migration switch re-queued the row). A lock serialises each renewal with each
 check of the stamp, so a check never compares a value a renewal is replacing.
+
+A renewal waits at most ``RENEW_CHECKOUT_TIMEOUT_SECONDS`` for a pooled
+connection (#2070): without that bound, a starved pool makes it wait the full
+``DB_POOL_TIMEOUT``, and a single failed renewal could already let the stamp
+go stale.
 """
 
 from __future__ import annotations
@@ -38,8 +43,14 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Well inside the 60 s stale cutoff: two renewals can fail before a reclaim.
-RENEW_INTERVAL_SECONDS = 20.0
+# A ``processing`` row whose stamp is older than this is reclaimed: by the
+# embedding sweep and by a new run's claim (crash recovery).
+STALE_CLAIM_SECONDS = 60.0
+# After a renewal at T, the next ones start at T+15 and T+35; each waits at
+# most RENEW_CHECKOUT_TIMEOUT_SECONDS for a connection, so when both fail the
+# third still starts at T+55, inside the cutoff (#2070).
+RENEW_INTERVAL_SECONDS = 15.0
+RENEW_CHECKOUT_TIMEOUT_SECONDS = 5.0
 # Longer than any healthy run; a run still going after this is presumed hung.
 MAX_RENEW_SECONDS = 600.0
 
@@ -60,12 +71,32 @@ class EmbeddingClaim:
         self._task: asyncio.Task[None] | None = None
         self._renewing = False
         self._gone = False
+        # When a renewal found the claim gone (``loss_reason``).
+        self._gone_seen_at: datetime | None = None
 
     @asynccontextmanager
     async def held(self) -> AsyncIterator[datetime]:
         """The current stamp, with renewals held off until the block ends."""
         async with self._lock:
             yield self.stamp
+
+    def loss_reason(self) -> str:
+        """Why the claim was lost, for ``embedding_claim_lost`` (#2070).
+
+        Call once the renewal is stopped. A row is reclaimed (by the sweep or
+        a new run's claim) only once its stamp is ``STALE_CLAIM_SECONDS`` old,
+        so a loss seen while the stamp was younger is a re-queue — an edit, a
+        migration switch — or a delete: ``"requeued"``, expected. Seen later,
+        the run may have been reclaimed: ``"stale"`` — its renewals failed (a
+        starved pool) or stopped (``MAX_RENEW_SECONDS``: a hung provider).
+        A live renewal sees a re-queue within one interval, so only a run
+        whose renewals were not landing reports ``"stale"``.
+        """
+        from utils.datetime import utcnow
+
+        seen_at = self._gone_seen_at or utcnow()
+        age = (seen_at - self.stamp).total_seconds()
+        return "stale" if age >= STALE_CLAIM_SECONDS else "requeued"
 
     def start_renewal(self) -> None:
         """Start renewing the stamp in the background (once the claim is committed)."""
@@ -113,7 +144,9 @@ class EmbeddingClaim:
         async with isolated_session(self._db) as session:
             # Check out the connection before taking the lock: under pool
             # pressure the wait must not hold off the chunk writer's checks.
-            await session.connection()
+            # A bounded wait (#2070): this renewal fails fast and the next
+            # one still starts inside the stale cutoff.
+            await asyncio.wait_for(session.connection(), RENEW_CHECKOUT_TIMEOUT_SECONDS)
             async with self._lock:
                 if self._stop.is_set():
                     return
@@ -135,6 +168,8 @@ class EmbeddingClaim:
                     if renewed:
                         self.stamp = new_stamp
                     else:
-                        self._gone = True  # Re-queued or reclaimed; the outcome write logs it.
+                        # Re-queued or reclaimed; the outcome write logs it.
+                        self._gone = True
+                        self._gone_seen_at = new_stamp
                 finally:
                     self._renewing = False
