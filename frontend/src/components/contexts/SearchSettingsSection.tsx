@@ -63,7 +63,7 @@ import {
   listExternalAPIKeys,
   type ExternalAPIKey,
 } from "@/lib/api/external-keys";
-import { apiClient } from "@/lib/api/base";
+import { apiClient, ApiError } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
@@ -131,9 +131,10 @@ export function SearchSettingsSection({
   // "known".
   const [externalKeysLoaded, setExternalKeysLoaded] = useState(false);
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
-  // #2104: the content chunk value awaiting the user's confirmation (the
-  // AlertDialog is open while this is not null).
-  const [chunkConfirm, setChunkConfirm] = useState<boolean | null>(null);
+  // #2104: the content chunk confirmation. The target is kept apart from
+  // `open` so the dialog keeps its wording through the close animation.
+  const [chunkDialogOpen, setChunkDialogOpen] = useState(false);
+  const [chunkTarget, setChunkTarget] = useState(false);
   const { toast } = useToast();
   // Issue #1167: with BYOK off no new key can be added, so the "configure
   // reranker keys" CTA would point at a page without an Add button — skip the
@@ -275,8 +276,13 @@ export function SearchSettingsSection({
       // #2104: a refused chunk change (403 FEAT-001 plan / 429 QUOTA-001 cap,
       // e.g. another context took the last slot meanwhile): re-read the
       // server's view so the card shows the reason, and drop only the staged
-      // chunk flag — the user's other unsaved edits stay.
-      if (chunksChanged) {
+      // chunk flag — the user's other unsaved edits stay. Any other failure
+      // (network, 500, a capacity lock) keeps the confirmed choice staged.
+      const gate = err instanceof ApiError ? err.gate : undefined;
+      const chunkRefusal =
+        gate?.feature === "content_chunks" ||
+        gate?.quotaType === "content_chunk_contexts";
+      if (chunksChanged && chunkRefusal) {
         try {
           const data = await getContextSearchConfig(contextId);
           setConfig(data);
@@ -419,18 +425,25 @@ export function SearchSettingsSection({
     storedChunks && config.content_chunks_effective === false;
   const chunksInactiveForPlan =
     chunksInactive && (chunksReason === "plan" || chunksReason === "cap");
-  // Why the switch is disabled. A reason the inactive note already explains
-  // leaves only the role to say; a backend predating the reason field could
-  // only refuse on the role or the store.
+  // A backend predating #2103 computes can_change from the owner rule alone,
+  // so a store without chunk vectors (LanceDB) must block turning it on here.
+  const chunksUnsupportedOn =
+    !storedChunks && config.content_chunks_supported === false;
+  const chunksSwitchBlocked = !chunksCanChange || chunksUnsupportedOn;
+  // The reason shown under the switch: why it is disabled, or why a stored
+  // flag is inactive when the inactive note does not already say it (e.g.
+  // unsupported). A reason the note explains leaves only the role to say; a
+  // backend predating the reason field could only refuse on role or store.
+  const fallbackReason: ContentChunksDisabledReason | null =
+    config.content_chunks_supported === false ? "unsupported" : null;
   const chunksBlockedReason: ContentChunksDisabledReason | null =
-    chunksCanChange
-      ? null
-      : chunksInactiveForPlan
+    chunksSwitchBlocked
+      ? chunksInactiveForPlan
         ? "permission"
-        : (chunksReason ??
-          (config.content_chunks_supported === false
-            ? "unsupported"
-            : "permission"));
+        : (chunksReason ?? fallbackReason ?? "permission")
+      : chunksInactive && !chunksInactiveForPlan
+        ? (chunksReason ?? fallbackReason)
+        : null;
   const chunksBackfillPending = config.content_chunks_backfill_pending ?? 0;
 
   // Literal keys on purpose: the message-orphan scan (parity.test.ts) reads
@@ -459,13 +472,13 @@ export function SearchSettingsSection({
       setEditedConfig(next);
       return;
     }
-    setChunkConfirm(checked);
+    setChunkTarget(checked);
+    setChunkDialogOpen(true);
   };
 
   const confirmChunksToggle = () => {
-    if (chunkConfirm === null) return;
-    setEditedConfig({ ...editedConfig, content_chunks_enabled: chunkConfirm });
-    setChunkConfirm(null);
+    setEditedConfig({ ...editedConfig, content_chunks_enabled: chunkTarget });
+    setChunkDialogOpen(false);
   };
 
   const getProviderDescription = () => {
@@ -868,11 +881,14 @@ export function SearchSettingsSection({
                   id="content_chunks_enabled"
                   checked={currentChunks}
                   onCheckedChange={handleChunksToggle}
-                  disabled={!chunksCanChange}
-                  aria-describedby={cn(
-                    "content-chunks-desc",
-                    chunksBlockedReason && "content-chunks-reason",
-                  )}
+                  // Not while saving: a successful save resets the staged
+                  // edits, which would drop a change confirmed meanwhile.
+                  disabled={chunksSwitchBlocked || saving}
+                  aria-describedby={
+                    chunksBlockedReason
+                      ? "content-chunks-desc content-chunks-reason"
+                      : "content-chunks-desc"
+                  }
                 />
               </div>
 
@@ -904,7 +920,8 @@ export function SearchSettingsSection({
 
               {chunksBackfillPending > 0 && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {/* A snapshot, not live progress: no spinner. */}
+                  <Info className="h-4 w-4 shrink-0" />
                   <span>
                     {t("contentChunks.backfillPending", {
                       count: chunksBackfillPending,
@@ -953,22 +970,17 @@ export function SearchSettingsSection({
       </div>
 
       {/* #2104: confirm a content chunk change before it is staged */}
-      <AlertDialog
-        open={chunkConfirm !== null}
-        onOpenChange={(open) => {
-          if (!open) setChunkConfirm(null);
-        }}
-      >
+      <AlertDialog open={chunkDialogOpen} onOpenChange={setChunkDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {chunkConfirm
+              {chunkTarget
                 ? t("contentChunks.enableConfirmTitle")
                 : t("contentChunks.disableConfirmTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
-                {chunkConfirm ? (
+                {chunkTarget ? (
                   <>
                     <p>
                       {config.embedding_provider
@@ -977,7 +989,9 @@ export function SearchSettingsSection({
                           })
                         : t("contentChunks.enableConfirmBodyNoProvider")}
                     </p>
-                    {useRerank && !rerankingDisabledByDeployment && (
+                    {/* Only where the reranker is actually called: the
+                        plan and the deployment both allow it (#1645). */}
+                    {useRerank && rerank.state === "allowed" && (
                       <p>{t("contentChunks.enableConfirmRerank")}</p>
                     )}
                     <p>{t("contentChunks.enableConfirmBackfill")}</p>
@@ -991,7 +1005,7 @@ export function SearchSettingsSection({
           <AlertDialogFooter>
             <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={confirmChunksToggle}>
-              {chunkConfirm
+              {chunkTarget
                 ? t("contentChunks.confirmEnable")
                 : t("contentChunks.confirmDisable")}
             </AlertDialogAction>

@@ -49,9 +49,10 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
 
+let mockPlan = "basic";
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
-    currentWorkspace: { id: "ws-1", plan_name: "basic" },
+    currentWorkspace: { id: "ws-1", plan_name: mockPlan },
   }),
 }));
 
@@ -64,6 +65,7 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 }));
 
 const TIERS = [
+  { name: "free", display_name: "S", reranking: false },
   { name: "basic", display_name: "M", reranking: true },
 ] as unknown as PlanTierFeature[];
 vi.mock("@/hooks/usePlanFeatures", () => ({
@@ -90,7 +92,13 @@ vi.mock("@/lib/api/base", () => ({
   ApiError: class ApiError extends Error {},
 }));
 
+import { ApiError } from "@/lib/api/base";
 import { SearchSettingsSection } from "./SearchSettingsSection";
+
+/** A refusal as `lib/api/base.ts` hands it over: the gate facts attached. */
+function refusal(gate: Record<string, unknown>) {
+  return Object.assign(new ApiError("refused"), { gate });
+}
 
 const BASE = {
   context_id: "ctx-1",
@@ -140,6 +148,7 @@ async function renderWith(config: Record<string, unknown>) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockInfo = { features: { byok: false } };
+  mockPlan = "basic";
   mockUpdateConfig.mockResolvedValue({});
 });
 
@@ -199,6 +208,14 @@ describe("content chunk card — enabling", () => {
     expect(screen.getByText("contentChunks.enableConfirmRerank")).toBeTruthy();
   });
 
+  it("omits it where the plan does not rerank, whatever is stored", async () => {
+    mockPlan = "free";
+    await renderWith({ ...CHUNKS_OFF, use_rerank: true });
+    fireEvent.click(chunkSwitch());
+    expect(screen.getByText("contentChunks.enableConfirmTitle")).toBeTruthy();
+    expect(screen.queryByText("contentChunks.enableConfirmRerank")).toBeNull();
+  });
+
   it("falls back to the provider-less copy when the provider is unknown", async () => {
     await renderWith({ ...CHUNKS_OFF, embedding_provider: null });
     fireEvent.click(chunkSwitch());
@@ -230,21 +247,59 @@ describe("content chunk card — enabling", () => {
     );
   });
 
-  it("refreshes the config after a refusal so the reason shows", async () => {
+  it.each([
+    ["plan", { state: "plan", feature: "content_chunks" }],
+    ["cap", { state: "quota", quotaType: "content_chunk_contexts" }],
+  ])(
+    "a %s refusal re-reads the config and drops only the chunk change",
+    async (_label, gate) => {
+      await renderWith(CHUNKS_OFF);
+      mockUpdateConfig.mockRejectedValueOnce(refusal(gate));
+      fireEvent.click(chunkSwitch());
+      fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
+      fireEvent.change(screen.getByLabelText("fetchFactorLabel"), {
+        target: { value: "5" },
+      });
+      fireEvent.click(await screen.findByText("saveChanges"));
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({
+            variant: "destructive",
+            description: "refused",
+          }),
+        ),
+      );
+      await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(chunkSwitch().getAttribute("aria-checked")).toBe("false"),
+      );
+      // The other unsaved edit is still staged.
+      expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
+    },
+  );
+
+  it("any other failure keeps the confirmed chunk change staged", async () => {
     await renderWith(CHUNKS_OFF);
-    mockUpdateConfig.mockRejectedValueOnce(new Error("quota reached"));
+    mockUpdateConfig.mockRejectedValueOnce(new Error("network down"));
     fireEvent.click(chunkSwitch());
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
     fireEvent.click(await screen.findByText("saveChanges"));
-    await waitFor(() =>
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          variant: "destructive",
-          description: "quota reached",
-        }),
-      ),
-    );
-    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockToast).toHaveBeenCalled());
+    expect(mockGetConfig).toHaveBeenCalledTimes(1);
+    expect(chunkSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
+  });
+
+  it("disables the switch on a store without chunks, even where the backend predates the reason", async () => {
+    await renderWith({
+      ...CHUNKS_OFF,
+      content_chunks_supported: false,
+      // A pre-#2103 backend: can_change is the owner rule alone.
+      content_chunks_can_change: true,
+      content_chunks_disabled_reason: undefined,
+    });
+    expect(chunkSwitch().hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("contentChunks.reasonUnsupported")).toBeTruthy();
   });
 });
 
@@ -330,6 +385,21 @@ describe("content chunk card — stored on but inactive", () => {
       expect(chunkSwitch().hasAttribute("disabled")).toBe(false);
     },
   );
+});
+
+describe("content chunk card — inactive for another reason", () => {
+  it("says why when the store no longer keeps chunk vectors", async () => {
+    await renderWith({
+      ...CHUNKS_ON,
+      content_chunks_effective: false,
+      content_chunks_supported: false,
+      content_chunks_disabled_reason: "unsupported",
+    });
+    expect(screen.getByText("contentChunks.inactiveBadge")).toBeTruthy();
+    expect(screen.getByText("contentChunks.reasonUnsupported")).toBeTruthy();
+    // Turning it off is still allowed.
+    expect(chunkSwitch().hasAttribute("disabled")).toBe(false);
+  });
 });
 
 describe("content chunk card — backfill progress", () => {
