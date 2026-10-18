@@ -284,17 +284,17 @@ async def test_a_slow_checkout_does_not_push_the_next_renewal_back():
     sessions.session.connection = AsyncMock(side_effect=_pool_exhausted)
     claim = _claim()
     with (
-        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.2),
-        patch.object(embedding_claim, "RENEW_CHECKOUT_TIMEOUT_SECONDS", 0.15),
+        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.4),
+        patch.object(embedding_claim, "RENEW_CHECKOUT_TIMEOUT_SECONDS", 0.3),
         patch.object(embedding_claim, "isolated_session", sessions),
         patch.object(embedding_claim, "logger"),
     ):
         claim.start_renewal()
-        await _until(lambda: len(starts) >= 3, timeout=5.0)
+        await _until(lambda: len(starts) >= 3, timeout=10.0)
         await claim.stop_renewal()
-    # One interval apart, not interval + checkout wait (0.35).
+    # One interval apart, not interval + checkout wait (0.7).
     gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
-    assert all(gap < 0.3 for gap in gaps), gaps
+    assert all(gap < 0.55 for gap in gaps), gaps
 
 
 # #2070: ``embedding_claim_lost`` says why the claim went. A row is reclaimable
@@ -331,3 +331,34 @@ async def test_a_loss_seen_with_a_stale_stamp_is_a_possible_reclaim():
     claim = _claim()
     with patch("utils.datetime.utcnow", return_value=_T0 + timedelta(seconds=60)):
         assert claim.loss_reason() == "stale"
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_the_loop_when_renewals_overrun_the_interval():
+    """#2070: an attempt longer than the interval leaves no wait before the
+    next one, and the loop must still see a stop that arrived during it (the
+    stop does not cancel a renewal that is writing)."""
+    writing = asyncio.Event()
+
+    async def _slow_write() -> MagicMock:
+        writing.set()
+        await asyncio.sleep(0.02)
+        return _row(True)
+
+    async def _slow_checkout() -> None:
+        await asyncio.sleep(0.01)
+
+    sessions = _Sessions(_slow_write)
+    # Every attempt, even one that only finds the stop, outlasts the interval.
+    sessions.session.connection = AsyncMock(side_effect=_slow_checkout)
+    claim = _claim()
+    with (
+        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.001),
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch("utils.datetime.utcnow", return_value=_T1),
+    ):
+        claim.start_renewal()
+        await asyncio.wait_for(writing.wait(), 2)
+        await asyncio.wait_for(claim.stop_renewal(), 1)
+    # The write that was under way when the stop came is the last one.
+    assert len(sessions.statements) == 1

@@ -123,11 +123,20 @@ class EmbeddingClaim:
         deadline = time.monotonic() + MAX_RENEW_SECONDS
         next_at = time.monotonic() + RENEW_INTERVAL_SECONDS
         while self._gone_seen_at is None:
-            try:
-                await asyncio.wait_for(self._stop.wait(), max(0.0, next_at - time.monotonic()))
+            delay = next_at - time.monotonic()
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(self._stop.wait(), delay)
+                    return
+                except TimeoutError:
+                    pass
+            # Checked here, not only by the wait: when an attempt overran the
+            # interval there is no wait, and ``wait_for(..., 0)`` would cancel
+            # the event's waiter before it ran and miss a stop already set
+            # (#2070). Nor can ``stop_renewal``'s cancel be relied on: asyncpg
+            # shields a connect from cancellation.
+            if self._stop.is_set():
                 return
-            except TimeoutError:
-                pass
             if time.monotonic() >= deadline:
                 logger.warning("embedding_claim_renewal_expired", memory_id=str(self.memory_id))
                 return
@@ -152,7 +161,8 @@ class EmbeddingClaim:
             # pressure the wait must not hold off the chunk writer's checks.
             # A bounded wait (#2070): this renewal fails fast and the next
             # one still starts inside the stale cutoff.
-            await asyncio.wait_for(session.connection(), RENEW_CHECKOUT_TIMEOUT_SECONDS)
+            async with asyncio.timeout(RENEW_CHECKOUT_TIMEOUT_SECONDS):
+                await session.connection()
             async with self._lock:
                 if self._stop.is_set():
                     return
