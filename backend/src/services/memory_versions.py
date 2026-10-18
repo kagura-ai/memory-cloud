@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
@@ -29,7 +29,7 @@ from models.memory import (
     VERSIONED_FIELDS,
     MemoryRevision,
 )
-from utils.exceptions import VersionConflictError
+from utils.exceptions import ValidationError, VersionConflictError
 
 # Account erasure drops the subject's overwritten ``details`` from ``prior``
 # and lists the dropped fields under this key, so a reader can tell "erased"
@@ -37,6 +37,11 @@ from utils.exceptions import VersionConflictError
 # applies a ``prior`` (version reconstruction, a session rollback) reads it
 # through ``prior_values``.
 PRIOR_ERASED_KEY = "erased"
+# Account erasure NULLs the live ``details`` of the subject's memories; it
+# marks their ``updated`` events with this key, so a rebuild (which starts
+# from the live row) reports ``details`` as unavailable below them. Unlike
+# ``erased`` it does not mean the event changed the field.
+PRIOR_SCRUBBED_KEY = "scrubbed"
 
 
 def versioned_snapshot(memory: Any) -> dict[str, Any]:
@@ -227,12 +232,21 @@ def prior_values(prior: Mapping[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (prior or {}).items() if k in VERSIONED_FIELDS}
 
 
+def _marked(prior: Mapping[str, Any] | None, key: str) -> tuple[str, ...]:
+    names = (prior or {}).get(key)
+    if not isinstance(names, list):
+        return ()
+    return tuple(f for f in VERSIONED_FIELDS if f in names)
+
+
 def prior_erased(prior: Mapping[str, Any] | None) -> tuple[str, ...]:
     """The versioned fields whose overwritten value erasure removed."""
-    erased = (prior or {}).get(PRIOR_ERASED_KEY)
-    if not isinstance(erased, list):
-        return ()
-    return tuple(f for f in VERSIONED_FIELDS if f in erased)
+    return _marked(prior, PRIOR_ERASED_KEY)
+
+
+def prior_scrubbed(prior: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The versioned fields erasure scrubbed on the live row (unreadable below)."""
+    return _marked(prior, PRIOR_SCRUBBED_KEY)
 
 
 def changed_fields(prior: Mapping[str, Any] | None) -> list[str]:
@@ -242,13 +256,20 @@ def changed_fields(prior: Mapping[str, Any] | None) -> list[str]:
     return [f for f in VERSIONED_FIELDS if f in kept or f in erased]
 
 
-class UnknownVersionError(Exception):
-    """``version`` names no version of the memory that can be rebuilt."""
+class UnknownVersionError(ValidationError):
+    """``version`` names no version of the memory that can be rebuilt.
+
+    A ``ValidationError`` (422, ``details.current_version``), so the REST
+    route answers it like any bad argument; its own type lets the MCP handler
+    tell it from every other validation failure.
+    """
 
     def __init__(self, version: int, current_version: int) -> None:
         super().__init__(
             f"Version {version} is not a version of this memory: it is at version "
-            f"{current_version}, and earlier versions run from 1."
+            f"{current_version}, and earlier versions run from 1.",
+            field="version",
+            current_version=current_version,
         )
         self.version = version
         self.current_version = current_version
@@ -282,12 +303,15 @@ def reconstruct_version(
 ) -> HistoricalVersion:
     """Rebuild version ``target`` from the live row and its ``updated`` events.
 
-    Version K is the memory as it stood just before the edit that made K+1 —
-    maintenance that never moves the version (Sleep, the resource indexer,
-    a connector re-index) included, as the live row carries it. Each
-    ``updated`` event above ``target`` is undone newest first by laying its
-    ``prior`` (the values it overwrote) over the state. A value erasure
-    removed makes its field unavailable until an older event names it again.
+    Each ``updated`` event above ``target`` is undone newest first by laying
+    its ``prior`` (the values it overwrote) over the live row. A field one of
+    those edits changed reads the value it had just before the edit; a field
+    none of them changed reads its live value — including a change that
+    maintenance, which never moves the version and writes no event (Sleep,
+    the resource indexer, a connector re-index), made after ``target``. A
+    value erasure removed makes its field unavailable until an older event
+    names it again; a field erasure scrubbed on the live row is unavailable
+    below the event carrying the ``scrubbed`` marker.
 
     Pure: ``updates`` is any iterable of rows with ``version``, ``kind``,
     ``prior`` and ``at``; rows of another kind, at or below ``target`` (bar
@@ -324,7 +348,7 @@ def reconstruct_version(
     state = {f: copy.deepcopy(live.get(f)) for f in VERSIONED_FIELDS}
     unavailable: set[str] = set()
     for row in undo:
-        for field in prior_erased(row.prior):
+        for field in (*prior_scrubbed(row.prior), *prior_erased(row.prior)):
             state[field] = None
             unavailable.add(field)
         for field, value in prior_values(row.prior).items():
@@ -366,15 +390,34 @@ async def load_version(db: AsyncSession, memory: Any, target: int) -> Historical
 async def list_revision_rows(
     db: AsyncSession, memory_id: UUID, *, before_id: int | None, limit: int
 ) -> tuple[list[MemoryRevision], bool]:
-    """One page of a memory's revision rows, newest first (keyset on ``id``).
+    """One page of a memory's revision rows, newest first.
+
+    Ordered by ``(version, id)`` descending — the order of
+    ``idx_memory_revisions_memory (memory_id, version, id)``, so a page is an
+    index range read, not a sort of the whole log. The cursor stays the last
+    row's ``id``; its ``(version, id)`` is looked up (a primary-key read) and
+    the page continues strictly below it. A cursor that is not a row of this
+    memory reads as the end of the log.
 
     Returns:
         The rows (at most ``limit``) and whether older rows remain.
     """
+    order = (MemoryRevision.version.desc(), MemoryRevision.id.desc())
     stmt = select(MemoryRevision).where(MemoryRevision.memory_id == memory_id)
     if before_id is not None:
-        stmt = stmt.where(MemoryRevision.id < before_id)
-    result = await db.execute(stmt.order_by(MemoryRevision.id.desc()).limit(limit + 1))
+        anchor = (
+            await db.execute(
+                select(MemoryRevision.version).where(
+                    MemoryRevision.id == before_id, MemoryRevision.memory_id == memory_id
+                )
+            )
+        ).scalar_one_or_none()
+        if anchor is None:
+            return [], False
+        stmt = stmt.where(
+            tuple_(MemoryRevision.version, MemoryRevision.id) < tuple_(anchor, before_id)
+        )
+    result = await db.execute(stmt.order_by(*order).limit(limit + 1))
     rows = list(result.scalars().all())
     return rows[:limit], len(rows) > limit
 

@@ -5,7 +5,8 @@ fields it changed), ``forgotten``, ``restored``, each with the version after
 it. ``reference(memory_id, version=N)`` reads an earlier version's text. The
 gate is ``reference``'s: the context resolves like every read tool and the
 memory-level access check runs in ``MemoryService.list_revisions``; a
-forgotten memory answers ``memory_not_found``, so its log is unreadable too.
+forgotten memory, or one outside the named context, answers
+``memory_not_found``, so its log is unreadable too.
 """
 
 from __future__ import annotations
@@ -29,7 +30,13 @@ from mcp_server.tools._helpers import (
 )
 from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException
-from utils.response_budget import BudgetArgumentError, fit_items, parse_limit, parse_max_chars
+from utils.response_budget import (
+    BudgetArgumentError,
+    fit_items,
+    parse_limit,
+    parse_max_chars,
+    parse_offset_cursor,
+)
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
@@ -42,14 +49,10 @@ def _parse_cursor(raw: Any) -> int | None:
     """The ``next_cursor`` of a previous page (a revision id), or None."""
     if raw is None or raw == "":
         return None
-    # isascii(): str.isdigit() also accepts e.g. superscripts, which int() refuses.
-    if (
-        not isinstance(raw, str)
-        or not (raw.isascii() and raw.isdigit())
-        or len(raw) > _MAX_CURSOR_DIGITS
-    ):
+    value = parse_offset_cursor(raw)  # the same digits-only token as list's
+    if len(raw) > _MAX_CURSOR_DIGITS:
         raise BudgetArgumentError("cursor must be the next_cursor of a previous response.", raw)
-    return int(raw)
+    return value
 
 
 def _item(revision: Any) -> dict[str, Any]:
@@ -88,7 +91,11 @@ async def handle_list_revisions(
             try:
                 page = await execute_with_timeout(
                     MemoryService(db).list_revisions(
-                        memory_uuid, user_id=user_id, before_id=before_id, limit=limit
+                        memory_uuid,
+                        user_id=user_id,
+                        before_id=before_id,
+                        limit=limit,
+                        context_id=context_id,
                     ),
                     operation_name="list_revisions",
                 )

@@ -643,8 +643,7 @@ async def forget(
 
     Request:
         {
-            "memory_id": "uuid",
-            "version": 3            // optional (#2043): an earlier version
+            "memory_id": "uuid"
         }
 
     Response:

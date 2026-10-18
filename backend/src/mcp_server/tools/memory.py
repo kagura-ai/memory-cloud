@@ -47,7 +47,6 @@ from utils.exceptions import (
     ContentSizeExceededError,
     NotFoundException,
     QuotaExceededError,
-    ValidationError,
     VersionConflictError,
 )
 from utils.recall_projection import RECALL_VERBOSITIES, recall_result_item
@@ -1786,6 +1785,7 @@ async def handle_reference(
     from db.base import get_db
     from models.schemas import ReferenceRequest
     from services.memory_service import MemoryService
+    from services.memory_versions import UnknownVersionError
 
     request = ReferenceRequest(memory_id=memory_uuid, version=version)
 
@@ -1819,7 +1819,7 @@ async def handle_reference(
                     ),
                     operation_name="reference",
                 )
-            except ValidationError as e:
+            except UnknownVersionError as e:
                 # #2043: ``version`` names no version of this memory (the
                 # memory itself was found and readable).
                 await db.rollback()
@@ -1830,7 +1830,7 @@ async def handle_reference(
                     "validation_error",
                     e.message,
                     received=request.version,
-                    current_version=e.details.get("current_version"),
+                    current_version=e.current_version,
                     help="list_revisions(memory_id) lists the versions.",
                 )
             except NotFoundException:

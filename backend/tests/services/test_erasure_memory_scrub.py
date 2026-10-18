@@ -67,16 +67,26 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
         count = await service._erase_memory_revisions("google-oauth2|erased")
 
     assert count == 3
-    strip, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
+    strip, scrub, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
     strip_sql = str(strip.compile(dialect=postgresql.dialect()))
     assert strip_sql.startswith("UPDATE memory_revisions SET prior=((memory_revisions.prior #-")
-    # the subject's own events AND every event of a memory the subject wrote
-    assert "memory_revisions.actor_user_id =" in strip_sql
+    # every event of a memory the subject wrote, and (PR2) the event whose
+    # prior holds a details the subject wrote — the next details edit after
+    # theirs, found through the subject's own events
     assert "memory_revisions.memory_id IN (SELECT memories.id" in strip_sql
+    assert "memory_revisions_1.actor_user_id =" in strip_sql
+    assert "memory_revisions_1.version < memory_revisions.version" in strip_sql
+    assert "NOT (EXISTS" in strip_sql
     assert "memory_revisions.prior ? " in strip_sql  # only rows that carry details
     # PR2: the dropped key is recorded, so a rebuilt version says "unavailable"
     assert ") || " in strip_sql
     assert {"erased": ["details"]} in strip.compile(dialect=postgresql.dialect()).params.values()
+
+    # PR2: the authored memories' events say their live details was scrubbed
+    scrub_compiled = scrub.compile(dialect=postgresql.dialect())
+    assert "memory_revisions.memory_id IN (SELECT memories.id" in str(scrub_compiled)
+    assert "memory_revisions.kind =" in str(scrub_compiled)
+    assert {"scrubbed": ["details"]} in scrub_compiled.params.values()
 
     compiled = pseudonymize.compile(dialect=postgresql.dialect())
     assert str(compiled).startswith("UPDATE memory_revisions SET actor_user_id=")

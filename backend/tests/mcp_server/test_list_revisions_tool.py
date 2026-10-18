@@ -25,6 +25,7 @@ from models.schemas import (
     MemoryRevisionsResponse,
     ReferenceResponse,
 )
+from services.memory_versions import UnknownVersionError
 from utils.exceptions import NotFoundException, ValidationError
 
 _CTX = str(uuid4())
@@ -140,11 +141,8 @@ class TestListRevisions:
         assert "session_id" not in second and "agent_id" not in second  # absent, never null
         assert last["kind"] == "created"
         assert "truncated" not in payload
-        assert service.list_revisions.await_args.kwargs == {
-            "user_id": "u",
-            "before_id": 1200,
-            "limit": 3,
-        }
+        kwargs = service.list_revisions.await_args.kwargs
+        assert (kwargs["user_id"], kwargs["before_id"], kwargs["limit"]) == ("u", 1200, 3)
 
     @pytest.mark.asyncio
     async def test_limit_is_clamped_to_one_hundred(self) -> None:
@@ -281,14 +279,24 @@ class TestReferenceVersion:
 
     @pytest.mark.asyncio
     async def test_an_unknown_version_is_validation_error_with_the_current_version(self) -> None:
-        service = MagicMock(
-            reference=AsyncMock(
-                side_effect=ValidationError("no such version", field="version", current_version=4)
-            )
-        )
+        service = MagicMock(reference=AsyncMock(side_effect=UnknownVersionError(9, 4)))
         payload = await _reference(
             {"context_id": _CTX, "memory_id": str(uuid4()), "version": 9}, service
         )
         assert payload["error"] == "validation_error"
         assert payload["current_version"] == 4
         assert payload["received"] == 9
+
+
+@pytest.mark.asyncio
+async def test_another_validation_error_is_not_reported_as_a_bad_version() -> None:
+    service = MagicMock(reference=AsyncMock(side_effect=ValidationError("something else")))
+    with pytest.raises(ValidationError):
+        await _reference({"context_id": _CTX, "memory_id": str(uuid4())}, service)
+
+
+@pytest.mark.asyncio
+async def test_list_revisions_scopes_the_memory_to_the_named_context() -> None:
+    service = MagicMock(list_revisions=AsyncMock(return_value=_page(1)))
+    await _list({"context_id": _CTX, "memory_id": str(uuid4())}, service)
+    assert str(service.list_revisions.await_args.kwargs["context_id"]) == _CTX

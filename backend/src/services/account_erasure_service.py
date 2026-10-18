@@ -42,6 +42,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
@@ -74,14 +75,14 @@ from models.erasure import (
     VALID_REASON_CODES,
     ErasureRequest,
 )
-from models.memory import Memory, MemoryRevision
+from models.memory import REVISION_KIND_UPDATED, Memory, MemoryRevision
 from services.billing_contract import (
     ensure_no_billing_contract,
     owned_workspaces_under_contract,
     workspaces_under_contract,
 )
 from services.email_service import EmailService, get_email_service
-from services.memory_versions import PRIOR_ERASED_KEY
+from services.memory_versions import PRIOR_ERASED_KEY, PRIOR_SCRUBBED_KEY
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
@@ -1431,36 +1432,79 @@ class AccountErasureService:
     async def _erase_memory_revisions(self, user_id: str) -> int:
         """Scrub the erased subject out of ``memory_revisions`` (#2043).
 
-        Two UPDATEs:
+        An ``updated`` row's ``prior`` holds the values its edit OVERWROTE,
+        so the ``details`` the subject wrote sit in the prior of the next
+        edit that changed ``details`` after theirs — not in the subject's own
+        row, whose prior is the previous writer's. Three UPDATEs, the first
+        two in the revision-log twin of ``_scrub_surviving_memories`` (which
+        NULLs the surviving memories' ``details``):
 
-        - ``prior`` loses its ``details`` key on every revision the subject
-          wrote and on every revision of a memory the subject authored — the
-          revision-log twin of ``_scrub_surviving_memories`` NULLing the
-          surviving memories' ``details`` (an overwritten ``details`` would
-          otherwise keep the structured payload the scrub removes). The
-          overwritten text stays, as the memory text itself does. The key
-          is replaced by ``{"erased": ["details"]}`` (``PRIOR_ERASED_KEY``),
-          so a rebuilt earlier version says its details are unavailable
-          instead of passing a later value off as it (#2043 PR2).
+        - ``prior.details`` is removed from every revision of a memory the
+          subject authored and from every revision that holds a ``details``
+          the subject wrote; the key is replaced by
+          ``{"erased": ["details"]}`` (``PRIOR_ERASED_KEY``) so a rebuilt
+          earlier version reports its details as unavailable instead of
+          passing another value off as it. The overwritten text stays, as
+          the memory text itself does.
+        - every ``updated`` row of a memory the subject authored gets
+          ``{"scrubbed": ["details"]}`` (``PRIOR_SCRUBBED_KEY``): the live
+          ``details`` that a rebuild starts from is NULLed by the memory
+          scrub, so no version below those events can read it either.
         - the subject's own events get the salted pseudonym as
           ``actor_user_id`` (the same pseudonym as the memories, so the log
           still lines up) and a NULL ``session_id`` (the
           ``memory_access_events`` rule: an opaque session token has no
           post-erasure value).
 
+        Runs BEFORE ``_scrub_surviving_memories`` (it finds the authored
+        memories by the raw ``user_id``) and before its own pseudonymization
+        (it finds the subject's edits by the raw ``actor_user_id``). Each
+        statement's subqueries read the rows as they were when it started.
+
         Returns:
             How many revision rows were pseudonymized.
         """
+        authored = MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id))
+        # The subject's details edit, and no other details edit between it
+        # and this row: this row's prior is the value the subject wrote.
+        theirs = aliased(MemoryRevision)
+        between = aliased(MemoryRevision)
+        holds_subjects_details = (
+            select(theirs.id)
+            .where(
+                theirs.memory_id == MemoryRevision.memory_id,
+                theirs.actor_user_id == user_id,
+                theirs.prior.has_key("details"),
+                theirs.version < MemoryRevision.version,
+                ~select(between.id)
+                .where(
+                    between.memory_id == MemoryRevision.memory_id,
+                    between.prior.has_key("details"),
+                    between.version > theirs.version,
+                    between.version < MemoryRevision.version,
+                )
+                .exists(),
+            )
+            .exists()
+        )
         await self.db.execute(
             update(MemoryRevision)
             .where(
                 MemoryRevision.prior.has_key("details"),
-                (MemoryRevision.actor_user_id == user_id)
-                | MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id)),
+                authored | holds_subjects_details,
             )
             .values(
                 prior=MemoryRevision.prior.delete_path(["details"]).op("||", return_type=JSONB)(
                     type_coerce({PRIOR_ERASED_KEY: ["details"]}, JSONB)
+                )
+            )
+        )
+        await self.db.execute(
+            update(MemoryRevision)
+            .where(authored, MemoryRevision.kind == REVISION_KIND_UPDATED)
+            .values(
+                prior=MemoryRevision.prior.op("||", return_type=JSONB)(
+                    type_coerce({PRIOR_SCRUBBED_KEY: ["details"]}, JSONB)
                 )
             )
         )

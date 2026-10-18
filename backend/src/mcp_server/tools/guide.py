@@ -387,8 +387,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "that one). Errors to branch on: memory_not_found, invalid_argument."
     ),
     "reference.versions": (
-        "Earlier versions: reference(memory_id, version=N) returns version N as it "
-        "stood before the next edit, rebuilt from the memory's revision log: "
+        "Earlier versions: reference(memory_id, version=N) returns version N rebuilt "
+        "from the memory's revision log — each later edit's overwritten values laid over "
+        "the memory as it is now, so a field no later edit changed reads its current "
+        "value, Sleep maintenance made after N included: "
         "historical: true, version: N, current_version (the live one), updated_at = "
         "when N was written; scope, context and provenance are today's, and the links "
         "and supersede_candidate are left out (they describe the memory now). "

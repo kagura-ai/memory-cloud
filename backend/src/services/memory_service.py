@@ -2655,6 +2655,7 @@ class MemoryService:
         *,
         before_id: int | None = None,
         limit: int = 20,
+        context_id: UUID | None = None,
     ) -> MemoryRevisionsResponse:
         """One page of a memory's revision log, newest first (#2043).
 
@@ -2668,14 +2669,20 @@ class MemoryService:
             before_id: Keyset cursor — the ``id`` of the last row of the
                 previous page; None for the newest page.
             limit: Rows per page.
+            context_id: The context the caller named (MCP); a memory of
+                another context is not found, so the envelope's context
+                fields always describe the memory's own context.
 
         Raises:
-            NotFoundException: No such live memory, or no access.
+            NotFoundException: No such live memory, no access, or not in
+                ``context_id``.
         """
         from services.identity_link_service import linked_user_ids
         from services.memory_versions import list_revision_rows, revision_item
 
         memory = await self._load_readable_memory(memory_id, user_id)
+        if context_id is not None and memory.context_id != context_id:
+            raise NotFoundException("Memory", str(memory_id))
         rows, has_more = await list_revision_rows(
             self.db, memory.id, before_id=before_id, limit=limit
         )
@@ -2723,7 +2730,8 @@ class MemoryService:
 
         Raises:
             NotFoundException: If memory not found
-            ValidationError: ``version`` is not a version of the memory.
+            UnknownVersionError: ``version`` is not a version of the memory
+                (a ``ValidationError``: 422 / ``validation_error``).
         """
         memory = await self._load_readable_memory(memory_id, user_id)
         if version is not None and version != memory.version:
@@ -2749,20 +2757,7 @@ class MemoryService:
             )
             await self.db.commit()
 
-        logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
-
-        # #1278/#1281 item 7: audit the Layer-3 adoption read (no-op unless
-        # verified agent identity).
-        from services.memory_access_event_writer import emit_memory_access_event
-
-        await emit_memory_access_event(
-            operation="reference",
-            outcome="success",
-            workspace_id=memory.workspace_id,
-            user_id=user_id,
-            context_id=memory.context_id,
-            memory_id=memory_id,
-        )
+        await self._audit_reference_read(memory, user_id)
 
         # Issue #440: Fetch declared_link references for the dialog References
         # section. The edge invariant (`_validate_edge_context_invariant` in
@@ -2818,24 +2813,23 @@ class MemoryService:
             incoming_has_more=incoming_has_more,
         )
 
-    async def _reference_historical(
-        self, memory: Memory, user_id: str, version: int
-    ) -> ReferenceResponse:
-        """``reference(version=N)`` for an earlier version (#2043)."""
-        from services.memory_versions import UnknownVersionError, load_version
+    async def _audit_reference_read(
+        self, memory: Memory, user_id: str, *, version: int | None = None
+    ) -> None:
+        """Log and audit one reference read (the current or an earlier version)."""
+        if version is None:
+            logger.info("memory_referenced", memory_id=str(memory.id), user_id=user_id)
+        else:
+            logger.info(
+                "memory_referenced",
+                memory_id=str(memory.id),
+                user_id=user_id,
+                version=version,
+                historical=True,
+            )
 
-        try:
-            historical = await load_version(self.db, memory, version)
-        except UnknownVersionError as e:
-            raise ValidationError(str(e), field="version", current_version=e.current_version) from e
-
-        logger.info(
-            "memory_referenced",
-            memory_id=str(memory.id),
-            user_id=user_id,
-            version=version,
-            historical=True,
-        )
+        # #1278/#1281 item 7: audit the Layer-3 adoption read (no-op unless
+        # verified agent identity).
         from services.memory_access_event_writer import emit_memory_access_event
 
         await emit_memory_access_event(
@@ -2846,6 +2840,16 @@ class MemoryService:
             context_id=memory.context_id,
             memory_id=memory.id,
         )
+
+    async def _reference_historical(
+        self, memory: Memory, user_id: str, version: int
+    ) -> ReferenceResponse:
+        """``reference(version=N)`` for an earlier version (#2043)."""
+        from services.memory_versions import load_version
+
+        # UnknownVersionError (a ValidationError) propagates: 422 / validation_error.
+        historical = await load_version(self.db, memory, version)
+        await self._audit_reference_read(memory, user_id, version=version)
 
         values = historical.values
         return ReferenceResponse(

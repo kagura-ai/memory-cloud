@@ -23,6 +23,7 @@ from models.memory import VERSIONED_FIELDS
 from services.memory_service import MemoryService
 from services.memory_versions import (
     PRIOR_ERASED_KEY,
+    PRIOR_SCRUBBED_KEY,
     UnknownVersionError,
     changed_fields,
     list_revision_rows,
@@ -129,6 +130,16 @@ class TestReconstructVersion:
         # still unavailable further back: no older event names details
         assert reconstruct_version(LIVE, 3, updates, 1).unavailable == ("details",)
 
+    def test_a_scrubbed_live_value_is_unavailable_below_the_marked_event(self) -> None:
+        # erasure NULLed the live details; v2 changed only the summary
+        updates = [_rev(2, {"summary": "first summary", PRIOR_SCRUBBED_KEY: ["details"]})]
+        live = {**LIVE, "details": None}
+        got = reconstruct_version(live, 2, updates, 1)
+        assert got.values["details"] is None
+        assert got.unavailable == ("details",)
+        # the marker is not a change of the field
+        assert changed_fields(updates[0].prior) == ["summary"]
+
     def test_an_older_event_that_names_the_field_makes_it_available_again(self) -> None:
         updates = [
             _rev(3, {PRIOR_ERASED_KEY: ["details"]}),
@@ -200,18 +211,41 @@ class TestQueries:
     @pytest.mark.asyncio
     async def test_list_revision_rows_is_newest_first_keyset_with_one_extra(self) -> None:
         rows = [SimpleNamespace(id=i) for i in (9, 8, 7)]
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = rows
-        db = MagicMock(execute=AsyncMock(return_value=result))
+        anchor = MagicMock()
+        anchor.scalar_one_or_none.return_value = 5  # the cursor row's version
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = rows
+        db = MagicMock(execute=AsyncMock(side_effect=[anchor, page_result]))
 
         page, has_more = await list_revision_rows(db, uuid4(), before_id=10, limit=2)
 
         assert [r.id for r in page] == [9, 8]
         assert has_more is True
-        sql = str(db.execute.await_args.args[0].compile(dialect=postgresql.dialect()))
-        assert "memory_revisions.id < " in sql
-        assert "ORDER BY memory_revisions.id DESC" in sql
-        assert "LIMIT" in sql
+        lookup, query = (
+            str(c.args[0].compile(dialect=postgresql.dialect())) for c in db.execute.await_args_list
+        )
+        # the cursor is looked up within the same memory
+        assert "memory_revisions.id = " in lookup and "memory_revisions.memory_id = " in lookup
+        # (version, id) order: an index range read on (memory_id, version, id)
+        assert "(memory_revisions.version, memory_revisions.id) < " in query
+        assert "ORDER BY memory_revisions.version DESC, memory_revisions.id DESC" in query
+        assert "LIMIT" in query
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_of_another_memory_is_the_end_of_the_log(self) -> None:
+        anchor = MagicMock()
+        anchor.scalar_one_or_none.return_value = None
+        db = MagicMock(execute=AsyncMock(return_value=anchor))
+        assert await list_revision_rows(db, uuid4(), before_id=10, limit=2) == ([], False)
+        db.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_first_page_needs_no_lookup(self) -> None:
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = []
+        db = MagicMock(execute=AsyncMock(return_value=page_result))
+        assert await list_revision_rows(db, uuid4(), before_id=None, limit=2) == ([], False)
+        db.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_load_version_reads_the_updated_rows_from_the_target_up(self) -> None:
@@ -320,9 +354,11 @@ class TestReferenceVersion:
         memory = _memory()
         service, perm = _service(memory)
         with patch("services.permission_service.PermissionService", return_value=perm):
-            with pytest.raises(ValidationError) as e:
+            with pytest.raises(UnknownVersionError) as e:
                 await service.reference(memory.id, "u", version=9)
-        assert e.value.details["current_version"] == 4
+        # a ValidationError: the REST route answers 422 with the current version
+        assert isinstance(e.value, ValidationError)
+        assert e.value.details == {"field": "version", "current_version": 4}
 
     @pytest.mark.asyncio
     async def test_a_denied_or_forgotten_memory_is_not_found_before_any_version_check(
@@ -385,6 +421,18 @@ class TestListRevisions:
         ):
             page = await service.list_revisions(memory.id, "u")
         assert (page.has_more, page.next_cursor) == (False, None)
+
+    @pytest.mark.asyncio
+    async def test_a_memory_outside_the_named_context_is_not_found(self) -> None:
+        memory = _memory()
+        service, perm = _service(memory)
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch("services.memory_versions.list_revision_rows", new=AsyncMock()) as page_rows,
+        ):
+            with pytest.raises(NotFoundException):
+                await service.list_revisions(memory.id, "u", context_id=uuid4())
+        page_rows.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_denied_is_not_found_and_reads_no_log(self) -> None:
