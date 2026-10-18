@@ -4,7 +4,9 @@ Two overlapping re-embeds of one memory write the same chunk point ids, so
 ``write_content_chunks`` re-reads the row right before its upsert. These tests
 pin the SQL of that check (``_superseded``): the NULL claim stamp of a row
 never claimed, a re-queue to ``pending``, a newer claim, a content edit and a
-soft delete. No Qdrant is needed. Skipped when Postgres is unreachable.
+soft delete. They also pin the fence of ``requeue_embedding`` (#2061), which
+a failed Sleep chunk write uses. No Qdrant is needed. Skipped when Postgres is
+unreachable.
 """
 
 from __future__ import annotations

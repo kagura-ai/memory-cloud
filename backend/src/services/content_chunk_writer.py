@@ -9,10 +9,13 @@ and callers on such a context can skip the chunk cascade.
 - Flag off: nothing is read from or written to the vector store (turning
   the flag off purges the context's chunks, see
   ``purge_context_chunk_points``).
-- Flag on: the chunks of the current content are upserted over the old ones
-  (chunk ids are deterministic per index), then the old chunks past the new
-  count are deleted (#2061) — content that shrank below the split threshold
-  loses them all. A superseded run (below) does neither.
+- Flag on: the chunks are replaced in place (#2061). The chunks of the
+  current content are upserted over the old ones (chunk ids are
+  deterministic per index), then the old chunks past the new count are
+  deleted; content that shrank below the split threshold loses them all.
+  The memory is never without chunks while new ones are embedded, and a
+  failed embedding keeps the old ones. A superseded run (below) writes
+  nothing.
 
 The flag is read again, fresh, right before the upsert, so a writer whose
 embedding was in flight while the flag was turned off writes nothing; the
@@ -21,34 +24,36 @@ back on, so a leftover from the remaining window never becomes visible.
 
 Two overlapping re-embeds of one memory write the same chunk ids (#2041). So
 the row is read again before anything is embedded and again right before the
-upsert: a
-run whose memory was deleted, edited (its content changed or it was re-queued
-``pending``) or, for an embedding run, claimed by a newer run (the stamp its
-claim holds moved; ``services.embedding_claim``) stops there — the newer
-write owns the chunks. The Sleep paths hold no claim and compare no stamp.
-The first check keeps a stale run from paying for an embedding and from
-writing over chunks a newer run already wrote; the second catches an edit
-that landed while the chunks were embedded. ``updated_at`` is not
-used: metadata-only changes move it without a re-embed, so skipping on it
-would leave the memory without chunks. What remains is the gap between the
-second check and the write (two round trips): a newer run that writes inside
-it can be overwritten by this run's upsert. That is repaired, not prevented
-(#2061): a run without a claim reads the row once more after its write and
-re-queues it when it moved on, and an embedding run that finds its claim lost
-re-queues it (``process_pending_embedding``). Both re-queues move only a
-``success`` row, so a run still in flight is left to finish. The
-``content_hash`` every chunk point carries is not compared yet. The summary
-point has the same race; the claim-lost re-queue covers it too.
+upsert: a run whose memory was deleted, edited (its content changed or it was
+re-queued ``pending``) or, for an embedding run, claimed by a newer run (the
+stamp its claim holds moved; ``services.embedding_claim``) stops there — the
+newer write owns the chunks. The Sleep paths hold no claim and compare no
+stamp. The first check keeps a stale run from paying for an embedding and
+from writing over chunks a newer run already wrote; the second catches an
+edit that landed while the chunks were embedded. ``updated_at`` is not used:
+metadata-only changes move it without a re-embed, so skipping on it would
+leave the memory without chunks.
+
+What remains is the gap between the second check and the write (two round
+trips): a newer run that writes inside it can be overwritten by this run's
+upsert. That is repaired, not prevented (#2061): a run without a claim reads
+the row once more after its write and re-queues it when it moved on, and an
+embedding run that finds its claim lost re-queues it
+(``process_pending_embedding``). Both re-queues (``requeue_embedding``) move
+only a ``success`` row, so a run still in flight is left to finish. The
+summary point has the same race; the claim-lost re-queue covers it too. The
+``content_hash`` every chunk point carries is not compared yet.
 
 Every failure is logged (``content_chunks_failed``, error class only — never
-the text). One before the upsert leaves the old chunks as they were. By
-default it is then fail-open: the summary point is already written and the
-memory keeps whatever chunks it had until its next re-embed. ``process_pending_embedding`` passes
-``fail_open=False`` (#2049) so the failure is raised and the row is marked
-failed and retried by the embedding sweep, never stamped ``success`` without
-its chunks. Its outcome write is fenced on the claim's own
-``embedding_attempted_at``, so a run superseded here (it returns 0, like a
-no-op) cannot stamp the newer run's claim either.
+the text). By default it is then fail-open: the summary point is already
+written and the memory keeps whatever chunks it had until its next re-embed.
+Every caller passes ``fail_open=False`` instead. ``process_pending_embedding``
+(#2049) marks the row failed and the embedding sweep retries it, never
+stamping ``success`` without its chunks; its outcome write is fenced on the
+claim's own ``embedding_attempted_at``, so a run superseded here (it returns
+0, like a no-op) cannot stamp the newer run's claim either. The Sleep reindex
+and undo have no retry of their own and re-queue the memory (``pending``), so
+the sweep rebuilds it (#2061).
 """
 
 from __future__ import annotations
