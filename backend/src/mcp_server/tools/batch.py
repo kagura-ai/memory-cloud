@@ -38,6 +38,7 @@ from mcp_server.tools._helpers import (
     _persistence_response_field,
     _resolve_context,
     _resolve_context_id,
+    _session_response_field,
     _touch_context_last_used,
     execute_with_timeout,
 )
@@ -215,6 +216,7 @@ def _envelope(
         "candidates": candidates,
         "failed": failed,
         "skipped": skipped,
+        **(_session_response_field() if succeeded else {}),  # #2044
         **context_fields,
         **extra,
     }

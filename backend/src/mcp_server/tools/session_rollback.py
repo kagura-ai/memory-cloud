@@ -32,9 +32,9 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _SESSION_ID_HELP = (
-    "session_id is the session your writes were recorded under: the "
-    "gen_ai.conversation.id / session.id OTel baggage of the request, else the "
-    "MCP session id (Mcp-Session-Id)."
+    "session_id is the session your writes were recorded under — remember, "
+    "update_memory and forget return it: the gen_ai.conversation.id / session.id "
+    "OTel baggage of the request, else the MCP session id (Mcp-Session-Id)."
 )
 _NOT_FOUND_HELP = (
     "Only your own sessions are visible (the same user and the same agent "
@@ -42,8 +42,10 @@ _NOT_FOUND_HELP = (
     "context. changes_since(context_id, since, session_id) lists what a session wrote."
 )
 _PARTIAL_HELP = (
-    "Every item not listed in summary.errors was handled and saved; the failed "
-    "items are not retried. Quote the correlation_id when reporting a failure."
+    "Every item not listed in summary.errors was handled and saved. Call "
+    "rollback_session again to retry the failed items (they are planned again "
+    "from the memory as it is then; nothing already reversed is reversed again). "
+    "Quote the correlation_id when reporting a failure."
 )
 
 
@@ -159,7 +161,7 @@ async def handle_rollback_session(
             )
             return _error_response(
                 "already_rolled_back",
-                "This session was already rolled back in this context; a rollback runs once.",
+                "This session's rollback in this context is complete and it wrote nothing since.",
                 retryable=False,
                 session_id=session_id,
                 **({"rollback_id": e.rollback_id} if e.rollback_id is not None else {}),
@@ -202,13 +204,8 @@ async def handle_rollback_session(
                 "partial_rollback",
                 f"Rollback finished this call with {len(result.errors)} failed item(s); "
                 "summary shows what was reversed.",
-                help=_PARTIAL_HELP
-                + (
-                    f" {result.remaining} event(s) remain: call rollback_session again to continue."
-                    if result.remaining
-                    else ""
-                ),
-                retryable=False,
+                help=f"{_PARTIAL_HELP} {result.remaining} event(s) remain.",
+                retryable=True,
                 rollback_status=result.status,
                 summary=result.summary,
                 totals=result.totals,

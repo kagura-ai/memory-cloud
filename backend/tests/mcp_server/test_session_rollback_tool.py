@@ -185,7 +185,9 @@ async def test_failed_items_answer_partial_rollback():
     )
     payload, db = await _call({"session_id": "s", "dry_run": False}, result=result)
     assert payload["status"] == "error" and payload["error"] == "partial_rollback"
-    assert payload["retryable"] is False and payload["correlation_id"] == "cid"
+    # The failed items are retried by the next call; nothing is reversed twice.
+    assert payload["retryable"] is True and payload["correlation_id"] == "cid"
+    assert "again" in payload["help"]
     assert payload["rollback_status"] == "partial"
     assert payload["summary"]["failed"] == 1
     db.commit.assert_awaited_once()  # what did succeed is saved
@@ -207,3 +209,23 @@ def test_registration():
     assert "rollback_session" not in CORE_TOOLS
     assert "rollback_session" not in _TOOLS_WITHOUT_CONTEXT_ID
     assert get_tool_timeout("rollback_session") == 120.0
+
+
+def test_write_tools_echo_the_recorded_session():
+    """A client without baggage learns its MCP session id from its writes."""
+    from api.correlation import CorrelationContext, set_correlation
+    from mcp_server.tools._definitions import get_tool_definitions
+    from mcp_server.tools._helpers import _session_response_field
+
+    set_correlation(None)
+    assert _session_response_field() == {}
+    set_correlation(
+        CorrelationContext(trace_id="0" * 31 + "1", span_id="0" * 15 + "1", session_id="mcp-1")
+    )
+    try:
+        assert _session_response_field() == {"session_id": "mcp-1"}
+    finally:
+        set_correlation(None)
+    returns = {t["name"]: t["description"] for t in get_tool_definitions()}
+    for name in ("remember", "remember_batch", "update_memory", "forget"):
+        assert "session_id?" in returns[name], name

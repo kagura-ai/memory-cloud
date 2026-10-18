@@ -37,7 +37,7 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1435,10 +1435,14 @@ class AccountErasureService:
         - ``memories.session_id`` is the last writer's session: NULLed where
           that session is one the subject wrote this memory under (the
           revision log still names the subject as the actor here). Another
-          member's later session on the same memory is left alone.
+          member's later session on the same memory is left alone. Driven
+          from the subject's own revisions, so other tenants' rows are never
+          scanned.
         - ``memory_session_rollbacks``: the subject as the session's principal
           gets the salted pseudonym and a NULL ``session_id``; as the one who
-          requested a rollback, the pseudonym.
+          requested a rollback, the pseudonym — and a NULL ``session_id`` on
+          a context owner's rollback (no principal), whose id may be the
+          subject's own session.
 
         Returns:
             ``memory_sessions_scrubbed`` and ``session_rollbacks_pseudonymized``
@@ -1446,20 +1450,15 @@ class AccountErasureService:
         """
         from models.memory import MemorySessionRollback
 
-        subject_wrote_this_session = (
-            select(MemoryRevision.id)
-            .where(
-                MemoryRevision.memory_id == Memory.id,
-                MemoryRevision.actor_user_id == user_id,
-                MemoryRevision.session_id == Memory.session_id,
-            )
-            .exists()
+        subject_sessions = select(MemoryRevision.memory_id, MemoryRevision.session_id).where(
+            MemoryRevision.actor_user_id == user_id,
+            MemoryRevision.session_id.is_not(None),
         )
         memories = cast(
             CursorResult[Any],
             await self.db.execute(
                 update(Memory)
-                .where(Memory.session_id.is_not(None), subject_wrote_this_session)
+                .where(tuple_(Memory.id, Memory.session_id).in_(subject_sessions))
                 .values(session_id=None)
                 .execution_options(synchronize_session=False)
             ),
@@ -1478,7 +1477,13 @@ class AccountErasureService:
             await self.db.execute(
                 update(MemorySessionRollback)
                 .where(MemorySessionRollback.requested_by == user_id)
-                .values(requested_by=pseudonym)
+                .values(
+                    requested_by=pseudonym,
+                    session_id=case(
+                        (MemorySessionRollback.principal_user_id.is_(None), None),
+                        else_=MemorySessionRollback.session_id,
+                    ),
+                )
             ),
         )
         return {

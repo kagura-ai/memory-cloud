@@ -233,7 +233,7 @@ def _executor(db: MagicMock, memories: dict[uuid.UUID, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_a_failing_item_is_isolated_and_still_marked_handled():
+async def test_a_failing_item_is_isolated_and_left_for_the_next_call():
     db = _db()
     good, bad = uuid.uuid4(), uuid.uuid4()
     executor = _executor(db, {})
@@ -267,8 +267,11 @@ async def test_a_failing_item_is_isolated_and_still_marked_handled():
         f"Memory {bad} (restore) failed: service_unavailable (correlation_id cid-1)"
     ]
     assert executor.correlation_id == "cid-1"
-    # skipped first, then the failed item (outside its SAVEPOINT), then the good one
-    assert sorted(i for ids in marked for i in ids) == [1, 2, 3]
+    # The skipped and the good item are handled; the failed one is not, so the
+    # next call plans it again.
+    assert sorted(i for ids in marked for i in ids) == [2, 3]
+    assert executor.failed_events == 1
+    assert executor.restored_ids == [good]
     assert db.begin_nested.call_count == 2  # one SAVEPOINT per item
 
 
@@ -340,29 +343,124 @@ async def test_an_unknown_session_is_not_found_before_anything_else():
             )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["completed", "partial"])
-async def test_a_final_rollback_record_refuses_the_next_call(status):
-    db = _db()
-    record = MagicMock(id=11, status=status)
+def _empty_batch() -> Any:
+    return sr._Batch(items=[], memories={}, events=0, remaining=0)
+
+
+async def _run(db: MagicMock, record: Any, batch: Any, *, dry_run: bool = False) -> Any:
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: record))
     with (
         patch.object(sr, "_session_exists", AsyncMock(return_value=True)),
         patch.object(sr, "_lock_session", AsyncMock()),
-        patch.object(sr, "_read_batch", AsyncMock()) as read,
+        patch.object(sr, "_read_batch", AsyncMock(return_value=batch)),
     ):
-        with pytest.raises(sr.AlreadyRolledBackError) as refused:
-            await sr.rollback_session(
-                db,
-                scope=sr.SessionScope(uuid.uuid4(), "s", None),
-                workspace_id=uuid.uuid4(),
-                requested_by=ME,
-                dry_run=False,
-                classify=lambda e: "x",
-                new_correlation_id=lambda: "c",
-            )
-    assert (refused.value.rollback_id, refused.value.status) == (11, status)
-    read.assert_not_awaited()
+        return await sr.rollback_session(
+            db,
+            scope=sr.SessionScope(uuid.uuid4(), "s", None),
+            workspace_id=uuid.uuid4(),
+            requested_by=ME,
+            dry_run=dry_run,
+            classify=lambda e: "x",
+            new_correlation_id=lambda: "c",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_a_completed_rollback_with_nothing_new_refuses_the_next_call(dry_run):
+    record = MagicMock(id=11, status="completed")
+    with pytest.raises(sr.AlreadyRolledBackError) as refused:
+        await _run(_db(), record, _empty_batch(), dry_run=dry_run)
+    assert (refused.value.rollback_id, refused.value.status) == (11, "completed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "partial", "in_progress"])
+async def test_new_or_failed_events_reopen_the_rollback(status):
+    """A completed rollback whose session wrote again, and a partial one
+    whose failed items wait, are continued — under the same record."""
+    record = MagicMock(id=11, status=status, summary={"failed": 1, "calls": 1})
+    batch = sr._Batch(
+        items=[PlanItem(MID, "created", ACTION_FORGET, event_ids=(5,))],
+        memories={},
+        events=1,
+        remaining=0,
+    )
+    executor = MagicMock(
+        run=AsyncMock(),
+        summary=sr._empty_summary(),
+        failed_events=0,
+        correlation_id=None,
+        reembed_ids=[],
+        restored_ids=[],
+        forgotten_ids=[MID],
+        forgotten_points=[str(MID)],
+        collection="coll",
+    )
+    executor.summary["forgotten"] = 1
+    with patch.object(sr, "_Executor", MagicMock(return_value=executor)):
+        result = await _run(_db(), record, batch)
+    assert result.rollback_id == 11 and record.status == "completed"
+    assert result.totals["calls"] == 2 and result.totals["failed"] == 1
+    assert result.forgotten_points == [str(MID)] and result.audit is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_items_keep_the_rollback_open_as_partial():
+    record = MagicMock(id=3, status="in_progress", summary={})
+    batch = sr._Batch(
+        items=[PlanItem(MID, "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(1, 2))],
+        memories={},
+        events=2,
+        remaining=4,
+    )
+    executor = MagicMock(
+        run=AsyncMock(),
+        summary={**sr._empty_summary(), "failed": 1},
+        failed_events=2,
+        correlation_id="cid",
+        reembed_ids=[],
+        restored_ids=[],
+        forgotten_ids=[],
+        forgotten_points=[],
+        collection=None,
+    )
+    with patch.object(sr, "_Executor", MagicMock(return_value=executor)):
+        result = await _run(_db(), record, batch)
+    assert record.status == "partial"
+    assert (result.remaining, result.events) == (6, 0)
+
+
+@pytest.mark.asyncio
+async def test_finish_deletes_points_and_audits_after_the_commit():
+    deleted = [uuid.uuid4(), uuid.uuid4()]
+    result = sr.RollbackResult(
+        dry_run=False,
+        items=[],
+        events=3,
+        remaining=0,
+        rollback_id=4,
+        restored_ids=[MID],
+        forgotten_ids=deleted,
+        forgotten_points=["p1", "p2"],
+        collection="coll",
+        audit=(uuid.uuid4(), ME, uuid.uuid4()),
+    )
+    with (
+        patch(
+            "db.qdrant.delete_points_from_qdrant", AsyncMock(side_effect=OSError("down"))
+        ) as points,
+        patch("db.qdrant.delete_chunk_points", AsyncMock()) as chunks,
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()) as emit,
+    ):
+        await sr.finish(result)  # a failed vector delete does not raise
+    points.assert_awaited_once_with(["p1", "p2"], "coll")
+    chunks.assert_awaited_once_with(deleted, "coll")
+    calls = {c.kwargs["operation"]: c.kwargs for c in emit.await_args_list}
+    assert calls["forget"]["result_count"] == 2
+    assert calls["forget"]["extra_metadata"]["memory_ids"] == [str(m) for m in deleted]
+    assert calls["update"]["memory_id"] == MID
+    assert calls["update"]["extra_metadata"] == {"rollback_id": 4}
 
 
 def test_principal_predicates_compile_index_friendly():

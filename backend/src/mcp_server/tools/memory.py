@@ -31,6 +31,7 @@ from mcp_server.tools._helpers import (
     _resolve_context,
     _resolve_context_for_read,
     _resolve_context_id,
+    _session_response_field,
     _touch_context_last_used,
     _validate_memory_id,
     execute_with_timeout,
@@ -340,6 +341,7 @@ async def handle_remember(
                             # The summary was over the cap and cut at a sentence
                             # boundary; the full text went into content.
                             **summary_fit,
+                            **_session_response_field(),  # #2044
                             **_context_response_fields(current_context),
                         }
                     ),
@@ -556,6 +558,7 @@ async def handle_update_memory(
                                 else {}
                             ),
                             **_lint_response_field(result.lint),  # #1502
+                            **_session_response_field(),  # #2044
                             **_context_response_fields(current_context),
                         }
                     ),
@@ -1423,6 +1426,7 @@ async def handle_forget(
                             "status": "success",
                             "deleted_count": result.deleted_count,
                             "memory_ids": [str(mid) for mid in result.memory_ids],
+                            **_session_response_field(),  # #2044
                             "context_id": str(current_context.id) if current_context else None,
                             "context_name": current_context.name if current_context else None,
                         }

@@ -443,6 +443,16 @@ async def test_a_finished_rollback_is_refused(world: World) -> None:
     owner_plan = await _rollback(world, "S1", None, dry_run=True)
     assert len(owner_plan.items) == 1
 
+    # The session writes again after its rollback completed (one MCP session
+    # id per connection): the new write is rolled back under the same row.
+    later = await world.create(world.owner, "S1")
+    await world.session.commit()
+    again = await _rollback(world, "S1", s1, dry_run=False)
+    await world.session.commit()
+    assert (again.rollback_id, again.status) == (first.rollback_id, "completed")
+    assert [i.memory_id for i in again.items] == [later]
+    assert (await world.row(later))["deleted_at"] is not None
+
 
 async def test_cap_continues_on_the_next_call(world: World) -> None:
     w = world
@@ -467,7 +477,7 @@ async def test_cap_continues_on_the_next_call(world: World) -> None:
         assert (await w.row(memory_id))["deleted_at"] is not None
 
 
-async def test_a_failed_item_is_isolated_and_the_rollback_ends_partial(
+async def test_a_failed_item_is_isolated_and_retried_by_the_next_call(
     world: World, _stubs: dict[str, Any]
 ) -> None:
     w = world
@@ -486,9 +496,11 @@ async def test_a_failed_item_is_isolated_and_the_rollback_ends_partial(
     s = SessionPrincipal(w.owner, None)
     result = await _rollback(w, "S9", s, dry_run=False)
     await w.session.commit()
-    assert result.status == "partial"
+    assert result.status == "partial" and result.remaining == 1
     assert result.summary["failed"] == 1 and result.summary["restored"] == 1
     assert result.summary["forgotten"] == 1
+    assert result.forgotten_points  # deleted after the commit, by finish()
+    _stubs["points"].assert_not_awaited()
     assert len(result.errors) == 1 and str(broken) in result.errors[0]
     assert "corr-test" in result.errors[0]
     assert (await w.row(kept))["deleted_at"] is None
@@ -502,9 +514,19 @@ async def test_a_failed_item_is_isolated_and_the_rollback_ends_partial(
         )
     )
     assert restored_for_broken == 0
+
+    # The vector store is back: the next call retries the failed item only.
+    _stubs["reembed"].side_effect = None
+    retry = await _rollback(w, "S9", s, dry_run=False)
+    await w.session.commit()
+    assert (retry.status, retry.remaining, retry.events) == ("completed", 0, 1)
+    assert [i.memory_id for i in retry.items] == [broken]
+    assert retry.rollback_id == result.rollback_id
+    assert (await w.row(broken))["deleted_at"] is None
+    assert retry.totals["restored"] == 2 and retry.totals["failed"] == 1
     with pytest.raises(sr.AlreadyRolledBackError) as refused:
         await _rollback(w, "S9", s, dry_run=False)
-    assert refused.value.status == "partial"
+    assert refused.value.status == "completed"
 
 
 async def test_a_later_write_by_someone_else_skips_the_memory(world: World) -> None:
@@ -634,9 +656,11 @@ async def test_erasure_scrubs_session_tokens(world: World) -> None:
             .order_by(MemorySessionRollback.id)
         )
     ).all()
+    # The owner-scope row the subject requested may name the subject's own
+    # session: its token goes too.
     assert [tuple(r) for r in rows] == [
         (None, pseudonym, pseudonym),
-        ("O-SESSION", None, pseudonym),
+        (None, None, pseudonym),
     ]
 
 

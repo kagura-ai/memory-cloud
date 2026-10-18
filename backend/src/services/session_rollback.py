@@ -28,13 +28,15 @@ is nothing left to undo (``already_forgotten`` / ``already_restored``).
 Execution holds a per-(context, session id) advisory lock, locks the batch's
 memory rows in id order, and runs each item (each forget chunk) in a SAVEPOINT
 of its own: a failed item leaves nothing behind and the rest still runs. Every
-event a call handles — reversed, skipped or failed — gets the rollback row's
-id in ``undone_by``, so a call that stops at ``MAX_ROLLBACK_EVENTS_PER_CALL``
-(or at ``MAX_UNFORGETS_PER_CALL`` un-forgets, each of which re-embeds inside
-the call) is continued by the next call, and nothing is ever reversed twice.
-A rollback whose events are all handled is final (``completed``, or
-``partial`` when an item failed); the next call is refused
-(``AlreadyRolledBackError``).
+event a call handles — reversed or skipped — gets the rollback row's id in
+``undone_by``, so a call that stops at ``MAX_ROLLBACK_EVENTS_PER_CALL`` (or at
+``MAX_UNFORGETS_PER_CALL`` un-forgets, each of which re-embeds inside the
+call) is continued by the next call, and nothing is ever reversed twice. A
+failed item's events stay unhandled: the next call retries it (``partial``).
+A rollback whose events are all handled is ``completed``; the next call is
+refused (``AlreadyRolledBackError``) unless the session wrote again since.
+Vector deletes, re-embeds of restored text and the access audit run after
+the commit (``finish``).
 
 No MCP types here; ``mcp_server/tools/session_rollback.py`` is the tool.
 """
@@ -71,7 +73,12 @@ from models.memory import (
     MemoryRevision,
     MemorySessionRollback,
 )
-from services.memory_versions import record_edit, record_revision, versioned_snapshot
+from services.memory_versions import (
+    _comparable,  # one "is this the same value" rule with the version bump
+    record_edit,
+    record_revision,
+    versioned_snapshot,
+)
 from services.write_provenance import (
     SessionPrincipal,
     WriteProvenance,
@@ -132,7 +139,8 @@ SKIP_CAUSES: tuple[str, ...] = (
 # old value left.
 _PRIOR_LOST_KEYS = ("erased", "scrubbed")
 _TEXT_FIELDS = frozenset({"summary", "context_summary", "content"})
-_FINAL_STATUSES = frozenset({SESSION_ROLLBACK_COMPLETED, SESSION_ROLLBACK_PARTIAL})
+# ``partial`` is not final: its failed items are retried by the next call.
+_FINAL_STATUSES = frozenset({SESSION_ROLLBACK_COMPLETED})
 _COUNT_KEYS = (
     "forgotten",
     "restored",
@@ -153,7 +161,7 @@ class SessionNotFoundError(Exception):
 
 
 class AlreadyRolledBackError(Exception):
-    """The session's rollback is final (``completed`` / ``partial``)."""
+    """The session's rollback is ``completed`` and it wrote nothing since."""
 
     def __init__(self, rollback_id: int | None, status: str) -> None:
         super().__init__(status)
@@ -423,11 +431,6 @@ def plan_memory(events: list[SessionEvent], state: MemoryState) -> PlanItem:
     return skip(CAUSE_ALREADY_RESTORED)
 
 
-def _comparable(name: str, value: Any) -> Any:
-    # A NULL tag array and an empty one say the same thing (#2043's rule).
-    return list(value or []) if name == "tags" else value
-
-
 def plan_counts(items: list[PlanItem]) -> dict[str, int]:
     counts = {ACTION_FORGET: 0, ACTION_RESTORE: 0, ACTION_UNFORGET: 0, ACTION_SKIP: 0}
     for item in items:
@@ -608,6 +611,9 @@ async def _permitted(
                 workspace_id=workspace_id,
                 context_id=context_id,
                 access="write",
+                # Deny-capture identity: the rollback rewrites or removes the
+                # memory, the audit vocabulary's ``update``.
+                operation="update",
                 memory_type=memory.type,
                 memory_source_type=memory.source_type,
             )
@@ -636,8 +642,12 @@ class RollbackResult:
     correlation_id: str | None = None
     # Work for after the commit (``finish``).
     reembed_ids: list[UUID] = field(default_factory=list)
+    restored_ids: list[UUID] = field(default_factory=list)
     forgotten_ids: list[UUID] = field(default_factory=list)
+    forgotten_points: list[str] = field(default_factory=list)
     collection: str | None = None
+    # (workspace_id, requested_by, context_id) for the access-event audit.
+    audit: tuple[UUID, str, UUID] | None = None
 
     def listed_items(self) -> list[dict[str, Any]]:
         return [item.as_dict() for item in self.items[:MAX_LISTED_ITEMS]]
@@ -697,7 +707,10 @@ class _Executor:
         self.summary = _empty_summary()
         self.correlation_id: str | None = None
         self.reembed_ids: list[UUID] = []
+        self.restored_ids: list[UUID] = []
         self.forgotten_ids: list[UUID] = []
+        self.forgotten_points: list[str] = []
+        self.failed_events = 0
         self.collection: str | None = None
         self._embedding: tuple[Any, str] | None = None
 
@@ -726,10 +739,15 @@ class _Executor:
             async with self.db.begin_nested():
                 await work(items)
                 await _mark_handled(self.db, event_ids, self.rollback_id)
+            self.restored_ids.extend(
+                item.memory_id for item in items if item.action != ACTION_FORGET
+            )
         except Exception as exc:
-            # The SAVEPOINT rolled the item back; the events are still marked
-            # handled (outside it) so a continuation never retries — and maybe
-            # half-applies — an item that failed once. The summary names it.
+            # The SAVEPOINT rolled the item back whole, and its events stay
+            # unhandled: the next call plans the item again from the row as it
+            # is then (a transient vector-store or provider failure is retried,
+            # never half-applied). The summary names it.
+            self.failed_events += len(event_ids)
             self.correlation_id = self.correlation_id or self.new_correlation_id()
             cause = self.classify(exc)
             for item in items:
@@ -748,7 +766,6 @@ class _Executor:
                     f"Memory {item.memory_id} ({item.action}) failed: {cause} "
                     f"(correlation_id {self.correlation_id})"
                 )
-            await _mark_handled(self.db, event_ids, self.rollback_id)
 
     async def _collection(self) -> str:
         from services.context_routing import resolve_collection_name
@@ -765,9 +782,15 @@ class _Executor:
         return self._embedding
 
     async def _forget_chunk(self, items: list[PlanItem]) -> None:
-        """Forget what the session created: forget's own chunk statement."""
-        from db.qdrant import delete_points_from_qdrant
+        """Forget what the session created: forget's own chunk statement.
 
+        The rows' points are deleted after the commit (``finish``), not here:
+        this call commits once, at its end, and a point deleted before a
+        rollback of that transaction would leave a live row no vector search
+        finds. The other way round is safe — a tombstone's point is never a
+        hit (hits are hydrated from live rows) and the orphan sweep removes
+        one whose delete failed.
+        """
         deleted, points = await self.service._soft_delete_chunk(
             self.requested_by,
             [item.memory_id for item in items],
@@ -775,10 +798,8 @@ class _Executor:
             self.ctx,
             writer=REVISION_WRITER_ROLLBACK,
         )
-        # Points before the commit, as forget_bulk: a failed delete raises
-        # inside the SAVEPOINT and the rows stay live with their points.
-        await delete_points_from_qdrant(points, cast(str, self.collection))
         self.forgotten_ids.extend(deleted)
+        self.forgotten_points.extend(points)
         self.summary["forgotten"] += len(deleted)
 
     async def _restore(self, items: list[PlanItem]) -> None:
@@ -902,8 +923,9 @@ async def rollback_session(
 
     Raises:
         SessionNotFoundError: no event of the scope exists in the context.
-        AlreadyRolledBackError: the scope's rollback is final, or every one of
-            its events was handled by another rollback (an owner's).
+        AlreadyRolledBackError: the scope's rollback is ``completed`` and the
+            session wrote nothing since, or every one of its events was
+            handled by another rollback (a context owner's).
     """
     if not dry_run:
         await _lock_session(db, scope)
@@ -913,18 +935,22 @@ async def rollback_session(
     if not dry_run:
         record_stmt = record_stmt.with_for_update()
     record = (await db.execute(record_stmt)).scalar_one_or_none()
-    if record is not None and record.status in _FINAL_STATUSES:
-        raise AlreadyRolledBackError(record.id, record.status)
 
     batch = await _read_batch(db, scope, requested_by, workspace_id, lock=not dry_run)
-    if not batch.items and record is None:
-        if await _handled_exists(db, scope):
-            # Every event was handled by another rollback of the same events
-            # (a context owner's, or the principal's own).
-            raise AlreadyRolledBackError(None, SESSION_ROLLBACK_COMPLETED)
-        # Only rollback-written events under this session: nothing to undo,
-        # and no record, so a later write in the session stays undoable.
-        return RollbackResult(dry_run=dry_run, items=[], events=0, remaining=0)
+    if not batch.items:
+        if record is not None and record.status in _FINAL_STATUSES:
+            raise AlreadyRolledBackError(record.id, record.status)
+        if record is None:
+            if await _handled_exists(db, scope):
+                # Every event was handled by another rollback of the same
+                # events (a context owner's, or the principal's own).
+                raise AlreadyRolledBackError(None, SESSION_ROLLBACK_COMPLETED)
+            # Only rollback-written events under this session: nothing to
+            # undo, and no record, so a later write in the session stays
+            # undoable.
+            return RollbackResult(dry_run=dry_run, items=[], events=0, remaining=0)
+        # An unfinished record whose remaining events another rollback (a
+        # context owner's) handled: the call below closes it.
     if dry_run:
         return RollbackResult(
             dry_run=True,
@@ -949,6 +975,12 @@ async def rollback_session(
         )
         db.add(record)
         await db.flush()
+    elif record.status in _FINAL_STATUSES:
+        # The session wrote again after its rollback finished (the MCP
+        # session id lasts a whole connection): those writes are new, never
+        # handled, and are rolled back under the same record.
+        record.status = SESSION_ROLLBACK_IN_PROGRESS
+        record.completed_at = None
 
     executor = _Executor(
         db,
@@ -964,11 +996,15 @@ async def rollback_session(
 
     totals = _add_totals(record.summary or {}, executor.summary)
     record.summary = totals
-    if batch.remaining > 0:
-        record.status = SESSION_ROLLBACK_IN_PROGRESS
-    else:
-        record.status = SESSION_ROLLBACK_PARTIAL if totals["failed"] else SESSION_ROLLBACK_COMPLETED
+    # A failed item's events stay unhandled: they are part of what remains.
+    remaining = batch.remaining + executor.failed_events
+    if remaining == 0:
+        record.status = SESSION_ROLLBACK_COMPLETED
         record.completed_at = utcnow()
+    else:
+        record.status = (
+            SESSION_ROLLBACK_PARTIAL if executor.failed_events else SESSION_ROLLBACK_IN_PROGRESS
+        )
     await db.flush()
     logger.info(
         "session_rolled_back",
@@ -977,14 +1013,14 @@ async def rollback_session(
         owner_scope=scope.principal is None,
         status=record.status,
         events=batch.events,
-        remaining=batch.remaining,
+        remaining=remaining,
         **{key: executor.summary[key] for key in _COUNT_KEYS},
     )
     return RollbackResult(
         dry_run=False,
         items=batch.items,
-        events=batch.events,
-        remaining=batch.remaining,
+        events=batch.events - executor.failed_events,
+        remaining=remaining,
         rollback_id=record.id,
         status=record.status,
         summary=executor.summary,
@@ -992,18 +1028,36 @@ async def rollback_session(
         errors=list(executor.summary["errors"]),
         correlation_id=executor.correlation_id,
         reembed_ids=executor.reembed_ids,
+        restored_ids=executor.restored_ids,
         forgotten_ids=executor.forgotten_ids,
+        forgotten_points=executor.forgotten_points,
         collection=executor.collection,
+        audit=(workspace_id, requested_by, scope.context_id),
     )
 
 
 async def finish(result: RollbackResult) -> None:
-    """After the commit: re-embed restored text, drop forgotten chunk points.
+    """After the commit: vector deletes, re-embeds and the access audit.
 
-    Both fail soft, as on the write paths they mirror: a re-embed task that
-    fails leaves the row ``pending`` for the embedding sweep; chunk points of
-    a tombstone are removed by the orphan sweep after its grace period.
+    The vector store follows Postgres, never the other way round: the
+    forgotten rows' points and content chunks are deleted only now that the
+    tombstones are committed, and restored texts are re-embedded now that the
+    restore is. Every step fails soft, as on the write paths it mirrors — a
+    tombstone's leftover point is no hit and the orphan sweep removes it; a
+    re-embed that fails leaves the row ``pending`` for the embedding sweep.
     """
+    if result.forgotten_points and result.collection:
+        from db.qdrant import delete_points_from_qdrant
+
+        try:
+            await delete_points_from_qdrant(result.forgotten_points, result.collection)
+        except Exception as exc:
+            logger.warning(
+                "session_rollback_point_delete_failed",
+                collection=result.collection,
+                points=len(result.forgotten_points),
+                error_class=type(exc).__name__,
+            )
     if result.reembed_ids:
         # One task working through the ids, not one task each: a rollback can
         # restore hundreds of texts, and each embedding run holds a database
@@ -1022,6 +1076,43 @@ async def finish(result: RollbackResult) -> None:
                 memories=len(result.forgotten_ids),
                 error_class=type(exc).__name__,
             )
+    await _emit_access_events(result)
+
+
+async def _emit_access_events(result: RollbackResult) -> None:
+    """The agent access audit of the rollback's writes (#1286; no-op for users).
+
+    One ``forget`` row for the memories it forgot and one ``update`` row for
+    those it restored, each listing the ids like ``forget_bulk``'s chunk rows.
+    """
+    if result.audit is None:
+        return
+    from services.memory_access_event_writer import (
+        MAX_METADATA_MEMORY_IDS,
+        emit_memory_access_event,
+    )
+
+    workspace_id, user_id, context_id = result.audit
+    for operation, ids in (("forget", result.forgotten_ids), ("update", result.restored_ids)):
+        if not ids:
+            continue
+        await emit_memory_access_event(
+            operation=operation,
+            outcome="success",
+            workspace_id=workspace_id,
+            user_id=user_id,
+            context_id=context_id,
+            memory_id=ids[0] if len(ids) == 1 else None,
+            result_count=len(ids),
+            extra_metadata=(
+                {
+                    "memory_ids": [str(mid) for mid in ids[:MAX_METADATA_MEMORY_IDS]],
+                    "rollback_id": result.rollback_id,
+                }
+                if len(ids) > 1
+                else {"rollback_id": result.rollback_id}
+            ),
+        )
 
 
 async def _reembed_in_turn(memory_ids: list[UUID]) -> None:

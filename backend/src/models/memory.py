@@ -137,9 +137,10 @@ REVISION_WRITER_ROLLBACK = "rollback"
 REVISION_WRITERS: tuple[str, ...] = (REVISION_WRITER_API, REVISION_WRITER_ROLLBACK)
 
 # #2044: ``memory_session_rollbacks.status``. ``in_progress`` = a call stopped
-# at the per-call event cap and the next call continues; ``completed`` /
-# ``partial`` (some items failed) are final, and a further rollback of the
-# same session is refused. Byte-identical to the f04 CHECK literal (pinned by
+# at the per-call cap and the next call continues; ``partial`` = the last call
+# left failed items, which the next call retries; ``completed`` = every event
+# is handled, and a further rollback of the session is refused until it
+# writes again. Byte-identical to the f04 CHECK literal (pinned by
 # tests/test_session_rollback_constants.py); new values are APPENDED.
 SESSION_ROLLBACK_IN_PROGRESS = "in_progress"
 SESSION_ROLLBACK_COMPLETED = "completed"
@@ -314,7 +315,8 @@ class Memory(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
     # #2044: the LAST writer's verified agent (``AgentScope``, never a request
     # field) and session (OTel baggage, else the MCP protocol session) — every
-    # create / edit / forget overwrites both. A display and lookup convenience:
+    # create, versioned edit and forget (each one a revision row) overwrites
+    # both. A display and lookup convenience:
     # the per-write principal lives in ``memory_revisions``, and nothing
     # authorizes on these two columns. NULL on rows written before #2044.
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
@@ -707,10 +709,11 @@ class MemoryRevision(Base):
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     # #2044: the ``memory_session_rollbacks.id`` that handled this event —
-    # reversed it, skipped it (the summary names the cause) or failed on it.
-    # A handled event is never planned again, which is how a rollback that
-    # stopped at the per-call cap continues where it left off. No FK: the
-    # rollback row and this one share the context's lifetime.
+    # reversed it or skipped it (the summary names the cause); an item that
+    # failed stays NULL and is retried. A handled event is never planned
+    # again, which is how a rollback that stopped at the per-call cap
+    # continues where it left off. No FK: the rollback row and this one share
+    # the context's lifetime.
     undone_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
@@ -743,9 +746,10 @@ class MemorySessionRollback(Base):
     """One ``rollback_session`` of one session in one context (#2044).
 
     The durable half of "a second rollback of the same session is refused":
-    a ``completed`` or ``partial`` row stops the next call. ``in_progress``
-    means a call stopped at the per-call event cap; the next call continues
-    with the events no rollback has handled yet (``memory_revisions.undone_by``).
+    a ``completed`` row stops the next call while the session has written
+    nothing since. ``in_progress`` (stopped at the per-call cap) and
+    ``partial`` (failed items left) are continued by the next call, with the
+    events no rollback has handled yet (``memory_revisions.undone_by``).
 
     The target is ``(context_id, session_id, principal_user_id, agent_id)``:
     a session is only ever addressed together with its principal — the caller

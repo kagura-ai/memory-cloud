@@ -321,6 +321,20 @@ def _persistence_response_field(persistence: Any, *, verbose: bool = False) -> d
     return {"persistence": block}
 
 
+def _session_response_field() -> dict[str, Any]:
+    """The session this request's writes are recorded under (#2044), or nothing.
+
+    A client without OTel baggage never sees the MCP session id its writes
+    carry (it lives in a transport header the model does not read); the write
+    tools echo it so the model can pass it to ``changes_since(session_id=)`` /
+    ``rollback_session``. Omitted when the request has no session.
+    """
+    from services.write_provenance import current_provenance
+
+    session_id = current_provenance().session_id
+    return {"session_id": session_id} if session_id else {}
+
+
 def _lint_response_field(lint: Any) -> dict[str, Any]:
     """Render the Issue #1502 write-lint hints for a write-tool response.
 

@@ -113,8 +113,9 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "get_sleep_report": _read("Get Sleep Report"),
     # A rolled-back report is refused, so a repeat changes nothing.
     "rollback_sleep_run": _destructive("Roll Back Sleep Run", idempotent=True),
-    # #2044: a finished rollback is refused, so a repeat changes nothing.
-    "rollback_session": _destructive("Roll Back Session", idempotent=True),
+    # #2044: a repeat continues an unfinished rollback (cap, failed items),
+    # so it can change more; a finished one is refused.
+    "rollback_session": _destructive("Roll Back Session", idempotent=False),
     "setup_resource": _additive("Set Up Resource"),
     # Stores a chat platform's OAuth tokens for a connector that reads from it.
     "setup_connector": _additive("Set Up Connector", open_world=True),

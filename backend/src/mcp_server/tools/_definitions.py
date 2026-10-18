@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. summary_truncated + summary_original_length: the summary was cut to 500 chars. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (limit, actual: the memory is over 1,000,000 chars — split it), validation_error.
+Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. summary_truncated + summary_original_length: the summary was cut to 500 chars. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (limit, actual: the memory is over 1,000,000 chars — split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -151,7 +151,7 @@ Manual: guide(["remember"]).""",
         {
             "name": "remember_batch",
             "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments except context_id, dedupe, tags_normalize and verbose (the batch's apply) and is validated and limited like a single remember; an unknown item key is that item's invalid_argument error. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item, or a dedupe='check' candidate, rolls the batch back and nothing is written.
-Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, session_id?, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
                 "type": "object",
@@ -193,7 +193,7 @@ Manual: guide(["remember_batch"]).""",
             "name": "update_memory",
             "description": """Update an existing memory in place (memory_id) or upsert by external_id (details.resource_id: found → replaced under a NEW memory_id, not found → created; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
 SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
-Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Errors: memory_not_found, validation_error, version_conflict (current_version; nothing written).
+Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, session_id?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Errors: memory_not_found, validation_error, version_conflict (current_version; nothing written).
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",
@@ -527,7 +527,7 @@ Returns: {status, format, version, pinned: [item], tool_triggered: [item], total
             "name": "forget",
             "description": """Soft-delete memories that are outdated, incorrect or no longer needed. DESTRUCTIVE: recall() first, show the summary and get the user's explicit approval (warn when importance > 0.8). To replace a fact instead, use remember(supersedes=...).
 Supply exactly ONE of memory_id (deletes that memory) or query (deletes its top-k matches; bulk cleanup only). Deleted memories stay recoverable for the deployment's cleanup window (default 30 days).
-Returns: {status, deleted_count, memory_ids, context_id, context_name}; a target you may not delete, or already gone, is skipped, so deleted_count can be 0.
+Returns: {status, deleted_count, memory_ids, session_id?, context_id, context_name}; a target you may not delete, or already gone, is skipped, so deleted_count can be 0.
 Manual: guide(["forget"]).""",
             "inputSchema": {
                 "type": "object",
@@ -1201,8 +1201,8 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
         },
         {
             "name": "rollback_session",
-            "description": """Undo what one session wrote in a context. DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the session's first edit put back (a new version); forgotten → restored and re-embedded. A memory someone else changed since, Sleep merged, someone else forgot, or a resource row is skipped with a cause, never half-reverted. Your own sessions only (same user, same agent credential); a context owner may name any. Editor role required. At most 500 events (100 restores of forgotten memories) per call: status 'in_progress' with remaining > 0 means call again. Once finished, a second rollback of the session is refused (already_rolled_back).
-Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, updated_restored, skipped, failed, chunks_requeued, points_requeued, skipped_items, errors}, totals?, context_id, ...}. Errors: session_not_found (also for another principal's session), already_rolled_back, partial_rollback (summary lists what was reversed).""",
+            "description": """Undo what one session wrote in a context. DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the session's first edit put back (a new version); forgotten → restored and re-embedded. A memory someone else changed since, Sleep merged, someone else forgot, or a resource row is skipped with a cause, never half-reverted. Your own sessions only (same user, same agent credential); a context owner may name any. Editor role required. At most 500 events (100 restores of forgotten memories) per call: status 'in_progress' with remaining > 0 means call again; failed items are retried by the next call. Once complete, a further call is refused (already_rolled_back) until the session writes again.
+Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, updated_restored, skipped, failed, chunks_requeued, points_requeued, skipped_items, errors}, totals?, context_id, ...}. Errors: session_not_found (also for another principal's session), already_rolled_back, partial_rollback (summary lists what was reversed; call again to retry the failed items).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id", "session_id"],
@@ -1215,7 +1215,7 @@ Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining
                     "session_id": {
                         "type": "string",
                         "maxLength": 128,
-                        "description": "The session whose writes to undo: the OTel baggage session (gen_ai.conversation.id / session.id), else the MCP session id.",
+                        "description": "The session whose writes to undo — the session_id remember / update_memory / forget returned (your OTel baggage session, else the MCP session id).",
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -2004,7 +2004,7 @@ Manual: guide(["changes_since"]).""",
                     "session_id": {
                         "type": "string",
                         "maxLength": 128,
-                        "description": "Only this session's writes: your OTel baggage session (gen_ai.conversation.id / session.id), else the MCP session id.",
+                        "description": "Only this session's writes — the session_id remember / update_memory / forget returned (your OTel baggage session, else the MCP session id).",
                     },
                     "limit": {
                         "type": "integer",
