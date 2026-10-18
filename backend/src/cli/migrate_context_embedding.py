@@ -372,7 +372,8 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "ISO timestamp (UTC unless it has an offset); with a standalone --switch, "
             "re-queue memories written since; with --rollback-to, overrides the "
-            "recorded switch time"
+            "recorded switch time (the search config's last change: pass this if "
+            "the config was edited after the switch)"
         ),
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompts")

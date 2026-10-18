@@ -1094,7 +1094,10 @@ async def rollback_context_embedding(
     would make them unsearchable, stale, or resurrect them. This re-queues
     the delta since the switch — by default the ``updated_at`` of the
     ``ContextSearchConfig`` row, which the switch stamped — and refuses when
-    ``model``'s collection does not exist (nothing to serve from).
+    ``model``'s collection does not exist (nothing to serve from). Any later
+    search-config change stamps that row too, which moves the default past
+    the switch and leaves out what was written in between: pass the switch
+    time as ``requeue_since`` when the config was edited since.
 
     The re-queue and the removal of forgotten points are
     :func:`switch_context_embedding`'s, so resource-ingested rows are handled
@@ -1120,15 +1123,14 @@ async def rollback_context_embedding(
                 ContextSearchConfig.context_id == context_id
             )
         )
-        switched_at = result.scalar_one_or_none()
-        if switched_at is None:
+        # An aware TIMESTAMP WITH TIME ZONE: switch_context_embedding takes it
+        # to the naive UTC of the ``memories`` timestamps (#1525).
+        requeue_since = result.scalar_one_or_none()
+        if requeue_since is None:
             raise ValidationError(
                 f"Context {context_id} has no recorded switch time; pass the time of "
                 "the switch being undone as requeue_since (--requeue-since)"
             )
-        # An aware TIMESTAMP WITH TIME ZONE; the ``memories`` timestamps it is
-        # compared with are naive UTC, and asyncpg refuses to mix the two.
-        requeue_since = to_naive_utc(switched_at)
 
     collection = get_collection_name(model, dimensions)
     if not await get_qdrant_client().collection_exists(collection):

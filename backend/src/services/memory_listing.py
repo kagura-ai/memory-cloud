@@ -72,11 +72,6 @@ _KNOWN_FILTERS = {
 _RECALL_ONLY = {"near", "within"}
 
 
-def to_naive_utc(dt: datetime) -> datetime:
-    """An aware datetime as the naive UTC the ``memories`` timestamps are stored in."""
-    return dt.astimezone(UTC).replace(tzinfo=None)
-
-
 def _naive_utc(value: Any, name: str) -> datetime:
     """ISO 8601 (naive = UTC, or aware) → naive UTC, the storage convention."""
     if not isinstance(value, str):
