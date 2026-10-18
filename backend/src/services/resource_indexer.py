@@ -340,15 +340,18 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     """
     if point_id == memory_id:
         return point_id
-    shared = await db.execute(
-        select(
-            exists().where(
-                Memory.summary_embedding_id == point_id,
-                Memory.id != memory_id,
-                Memory.deleted_at.is_(None),
+    # A SAVEPOINT: a failed lookup must not abort the caller's transaction
+    # (the Sleep phases call this from a best-effort vector step).
+    async with db.begin_nested():
+        shared = await db.execute(
+            select(
+                exists().where(
+                    Memory.summary_embedding_id == point_id,
+                    Memory.id != memory_id,
+                    Memory.deleted_at.is_(None),
+                )
             )
         )
-    )
     if shared.scalar():
         logger.info("memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id))
         return None

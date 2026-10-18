@@ -64,12 +64,13 @@ async def session(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
 async def test_a_failed_undo_is_rolled_back_alone(session: AsyncSession) -> None:
     from mcp_server.tools.sleep import handle_rollback_sleep_run
 
-    # The point of ``unrebuildable`` cannot be written and the row cannot be
-    # re-queued (it is not ``success``): its undo must leave it a tombstone.
+    # The point of ``unrebuildable`` cannot be written and its re-queue fails
+    # too: its undo raises and must leave the row a tombstone.
     unrebuildable = _archived("point cannot be rebuilt", status="failed")
-    # The point of ``requeued`` cannot be written either, but the row is
-    # ``success``: restored and handed to the embedding sweep.
-    requeued = _archived("point re-queued")
+    # The point of ``requeued`` cannot be written either: restored and handed
+    # to the embedding sweep, also as a ``failed`` row (#2065: the re-queue is
+    # not fenced on ``success``; the point is gone whatever the status says).
+    requeued = _archived("point re-queued", status="failed")
     restored = _archived("point rebuilt")
     rescored = Memory(
         id=uuid4(),
@@ -128,6 +129,15 @@ async def test_a_failed_undo_is_rolled_back_alone(session: AsyncSession) -> None
     embedding_service = AsyncMock()
     embedding_service.embed = AsyncMock(side_effect=_embed)
 
+    from services.sleep import undo
+
+    real_requeue = undo._requeue_restored
+
+    async def _requeue(db, memory_id):
+        if memory_id == unrebuildable_id:
+            raise RuntimeError("database down")
+        return await real_requeue(db, memory_id)
+
     async def _get_db():
         yield session
 
@@ -141,6 +151,7 @@ async def test_a_failed_undo_is_rolled_back_alone(session: AsyncSession) -> None
         patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
         patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()),
         patch("db.qdrant.update_memory_payload_in_qdrant", new=AsyncMock()) as payload,
+        patch.object(undo, "_requeue_restored", new=_requeue),
     ):
         response = await handle_rollback_sleep_run({"report_id": str(report.id)}, _USER, None)
     data = json.loads(response[0].text)

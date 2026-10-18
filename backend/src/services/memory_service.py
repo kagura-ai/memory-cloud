@@ -8309,7 +8309,9 @@ async def write_memory_point(
         usage: Optional out-parameter for a caller that accounts embedding
             cost: ``usage["tokens"]`` is set once the embedding answered (0 on
             a cache hit), also when the write then fails.
-        on_write: Called right before the first vector-store write is sent.
+        on_write: Called once the write is under way: right before the
+            summary point's upsert, and — the indexer embedding and writing in
+            one call — right before ``rebuild_point`` for a resource row.
         resource_indexer: Reused for a resource row; one is built otherwise.
         embed_scope: ``(workspace_id, context_id)`` for the embedding call's key
             lookup when it is not the point's (the pipeline passes the row's

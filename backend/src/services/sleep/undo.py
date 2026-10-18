@@ -204,12 +204,11 @@ async def re_embed_memory_to_qdrant(
     the sweep rebuilds what is missing once the restore commits:
 
     - A failed point write (#2065: a resource whose schema is gone, an
-      embedding provider down) re-queues the row ``pending``. The sweep
-      rebuilds a resource row through the indexer too, and a resource row that
-      cannot be rebuilt ends ``failed`` there, for the admin retry. A row
-      that is ``pending`` or ``processing`` already is left to the sweep the
-      same way. Any other row (``failed``), or a re-queue that failed, raises
-      the write's error: the caller's restore must not commit.
+      embedding provider down) puts the row back to ``pending``, whatever its
+      status (``_requeue_restored``). The sweep rebuilds a resource row
+      through the indexer too, and a resource row that cannot be rebuilt ends
+      ``failed`` there, for the admin retry. A re-queue that failed raises the
+      write's error: the caller's restore must not commit.
     - A failed chunk write (#2061) re-queues the row the same way. A failed
       re-queue is logged and the restore goes on; the memory then stays
       summary-only until its next re-embed.
@@ -221,7 +220,13 @@ async def re_embed_memory_to_qdrant(
     from services.memory_service import write_memory_point
     from services.resource_indexer import owns_resource_point
 
-    if db is None and owns_resource_point(memory):
+    if db is not None:
+        # #2065: the caller's restore UPDATE expired the row's computed
+        # resource columns (and its embedding clock); the point writer reads
+        # them, and an expired attribute cannot be loaded lazily on an async
+        # session (MissingGreenlet).
+        await db.refresh(memory)
+    elif owns_resource_point(memory):
         raise ValueError(f"Restoring resource-indexed memory {memory.id} needs a database session")
     from services.content_chunk_writer import requeue_embedding, write_content_chunks
 
@@ -244,10 +249,13 @@ async def re_embed_memory_to_qdrant(
             error_class=type(e).__name__,
         )
         try:
-            queued = await requeue_embedding(
-                db, memory.id, reason="point_write_failed"
-            ) or await _embedding_queued(db, memory.id)
-        except Exception:
+            queued = await _requeue_restored(db, memory.id)
+        except Exception as requeue_error:
+            logger.warning(
+                "embedding_requeue_failed",
+                memory_id=str(memory.id),
+                error_class=type(requeue_error).__name__,
+            )
             queued = False
         if not queued:
             raise
@@ -279,12 +287,34 @@ async def re_embed_memory_to_qdrant(
     return None
 
 
-async def _embedding_queued(db: AsyncSession, memory_id: Any) -> bool:
-    """Whether the embedding sweep has ``memory_id`` queued already (#2065)."""
-    status = (
-        await db.execute(select(Memory.embedding_status).where(Memory.id == memory_id))
-    ).scalar_one_or_none()
-    return status in ("pending", "processing")
+async def _requeue_restored(db: AsyncSession, memory_id: Any) -> bool:
+    """Put a restored row whose point write failed back to ``pending`` (#2065).
+
+    Unlike ``requeue_embedding`` this is not fenced on ``success``: the merge or
+    archive deleted the row's point, so whatever its status says, the point is
+    gone. A ``processing`` claim taken before the tombstone would otherwise
+    stamp ``success`` with no point (its fence matches on the status and its
+    stamp, which the restore leaves alone); moved to ``pending``, that run's
+    success write misses and the sweep writes the point. A ``failed`` row gets
+    a fresh attempt; its retry count is kept. In a SAVEPOINT, so a failed
+    UPDATE leaves the caller's transaction usable; the caller commits.
+
+    Returns:
+        True when the row (live) was found and is ``pending`` now.
+    """
+    from sqlalchemy import update as sa_update
+
+    async with db.begin_nested():
+        result = await db.execute(
+            sa_update(Memory)
+            .where(Memory.id == memory_id, Memory.deleted_at.is_(None))
+            .values(embedding_status="pending")
+            .execution_options(synchronize_session=False)
+        )
+    requeued = (cast(CursorResult[Any], result).rowcount or 0) > 0
+    if requeued:
+        logger.info("embedding_requeued", memory_id=str(memory_id), reason="point_write_failed")
+    return requeued
 
 
 async def _resolve_embedding_info(
@@ -456,10 +486,6 @@ async def undo_merge_action(
             f"Memory {loser_id} could not be restored — it was forgotten, purged, or its "
             "context was deleted after the merge was checked.",
         )
-    # #2065: the UPDATE expired the row's computed resource columns (and its
-    # embedding clock); the point writer reads them, and an expired attribute
-    # cannot be loaded lazily on an async session (MissingGreenlet).
-    await db.refresh(loser)
 
     # Resolve workspace_id — required by add_memory_to_qdrant. Mirrors the
     # run-level rollback's Context fallback: workspace-less reports exist,

@@ -1474,12 +1474,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #2065: by forget's rule — a resource point another live row still
         # names stays with that row (``unshared_point_id``).
         try:
-            point_id: UUID | None = loser.point_id
-            if point_id != loser.id:
-                # Its own savepoint: a failed lookup must not abort the run's
-                # transaction from inside this best-effort step.
-                async with self.db.begin_nested():
-                    point_id = await unshared_point_id(self.db, loser.id, loser.point_id)
+            point_id = await unshared_point_id(self.db, loser.id, loser.point_id)
             if point_id is not None:
                 await delete_memory_from_qdrant(
                     user_id, point_id, self.collection_name or "kagura_memories"

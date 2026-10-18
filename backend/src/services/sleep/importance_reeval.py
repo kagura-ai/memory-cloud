@@ -179,9 +179,10 @@ class ImportanceReevalPhase(LLMSpendTracker):
 
                 # Update Qdrant payload. #2065: not for a resource-indexer row.
                 # Its point is the indexer's (``Memory.point_id``), whose
-                # payload carries no importance — and the reindex below
-                # rebuilds it whole from the row. Its id names no point of its
-                # own (or a stray label one, #2053), so a write there was lost.
+                # payload carries no importance, and its id names no point of
+                # its own (or a stray label one, #2053): a write there was
+                # lost. Nor is it handed to the reindex, which would rebuild
+                # the whole indexer point for a change the point does not hold.
                 try:
                     if not resource_row:
                         await update_memory_payload_in_qdrant(
@@ -197,7 +198,8 @@ class ImportanceReevalPhase(LLMSpendTracker):
                         error=str(e),
                     )
 
-                result.changed_memory_ids.add(memory_id)
+                if not resource_row:
+                    result.changed_memory_ids.add(memory_id)
                 updated_count += 1
                 if reporter and report_id:
                     await reporter.add_action(

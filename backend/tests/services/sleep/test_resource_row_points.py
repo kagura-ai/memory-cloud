@@ -206,9 +206,9 @@ class TestImportanceSkipsTheIndexerPoint:
     async def test_only_a_summary_point_gets_the_payload(
         self, db_session: AsyncSession, indexer_row: bool
     ):
-        """An indexer row's id names no point of its own (or a stray label one):
-        the payload write is skipped, and the row still goes to the reindex,
-        which rebuilds the indexer's point from it."""
+        """An indexer row's id names no point of its own (or a stray label one),
+        and the indexer's point carries no importance: neither the payload
+        write nor the reindex (a whole rebuild of that point) is spent on it."""
         user = f"{_USER}-{uuid4()}"
         stale = utcnow() - timedelta(days=60)
         make = _indexer_row if indexer_row else _row
@@ -218,11 +218,12 @@ class TestImportanceSkipsTheIndexerPoint:
 
         payload, changed = await self._run(db_session, row)
 
-        assert changed == {row.id}
         if indexer_row:
             payload.assert_not_awaited()
+            assert changed == set()
         else:
             assert payload.await_args.kwargs["memory_id"] == row.id
+            assert changed == {row.id}
 
 
 class TestRollbackImportanceSkipsTheIndexerPoint:

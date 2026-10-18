@@ -535,12 +535,7 @@ class ConsolidationPhase(LLMSpendTracker):
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
             return False
         try:
-            point_id: UUID | None = memory.point_id
-            if point_id != memory_id:
-                # Its own savepoint: a failed lookup must not abort the run's
-                # transaction from inside this best-effort step.
-                async with self.db.begin_nested():
-                    point_id = await unshared_point_id(self.db, memory_id, memory.point_id)
+            point_id = await unshared_point_id(self.db, memory_id, memory.point_id)
             if point_id is not None:
                 await delete_memory_from_qdrant(user_id, point_id, self.collection_name)
         except Exception as e:  # noqa: BLE001 — the tombstone is the truth; log the orphan

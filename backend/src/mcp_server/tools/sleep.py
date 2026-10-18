@@ -470,10 +470,6 @@ async def _restore_sleep_tombstone(
     if restore_rows == 0 or mem is None:
         summary["errors"].append(not_restorable)
         return
-    # #2065: the UPDATE expired the row's computed resource columns (and its
-    # embedding clock); the point writer reads them, and an expired attribute
-    # cannot be loaded lazily on an async session (MissingGreenlet).
-    await db.refresh(mem)
     requeued = await _re_embed_to_qdrant(
         mem,
         ctx.user_id,

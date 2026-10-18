@@ -52,7 +52,6 @@ async def test_restore_counts_memories_re_queued_for_their_chunks_or_point(
     )
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
-    db.refresh = AsyncMock()
     summary = {"archives_restored": 0, "chunks_requeued": 0, "points_requeued": 0, "errors": []}
     with (
         patch.object(sleep_tools, "hold_point_writer_lock", new=AsyncMock()),
@@ -70,8 +69,6 @@ async def test_restore_counts_memories_re_queued_for_their_chunks_or_point(
             not_restorable="gone",
         )
     assert reembed.await_args.kwargs["db"] is db
-    # #2065: the row is re-read after the restore UPDATE expired it.
-    db.refresh.assert_awaited_once_with(mem)
     assert summary == {
         "archives_restored": 1,
         "chunks_requeued": chunks,
