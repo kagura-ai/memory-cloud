@@ -1,0 +1,158 @@
+"""Where a write's agent and session come from (#2044).
+
+- ``agent_id`` only from the verified credential (``AgentScope``); a baggage
+  agent claim never reaches it, on REST or MCP.
+- ``session_id`` from the request's correlation (OTel baggage); on the
+  stateful MCP transport the protocol session fills in when baggage named
+  none, and baggage wins when it did.
+- Every revision row and the memory's last-writer columns carry both.
+"""
+
+from __future__ import annotations
+
+import uuid
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from api.correlation import CorrelationContext, get_correlation, set_correlation
+from auth.agent_scope import AgentScope, set_agent_scope
+from models.memory import MemoryRevision
+from services.memory_versions import record_revision, revision_values
+from services.write_provenance import (
+    SessionPrincipal,
+    WriteProvenance,
+    caller_principal,
+    current_provenance,
+)
+
+AGENT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def _clean() -> None:
+    set_agent_scope(None)
+    set_correlation(None)
+    yield
+    set_agent_scope(None)
+    set_correlation(None)
+
+
+def _corr(session_id: str | None = None, agent_claim: str | None = None) -> CorrelationContext:
+    return CorrelationContext(
+        trace_id="0" * 31 + "1",
+        span_id="0" * 15 + "1",
+        session_id=session_id,
+        agent_claim=agent_claim,
+    )
+
+
+def test_outside_a_request_there_is_no_provenance():
+    assert current_provenance() == WriteProvenance(None, None)
+    assert caller_principal("u1") == SessionPrincipal("u1", None)
+
+
+def test_agent_comes_from_the_credential_and_session_from_baggage():
+    set_agent_scope(AgentScope(agent_id=AGENT, enforcement_mode="enforce"))
+    set_correlation(_corr(session_id="run-42"))
+    assert current_provenance() == WriteProvenance(AGENT, "run-42")
+    assert caller_principal("u1") == SessionPrincipal("u1", AGENT)
+
+
+def test_a_baggage_agent_claim_never_becomes_the_agent():
+    set_correlation(_corr(session_id="s", agent_claim=str(AGENT)))
+    assert current_provenance() == WriteProvenance(None, "s")
+    assert caller_principal("u1").agent_id is None
+
+
+def test_rest_baggage_reaches_the_session_but_not_the_agent():
+    """The REST seam: CorrelationMiddleware parses baggage; a claimed agent id
+    in it stays out of the provenance (no credential-bound AgentScope)."""
+    from api.middleware.correlation import CorrelationMiddleware
+
+    app = FastAPI()
+    app.add_middleware(CorrelationMiddleware)
+
+    @app.get("/api/v1/probe")
+    async def probe() -> dict[str, str | None]:
+        prov = current_provenance()
+        return {
+            "agent": str(prov.agent_id) if prov.agent_id else None,
+            "session": prov.session_id,
+        }
+
+    client = TestClient(app)
+    body = client.get(
+        "/api/v1/probe",
+        headers={"baggage": f"session.id=rest-session,gen_ai.agent.id={AGENT}"},
+    ).json()
+    assert body == {"agent": None, "session": "rest-session"}
+    malformed = client.get("/api/v1/probe", headers={"baggage": "session.id=has%20space"}).json()
+    assert malformed == {"agent": None, "session": None}
+
+
+def test_mcp_protocol_session_fills_in_only_without_baggage():
+    from mcp_server.transport import _default_correlation_session
+
+    set_correlation(_corr())
+    _default_correlation_session("mcp-0123456789abcdef")
+    assert get_correlation().session_id == "mcp-0123456789abcdef"
+
+    set_correlation(_corr(session_id="from-baggage"))
+    _default_correlation_session("mcp-0123456789abcdef")
+    assert get_correlation().session_id == "from-baggage"
+
+    # An id that fails the token check is dropped, never stored.
+    set_correlation(_corr())
+    _default_correlation_session("bad id!")
+    assert get_correlation().session_id is None
+
+    set_correlation(None)
+    _default_correlation_session("mcp-0123456789abcdef")  # no correlation: no-op
+    assert get_correlation() is None
+
+
+def test_record_revision_stamps_the_row_and_the_memory():
+    set_agent_scope(AgentScope(agent_id=AGENT, enforcement_mode="enforce"))
+    set_correlation(_corr(session_id="sess-1"))
+    db = MagicMock()
+    memory = SimpleNamespace(
+        id=uuid.uuid4(), context_id=uuid.uuid4(), version=2, agent_id=None, session_id="old"
+    )
+    record_revision(db, memory, kind="updated", actor_user_id="u1", prior={"summary": "a"})
+    (row,) = [c.args[0] for c in db.add.call_args_list]
+    assert isinstance(row, MemoryRevision)
+    assert (row.agent_id, row.session_id, row.actor_user_id) == (AGENT, "sess-1", "u1")
+    assert (memory.agent_id, memory.session_id) == (AGENT, "sess-1")
+
+
+def test_explicit_provenance_wins_and_a_contextless_row_is_still_stamped():
+    db = MagicMock()
+    memory = SimpleNamespace(
+        id=uuid.uuid4(), context_id=None, version=1, agent_id=AGENT, session_id=None
+    )
+    record_revision(
+        db,
+        memory,
+        kind="created",
+        actor_user_id="u1",
+        provenance=WriteProvenance(None, "explicit"),
+    )
+    db.add.assert_not_called()  # no context, no revision (PR1 rule)
+    assert memory.session_id == "explicit" and memory.agent_id is None
+
+
+def test_revision_values_carry_the_provenance_and_writer():
+    values = revision_values(
+        memory_id=uuid.uuid4(),
+        context_id=uuid.uuid4(),
+        version=1,
+        kind="forgotten",
+        actor_user_id="u1",
+        writer="rollback",
+        provenance=WriteProvenance(AGENT, "s"),
+    )
+    assert (values["agent_id"], values["session_id"], values["writer"]) == (AGENT, "s", "rollback")

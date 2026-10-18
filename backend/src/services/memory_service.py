@@ -40,6 +40,7 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     REVISION_KIND_CREATED,
     REVISION_KIND_FORGOTTEN,
+    REVISION_WRITER_API,
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
     Memory,
@@ -89,6 +90,7 @@ from services.memory_versions import (
     record_edit,
     record_revision,
     revision_values,
+    stamp_writer,
     versioned_snapshot,
 )
 from services.persistence import persistence_info
@@ -102,6 +104,7 @@ from services.recall_timings import RecallTimings
 from services.reranker_service import RERANK_UNSCORED_KEY
 from services.search_service import SearchService
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
+from services.write_provenance import current_provenance
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     ConfigurationError,
@@ -995,6 +998,9 @@ class MemoryService:
             # the column default (the created revision and the response read it).
             version=1,
         )
+        # #2044: the writer's agent / session go into the INSERT itself (the
+        # created revision reads the same values and leaves the row clean).
+        stamp_writer(memory, current_provenance())
         # Issue #886: pin-on-write. delivery_mode='always' pins straight to
         # persistent (so it is exempt from sleep consolidation — which only acts
         # on scope='working' — without waiting for a consolidation pass).
@@ -5944,6 +5950,9 @@ class MemoryService:
         # Soft delete in PostgreSQL (set deleted_at, deleted_by)
         memory.deleted_at = utcnow()
         memory.deleted_by = user_id
+        # #2044: the forgetting writer's agent / session, in the same UPDATE.
+        provenance = current_provenance()
+        stamp_writer(memory, provenance)
         # touch=False: the delete is dated by deleted_at, not
         # updated_at — else changes_since lists an "updated" event
         # after the "forgotten" one (#1924).
@@ -5959,6 +5968,7 @@ class MemoryService:
             kind=REVISION_KIND_FORGOTTEN,
             actor_user_id=user_id,
             at=memory.deleted_at,
+            provenance=provenance,
         )
 
         # Hard delete from Qdrant (remove from search index) — by the
@@ -5989,18 +5999,26 @@ class MemoryService:
         return point_to_delete
 
     async def _soft_delete_chunk(
-        self, user_id: str, ids: list[UUID], workspace_id: str, context_id: str
+        self,
+        user_id: str,
+        ids: list[UUID],
+        workspace_id: str,
+        context_id: str,
+        *,
+        writer: str = REVISION_WRITER_API,
     ) -> tuple[list[UUID], list[str]]:
         """``_soft_delete_memory`` for a chunk, in a fixed number of statements.
 
-        One UPDATE stamps ``deleted_at`` / ``deleted_by`` (and nothing else:
-        ``updated_at`` stays, #1924) on the chunk's still-live rows of the
-        context; one multi-row INSERT logs their ``forgotten`` events (#2043);
-        one SELECT keeps every shared point another live row still owns
-        (#1829); one DELETE drops the deleted nodes' neural edges with
-        forget's (user, workspace, context) isolation. Returns the deleted ids
-        and the point ids to remove from the index. The caller deletes the
-        points and commits.
+        One UPDATE stamps ``deleted_at`` / ``deleted_by`` and the writer's
+        agent / session (#2044) — nothing else: ``updated_at`` stays, #1924 —
+        on the chunk's still-live rows of the context; one multi-row INSERT
+        logs their ``forgotten`` events (#2043; ``writer`` is ``rollback``
+        when ``rollback_session`` forgets what a session created); one SELECT
+        keeps every shared point another live row still owns (#1829); one
+        DELETE drops the deleted nodes' neural edges with forget's (user,
+        workspace, context) isolation. Returns the deleted ids and the point
+        ids to remove from the index. The caller deletes the points and
+        commits.
         """
         from sqlalchemy import insert, update
 
@@ -6009,6 +6027,7 @@ class MemoryService:
         if not ids:
             return [], []
         deleted_at = utcnow()
+        provenance = current_provenance()
         rows = (
             await self.db.execute(
                 update(Memory)
@@ -6017,7 +6036,12 @@ class MemoryService:
                     Memory.context_id == UUID(context_id),
                     Memory.deleted_at.is_(None),
                 )
-                .values(deleted_at=deleted_at, deleted_by=user_id)
+                .values(
+                    deleted_at=deleted_at,
+                    deleted_by=user_id,
+                    agent_id=provenance.agent_id,
+                    session_id=provenance.session_id,
+                )
                 .returning(Memory.id, Memory.summary_embedding_id, Memory.version)
                 .execution_options(synchronize_session=False)
             )
@@ -6036,6 +6060,8 @@ class MemoryService:
                             kind=REVISION_KIND_FORGOTTEN,
                             actor_user_id=user_id,
                             at=deleted_at,
+                            writer=writer,
+                            provenance=provenance,
                         )
                         for row in rows
                     ]

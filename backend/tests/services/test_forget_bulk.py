@@ -457,7 +457,8 @@ class TestTheChunkIsAFixedNumberOfStatements:
         )
         assert len(statements) == 4
         sqls = [str(st.compile(dialect=postgresql.dialect())) for st in statements]
-        assert sqls[0].startswith("UPDATE memories SET deleted_at=")
+        assert sqls[0].startswith("UPDATE memories SET ")
+        assert "deleted_at=" in sqls[0] and "session_id=" in sqls[0]  # #2044
         assert "deleted_by" in sqls[0] and "updated_at" not in sqls[0]  # #1924
         assert "memories.context_id =" in sqls[0]
         assert "memories.version" in sqls[0]  # RETURNING feeds the revision rows

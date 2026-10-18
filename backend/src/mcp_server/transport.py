@@ -220,6 +220,26 @@ def _extract_session_id(
     return None
 
 
+def _default_correlation_session(mcp_session_id: str) -> None:
+    """Use the MCP protocol session as the request's session when baggage named none (#2044).
+
+    Writes record the request's session as their provenance
+    (``services.write_provenance``); a client that sends no
+    ``gen_ai.conversation.id`` / ``session.id`` baggage still gets one per
+    MCP session, with no client change. The id is server-minted (or
+    re-adopted only in the server-minted shape) and passes the correlation
+    token check like any baggage value. Baggage, when present, wins. Side
+    effect: agent-key ``memory_access_events`` rows of such traffic now carry
+    this session id too. Stateless (modern) requests have no session and keep
+    None.
+    """
+    from api.correlation import get_correlation, validate_correlation_token
+
+    corr = get_correlation()
+    if corr is not None and corr.session_id is None:
+        corr.session_id = validate_correlation_token(mcp_session_id)
+
+
 def _normalize_mcp_path(path: str) -> str:
     """Strip the ``/mcp`` mount prefix for the downstream handlers (#1456)."""
     if path.startswith("/mcp/"):
@@ -1838,6 +1858,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     logger.debug(
         f"MCP handling: {method} {_normalize_mcp_path(path)} (session={session.session_id})"
     )
+    _default_correlation_session(session.session_id)
 
     # Only POST /mcp gets here: the unified Streamable HTTP endpoint (MCP spec
     # 2025-03-26). Every other method and path was answered above.

@@ -26,6 +26,7 @@ from models.memory import (
     VERSIONED_FIELDS,
     MemoryRevision,
 )
+from services.write_provenance import WriteProvenance, current_provenance
 from utils.exceptions import VersionConflictError
 
 
@@ -109,13 +110,16 @@ def revision_values(
     at: datetime | None = None,
     prior: dict[str, Any] | None = None,
     writer: str = REVISION_WRITER_API,
+    provenance: WriteProvenance | None = None,
 ) -> dict[str, Any]:
     """The column values of one revision row — the single mapping both the
     per-row writer (``record_revision``) and the bulk forget INSERT use, so a
     column added here (#2044's provenance) reaches every write path.
 
     ``at`` is left out when None, so the column default applies.
+    ``provenance`` defaults to the current request's (#2044).
     """
+    prov = provenance if provenance is not None else current_provenance()
     values: dict[str, Any] = {
         "memory_id": memory_id,
         "context_id": context_id,
@@ -124,10 +128,24 @@ def revision_values(
         "prior": prior or {},
         "writer": writer,
         "actor_user_id": actor_user_id,
+        "agent_id": prov.agent_id,
+        "session_id": prov.session_id,
     }
     if at is not None:
         values["at"] = at
     return values
+
+
+def stamp_writer(memory: Any, provenance: WriteProvenance) -> None:
+    """Record ``provenance`` as the memory's last writer (#2044).
+
+    Assigns only what differs, so a row that already carries these values
+    (set when it was built) is not made dirty again after its INSERT.
+    """
+    if getattr(memory, "agent_id", None) != provenance.agent_id:
+        memory.agent_id = provenance.agent_id
+    if getattr(memory, "session_id", None) != provenance.session_id:
+        memory.session_id = provenance.session_id
 
 
 def record_revision(
@@ -139,14 +157,15 @@ def record_revision(
     at: datetime | None = None,
     prior: dict[str, Any] | None = None,
     writer: str = REVISION_WRITER_API,
+    provenance: WriteProvenance | None = None,
 ) -> None:
     """Add one revision row for ``memory`` at its current version.
 
     ``at`` is the timestamp the write stamped on the row (``updated_at`` /
     ``deleted_at``), so the log and the row agree; omitted, the column's
     ``now()`` default applies (the transaction time, which is what a new
-    row's ``created_at`` holds). ``agent_id`` / ``session_id`` stay NULL
-    until #2044's provenance fills them.
+    row's ``created_at`` holds). The row's ``agent_id`` / ``session_id`` are
+    the writer's (#2044), which also become the memory's last writer.
 
     A legacy row without a context gets no revision: the column is NOT NULL
     and no context-scoped read can reach such a row.
@@ -159,7 +178,11 @@ def record_revision(
         at: The event time, or None for the database default.
         prior: ``changed_prior`` of an ``updated`` event; empty otherwise.
         writer: One of ``REVISION_WRITERS``.
+        provenance: The writer's agent and session; None reads the current
+            request's (``current_provenance``).
     """
+    prov = provenance if provenance is not None else current_provenance()
+    stamp_writer(memory, prov)
     if memory.context_id is None:
         return
     db.add(
@@ -173,13 +196,20 @@ def record_revision(
                 at=at,
                 prior=prior,
                 writer=writer,
+                provenance=prov,
             )
         )
     )
 
 
 def record_edit(
-    db: AsyncSession, memory: Any, before: dict[str, Any], *, actor_user_id: str
+    db: AsyncSession,
+    memory: Any,
+    before: dict[str, Any],
+    *,
+    actor_user_id: str,
+    writer: str = REVISION_WRITER_API,
+    provenance: WriteProvenance | None = None,
 ) -> bool:
     """Bump the version and log the edit when it changed a versioned field.
 
@@ -188,6 +218,8 @@ def record_edit(
         memory: The locked row with the edit applied (``updated_at`` stamped).
         before: ``versioned_snapshot`` taken before the edit.
         actor_user_id: The caller who made the edit.
+        writer: ``rollback`` when ``rollback_session`` restores (#2044).
+        provenance: The writer's agent and session (default: the request's).
 
     Returns:
         True when the version moved.
@@ -203,5 +235,7 @@ def record_edit(
         actor_user_id=actor_user_id,
         at=memory.updated_at,
         prior=prior,
+        writer=writer,
+        provenance=provenance,
     )
     return True
