@@ -324,3 +324,106 @@ async def test_mcp_turning_the_flag_off_is_allowed_without_chunk_point_support()
         )
     assert payload["status"] == "success"
     assert repo.update.await_args.args[1].content_chunks_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# #2015 PR 2b (D4): turning the flag on queues the existing long memories.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_turning_the_flag_on_queues_the_backfill_inside_the_transaction():
+    from unittest.mock import patch
+
+    import structlog
+
+    repo, db = _repo_with(_flagged_config(False), uuid4())
+    order = []
+    db.commit.side_effect = lambda: order.append("commit")
+    ctx = uuid4()
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch(
+            "db.qdrant.purge_context_chunk_points_everywhere",
+            AsyncMock(side_effect=lambda *a, **k: order.append("purge") or []),
+        ),
+        patch.object(
+            repo,
+            "_queue_content_chunk_backfill",
+            AsyncMock(side_effect=lambda _ctx: order.append("backfill") or 7),
+        ) as backfill,
+    ):
+        await repo.update(ctx, ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
+    assert order == ["purge", "backfill", "commit"]
+    backfill.assert_awaited_once_with(ctx)
+    event = next(e for e in logs if e["event"] == "content_chunks_backfill_queued")
+    assert (event["context_id"], event["count"]) == (str(ctx), 7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("before", "after"), [(True, False), (True, True), (False, False)])
+async def test_no_backfill_unless_the_flag_turns_on(before, after):
+    from unittest.mock import patch
+
+    repo, _ = _repo_with(_flagged_config(before), uuid4())
+    with (
+        patch("db.qdrant.purge_context_chunk_points_everywhere", AsyncMock(return_value=[])),
+        patch.object(repo, "_queue_content_chunk_backfill", AsyncMock()) as backfill,
+    ):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=after))
+    backfill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_backfill_keeps_the_flag_off():
+    from unittest.mock import patch
+
+    repo, db = _repo_with(_flagged_config(False), uuid4())
+    with (
+        patch("db.qdrant.purge_context_chunk_points_everywhere", AsyncMock(return_value=[])),
+        patch.object(
+            repo, "_queue_content_chunk_backfill", AsyncMock(side_effect=RuntimeError("db"))
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_statement_requeues_only_long_live_success_rows():
+    """The predicate (the DB test runs it on real rows): never processing rows,
+    never the pipeline clock or updated_at, never resource rows."""
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy.dialects import postgresql
+
+    from utils.content_chunks import CONTENT_CHUNK_MIN_CONTENT_CHARS
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=3))
+    repo = ContextSearchConfigRepository(db)
+    with patch("db.qdrant.chunk_points_supported", return_value=True):
+        assert await repo._queue_content_chunk_backfill(uuid4()) == 3
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert sql.startswith("UPDATE memories SET embedding_status='pending'")
+    set_clause = sql.split(" WHERE ")[0]
+    assert "embedding_attempted_at" not in set_clause and "updated_at" not in set_clause
+    where = sql.split(" WHERE ")[1]
+    assert "memories.embedding_status = 'success'" in where
+    assert "memories.deleted_at IS NULL" in where
+    assert f"char_length(memories.content) >= {CONTENT_CHUNK_MIN_CONTENT_CHARS}" in where
+    assert "memories.resource_id IS NULL" in where
+
+
+@pytest.mark.asyncio
+async def test_no_backfill_on_a_store_without_chunk_points():
+    from unittest.mock import patch
+
+    db = AsyncMock()
+    repo = ContextSearchConfigRepository(db)
+    with patch("db.qdrant.chunk_points_supported", return_value=False):
+        assert await repo._queue_content_chunk_backfill(uuid4()) == 0
+    db.execute.assert_not_awaited()

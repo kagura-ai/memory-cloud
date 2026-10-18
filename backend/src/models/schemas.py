@@ -1351,6 +1351,34 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     content_chunks_enabled: bool = Field(
         default=False, description="Embed long content as chunk vectors for dense retrieval"
     )
+    # Issue #2015 (D7): computed by the server for the UI; the PUT stays the
+    # authority (it re-checks the permission and the store).
+    content_chunks_can_change: bool = Field(
+        default=False,
+        description=(
+            "Whether the caller may change content_chunks_enabled (the context "
+            "owner or a workspace owner/admin)"
+        ),
+    )
+    content_chunks_supported: bool = Field(
+        default=True,
+        description="Whether the vector store keeps content chunk vectors (false on LanceDB)",
+    )
+    embedding_provider: str | None = Field(
+        default=None,
+        description=(
+            "Provider of the context's embedding model (openai / self_hosted): "
+            "where memory content goes when content_chunks_enabled is on"
+        ),
+    )
+    content_chunks_backfill_pending: int = Field(
+        default=0,
+        description=(
+            "Long memories (1,500+ characters) still waiting for their chunk "
+            "vectors, e.g. the existing memories queued when the flag was turned "
+            "on; 0 while it is off"
+        ),
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1405,8 +1433,10 @@ class ContextSearchConfigUpdate(BaseModel):
     content_chunks_enabled: bool = Field(
         default=False,
         description="Embed long content (>= 1500 chars) as chunk vectors so dense "
-        "retrieval sees the body, not only the summary. Applies to writes and "
-        "re-embeds after it is turned on; turning it off deletes the chunks. "
+        "retrieval sees the body, not only the summary. Turning it on also "
+        "queues the context's existing long memories for chunking (drained in "
+        "the background; see content_chunks_backfill_pending); turning it off "
+        "deletes the chunks. "
         "When on, memory content (not only summaries) is sent to the embedding "
         "and rerank providers. Changing it takes the context owner or a "
         "workspace owner/admin (403 for an editor); sending the stored value is "

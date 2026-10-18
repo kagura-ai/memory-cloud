@@ -2519,11 +2519,15 @@
       "ContextSearchConfigResponse": {
         "properties": {
           "bm25_weight": {},
+          "content_chunks_backfill_pending": {},
+          "content_chunks_can_change": {},
           "content_chunks_enabled": {},
+          "content_chunks_supported": {},
           "context_id": {},
           "created_at": {},
           "embedding_dimensions": {},
           "embedding_model": {},
+          "embedding_provider": {},
           "fetch_factor": {},
           "reinforce_enabled": {},
           "reinforce_max_boost": {},

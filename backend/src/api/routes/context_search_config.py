@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
+from config.constants import EMBEDDING_MODEL_REGISTRY
+from config.settings import get_settings
 from db.base import get_db
+from db.qdrant import chunk_points_supported
+from models.config import ContextSearchConfig
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.capacity_lock import CapacityPolicy
@@ -19,12 +23,52 @@ from services.permission_service import (
     check_content_chunks_change,
     gate_content_chunks_change,
 )
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import AuthorizationError, MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/contexts", tags=["context-search-config"])
+
+
+async def build_search_config_response(
+    repo: ContextSearchConfigRepository,
+    perm_service: PermissionService,
+    user_id: str,
+    context_id: UUID,
+    config: ContextSearchConfig,
+) -> ContextSearchConfigResponse:
+    """The search-config response, with the server-computed #2015 fields (D7).
+
+    Shared by GET, PUT and reset. ``content_chunks_can_change`` is the PUT's
+    own owner rule, asked of the caller; ``content_chunks_backfill_pending``
+    is counted only while the flag is on. They inform the UI — the PUT checks
+    the permission and the store again.
+    """
+    try:
+        await check_content_chunks_change(perm_service, user_id, context_id)
+        can_change = True
+    except AuthorizationError:
+        can_change = False
+    model = config.embedding_model
+    provider = (
+        EMBEDDING_MODEL_REGISTRY[model][1]
+        if model in EMBEDDING_MODEL_REGISTRY
+        else get_settings().embedding_provider
+    )
+    pending = (
+        await repo.content_chunk_backfill_pending(context_id)
+        if config.content_chunks_enabled is True
+        else 0
+    )
+    return ContextSearchConfigResponse.model_validate(config).model_copy(
+        update={
+            "content_chunks_can_change": can_change,
+            "content_chunks_supported": chunk_points_supported(),
+            "embedding_provider": provider,
+            "content_chunks_backfill_pending": pending,
+        }
+    )
 
 
 @router.get("/{context_id}/search-config", response_model=ContextSearchConfigResponse)
@@ -67,7 +111,7 @@ async def get_context_search_config(
             fetch_factor=config.fetch_factor,
         )
 
-        return ContextSearchConfigResponse.model_validate(config)
+        return await build_search_config_response(repo, perm_service, user_id, context_id, config)
 
     except (HTTPException, MemoryCloudException):
         raise
@@ -161,7 +205,7 @@ async def update_context_search_config(
             use_rerank=config.use_rerank,
         )
 
-        return ContextSearchConfigResponse.model_validate(config)
+        return await build_search_config_response(repo, perm_service, user_id, context_id, config)
 
     except (HTTPException, MemoryCloudException):
         raise
@@ -236,7 +280,7 @@ async def reset_context_search_config(
 
         logger.info("reset_search_config_success", user_id=user_id, context_id=str(context_id))
 
-        return ContextSearchConfigResponse.model_validate(config)
+        return await build_search_config_response(repo, perm_service, user_id, context_id, config)
 
     except (HTTPException, MemoryCloudException):
         raise

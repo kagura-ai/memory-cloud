@@ -51,7 +51,7 @@ async def _put(update: ContextSearchConfigUpdate, *, stored: bool, owner: bool):
     with (
         patch(f"{_MODULE}.PermissionService", return_value=perms),
         patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
-        patch(f"{_MODULE}.ContextSearchConfigResponse.model_validate", side_effect=lambda c: c),
+        patch(f"{_MODULE}.build_search_config_response", AsyncMock(return_value=None)),
     ):
         await update_context_search_config(uuid4(), update, {"user_id": "u-1"}, db=AsyncMock())
     return perms, repo
@@ -64,7 +64,7 @@ async def _reset(*, stored: bool, owner: bool):
     with (
         patch(f"{_MODULE}.PermissionService", return_value=perms),
         patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
-        patch(f"{_MODULE}.ContextSearchConfigResponse.model_validate", side_effect=lambda c: c),
+        patch(f"{_MODULE}.build_search_config_response", AsyncMock(return_value=None)),
     ):
         await reset_context_search_config(uuid4(), {"user_id": "u-1"}, db=AsyncMock())
     return perms, repo
@@ -239,3 +239,102 @@ async def test_sending_the_stored_on_value_is_a_no_op_without_chunk_point_suppor
             owner=False,
         )
     assert "content_chunks_enabled" not in repo.update.await_args.args[1].model_fields_set
+
+
+# ---------------------------------------------------------------------------
+# #2015 PR 2b (D7): the server-computed fields the UI reads.
+# ---------------------------------------------------------------------------
+
+
+def _row(*, enabled: bool, model: str = "qwen3-embedding:4b"):
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 10, 18, tzinfo=UTC)
+    return SimpleNamespace(
+        context_id=uuid4(),
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+        reranker_provider="voyage",
+        reranker_model="rerank-2",
+        embedding_model=model,
+        embedding_dimensions=2560,
+        reinforce_enabled=True,
+        reinforce_max_boost=0.15,
+        reinforce_require_host_arbitration=False,
+        routing_mode="off",
+        content_chunks_enabled=enabled,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def _get(row, *, owner: bool, supported: bool = True, pending: int = 0):
+    from api.routes.context_search_config import get_context_search_config
+
+    perms = _perms(owner=owner)
+    repo = MagicMock()
+    repo.create_or_get = AsyncMock(return_value=row)
+    repo.content_chunk_backfill_pending = AsyncMock(return_value=pending)
+    with (
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        patch(f"{_MODULE}.chunk_points_supported", return_value=supported),
+    ):
+        response = await get_context_search_config(uuid4(), {"user_id": "u-1"}, db=AsyncMock())
+    return response, repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [True, False])
+async def test_get_says_whether_the_caller_may_change_the_flag(owner):
+    response, _ = await _get(_row(enabled=False), owner=owner)
+    assert response.content_chunks_can_change is owner
+    assert response.content_chunks_supported is True
+    assert response.embedding_provider == "self_hosted"
+
+
+@pytest.mark.asyncio
+async def test_get_reports_an_unsupported_store_and_the_openai_provider():
+    response, _ = await _get(
+        _row(enabled=False, model="text-embedding-3-small"), owner=True, supported=False
+    )
+    assert response.content_chunks_supported is False
+    assert response.embedding_provider == "openai"
+
+
+@pytest.mark.asyncio
+async def test_backfill_pending_is_counted_only_while_the_flag_is_on():
+    on, repo_on = await _get(_row(enabled=True), owner=True, pending=12)
+    off, repo_off = await _get(_row(enabled=False), owner=True, pending=12)
+    assert on.content_chunks_backfill_pending == 12
+    repo_on.content_chunk_backfill_pending.assert_awaited_once()
+    assert off.content_chunks_backfill_pending == 0
+    repo_off.content_chunk_backfill_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_put_and_reset_return_the_same_fields():
+    from api.routes.context_search_config import (
+        reset_context_search_config,
+        update_context_search_config,
+    )
+
+    for owner in (True, False):
+        perms = _perms(owner=owner)
+        repo = MagicMock()
+        repo.get_by_context = AsyncMock(return_value=SimpleNamespace(content_chunks_enabled=False))
+        repo.update = AsyncMock(return_value=_row(enabled=False))
+        repo.reset_to_default = AsyncMock(return_value=_row(enabled=False))
+        with (
+            patch(f"{_MODULE}.PermissionService", return_value=perms),
+            patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        ):
+            put = await update_context_search_config(
+                uuid4(), ContextSearchConfigUpdate(**_BASE), {"user_id": "u-1"}, db=AsyncMock()
+            )
+            reset = await reset_context_search_config(uuid4(), {"user_id": "u-1"}, db=AsyncMock())
+        assert put.content_chunks_can_change is owner
+        assert reset.content_chunks_can_change is owner
+        assert put.embedding_provider == reset.embedding_provider == "self_hosted"
