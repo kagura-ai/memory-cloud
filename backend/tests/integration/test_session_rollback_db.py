@@ -27,6 +27,7 @@ needs the DB container.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -243,9 +244,7 @@ def _stubs() -> Any:
             "services.sleep.undo.re_embed_memory_to_qdrant", AsyncMock(return_value=None)
         ) as reembed,
         patch("services.embedding_service.EmbeddingService", MagicMock()),
-        patch(
-            "services.memory_service.MemoryService._update_sync_qdrant_payload", AsyncMock()
-        ) as payload,
+        patch("db.qdrant.update_memory_payload_in_qdrant", AsyncMock()) as payload,
     ):
         yield {"points": points, "reembed": reembed, "payload": payload}
 
@@ -259,7 +258,12 @@ def _cid() -> str:
 
 
 async def _rollback(
-    world: World, session_id: str, principal: SessionPrincipal | None, *, dry_run: bool
+    world: World,
+    session_id: str,
+    principal: SessionPrincipal | None,
+    *,
+    dry_run: bool,
+    time_budget: float | None = None,
 ) -> sr.RollbackResult:
     return await sr.rollback_session(
         world.session,
@@ -269,6 +273,7 @@ async def _rollback(
         dry_run=dry_run,
         classify=_errors,
         new_correlation_id=_cid,
+        time_budget=time_budget,
     )
 
 
@@ -545,6 +550,130 @@ async def test_a_later_write_by_someone_else_skips_the_memory(world: World) -> N
     ]
     assert await w.row(target) == before
     assert (await w.row(gone))["deleted_at"] is not None
+
+
+async def test_a_metadata_restore_reaches_the_payload_only_after_the_commit(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """v0.113.0 review F1: a call whose transaction is rolled back (a tool
+    timeout, a failed commit) leaves the vector payload untouched; the
+    committed call patches it in ``finish``."""
+    w = world
+    target = await w.create(w.member, None, tags=["orig"], importance=0.5)
+    await w.update(target, w.owner, "P1", tags=["session"], importance=0.9)
+    await w.session.commit()
+    s = SessionPrincipal(w.owner, None)
+
+    lost = await _rollback(w, "P1", s, dry_run=False)
+    assert [sync.memory_id for sync in lost.payload_syncs] == [target]
+    await w.session.rollback()  # the commit never happens
+    _stubs["payload"].assert_not_awaited()
+    row = await w.row(target)
+    assert (row["tags"], row["importance"], row["version"]) == (["session"], 0.9, 2)
+
+    done = await _rollback(w, "P1", s, dry_run=False)
+    await w.session.commit()
+    _stubs["payload"].assert_not_awaited()
+    await sr.finish(done)
+    _stubs["payload"].assert_awaited_once()
+    kwargs = _stubs["payload"].await_args.kwargs
+    assert kwargs["memory_id"] == target
+    assert kwargs["payload_updates"]["tags"] == ["orig"]
+    assert kwargs["payload_updates"]["importance"] == 0.5
+    assert (await w.row(target))["tags"] == ["orig"]
+
+
+async def test_a_spent_time_budget_spreads_the_batch_over_calls(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """v0.113.0 review F2: each call starts items only within its budget and
+    commits what it finished; the next call continues."""
+    w = world
+    forgotten = [await w.create(w.member, None) for _ in range(3)]
+    for memory_id in forgotten:
+        await w.forget(memory_id, w.owner, "SLOW")
+    await w.session.commit()
+    s = SessionPrincipal(w.owner, None)
+
+    first = await _rollback(w, "SLOW", s, dry_run=False, time_budget=0)
+    await w.session.commit()
+    assert (first.status, first.events, first.remaining) == ("in_progress", 1, 2)
+    assert first.summary["restored"] == 1 and first.errors == []
+    calls = [first]
+    while calls[-1].remaining:
+        calls.append(await _rollback(w, "SLOW", s, dry_run=False, time_budget=0))
+        await w.session.commit()
+        assert len(calls) <= 3
+    assert calls[-1].status == "completed" and calls[-1].totals["restored"] == 3
+    for memory_id in forgotten:
+        assert (await w.row(memory_id))["deleted_at"] is None
+
+
+async def test_the_sessions_own_write_during_its_rollback_is_rolled_back_too(
+    world: World, async_engine: AsyncEngine
+) -> None:
+    """v0.113.0 review F7: the session's own edit holds the row lock when the
+    rollback reads its batch. Once the lock is granted the edit's event is
+    part of the plan — the memory goes back to its pre-session state instead
+    of being skipped as ``modified_since`` with the earlier edit marked
+    handled for good."""
+    w = world
+    target = await w.create(w.member, None, tags=["orig"])
+    await w.update(target, w.owner, "S7", tags=["first"])
+    await w.session.commit()
+    s = SessionPrincipal(w.owner, None)
+    rollback_pid = await w.session.scalar(text("SELECT pg_backend_pid()"))
+    maker = _maker(async_engine)
+
+    async with maker() as writer:
+        await writer.execute(
+            text(
+                "UPDATE memories SET tags = ARRAY['second'], version = 3, session_id = 'S7' "
+                "WHERE id = :m"
+            ),
+            {"m": target},
+        )
+        writer.add(
+            MemoryRevision(
+                memory_id=target,
+                context_id=w.context_id,
+                version=3,
+                kind="updated",
+                writer="api",
+                actor_user_id=w.owner,
+                session_id="S7",
+                prior={"tags": ["first"]},
+                at=utcnow(),
+            )
+        )
+        await writer.flush()
+        task = asyncio.create_task(_rollback(w, "S7", s, dry_run=False))
+        for _ in range(200):  # until the rollback waits on the row lock
+            async with maker() as probe:
+                waiting = await probe.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = :p AND NOT granted)"),
+                    {"p": rollback_pid},
+                )
+            if waiting or task.done():
+                break
+            await asyncio.sleep(0.05)
+        assert waiting, "the rollback never waited on the row lock"
+        await writer.commit()
+    result = await task
+    await w.session.commit()
+
+    assert result.summary["skipped"] == 0 and result.summary["updated_restored"] == 1
+    assert (result.status, result.remaining) == ("completed", 0)
+    row = await w.row(target)
+    assert (row["tags"], row["version"]) == (["orig"], 4)
+    handled = await w.session.scalar(
+        select(func.count()).where(
+            MemoryRevision.session_id == "S7",
+            MemoryRevision.writer == "api",
+            MemoryRevision.undone_by == result.rollback_id,
+        )
+    )
+    assert handled == 2
 
 
 async def test_mcp_handler_uses_the_credential_principal(world: World) -> None:

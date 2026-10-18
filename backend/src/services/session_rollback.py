@@ -44,6 +44,7 @@ No MCP types here; ``mcp_server/tools/session_rollback.py`` is the tool.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -89,7 +90,7 @@ from services.write_provenance import (
     current_provenance,
     principal_predicate,
 )
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -332,20 +333,27 @@ def combined_prior(updates: list[SessionEvent]) -> tuple[dict[str, Any], bool]:
 
     ``updates`` oldest first. A field's value is the ``prior`` of the first
     update that changed it. Returns ``(values, erased)``: ``erased`` is True
-    when such a first ``prior`` lost the field to erasure (its ``erased`` /
-    ``scrubbed`` marker names it: the old value is gone, so the memory cannot
-    be put back whole). Marker keys are never values.
+    when such a first ``prior`` lost the field to erasure (the old value is
+    gone, so the memory cannot be put back whole). Marker keys are never
+    values.
     """
     values: dict[str, Any] = {}
     seen: set[str] = set()
     erased = False
     for event in updates:
-        # #2043's erasure markers: ``erased`` (the subject wrote the edit
-        # whose overwritten value this was) and ``scrubbed`` (the subject
-        # authored the memory, whose live value is gone). Read only through
-        # the memory_versions helpers, so the marker keys are never values.
-        lost = {*prior_erased(event.prior), *prior_scrubbed(event.prior)}
+        # #2043's erasure markers, read only through the memory_versions
+        # helpers so the marker keys are never values. ``erased`` names a
+        # field the event changed whose overwritten value is gone. ``scrubbed``
+        # says the live value of a field is gone (the memory's author was
+        # erased); it is on every ``updated`` event of such a memory, whatever
+        # the event changed, so it only counts for a field this event changed
+        # — a session that edited only the tags of an erased author's memory
+        # still gets its tags back (v0.113.0 review F3).
         kept = prior_values(event.prior)
+        lost = {
+            *prior_erased(event.prior),
+            *(name for name in prior_scrubbed(event.prior) if name in kept),
+        }
         for name in VERSIONED_FIELDS:
             if name in seen:
                 continue
@@ -474,9 +482,16 @@ async def _handled_exists(db: AsyncSession, scope: SessionScope) -> bool:
 async def _read_batch(
     db: AsyncSession, scope: SessionScope, user_id: str, workspace_id: UUID, *, lock: bool
 ) -> _Batch:
-    """The next batch's plan: the newest memories first, ≤ the event cap."""
+    """The next batch's plan: the newest memories first, ≤ the event cap.
+
+    Executing (``lock``), the batch's memory rows are locked before their
+    events are read: a write that held a row lock when the groups were read
+    (the session's own ``update_memory`` racing its rollback) has committed
+    its event by the time the lock is granted, so the plan sees it as one of
+    the session's events instead of skipping the memory as ``modified_since``
+    and marking its earlier events handled for good (v0.113.0 review F7).
+    """
     unhandled = [*_api_event_predicates(scope), MemoryRevision.undone_by.is_(None)]
-    total = await _unhandled_count(db, scope)
     groups = (
         await db.execute(
             select(
@@ -498,8 +513,16 @@ async def _read_batch(
         chosen.append(group.memory_id)
         taken += int(group.n)
     if not chosen:
-        return _Batch(items=[], memories={}, events=0, remaining=total)
+        return _Batch(items=[], memories={}, events=0, remaining=await _unhandled_count(db, scope))
 
+    stmt = select(Memory).where(Memory.id.in_(chosen)).order_by(Memory.id)
+    if lock:
+        # Id order, like every multi-row lock here (backend rules, #1985).
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    memories = {m.id: m for m in (await db.execute(stmt)).scalars()}
+    # Counted after the lock, with the events below, so ``remaining`` includes
+    # an event committed while the lock was awaited.
+    total = await _unhandled_count(db, scope)
     rows = (
         await db.execute(
             select(MemoryRevision)
@@ -530,11 +553,6 @@ async def _read_batch(
             )
         ).all()
     )
-    stmt = select(Memory).where(Memory.id.in_(chosen)).order_by(Memory.id)
-    if lock:
-        # Id order, like every multi-row lock here (backend rules, #1985).
-        stmt = stmt.with_for_update().execution_options(populate_existing=True)
-    memories = {m.id: m for m in (await db.execute(stmt)).scalars()}
     permitted = await _permitted(db, user_id, workspace_id, scope.context_id, memories)
 
     items: list[PlanItem] = []
@@ -621,6 +639,17 @@ async def _permitted(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class PayloadSync:
+    """One restored memory's vector payload patch, applied after the commit."""
+
+    memory_id: UUID
+    collection: str
+    updates: dict[str, Any]
+    delete_keys: tuple[str, ...]
+    cascade_chunks: bool
+
+
 @dataclass
 class RollbackResult:
     """What one ``rollback_session`` call did (or, on a dry run, would do)."""
@@ -641,6 +670,7 @@ class RollbackResult:
     forgotten_ids: list[UUID] = field(default_factory=list)
     forgotten_points: list[str] = field(default_factory=list)
     collection: str | None = None
+    payload_syncs: list[PayloadSync] = field(default_factory=list)
     # (workspace_id, requested_by, context_id) for the access-event audit.
     audit: tuple[UUID, str, UUID] | None = None
 
@@ -685,6 +715,7 @@ class _Executor:
         memories: dict[UUID, Any],
         classify: Callable[[BaseException], str],
         new_correlation_id: Callable[[], str],
+        deadline: float | None = None,
     ) -> None:
         from services.memory_service import MemoryService
 
@@ -708,6 +739,12 @@ class _Executor:
         self.failed_events = 0
         self.collection: str | None = None
         self._embedding: tuple[Any, str] | None = None
+        # time.monotonic() after which no further item is started.
+        self.deadline = deadline
+        self.deferred: list[PlanItem] = []
+        self.payload_syncs: list[PayloadSync] = []
+        self._item_syncs: list[PayloadSync] = []
+        self._payload_target: tuple[str, bool] | None = None
 
     async def run(self, items: list[PlanItem]) -> None:
         skipped = [item for item in items if item.action == ACTION_SKIP]
@@ -723,13 +760,29 @@ class _Executor:
         )
         if forgets:
             self.collection = await self._collection()
-        for start in range(0, len(forgets), FORGET_CHUNK):
-            await self._guarded(forgets[start : start + FORGET_CHUNK], self._forget_chunk)
-        for item in restores:
-            await self._guarded([item], self._restore)
+        units: list[tuple[list[PlanItem], Callable[[list[PlanItem]], Any]]] = [
+            (forgets[start : start + FORGET_CHUNK], self._forget_chunk)
+            for start in range(0, len(forgets), FORGET_CHUNK)
+        ]
+        units += [([item], self._restore) for item in restores]
+        for index, (unit, work) in enumerate(units):
+            if index and self._out_of_time():
+                # Time-boxed (v0.113.0 review F2): the rest waits for the next
+                # call, its events unhandled, so a slow embedding provider
+                # cannot push the whole batch past the tool timeout — which
+                # would roll everything back and replay the same batch on
+                # every call. The first unit always runs: each call progresses.
+                for _rest, _ in units[index:]:
+                    self.deferred.extend(_rest)
+                break
+            await self._guarded(unit, work)
+
+    def _out_of_time(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
 
     async def _guarded(self, items: list[PlanItem], work: Callable[[list[PlanItem]], Any]) -> None:
         event_ids = [i for item in items for i in item.event_ids]
+        self._item_syncs = []
         try:
             async with self.db.begin_nested():
                 await work(items)
@@ -737,6 +790,8 @@ class _Executor:
             self.restored_ids.extend(
                 item.memory_id for item in items if item.action != ACTION_FORGET
             )
+            # Only an item whose SAVEPOINT was released syncs its payload.
+            self.payload_syncs.extend(self._item_syncs)
         except Exception as exc:
             # The SAVEPOINT rolled the item back whole, and its events stay
             # unhandled: the next call plans the item again from the row as it
@@ -872,10 +927,45 @@ class _Executor:
             memory.embedding_status = "pending"
             self.reembed_ids.append(memory.id)
         elif changed:
-            await self.service._update_sync_qdrant_payload(
-                memory, _payload_request(memory, changed), None, memory.details
-            )
+            await self._queue_payload_sync(memory, changed)
         self.summary["updated_restored"] += 1
+
+    async def _queue_payload_sync(self, memory: Any, changed: set[str]) -> None:
+        """Queue the restored fields' payload patch for ``finish`` (after the commit).
+
+        Not patched here: this call commits once, at its end, and a payload
+        patched before a rollback of that transaction (a tool timeout, a
+        failed commit) would leave the live row with the session's tags /
+        importance / type in Postgres and the pre-session ones in the vector
+        payload that ``filters`` read — with nothing to repair it (v0.113.0
+        review F1). The collection and the chunk cascade are read now, while
+        the session is in its transaction.
+        """
+        from services.memory_service import metadata_payload_patch
+
+        updates, delete_keys = metadata_payload_patch(
+            _payload_request(memory, changed), None, memory.details
+        )
+        if not (updates or delete_keys):
+            return
+        if self._payload_target is None:
+            from services.content_chunk_writer import chunk_cascade_needed
+
+            self._payload_target = (
+                await self._collection(),
+                await chunk_cascade_needed(self.db, self.scope.context_id),
+            )
+        collection, cascade = self._payload_target
+        self._item_syncs.append(
+            PayloadSync(
+                memory_id=memory.id,
+                collection=collection,
+                # Issue #78: date-range filters read the payload's updated_at.
+                updates={**updates, "updated_at": to_utc_iso(memory.updated_at)},
+                delete_keys=tuple(delete_keys),
+                cascade_chunks=cascade,
+            )
+        )
 
 
 def _payload_request(memory: Any, changed: set[str]) -> Any:
@@ -909,12 +999,15 @@ async def rollback_session(
     dry_run: bool,
     classify: Callable[[BaseException], str],
     new_correlation_id: Callable[[], str],
+    time_budget: float | None = None,
 ) -> RollbackResult:
     """Plan (``dry_run``) or execute the next batch of one session's rollback.
 
     The caller has authorized the context (editor) and built ``scope`` with
     ``addressable_principal``. Nothing is committed here: the caller commits,
-    then runs ``finish(result)``.
+    then runs ``finish(result)``. With ``time_budget`` (seconds, from the
+    start of this call) no further item is started once it is spent; the rest
+    is left for the next call (``remaining``).
 
     Raises:
         SessionNotFoundError: no event of the scope exists in the context.
@@ -922,6 +1015,7 @@ async def rollback_session(
             session wrote nothing since, or every one of its events was
             handled by another rollback (a context owner's).
     """
+    deadline = time.monotonic() + time_budget if time_budget is not None else None
     if not dry_run:
         await _lock_session(db, scope)
     if not await _session_exists(db, scope):
@@ -986,13 +1080,16 @@ async def rollback_session(
         memories=batch.memories,
         classify=classify,
         new_correlation_id=new_correlation_id,
+        deadline=deadline,
     )
     await executor.run(batch.items)
 
     totals = _add_totals(record.summary or {}, executor.summary)
     record.summary = totals
-    # A failed item's events stay unhandled: they are part of what remains.
-    remaining = batch.remaining + executor.failed_events
+    # A failed item's events stay unhandled, and so do a deferred item's:
+    # both are part of what remains.
+    deferred_events = sum(len(item.event_ids) for item in executor.deferred)
+    remaining = batch.remaining + executor.failed_events + deferred_events
     if remaining == 0:
         record.status = SESSION_ROLLBACK_COMPLETED
         record.completed_at = utcnow()
@@ -1009,12 +1106,14 @@ async def rollback_session(
         status=record.status,
         events=batch.events,
         remaining=remaining,
+        deferred=len(executor.deferred),
         **{key: executor.summary[key] for key in _COUNT_KEYS},
     )
+    deferred_ids = {item.memory_id for item in executor.deferred}
     return RollbackResult(
         dry_run=False,
-        items=batch.items,
-        events=batch.events - executor.failed_events,
+        items=[item for item in batch.items if item.memory_id not in deferred_ids],
+        events=batch.events - executor.failed_events - deferred_events,
         remaining=remaining,
         rollback_id=record.id,
         status=record.status,
@@ -1027,19 +1126,23 @@ async def rollback_session(
         forgotten_ids=executor.forgotten_ids,
         forgotten_points=executor.forgotten_points,
         collection=executor.collection,
+        payload_syncs=executor.payload_syncs,
         audit=(workspace_id, requested_by, scope.context_id),
     )
 
 
 async def finish(result: RollbackResult) -> None:
-    """After the commit: vector deletes, re-embeds and the access audit.
+    """After the commit: vector deletes, payload patches, re-embeds and the audit.
 
     The vector store follows Postgres, never the other way round: the
     forgotten rows' points and content chunks are deleted only now that the
-    tombstones are committed, and restored texts are re-embedded now that the
-    restore is. Every step fails soft, as on the write paths it mirrors — a
-    tombstone's leftover point is no hit and the orphan sweep removes it; a
-    re-embed that fails leaves the row ``pending`` for the embedding sweep.
+    tombstones are committed, restored tags / importance / type reach the
+    payload now that they are, and restored texts are re-embedded now that
+    the restore is. Every step fails soft, as on the write paths it mirrors —
+    a tombstone's leftover point is no hit and the orphan sweep removes it; a
+    re-embed that fails leaves the row ``pending`` for the embedding sweep; a
+    payload patch that fails is logged (the payload keeps the session's
+    values until the memory's next edit or re-embed).
     """
     if result.forgotten_points and result.collection:
         from db.qdrant import delete_points_from_qdrant
@@ -1053,6 +1156,7 @@ async def finish(result: RollbackResult) -> None:
                 points=len(result.forgotten_points),
                 error_class=type(exc).__name__,
             )
+    await _apply_payload_syncs(result.payload_syncs)
     if result.reembed_ids:
         # One task working through the ids, not one task each: a rollback can
         # restore hundreds of texts, and each embedding run holds a database
@@ -1072,6 +1176,33 @@ async def finish(result: RollbackResult) -> None:
                 error_class=type(exc).__name__,
             )
     await _emit_access_events(result)
+
+
+async def _apply_payload_syncs(syncs: list[PayloadSync]) -> None:
+    if not syncs:
+        return
+    from db.qdrant import update_memory_payload_in_qdrant
+
+    failed: list[str] = []
+    for sync in syncs:
+        try:
+            await update_memory_payload_in_qdrant(
+                memory_id=sync.memory_id,
+                payload_updates=sync.updates,
+                collection_name=sync.collection,
+                delete_keys=list(sync.delete_keys) or None,
+                cascade_chunks=sync.cascade_chunks,
+            )
+        except Exception as exc:
+            failed.append(str(sync.memory_id))
+            logger.warning(
+                "session_rollback_payload_sync_failed",
+                memory_id=str(sync.memory_id),
+                collection=sync.collection,
+                error_class=type(exc).__name__,
+            )
+    if failed:
+        logger.warning("session_rollback_payload_syncs_failed", failed=len(failed), of=len(syncs))
 
 
 async def _emit_access_events(result: RollbackResult) -> None:
@@ -1142,6 +1273,7 @@ __all__ = [
     "SKIP_CAUSES",
     "AlreadyRolledBackError",
     "MemoryState",
+    "PayloadSync",
     "PlanItem",
     "RollbackResult",
     "SessionEvent",

@@ -15,6 +15,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._constants import get_tool_timeout
 from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -30,6 +31,10 @@ from mcp_server.tools._helpers import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+#: Share of the tool timeout one call may spend starting items; the rest is
+#: headroom for the item in flight, the commit and the post-commit steps.
+_TIME_BUDGET_SHARE = 0.5
 
 _SESSION_ID_HELP = (
     "session_id is the session your writes were recorded under — remember, "
@@ -125,6 +130,10 @@ async def handle_rollback_session(
                     dry_run=dry_run,
                     classify=classify_cause,
                     new_correlation_id=new_correlation_id,
+                    # Half the tool timeout: no item starts after it, so the
+                    # call commits what it finished instead of timing out and
+                    # replaying the same batch (v0.113.0 review F2).
+                    time_budget=get_tool_timeout("rollback_session") * _TIME_BUDGET_SHARE,
                 ),
                 operation_name="rollback_session",
             )

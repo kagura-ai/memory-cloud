@@ -129,10 +129,19 @@ def state(**kw: Any) -> MemoryState:
             "prior_erased",
         ),
         (
-            [ev(1, "updated", 2, {"scrubbed": ["details"]})],
+            # erasure stripped the details the session overwrote (both markers)
+            [ev(1, "updated", 2, {"erased": ["details"], "scrubbed": ["details"]})],
             state(version=2),
             ACTION_SKIP,
             "prior_erased",
+        ),
+        (
+            # v0.113.0 review F3: the author was erased, but the session
+            # changed only the tags — their prior is intact
+            [ev(1, "updated", 2, {"tags": ["old"], "scrubbed": ["details"]})],
+            state(version=2),
+            ACTION_RESTORE,
+            None,
         ),
     ],
 )
@@ -181,6 +190,27 @@ def test_combined_prior_keeps_null_and_ignores_marker_keys():
         [ev(1, "updated", 2, {"details": {"k": 1}}), ev(2, "updated", 3, {"erased": ["details"]})]
     )
     assert values == {"details": {"k": 1}} and not erased
+
+
+def test_scrubbed_blocks_only_a_field_the_event_changed():
+    """v0.113.0 review F3: ``scrubbed`` (the live details of an erased author's
+    memory are gone) is on every updated event of the memory; it must not stop
+    a restore of fields whose prior is intact."""
+    values, erased = combined_prior(
+        [
+            ev(1, "updated", 2, {"tags": ["orig"], "scrubbed": ["details"]}),
+            ev(2, "updated", 3, {"importance": 0.2, "scrubbed": ["details"]}),
+        ]
+    )
+    assert values == {"tags": ["orig"], "importance": 0.2} and not erased
+    item = plan_memory(
+        [ev(1, "updated", 2, {"tags": ["orig"], "scrubbed": ["details"]})],
+        state(version=2, current={"tags": ["mine"]}),
+    )
+    assert (item.action, item.values) == (ACTION_RESTORE, {"tags": ["orig"]})
+    # A scrubbed field the event did change still counts as lost.
+    _, erased = combined_prior([ev(1, "updated", 2, {"details": {}, "scrubbed": ["details"]})])
+    assert erased
 
 
 def test_tags_null_and_empty_are_the_same_value():
@@ -516,3 +546,151 @@ async def test_finish_reembeds_one_after_another_and_survives_a_failure():
         for _ in range(10):
             await asyncio.sleep(0)
     assert order == ids
+
+
+# ------------------------------------------- v0.113.0 review: F1 / F2
+
+
+@pytest.mark.asyncio
+async def test_a_spent_time_budget_defers_the_rest_to_the_next_call():
+    """F2: once the budget is spent no further item starts; the first always
+    runs (each call progresses) and the rest stay unhandled."""
+    import time
+
+    db = _db()
+    executor = _executor(db, {})
+    executor.deadline = time.monotonic() - 1  # already spent
+    ran: list[uuid.UUID] = []
+
+    async def restore(items: list[PlanItem]) -> None:
+        ran.append(items[0].memory_id)
+
+    executor._restore = restore  # type: ignore[method-assign]
+    items = [
+        PlanItem(uuid.uuid4(), "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(i,))
+        for i in range(3)
+    ] + [PlanItem(uuid.uuid4(), "created", ACTION_SKIP, cause="purged", event_ids=(9,))]
+    marked: list[int] = []
+
+    async def mark(_db: Any, ids: list[int], _rid: int) -> None:
+        marked.extend(ids)
+
+    with patch.object(sr, "_mark_handled", mark):
+        await executor.run(items)
+    assert ran == [items[0].memory_id]
+    assert executor.deferred == items[1:3]
+    assert sorted(marked) == [0, 9]  # the skip and the one item that ran
+
+
+@pytest.mark.asyncio
+async def test_deferred_items_remain_and_keep_the_rollback_in_progress():
+    record = MagicMock(id=3, status="in_progress", summary={})
+    done, later = uuid.uuid4(), uuid.uuid4()
+    batch = sr._Batch(
+        items=[
+            PlanItem(done, "created", ACTION_FORGET, event_ids=(1,)),
+            PlanItem(later, "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(2, 3)),
+        ],
+        memories={},
+        events=3,
+        remaining=0,
+    )
+    executor = MagicMock(
+        run=AsyncMock(),
+        summary=sr._empty_summary(),
+        failed_events=0,
+        correlation_id=None,
+        reembed_ids=[],
+        restored_ids=[],
+        forgotten_ids=[done],
+        forgotten_points=[],
+        collection="coll",
+        payload_syncs=[],
+        deferred=[batch.items[1]],
+    )
+    with patch.object(sr, "_Executor", MagicMock(return_value=executor)):
+        result = await _run(_db(), record, batch)
+    assert (result.status, result.events, result.remaining) == ("in_progress", 1, 2)
+    assert [i.memory_id for i in result.items] == [done]
+
+
+def _restored_memory() -> Any:
+    from types import SimpleNamespace
+
+    from utils.datetime import utcnow
+
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        summary="s",
+        context_summary=None,
+        content="c",
+        details=None,
+        type="note",
+        importance=0.9,
+        tags=["session"],
+        version=2,
+        updated_at=utcnow(),
+        embedding_status="success",
+        context_id=uuid.uuid4(),
+        agent_id=None,
+        session_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_restore_patches_the_payload_only_after_the_commit():
+    """F1: the restore queues the payload patch; nothing reaches the vector
+    store inside the transaction, and a failed item queues nothing."""
+    db = _db()
+    good, bad = _restored_memory(), _restored_memory()
+    executor = _executor(db, {good.id: good, bad.id: bad})
+    executor._collection = AsyncMock(return_value="coll")  # type: ignore[method-assign]
+    items = [
+        PlanItem(
+            m.id,
+            "updated",
+            ACTION_RESTORE,
+            values={"tags": ["orig"], "importance": 0.5},
+            event_ids=(n,),
+        )
+        for n, m in enumerate((good, bad), start=1)
+    ]
+
+    async def mark(_db: Any, ids: list[int], _rid: int) -> None:
+        if ids == [2]:
+            raise ConnectionError("lost")
+
+    with (
+        patch("db.qdrant.update_memory_payload_in_qdrant", AsyncMock()) as qdrant,
+        patch("services.content_chunk_writer.chunk_cascade_needed", AsyncMock(return_value=True)),
+        patch.object(sr, "record_edit", MagicMock()),
+        patch.object(sr, "_mark_handled", mark),
+    ):
+        await executor.run(items)
+    qdrant.assert_not_awaited()
+    (sync,) = executor.payload_syncs
+    assert sync.memory_id == good.id and sync.collection == "coll" and sync.cascade_chunks
+    assert sync.updates["tags"] == ["orig"] and sync.updates["importance"] == 0.5
+    assert "updated_at" in sync.updates and "type" not in sync.updates
+
+
+@pytest.mark.asyncio
+async def test_finish_applies_payload_syncs_and_survives_a_failure():
+    first, second = uuid.uuid4(), uuid.uuid4()
+    syncs = [
+        sr.PayloadSync(m, "coll", {"tags": ["a"]}, ("location",) if m == first else (), False)
+        for m in (first, second)
+    ]
+    result = sr.RollbackResult(dry_run=False, items=[], events=0, remaining=0, payload_syncs=syncs)
+    calls: list[dict[str, Any]] = []
+
+    async def patch_payload(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        if kwargs["memory_id"] == first:
+            raise OSError("vector store down")
+
+    with patch("db.qdrant.update_memory_payload_in_qdrant", patch_payload):
+        await sr.finish(result)  # a failed patch does not raise
+    assert [c["memory_id"] for c in calls] == [first, second]
+    assert calls[0]["delete_keys"] == ["location"] and calls[1]["delete_keys"] is None
+    assert calls[1]["collection_name"] == "coll" and calls[1]["cascade_chunks"] is False

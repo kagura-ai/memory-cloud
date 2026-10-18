@@ -248,6 +248,38 @@ def _rerank_sort_key(result: dict, adjusted: float) -> tuple[bool, float]:
     return (not result.get(RERANK_UNSCORED_KEY, False), adjusted)
 
 
+def metadata_payload_patch(
+    request: Any, normalized_ctx_summary: str | None, effective_details: Any
+) -> tuple[dict[str, Any], list[str]]:
+    """The Qdrant payload patch of a metadata-only edit: ``(updates, delete_keys)``.
+
+    ``request`` is read for ``tags`` / ``importance`` / ``type`` / ``details``
+    (None = not changed). Without ``updated_at``: the caller stamps it when it
+    applies the patch. Shared by ``update_memory``'s in-transaction sync and
+    ``rollback_session``'s post-commit one (#2044), so the two cannot drift.
+    """
+    payload_updates: dict[str, Any] = {}
+    delete_keys: list[str] = []
+    if request.tags is not None:
+        payload_updates["tags"] = request.tags
+    if request.importance is not None:
+        payload_updates["importance"] = request.importance
+    if request.type is not None:
+        payload_updates["type"] = request.type
+    if normalized_ctx_summary is not None:
+        payload_updates["context_summary"] = normalized_ctx_summary
+    # WHERE axis (#1332): a details write changes the geo payload —
+    # sync it (or clear it when the location was removed) so
+    # filters.near never matches a stale coordinate.
+    if request.details is not None:
+        loc = location_payload_from_details(effective_details)
+        if loc is not None:
+            payload_updates["location"] = loc
+        else:
+            delete_keys.append("location")
+    return payload_updates, delete_keys
+
+
 def location_payload_from_details(details: dict | None) -> dict | None:
     """Qdrant ``location`` geo payload value from a details dict (#1332).
 
@@ -2002,26 +2034,9 @@ class MemoryService:
         the two stores consistent. That ordering is the difference and is left
         intact.
         """
-        payload_updates: dict = {}
-        delete_keys: list[str] = []
-        if request.tags is not None:
-            payload_updates["tags"] = request.tags
-        if request.importance is not None:
-            payload_updates["importance"] = request.importance
-        if request.type is not None:
-            payload_updates["type"] = request.type
-        if normalized_ctx_summary is not None:
-            payload_updates["context_summary"] = normalized_ctx_summary
-        # WHERE axis (#1332): a details write changes the geo payload —
-        # sync it (or clear it when the location was removed) so
-        # filters.near never matches a stale coordinate.
-        if request.details is not None:
-            loc = location_payload_from_details(effective_details)
-            if loc is not None:
-                payload_updates["location"] = loc
-            else:
-                delete_keys.append("location")
-
+        payload_updates, delete_keys = metadata_payload_patch(
+            request, normalized_ctx_summary, effective_details
+        )
         if not (payload_updates or delete_keys):
             return
 
