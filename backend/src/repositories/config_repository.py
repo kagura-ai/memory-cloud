@@ -82,6 +82,22 @@ def new_search_config_defaults(settings: Settings) -> dict[str, Any]:
     }
 
 
+def new_search_config_row(settings: Settings) -> dict[str, Any]:
+    """:func:`new_search_config_defaults` plus ``content_chunks_enabled_at`` (#2103).
+
+    What ``ContextSearchConfig(...)`` is built with for a NEW context. A row
+    created with the flag on records the enable, like turning it on through
+    :meth:`ContextSearchConfigRepository.update` does, so the plan's cap
+    ranks it among the workspace's other contexts. Not in ``/system/info``
+    (that serves :func:`new_search_config_defaults`).
+    """
+    defaults = new_search_config_defaults(settings)
+    return {
+        **defaults,
+        "content_chunks_enabled_at": func.now() if defaults["content_chunks_enabled"] else None,
+    }
+
+
 class ContextSearchConfigRepository:
     """Repository for managing context search configurations.
 
@@ -205,6 +221,9 @@ class ContextSearchConfigRepository:
         chunks_now_on = getattr(config, "content_chunks_enabled", False) is True
         flag_changed = chunks_were_on != chunks_now_on
         if flag_changed:
+            # #2103: the enable's rank under the plan's cap, committed with the
+            # flag and its backfill (a failed enable rolls all three back).
+            config.content_chunks_enabled_at = func.now() if chunks_now_on else None
             try:
                 await self._purge_chunk_points(context_id, config)
                 if chunks_now_on:

@@ -310,7 +310,7 @@ class ContextService:
 
         # Create context search config with embedding settings (Issue #146)
         from models.config import ContextSearchConfig
-        from repositories.config_repository import new_search_config_defaults
+        from repositories.config_repository import new_search_config_row
 
         search_config = ContextSearchConfig(
             context_id=context.id,
@@ -319,8 +319,9 @@ class ContextService:
             # #1572: reranker fields follow the deployment default (DEFAULT_USE_RERANK /
             # DEFAULT_RERANKER_PROVIDER / DEFAULT_RERANKER_MODEL); unset they are
             # today's values (off / voyage / rerank-2). #2015: content chunks
-            # follow DEFAULT_CONTENT_CHUNKS_ENABLED (off unless set).
-            **new_search_config_defaults(settings),
+            # follow DEFAULT_CONTENT_CHUNKS_ENABLED (off unless set), #2103 with
+            # the enable recorded.
+            **new_search_config_row(settings),
             embedding_model=actual_embedding_model,
             embedding_dimensions=actual_dimensions,
         )
