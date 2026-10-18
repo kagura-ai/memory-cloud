@@ -310,6 +310,19 @@ class TestRawScorePrompt:
         assert url == "http://x/v1/completions"
         assert "<|im_end|>" not in body["prompt"] and "<|im_start|>" not in body["prompt"]
 
+    async def test_long_query_is_cut_like_the_qwen3_one(self, monkeypatch):
+        """#2062: the score prompt cuts the query too (before neutralising), so a
+        long recall query cannot push the document and "Score: " out of the
+        model's context."""
+        calls = _patch_post(monkeypatch, lambda u, j, h: _Resp(_completion("0.5")))
+        reranker = SelfHostedReranker("http://x", prompt_format="raw")
+        async with httpx.AsyncClient() as client:
+            await reranker._score_one(client, "q" * (QWEN3_RERANK_MAX_QUERY_CHARS + 1), "d")
+        prompt = calls[0][1]["prompt"]
+        assert f"Query: {'q' * QWEN3_RERANK_MAX_QUERY_CHARS}\n" in prompt
+        assert "q" * (QWEN3_RERANK_MAX_QUERY_CHARS + 1) not in prompt
+        assert prompt.endswith("Document: d\n\nScore: ")
+
     async def test_parsed_scores_are_returned_as_is(self, monkeypatch):
         """An all-"0" list is the provider's answer; RerankerService's shared
         guard judges it (TestNoSignalGuard)."""

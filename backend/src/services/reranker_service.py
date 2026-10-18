@@ -151,7 +151,8 @@ RERANK_UNSCORED_KEY = "_rerank_unscored"
 # The document gets 2000 characters: a whole memory summary (capped at 500)
 # and most of its context summary — the generic score prompt
 # (SelfHostedReranker raw) scores only doc[:500]. The query gets 1000: recall
-# accepts up to 8000, far more than a relevance judgement uses. Common text,
+# accepts up to 8000, far more than a relevance judgement uses. That raw prompt
+# cuts the query to the same 1000. Common text,
 # CJK included, takes about one token per character or fewer, so the two
 # budgets plus the ~80-token template stay near 3100 tokens: under a
 # 4096-token --max-model-len or Ollama num_ctx, with headroom for a longer
@@ -527,7 +528,8 @@ class SelfHostedReranker(RerankerProvider):
       Qwen3 reranker answers it with "0" or "!!!!!" (measured, #2033).
 
     Memory text and the query are run through the Qwen3 control-token
-    neutraliser in both formats. A call whose scores carry no ranking —
+    neutraliser in both formats, and the query is cut to
+    ``QWEN3_RERANK_MAX_QUERY_CHARS`` in both. A call whose scores carry no ranking —
     every output unparseable, or every document scored the same — raises
     (``RerankNotDiscriminatingError``) so recall fails open instead of
     overwriting every hybrid_score with one value.
@@ -607,7 +609,8 @@ class SelfHostedReranker(RerankerProvider):
                 raise
             return _qwen3_yes_probability(resp.json())
 
-        safe_query = _neutralise_qwen3_control_tokens(query)
+        # Cut before neutralising, as in the qwen3 parts (#2062).
+        safe_query = _neutralise_qwen3_control_tokens(query[:QWEN3_RERANK_MAX_QUERY_CHARS])
         safe_doc = _neutralise_qwen3_control_tokens(doc[:500])
         resp = await client.post(
             f"{self.base_url}/v1/completions",

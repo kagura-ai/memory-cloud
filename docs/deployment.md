@@ -1981,7 +1981,8 @@ here too (#2033):
   Qwen3 rerankers**: measured on Ollama, `dengcao/Qwen3-Reranker-8B:Q5_K_M`
   answers `0` for almost every real memory and
   `dengcao/Qwen3-Reranker-0.6B:Q8_0` answers `!!!!!`. Control tokens in the
-  query and memories are neutralised here as well.
+  query and memories are neutralised here as well; each document is cut to
+  500 characters and the query to 1000 characters.
 
 As on `/v1/rerank`, a forced `RERANK_PROMPT_FORMAT` (`qwen3` or `raw`) applies
 to every self-hosted context's model, including a context that overrides
