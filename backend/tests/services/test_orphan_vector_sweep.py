@@ -458,6 +458,83 @@ class TestContentChunkPoints:
         assert _point_ref(SimpleNamespace(id="p", payload={})).chunk_of is None
 
 
+class TestStrayLabelPoints:
+    """#2065: before #2053 the Sleep reindex and undo wrote a summary point
+    under the row id of an indexer row, holding only its label. The row owns
+    the indexer's point; that one is swept, nothing else of the row's."""
+
+    @staticmethod
+    def _indexer_row(context: Context, **overrides) -> Memory:
+        from services.resource_indexer import resource_point_id
+
+        return _resource_memory(
+            context, resource_point_id("res_1", "doc_1", 1), doc_id="doc_1", version=1, **overrides
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_label_point_of_a_live_indexer_row_is_swept(self, db_session):
+        context = await _live_context(db_session)
+        row = self._indexer_row(context)
+        db_session.add(row)
+        await db_session.flush()
+        resource_point = _ref(
+            row.summary_embedding_id,
+            context_id=context.id,
+            is_resource=True,
+            resource_key=("res_1", "doc_1", 1),
+            written_at=OLD_ENOUGH,
+        )
+        store = _FakeStore([_ref(row.id, context_id=context.id), resource_point])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert store.deleted == [str(row.id)]
+        assert result.collections[0].resource_label == 1
+        assert result.orphans == 1
+
+    @pytest.mark.asyncio
+    async def test_rows_that_own_their_id_point_keep_it(self, db_session):
+        """A row that only carries resource fields (``remember(external_id=...)``),
+        or names a resource point it does not own, keeps the point under its id;
+        so does the chunk of an indexer row, which this rule does not judge."""
+        context = await _live_context(db_session)
+        api_row = _memory(
+            workspace_id=context.workspace_id,
+            context_id=context.id,
+            details={"resource_id": "res_1"},
+        )
+        mismatched = _resource_memory(context, uuid4(), doc_id="doc_2")
+        indexer = self._indexer_row(context)
+        db_session.add_all([api_row, mismatched, indexer])
+        await db_session.flush()
+        store = _FakeStore(
+            [
+                _ref(api_row.id),
+                _ref(mismatched.id),
+                _ref(uuid4(), chunk_of=indexer.id),
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_a_freshly_tombstoned_indexer_row_keeps_its_label_point(self, db_session):
+        """A tombstone follows the grace period, like any other row's point."""
+        context = await _live_context(db_session)
+        row = self._indexer_row(context, deleted_at=utcnow() - timedelta(minutes=5))
+        db_session.add(row)
+        await db_session.flush()
+        store = _FakeStore([_ref(row.id)])
+
+        result = await _sweep(db_session, store, dry_run=False, grace=timedelta(hours=1))
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+
 class TestSafetyRails:
     @pytest.mark.asyncio
     async def test_dry_run_deletes_nothing(self, db_session):

@@ -1505,7 +1505,10 @@ Two things keep the two stores in step:
 - **An orphan sweep** runs daily at 04:30 UTC. It deletes a memory point whose
   row is gone or was soft-deleted more than an hour ago, and a resource point
   whose context is. It never deletes a point whose memory row is live, and it
-  keeps every resource point of a live context. Set
+  keeps every resource point of a live context — with one exception: a summary
+  point under the id of a live resource-document memory, whose own point is
+  the resource point. Sleep Maintenance wrote such "label" points before
+  v0.111.0 ([#2065](https://github.com/kagura-ai/memory-cloud/issues/2065)). Set
   `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off.
 
 The scheduled run refuses to delete more than half of the points it scanned
@@ -1520,7 +1523,7 @@ python -m src.cli.sweep_orphan_vectors --apply --yes   # delete the orphans
 ```
 
 The plan lists each collection with its point count and the orphans by reason
-(no row, soft-deleted, context gone), next to the number of live embedded
+(no row, soft-deleted, context gone, document gone, label), next to the number of live embedded
 memories — if the orphans are most of the store, check that `DATABASE_URL`
 and `QDRANT_URL` belong to the same deployment before applying. `--apply`
 scans again and looks every orphan up a second time before deleting it, then

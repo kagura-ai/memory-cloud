@@ -66,6 +66,19 @@ class TestSweepOrphanVectorsCommand:
         assert "would delete 3" in out
         assert "dry run — pass --apply to write" in out
 
+    def test_the_plan_lists_stray_label_points(self, capsys):
+        """#2065: label points of live indexer rows get a column of their own."""
+        plan = _result(dry_run=True)
+        plan.collections[0].resource_label = 4
+        sweep = AsyncMock(return_value=plan)
+
+        assert _run([], sweep) == 0
+
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].split()[-1] == "label"
+        assert lines[1].split()[-1] == "4"
+        assert "would delete 7" in "\n".join(lines)
+
     def test_apply_plans_then_deletes_and_reports_what_is_left(self, capsys):
         sweep = AsyncMock(side_effect=[_result(dry_run=True), _result(dry_run=False, deleted=3)])
 
