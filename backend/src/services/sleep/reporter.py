@@ -9,6 +9,7 @@ Issue #471: Per-(provider, model) cost-grade breakdown via the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,9 @@ from models.sleep import (
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from services.embedding_service import EmbeddingService
 
 logger = get_logger(__name__)
 
@@ -204,6 +208,29 @@ class LLMSpendTracker:
         # #471: attach the per-(provider, model) breakdown for the child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
+
+
+class EmbeddingSpendTracker(LLMSpendTracker):
+    """``LLMSpendTracker`` for a phase that also embeds (#475, #2060).
+
+    edge_discovery and dedup_merge embed memories for their candidate search;
+    ``record_spend`` reports that usage alongside the LLM spend.
+    """
+
+    _embedding_calls_used: int = 0
+    _embedding_tokens_used: int = 0
+    embedding_service: EmbeddingService
+
+    def record_spend(self, result: PhaseResult) -> None:
+        """Copy the LLM spend and the embedding usage onto ``result``."""
+        super().record_spend(result)
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
+        result.embedding_calls_used = self._embedding_calls_used
+        result.embedding_tokens = self._embedding_tokens_used
+        if self._embedding_calls_used > 0:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
 
 
 @dataclass

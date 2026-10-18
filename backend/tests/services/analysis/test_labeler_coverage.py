@@ -386,7 +386,8 @@ class TestLabelOneCluster:
 
         assert cl.breakdown is not None
         # winner (_llm_response) is 20 in / 10 out; failed attempt adds 60 / 30.
-        assert cl.breakdown.calls == 2
+        # #2060: the failed attempt's tokens count, its call does not.
+        assert cl.breakdown.calls == 1
         assert cl.breakdown.input_tokens == 20 + 60
         assert cl.breakdown.output_tokens == 10 + 30
         # #1289: same (provider, model) as the winner — folds into the
@@ -438,20 +439,20 @@ class TestLabelOneCluster:
         assert len(cl.prior_breakdowns) == 1
         prior = cl.prior_breakdowns[0]
         assert (prior.provider, prior.model) == ("openai", "gpt-5.5")
-        assert prior.calls == 1
+        assert prior.calls == 0  # #2060: a failed attempt is not a call
         assert prior.input_tokens == 60
         assert prior.output_tokens == 30
         # ...and the ledger stays sum-invariant vs the old fold-into-winner.
         entries = [cl.breakdown, *cl.prior_breakdowns]
         assert sum(b.input_tokens for b in entries) == 20 + 60
         assert sum(b.output_tokens for b in entries) == 10 + 30
-        assert sum(b.calls for b in entries) == 2
+        assert sum(b.calls for b in entries) == 1  # the winner only
 
     async def test_two_failed_attempts_same_pair_merge_into_one_prior_entry(
         self, monkeypatch
     ) -> None:
         """#1289: multiple billed attempts on the same non-winner pair
-        accumulate into ONE prior entry (calls=2), not one entry each."""
+        accumulate into ONE prior entry, not one entry each."""
         import asyncio
 
         winner = _llm_response(parsed={"label": "L", "label_confidence": 0.5})
@@ -488,7 +489,7 @@ class TestLabelOneCluster:
         assert len(cl.prior_breakdowns) == 1
         prior = cl.prior_breakdowns[0]
         assert prior.model == "gpt-5.5"
-        assert prior.calls == 2
+        assert prior.calls == 0  # #2060: failed attempts are not calls
         assert prior.input_tokens == 90
         assert prior.output_tokens == 40
 

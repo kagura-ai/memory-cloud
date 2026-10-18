@@ -47,8 +47,8 @@ from services.sleep.prompts import (
     wrap_untrusted_content,
 )
 from services.sleep.reporter import (
+    EmbeddingSpendTracker,
     LLMCallBreakdown,
-    LLMSpendTracker,
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
@@ -352,7 +352,7 @@ def _build_confidence_histogram(confidences: list[float]) -> dict[str, int]:
     return histogram
 
 
-class EdgeDiscoveryPhase(LLMSpendTracker):
+class EdgeDiscoveryPhase(EmbeddingSpendTracker):
     """Discover missing edges between semantically related memories."""
 
     def __init__(
@@ -379,17 +379,6 @@ class EdgeDiscoveryPhase(LLMSpendTracker):
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
 
-    def record_spend(self, result: PhaseResult) -> None:
-        """LLM spend (``LLMSpendTracker``) plus the #475 embedding usage."""
-        super().record_spend(result)
-        # #475: surface embedding usage; skip identity when no calls
-        # happened so no-memory early-returns don't fabricate it.
-        result.embedding_calls_used = self._embedding_calls_used
-        result.embedding_tokens = self._embedding_tokens_used
-        if self._embedding_calls_used > 0:
-            result.embedding_provider = self.embedding_service.provider
-            result.embedding_model = self.embedding_service.model
-
     async def execute(
         self,
         config: NeuralMemoryConfig,
@@ -405,8 +394,8 @@ class EdgeDiscoveryPhase(LLMSpendTracker):
         result = PhaseResult(phase_name="edge_discovery")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
-        # #2060: judge calls that raised, for ``record_spend`` when the phase
-        # itself raises (a completed run reports ``agg.failures``, the same count).
+        # #1183/#2060: judge calls that raised (feeds run-status grading;
+        # ``record_spend`` reports it, also when the phase itself raises).
         self._llm_failures = 0
         self._llm_breakdown = None
         self._embedding_calls_used = 0
@@ -444,6 +433,8 @@ class EdgeDiscoveryPhase(LLMSpendTracker):
                 "edges_created": 0,
                 **_empty_metrics(config),
             }
+            # #2060: the candidate search above already billed its embeddings.
+            self.record_spend(result)
             return result
 
         # Step 3: Filter out existing edges
@@ -457,6 +448,7 @@ class EdgeDiscoveryPhase(LLMSpendTracker):
                 "edges_created": 0,
                 **_empty_metrics(config),
             }
+            self.record_spend(result)  # #2060: embeddings already billed
             return result
 
         # Step 4: Judge candidates (LLM or auto-accept)
@@ -519,7 +511,6 @@ class EdgeDiscoveryPhase(LLMSpendTracker):
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         self.record_spend(result)
-        result.llm_call_failures = agg.failures  # #1183: feeds run-status grading
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),

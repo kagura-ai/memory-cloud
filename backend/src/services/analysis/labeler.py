@@ -211,23 +211,24 @@ def _prior_breakdowns(
     prior_usages: tuple[LLMResponse, ...],
     *,
     winner: LLMCallBreakdown | None = None,
-    count_call: bool = True,
 ) -> tuple[LLMCallBreakdown, ...]:
     """Fold failed fallback attempts' billed usage into breakdowns (#1289).
 
     Each attempt is attributed to the (provider, model) that billed it. An
     attempt on the ``winner``'s pair folds into ``winner``; the others get
-    one entry per pair, which is returned. ``count_call=False`` (#2060) is
-    for a chain that failed end to end: its tokens count, its calls do not.
+    one entry per pair, which is returned. #2060: every such attempt failed, so its
+    tokens count but its call does not (``count_call=False``, as in the Sleep
+    phases): ``calls`` stays the number of successful calls whether the chain
+    ended in a winner or failed end to end.
     """
     winner_pair = (winner.provider, winner.model) if winner is not None else None
     by_pair: dict[tuple[str, str], LLMCallBreakdown] = {}
     for prior in prior_usages:
         pair = (prior.provider, prior.model)
         if winner is not None and pair == winner_pair:
-            accumulate_llm_response(winner, prior, count_call=count_call)
+            accumulate_llm_response(winner, prior, count_call=False)
         else:
-            by_pair[pair] = accumulate_llm_response(by_pair.get(pair), prior, count_call=count_call)
+            by_pair[pair] = accumulate_llm_response(by_pair.get(pair), prior, count_call=False)
     return tuple(by_pair.values())
 
 
@@ -320,7 +321,7 @@ async def _label_one_cluster(
                     representative_memory_ids=rep_ids,
                     breakdown=None,
                     failed=True,
-                    prior_breakdowns=_prior_breakdowns(e.prior_usages, count_call=False),
+                    prior_breakdowns=_prior_breakdowns(e.prior_usages),
                 )
 
     # Frozenset guard: defense in depth across prompt evolutions —

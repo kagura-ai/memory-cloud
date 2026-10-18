@@ -241,6 +241,29 @@ class TestEdgeDiscoveryPhase:
         assert result.details["prompt_revision"] == EDGE_DISCOVERY_PROMPT_REVISION
 
     @pytest.mark.asyncio
+    async def test_no_candidates_still_reports_the_embedding_spend(self, edge_phase):
+        """#2060: the candidate search embeds the sample before finding no
+        candidates; that billed usage reaches the result."""
+        mems = [_make_memory() for _ in range(3)]
+        edge_phase._sample_memories = AsyncMock(return_value=mems)
+
+        async def _search_that_embeds(*_args, **_kwargs):  # noqa: ANN002, ANN003
+            edge_phase._embedding_calls_used += 3
+            edge_phase._embedding_tokens_used += 450
+            return []
+
+        edge_phase._find_candidates = _search_that_embeds
+        edge_phase.embedding_service.provider = "openai"
+        edge_phase.embedding_service.model = "text-embedding-3-small"
+
+        result = await edge_phase.execute(_make_config(), "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.details["message"] == "no_edge_candidates"
+        assert result.embedding_calls_used == 3
+        assert result.embedding_tokens == 450
+        assert result.embedding_provider == "openai"
+
+    @pytest.mark.asyncio
     async def test_all_already_connected(self, edge_phase):
         config = _make_config()
         budget = SleepBudget()
