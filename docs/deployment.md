@@ -1879,7 +1879,7 @@ and the target agree. See [chunking-guide.md](chunking-guide.md).
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `DEFAULT_CONTENT_CHUNKS_ENABLED` | `false` | `content_chunks_enabled` written to **new** context search configs ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)). `true` **sends memory content, not only summaries, to the embedding provider** (and the matched passage to the reranker) for every context created from now on; existing contexts are never changed, and a reset never turns the flag on. Needs the Qdrant vector store: `true` with `KAGURA_VECTOR_BACKEND=lance` refuses to start. Shown as `search_defaults.content_chunks_enabled` in `/system/info`. |
+| `DEFAULT_CONTENT_CHUNKS_ENABLED` | `false` | `content_chunks_enabled` written to **new** context search configs ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)). `true` **sends memory content, not only summaries, to the embedding provider** (and the matched passage to the reranker) for every context created from now on; existing contexts are never changed, and a reset never turns the flag on. Needs the Qdrant vector store: `true` with `KAGURA_VECTOR_BACKEND=lance` refuses to start. Shown as `search_defaults.content_chunks_enabled` in `/system/info`. With `CONTENT_CHUNKS_REQUIRE_PLAN=true` a new context gets the flag on only where turning it on would pass: the workspace's plan has the `content_chunks` feature and is below its `max_content_chunk_contexts` (counted under the cap's lock); otherwise it is created off, and the owner can turn it on later within the cap. |
 
 Turning the flag on for a context queues its existing long memories; the
 embedding sweep rebuilds them with their chunk points. Sleep Maintenance
@@ -1904,7 +1904,11 @@ upgrade makes the kept points active again with no backfill. The admin plan
 change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) lists the contexts
 that go inactive (`content_chunks_deactivated`, also logged as
 `content_chunks_deactivated_by_plan`). The search-config response says why a
-context's toggle is disabled (`content_chunks_disabled_reason`).
+context's toggle is disabled (`content_chunks_disabled_reason`). A deleted
+context that is restored with the flag on keeps it and ranks as enabled at the
+restore, last under the cap: past the cap it is inactive (the restore is not
+refused), and `content_chunks_in_use` can then read above
+`content_chunks_limit` until the owner turns chunks off in some context.
 
 One gap: nothing is re-queued when a context becomes active again. A memory
 written while its context was inactive has no chunk points, a memory whose
@@ -1912,6 +1916,14 @@ content was edited then has lost them (they would hold the old text), and an
 embedding model migration run then writes none into the new collection. Such
 memories are still found through their summary point, and get chunks on their
 next content edit or re-embed; points of unchanged memories are kept.
+
+A second gap, when an embedding migration is in flight: if a context goes
+inactive after `--reembed` wrote its chunk points into the target collection
+and before `--switch`, an edit to a long memory then drops its old chunk
+points in the current collection only, and the switch keeps the target's (the
+context keeps its points while inactive). Those points hold the text from
+before the edit and are read again once an upgrade makes the context active,
+until the memory's next content edit or re-embed.
 
 **Before turning the gate on** on a deployment where contexts already have the
 flag on, list the contexts it would make inactive (no write; plan names and
