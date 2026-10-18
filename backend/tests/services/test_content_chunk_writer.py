@@ -890,3 +890,57 @@ async def test_sync_reports_chunks_it_could_not_update(outcome):
             _db(True), _memory(LONG), base_payload={"summary": "s"}, collection_name="c"
         )
     assert ok is False
+
+
+# --------------------------------------------------------------------- #2061
+# A Sleep chunk write that failed re-queues the memory for the embedding sweep.
+
+
+def _requeue_db(rowcount):
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=rowcount))
+    return db
+
+
+async def test_requeue_embedding_is_fenced_on_a_live_success_row():
+    """Only ``embedding_status`` moves; the edit cue, the claim stamp and the
+    last error stay, and a pending / processing / failed / deleted row is left."""
+    import structlog
+    from sqlalchemy.dialects import postgresql
+
+    memory_id = uuid4()
+    db = _requeue_db(1)
+    with structlog.testing.capture_logs() as logs:
+        assert await writer.requeue_embedding(db, memory_id, reason="chunk_write_failed") is True
+
+    db.begin_nested.assert_called_once()  # a failed UPDATE leaves the caller's txn usable
+    stmt = db.execute.await_args.args[0]
+    sql = str(
+        stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).replace("memories.", "")
+    set_clause, where = sql.split(" WHERE ", 1)
+    assert set_clause.endswith("SET embedding_status='pending'")
+    for column in ("updated_at", "embedding_attempted_at", "embedding_error"):
+        assert column not in set_clause
+    assert f"id = '{memory_id}'" in where.replace("::UUID", "")
+    assert "deleted_at IS NULL" in where
+    assert "embedding_status = 'success'" in where
+    assert stmt.get_execution_options()["synchronize_session"] is False
+    event = next(e for e in logs if e["event"] == "embedding_requeued")
+    assert event["memory_id"] == str(memory_id)
+    assert event["reason"] == "chunk_write_failed"
+
+
+async def test_requeue_embedding_of_a_row_not_success_is_a_quiet_no_op():
+    import structlog
+
+    with structlog.testing.capture_logs() as logs:
+        assert await writer.requeue_embedding(_requeue_db(0), uuid4(), reason="r") is False
+    assert not [e for e in logs if e["event"] == "embedding_requeued"]
+
+
+async def test_requeue_embedding_raises_a_failed_update():
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=RuntimeError("db"))
+    with pytest.raises(RuntimeError):
+        await writer.requeue_embedding(db, uuid4(), reason="r")

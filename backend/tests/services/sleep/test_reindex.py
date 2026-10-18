@@ -436,9 +436,111 @@ class TestReindexContentChangedSplit:
 
         async def _write(db, memory, *, usage=None, **kwargs):
             usage.update(cached=0, requests=1, tokens=6)
-            raise RuntimeError("delete failed")
+            raise RuntimeError("upsert failed")
 
-        with patch("services.sleep.reindex.write_content_chunks", AsyncMock(side_effect=_write)):
+        with (
+            patch("services.sleep.reindex.write_content_chunks", AsyncMock(side_effect=_write)),
+            patch("services.sleep.reindex.requeue_embedding", AsyncMock(return_value=True)),
+        ):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        assert result.details["content_chunk_requeued"] == 1
+        assert result.embedding_tokens == 8
+        assert result.embedding_calls_used == 2
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    async def test_a_failed_chunk_write_re_queues_the_memory(
+        self, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        """#2061: a 429 during a Sleep run must not leave the memory without its
+        chunks for good — the write is fail-closed and the row goes back to
+        ``pending``, so the embedding sweep rebuilds it. The summary point was
+        written: the memory still counts as reindexed."""
+        from services.content_chunk_writer import ContentChunkWriteError
+
+        mock_flag.return_value = True
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+        write = AsyncMock(side_effect=ContentChunkWriteError("Content chunk write failed (x)"))
+        requeue = AsyncMock(return_value=True)
+
+        with (
+            patch("services.sleep.reindex.write_content_chunks", write),
+            patch("services.sleep.reindex.requeue_embedding", requeue),
+        ):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        assert write.await_args.kwargs["fail_open"] is False
+        requeue.assert_awaited_once_with(mock_db, mem.id, reason="chunk_write_failed")
+        assert result.details["reindexed"] == 1
+        assert result.details["failed"] == 0
+        assert result.details["content_chunk_requeued"] == 1
+        assert result.details["content_chunk_rewrites"] == 0
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    async def test_a_row_not_success_is_not_counted_as_re_queued(
+        self, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        """The fence matched nothing: the row is being embedded or retried already."""
+        mock_flag.return_value = True
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+
+        with (
+            patch(
+                "services.sleep.reindex.write_content_chunks",
+                AsyncMock(side_effect=RuntimeError("x")),
+            ),
+            patch("services.sleep.reindex.requeue_embedding", AsyncMock(return_value=False)),
+        ):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        assert result.details["reindexed"] == 1
+        assert result.details["content_chunk_requeued"] == 0
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    async def test_a_failed_re_queue_counts_the_memory_as_failed(
+        self, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        mock_flag.return_value = True
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+
+        with (
+            patch(
+                "services.sleep.reindex.write_content_chunks",
+                AsyncMock(side_effect=RuntimeError("x")),
+            ),
+            patch(
+                "services.sleep.reindex.requeue_embedding",
+                AsyncMock(side_effect=RuntimeError("db")),
+            ),
+        ):
             result = await reindex_phase.execute(
                 changed_memory_ids={mem.id},
                 user_id="user-1",
@@ -447,8 +549,8 @@ class TestReindexContentChangedSplit:
             )
 
         assert result.details["failed"] == 1
-        assert result.embedding_tokens == 8
-        assert result.embedding_calls_used == 2
+        assert result.details["reindexed"] == 0
+        assert result.details["failed_ids"] == [str(mem.id)]
 
     @pytest.mark.asyncio
     @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)

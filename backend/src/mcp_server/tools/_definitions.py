@@ -1181,7 +1181,7 @@ Returns: {status, report: {report_id, context_id, status, started_at, completed_
 
 Only for reports with status 'completed' or 'degraded' (a degraded run still executed real merges); the report is then marked 'rolled_back', so it cannot be rolled back twice.
 
-Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, importance_kept, promotions_kept, archives_restored, errors}}. importance_kept / promotions_kept count actions left standing by design (the memory was pinned with delivery_mode='always', forgotten, or removed since the run) — not errors. merges_unreversible counts merges NOT reversed because a later writer changed or removed the edge; such a run returns error partial_rollback, and a rollback is complete only when it is 0. Re-embedding is best-effort — check rollback_summary.errors.""",
+Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, importance_kept, promotions_kept, archives_restored, chunks_requeued, errors}}. importance_kept / promotions_kept count actions left standing by design (the memory was pinned with delivery_mode='always', forgotten, or removed since the run) — not errors. chunks_requeued counts restored memories queued to rebuild their content chunks — not errors. merges_unreversible counts merges NOT reversed because a later writer changed or removed the edge; such a run returns error partial_rollback, and a rollback is complete only when it is 0. Re-embedding is best-effort — check rollback_summary.errors.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],

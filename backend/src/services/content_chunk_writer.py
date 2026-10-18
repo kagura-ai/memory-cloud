@@ -52,7 +52,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import (
@@ -349,6 +349,46 @@ async def write_content_chunks(
         cached=usage.get("cached", 0),
     )
     return len(points)
+
+
+async def requeue_embedding(db: AsyncSession, memory_id: Any, *, reason: str) -> bool:
+    """Put an embedded memory back to ``pending`` so the embedding sweep redoes it (#2061).
+
+    For a chunk write that failed on a path that has no retry of its own (the
+    Sleep reindex and undo), or that may have been overwritten. The sweep
+    picks the row up on its next tick and rewrites its summary point and its
+    chunks under the usual claim and retry; the row keeps its summary point
+    meanwhile, so it stays searchable.
+
+    Fenced: only a live ``success`` row moves. A ``pending`` or ``processing``
+    row is being embedded anyway, a ``failed`` one is retried on its own
+    budget, a deleted one has nothing to rebuild. Only ``embedding_status`` is
+    written: ``updated_at`` (an edit's cue), ``embedding_attempted_at`` (the
+    claim stamp and the retry clock) and ``embedding_error`` stay as they are.
+    The UPDATE runs in a SAVEPOINT, so a failed one leaves the caller's
+    transaction usable; the caller commits.
+
+    Returns:
+        True when the row was re-queued.
+
+    Raises:
+        Exception: the UPDATE failed; the caller decides what that means.
+    """
+    async with db.begin_nested():
+        result = await db.execute(
+            update(Memory)
+            .where(
+                Memory.id == memory_id,
+                Memory.deleted_at.is_(None),
+                Memory.embedding_status == "success",
+            )
+            .values(embedding_status="pending")
+            .execution_options(synchronize_session=False)
+        )
+    requeued = int(getattr(result, "rowcount", 0) or 0) > 0
+    if requeued:
+        logger.info("embedding_requeued", memory_id=str(memory_id), reason=reason)
+    return requeued
 
 
 #: Summary-point payload keys ``build_memory_point`` writes only when the

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,3 +106,65 @@ async def test_a_failed_check_leaves_the_session_usable(db_session, row):
             await _superseded(db_session, row.id, _CONTENT, row.embedding_attempted_at)
     assert (await db_session.execute(text("SELECT 1"))).scalar_one() == 1
     assert await _superseded(db_session, row.id, _CONTENT, row.embedding_attempted_at) is False
+
+
+# --------------------------------------------------------------------- #2061
+# A failed Sleep chunk write re-queues the row: only a live ``success`` row
+# moves, and nothing but ``embedding_status`` is written.
+
+
+async def _state(db: AsyncSession, memory: Memory) -> tuple:
+    result = await db.execute(
+        select(
+            Memory.embedding_status,
+            Memory.updated_at,
+            Memory.embedding_attempted_at,
+            Memory.embedding_error,
+        ).where(Memory.id == memory.id)
+    )
+    return tuple(result.one())
+
+
+async def test_requeue_moves_a_success_row_to_pending_and_nothing_else(db_session, row):
+    from services.content_chunk_writer import requeue_embedding
+
+    stamp = row.embedding_attempted_at
+    edited = datetime(2026, 1, 1, 0, 0, 0)
+    await _set(
+        db_session, row, embedding_status="success", updated_at=edited, embedding_error="old"
+    )
+
+    assert await requeue_embedding(db_session, row.id, reason="test") is True
+    await db_session.commit()
+
+    assert await _state(db_session, row) == ("pending", edited, stamp, "old")
+
+
+@pytest.mark.parametrize("status", ["pending", "processing", "failed"])
+async def test_requeue_leaves_a_row_that_is_not_success(db_session, row, status):
+    from services.content_chunk_writer import requeue_embedding
+
+    await _set(db_session, row, embedding_status=status)
+    assert await requeue_embedding(db_session, row.id, reason="test") is False
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == status
+
+
+async def test_requeue_leaves_a_soft_deleted_row(db_session, row):
+    from services.content_chunk_writer import requeue_embedding
+
+    await _set(db_session, row, embedding_status="success", deleted_at=utcnow())
+    assert await requeue_embedding(db_session, row.id, reason="test") is False
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == "success"
+
+
+async def test_requeue_sees_a_restore_in_the_same_uncommitted_transaction(db_session, row):
+    """The undo re-queues inside its restore transaction, before the commit."""
+    from services.content_chunk_writer import requeue_embedding
+
+    await _set(db_session, row, embedding_status="success", deleted_at=utcnow())
+    await db_session.execute(update(Memory).where(Memory.id == row.id).values(deleted_at=None))
+    assert await requeue_embedding(db_session, row.id, reason="test") is True
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == "pending"

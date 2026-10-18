@@ -784,6 +784,7 @@ class TestRollbackActionDispatch:
                 "importance_kept",
                 "promotions_kept",
                 "archives_restored",
+                "chunks_requeued",
             )
         ), summary
 

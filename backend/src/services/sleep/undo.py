@@ -182,17 +182,27 @@ async def re_embed_memory_to_qdrant(
     collection_name: str,
     *,
     db: AsyncSession | None = None,
-) -> None:
+) -> bool:
     """Re-embed a restored memory back into Qdrant.
 
     Merge hard-deletes the loser's vector (orphan-vector prevention), so any
     restore path must rebuild it. Shared by run-level rollback and per-merge
     undo. With ``db`` the memory's content chunk points (#2015) are rebuilt
-    too when its context has ``content_chunks_enabled`` (delete-first).
+    too when its context has ``content_chunks_enabled`` (the merge deleted
+    them with the vector).
+
+    A failed chunk write never aborts the restore (#2061): the row is
+    re-queued ``pending`` instead, in the caller's still-uncommitted restore
+    transaction, so the embedding sweep rebuilds its chunks once the restore
+    commits. A failed re-queue is logged and the restore goes on; the memory
+    then stays summary-only until its next re-embed.
 
     A row the resource indexer wrote (#2053) gets the indexer's own point back
     under ``Memory.point_id`` (the point the merge deleted), rebuilt from the
     document; that needs ``db``.
+
+    Returns:
+        True when the memory was re-queued for its chunks.
     """
     from db.qdrant import add_memory_to_qdrant
     from services.memory_service import build_memory_point
@@ -210,7 +220,7 @@ async def re_embed_memory_to_qdrant(
         await ResourceIndexer(db).rebuild_point(
             memory, collection_name=collection_name, embedding_service=embedding_svc
         )
-        return
+        return False
 
     vector = await embedding_svc.embed(
         memory.summary or "",
@@ -233,16 +243,30 @@ async def re_embed_memory_to_qdrant(
         sparse_values=sparse_values,
         collection_name=collection_name,
     )
-    if db is not None:
-        from services.content_chunk_writer import write_content_chunks
+    if db is None:
+        return False
+    from services.content_chunk_writer import requeue_embedding, write_content_chunks
 
+    try:
         await write_content_chunks(
             db,
             memory,
             base_payload=payload,
             embed_svc=embedding_svc,
             collection_name=collection_name,
+            fail_open=False,
         )
+    except Exception:
+        # Logged by the writer (content_chunks_failed, error class only).
+        try:
+            return await requeue_embedding(db, memory.id, reason="chunk_write_failed")
+        except Exception as e:
+            logger.warning(
+                "content_chunks_requeue_failed",
+                memory_id=str(memory.id),
+                error_class=type(e).__name__,
+            )
+    return False
 
 
 async def _resolve_embedding_info(
@@ -430,7 +454,7 @@ async def undo_merge_action(
             ws_id = str(ctx_ws)
     ctx_id = str(report.context_id) if report.context_id else ""
     embedding_svc = EmbeddingService(db, model=embedding_model)
-    await re_embed_memory_to_qdrant(
+    chunks_requeued = await re_embed_memory_to_qdrant(
         loser,
         report.user_id,
         embedding_svc,
@@ -462,6 +486,7 @@ async def undo_merge_action(
         restored_memory_id=str(loser_id),
         winner_id=str(winner_id) if winner_id else None,
         report_id=str(action.report_id),
+        chunks_requeued=chunks_requeued,
     )
     return {
         "restored_memory_id": str(loser_id),

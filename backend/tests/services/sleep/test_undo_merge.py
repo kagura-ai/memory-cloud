@@ -371,6 +371,89 @@ async def test_re_embed_rebuilds_content_chunks_when_given_a_session() -> None:
         write.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_failed_chunk_write_re_queues_the_restored_memory() -> None:
+    """#2061: the merge deleted the loser's chunks with its vector; a chunk write
+    that fails during the restore re-queues the row (same uncommitted restore
+    transaction) instead of aborting the undo or leaving it summary-only."""
+    from services.content_chunk_writer import ContentChunkWriteError
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = _restorable_memory()
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    db = MagicMock()
+    db.commit = AsyncMock()
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch(
+            "services.content_chunk_writer.write_content_chunks",
+            new=AsyncMock(side_effect=ContentChunkWriteError("Content chunk write failed (x)")),
+        ) as write,
+        patch(
+            "services.content_chunk_writer.requeue_embedding", new=AsyncMock(return_value=True)
+        ) as requeue,
+    ):
+        requeued = await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
+
+    assert requeued is True
+    upsert.assert_awaited_once()  # the summary point is back
+    assert write.await_args.kwargs["fail_open"] is False
+    requeue.assert_awaited_once_with(db, memory.id, reason="chunk_write_failed")
+    db.commit.assert_not_awaited()  # the caller commits the restore with it
+
+
+@pytest.mark.asyncio
+async def test_a_failed_re_queue_does_not_abort_the_restore() -> None:
+    import structlog
+
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = _restorable_memory()
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch(
+            "services.content_chunk_writer.write_content_chunks",
+            new=AsyncMock(side_effect=RuntimeError("x")),
+        ),
+        patch(
+            "services.content_chunk_writer.requeue_embedding",
+            new=AsyncMock(side_effect=RuntimeError("secret")),
+        ),
+    ):
+        requeued = await re_embed_memory_to_qdrant(
+            memory, "u", svc, "w", "c", "coll", db=MagicMock()
+        )
+
+    assert requeued is False
+    event = next(e for e in logs if e["event"] == "content_chunks_requeue_failed")
+    assert event["error_class"] == "RuntimeError"
+    assert "secret" not in repr(event)
+
+
+@pytest.mark.asyncio
+async def test_a_written_or_skipped_chunk_write_re_queues_nothing() -> None:
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock(return_value=3)),
+        patch("services.content_chunk_writer.requeue_embedding", new=AsyncMock()) as requeue,
+    ):
+        assert (
+            await re_embed_memory_to_qdrant(
+                _restorable_memory(), "u", svc, "w", "c", "coll", db=MagicMock()
+            )
+            is False
+        )
+    requeue.assert_not_awaited()
+
+
 def _restorable_memory(**overrides: object) -> MagicMock:
     """A merge loser with the real column values build_memory_point reads."""
     from datetime import datetime

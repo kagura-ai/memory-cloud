@@ -133,16 +133,17 @@ async def _re_embed_to_qdrant(
     collection_name: str,
     *,
     db: Any = None,
-) -> None:
+) -> bool:
     """Re-embed a restored memory back into Qdrant.
 
     #1209: thin wrapper over the shared restore helper in
     ``services.sleep.undo`` so run-level rollback and per-merge undo cannot
-    drift in how they rebuild the vector.
+    drift in how they rebuild the vector. Returns True when the memory's
+    chunk write failed and it was re-queued for the embedding sweep (#2061).
     """
     from services.sleep.undo import re_embed_memory_to_qdrant
 
-    await re_embed_memory_to_qdrant(
+    return await re_embed_memory_to_qdrant(
         memory,
         user_id,
         embedding_svc,
@@ -468,7 +469,7 @@ async def _restore_sleep_tombstone(
     if restore_rows == 0 or mem is None:
         summary["errors"].append(not_restorable)
         return
-    await _re_embed_to_qdrant(
+    requeued = await _re_embed_to_qdrant(
         mem,
         ctx.user_id,
         ctx.embedding_svc,
@@ -478,6 +479,8 @@ async def _restore_sleep_tombstone(
         db=db,
     )
     summary[counter_key] += 1
+    if requeued is True:
+        summary["chunks_requeued"] += 1
 
 
 async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
@@ -775,6 +778,9 @@ async def handle_rollback_sleep_run(
                 "importance_kept": 0,
                 "promotions_kept": 0,
                 "archives_restored": 0,
+                # #2061: restored memories whose chunk write failed, re-queued
+                # for the embedding sweep (the restore itself went through).
+                "chunks_requeued": 0,
                 "errors": [],
             }
 

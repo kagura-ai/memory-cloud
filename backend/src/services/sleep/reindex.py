@@ -7,6 +7,7 @@ importance re-eval, etc.) to keep Qdrant in sync with PostgreSQL.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
 from services.content_chunk_writer import (
     content_chunks_enabled,
+    requeue_embedding,
     sync_content_chunk_payload,
     write_content_chunks,
 )
@@ -90,6 +92,7 @@ class ReindexPhase:
             changed_memory_ids if content_changed_memory_ids is None else content_changed_memory_ids
         )
         chunk_rewrites = 0
+        chunk_requeues = 0
 
         # Batch-fetch all changed memories in one query (avoid N+1)
         stmt = select(Memory).where(
@@ -173,7 +176,7 @@ class ReindexPhase:
                     collection_name=self.collection_name,
                 )
                 # #2015: a content change rewrites the chunk points
-                # (delete-first, re-embedded). A metadata-only change keeps
+                # (re-embedded, in place). A metadata-only change keeps
                 # their vectors and copies the new payload onto them — a
                 # promotion's scope reaches them only this way; chunks that
                 # could not be updated are rewritten instead.
@@ -184,8 +187,11 @@ class ReindexPhase:
                     collection_name=self.collection_name,
                     chunks_enabled=chunks_enabled,
                 ):
-                    if await self._write_chunks(result, memory, payload, chunks_enabled):
+                    outcome = await self._write_chunks(result, memory, payload, chunks_enabled)
+                    if outcome == "written":
                         chunk_rewrites += 1
+                    elif outcome == "requeued":
+                        chunk_requeues += 1
 
                 reindexed += 1
 
@@ -206,6 +212,9 @@ class ReindexPhase:
             "failed_ids": failed_ids[:20],  # Cap for report size
             # #2015: memories whose content chunk points were rewritten.
             "content_chunk_rewrites": chunk_rewrites,
+            # #2061: memories whose chunk write failed, re-queued for the
+            # embedding sweep (still counted as reindexed).
+            "content_chunk_requeued": chunk_requeues,
         }
 
         if failed > 0 and reindexed == 0:
@@ -227,8 +236,17 @@ class ReindexPhase:
         memory: Memory,
         payload: dict,
         chunks_enabled: bool | None,
-    ) -> bool:
-        """Rewrite the memory's chunk points; True when chunk points were written.
+    ) -> Literal["written", "requeued", "none"]:
+        """Rewrite the memory's chunk points.
+
+        Returns ``"written"`` when chunk points were written, ``"none"`` when
+        there was nothing to write (flag off, short content, superseded).
+        A failed write (#2061) re-queues the memory instead: the Sleep run has
+        no retry of its own, and the memory is at least a week old, so
+        nothing else would rebuild its chunks — the embedding sweep does
+        (``"requeued"``; ``"none"`` when the row was not ``success``, so it is
+        being embedded or retried already). A failed re-queue is raised: the
+        caller counts the memory as failed.
 
         A provider request for the chunks counts as one embedding call with
         its tokens (#2015), also when the write then failed — the provider
@@ -236,7 +254,6 @@ class ReindexPhase:
         counts none.
         """
         usage: dict[str, int] = {}
-        written = 0
         try:
             written = await write_content_chunks(
                 self.db,
@@ -245,12 +262,17 @@ class ReindexPhase:
                 embed_svc=self.embedding_service,
                 collection_name=self.collection_name,
                 chunks_enabled=chunks_enabled,
+                fail_open=False,
                 usage=usage,
             )
+        except Exception:
+            # Logged by the writer (content_chunks_failed, error class only).
+            requeued = await requeue_embedding(self.db, memory.id, reason="chunk_write_failed")
+            return "requeued" if requeued else "none"
         finally:
             if usage.get("requests"):
                 self._account_embedding(result, usage.get("tokens", 0))
-        return bool(written)
+        return "written" if written else "none"
 
     def _account_embedding(self, result: PhaseResult, tokens: int) -> None:
         """Count one embedding call and its tokens on ``result``."""
