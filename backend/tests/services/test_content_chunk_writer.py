@@ -1091,3 +1091,51 @@ async def test_a_failed_write_of_an_embedding_run_removes_the_old_chunks(cleanup
     delete.assert_awaited_once_with([memory.id], "c")
     cleanup = [e for e in logs if e["event"] == "content_chunks_cleanup_failed"]
     assert len(cleanup) == (1 if cleanup_fails else 0)
+
+
+@pytest.mark.parametrize("check_fails", [False, True])
+async def test_a_reclaimed_run_keeps_the_newer_runs_chunks_on_failure(check_fails):
+    """#2061: a run whose claim a newer run took writes nothing and must not
+    delete what that run wrote either: the drop after a failure is fenced on
+    the claim. A failed check keeps the drop (stale body text must go)."""
+    import structlog
+
+    from services.embedding_claim import EmbeddingClaim
+    from utils.exceptions import SelfHostedUnreachableError
+
+    memory = _memory(LONG)
+    current = MagicMock()
+    current.scalar_one_or_none.return_value = memory.id
+    reclaimed = MagicMock()
+    reclaimed.scalar_one_or_none.return_value = None
+    db = MagicMock()
+    # The check before the write sees this run's claim; by the failure a newer
+    # run has claimed (and written) the row.
+    db.execute = AsyncMock(side_effect=[current, RuntimeError("db") if check_fails else reclaimed])
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=SelfHostedUnreachableError("down"))
+    delete = AsyncMock()
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", delete),
+        pytest.raises(SelfHostedUnreachableError),
+    ):
+        await writer.write_content_chunks(
+            db,
+            memory,
+            base_payload={},
+            embed_svc=svc,
+            collection_name="c",
+            chunks_enabled=True,
+            fail_open=False,
+            claim=EmbeddingClaim(db, memory.id, None),
+        )
+    events = [e["event"] for e in logs]
+    if check_fails:
+        delete.assert_awaited_once_with([memory.id], "c")
+        assert "content_chunks_superseded_check_failed" in events
+    else:
+        delete.assert_not_awaited()
+        skipped = next(e for e in logs if e["event"] == "content_chunks_cleanup_skipped_superseded")
+        assert skipped["memory_id"] == str(memory.id)
