@@ -1872,6 +1872,18 @@ removes every chunk point of the context from the target. Turning the flag
 off deletes the context's chunk points from every collection, so the source
 and the target agree. See [chunking-guide.md](chunking-guide.md).
 
+### Content chunk vectors by default
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `DEFAULT_CONTENT_CHUNKS_ENABLED` | `false` | `content_chunks_enabled` written to **new** context search configs ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)). `true` **sends memory content, not only summaries, to the embedding provider** (and the matched passage to the reranker) for every context created from now on; existing contexts are never changed, and a reset never turns the flag on. Needs the Qdrant vector store: `true` with `KAGURA_VECTOR_BACKEND=lance` refuses to start. Shown as `search_defaults.content_chunks_enabled` in `/system/info`. |
+
+Turning the flag on for a context queues its existing long memories; the
+embedding sweep rebuilds them with their chunk points. Sleep Maintenance
+re-embeds a memory's chunks only when its content changed and counts the
+chunk tokens in `sleep_reports` with the run's other embeddings; metadata-only
+changes copy the new values onto the chunk points without an embedding.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score
@@ -1913,8 +1925,8 @@ Unset, they reproduce the previous behaviour (`false` / `voyage` / `rerank-2`).
 
 `GET /api/v1/system/info` (public) exposes `features.reranking`
 (`ENABLE_RERANKING` and, for a `self_hosted` default, an endpoint is configured)
-and `search_defaults: {use_rerank, reranker_provider, reranker_model}` — names
-only, never URLs or keys.
+and `search_defaults: {use_rerank, reranker_provider, reranker_model,
+content_chunks_enabled}` — names only, never URLs or keys.
 
 ### Self-hosted recipe (keyless reranking as standard equipment)
 

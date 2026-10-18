@@ -1100,7 +1100,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "content_chunks_enabled": {
                         "type": "boolean",
-                        "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Applies to memories written or re-embedded after it is turned on; turning it off deletes the chunks. When on, memory content (not only summaries) is sent to the embedding and rerank providers. Changing it takes the context owner or a workspace owner/admin; sending the stored value is a no-op. Needs the Qdrant vector store: refused on LanceDB.",
+                        "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Turning it on also queues existing long memories for chunking (in the background); turning it off deletes the chunks. When on, memory content (not only summaries) is sent to the embedding and rerank providers. Changing it takes the context owner or a workspace owner/admin; sending the stored value is a no-op. Needs the Qdrant vector store: refused on LanceDB.",
                     },
                 },
             },

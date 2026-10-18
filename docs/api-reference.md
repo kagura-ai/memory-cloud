@@ -1525,7 +1525,8 @@ System information. Public (no authentication): the version plus non-sensitive d
   "search_defaults": {
     "use_rerank": false,
     "reranker_provider": "voyage",
-    "reranker_model": "rerank-2"
+    "reranker_model": "rerank-2",
+    "content_chunks_enabled": false
   },
   "features": {
     "neural_memory": true,
@@ -1542,7 +1543,7 @@ System information. Public (no authentication): the version plus non-sensitive d
 }
 ```
 
-`search_defaults` are the reranker values new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance).
+`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance).
 
 ---
 
