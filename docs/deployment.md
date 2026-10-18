@@ -1849,9 +1849,11 @@ A context with `content_chunks_enabled` on is migrated with its chunk points:
 to 16 extra embedding inputs per memory of 1,500 characters or more; `--plan`
 prints the estimate), and a flag turned off while it runs stops the chunk
 writes. `--verify` lists memories whose number of chunk points in the target
-differs from what their content splits into on a `CHUNKS_MISSING` line — a report, not a failure: the exit
-code and the switch only depend on the summary points, and re-running
-`--reembed` rebuilds them. `--verify` and `--switch` also delete the chunk
+differs from what their content splits into on a `CHUNKS_MISSING` line. On its
+own `--verify` only reports them (the exit code depends on the summary points,
+and re-running `--reembed` rebuilds them); when a switch follows (`--run`,
+`--verify --switch`), the listed memories' chunks are rebuilt first and the
+switch is refused (exit 2) while any remain. `--verify` and `--switch` also delete the chunk
 points of memories forgotten meanwhile, and with the flag off `--verify`
 removes every chunk point of the context from the target. Turning the flag
 off deletes the context's chunk points from every collection, so the source

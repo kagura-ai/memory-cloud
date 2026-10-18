@@ -209,7 +209,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
         result = await reembed_context(db, plan, batch_size=args.batch_size, progress=_progress)
         requeue_since = result.started_at
-        chunks = f", {result.chunks_written} content chunk points" if plan.content_chunks_on else ""
+        chunks = f", {result.chunks_written} content chunk points" if result.chunks_written else ""
         print(f"  re-embed done: {result.embedded} points in {result.batches} batches{chunks}")
         skipped = result.unrebuildable
         if not (args.verify or args.run):

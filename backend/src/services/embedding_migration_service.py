@@ -57,7 +57,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -407,6 +407,31 @@ def _group_by_user(rows: list[Memory]) -> Iterator[tuple[str, list[Memory]]]:
         yield current[-1].user_id, current
 
 
+def _requeued_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
+    """The live rows :func:`switch_context_embedding` re-queues with ``requeue_since``:
+    not embedded successfully, or written since."""
+    return or_(
+        Memory.embedding_status != "success",
+        Memory.created_at >= requeue_since,
+        Memory.updated_at >= requeue_since,
+    )
+
+
+def _left_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
+    """The exact complement of :func:`_requeued_by_switch` under SQL NULLs.
+
+    ``updated_at`` is nullable (a memory never edited has none) and
+    ``updated_at >= since`` is NULL for it, so the switch leaves such a row
+    alone; a plain ``updated_at < since`` would drop it from this side too.
+    ``embedding_status`` and ``created_at`` are NOT NULL.
+    """
+    return and_(
+        Memory.embedding_status == "success",
+        Memory.created_at < requeue_since,
+        or_(Memory.updated_at.is_(None), Memory.updated_at < requeue_since),
+    )
+
+
 async def reembed_context(
     db: AsyncSession,
     plan: MigrationPlan,
@@ -430,14 +455,14 @@ async def reembed_context(
     collection held before: the row has no target vector, and
     :func:`verify_context_migration` reports it.
 
-    With ``plan.content_chunks_on`` (#2015) each page's content chunk
-    points are rebuilt in the target right after its summary points, with
-    the target model (``rebuild_content_chunks``: delete first, the flag read
-    fresh before the delete and before the upsert, so a flag turned off
-    mid-run writes nothing more). A chunk failure stops the run like a
-    summary failure does. A flag turned on after the plan was made is not
-    picked up; :func:`verify_context_migration` then reports the memories
-    without chunks.
+    Each page's content chunk points (#2015) are rebuilt in the target right
+    after its summary points, with the target model
+    (``rebuild_content_chunks``: the flag read fresh per page before the
+    delete and before the upsert, so a flag turned off mid-run writes nothing
+    more, and one turned on mid-run is picked up from the next page; the
+    pages before it are what :func:`verify_context_migration` reports as
+    without chunks). ``plan.content_chunks_on`` only feeds the plan's
+    estimate. A chunk failure stops the run like a summary failure does.
 
     Idempotent: points are upserted by point id, so a rerun after a failure
     overwrites instead of duplicating.
@@ -508,7 +533,9 @@ async def reembed_context(
                 )
                 embedded += 1
 
-        if plan.content_chunks_on and plain_rows:
+        if plain_rows:
+            # Not gated on plan.content_chunks_on: the writer reads the flag
+            # fresh (one SELECT per page) and writes nothing while it is off.
             chunks_written += await rebuild_content_chunks(
                 db,
                 plain_rows,
@@ -607,6 +634,10 @@ async def rebuild_target_chunks(
     re-queue's job, as they are after any verify). A memory the switch
     re-queues with this ``requeue_since`` is not reported: the sweep
     rewrites its chunks under the new routing.
+
+    Only safe before the switch: the writer claims nothing, so in a routed
+    collection it would race the embedding worker's chunk writes. Refused
+    (``ValidationError``) when the context already routes to the target.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
@@ -614,6 +645,12 @@ async def rebuild_target_chunks(
     ids = sorted(set(memory_ids))
     if not ids:
         return out
+    current_model, current_dimensions = await resolve_context_embedding(db, plan.context_id)
+    if get_collection_name(current_model, current_dimensions) == plan.target_collection:
+        raise ValidationError(
+            f"Context {plan.context_id} already routes to {plan.target_collection!r}; "
+            "rebuilding its chunks there is only safe before the switch"
+        )
     service = embedding_service or EmbeddingService(
         db, model=plan.target_model, dimensions=plan.target_dimensions
     )
@@ -657,11 +694,7 @@ async def rebuild_target_chunks(
             )
             if requeue_since is not None:
                 # What switch_context_embedding re-queues is left to the sweep.
-                stmt = stmt.where(
-                    Memory.embedding_status == "success",
-                    Memory.created_at < requeue_since,
-                    Memory.updated_at < requeue_since,
-                )
+                stmt = stmt.where(_left_by_switch(requeue_since))
             for memory_id, n in (await db.execute(stmt)).all():
                 expected = expected_chunk_count(int(n or 0))
                 if stored.get(str(memory_id), 0) != expected:
@@ -954,11 +987,7 @@ async def switch_context_embedding(
             .where(
                 Memory.context_id == context_id,
                 Memory.deleted_at.is_(None),
-                or_(
-                    Memory.embedding_status != "success",
-                    Memory.created_at >= requeue_since,
-                    Memory.updated_at >= requeue_since,
-                ),
+                _requeued_by_switch(requeue_since),
             )
             .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
         )

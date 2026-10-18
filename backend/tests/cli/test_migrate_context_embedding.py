@@ -158,6 +158,19 @@ async def test_content_chunks_are_estimated_reported_and_never_fail_verify(capsy
 
 
 @pytest.mark.asyncio
+async def test_chunks_written_are_reported_when_the_flag_was_turned_on_after_the_plan(capsys):
+    """F21: the count follows what the re-embed wrote, not the plan's flag."""
+    reembed = ReembedResult(
+        embedded=3, batches=1, started_at=datetime(2026, 10, 1), chunks_written=4
+    )
+    verified = VerifyResult(expected=3, present=3)
+    assert await _run(["--reembed", "--verify"], reembed=reembed, verify=verified) == 0
+    out = capsys.readouterr().out
+    assert "4 content chunk points" in out
+    assert "~" not in out  # no estimate line: the plan had the flag off
+
+
+@pytest.mark.asyncio
 async def test_no_chunk_lines_without_content_chunks(capsys):
     verified = VerifyResult(expected=3, present=3)
     assert await _run(["--reembed", "--verify"], reembed=_reembed([]), verify=verified) == 0
