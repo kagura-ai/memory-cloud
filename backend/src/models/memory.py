@@ -178,13 +178,16 @@ class Memory(Base):
         Integer, nullable=False, server_default="0", default=0
     )
     # The embedding pipeline's own clock: stamped when a row is claimed
-    # (``processing``) and when an attempt fails. The stale-claim recovery
-    # and the #979 retry backoff read it. It used to be ``updated_at``, which
-    # made every freshly embedded memory look edited to anyone reading
-    # ``updated_at`` as "a person changed this" (``list`` / ``changes_since``,
-    # #1852); ``updated_at`` is now written by an edit, a scope promotion or a
-    # Sleep maintenance change (importance re-evaluation, dedup tag merge,
-    # rollback); never by the initial write or an embedding retry.
+    # (``processing``), when an attempt fails, and when a Sleep undo or
+    # rollback restores a ``success`` row and re-embeds it (#2063; an
+    # embedding-model switch re-queues rows embedded since its re-embed
+    # started). The stale-claim recovery and the #979 retry backoff read it.
+    # It used to be ``updated_at``, which made every freshly embedded memory
+    # look edited to anyone reading ``updated_at`` as "a person changed this"
+    # (``list`` / ``changes_since``, #1852); ``updated_at`` is now written by
+    # an edit, a scope promotion or a Sleep maintenance change (importance
+    # re-evaluation, dedup tag merge, rollback); never by the initial write or
+    # an embedding retry.
     embedding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Layer 2: 文脈説明

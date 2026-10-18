@@ -1026,7 +1026,8 @@ def _routed_to_source():
 
 class TestSwitchRequeuePredicates:
     """F20: the rows the switch re-queues and the rows the chunk recheck
-    looks at partition the live rows, NULL ``updated_at`` included.
+    looks at partition the live rows, NULL ``updated_at`` and
+    ``embedding_attempted_at`` included (#2063 added the latter).
 
     Evaluated by a real SQL engine (in-memory SQLite: the same three-valued
     NULL logic as Postgres), not by reading the compiled text."""
@@ -1059,18 +1060,24 @@ class TestSwitchRequeuePredicates:
             Column("embedding_status", String),
             Column("created_at", DateTime),
             Column("updated_at", DateTime),
+            Column("embedding_attempted_at", DateTime),
         )
-        combos = list(
-            product(("success", "pending", "failed"), (before, after), (None, before, after))
-        )
+        stamps = (None, before, after)
+        combos = list(product(("success", "pending", "failed"), (before, after), stamps, stamps))
         engine = create_engine("sqlite://")
         with engine.connect() as conn:
             table.create(conn)
             conn.execute(
                 table.insert(),
                 [
-                    {"n": n, "embedding_status": st, "created_at": c, "updated_at": u}
-                    for n, (st, c, u) in enumerate(combos)
+                    {
+                        "n": n,
+                        "embedding_status": st,
+                        "created_at": c,
+                        "updated_at": u,
+                        "embedding_attempted_at": a,
+                    }
+                    for n, (st, c, u, a) in enumerate(combos)
                 ],
             )
 
@@ -1083,11 +1090,12 @@ class TestSwitchRequeuePredicates:
 
         assert requeued.isdisjoint(left)
         assert requeued | left == set(range(len(combos)))
-        never_edited = combos.index(("success", before, None))
+        never_edited = combos.index(("success", before, None, None))
         assert never_edited in left  # the F20 row: not re-queued, so still checked
+        # #2063: a row a Sleep undo restored (and re-embedded) since is re-queued.
+        assert combos.index(("success", before, None, after)) in requeued
         assert left == {
-            combos.index(("success", before, None)),
-            combos.index(("success", before, before)),
+            combos.index(("success", before, u, a)) for u in (None, before) for a in (None, before)
         }
 
 

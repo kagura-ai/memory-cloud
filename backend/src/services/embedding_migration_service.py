@@ -9,7 +9,7 @@ routing — the dual-collection shape::
     plan -> reembed (routing untouched) -> verify -> switch -> [purge]
 
 * ``switch`` is one transaction: the ``ContextSearchConfig`` row changes and
-  every memory written since the re-embed started is re-queued
+  every memory written or embedded since the re-embed started is re-queued
   (``embedding_status='pending'``) so the regular sweep lands that small delta
   in the new collection. There is no moment at which the context has no
   vectors.
@@ -410,11 +410,14 @@ def _group_by_user(rows: list[Memory]) -> Iterator[tuple[str, list[Memory]]]:
 
 def _requeued_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
     """The live rows :func:`switch_context_embedding` re-queues with ``requeue_since``:
-    not embedded successfully, or written since."""
+    not embedded successfully, written since, or embedded since under the old
+    routing (``embedding_attempted_at``: a Sleep undo or rollback restoring a
+    row the re-embed skipped as a tombstone, #2063, or an embedding run)."""
     return or_(
         Memory.embedding_status != "success",
         Memory.created_at >= requeue_since,
         Memory.updated_at >= requeue_since,
+        Memory.embedding_attempted_at >= requeue_since,
     )
 
 
@@ -424,12 +427,18 @@ def _left_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
     ``updated_at`` is nullable (a memory never edited has none) and
     ``updated_at >= since`` is NULL for it, so the switch leaves such a row
     alone; a plain ``updated_at < since`` would drop it from this side too.
-    ``embedding_status`` and ``created_at`` are NOT NULL.
+    ``embedding_attempted_at`` is nullable in the same way (a row written
+    before #1852, or never stamped). ``embedding_status`` and ``created_at``
+    are NOT NULL.
     """
     return and_(
         Memory.embedding_status == "success",
         Memory.created_at < requeue_since,
         or_(Memory.updated_at.is_(None), Memory.updated_at < requeue_since),
+        or_(
+            Memory.embedding_attempted_at.is_(None),
+            Memory.embedding_attempted_at < requeue_since,
+        ),
     )
 
 
@@ -950,12 +959,13 @@ async def switch_context_embedding(
 
     ``requeue_since`` is the :attr:`ReembedResult.started_at` of the run that
     filled the target collection (or, for :func:`rollback_context_embedding`,
-    the moment of the switch being undone). Rows created or updated since
-    then — plus any row whose embedding was not ``success`` to begin with — go
-    back to ``pending`` so the regular sweep embeds them under the new
-    routing. Rows *forgotten* since then are removed from the new collection
-    after the flip, closing the window between the last verify and the
-    routing change — each under the point id the migration wrote it with
+    the moment of the switch being undone). Rows created, updated or embedded
+    since then (a Sleep undo or rollback stamps the row it restores, #2063) —
+    plus any row whose embedding was not ``success`` to begin with — go back
+    to ``pending`` so the regular sweep embeds them under the new routing.
+    Rows *forgotten* since then are removed from the new collection after the
+    flip, closing the window between the last verify and the routing change —
+    each under the point id the migration wrote it with
     (:func:`_migrated_point_id`, #1896), and never a point a live row of any
     context still names — together with their content chunk points (#2015).
     With ``None`` this is a pure routing flip.

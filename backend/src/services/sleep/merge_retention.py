@@ -29,7 +29,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Update, delete, or_, select, update
+from sqlalchemy import ColumnElement, Update, case, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -72,6 +72,19 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
     per-merge undo's ``not_merge_deleted``), and to live in a context that is
     not soft-deleted (a rollback must not plant a live row + vector inside a
     deleted context, where no retention sweep can reach it).
+
+    Both callers re-embed the row right after this UPDATE, before they commit,
+    so a row whose embedding is done (``success``) gets the embedding
+    pipeline's clock, ``embedding_attempted_at``, stamped (#2063): an
+    embedding-model switch re-queues the rows embedded since its re-embed
+    started, and that re-embed skipped this row while it was a tombstone.
+    ``updated_at`` stays as it is — Sleep dedup reads it as the fact's
+    currency, and a restore changes no content. A row in any other state keeps
+    its stamp (the claim fence, the stale-claim recovery and the retry backoff
+    read it), and the switch re-queues every row that is not ``success``
+    anyway. The ORM cannot evaluate the CASE, so it expires
+    ``embedding_attempted_at`` on an in-session row; the restore paths do not
+    read it before they commit.
     """
     live_context = or_(
         Memory.context_id.is_(None),
@@ -86,7 +99,14 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
             Memory.deleted_by == deleted_by,
             live_context,
         )
-        .values(deleted_at=None, deleted_by=None)
+        .values(
+            deleted_at=None,
+            deleted_by=None,
+            embedding_attempted_at=case(
+                (Memory.embedding_status == "success", utcnow()),
+                else_=Memory.embedding_attempted_at,
+            ),
+        )
     )
 
 
