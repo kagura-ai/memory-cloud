@@ -434,6 +434,9 @@ export interface PlanTierFeature {
   public_calls_per_day: number;
   max_resource_tokens: number;
   max_connectors: number;
+  // #2103: contexts that may have content chunk vectors active (0 without
+  // `content_chunks`). Optional: an API predating #2103 omits both fields.
+  max_content_chunk_contexts?: number;
   analysis_runs_per_day: number;
   sleep_enabled_contexts_limit: number;
   reranking: boolean;
@@ -449,6 +452,10 @@ export interface PlanTierFeature {
   resources: boolean;
   connectors: boolean;
   public_contexts: boolean;
+  // #2103: content chunk vectors. Enforced only where the deployment sets
+  // CONTENT_CHUNKS_REQUIRE_PLAN (`feature_enforcement.content_chunks` is
+  // "conditional"), so no control hard-disables on this column alone.
+  content_chunks?: boolean;
   // #1648: what each feature name actually does at runtime — "enforced" (the
   // backend refuses), "conditional" (it refuses only where a deployment
   // setting turns the check on), "degrades" (the request still succeeds with

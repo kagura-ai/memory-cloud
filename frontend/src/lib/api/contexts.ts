@@ -160,9 +160,36 @@ export interface ContextSearchConfig {
   reranker_model: string;
   embedding_model?: string;
   embedding_dimensions?: number;
+  // #2015 / #2091: content chunk vectors. Optional throughout — a backend
+  // predating them omits every field, and the settings card is then hidden.
+  // `content_chunks_enabled` is the STORED flag: never write
+  // `content_chunks_effective` back into it (that would turn the flag off and
+  // remove the chunk vectors).
+  content_chunks_enabled?: boolean;
+  /** The caller may change the flag: always to turn it off (owner rule
+   * permitting); to turn it on only when the store, plan and cap allow. */
+  content_chunks_can_change?: boolean;
+  /** False on the LanceDB vector store, which keeps no chunk vectors. */
+  content_chunks_supported?: boolean;
+  /** Where memory content goes when chunks are on; null when unknown. */
+  embedding_provider?: string | null;
+  /** Memories still queued for chunk re-embedding; 0 while the flag is off. */
+  content_chunks_backfill_pending?: number;
+  // #2103 / #2080: whether the stored flag is acted on, and why not.
+  content_chunks_effective?: boolean;
+  /** The plan's cap on contexts with chunks; null where the deployment does
+   * not gate content chunks by plan. */
+  content_chunks_limit?: number | null;
+  /** Workspace contexts with the flag stored on (this one included). */
+  content_chunks_in_use?: number;
+  content_chunks_disabled_reason?: ContentChunksDisabledReason | null;
   created_at: string;
   updated_at: string;
 }
+
+/** Why the content chunk toggle cannot be turned on, or the chunks are inactive. */
+export type ContentChunksDisabledReason =
+  "permission" | "unsupported" | "plan" | "cap";
 
 export interface ContextSearchConfigUpdate {
   semantic_weight: number;
@@ -171,6 +198,8 @@ export interface ContextSearchConfigUpdate {
   use_rerank: boolean;
   reranker_provider: "voyage" | "cohere" | "self_hosted";
   reranker_model: string;
+  /** #2015: sent only when the user changed it (optional on the server). */
+  content_chunks_enabled?: boolean;
 }
 
 /**

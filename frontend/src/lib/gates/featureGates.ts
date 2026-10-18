@@ -243,6 +243,13 @@ export const GATE_SPECS = {
   agents: {},
   embedding_spend: {},
   api_calls: {},
+  // #2103: no matrix spec on purpose — the server refuses on the plan only
+  // where the deployment sets CONTENT_CHUNKS_REQUIRE_PLAN, so the tier row
+  // alone would upsell on a deployment that allows it. The search-config
+  // response's `content_chunks_disabled_reason` is the pre-check; this key
+  // names the wire refusals (FEAT-001 `content_chunks`, QUOTA-001
+  // `content_chunk_contexts`).
+  content_chunks: {},
 } as const satisfies Record<string, GateSpec>;
 
 export type GateKey = keyof typeof GATE_SPECS;
@@ -277,6 +284,7 @@ export const QUOTA_TYPE_TO_GATE_KEY: Readonly<Record<string, GateKey>> = {
   agents: "agents",
   resource_tokens: "resource_tokens",
   connectors: "connectors",
+  content_chunk_contexts: "content_chunks",
   embedding_spend_daily: "embedding_spend",
   embedding_spend_monthly: "embedding_spend",
   api_mcp_daily: "api_calls",

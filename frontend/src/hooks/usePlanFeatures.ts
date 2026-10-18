@@ -42,7 +42,8 @@ export { requiredTierFor } from "@/lib/gates/featureGates";
 /**
  * Every boolean column of the served tier row (#1551 create gates, #1583
  * `shared_contexts`, and — since #1645 — the rest: `team_invitations`,
- * `reranking`, `managed_embeddings`, `managed_llm`, `secret_store`).
+ * `reranking`, `managed_embeddings`, `managed_llm`, `secret_store`; #2103
+ * `content_chunks`).
  *
  * Derived from `PlanTierFeature` at compile time, not hand-typed: the API
  * type is the source of truth. `-?` + `NonNullable` keep the optional
@@ -73,6 +74,7 @@ export const PLAN_FEATURE_KEYS = [
   "managed_embeddings",
   "managed_llm",
   "secret_store",
+  "content_chunks",
 ] as const satisfies readonly PlanFeature[];
 
 type AssertNever<T extends never> = T;

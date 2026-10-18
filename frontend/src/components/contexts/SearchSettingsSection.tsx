@@ -2,7 +2,8 @@
  * SearchSettingsSection
  *
  * Self-contained section for search/reranker settings within the Settings tab.
- * Contains hybrid search weights, reranker config, embedding info with sticky save bar.
+ * Contains hybrid search weights, reranker config, content chunk vectors
+ * (#2104), embedding info with sticky save bar.
  * Extracted from contexts/[id]/search-settings/page.tsx (#232).
  */
 
@@ -32,6 +33,16 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Settings,
   Save,
   AlertCircle,
@@ -39,10 +50,12 @@ import {
   Database,
   Loader2,
   Sparkles,
+  Layers,
 } from "lucide-react";
 import {
   getContextSearchConfig,
   updateContextSearchConfig,
+  type ContentChunksDisabledReason,
   type ContextSearchConfig,
   type ContextSearchConfigUpdate,
 } from "@/lib/api/contexts";
@@ -118,6 +131,9 @@ export function SearchSettingsSection({
   // "known".
   const [externalKeysLoaded, setExternalKeysLoaded] = useState(false);
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
+  // #2104: the content chunk value awaiting the user's confirmation (the
+  // AlertDialog is open while this is not null).
+  const [chunkConfirm, setChunkConfirm] = useState<boolean | null>(null);
   const { toast } = useToast();
   // Issue #1167: with BYOK off no new key can be added, so the "configure
   // reranker keys" CTA would point at a page without an Add button — skip the
@@ -220,6 +236,12 @@ export function SearchSettingsSection({
   const handleSave = useCallback(async () => {
     if (!contextId || Object.keys(editedConfig).length === 0) return;
 
+    // #2104: the content chunk flag goes out only when the user changed it —
+    // the server treats it as optional, and turning it on is plan/cap-checked.
+    const chunksChanged =
+      editedConfig.content_chunks_enabled !== undefined &&
+      editedConfig.content_chunks_enabled !== config!.content_chunks_enabled;
+
     try {
       setSaving(true);
       setError(null);
@@ -233,10 +255,14 @@ export function SearchSettingsSection({
         reranker_provider:
           editedConfig.reranker_provider ?? config!.reranker_provider,
         reranker_model: editedConfig.reranker_model ?? config!.reranker_model,
+        ...(chunksChanged
+          ? { content_chunks_enabled: editedConfig.content_chunks_enabled }
+          : {}),
       };
 
       await updateContextSearchConfig(contextId, updateData);
       toast({ title: tCommon("success"), description: t("configSaved") });
+      // Also re-reads content_chunks_backfill_pending for the progress note.
       await refreshConfig();
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : t("errorSave");
@@ -246,6 +272,23 @@ export function SearchSettingsSection({
         description: errorMsg,
         variant: "destructive",
       });
+      // #2104: a refused chunk change (403 FEAT-001 plan / 429 QUOTA-001 cap,
+      // e.g. another context took the last slot meanwhile): re-read the
+      // server's view so the card shows the reason, and drop only the staged
+      // chunk flag — the user's other unsaved edits stay.
+      if (chunksChanged) {
+        try {
+          const data = await getContextSearchConfig(contextId);
+          setConfig(data);
+          setEditedConfig((prev) => {
+            const next = { ...prev };
+            delete next.content_chunks_enabled;
+            return next;
+          });
+        } catch {
+          // Silent: the toast above already reported the failure.
+        }
+      }
     } finally {
       setSaving(false);
     }
@@ -357,6 +400,73 @@ export function SearchSettingsSection({
     isDirty &&
     useRerank &&
     selectedProviderUnavailable;
+
+  // ── #2104: content chunk vectors ──
+  // Every answer is the server's (GET search-config, #2091 / #2103): the
+  // plan gate applies only where the deployment turns it on, so the tier
+  // matrix is not consulted here. A backend predating the fields omits
+  // `content_chunks_enabled` and the card is not rendered.
+  const chunksShown = config.content_chunks_enabled !== undefined;
+  const storedChunks = config.content_chunks_enabled === true;
+  const currentChunks = getCurrentValue("content_chunks_enabled") === true;
+  const chunksCanChange = config.content_chunks_can_change === true;
+  const chunksReason = config.content_chunks_disabled_reason ?? null;
+  const chunksInUse = config.content_chunks_in_use ?? 0;
+  const chunksLimit = config.content_chunks_limit ?? 0;
+  // Stored on but not acted on (plan or cap, #2103); the chunk vectors are
+  // kept. A backend without the field is taken at the stored value.
+  const chunksInactive =
+    storedChunks && config.content_chunks_effective === false;
+  const chunksInactiveForPlan =
+    chunksInactive && (chunksReason === "plan" || chunksReason === "cap");
+  // Why the switch is disabled. A reason the inactive note already explains
+  // leaves only the role to say; a backend predating the reason field could
+  // only refuse on the role or the store.
+  const chunksBlockedReason: ContentChunksDisabledReason | null =
+    chunksCanChange
+      ? null
+      : chunksInactiveForPlan
+        ? "permission"
+        : (chunksReason ??
+          (config.content_chunks_supported === false
+            ? "unsupported"
+            : "permission"));
+  const chunksBackfillPending = config.content_chunks_backfill_pending ?? 0;
+
+  // Literal keys on purpose: the message-orphan scan (parity.test.ts) reads
+  // a computed key as a reference to the whole namespace.
+  const chunkReasonText = (reason: ContentChunksDisabledReason) => {
+    switch (reason) {
+      case "plan":
+        return t("contentChunks.reasonPlan");
+      case "cap":
+        return t("contentChunks.reasonCap", {
+          inUse: chunksInUse,
+          limit: chunksLimit,
+        });
+      case "unsupported":
+        return t("contentChunks.reasonUnsupported");
+      case "permission":
+        return t("contentChunks.reasonPermission");
+    }
+  };
+
+  const handleChunksToggle = (checked: boolean) => {
+    if (checked === storedChunks) {
+      // Back to the saved value: nothing to confirm, nothing to send.
+      const next = { ...editedConfig };
+      delete next.content_chunks_enabled;
+      setEditedConfig(next);
+      return;
+    }
+    setChunkConfirm(checked);
+  };
+
+  const confirmChunksToggle = () => {
+    if (chunkConfirm === null) return;
+    setEditedConfig({ ...editedConfig, content_chunks_enabled: chunkConfirm });
+    setChunkConfirm(null);
+  };
 
   const getProviderDescription = () => {
     if (selfHostedAvailable && hasVoyageKey && hasCohereKey)
@@ -715,6 +825,97 @@ export function SearchSettingsSection({
           </Card>
         )}
 
+        {/* Content chunk vectors (#2104) — only with a backend that
+            reports them (#2015) */}
+        {chunksShown && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Layers className="h-5 w-5" />
+                {t("contentChunks.title")}
+                {storedChunks &&
+                  (chunksInactive ? (
+                    <Badge variant="outline" className="text-muted-foreground">
+                      {t("contentChunks.inactiveBadge")}
+                    </Badge>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      className="border-green-500 text-green-700 dark:text-green-400"
+                    >
+                      {t("contentChunks.activeBadge")}
+                    </Badge>
+                  ))}
+              </CardTitle>
+              <CardDescription>
+                {t("contentChunks.description")}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <Label htmlFor="content_chunks_enabled" className="text-base">
+                    {t("contentChunks.toggleLabel")}
+                  </Label>
+                  <p
+                    id="content-chunks-desc"
+                    className="text-sm text-muted-foreground"
+                  >
+                    {t("contentChunks.toggleDesc")}
+                  </p>
+                </div>
+                <Switch
+                  id="content_chunks_enabled"
+                  checked={currentChunks}
+                  onCheckedChange={handleChunksToggle}
+                  disabled={!chunksCanChange}
+                  aria-describedby={cn(
+                    "content-chunks-desc",
+                    chunksBlockedReason && "content-chunks-reason",
+                  )}
+                />
+              </div>
+
+              {chunksBlockedReason && (
+                <p
+                  id="content-chunks-reason"
+                  className="text-sm text-muted-foreground"
+                >
+                  {chunkReasonText(chunksBlockedReason)}
+                </p>
+              )}
+
+              {chunksInactiveForPlan && (
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription className="space-y-1">
+                    <p className="text-sm">
+                      {chunksReason === "cap"
+                        ? t("contentChunks.inactiveCap", {
+                            inUse: chunksInUse,
+                            limit: chunksLimit,
+                          })
+                        : t("contentChunks.inactivePlan")}
+                    </p>
+                    <p className="text-sm">{t("contentChunks.inactiveKept")}</p>
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {chunksBackfillPending > 0 && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>
+                    {t("contentChunks.backfillPending", {
+                      count: chunksBackfillPending,
+                    })}
+                  </span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Embedding Configuration (Read-only) */}
         <Card>
           <CardHeader>
@@ -750,6 +951,53 @@ export function SearchSettingsSection({
           </CardContent>
         </Card>
       </div>
+
+      {/* #2104: confirm a content chunk change before it is staged */}
+      <AlertDialog
+        open={chunkConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setChunkConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {chunkConfirm
+                ? t("contentChunks.enableConfirmTitle")
+                : t("contentChunks.disableConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                {chunkConfirm ? (
+                  <>
+                    <p>
+                      {config.embedding_provider
+                        ? t("contentChunks.enableConfirmBody", {
+                            provider: config.embedding_provider,
+                          })
+                        : t("contentChunks.enableConfirmBodyNoProvider")}
+                    </p>
+                    {useRerank && !rerankingDisabledByDeployment && (
+                      <p>{t("contentChunks.enableConfirmRerank")}</p>
+                    )}
+                    <p>{t("contentChunks.enableConfirmBackfill")}</p>
+                  </>
+                ) : (
+                  <p>{t("contentChunks.disableConfirmBody")}</p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmChunksToggle}>
+              {chunkConfirm
+                ? t("contentChunks.confirmEnable")
+                : t("contentChunks.confirmDisable")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Sticky Save Bar — only rendered when dirty */}
       {isDirty && (

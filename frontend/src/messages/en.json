@@ -2238,7 +2238,32 @@
     "fetchFactorExample": "Example: For top 10 results, retrieve {count} candidates.",
     "impactOnQuality": "Impact on Search Quality",
     "impactOnQualityDesc": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms). Fetch factor controls the diversity of candidates before reranking.",
-    "impactOnQualityDescNoRerank": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms)."
+    "impactOnQualityDescNoRerank": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms).",
+    "contentChunks": {
+      "title": "Content chunk vectors",
+      "description": "Also index long memory content in passages, so a search can match text beyond the summary.",
+      "toggleLabel": "Index memory content in chunks",
+      "toggleDesc": "Off: only the summary of each memory is embedded. On: long content is split into passages and each passage is embedded too.",
+      "activeBadge": "Active",
+      "inactiveBadge": "Inactive",
+      "enableConfirmTitle": "Turn on content chunk vectors?",
+      "enableConfirmBody": "When you save, memory content, not only summaries, is sent to the embedding provider ({provider}).",
+      "enableConfirmBodyNoProvider": "When you save, memory content, not only summaries, is sent to the embedding provider.",
+      "enableConfirmRerank": "Reranking is on, so the matched passage is also sent to the reranker.",
+      "enableConfirmBackfill": "Existing long memories are queued for re-embedding in the background.",
+      "confirmEnable": "Turn on",
+      "disableConfirmTitle": "Turn off content chunk vectors?",
+      "disableConfirmBody": "When you save, the chunk vectors of this context are removed. Search goes back to summaries only; turning it on again re-embeds the content.",
+      "confirmDisable": "Turn off",
+      "reasonPlan": "Your plan does not include content chunk vectors.",
+      "reasonCap": "Your plan's limit of contexts with content chunk vectors is reached ({inUse} of {limit} in use).",
+      "reasonPermission": "Only the context owner or a workspace owner/admin can change this setting.",
+      "reasonUnsupported": "This deployment's vector store (LanceDB) does not support content chunk vectors.",
+      "inactivePlan": "Content chunk vectors are on for this context but inactive: your plan does not include them.",
+      "inactiveCap": "Content chunk vectors are on for this context but inactive: the plan's limit is exceeded ({inUse} of {limit} in use) and earlier-enabled contexts come first.",
+      "inactiveKept": "Search uses summaries only meanwhile. The chunk vectors are kept and are used again after an upgrade or once a slot frees up; memories added or edited in the meantime get chunks on their next edit or re-embed.",
+      "backfillPending": "{count, plural, one {# memory is} other {# memories are}} waiting to be re-embedded in chunks. Reload to update."
+    }
   },
   "externalKeys": {
     "title": "External API Keys",
@@ -4511,6 +4536,11 @@
         "label": "API calls",
         "plural": "API calls",
         "singular": "API call"
+      },
+      "content_chunks": {
+        "label": "Content chunk vectors",
+        "plural": "content chunk contexts",
+        "singular": "content chunk context"
       }
     }
   },
