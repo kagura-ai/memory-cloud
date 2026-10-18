@@ -108,6 +108,25 @@ async def test_flag_on_without_chunk_point_support_keeps_the_plain_call():
     assert [r["id"] for r in results] == ["m2"]
 
 
+async def test_flag_on_past_the_plans_cap_keeps_the_plain_call():
+    """#2103: a stored true the plan does not allow (gated deployment, past
+    the cap) neither oversamples nor asks for chunks."""
+    plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
+    effective = AsyncMock(return_value=False)
+    with patch("services.search_service.content_chunks_effective", new=effective):
+        results, kwargs = await _search(_config(True), plain)
+    assert "include_chunks" not in kwargs
+    assert kwargs["limit"] == 5 * 3
+    assert effective.await_args.kwargs == {"stored": True}
+
+
+async def test_flag_off_asks_the_plan_nothing():
+    effective = AsyncMock(return_value=True)
+    with patch("services.search_service.content_chunks_effective", new=effective):
+        await _search(_config(False), [])
+    effective.assert_not_awaited()
+
+
 async def test_flag_on_oversamples_and_collapses_before_the_merge():
     results, kwargs = await _search(_config(True), _DENSE)
     assert kwargs["include_chunks"] is True
@@ -262,3 +281,16 @@ async def test_keyword_cross_context_search_reads_no_chunk_flags():
             search_mode="keyword",
         )
     service._chunk_enabled_context_ids.assert_not_awaited()
+
+
+async def test_chunk_enabled_context_ids_asks_the_policy_for_active_ones():
+    """#2103: cross-context recall keeps only contexts within their plan's cap."""
+    from uuid import UUID
+
+    db = MagicMock()
+    db.begin_nested = MagicMock(return_value=_Savepoint())
+    active = AsyncMock(return_value={UUID(_CTX)})
+    with patch("services.search_service.content_chunks_effective_ids", new=active):
+        ids = await SearchService(db)._chunk_enabled_context_ids([_CTX, _CTX2])
+    assert ids == [_CTX]
+    assert active.await_args.args[1] == [UUID(_CTX), UUID(_CTX2)]

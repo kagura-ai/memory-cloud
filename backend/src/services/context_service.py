@@ -1194,8 +1194,15 @@ class ContextService:
 
         # #2015: the copy carries summary points only. A target with content
         # chunk vectors gets its long merged memories re-queued, so the
-        # embedding sweep rebuilds them with their chunk points.
-        if tgt_cfg is not None and getattr(tgt_cfg, "content_chunks_enabled", False) is True:
+        # embedding sweep rebuilds them with their chunk points — only while
+        # its chunks are active (#2103 / #2080: store and plan included).
+        from services.content_chunk_policy import content_chunks_effective
+
+        if (
+            tgt_cfg is not None
+            and getattr(tgt_cfg, "content_chunks_enabled", False) is True
+            and await content_chunks_effective(self.db, target_context_id, stored=True)
+        ):
             from utils.content_chunks import split_content
 
             requeued = 0

@@ -80,6 +80,7 @@ from models.auth import Context
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from repositories.config_repository import search_config_defaults
+from services.content_chunk_policy import content_chunks_status
 from services.content_chunk_writer import content_chunks_enabled, rebuild_content_chunks
 from services.context_routing import (
     resolve_context_embedding,
@@ -94,6 +95,18 @@ from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def _chunks_active(db: AsyncSession, context_id: UUID, *, stored: bool | None = None) -> bool:
+    """Whether the context's content chunks are active (#2103, #2080).
+
+    The stored flag (``content_chunks_enabled``, read here unless given) and,
+    where the deployment gates content chunks by plan, the plan's cap.
+    """
+    if stored is None:
+        stored = await content_chunks_enabled(db, context_id)
+    return stored and (await content_chunks_status(db, context_id, stored=True)).effective
+
 
 ProgressCallback = Callable[[int, int], None]
 """``(done, total)`` — called after every batch of :func:`reembed_context`."""
@@ -232,7 +245,8 @@ async def plan_context_migration(
     current_model, current_dimensions, content_chunks_on = await resolve_context_embedding_config(
         db, context_id
     )
-    content_chunks_on = content_chunks_on and chunk_points_supported()  # #2072: none on LanceDB
+    # #2072: none on LanceDB (the helper checks it too; #2103 the plan as well).
+    content_chunks_on = content_chunks_on and chunk_points_supported()
     if source_model is None:
         source_model, source_dimensions = current_model, current_dimensions
         if source_model == target_model:
@@ -695,7 +709,7 @@ async def rebuild_target_chunks(
         rebuilt_ids.extend(memory.id for memory in rows)
     out.rebuilt = len(rebuilt_ids)
 
-    if rebuilt_ids and await content_chunks_enabled(db, plan.context_id):
+    if rebuilt_ids and await _chunks_active(db, plan.context_id):
         length = func.char_length(Memory.content)
         for i in range(0, len(rebuilt_ids), batch_size):
             page = rebuilt_ids[i : i + batch_size]
@@ -871,12 +885,18 @@ async def _reconcile_target_chunks(
     re-run after the switch, when the sweep writes to the target) keeps its
     chunks. With the flag off nothing is expected and every chunk point of
     the context in the target is deleted ("flag off ⇒ no chunk points").
+    With the flag on but the context inactive (#2103: plan, cap) nothing is
+    expected either, and only the chunks of memories no longer live are
+    deleted — the context keeps its points for when it is active again.
     A no-op on a store without chunk points.
     """
     out = _ChunkReconciliation()
     if not chunk_points_supported():
         return out
-    chunks_on = await content_chunks_enabled(db, plan.context_id)
+    # #2103: chunks are expected only while active; the points of a context
+    # that keeps its flag but is inactive (plan, cap) are kept, not purged.
+    chunks_kept = await content_chunks_enabled(db, plan.context_id)
+    chunks_on = chunks_kept and await _chunks_active(db, plan.context_id, stored=True)
     stored = await count_context_chunk_points(
         str(plan.workspace_id), str(plan.context_id), plan.target_collection
     )
@@ -904,8 +924,8 @@ async def _reconcile_target_chunks(
             if stored.get(str(memory_id), 0) != expected_counts.get(memory_id, 0)
         )
 
-    stale_keys = [key for key in stored if not chunks_on or _as_uuid(key) not in live_plain_ids]
-    if stale_keys and chunks_on:
+    stale_keys = [key for key in stored if not chunks_kept or _as_uuid(key) not in live_plain_ids]
+    if stale_keys and chunks_kept:
         # A memory written after the first read is live, but not in the set.
         # The same rule as that read: a live plain row of this context.
         candidates = [u for key in stale_keys if (u := _as_uuid(key)) is not None]

@@ -266,3 +266,16 @@ async def test_page_usage_is_summed_over_the_batches_and_hashes_are_written():
     assert (event["tokens"], event["cached"]) == (100, 2)
     hashes = {p[2]["content_hash"] for call in upsert.await_args_list for p in call.args[0]}
     assert hashes == {content_hash(LONG)}
+
+
+async def test_an_inactive_context_gets_no_chunks_rebuilt():
+    """#2103: stored on, but past the plan's cap — the migration target gets
+    summary points only (verify then reports the chunks missing)."""
+    from services.content_chunk_policy import ContentChunksStatus
+
+    inactive = ContentChunksStatus(stored=True, supported=True, gated=True, limit=1, earlier=3)
+    with patch.object(writer, "content_chunks_status", AsyncMock(return_value=inactive)):
+        n, delete, upsert, _ = await _rebuild([_memory(LONG)])
+    assert n == 0
+    delete.assert_not_awaited()
+    upsert.assert_not_awaited()

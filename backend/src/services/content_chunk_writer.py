@@ -9,6 +9,11 @@ and callers on such a context can skip the chunk cascade.
 - Flag off: nothing is read from or written to the vector store (turning
   the flag off purges the context's chunks, see
   ``purge_context_chunk_points``).
+- Flag on but inactive (#2103: the plan lacks content chunks, or the context
+  ranks past the plan's cap; ``services.content_chunk_policy``): no chunk is
+  written, and a content write deletes the memory's own chunk points, which
+  would hold the old text. Payload syncs and metadata cascades still reach the
+  points the context keeps, so they are current when it becomes active again.
 - Flag on: the chunks are replaced in place (#2061). The chunks of the
   current content are upserted over the old ones (chunk ids are
   deterministic per index), then the old chunks past the new count are
@@ -71,8 +76,8 @@ from db.qdrant import (
     sync_chunk_points_payload,
     upsert_chunk_points,
 )
-from models.config import ContextSearchConfig
 from models.memory import Memory
+from services.content_chunk_policy import content_chunks_status, content_chunks_stored
 from utils.content_chunks import (
     build_chunk_payload,
     chunk_payload_updates,
@@ -90,15 +95,37 @@ logger = get_logger(__name__)
 
 
 async def content_chunks_enabled(db: AsyncSession, context_id: Any) -> bool:
-    """Whether the context opted into content chunk vectors."""
-    if context_id is None:
-        return False
-    result = await db.execute(
-        select(ContextSearchConfig.content_chunks_enabled).where(
-            ContextSearchConfig.context_id == context_id
-        )
-    )
-    return result.scalar_one_or_none() is True
+    """Whether the context may hold chunk points: flag on, on a store that keeps them.
+
+    The stored predicate (#2080): what cascades and payload syncs follow. Whether
+    chunks are read and written also takes the plan (:func:`_chunk_flags`).
+    """
+    return await content_chunks_stored(db, context_id)
+
+
+async def _chunk_flags(db: AsyncSession, context_id: Any) -> tuple[bool, bool]:
+    """``(stored, active)`` for the context, read fresh (#2103).
+
+    ``active`` is the effective flag: stored, and allowed by the plan where the
+    deployment gates it. With the gate off it costs nothing past the flag read.
+    """
+    stored = await content_chunks_enabled(db, context_id)
+    if not stored:
+        return False, False
+    return True, (await content_chunks_status(db, context_id, stored=True)).effective
+
+
+async def _drop_inactive_chunks(memory: Memory, collection_name: str) -> None:
+    """Delete the memory's chunk points on a context whose chunks are inactive (#2103).
+
+    A content write is not turned into chunks there, so the points the memory
+    had would keep its old text, and come back with it when the context is
+    active again. Best effort: a failure is logged (error class only).
+    """
+    try:
+        await delete_chunk_points([memory.id], collection_name)
+    except Exception as e:  # noqa: BLE001 — best effort, logged
+        _log_failure(memory, collection_name, e)
 
 
 async def chunk_cascade_needed(db: AsyncSession, context_id: Any) -> bool:
@@ -305,6 +332,7 @@ async def write_content_chunks(
     embed_svc: Any,
     collection_name: str,
     chunks_enabled: bool | None = None,
+    chunks_stored: bool | None = None,
     fail_open: bool = True,
     claim: EmbeddingClaim | None = None,
     usage: dict[str, int] | None = None,
@@ -328,9 +356,13 @@ async def write_content_chunks(
         base_payload: The memory's summary-point payload (``build_memory_point``).
         embed_svc: The context's embedding service.
         collection_name: The context's routed collection.
-        chunks_enabled: The context's flag when the caller already has it
-            (a per-context batch); ``None`` looks it up. Either way the flag
-            is read again, fresh, right before the upsert.
+        chunks_enabled: Whether the context's chunks are active (the
+            effective flag, #2103) when the caller already has it (a
+            per-context batch); ``None`` looks it up. Either way it is read
+            again, fresh, right before the upsert.
+        chunks_stored: The stored flag beside a given ``chunks_enabled``
+            (``None``: the same value). Stored but not active deletes the
+            memory's chunk points (:func:`_drop_inactive_chunks`).
         fail_open: False re-raises a failed flag lookup, embedding, upsert or
             delete after logging it (#2049), so the caller's failure path
             retries.
@@ -355,13 +387,17 @@ async def write_content_chunks(
     content = memory.content
     try:
         if chunks_enabled is None:
-            chunks_enabled = await content_chunks_enabled(db, memory.context_id)
+            chunks_stored, chunks_enabled = await _chunk_flags(db, memory.context_id)
     except Exception as e:
         _log_failure(memory, collection_name, e)
         if not fail_open:
             raise _without_text(e) from None
         return 0
-    if not chunks_enabled or not chunk_points_supported():
+    if not chunk_points_supported():
+        return 0
+    if not chunks_enabled:
+        if chunks_stored:
+            await _drop_inactive_chunks(memory, collection_name)
         return 0
     if await _superseded_before_write(db, memory, content, claim):
         return 0
@@ -399,10 +435,16 @@ async def write_content_chunks(
             )
             for index, (text, vector) in enumerate(zip(chunks, vectors, strict=True))
         ]
-        # The flag may have been turned off (and the context purged) while
-        # the chunks were embedded: re-read it fresh, never from a cache.
-        if not await content_chunks_enabled(db, memory.context_id):
-            logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))
+        # The flag may have been turned off (and the context purged), or the
+        # context gone inactive (#2103), while the chunks were embedded:
+        # re-read it fresh, never from a cache.
+        stored_now, active_now = await _chunk_flags(db, memory.context_id)
+        if not active_now:
+            if stored_now:
+                await _drop_inactive_chunks(memory, collection_name)
+                logger.info("content_chunks_skipped_plan", memory_id=str(memory.id))
+            else:
+                logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))
             return 0
         # #2041: an edit or a newer embedding run landed while the chunks were
         # embedded; that run writes the chunks of the current content.
@@ -514,7 +556,9 @@ async def sync_content_chunk_payload(
     Returns:
         True when the chunk points need nothing more: they carry the payload,
         the context has the flag off (it has no chunk points) or the store
-        keeps none. False when they could not be updated (they were deleted,
+        keeps none. ``chunks_enabled`` here is the STORED flag: a context
+        whose chunks are inactive (#2103) keeps its points, and they get the
+        new payload too. False when they could not be updated (they were deleted,
         or the flag lookup or the delete failed): the caller rewrites them
         with :func:`write_content_chunks`. Never raises.
     """
@@ -609,7 +653,8 @@ async def rebuild_content_chunks(
     plain = [memory for memory in rows if not _is_resource_row(memory)]
     if not plain or not chunk_points_supported():
         return 0
-    enabled = await content_chunks_enabled(db, context_id)
+    # #2103: the effective flag — an inactive context gets no chunks rebuilt.
+    _, enabled = await _chunk_flags(db, context_id)
     await db.commit()
     if not enabled:
         logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))
@@ -665,9 +710,10 @@ async def rebuild_content_chunks(
                 for (memory, index, _), vector in zip(part, got, strict=True):
                     vectors[(memory.id, index)] = vector
         current = None
-        # The flag may have been turned off (and every collection purged)
-        # while the chunks were embedded: re-read it fresh.
-        enabled = await content_chunks_enabled(db, context_id)
+        # The flag may have been turned off (and every collection purged), or
+        # the context gone inactive, while the chunks were embedded: re-read
+        # it fresh.
+        _, enabled = await _chunk_flags(db, context_id)
         await db.commit()
         if not enabled:
             logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))

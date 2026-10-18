@@ -1394,6 +1394,55 @@ class TestContentChunks:
         assert db.execute.await_count == 1  # no length query, no live re-check
 
     @pytest.mark.asyncio
+    async def test_verify_keeps_an_inactive_contexts_chunks_of_live_memories(
+        self, _no_content_chunks
+    ):
+        """#2103: flag on but past the plan's cap — nothing is expected (no
+        CHUNKS_MISSING), and the points of live memories are kept for when the
+        context is active again; only those of forgotten memories go."""
+        from services.content_chunk_policy import ContentChunksStatus
+
+        plan = _plan()
+        live = _memory()
+        forgotten = str(uuid4())
+        _no_content_chunks["enabled"].return_value = True
+        _no_content_chunks["counted"].return_value = {str(live.id): 2, forgotten: 2}
+        db = _db([_result(scalars=[live]), _result(scalars=[])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(return_value=[MagicMock(id=str(live.id))])
+        inactive = ContentChunksStatus(stored=True, supported=True, gated=True, limit=1, earlier=1)
+        with (
+            patch.object(svc, "content_chunks_status", AsyncMock(return_value=inactive)),
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(svc, "list_context_point_ids", AsyncMock(return_value=[])),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        ):
+            result = await svc.verify_context_migration(db, plan)
+
+        _no_content_chunks["deleted"].assert_awaited_once_with([forgotten], plan.target_collection)
+        assert (result.chunks_expected, result.chunks_missing) == (0, [])
+        assert result.chunks_stale_removed == 1
+
+    @pytest.mark.asyncio
+    async def test_plan_records_an_inactive_contexts_chunks_as_off(self):
+        """#2103: the plan's content_chunks_on is the effective flag."""
+        from services.content_chunk_policy import ContentChunksStatus
+
+        inactive = ContentChunksStatus(stored=True, supported=True, gated=True, limit=1, earlier=1)
+        config = MagicMock(
+            embedding_model=SMALL, embedding_dimensions=512, content_chunks_enabled=True
+        )
+        with patch(
+            "services.content_chunk_policy.content_chunks_status",
+            AsyncMock(return_value=inactive),
+        ):
+            from services.context_routing import resolve_context_embedding_config
+
+            db = MagicMock()
+            db.execute = AsyncMock(return_value=_result(scalar=config))
+            assert await resolve_context_embedding_config(db, uuid4()) == (SMALL, 512, False)
+
+    @pytest.mark.asyncio
     async def test_switch_deletes_the_chunks_of_memories_forgotten_since(self, _no_content_chunks):
         config = _config(SMALL, 512)
         note, doc = _memory(), _resource_memory()

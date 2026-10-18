@@ -1159,3 +1159,128 @@ async def test_the_cleanup_fence_compares_only_the_claim():
     assert "embedding_attempted_at IS DISTINCT FROM" in sql
     for column in ("content", "deleted_at", "embedding_status"):
         assert f"memories.{column}" not in sql.split("WHERE", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# #2103: a context whose chunks are inactive (plan, cap) keeps its points
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inactive():
+    """CONTENT_CHUNKS_REQUIRE_PLAN on and the context past its plan's cap."""
+    from services.content_chunk_policy import ContentChunksStatus
+
+    status = ContentChunksStatus(
+        stored=True, supported=True, gated=True, plan_has_feature=True, limit=1, earlier=1
+    )
+    with patch.object(writer, "content_chunks_status", AsyncMock(return_value=status)) as st:
+        yield st
+
+
+async def test_an_inactive_context_writes_no_chunks_and_drops_the_memorys_own(inactive):
+    memory = _memory(LONG)
+    svc = _embed_svc()
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        n = await writer.write_content_chunks(
+            _db(True), memory, base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    assert n == 0
+    # Its points would hold the old content when the context is active again.
+    delete.assert_awaited_once_with([memory.id], "c")
+    svc.embed_batch.assert_not_awaited()
+    upsert.assert_not_awaited()
+
+
+async def test_a_preloaded_inactive_flag_drops_only_what_is_stored():
+    memory = _memory(LONG)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+    ):
+        for stored in (True, False, None):
+            await writer.write_content_chunks(
+                MagicMock(),
+                memory,
+                base_payload={},
+                embed_svc=_embed_svc(),
+                collection_name="c",
+                chunks_enabled=False,
+                chunks_stored=stored,
+            )
+    # Only the stored-on call deletes; stored off / unknown has no points.
+    assert delete.await_count == 1
+
+
+async def test_a_failed_drop_is_logged_not_raised(inactive):
+    import structlog
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=RuntimeError("x"))),
+    ):
+        n = await writer.write_content_chunks(
+            _db(True),
+            _memory(LONG),
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            fail_open=False,
+        )
+    assert n == 0
+    assert any(e["event"] == "content_chunks_failed" for e in logs)
+
+
+async def test_a_context_gone_inactive_while_embedding_writes_nothing():
+    """Active at the first read, inactive at the re-read before the upsert."""
+    from services.content_chunk_policy import ContentChunksStatus
+
+    def _status(effective):
+        return ContentChunksStatus(
+            stored=True, supported=True, gated=True, limit=1, earlier=0 if effective else 1
+        )
+
+    memory = _memory(LONG)
+    with (
+        patch.object(
+            writer,
+            "content_chunks_status",
+            AsyncMock(side_effect=[_status(True), _status(False)]),
+        ),
+        patch.object(writer, "content_chunks_enabled", AsyncMock(return_value=True)),
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+        patch.object(writer, "_superseded_before_write", AsyncMock(return_value=False)),
+        patch.object(writer, "_check_superseded", AsyncMock(return_value=False)),
+    ):
+        n = await writer.write_content_chunks(
+            MagicMock(), memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n == 0
+    upsert.assert_not_awaited()
+    delete.assert_awaited_once_with([memory.id], "c")
+
+
+async def test_an_inactive_contexts_points_still_get_the_new_payload(inactive):
+    """Payload syncs follow the STORED flag, so kept points stay current."""
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "sync_chunk_points_payload", AsyncMock(return_value=True)) as sync,
+    ):
+        ok = await writer.sync_content_chunk_payload(
+            _db(True), _memory(LONG), base_payload={"summary": "s"}, collection_name="c"
+        )
+    assert ok is True
+    sync.assert_awaited_once()
+    inactive.assert_not_awaited()
+
+
+async def test_the_cascade_follows_the_stored_flag(inactive):
+    assert await writer.chunk_cascade_needed(_db(True), CTX) is True
+    inactive.assert_not_awaited()

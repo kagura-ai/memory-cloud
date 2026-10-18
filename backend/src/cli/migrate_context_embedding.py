@@ -234,8 +234,10 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         if rebuild_first:
             # After the switch a re-embed to this target is refused (the
             # context already uses it), so chunks verify found incomplete are
-            # rebuilt now: e.g. content_chunks_enabled turned on while the
-            # re-embed ran (verify read the flag again; the plan had it off).
+            # rebuilt now: e.g. the context's content chunks became active
+            # (content_chunks_enabled turned on, or #2103 the plan allows them
+            # again) while the re-embed ran (verify read the flag again; the
+            # plan had it off).
             # Asked before the rebuild: it is embedding spend for the switch.
             if not _confirm(
                 f"Rebuild the content chunks of {len(verified.chunks_missing)} memory(ies), "
@@ -246,7 +248,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                 return 0
             switch_confirmed = True
             if not plan.content_chunks_on:
-                print("  content_chunks_enabled was turned on after the plan")
+                print("  content chunks became active after the plan")
             switch_since = requeue_since if requeue_since is not None else args.requeue_since
             try:
                 rebuilt = await rebuild_target_chunks(
