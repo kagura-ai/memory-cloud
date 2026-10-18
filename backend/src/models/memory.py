@@ -136,6 +136,20 @@ REVISION_WRITER_API = "api"
 REVISION_WRITER_ROLLBACK = "rollback"
 REVISION_WRITERS: tuple[str, ...] = (REVISION_WRITER_API, REVISION_WRITER_ROLLBACK)
 
+# #2044: ``memory_session_rollbacks.status``. ``in_progress`` = a call stopped
+# at the per-call event cap and the next call continues; ``completed`` /
+# ``partial`` (some items failed) are final, and a further rollback of the
+# same session is refused. Byte-identical to the f04 CHECK literal (pinned by
+# tests/test_session_rollback_constants.py); new values are APPENDED.
+SESSION_ROLLBACK_IN_PROGRESS = "in_progress"
+SESSION_ROLLBACK_COMPLETED = "completed"
+SESSION_ROLLBACK_PARTIAL = "partial"
+SESSION_ROLLBACK_STATUSES: tuple[str, ...] = (
+    SESSION_ROLLBACK_IN_PROGRESS,
+    SESSION_ROLLBACK_COMPLETED,
+    SESSION_ROLLBACK_PARTIAL,
+)
+
 
 class Memory(Base):
     """Memory model with 3-layer architecture.
@@ -298,6 +312,14 @@ class Memory(Base):
     # embedding pipeline and access stats never move it, so an agent's
     # ``update_memory(expected_version=N)`` fails only on a real edit.
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
+    # #2044: the LAST writer's verified agent (``AgentScope``, never a request
+    # field) and session (OTel baggage, else the MCP protocol session) — every
+    # create / edit / forget overwrites both. A display and lookup convenience:
+    # the per-write principal lives in ``memory_revisions``, and nothing
+    # authorizes on these two columns. NULL on rows written before #2044.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Same width and charset as memory_access_events.session_id.
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # Logical Delete (Issue #46 Phase 4)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -553,6 +575,17 @@ class Memory(Base):
             "context_id",
             postgresql_where=text("(details->'tool_trigger') IS NOT NULL AND deleted_at IS NULL"),
         ),
+        # #2044: "which memories did this session write last" per context.
+        # Partial: rows written before #2044, and writes without a session,
+        # carry no entry. Created CONCURRENTLY in migration
+        # f04_2044_session_provenance; the predicate text must stay
+        # byte-identical.
+        Index(
+            "idx_memories_context_session",
+            "context_id",
+            "session_id",
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
         # Time Memory (type="time") partial btree on the generated lower bound,
         # supporting the window-overlap query + ORDER BY trigger_from on
         # GET /memory/list (migration e30_877_time_trigger_cols). Partial so
@@ -673,6 +706,12 @@ class MemoryRevision(Base):
     # Same width and charset as memory_access_events.session_id.
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    # #2044: the ``memory_session_rollbacks.id`` that handled this event —
+    # reversed it, skipped it (the summary names the cause) or failed on it.
+    # A handled event is never planned again, which is how a rollback that
+    # stopped at the per-call cap continues where it left off. No FK: the
+    # rollback row and this one share the context's lifetime.
+    undone_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         # Derived like valid_delivery_mode: byte-identical to the f03 literal.
@@ -691,6 +730,70 @@ class MemoryRevision(Base):
             "actor_user_id",
             "id",
             postgresql_where=text("session_id IS NOT NULL"),
+        ),
+    )
+
+
+# The all-zero uuid stands in for "no agent" in the rollback target key, so a
+# user-credential session (agent NULL) has exactly one row per target.
+_NIL_UUID_SQL = "'00000000-0000-0000-0000-000000000000'::uuid"
+
+
+class MemorySessionRollback(Base):
+    """One ``rollback_session`` of one session in one context (#2044).
+
+    The durable half of "a second rollback of the same session is refused":
+    a ``completed`` or ``partial`` row stops the next call. ``in_progress``
+    means a call stopped at the per-call event cap; the next call continues
+    with the events no rollback has handled yet (``memory_revisions.undone_by``).
+
+    The target is ``(context_id, session_id, principal_user_id, agent_id)``:
+    a session is only ever addressed together with its principal — the caller
+    sub and the verified agent of the credential that wrote it.
+    ``principal_user_id`` is NULL for a context owner's rollback, which covers
+    every principal's events under that session id in the context. ``summary``
+    holds the running counts over all calls.
+
+    Erasure pseudonymizes ``principal_user_id`` / ``requested_by`` and NULLs
+    the subject's ``session_id``; the row goes with its context.
+    """
+
+    __tablename__ = "memory_session_rollbacks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    context_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NULL only after erasure scrubbed the subject's session token.
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    principal_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    summary: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        # Derived from the ordered tuple: byte-identical to the f04 literal.
+        CheckConstraint(
+            f"status IN ({', '.join(repr(s) for s in SESSION_ROLLBACK_STATUSES)})",
+            name="valid_session_rollback_status",
+        ),
+        Index(
+            "uq_memory_session_rollbacks_target",
+            "context_id",
+            "session_id",
+            text("COALESCE(principal_user_id, '')"),
+            text(f"COALESCE(agent_id, {_NIL_UUID_SQL})"),
+            unique=True,
         ),
     )
 

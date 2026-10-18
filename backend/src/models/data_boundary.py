@@ -77,6 +77,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # entity deletion); user_id/session_id/run_id/event_metadata
         # pseudonymized+scrubbed on erasure via the append-only carve-out.
         "memory_access_events",
+        # rollback_session records (#2044) — control plumbing (which session
+        # was rolled back, by whom, running counts); no memory text. Goes with
+        # its context; principal/requester pseudonymized on erasure.
+        "memory_session_rollbacks",
         "users",
         "user_oauth_providers",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
