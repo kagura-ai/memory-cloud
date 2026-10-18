@@ -24,7 +24,7 @@ from db.qdrant import (
     update_memory_payload_in_qdrant,
     upsert_chunk_points,
 )
-from utils.content_chunks import CHUNK_OF_FIELD, CONTENT_CHUNK_MAX_PER_MEMORY, chunk_point_id
+from utils.content_chunks import CHUNK_OF_FIELD
 from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio
@@ -126,22 +126,19 @@ async def test_delete_chunk_points_empty_is_noop(mock_client):
     mock_client.delete.assert_not_awaited()
 
 
-async def test_delete_chunk_points_from_trims_by_id_past_the_new_count(mock_client):
-    """#2061: the trim after an in-place rewrite deletes chunk ids start..max-1 only."""
+async def test_delete_chunk_points_from_trims_the_chunks_past_the_new_count(mock_client):
+    """#2061: the trim after an in-place rewrite deletes chunk_index >= start of
+    that memory only — by filter, so a chunk past the cap goes too."""
     memory_id = uuid4()
     await delete_chunk_points_from(memory_id, 3, "coll")
     kwargs = mock_client.delete.await_args.kwargs
     assert kwargs["collection_name"] == "coll"
     selector = kwargs["points_selector"]
-    assert isinstance(selector, PointIdsList)
-    assert selector.points == [
-        chunk_point_id(memory_id, i) for i in range(3, CONTENT_CHUNK_MAX_PER_MEMORY)
-    ]
-
-
-async def test_delete_chunk_points_from_the_cap_is_a_noop(mock_client):
-    await delete_chunk_points_from(uuid4(), CONTENT_CHUNK_MAX_PER_MEMORY)
-    mock_client.delete.assert_not_awaited()
+    assert isinstance(selector, FilterSelector)
+    by_key = {cond.key: cond for cond in selector.filter.must}
+    assert by_key[CHUNK_OF_FIELD].match == MatchValue(value=str(memory_id))
+    assert by_key["chunk_index"].range.gte == 3
+    assert by_key["chunk_index"].range.lt is None
 
 
 async def test_delete_chunk_points_from_raises_a_qdrant_error(mock_client):

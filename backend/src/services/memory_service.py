@@ -8341,6 +8341,10 @@ async def process_pending_embedding(memory_id: UUID) -> None:
         # must not end the newer run's claim. A live run renews its stamp so
         # it is not reclaimed for being slow (``services.embedding_claim``).
         claim = EmbeddingClaim(db, memory_id, now)
+        # #2061: set once this run sends its first vector-store write, so a
+        # run that lost its claim re-queues the row only if it may have
+        # replaced the newer run's points.
+        wrote_points = False
         try:
             # Claim: atomically set pending/stale-processing → processing
             # Stale processing: embedding_attempted_at older than 60s (crash
@@ -8416,6 +8420,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
             vector: list[float] | None = None
             if owns_resource_point(memory):
+                wrote_points = True
                 await ResourceIndexer(db).rebuild_point(
                     memory, collection_name=collection, embedding_service=embed_svc
                 )
@@ -8432,6 +8437,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 # embedding-model migration so both paths write identical points).
                 payload, sparse_indices, sparse_values = build_memory_point(memory)
 
+                wrote_points = True
                 await add_memory_to_qdrant(
                     user_id=memory.user_id,
                     memory_id=memory_id,
@@ -8587,7 +8593,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     "embedding_claim_lost",
                     memory_id=str(memory_id),
                     error=str(e),
-                    requeued=await _requeue_after_lost_claim(db, memory_id),
+                    # A run that failed before writing replaced nothing.
+                    requeued=wrote_points and await _requeue_after_lost_claim(db, memory_id),
                 )
                 return
 

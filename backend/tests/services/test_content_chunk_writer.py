@@ -1028,17 +1028,21 @@ async def test_an_embedding_run_does_not_check_after_its_write():
     assert db.execute.await_count == 4
 
 
-async def test_a_failed_check_after_the_write_is_fail_open_controlled():
+async def test_a_failed_check_after_the_write_keeps_the_write():
+    """The chunks were written; a failed read after them is logged, not a failure
+    (that would re-queue a memory whose chunks are fine)."""
+    import structlog
+
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[flag, _check(True), flag, _check(True), RuntimeError("db")])
     with (
+        structlog.testing.capture_logs() as logs,
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "upsert_chunk_points", AsyncMock()),
-        pytest.raises(writer.ContentChunkWriteError),
     ):
-        await writer.write_content_chunks(
+        n = await writer.write_content_chunks(
             db,
             _memory(LONG),
             base_payload={},
@@ -1046,3 +1050,40 @@ async def test_a_failed_check_after_the_write_is_fail_open_controlled():
             collection_name="c",
             fail_open=False,
         )
+    assert n == len(split_content(LONG))
+    event = next(e for e in logs if e["event"] == "content_chunks_superseded_check_failed")
+    assert event["stage"] == "after_write"
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_a_failed_write_of_an_embedding_run_removes_the_old_chunks(cleanup_fails):
+    """#2061: an embedding run follows an edit, so its old chunks may hold body
+    text the memory no longer has; they go while the row waits for its retry."""
+    import structlog
+
+    from services.embedding_claim import EmbeddingClaim
+    from utils.exceptions import SelfHostedUnreachableError
+
+    memory = _memory(LONG)
+    db = _db(True)
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=SelfHostedUnreachableError("down"))
+    delete = AsyncMock(side_effect=RuntimeError("q") if cleanup_fails else None)
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", delete),
+        pytest.raises(SelfHostedUnreachableError),
+    ):
+        await writer.write_content_chunks(
+            db,
+            memory,
+            base_payload={},
+            embed_svc=svc,
+            collection_name="c",
+            fail_open=False,
+            claim=EmbeddingClaim(db, memory.id, None),
+        )
+    delete.assert_awaited_once_with([memory.id], "c")
+    cleanup = [e for e in logs if e["event"] == "content_chunks_cleanup_failed"]
+    assert len(cleanup) == (1 if cleanup_fails else 0)

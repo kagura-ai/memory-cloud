@@ -13,9 +13,10 @@ and callers on such a context can skip the chunk cascade.
   current content are upserted over the old ones (chunk ids are
   deterministic per index), then the old chunks past the new count are
   deleted; content that shrank below the split threshold loses them all.
-  The memory is never without chunks while new ones are embedded, and a
-  failed embedding keeps the old ones. A superseded run (below) writes
-  nothing.
+  The memory is never without chunks while new ones are embedded. A failed
+  write of the Sleep paths keeps the old ones; one of an embedding run
+  removes them (it follows an edit, and the old ones can hold removed body
+  text). A superseded run (below) writes nothing.
 
 The flag is read again, fresh, right before the upsert, so a writer whose
 embedding was in flight while the flag was turned off writes nothing; the
@@ -219,6 +220,26 @@ async def _superseded_before_write(
     return superseded
 
 
+async def _drop_chunks_after_failure(memory: Memory, collection_name: str) -> None:
+    """Remove the chunk points of a memory whose embedding run failed to write them (#2061).
+
+    An embedding run (``process_pending_embedding``) is what follows an edit,
+    so the old chunks can hold body text the memory no longer has, and the
+    row now waits for its retry — for good once its retry budget is spent.
+    It must not stay searchable meanwhile: the retry writes the new chunks.
+    Best effort (a failure is logged): the failure is raised either way.
+    """
+    try:
+        await delete_chunk_points([memory.id], collection_name)
+    except Exception as e:
+        logger.warning(
+            "content_chunks_cleanup_failed",
+            memory_id=str(memory.id),
+            collection=collection_name,
+            error_class=type(e).__name__,
+        )
+
+
 async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | None) -> bool:
     """The check after the write of a run without a claim (the Sleep paths, #2061).
 
@@ -227,9 +248,21 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
     run's chunks then replace the current ones. One more read of the row
     tells: if it moved on, re-queue it (``requeue_embedding``: a ``success``
     row only — a ``pending`` or ``processing`` one is being embedded anyway)
-    so the embedding sweep writes the chunks of the current content.
+    so the embedding sweep writes the chunks of the current content. A failed
+    read is logged and taken as current, like the check before the write.
     """
-    if not await _check_superseded(db, memory.id, content, None):
+    try:
+        superseded = await _check_superseded(db, memory.id, content, None)
+    except Exception as e:
+        # The chunks were written; an unknown answer does not undo that.
+        logger.warning(
+            "content_chunks_superseded_check_failed",
+            memory_id=str(memory.id),
+            stage="after_write",
+            error_class=type(e).__name__,
+        )
+        return False
+    if not superseded:
         return False
     requeued = await requeue_embedding(db, memory.id, reason="stale_after_write")
     logger.info("content_chunks_stale_after_write", memory_id=str(memory.id), requeued=requeued)
@@ -254,10 +287,11 @@ async def write_content_chunks(
     the old chunks past the new count are deleted; content too short to split
     deletes them all. A failed flag lookup, embedding, upsert or delete is
     logged, then returns 0 — or, with ``fail_open=False``, is raised
-    (``_without_text``) so the caller can retry the memory. A failure before
-    the upsert leaves the old chunks as they were until that retry rewrites
-    them; a caller passing ``fail_open=False`` never records the memory as
-    embedded with them.
+    (``_without_text``) so the caller can retry the memory. A failure leaves
+    the old chunks as they were (the Sleep paths re-queue the memory, and the
+    sweep rewrites them) — except in an embedding run (``claim``), which
+    follows an edit: it removes them, so removed body text is not searchable
+    while the row waits for its retry.
 
     Args:
         db: Session used for the flag lookups.
@@ -309,8 +343,7 @@ async def write_content_chunks(
     try:
         if not chunks:
             # Too short to split (it may have shrunk below the threshold): the
-            # memory keeps no chunk points, so removed body text never
-            # survives in ``chunk_text``.
+            # memory keeps no chunk points.
             await delete_chunk_points([memory.id], collection_name)
             if claim is None:
                 await _stale_after_write(db, memory, content)
@@ -368,6 +401,8 @@ async def write_content_chunks(
             return 0
     except Exception as e:
         _log_failure(memory, collection_name, e)
+        if claim is not None and chunks:
+            await _drop_chunks_after_failure(memory, collection_name)
         if not fail_open:
             raise _without_text(e) from None
         return 0

@@ -244,9 +244,10 @@ class ReindexPhase:
         A failed write (#2061) re-queues the memory instead: the Sleep run has
         no retry of its own, and the memory is at least a week old, so
         nothing else would rebuild its chunks — the embedding sweep does
-        (``"requeued"``; ``"none"`` when the row was not ``success``, so it is
-        being embedded or retried already). A failed re-queue is raised: the
-        caller counts the memory as failed.
+        (``"requeued"``). ``"none"`` when the row was not ``success``: a
+        ``pending`` or ``processing`` row is being embedded, a ``failed`` one
+        waits for its retry (or, with its budget spent, the admin retry). A
+        failed re-queue is raised: the caller counts the memory as failed.
 
         A provider request for the chunks counts as one embedding call with
         its tokens (#2015), also when the write then failed — the provider

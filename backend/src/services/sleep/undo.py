@@ -262,7 +262,7 @@ async def re_embed_memory_to_qdrant(
             return await requeue_embedding(db, memory.id, reason="chunk_write_failed")
         except Exception as e:
             logger.warning(
-                "content_chunks_requeue_failed",
+                "embedding_requeue_failed",
                 memory_id=str(memory.id),
                 error_class=type(e).__name__,
             )

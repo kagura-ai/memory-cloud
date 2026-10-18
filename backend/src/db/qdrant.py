@@ -50,12 +50,7 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
-from utils.content_chunks import (
-    CHUNK_OF_FIELD,
-    CONTENT_CHUNK_MAX_PER_MEMORY,
-    chunk_payload_updates,
-    chunk_point_id,
-)
+from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
@@ -1232,25 +1227,27 @@ async def delete_chunk_points_from(
 
     The trim after a chunk rewrite in place: chunk point ids are deterministic
     per index (``chunk_point_id``), so the upsert has just replaced chunks
-    ``0..start-1`` and only the old ones past the new count are left. Deleted
-    by id, up to ``CONTENT_CHUNK_MAX_PER_MEMORY`` (ids with no point are
-    ignored). A no-op when ``start`` is at or past that cap, or on a
-    non-Qdrant store.
+    ``0..start-1`` and only the old ones past the new count are left.
+    Filter-based (``chunk_of`` and ``chunk_index >= start``), like
+    :func:`delete_chunk_points`, so it also removes a chunk past the current
+    per-memory cap. A no-op on a non-Qdrant store.
 
     Raises:
         QdrantError: If the delete fails.
     """
-    if start >= CONTENT_CHUNK_MAX_PER_MEMORY or _active_store() is not None:
+    if _active_store() is not None:
         return
     client = get_qdrant_client()
     try:
         await client.delete(
             collection_name=collection_name,
-            points_selector=PointIdsList(
-                points=[
-                    chunk_point_id(memory_id, index)
-                    for index in range(max(start, 0), CONTENT_CHUNK_MAX_PER_MEMORY)
-                ]
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(key=CHUNK_OF_FIELD, match=MatchValue(value=str(memory_id))),
+                        FieldCondition(key="chunk_index", range=Range(gte=max(start, 0))),
+                    ]
+                )
             ),
         )
     except Exception as e:

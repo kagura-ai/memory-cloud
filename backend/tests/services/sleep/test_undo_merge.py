@@ -429,7 +429,7 @@ async def test_a_failed_re_queue_does_not_abort_the_restore() -> None:
         )
 
     assert requeued is False
-    event = next(e for e in logs if e["event"] == "content_chunks_requeue_failed")
+    event = next(e for e in logs if e["event"] == "embedding_requeue_failed")
     assert event["error_class"] == "RuntimeError"
     assert "secret" not in repr(event)
 
