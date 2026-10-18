@@ -230,11 +230,6 @@ class ContextSearchConfigRepository:
                     context_id=str(context_id),
                     error_class=type(exc).__name__,
                 )
-        if "content_chunks_enabled" in update_dict:
-            from services.content_chunk_writer import forget_cached_chunk_flag
-
-            forget_cached_chunk_flag(context_id)
-
         logger.info(
             "config_updated",
             context_id=str(context_id),
