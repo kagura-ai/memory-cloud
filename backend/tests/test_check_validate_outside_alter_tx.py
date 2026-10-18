@@ -134,5 +134,5 @@ def test_offline_support_is_upgrade_only(revision, direction):
             getattr(module, direction)()
         else:
             # The mock connection returns None for a read; ``.first()`` fails.
-            with pytest.raises(AttributeError):
+            with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'first'"):
                 getattr(module, direction)()
