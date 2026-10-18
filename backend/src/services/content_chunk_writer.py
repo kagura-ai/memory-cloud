@@ -9,9 +9,10 @@ and callers on such a context can skip the chunk cascade.
 - Flag off: nothing is read from or written to the vector store (turning
   the flag off purges the context's chunks, see
   ``purge_context_chunk_points``).
-- Flag on: the memory's chunk points are deleted first, then rewritten from
-  the current content — content that shrank below the split threshold
-  therefore just loses its chunks. A superseded run (below) does neither.
+- Flag on: the chunks of the current content are upserted over the old ones
+  (chunk ids are deterministic per index), then the old chunks past the new
+  count are deleted (#2061) — content that shrank below the split threshold
+  loses them all. A superseded run (below) does neither.
 
 The flag is read again, fresh, right before the upsert, so a writer whose
 embedding was in flight while the flag was turned off writes nothing; the
@@ -19,25 +20,26 @@ config update also purges after its commit and again when the flag is turned
 back on, so a leftover from the remaining window never becomes visible.
 
 Two overlapping re-embeds of one memory write the same chunk ids (#2041). So
-the row is read again before the delete and again right before the upsert: a
+the row is read again before anything is embedded and again right before the
+upsert: a
 run whose memory was deleted, edited (its content changed or it was re-queued
 ``pending``) or, for an embedding run, claimed by a newer run (the stamp its
 claim holds moved; ``services.embedding_claim``) stops there — the newer
-write owns the chunks. The Sleep paths hold no claim and compare no stamp. The first check keeps a
-stale run from deleting chunks a newer run already wrote; the second catches
-an edit that landed while the chunks were embedded. ``updated_at`` is not
+write owns the chunks. The Sleep paths hold no claim and compare no stamp.
+The first check keeps a stale run from paying for an embedding and from
+writing over chunks a newer run already wrote; the second catches an edit
+that landed while the chunks were embedded. ``updated_at`` is not
 used: metadata-only changes move it without a re-embed, so skipping on it
 would leave the memory without chunks. What remains is the gap between the
-second check and the upsert (one round trip): a newer run that deletes inside
-it can still be overwritten by this run's upsert. Comparing the
+second check and the upsert and trim (two round trips): a newer run that
+writes inside it can still be overwritten by this run's upsert. Comparing the
 ``content_hash`` every chunk point now carries would close it; nothing
 compares it yet. The summary point has the same race and is not guarded here.
 
-A failed delete of the old chunk points is raised (the row is retried, the
-old body never survives an edit). Any other failure is logged
-(``content_chunks_failed``, error class only — never the text). By default it
-is then fail-open: the summary point is already written and the memory stays
-summary-only until its next re-embed. ``process_pending_embedding`` passes
+Every failure is logged (``content_chunks_failed``, error class only — never
+the text). One before the upsert leaves the old chunks as they were. By
+default it is then fail-open: the summary point is already written and the
+memory keeps whatever chunks it had until its next re-embed. ``process_pending_embedding`` passes
 ``fail_open=False`` (#2049) so the failure is raised and the row is marked
 failed and retried by the embedding sweep, never stamped ``success`` without
 its chunks. Its outcome write is fenced on the claim's own
@@ -56,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import (
     chunk_points_supported,
     delete_chunk_points,
+    delete_chunk_points_from,
     sync_chunk_points_payload,
     upsert_chunk_points,
 )
@@ -180,12 +183,14 @@ async def _check_superseded(
         return await _superseded(db, memory_id, content, stamp)
 
 
-async def _superseded_before_delete(
+async def _superseded_before_write(
     db: AsyncSession, memory: Memory, content: str | None, claim: EmbeddingClaim | None
 ) -> bool:
     """The first superseded check (#2041); a failed lookup does not stop the run.
 
-    The check right before the upsert still runs; a failure there writes nothing.
+    It runs before anything is embedded or written, so a stale run pays for no
+    embedding and touches no chunk. The check right before the upsert still
+    runs; a failure there writes nothing.
     """
     try:
         superseded = await _check_superseded(db, memory.id, content, claim)
@@ -200,7 +205,7 @@ async def _superseded_before_delete(
         logger.info(
             "content_chunks_skipped_superseded",
             memory_id=str(memory.id),
-            stage="before_delete",
+            stage="before_write",
         )
     return superseded
 
@@ -217,13 +222,16 @@ async def write_content_chunks(
     claim: EmbeddingClaim | None = None,
     usage: dict[str, int] | None = None,
 ) -> int:
-    """Replace the memory's chunk points; return how many were written.
+    """Replace the memory's chunk points in place; return how many were written.
 
-    A failed delete of the old chunk points is raised — the caller's normal
-    failure path (``process_pending_embedding`` marks the row failed and
-    retries it), so an edit never leaves the old body in ``chunk_text``. A
-    failed flag lookup, embedding or upsert is logged, then returns 0 — or,
-    with ``fail_open=False``, is raised (``_without_text``).
+    The new chunks are upserted over the old ones (same ids per index), then
+    the old chunks past the new count are deleted; content too short to split
+    deletes them all. A failed flag lookup, embedding, upsert or delete is
+    logged, then returns 0 — or, with ``fail_open=False``, is raised
+    (``_without_text``) so the caller can retry the memory. A failure before
+    the upsert leaves the old chunks as they were until that retry rewrites
+    them; a caller passing ``fail_open=False`` never records the memory as
+    embedded with them.
 
     Args:
         db: Session used for the flag lookups.
@@ -234,8 +242,9 @@ async def write_content_chunks(
         chunks_enabled: The context's flag when the caller already has it
             (a per-context batch); ``None`` looks it up. Either way the flag
             is read again, fresh, right before the upsert.
-        fail_open: False re-raises a failed flag lookup, embedding or upsert
-            after logging it (#2049), so the caller's failure path retries.
+        fail_open: False re-raises a failed flag lookup, embedding, upsert or
+            delete after logging it (#2049), so the caller's failure path
+            retries.
         claim: The embedding run's own claim (#2041); its stamp, renewed
             while the run works, is what the superseded checks compare.
             ``None`` (the Sleep paths) compares no stamp, only the content,
@@ -246,8 +255,8 @@ async def write_content_chunks(
             The Sleep reindex adds it to its embedding accounting.
 
     Raises:
-        Exception: a failed delete of the old chunk points; with
-            ``fail_open=False`` also a failed flag lookup, embedding or upsert.
+        Exception: with ``fail_open=False``, a failed flag lookup, embedding,
+            upsert or delete.
     """
     if _is_resource_row(memory):
         return 0
@@ -263,17 +272,20 @@ async def write_content_chunks(
         return 0
     if not chunks_enabled or not chunk_points_supported():
         return 0
-    if await _superseded_before_delete(db, memory, content, claim):
+    if await _superseded_before_write(db, memory, content, claim):
         return 0
-    await delete_chunk_points([memory.id], collection_name)
     chunks = split_content(content)
-    if not chunks:
-        return 0
     points: list[tuple[str, list[float], dict[str, Any]]] = []
     if usage is None:
         usage = {}
-    digest = content_hash(content)
     try:
+        if not chunks:
+            # Too short to split (it may have shrunk below the threshold): the
+            # memory keeps no chunk points, so removed body text never
+            # survives in ``chunk_text``.
+            await delete_chunk_points([memory.id], collection_name)
+            return 0
+        digest = content_hash(content)
         vectors = await embed_svc.embed_batch(
             chunks,
             memory.user_id,
@@ -309,6 +321,11 @@ async def write_content_chunks(
                 stage="before_upsert",
             )
             return 0
+        # #2061: upsert first, then trim. The ids are deterministic per index,
+        # so the upsert replaces chunks 0..n-1 in place and the trim deletes
+        # only the old ones past n: the memory is never left without chunks
+        # while the new ones are embedded, and a failed embedding keeps the
+        # old ones.
         await upsert_chunk_points(
             points,
             user_id=memory.user_id,
@@ -316,6 +333,7 @@ async def write_content_chunks(
             context_id=str(memory.context_id),
             collection_name=collection_name,
         )
+        await delete_chunk_points_from(memory.id, len(points), collection_name)
     except Exception as e:
         _log_failure(memory, collection_name, e)
         if not fail_open:
@@ -429,14 +447,17 @@ async def rebuild_content_chunks(
 
     The embedding migration's re-embed (#2015 PR 2a): its target collection
     is not routed yet, so nothing else writes there, and a page's chunks are
-    embedded in batches across memories, not one memory at a time. The
-    contract is :func:`write_content_chunks`'s: delete first (content that
-    is now too short loses its chunks, chunks an earlier migration to the
-    same model left are replaced), then write; the flag is read fresh before the delete
-    and again right before the upsert, and each read's transaction is ended
-    before the next embedding or vector store call. Unlike that writer it is
-    not fail-open: a failed delete, embedding or upsert is logged and raised,
-    so the migration stops and can be re-run (point ids are deterministic).
+    embedded in batches across memories, not one memory at a time. Unlike
+    :func:`write_content_chunks` (upsert first, then trim, #2061) it still
+    deletes first: content that is now too short loses its chunks, and chunks
+    an earlier migration to the same model left are replaced. Recall reads the
+    context's points in the target only after the switch, so the window
+    without chunks is not seen. The
+    flag is read fresh before the delete and again right before the upsert,
+    and each read's transaction is ended before the next embedding or vector
+    store call. It is not fail-open: a failed delete, embedding or upsert is
+    logged and raised, so the migration stops and can be re-run (point ids
+    are deterministic).
 
     Args:
         db: Session for the flag reads.

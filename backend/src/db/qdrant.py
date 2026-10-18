@@ -50,7 +50,12 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
-from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates
+from utils.content_chunks import (
+    CHUNK_OF_FIELD,
+    CONTENT_CHUNK_MAX_PER_MEMORY,
+    chunk_payload_updates,
+    chunk_point_id,
+)
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
@@ -1216,6 +1221,40 @@ async def delete_chunk_points(
         )
     except Exception as e:
         raise QdrantError(f"Failed to delete content chunks: {e}") from e
+
+
+async def delete_chunk_points_from(
+    memory_id: UUID | str,
+    start: int,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
+    """Delete a memory's content chunk points from ``chunk_index`` ``start`` on (#2061).
+
+    The trim after a chunk rewrite in place: chunk point ids are deterministic
+    per index (``chunk_point_id``), so the upsert has just replaced chunks
+    ``0..start-1`` and only the old ones past the new count are left. Deleted
+    by id, up to ``CONTENT_CHUNK_MAX_PER_MEMORY`` (ids with no point are
+    ignored). A no-op when ``start`` is at or past that cap, or on a
+    non-Qdrant store.
+
+    Raises:
+        QdrantError: If the delete fails.
+    """
+    if start >= CONTENT_CHUNK_MAX_PER_MEMORY or _active_store() is not None:
+        return
+    client = get_qdrant_client()
+    try:
+        await client.delete(
+            collection_name=collection_name,
+            points_selector=PointIdsList(
+                points=[
+                    chunk_point_id(memory_id, index)
+                    for index in range(max(start, 0), CONTENT_CHUNK_MAX_PER_MEMORY)
+                ]
+            ),
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to trim content chunks: {e}") from e
 
 
 async def purge_context_chunk_points(

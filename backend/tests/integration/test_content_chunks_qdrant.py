@@ -257,6 +257,43 @@ async def test_content_that_shrinks_loses_its_chunks(qdrant, collection):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_a_rewrite_replaces_chunks_in_place_and_trims_the_tail(
+    qdrant, collection, monkeypatch
+):
+    """#2061: the new chunks are upserted over ids 0..n-1, then only the old
+    chunks past n are deleted — the memory is never left without chunks."""
+    from unittest.mock import AsyncMock
+
+    from services import content_chunk_writer
+    from services.content_chunk_writer import write_content_chunks
+
+    memory_id = uuid4()
+    await _write(collection, memory_id, chunks=3)
+    # No database here: the row is current and the flag stays on.
+    monkeypatch.setattr(content_chunk_writer, "_check_superseded", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        content_chunk_writer, "content_chunks_enabled", AsyncMock(return_value=True)
+    )
+
+    n = await write_content_chunks(
+        None,  # type: ignore[arg-type]
+        _row(memory_id, "y" * 2000),  # two chunks
+        base_payload={"summary": "summary"},
+        embed_svc=_Embedder(),
+        collection_name=collection,
+        chunks_enabled=True,
+    )
+
+    assert n == 2
+    assert await _count(qdrant, collection, memory_id) == (1, 2)
+    points = await qdrant.retrieve(
+        collection, ids=[chunk_point_id(memory_id, i) for i in range(3)], with_payload=True
+    )
+    assert sorted((p.payload or {})["chunk_index"] for p in points) == [0, 1]
+    assert all((p.payload or {})["chunk_text"].startswith("y") for p in points)
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_turning_the_flag_off_purges_and_later_edits_write_none(qdrant, collection):
     from db.qdrant import purge_context_chunk_points
     from services.content_chunk_writer import write_content_chunks

@@ -18,12 +18,14 @@ import db.qdrant as qmod
 from db.qdrant import (
     KAGURA_MEMORIES_VECTOR_NAME,
     delete_chunk_points,
+    delete_chunk_points_from,
     delete_memory_from_qdrant,
     search_memories_qdrant,
     update_memory_payload_in_qdrant,
     upsert_chunk_points,
 )
-from utils.content_chunks import CHUNK_OF_FIELD
+from utils.content_chunks import CHUNK_OF_FIELD, CONTENT_CHUNK_MAX_PER_MEMORY, chunk_point_id
+from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,12 +126,37 @@ async def test_delete_chunk_points_empty_is_noop(mock_client):
     mock_client.delete.assert_not_awaited()
 
 
+async def test_delete_chunk_points_from_trims_by_id_past_the_new_count(mock_client):
+    """#2061: the trim after an in-place rewrite deletes chunk ids start..max-1 only."""
+    memory_id = uuid4()
+    await delete_chunk_points_from(memory_id, 3, "coll")
+    kwargs = mock_client.delete.await_args.kwargs
+    assert kwargs["collection_name"] == "coll"
+    selector = kwargs["points_selector"]
+    assert isinstance(selector, PointIdsList)
+    assert selector.points == [
+        chunk_point_id(memory_id, i) for i in range(3, CONTENT_CHUNK_MAX_PER_MEMORY)
+    ]
+
+
+async def test_delete_chunk_points_from_the_cap_is_a_noop(mock_client):
+    await delete_chunk_points_from(uuid4(), CONTENT_CHUNK_MAX_PER_MEMORY)
+    mock_client.delete.assert_not_awaited()
+
+
+async def test_delete_chunk_points_from_raises_a_qdrant_error(mock_client):
+    mock_client.delete.side_effect = RuntimeError("down")
+    with pytest.raises(QdrantError, match="trim content chunks"):
+        await delete_chunk_points_from(uuid4(), 0)
+
+
 async def test_chunk_helpers_are_noops_on_a_non_qdrant_store(monkeypatch):
     client = AsyncMock()
     monkeypatch.setattr(qmod, "get_qdrant_client", lambda: client)
     monkeypatch.setattr(qmod, "_active_store", lambda: object())
     await upsert_chunk_points([("i", [0.1], {})], user_id=UID, workspace_id=WS, context_id=CTX)
     await delete_chunk_points([uuid4()])
+    await delete_chunk_points_from(uuid4(), 0)
     client.upsert.assert_not_awaited()
     client.delete.assert_not_awaited()
 

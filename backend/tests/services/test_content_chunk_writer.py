@@ -50,6 +50,13 @@ def _embed_svc():
 LONG = "x" * (CONTENT_CHUNK_MIN_CONTENT_CHARS * 3)
 
 
+@pytest.fixture(autouse=True)
+def _trim():
+    """The trim after the upsert (#2061); a test that checks it patches it again."""
+    with patch.object(writer, "delete_chunk_points_from", AsyncMock()) as trim:
+        yield trim
+
+
 async def test_flag_on_short_content_still_deletes_old_chunks():
     """Shrink below the split threshold: the old body text must not survive."""
     memory = _memory("short")
@@ -136,7 +143,8 @@ async def test_flag_off_writes_nothing():
     upsert.assert_not_awaited()
 
 
-async def test_flag_on_replaces_chunks():
+async def test_flag_on_replaces_chunks_in_place():
+    """#2061: upsert over the old chunks first, then trim the ones past the new count."""
     memory = _memory(LONG)
     svc = _embed_svc()
     calls = []
@@ -145,6 +153,11 @@ async def test_flag_on_replaces_chunks():
         patch.object(
             writer, "delete_chunk_points", AsyncMock(side_effect=lambda *a: calls.append("delete"))
         ) as delete,
+        patch.object(
+            writer,
+            "delete_chunk_points_from",
+            AsyncMock(side_effect=lambda *a: calls.append("trim")),
+        ) as trim,
         patch.object(
             writer,
             "upsert_chunk_points",
@@ -160,8 +173,10 @@ async def test_flag_on_replaces_chunks():
         )
     expected = split_content(LONG)
     assert n == len(expected) > 1
-    assert calls == ["delete", "upsert"]  # stale chunks go first
-    delete.assert_awaited_once_with([memory.id], "coll")
+    # Never without chunks: the old ones are overwritten, then the tail trimmed.
+    assert calls == ["upsert", "trim"]
+    delete.assert_not_awaited()
+    trim.assert_awaited_once_with(memory.id, n, "coll")
     svc.embed_batch.assert_awaited_once()
     assert svc.embed_batch.await_args.args[0] == expected
     points = upsert.await_args.args[0]
@@ -296,18 +311,80 @@ async def test_a_preloaded_flag_is_still_re_read_before_the_upsert():
     upsert.assert_not_awaited()
 
 
-async def test_a_failed_delete_propagates():
-    """#2015: the old body must not survive an edit — the row takes the normal
-    failed/retry path instead."""
+@pytest.mark.parametrize("content", [LONG, "now short"])
+async def test_a_failed_trim_or_delete_is_raised_when_fail_closed(content):
+    """#2015: an edit's old body must not stay behind unnoticed — with
+    ``fail_open=False`` the row takes the caller's failed/retry path."""
+    from utils.exceptions import QdrantError
+
+    error = QdrantError("q")
     with (
         patch.object(writer, "chunk_points_supported", return_value=True),
-        patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
+        patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=error)),
+        patch.object(writer, "delete_chunk_points_from", AsyncMock(side_effect=error)),
         patch.object(writer, "upsert_chunk_points", AsyncMock()),
-        pytest.raises(RuntimeError),
     ):
-        await writer.write_content_chunks(
+        assert (
+            await writer.write_content_chunks(
+                _db(True),
+                _memory(content),
+                base_payload={},
+                embed_svc=_embed_svc(),
+                collection_name="c",
+            )
+            == 0
+        )
+        with pytest.raises(QdrantError):
+            await writer.write_content_chunks(
+                _db(True),
+                _memory(content),
+                base_payload={},
+                embed_svc=_embed_svc(),
+                collection_name="c",
+                fail_open=False,
+            )
+
+
+@pytest.mark.parametrize("fail_open", [True, False])
+async def test_a_failed_embedding_keeps_the_old_chunks(fail_open):
+    """#2061: nothing is deleted before the new chunks exist, so a provider
+    failure leaves the memory with its old chunks, not summary-only."""
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=RuntimeError("429"))
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+        patch.object(writer, "delete_chunk_points_from", AsyncMock()) as trim,
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        try:
+            await writer.write_content_chunks(
+                _db(True),
+                _memory(LONG),
+                base_payload={},
+                embed_svc=svc,
+                collection_name="c",
+                fail_open=fail_open,
+            )
+        except writer.ContentChunkWriteError:
+            assert not fail_open
+    delete.assert_not_awaited()
+    trim.assert_not_awaited()
+    upsert.assert_not_awaited()
+
+
+async def test_a_failed_upsert_trims_nothing():
+    """The old tail stays until a retry writes the new chunks in front of it."""
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points_from", AsyncMock()) as trim,
+        patch.object(writer, "upsert_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
+    ):
+        n = await writer.write_content_chunks(
             _db(True), _memory(LONG), base_payload={}, embed_svc=_embed_svc(), collection_name="c"
         )
+    assert n == 0
+    trim.assert_not_awaited()
 
 
 async def test_upsert_failure_stays_fail_open():
@@ -346,15 +423,18 @@ def _db_superseded_check(still_current: bool, *, current_at_entry: bool = True):
 
 
 async def _write_with(db, memory, svc=None):
+    """Returns ``(n, upsert, trim)``."""
     with (
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+        patch.object(writer, "delete_chunk_points_from", AsyncMock()) as trim,
         patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
     ):
         n = await writer.write_content_chunks(
             db, memory, base_payload={}, embed_svc=svc or _embed_svc(), collection_name="c"
         )
-    return n, upsert, delete
+    delete.assert_not_awaited()  # long content: replaced in place, never deleted
+    return n, upsert, trim
 
 
 async def test_a_superseded_run_writes_no_chunks():
@@ -362,9 +442,9 @@ async def test_a_superseded_run_writes_no_chunks():
 
     memory = _memory(LONG)
     with structlog.testing.capture_logs() as logs:
-        n, upsert, delete = await _write_with(_db_superseded_check(False), memory)
+        n, upsert, trim = await _write_with(_db_superseded_check(False), memory)
     assert n == 0
-    delete.assert_awaited_once()  # current at the start: the old chunks went first
+    trim.assert_not_awaited()  # the newer run's chunks are left as it wrote them
     upsert.assert_not_awaited()
     event = next(e for e in logs if e["event"] == "content_chunks_skipped_superseded")
     assert event["memory_id"] == str(memory.id)
@@ -374,34 +454,34 @@ async def test_a_superseded_run_writes_no_chunks():
 
 async def test_a_run_superseded_before_it_starts_deletes_nothing():
     """A stale run that reaches the writer after a newer run finished must not
-    delete the newer run's chunks (and pays for no embedding)."""
+    touch the newer run's chunks (and pays for no embedding)."""
     import structlog
 
     svc = _embed_svc()
     db = _db_superseded_check(True, current_at_entry=False)
     with structlog.testing.capture_logs() as logs:
-        n, upsert, delete = await _write_with(db, _memory(LONG), svc)
+        n, upsert, trim = await _write_with(db, _memory(LONG), svc)
     assert n == 0
-    delete.assert_not_awaited()
+    trim.assert_not_awaited()
     svc.embed_batch.assert_not_awaited()
     upsert.assert_not_awaited()
     event = next(e for e in logs if e["event"] == "content_chunks_skipped_superseded")
-    assert event["stage"] == "before_delete"
+    assert event["stage"] == "before_write"
 
 
-async def test_a_failed_check_before_the_delete_does_not_stop_the_run():
+async def test_a_failed_check_before_the_write_does_not_stop_the_run():
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[flag, RuntimeError("db"), flag, _check(True)])
-    n, upsert, delete = await _write_with(db, _memory(LONG))
+    n, upsert, trim = await _write_with(db, _memory(LONG))
     assert n == len(split_content(LONG))
-    delete.assert_awaited_once()
     upsert.assert_awaited_once()
+    trim.assert_awaited_once()
 
 
 async def test_a_current_run_writes_its_chunks():
-    n, upsert, delete = await _write_with(_db_superseded_check(True), _memory(LONG))
+    n, upsert, _ = await _write_with(_db_superseded_check(True), _memory(LONG))
     assert n == len(split_content(LONG))
     upsert.assert_awaited_once()
 
@@ -433,7 +513,7 @@ async def test_the_check_runs_after_the_embedding_and_before_the_upsert():
         await writer.write_content_chunks(
             db, _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
         )
-    # flag lookup, check, (delete), embed, flag re-read, check, upsert
+    # flag lookup, check, embed, flag re-read, check, upsert
     assert order == ["execute", "execute", "embed", "execute", "execute", "upsert"]
 
 
@@ -525,7 +605,7 @@ async def test_a_failed_superseded_check_is_fail_open():
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[flag, _check(True), flag, RuntimeError("db")])
-    n, upsert, delete = await _write_with(db, _memory(LONG))
+    n, upsert, _ = await _write_with(db, _memory(LONG))
     assert n == 0
     upsert.assert_not_awaited()
 
