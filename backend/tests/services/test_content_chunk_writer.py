@@ -411,13 +411,22 @@ def _check(current: bool):
     return check
 
 
-def _db_superseded_check(still_current: bool, *, current_at_entry: bool = True):
-    """Flag lookup, check before the delete, flag re-read, check before the upsert."""
+def _db_superseded_check(
+    still_current: bool, *, current_at_entry: bool = True, current_after_write: bool = True
+):
+    """Flag lookup, check before the write, flag re-read, check before the
+    upsert and — without a claim — the check after the write (#2061)."""
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
     db.execute = AsyncMock(
-        side_effect=[flag, _check(current_at_entry), flag, _check(still_current)]
+        side_effect=[
+            flag,
+            _check(current_at_entry),
+            flag,
+            _check(still_current),
+            _check(current_after_write),
+        ]
     )
     return db
 
@@ -473,7 +482,7 @@ async def test_a_failed_check_before_the_write_does_not_stop_the_run():
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[flag, RuntimeError("db"), flag, _check(True)])
+    db.execute = AsyncMock(side_effect=[flag, RuntimeError("db"), flag, _check(True), _check(True)])
     n, upsert, trim = await _write_with(db, _memory(LONG))
     assert n == len(split_content(LONG))
     upsert.assert_awaited_once()
@@ -513,8 +522,8 @@ async def test_the_check_runs_after_the_embedding_and_before_the_upsert():
         await writer.write_content_chunks(
             db, _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
         )
-    # flag lookup, check, embed, flag re-read, check, upsert
-    assert order == ["execute", "execute", "embed", "execute", "execute", "upsert"]
+    # flag lookup, check, embed, flag re-read, check, upsert, (trim), check
+    assert order == ["execute", "execute", "embed", "execute", "execute", "upsert", "execute"]
 
 
 async def test_the_superseded_check_compares_content_status_and_claim():
@@ -569,7 +578,10 @@ async def test_a_caller_without_a_claim_compares_no_stamp():
     n, upsert, _ = await _write_with(db, memory)
     assert n == len(split_content(LONG))
     upsert.assert_awaited_once()
-    for call in (db.execute.await_args_list[1], db.execute.await_args_list[3]):
+    calls = db.execute.await_args_list
+    assert len(calls) == 5
+    # Before the write, before the upsert, after the write.
+    for call in (calls[1], calls[3], calls[4]):
         sql = str(call.args[0])
         assert "memories.content = " in sql
         assert "embedding_attempted_at" not in sql
@@ -944,3 +956,93 @@ async def test_requeue_embedding_raises_a_failed_update():
     db.execute = AsyncMock(side_effect=RuntimeError("db"))
     with pytest.raises(RuntimeError):
         await writer.requeue_embedding(db, uuid4(), reason="r")
+
+
+async def test_a_sleep_write_overtaken_by_a_newer_write_is_re_queued():
+    """#2061: a run without a claim reads the row once more after its write; if
+    an edit landed meanwhile its chunks may have replaced the current ones, so
+    the row goes back to ``pending`` (fenced on ``success``) and 0 is returned."""
+    import structlog
+    from sqlalchemy.dialects import postgresql
+
+    memory = _memory(LONG)
+    db = _db_superseded_check(True, current_after_write=False)
+    db.execute.side_effect = [*db.execute.side_effect, MagicMock(rowcount=1)]
+    with structlog.testing.capture_logs() as logs:
+        n, upsert, trim = await _write_with(db, memory)
+
+    assert n == 0
+    upsert.assert_awaited_once()
+    trim.assert_awaited_once()
+    requeue = db.execute.await_args_list[-1].args[0]
+    sql = str(requeue.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert "SET embedding_status='pending'" in sql
+    assert "embedding_status = 'success'" in sql
+    event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
+    assert event["requeued"] is True
+    assert next(e for e in logs if e["event"] == "embedding_requeued")["reason"] == (
+        "stale_after_write"
+    )
+    assert not [e for e in logs if e["event"] == "content_chunks_written"]
+
+
+async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write():
+    memory = _memory("now short")
+    flag = MagicMock()
+    flag.scalar_one_or_none.return_value = True
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[flag, _check(True), _check(False), MagicMock(rowcount=0)])
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+    ):
+        n = await writer.write_content_chunks(
+            db, memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n == 0
+    delete.assert_awaited_once()
+    assert db.execute.await_count == 4  # flag, check, check after the write, re-queue
+
+
+async def test_an_embedding_run_does_not_check_after_its_write():
+    """A claim holder's lost claim is caught by its fenced outcome write instead."""
+    from datetime import datetime
+
+    from services.embedding_claim import EmbeddingClaim
+
+    memory = _memory(LONG)
+    db = _db_superseded_check(True, current_after_write=False)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+    ):
+        n = await writer.write_content_chunks(
+            db,
+            memory,
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            claim=EmbeddingClaim(db, memory.id, datetime(2026, 1, 2)),
+        )
+    assert n == len(split_content(LONG))
+    assert db.execute.await_count == 4
+
+
+async def test_a_failed_check_after_the_write_is_fail_open_controlled():
+    flag = MagicMock()
+    flag.scalar_one_or_none.return_value = True
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[flag, _check(True), flag, _check(True), RuntimeError("db")])
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+        pytest.raises(writer.ContentChunkWriteError),
+    ):
+        await writer.write_content_chunks(
+            db,
+            _memory(LONG),
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            fail_open=False,
+        )

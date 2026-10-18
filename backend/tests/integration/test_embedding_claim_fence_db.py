@@ -234,3 +234,63 @@ async def test_a_slow_live_run_keeps_its_claim(async_engine: AsyncEngine, row: M
 
     final = await _final(async_engine, row.id)
     assert final.embedding_status == "success"
+
+
+async def test_a_run_whose_claim_a_finished_run_took_re_queues_the_row(
+    async_engine: AsyncEngine, row: Memory
+) -> None:
+    """#2061: a newer run reclaimed the row and finished while this run was
+    still writing, so this run's points may have replaced the newer run's.
+    Its fenced success write matches nothing, and the row goes back to
+    ``pending`` for the sweep; the newer run's stamp is left as it is."""
+    from sqlalchemy import update
+
+    from services import memory_service
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    sessions: list[AsyncSession] = []
+
+    def _get_db() -> AsyncIterator[AsyncSession]:
+        async def _gen() -> AsyncIterator[AsyncSession]:
+            session = maker()
+            sessions.append(session)
+            yield session
+
+        return _gen()
+
+    newer_stamp = utcnow() + timedelta(seconds=61)
+
+    async def _embed(*_a: Any, **_k: Any) -> list[float]:
+        async with maker() as other:
+            await other.execute(
+                update(Memory)
+                .where(Memory.id == row.id)
+                .values(embedding_status="success", embedding_attempted_at=newer_stamp)
+            )
+            await other.commit()
+        return [0.1]
+
+    svc = MagicMock(model="m")
+    svc.embed = AsyncMock(side_effect=_embed)
+    try:
+        with (
+            patch("db.base.get_db", side_effect=_get_db),
+            patch("services.embedding_service.EmbeddingService", MagicMock()),
+            patch(
+                "services.context_routing.resolve_context_routing",
+                AsyncMock(return_value=("kagura_memories", svc)),
+            ),
+            patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
+            patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
+            patch.object(memory_service, "_create_knn_seed_edges", AsyncMock()) as knn,
+            patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()),
+        ):
+            await asyncio.wait_for(memory_service.process_pending_embedding(row.id), _TIMEOUT)
+    finally:
+        for session in sessions:
+            await session.close()
+
+    final = await _final(async_engine, row.id)
+    assert final.embedding_status == "pending"
+    assert final.embedding_attempted_at == newer_stamp
+    knn.assert_not_awaited()

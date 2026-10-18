@@ -31,10 +31,14 @@ writing over chunks a newer run already wrote; the second catches an edit
 that landed while the chunks were embedded. ``updated_at`` is not
 used: metadata-only changes move it without a re-embed, so skipping on it
 would leave the memory without chunks. What remains is the gap between the
-second check and the upsert and trim (two round trips): a newer run that
-writes inside it can still be overwritten by this run's upsert. Comparing the
-``content_hash`` every chunk point now carries would close it; nothing
-compares it yet. The summary point has the same race and is not guarded here.
+second check and the write (two round trips): a newer run that writes inside
+it can be overwritten by this run's upsert. That is repaired, not prevented
+(#2061): a run without a claim reads the row once more after its write and
+re-queues it when it moved on, and an embedding run that finds its claim lost
+re-queues it (``process_pending_embedding``). Both re-queues move only a
+``success`` row, so a run still in flight is left to finish. The
+``content_hash`` every chunk point carries is not compared yet. The summary
+point has the same race; the claim-lost re-queue covers it too.
 
 Every failure is logged (``content_chunks_failed``, error class only — never
 the text). One before the upsert leaves the old chunks as they were. By
@@ -210,6 +214,23 @@ async def _superseded_before_write(
     return superseded
 
 
+async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | None) -> bool:
+    """The check after the write of a run without a claim (the Sleep paths, #2061).
+
+    Such a run compares no claim stamp, so an edit plus the embedding run that
+    followed it can land between its last check and its upsert, and this
+    run's chunks then replace the current ones. One more read of the row
+    tells: if it moved on, re-queue it (``requeue_embedding``: a ``success``
+    row only — a ``pending`` or ``processing`` one is being embedded anyway)
+    so the embedding sweep writes the chunks of the current content.
+    """
+    if not await _check_superseded(db, memory.id, content, None):
+        return False
+    requeued = await requeue_embedding(db, memory.id, reason="stale_after_write")
+    logger.info("content_chunks_stale_after_write", memory_id=str(memory.id), requeued=requeued)
+    return True
+
+
 async def write_content_chunks(
     db: AsyncSession,
     memory: Memory,
@@ -248,7 +269,9 @@ async def write_content_chunks(
         claim: The embedding run's own claim (#2041); its stamp, renewed
             while the run works, is what the superseded checks compare.
             ``None`` (the Sleep paths) compares no stamp, only the content,
-            the soft delete and a re-queue.
+            the soft delete and a re-queue — and checks once more after the
+            write, re-queueing the memory when a newer write landed meanwhile
+            (#2061; it then returns 0).
         usage: Optional out-parameter, filled by ``embed_batch`` (``cached``,
             ``requests``, ``tokens``) when the chunks were embedded — set even
             when the write then fails, since the provider has billed them.
@@ -284,6 +307,8 @@ async def write_content_chunks(
             # memory keeps no chunk points, so removed body text never
             # survives in ``chunk_text``.
             await delete_chunk_points([memory.id], collection_name)
+            if claim is None:
+                await _stale_after_write(db, memory, content)
             return 0
         digest = content_hash(content)
         vectors = await embed_svc.embed_batch(
@@ -334,6 +359,8 @@ async def write_content_chunks(
             collection_name=collection_name,
         )
         await delete_chunk_points_from(memory.id, len(points), collection_name)
+        if claim is None and await _stale_after_write(db, memory, content):
+            return 0
     except Exception as e:
         _log_failure(memory, collection_name, e)
         if not fail_open:

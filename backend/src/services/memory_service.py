@@ -72,7 +72,11 @@ from models.schemas import (
 )
 from repositories.memory import AccessStats, MemoryRepository
 from services.capacity_lock import CapacityPolicy
-from services.content_chunk_writer import chunk_cascade_needed, write_content_chunks
+from services.content_chunk_writer import (
+    chunk_cascade_needed,
+    requeue_embedding,
+    write_content_chunks,
+)
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
@@ -8287,6 +8291,28 @@ def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[
     return payload, sparse_indices, sparse_values
 
 
+async def _requeue_after_lost_claim(db: Any, memory_id: UUID) -> bool:
+    """Re-queue a row whose embedding run found its claim lost after writing (#2061).
+
+    The run's points went out before it knew: a newer run may have written
+    the memory's summary and chunk points first, and this run's writes then
+    replaced them. When that newer run is done (``success``), the row goes
+    back to ``pending`` so the sweep writes them once more; a row re-queued
+    by an edit or a migration switch, or a newer run still in flight, is left
+    as it is (``requeue_embedding`` moves only a ``success`` row). Never
+    raises.
+    """
+    try:
+        requeued = await requeue_embedding(db, memory_id, reason="claim_lost_after_write")
+        await db.commit()
+    except Exception as e:
+        logger.warning(
+            "embedding_requeue_failed", memory_id=str(memory_id), error_class=type(e).__name__
+        )
+        return False
+    return requeued
+
+
 async def process_pending_embedding(memory_id: UUID) -> None:
     """Process embedding generation + Qdrant upsert for a pending memory.
 
@@ -8473,6 +8499,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     "embedding_claim_lost",
                     memory_id=str(memory_id),
                     collection=collection,
+                    requeued=await _requeue_after_lost_claim(db, memory_id),
                 )
                 return
 
@@ -8556,7 +8583,12 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 logger.warning("embedding_status_update_failed", memory_id=str(memory_id))
 
             if claim_lost:
-                logger.info("embedding_claim_lost", memory_id=str(memory_id), error=str(e))
+                logger.info(
+                    "embedding_claim_lost",
+                    memory_id=str(memory_id),
+                    error=str(e),
+                    requeued=await _requeue_after_lost_claim(db, memory_id),
+                )
                 return
 
             # #1496: the transition that matters to an operator is the one into

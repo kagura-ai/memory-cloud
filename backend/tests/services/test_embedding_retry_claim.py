@@ -160,7 +160,16 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
     memory_id = uuid4()
     captured: list = []
     # #2015: the content-chunk flag is read after the summary point (off here).
-    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _chunk_flag(False), _rowcount(0)])
+    # #2061: a lost claim re-queues the row (fenced on success; nothing to move here).
+    db = _worker_db(
+        [
+            _claimed(memory_id),
+            _memory_row(memory_id),
+            _chunk_flag(False),
+            _rowcount(0),
+            _rowcount(0),
+        ]
+    )
     original_execute = db.execute
 
     async def _execute(stmt, *a, **k):
@@ -190,9 +199,9 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
     ):
         await memory_service.process_pending_embedding(memory_id)
 
-    # claim UPDATE, SELECT memory, chunk-flag SELECT, success UPDATE — and
-    # nothing after a lost claim.
-    assert len(captured) == 4
+    # claim UPDATE, SELECT memory, chunk-flag SELECT, success UPDATE, the
+    # re-queue (#2061) — and nothing else after a lost claim.
+    assert len(captured) == 5
     sql = str(
         captured[3].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     ).upper()
@@ -208,7 +217,7 @@ async def test_failure_write_is_fenced_on_still_owning_the_claim():
 
     memory_id = uuid4()
     captured: list = []
-    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _rowcount(0), _rowcount(0)])
     original_execute = db.execute
 
     async def _execute(stmt, *a, **k):
@@ -233,7 +242,7 @@ async def test_failure_write_is_fenced_on_still_owning_the_claim():
     ):
         await memory_service.process_pending_embedding(memory_id)
 
-    assert len(captured) == 3
+    assert len(captured) == 4  # claim, SELECT, failure UPDATE, the re-queue (#2061)
     sql = str(
         captured[2].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     ).upper()
@@ -303,8 +312,16 @@ async def test_a_reclaimed_run_does_not_stamp_success_on_the_newer_claim():
 
     memory_id = uuid4()
     # The newer claim moved the stamp: the fenced success UPDATE matches nothing.
+    # The newer run is done (success), so the row is re-queued (#2061).
     db = _capturing_db(
-        memory_id, [_claimed(memory_id), _memory_row(memory_id), _chunk_flag(False), _rowcount(0)]
+        memory_id,
+        [
+            _claimed(memory_id),
+            _memory_row(memory_id),
+            _chunk_flag(False),
+            _rowcount(0),
+            _rowcount(1),
+        ],
     )
     embed_svc = MagicMock()
     embed_svc.embed = AsyncMock(return_value=[0.1])
@@ -319,12 +336,14 @@ async def test_a_reclaimed_run_does_not_stamp_success_on_the_newer_claim():
     where = success_sql.split("WHERE", 1)[1]
     assert "EMBEDDING_STATUS = 'PROCESSING'" in where
     assert "EMBEDDING_ATTEMPTED_AT = '2026-01-02 03:04:05.678901'" in where
-    # Fenced out: one info line, nothing else (no seeding, no further writes).
-    assert len(db.captured) == 4
+    # Fenced out: the re-queue, one info line, nothing else (no seeding).
+    assert len(db.captured) == 5
+    _assert_requeue(db.captured[4])
     knn.assert_not_awaited()
     tags.assert_not_awaited()
     events = [c.args[0] for c in log.info.call_args_list]
     assert events == ["embedding_claim_lost"]
+    assert log.info.call_args.kwargs["requeued"] is True
 
 
 @pytest.mark.asyncio
@@ -332,7 +351,9 @@ async def test_a_reclaimed_run_does_not_mark_the_newer_claim_failed():
     from services import memory_service
 
     memory_id = uuid4()
-    db = _capturing_db(memory_id, [_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    db = _capturing_db(
+        memory_id, [_claimed(memory_id), _memory_row(memory_id), _rowcount(0), _rowcount(0)]
+    )
     embed_svc = MagicMock()
     embed_svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
 
@@ -345,8 +366,41 @@ async def test_a_reclaimed_run_does_not_mark_the_newer_claim_failed():
     # The failure write itself moves the stamp (the #979 backoff clock); the
     # fence still compares the value this run's claim wrote.
     assert "EMBEDDING_ATTEMPTED_AT = '2026-01-02 03:04:05.678901'" in where
-    assert len(db.captured) == 3
+    assert len(db.captured) == 4
+    _assert_requeue(db.captured[3])
     events = [c.args[0] for c in log.info.call_args_list]
     assert events == ["embedding_claim_lost"]
+    # The newer run is still in flight (not success): nothing was re-queued.
+    assert log.info.call_args.kwargs["requeued"] is False
     log.warning.assert_not_called()
     log.error.assert_not_called()
+
+
+def _assert_requeue(stmt: Any) -> None:
+    """#2061: the lost claim's re-queue moves only a live ``success`` row to
+    ``pending`` (a newer run still in flight, or an edit, is left alone)."""
+    sql = _compiled(stmt)
+    set_clause, where = sql.split(" WHERE ", 1)
+    assert set_clause.endswith("SET EMBEDDING_STATUS='PENDING'")
+    assert "EMBEDDING_STATUS = 'SUCCESS'" in where
+    assert "DELETED_AT IS NULL" in where
+
+
+@pytest.mark.asyncio
+async def test_a_failed_re_queue_after_a_lost_claim_is_only_logged():
+    from services import memory_service
+
+    memory_id = uuid4()
+    db = _capturing_db(
+        memory_id,
+        [_claimed(memory_id), _memory_row(memory_id), _rowcount(0), RuntimeError("db")],
+    )
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+
+    _, _, log = await _run_worker(memory_service, db, embed_svc)
+
+    assert log.info.call_args.kwargs["requeued"] is False
+    warning = log.warning.call_args
+    assert warning.args[0] == "embedding_requeue_failed"
+    assert warning.kwargs["error_class"] == "RuntimeError"
