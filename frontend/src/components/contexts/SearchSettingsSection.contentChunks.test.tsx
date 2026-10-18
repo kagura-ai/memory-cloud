@@ -97,7 +97,9 @@ import { SearchSettingsSection } from "./SearchSettingsSection";
 
 /** A refusal as `lib/api/base.ts` hands it over: the gate facts attached. */
 function refusal(gate: Record<string, unknown>) {
-  return Object.assign(new ApiError("refused"), { gate });
+  // The mocked ApiError is a bare Error subclass taking a message.
+  const MockApiError = ApiError as unknown as new (message: string) => Error;
+  return Object.assign(new MockApiError("refused"), { gate });
 }
 
 const BASE = {
