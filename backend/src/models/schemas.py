@@ -367,7 +367,9 @@ class SupersedeCandidate(TZAwareBaseModel):
     # #2016: True when the deployment's judge (SUPERSEDE_VERIFY_MODE=llm)
     # confirmed, at or above its confidence floor, that this memory replaces
     # the candidate — the signal a client may auto-accept on. Absent (None)
-    # when unverified; a candidate judged a parallel fact is never surfaced.
+    # when unverified; a candidate judged a parallel fact is not surfaced.
+    # Both hold only while the verdict is about both memories' current texts
+    # (#2059): after an edit of either, the candidate surfaces unverified.
     verified: bool | None = None
 
 

@@ -4,6 +4,27 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.111.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.111.0) — 2026-10-18
+
+Hardening after v0.110.0: deploys migrate before the new code starts, content chunk writes are retried and can no longer be overwritten by a stale embedding run, Sleep keeps a memory's BM25 vector, supersede verdicts go stale by one rule, and `GET /mcp` stops a client reconnect loop.
+
+### Changed
+- **`GET /mcp` answers `405`** ([#2057](https://github.com/kagura-ai/memory-cloud/issues/2057)): the server sends no server-initiated messages, so the optional GET stream now gets `405 Method Not Allowed` with `Allow: POST, DELETE`, as the MCP Streamable HTTP spec allows. It used to answer `200 text/event-stream` and close at once, and MCP SDK clients reconnected in a tight loop (auth and a session lookup per reconnect, plus several log lines). A GET naming an ended, foreign or never-issued session still gets `404`, and a GET no longer opens a session. Every other `405` on `/mcp` now also lists `POST, DELETE`.
+- **`deploy.sh` migrates before it starts the new color** ([#2048](https://github.com/kagura-ai/memory-cloud/issues/2048)): `alembic upgrade head` runs as a one-off `compose run --rm --no-deps` container before the inactive color starts, so its startup tasks never meet a schema that is one migration behind. A failed migration stops the deploy before anything is switched. In registry mode the script checks that the pulled image is the one compose will run. `--rollback` still runs no migrations.
+
+### Fixed
+- **Sleep reindex and undo keep the BM25 sparse vector** ([#2053](https://github.com/kagura-ai/memory-cloud/issues/2053)): both paths rewrote a memory's point without its sparse vector, so after a Sleep run the memory dropped out of keyword (BM25) recall. They now build the point the same way the embedding pipeline does. Resource-indexer rows are rebuilt through the resource indexer.
+- **Failed content chunk writes are retried** ([#2049](https://github.com/kagura-ai/memory-cloud/issues/2049)): with `content_chunks_enabled` on, a transient failure (most often the self-hosted reachability probe) left a memory stamped `success` with no chunk vectors. The embedding pipeline now marks the row failed so the sweep retries it, and a successful self-hosted probe is cached per process for 60 seconds instead of running on almost every embed.
+- **A stale embedding run cannot overwrite a newer one** ([#2041](https://github.com/kagura-ai/memory-cloud/issues/2041)): the chunk writer checks, before it deletes and again before it writes, that the memory was not edited, deleted or claimed by a newer run meanwhile. The run's success and failure updates only apply to its own claim, and a live run renews its claim so a slow run is not taken over. Every summary-only Qdrant scroll now uses one shared filter that excludes chunk points, and a test fails on a new scroll that does not.
+- **`tags_match="all"` with `tags_normalize`** ([#2058](https://github.com/kagura-ai/memory-cloud/issues/2058)): the widened filter ORed every spelling of every requested tag together, so a memory with only one of two requested tags matched. Each requested tag is now its own group (any of its spellings), and the groups are ANDed.
+- **Supersede verdicts go stale by one rule** ([#2059](https://github.com/kagura-ai/memory-cloud/issues/2059)): with `SUPERSEDE_VERIFY_MODE=llm`, a `parallel` suggestion shown after the older memory was edited could not be dismissed, and an edit during the judge call could keep `verified: true` on text the judge never saw. A verdict now counts only while both memories' texts match what the judge saw; a run whose memory was edited during the judge call writes nothing; and a re-embed that finds no near neighbour clears a live candidate (dismissals are never cleared).
+- **Failed Sleep LLM calls count their tokens** ([#2038](https://github.com/kagura-ai/memory-cloud/issues/2038)): tokens a failed call still spent now reach the Sleep report totals and count against `max_llm_calls`; the analysis fallback chain includes a failed attempt's spend in its cost.
+
+### Notes
+- No migration, no new environment variables.
+- Self-hosted operators using `terraform/single-server/scripts/deploy.sh`: the migration step now runs before the new color starts (see "Migration discipline" in `terraform/single-server/README.md`).
+- Content chunk defaults and backfill ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)) move to v0.112.0.
+
 ## [v0.110.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.110.0) — 2026-10-17
 
 Retrieval that can see content and a reranker that cannot quietly make recall worse: opt-in content chunk vectors for dense retrieval, the Qwen3-Reranker prompt template on the vLLM and Ollama paths with a fail-safe for scores that carry no signal, the supersede judge's calls in the cost ledger, and Japanese tag variants folded together.

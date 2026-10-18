@@ -41,7 +41,7 @@ A context migrated before v0.96.0 has label-only vectors for its resource-ingest
 
 **What the reconciliation does not cover.** Forgotten memories are found by their tombstone (`deleted_at`). A row that was hard-deleted with no tombstone while the migration ran (the 30-day cleanup of old tombstones, or a manual `DELETE`) leaves its target point behind; a later `--verify` against that context removes it, since verify reconciles every target point that has no live row.
 
-**In-flight embedding workers.** A worker that claimed a memory just before `--switch` embeds it under the old routing. The switch re-queues that row, and the worker only records `success` while it still owns its claim (`embedding_status='processing'`), so the sweep re-embeds the row under the new routing. The log line for that case is `embedding_claim_lost`.
+**In-flight embedding workers.** A worker that claimed a memory just before `--switch` embeds it under the old routing. The switch re-queues that row, and the worker only records `success` while it still owns its claim (`embedding_status='processing'` and the `embedding_attempted_at` stamp its claim holds; a live worker renews that stamp), so the sweep re-embeds the row under the new routing. The log line for that case is `embedding_claim_lost`.
 
 **During the migration** a context is searched against whichever collection it routes to, so cross-context recall between a migrated and a not-yet-migrated context fails the same way it does today for contexts on different models. Migrate a deployment's contexts in one pass rather than over days.
 

@@ -822,6 +822,9 @@ class TestSupersedeCandidateExposure:
         m.supersede_candidate = candidate
         m.workspace_id = workspace_id or cls.WS
         m.context_id = context_id or cls.CTX
+        # #2059: the source's own text is half of what a verdict is about.
+        m.summary = "the newer fact"
+        m.content = "the newer content"
         return m
 
     @staticmethod
@@ -876,15 +879,21 @@ class TestSupersedeCandidateExposure:
 
     @staticmethod
     def _verification(verdict, confidence, *, old_fingerprint=None):
-        from services.supersede_verify import text_fingerprint
+        from services.supersede_verify import pair_fingerprint, text_fingerprint
 
         if old_fingerprint is None:  # matches _target_row's defaults
             old_fingerprint = text_fingerprint("the older fact", "the older content")
+        # Both sides as _target_row and _mem default them (#2059).
+        fingerprint = pair_fingerprint(
+            SimpleNamespace(summary="the older fact", content="the older content"),
+            SimpleNamespace(summary="the newer fact", content="the newer content"),
+        )
         return {
             "verdict": verdict,
             "confidence": confidence,
             "verified": False,
             "at": "2026-10-01T12:00:00Z",
+            "fingerprint": fingerprint,
             "old_fingerprint": old_fingerprint,
         }
 
@@ -956,6 +965,46 @@ class TestSupersedeCandidateExposure:
 
         assert resolved[s1.id].verified is None  # surfaced again, unverified
         assert resolved[s2.id].verified is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_sets_a_verdict_aside_when_the_source_text_changed(self, service):
+        """#2059: a verdict about the NEW memory's earlier text (an edit landed
+        during the judge call, or moved the memory away from every neighbour)
+        neither verifies nor hides the pair: it surfaces unverified."""
+        parallel_t, verified_t = uuid4(), uuid4()
+        c1 = self._candidate(parallel_t)
+        c1["verification"] = self._verification("parallel", 0.9)
+        c2 = self._candidate(verified_t)
+        c2["verification"] = {**self._verification("supersedes", 0.99), "verified": True}
+        s1, s2 = self._mem(c1), self._mem(c2)
+        s1.content = "the newer content, rewritten"
+        s2.summary = "the newer fact, about something else now"
+        self._mock_rows(service, [self._target_row(parallel_t), self._target_row(verified_t)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(s1.id): s1, str(s2.id): s2}, user_id="u1", operation="recall"
+        )
+
+        assert resolved[s1.id].verified is None  # surfaced, unverified
+        assert resolved[s2.id].verified is None  # no verified:true for the edited text
+
+    @pytest.mark.asyncio
+    async def test_resolve_does_not_verify_a_verdict_without_a_pair_fingerprint(self, service):
+        """A stored verdict that predates the pair check (no ``fingerprint``)
+        cannot be shown to still describe the source: it surfaces unverified."""
+        target_id = uuid4()
+        cand = self._candidate(target_id)
+        verification = self._verification("supersedes", 0.99)
+        del verification["fingerprint"]
+        cand["verification"] = verification
+        source = self._mem(cand)
+        self._mock_rows(service, [self._target_row(target_id)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved[source.id].verified is None
 
     @pytest.mark.asyncio
     async def test_resolve_drops_dead_target(self, service):

@@ -4,7 +4,16 @@ Issue #67: Verify tags are properly indexed, filtered, and searched.
 Issue #79: Verify AND logic for tag filters (tags_match="all").
 """
 
-from qdrant_client.models import FieldCondition, MatchAny, MatchValue
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchAny,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from db.qdrant import _build_tag_filter_conditions
 
@@ -141,3 +150,90 @@ class TestTagFilterIntegration:
         """MatchAny matches if ANY tag in the list is present."""
         conditions = _build_tag_filter_conditions({"tags": ["引越し", "ひっこし"]})
         assert len(conditions[0].match.any) == 2
+
+
+def _matching_ids(tagged: dict[int, list[str]], filters: dict) -> set[int]:
+    """Ids whose tags satisfy the built conditions, judged by Qdrant itself.
+
+    Local (in-process) mode applies the same filter semantics as the server, so
+    this checks what the conditions MATCH, not only their shape.
+    """
+    client = QdrantClient(":memory:")
+    client.create_collection("t", vectors_config=VectorParams(size=2, distance=Distance.COSINE))
+    client.upsert(
+        "t",
+        points=[
+            PointStruct(id=i, vector=[1.0, 0.0], payload={"tags": tags})
+            for i, tags in tagged.items()
+        ],
+    )
+    hits, _ = client.scroll(
+        "t", scroll_filter=Filter(must=_build_tag_filter_conditions(filters)), limit=100
+    )
+    return {int(h.id) for h in hits}
+
+
+class TestTagFilterAllWithNormalize:
+    """#2058: under tags_match='all', tags_normalize ANDs one group per tag.
+
+    recall widens the filter to every stored spelling of each requested tag and
+    hands the builder the flat list. ANDing that list made every spelling a
+    required tag, so turning tolerance on returned fewer memories, not more.
+    """
+
+    # recall's expansion of ["ログ", "デプロイ"] when another memory is tagged ろぐ.
+    EXPANDED = {"tags": ["ログ", "デプロイ", "ろぐ"], "tags_match": "all", "tags_normalize": True}
+
+    def test_spellings_of_one_tag_become_one_match_any(self):
+        conditions = _build_tag_filter_conditions(self.EXPANDED)
+
+        assert len(conditions) == 2
+        assert isinstance(conditions[0].match, MatchAny)
+        assert conditions[0].match.any == ["ログ", "ろぐ"]
+        assert isinstance(conditions[1].match, MatchValue)
+        assert conditions[1].match.value == "デプロイ"
+
+    def test_without_variants_the_conditions_are_unchanged(self):
+        """A tag with one spelling keeps the exact MatchValue of plain 'all'."""
+        plain = {"tags": ["python", "fastapi"], "tags_match": "all"}
+        normalized = {**plain, "tags_normalize": True}
+        assert _build_tag_filter_conditions(normalized) == _build_tag_filter_conditions(plain)
+
+    def test_without_tags_normalize_every_tag_stays_required(self):
+        """Exact semantics are the default: no grouping without the opt-in."""
+        conditions = _build_tag_filter_conditions({**self.EXPANDED, "tags_normalize": False})
+        assert [c.match.value for c in conditions] == ["ログ", "デプロイ", "ろぐ"]
+
+    def test_any_stays_one_flat_match_any(self):
+        conditions = _build_tag_filter_conditions({**self.EXPANDED, "tags_match": "any"})
+        assert len(conditions) == 1
+        assert conditions[0].match.any == ["ログ", "デプロイ", "ろぐ"]
+
+    def test_the_issue_scenario_matches_the_exactly_tagged_memories(self):
+        tagged = {
+            1: ["ログ", "デプロイ"],
+            2: ["ろぐ", "デプロイ"],
+            3: ["ろぐ"],
+            4: ["デプロイ"],
+        }
+        assert _matching_ids(tagged, self.EXPANDED) == {1, 2}
+
+    def test_normalize_never_matches_fewer_than_exact(self):
+        """Tolerance only widens: every exact 'all' match stays matched."""
+        tagged = {1: ["ログ", "デプロイ"], 2: ["ろぐ", "デプロイ"], 3: ["ログ"]}
+        exact = _matching_ids(tagged, {"tags": ["ログ", "デプロイ"], "tags_match": "all"})
+        assert exact == {1}
+        assert exact <= _matching_ids(tagged, self.EXPANDED)
+
+    def test_variants_cannot_push_a_requested_tag_past_the_cap(self):
+        """The 50-tag cap counts tags, not spellings, under all + normalize."""
+        widened: list[str] = []
+        for stem in ("alpha", "bravo", "charlie"):
+            widened += [stem] + [f"{stem}{'-' * n}" for n in range(1, 21)]  # 21 spellings
+        widened.append("delta")  # entry 64: past a flat cap of 50
+        conditions = _build_tag_filter_conditions(
+            {"tags": widened, "tags_match": "all", "tags_normalize": True}
+        )
+        assert len(conditions) == 4
+        assert conditions[-1].match.value == "delta"
+        assert len(conditions[0].match.any) == 21

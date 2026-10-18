@@ -815,3 +815,27 @@ async def test_restore_warns_of_resource_rows_whose_resource_has_no_schema(db_se
 
     result = await restore_deleted_context(db_session, context_id, dry_run=False)
     assert result.warnings == plan.warnings
+
+
+@pytest.mark.asyncio
+async def test_rebuild_point_reports_the_embedding_usage_when_asked(db_session, seed):
+    """#2053: Sleep reindex accounts the rebuild's embedding through ``usage``."""
+    context, indexed = await _index_resource(db_session, seed)
+    rows = await _memories(db_session, context.id)
+    memory = next(m for m in rows.values() if m.resource_doc_id == "doc_1")
+
+    client = AsyncMock()
+    with patch("services.resource_indexer.get_qdrant_client", return_value=client):
+        indexer = ResourceIndexer(db_session)
+    service = AsyncMock()
+    service.embed_with_usage = AsyncMock(side_effect=lambda text, **_kw: ([0.5] * 512, 42))
+    usage: dict[str, int] = {}
+    point_id = await indexer.rebuild_point(
+        memory, collection_name="kagura_memories", embedding_service=service, usage=usage
+    )
+
+    assert usage == {"tokens": 42}
+    service.embed.assert_not_awaited()
+    assert service.embed_with_usage.await_args.kwargs["text"] == indexed["doc_1"].payload["content"]
+    rebuilt = client.upsert.await_args.kwargs["points"][0]
+    assert rebuilt.id == str(point_id) == indexed["doc_1"].id

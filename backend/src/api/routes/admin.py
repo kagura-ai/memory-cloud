@@ -1715,10 +1715,14 @@ async def recover_context(
     import re
     from uuid import UUID as PyUUID
 
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
+    from qdrant_client.models import FieldCondition, MatchValue
 
     from config.settings import get_settings
-    from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_qdrant_client
+    from db.qdrant import (
+        KAGURA_MEMORIES_COLLECTION,
+        get_qdrant_client,
+        summary_points_filter,
+    )
     from models.config import ContextSearchConfig
 
     context_id = request_body.context_id
@@ -1741,17 +1745,17 @@ async def recover_context(
     while True:
         points, next_offset = await client.scroll(
             collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="context_id", match=MatchValue(value=context_id))]
+            # #2015: a content chunk point is part of a memory, not a memory —
+            # recovering it would create a row from a fragment of the body.
+            scroll_filter=summary_points_filter(
+                FieldCondition(key="context_id", match=MatchValue(value=context_id))
             ),
             limit=100,
             offset=offset,
             with_payload=True,
             with_vectors=False,
         )
-        # #2015: a content chunk point is part of a memory, not a memory —
-        # recovering it would create a row from a fragment of the body.
-        all_points.extend(p for p in points if not (p.payload or {}).get("chunk_of"))
+        all_points.extend(points)
         if next_offset is None or len(all_points) >= max_points:
             if len(all_points) > max_points:
                 all_points = all_points[:max_points]

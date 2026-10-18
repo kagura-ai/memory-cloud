@@ -47,7 +47,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from db.qdrant import extract_score_threshold
+from db.qdrant import extract_score_threshold, tag_groups_for_all
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
 from utils.geo_location import (
@@ -113,16 +113,28 @@ def _sql_str(value: str) -> str:
 
 
 def _build_tag_clause(filters: dict[str, Any]) -> str:
-    """Build a list-membership clause for tag filtering (Issue #67 / #79)."""
+    """Build a list-membership clause for tag filtering (Issue #67 / #79).
+
+    #2058: with tags_normalize, ``all`` ANDs one OR group per tag (the
+    spellings recall widened it to), mirroring
+    ``db.qdrant._build_tag_filter_conditions``.
+    """
     raw = filters.get("tags")
     if not isinstance(raw, list) or not raw:
         return ""
-    valid = [t for t in raw if isinstance(t, str) and t][:_MAX_TAGS]
+    strings = [t for t in raw if isinstance(t, str) and t]
+    valid = strings[:_MAX_TAGS]
     if not valid:
         return ""
     mode = filters.get("tags_match", "any")
     if mode not in ("any", "all"):
         raise ValueError(f"Invalid tags_match value: {mode!r}. Must be 'any' or 'all'.")
+    if mode == "all" and filters.get("tags_normalize"):
+        groups = []
+        for group in tag_groups_for_all(strings):
+            any_of = " OR ".join(f"array_has(tags, {_sql_str(t)})" for t in group)
+            groups.append(any_of if len(group) == 1 else f"({any_of})")
+        return "(" + " AND ".join(groups) + ")"
     clauses = [f"array_has(tags, {_sql_str(t)})" for t in valid]
     joiner = " AND " if mode == "all" else " OR "
     return "(" + joiner.join(clauses) + ")"

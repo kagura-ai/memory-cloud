@@ -9,6 +9,7 @@ forms of two tags an author meant differently must NOT collide.
 import pytest
 
 from utils.tag_normalize import (
+    group_tags_by_fold,
     is_mechanical_variant,
     is_near_duplicate,
     is_specialisation,
@@ -567,3 +568,23 @@ class TestIsMechanicalVariant:
     def test_a_tag_with_no_folding_signal_is_a_variant_of_nothing(self):
         assert not is_mechanical_variant("---", "...")
         assert not is_mechanical_variant("---", "---")
+
+
+class TestGroupTagsByFold:
+    """#2058: one group per tag, written any way, for tags_match='all'."""
+
+    def test_spellings_of_one_tag_share_a_group(self):
+        assert group_tags_by_fold(["ログ", "デプロイ", "ろぐ"]) == [["ログ", "ろぐ"], ["デプロイ"]]
+
+    def test_groups_keep_first_seen_order(self):
+        assert group_tags_by_fold(["b", "A", "a", "B_"]) == [["b", "B_"], ["A", "a"]]
+
+    def test_distinct_tags_stay_singletons(self):
+        assert group_tags_by_fold(["python", "fastapi"]) == [["python"], ["fastapi"]]
+
+    def test_a_tag_with_no_folding_signal_is_its_own_group(self):
+        """An empty fold must not merge every punctuation-only tag into one."""
+        assert group_tags_by_fold(["---", "***", "python"]) == [["---"], ["***"], ["python"]]
+
+    def test_duplicates_are_dropped(self):
+        assert group_tags_by_fold(["Deploy", "Deploy", "deploy"]) == [["Deploy", "deploy"]]

@@ -17,8 +17,9 @@
   server-minted format is re-adopted for the caller (#1740: any other is 404,
   see ``test_transport_spec_alignment``), another user's or workspace's
   session is 404,
-  ``DELETE`` ends the caller's own session (204). Other methods and paths
-  never open a session.
+  ``DELETE`` ends the caller's own session (204). ``GET`` is 405
+  (``Allow: POST, DELETE``, #2057): no server-initiated stream. Other methods
+  and paths never open a session.
 
 ``mcp_asgi_app`` runs with the real ``authenticate_mcp_request``; only the
 token lookups, the workspace lookup, the session store and the tool dispatch
@@ -787,12 +788,10 @@ async def test_stateless_read_only_token_lists_discovers_and_reads(app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/mcp/", "/mcp"])
-@pytest.mark.parametrize("method", ["POST", "GET"])
-async def test_an_unknown_session_id_is_re_adopted_for_the_caller(app, path, method):
+async def test_an_unknown_session_id_is_re_adopted_for_the_caller(app, path):
     """A client that cannot re-initialize after a 404 keeps working across a
     restart, a deploy or the idle timeout."""
-    body = _rpc("ping", 7) if method == "POST" else None
-    send = await app.call(body, headers={b"mcp-session-id": MINTED_B}, path=path, method=method)
+    send = await app.call(_rpc("ping", 7), headers={b"mcp-session-id": MINTED_B}, path=path)
 
     assert send.status == 200
     assert send.headers[b"mcp-session-id"] == MINTED_B
@@ -945,8 +944,58 @@ async def test_other_methods_and_paths_open_no_session(app, method, path, status
 
     assert send.status == status
     if status == 405:
-        assert send.headers[b"allow"] == b"GET, POST, DELETE"
+        assert send.headers[b"allow"] == b"POST, DELETE"
     assert app.sessions.calls == []
+
+
+# ------------------------------------------------------------------ GET /mcp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/mcp/", "/mcp"])
+async def test_get_on_the_callers_session_is_405_not_a_stream_that_ends(app, path):
+    """#2057: the server sends no server-initiated messages, so GET is the
+    spec's 405 — never a 200 event stream that closes at once and makes the
+    client reconnect in a loop."""
+    await _open_session(app)
+    send = await app.call(None, headers={b"mcp-session-id": b"mcp-open"}, path=path, method="GET")
+
+    assert send.status == 405
+    assert send.headers[b"allow"] == b"POST, DELETE"
+    assert send.headers.get(b"content-type", b"") != b"text/event-stream"
+    assert "mcp-open" in app.sessions._sessions  # still held: POST keeps using it
+
+
+@pytest.mark.asyncio
+async def test_get_without_a_session_id_is_405_and_opens_no_session(app):
+    send = await app.call(None, method="GET")
+
+    assert send.status == 405
+    assert send.headers[b"allow"] == b"POST, DELETE"
+    assert app.sessions.calls == []
+    assert app.sessions._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_get_on_a_minted_id_not_held_here_is_405_and_not_re_adopted(app):
+    """A lost session (restart, idle timeout) is re-adopted by the next POST;
+    GET has nothing to serve on it, so it neither adopts it nor says 404."""
+    send = await app.call(None, headers={b"mcp-session-id": MINTED_B}, method="GET")
+
+    assert send.status == 405
+    assert send.headers[b"allow"] == b"POST, DELETE"
+    assert not any(call[0] == "get_or_create_session" for call in app.sessions.calls)
+    assert MINTED not in app.sessions._sessions
+
+
+@pytest.mark.asyncio
+async def test_post_and_delete_still_serve_the_session_a_get_was_refused_on(app):
+    await _open_session(app)
+    session = {b"mcp-session-id": b"mcp-open"}
+    assert (await app.call(None, headers=session, method="GET")).status == 405
+
+    assert (await app.call(_rpc("ping", 7), headers=session)).status == 200
+    assert (await app.call(None, headers=session, method="DELETE")).status == 204
 
 
 # ------------------------------------------------------------------ logging

@@ -56,6 +56,7 @@ from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
+from utils.tag_normalize import group_tags_by_fold
 from utils.tokenizer import augment_reading_tokens, tokenize_and_reading
 
 if TYPE_CHECKING:
@@ -373,15 +374,42 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
 
 
+# Bound on the tags a filter matches on: tags under "any" / exact "all", tag
+# groups under "all" + tags_normalize (#2058).
+_MAX_FILTER_TAGS = 50
+# Bound on the spellings scanned to build those groups. expand_tag_filter adds
+# at most MAX_EXPANSION_PER_TAG (20) spellings per tag, so 50 widened tags stay
+# within it; the cap only limits the fold work on an oversized caller list.
+_MAX_FILTER_SPELLINGS = 2000
+
+
+def tag_groups_for_all(tags: list[str]) -> list[list[str]]:
+    """The groups a tags_match='all' + tags_normalize filter ANDs (#2058).
+
+    Groups BEFORE capping, so the variants of the first tags cannot push a
+    later requested tag past the cap and silently drop it from the AND.
+
+    Args:
+        tags: The filter's non-empty string tags, uncapped.
+
+    Returns:
+        At most ``_MAX_FILTER_TAGS`` groups from ``group_tags_by_fold``.
+    """
+    return group_tags_by_fold(tags[:_MAX_FILTER_SPELLINGS])[:_MAX_FILTER_TAGS]
+
+
 def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
     """Build FieldConditions for tag filtering.
 
     Issue #67: Exact-match tag filtering only. Tags are NOT added to
     BM25 text search to avoid score inflation for tag-heavy memories.
     Issue #79: Support AND logic via tags_match="all".
+    Issue #2058: with tags_normalize, "all" requires each TAG, not each
+    spelling: the spellings recall widened one tag to are one MatchAny.
 
     Args:
-        filters: Filter dict with optional tags list and tags_match mode
+        filters: Filter dict with optional tags list, tags_match mode and
+            tags_normalize flag
 
     Returns:
         List of FieldConditions for tag matching (empty if no tags)
@@ -391,7 +419,8 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return []
 
     # Validate: only non-empty strings, bounded to 50 tags
-    valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
+    strings = [t for t in filter_tags if isinstance(t, str) and t]
+    valid_tags = strings[:_MAX_FILTER_TAGS]
     if not valid_tags:
         return []
 
@@ -401,7 +430,17 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
 
     if tags_match == "all":
         # AND logic: memory must have ALL specified tags
-        return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
+        if not filters.get("tags_normalize"):
+            return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
+        # #2058: the list holds every stored spelling of each requested tag
+        # (expand_tag_filter); any one spelling satisfies that tag. A tag with
+        # one spelling keeps the exact MatchValue above.
+        return [
+            FieldCondition(key="tags", match=MatchValue(value=group[0]))
+            if len(group) == 1
+            else FieldCondition(key="tags", match=MatchAny(any=group))
+            for group in tag_groups_for_all(strings)
+        ]
     else:
         # OR logic (default): memory must have ANY of the specified tags
         return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
@@ -840,7 +879,7 @@ async def search_memories_qdrant(
     )
     if not include_chunks:
         # #2015: summary (and resource) points only — chunk points carry chunk_of.
-        chunk_exclusion = IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))
+        chunk_exclusion = summary_points_condition()
         if qdrant_filter is None:
             qdrant_filter = Filter(must=[chunk_exclusion])
         else:
@@ -972,6 +1011,28 @@ async def update_memory_payload_in_qdrant(
 
     except Exception as e:
         raise QdrantError(f"Failed to update memory payload: {e}") from e
+
+
+def summary_points_condition() -> IsEmptyCondition:
+    """The condition that keeps summary (and resource) points: ``chunk_of`` unset.
+
+    Content chunk points (#2015) carry ``chunk_of``; everything that assumes
+    one point per memory filters on this (#2041).
+    """
+    return IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))
+
+
+def summary_points_filter(*must: Condition, must_not: Sequence[Condition] | None = None) -> Filter:
+    """A filter of ``must`` (and ``must_not``) that also leaves chunk points out (#2041).
+
+    The one way to build the ``scroll_filter`` of a summary-only scroll:
+    ``tests/test_summary_points_scroll_guard.py`` fails on a ``.scroll(`` call
+    that does not use it, unless the function is allow-listed there.
+    """
+    return Filter(
+        must=[*must, summary_points_condition()],
+        must_not=list(must_not) if must_not is not None else None,
+    )
 
 
 def _chunks_of_filter(memory_ids: Sequence[UUID | str]) -> Filter:
@@ -1903,12 +1964,9 @@ async def list_context_point_ids(
         QdrantError: If the scroll fails.
     """
     client = get_qdrant_client()
-    filter_conditions = Filter(
-        must=[
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
-            IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD)),
-        ]
+    filter_conditions = summary_points_filter(
+        FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
     )
     ids: list[str] = []
     offset = None
@@ -2305,7 +2363,8 @@ async def _admin_scroll_context_points(
     non-admin code path.
 
     Used by the BM25 drift reveal-terms endpoint (#377) to rebuild the
-    token → mmh3-hash mapping for reverse lookup.
+    token → mmh3-hash mapping for reverse lookup. Summary (and resource)
+    points only: content chunk points (#2015) carry no token fields (#2041).
 
     Yields pages (lists of Record) instead of materializing the full
     point set so callers can break early once they have enough data —
@@ -2338,8 +2397,10 @@ async def _admin_scroll_context_points(
     while True:
         points, next_offset = await client.scroll(
             collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="context_id", match=MatchValue(value=context_id))]
+            # #2041: chunk points carry no BM25 token fields; their summary is
+            # their memory's, so they could only repeat a summary point's tokens.
+            scroll_filter=summary_points_filter(
+                FieldCondition(key="context_id", match=MatchValue(value=context_id))
             ),
             limit=200,
             offset=offset,
