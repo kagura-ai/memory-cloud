@@ -60,6 +60,7 @@ from services.embedding_migration_service import (  # noqa: E402
     switch_context_embedding,
     verify_context_migration,
 )
+from utils.datetime import to_naive_utc  # noqa: E402
 from utils.exceptions import MemoryCloudException  # noqa: E402
 
 
@@ -366,10 +367,12 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument(
         "--requeue-since",
-        type=lambda s: __import__("datetime").datetime.fromisoformat(s),
+        # Naive = UTC; an offset is converted (the memories timestamps are naive UTC).
+        type=lambda s: to_naive_utc(datetime.fromisoformat(s)),
         help=(
-            "ISO timestamp; with a standalone --switch, re-queue memories written since; "
-            "with --rollback-to, overrides the recorded switch time"
+            "ISO timestamp (UTC unless it has an offset); with a standalone --switch, "
+            "re-queue memories written since; with --rollback-to, overrides the "
+            "recorded switch time"
         ),
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompts")

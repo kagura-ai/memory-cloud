@@ -365,3 +365,19 @@ async def test_run_with_complete_chunks_switches_without_a_rebuild(capsys):
     assert code == 0
     rebuild.assert_not_awaited()
     switch.assert_awaited_once()
+
+
+def test_requeue_since_with_an_offset_is_parsed_as_naive_utc():
+    """The memories timestamps are naive UTC; asyncpg refuses an aware bound (#1525)."""
+    args = cli._parse(
+        ["--to", _MODEL, "--context", str(uuid4()), "--requeue-since", "2026-10-18T09:00:00+09:00"]
+    )
+    assert args.requeue_since == datetime(2026, 10, 18, 0, 0, 0)
+    assert args.requeue_since.tzinfo is None
+
+
+def test_requeue_since_without_an_offset_is_taken_as_utc():
+    args = cli._parse(
+        ["--to", _MODEL, "--context", str(uuid4()), "--requeue-since", "2026-10-18T09:00:00"]
+    )
+    assert args.requeue_since == datetime(2026, 10, 18, 9, 0, 0)

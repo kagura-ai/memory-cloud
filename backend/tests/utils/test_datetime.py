@@ -1,4 +1,4 @@
-"""Tests for utils.datetime — to_utc_iso, utcnow, parse_iso8601_to_aware.
+"""Tests for utils.datetime — to_utc_iso, utcnow, parse_iso8601_to_aware, to_naive_utc.
 
 Issue #489: serialization helpers must produce JS-parseable Z-suffixed ISO 8601
 strings regardless of input shape (None, naive, tz-aware, double-Z avoidance).
@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from utils.datetime import parse_iso8601_to_aware, to_utc_iso, utcnow
+from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso, utcnow
 
 
 class TestToUtcIso:
@@ -72,3 +72,19 @@ class TestParseIso8601ToAware:
     def test_invalid_raises(self):
         with pytest.raises(ValueError, match="Invalid datetime"):
             parse_iso8601_to_aware("not-a-date", "field")
+
+
+class TestToNaiveUtc:
+    def test_naive_is_returned_unchanged(self):
+        dt = datetime(2026, 4, 28, 17, 50, 22)
+        assert to_naive_utc(dt) == dt
+
+    def test_aware_utc_is_stripped(self):
+        dt = datetime(2026, 4, 28, 17, 50, 22, tzinfo=UTC)
+        assert to_naive_utc(dt) == datetime(2026, 4, 28, 17, 50, 22)
+
+    def test_aware_non_utc_is_converted_then_stripped(self):
+        dt = datetime(2026, 4, 28, 17, 50, 22, tzinfo=ZoneInfo("Asia/Tokyo"))
+        result = to_naive_utc(dt)
+        assert result.tzinfo is None
+        assert result == datetime(2026, 4, 28, 8, 50, 22)

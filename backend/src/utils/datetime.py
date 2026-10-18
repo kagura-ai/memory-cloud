@@ -55,6 +55,21 @@ def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def to_naive_utc(dt: datetime) -> datetime:
+    """Return ``dt`` as the naive UTC the TIMESTAMP WITHOUT TIME ZONE columns hold.
+
+    An aware value is converted to UTC and stripped; a naive one is taken to
+    be UTC already and returned unchanged. asyncpg refuses an aware value
+    bound against a naive column (``can't subtract offset-naive and
+    offset-aware datetimes``), so normalise at the boundary where an aware
+    value (a ``TIMESTAMP WITH TIME ZONE`` column, a parsed ISO string with an
+    offset) meets the naive columns.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).replace(tzinfo=None)
+
+
 def parse_iso8601_to_aware(value: str, field_name: str) -> datetime:
     """Parse an ISO 8601 string to a timezone-aware datetime.
 
