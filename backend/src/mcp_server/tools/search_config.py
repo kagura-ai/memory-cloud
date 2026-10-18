@@ -40,6 +40,7 @@ async def handle_update_search_config(
                 ContextSearchConfigRepository,
                 search_config_defaults,
             )
+            from services.content_chunk_policy import content_chunks_effective
             from services.permission_service import (
                 PermissionService,
                 gate_content_chunks_change,
@@ -207,6 +208,13 @@ async def handle_update_search_config(
                                 ),
                                 "routing_mode": config.routing_mode,
                                 "content_chunks_enabled": config.content_chunks_enabled,
+                                # #2103 / #2080: whether the stored flag is acted
+                                # on (store, and the plan where gated).
+                                "content_chunks_effective": await content_chunks_effective(
+                                    db,
+                                    ctx_uuid,
+                                    stored=config.content_chunks_enabled is True,
+                                ),
                             },
                         }
                     ),

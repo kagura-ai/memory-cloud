@@ -270,17 +270,28 @@ def _row(*, enabled: bool, model: str = "qwen3-embedding:4b"):
     )
 
 
-async def _get(row, *, owner: bool, supported: bool = True, pending: int = 0):
+def _status(stored: bool, *, supported: bool = True, **gated):
+    """The policy's answer for the response builder: ungated unless ``gated`` is given."""
+    from services.content_chunk_policy import ContentChunksStatus
+
+    if gated:
+        return ContentChunksStatus(stored=stored, supported=supported, gated=True, **gated)
+    return ContentChunksStatus(stored=stored, supported=supported, gated=False, in_use=0)
+
+
+async def _get(row, *, owner: bool, supported: bool = True, pending: int = 0, status=None):
     from api.routes.context_search_config import get_context_search_config
 
     perms = _perms(owner=owner)
     repo = MagicMock()
     repo.create_or_get = AsyncMock(return_value=row)
     repo.content_chunk_backfill_pending = AsyncMock(return_value=pending)
+    status = status or _status(row.content_chunks_enabled, supported=supported)
     with (
         patch(f"{_MODULE}.PermissionService", return_value=perms),
         patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
         patch(f"{_MODULE}.chunk_points_supported", return_value=supported),
+        patch(f"{_MODULE}.content_chunks_status", AsyncMock(return_value=status)),
     ):
         response = await get_context_search_config(uuid4(), {"user_id": "u-1"}, db=AsyncMock())
     return response, repo
@@ -330,6 +341,7 @@ async def test_put_and_reset_return_the_same_fields():
         with (
             patch(f"{_MODULE}.PermissionService", return_value=perms),
             patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+            patch(f"{_MODULE}.content_chunks_status", AsyncMock(return_value=_status(False))),
         ):
             put = await update_context_search_config(
                 uuid4(), ContextSearchConfigUpdate(**_BASE), {"user_id": "u-1"}, db=AsyncMock()
@@ -338,3 +350,203 @@ async def test_put_and_reset_return_the_same_fields():
         assert put.content_chunks_can_change is owner
         assert reset.content_chunks_can_change is owner
         assert put.embedding_provider == reset.embedding_provider == "self_hosted"
+
+
+# ---------------------------------------------------------------------------
+# #2103: the plan feature and the per-plan cap (CONTENT_CHUNKS_REQUIRE_PLAN)
+# ---------------------------------------------------------------------------
+
+_POLICY = "services.content_chunk_policy"
+
+
+async def _put_gated(
+    *, stored: bool, requested: bool, owner: bool, order: list, plan=None, cap=None, repo=None
+):
+    """A PUT with the policy's plan and cap checks recorded (and refusing when given)."""
+
+    async def _plan(*_a):
+        order.append("plan")
+        if plan:
+            raise plan
+
+    async def _cap(*_a):
+        order.append("cap")
+        if cap:
+            raise cap
+
+    perms = _perms(owner=owner)
+    owner_check = perms.check_context_owner.side_effect
+
+    async def _owner(*_a, **_k):
+        order.append("owner")
+        if owner_check:
+            raise owner_check
+
+    perms.check_context_owner = AsyncMock(side_effect=_owner)
+    repo = repo or _repo(stored)
+    from api.routes.context_search_config import update_context_search_config
+
+    with (
+        patch(f"{_POLICY}.ensure_content_chunks_plan", new=_plan),
+        patch(f"{_POLICY}.ensure_content_chunk_capacity", new=_cap),
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        patch(f"{_MODULE}.build_search_config_response", AsyncMock(return_value=None)),
+    ):
+        await update_context_search_config(
+            uuid4(),
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=requested),
+            {"user_id": "u-1"},
+            db=AsyncMock(),
+        )
+    return repo
+
+
+def _feat():
+    from utils.exceptions import FeatureNotAvailableError
+
+    return FeatureNotAvailableError.for_feature("free", "content_chunks")
+
+
+def _quota():
+    from services.content_chunk_policy import _raise_cap
+    from utils.exceptions import QuotaExceededError
+
+    try:
+        _raise_cap("basic", 1, 1)
+    except QuotaExceededError as e:
+        return e
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_turning_on_checks_plan_then_owner_then_cap():
+    order: list = []
+    repo = await _put_gated(stored=False, requested=True, owner=True, order=order)
+    assert order == ["plan", "owner", "cap"]
+    repo.update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [True, False])
+async def test_a_plan_without_the_feature_is_refused_before_the_owner_check(owner):
+    from utils.exceptions import FeatureNotAvailableError
+
+    order: list = []
+    with pytest.raises(FeatureNotAvailableError) as exc:
+        await _put_gated(stored=False, requested=True, owner=owner, order=order, plan=_feat())
+    assert exc.value.status_code == 403
+    assert exc.value.error_code == "FEAT-001"
+    assert order == ["plan"]
+
+
+@pytest.mark.asyncio
+async def test_an_editor_never_reaches_the_cap_lock():
+    order: list = []
+    with pytest.raises(AuthorizationError):
+        await _put_gated(stored=False, requested=True, owner=False, order=order, cap=_quota())
+    assert order == ["plan", "owner"]
+
+
+@pytest.mark.asyncio
+async def test_at_the_cap_the_owner_is_refused_and_nothing_is_written():
+    from utils.exceptions import QuotaExceededError
+
+    order: list = []
+    repo = _repo(False)
+    with pytest.raises(QuotaExceededError) as exc:
+        await _put_gated(
+            stored=False, requested=True, owner=True, order=order, cap=_quota(), repo=repo
+        )
+    assert exc.value.status_code == 429
+    assert exc.value.details["quota_type"] == "content_chunk_contexts"
+    assert order == ["plan", "owner", "cap"]
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_turning_off_is_always_allowed():
+    order: list = []
+    repo = await _put_gated(
+        stored=True, requested=False, owner=True, order=order, plan=_feat(), cap=_quota()
+    )
+    assert order == ["owner"]
+    assert repo.update.await_args.args[1].content_chunks_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_without_the_gate_never_refuses_by_plan():
+    """Self-hosted default: no plan lookup, no lock, no refusal, on any plan."""
+    perms, repo = _perms(owner=True), _repo(False)
+    perms.db = MagicMock()
+    perms.db.execute = AsyncMock()
+    from api.routes.context_search_config import update_context_search_config
+
+    with (
+        patch(
+            f"{_POLICY}.get_settings",
+            return_value=SimpleNamespace(content_chunks_require_plan=False),
+        ),
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        patch(f"{_MODULE}.build_search_config_response", AsyncMock(return_value=None)),
+    ):
+        await update_context_search_config(
+            uuid4(),
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True),
+            {"user_id": "u-1"},
+            db=AsyncMock(),
+        )
+    perms.db.execute.assert_not_awaited()
+    repo.update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_reports_an_active_context_within_the_cap():
+    status = _status(True, plan_name="pro", limit=5, in_use=2, earlier=1)
+    response, _ = await _get(_row(enabled=True), owner=True, status=status)
+    assert response.content_chunks_effective is True
+    assert (response.content_chunks_limit, response.content_chunks_in_use) == (5, 2)
+    assert response.content_chunks_disabled_reason is None
+    assert response.content_chunks_can_change is True
+    # The stored value, never the effective one (#2080): a client echoing it
+    # back must not turn the flag off.
+    assert response.content_chunks_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_get_reports_an_inactive_context_past_the_cap_that_may_still_turn_off():
+    status = _status(True, plan_name="basic", limit=1, in_use=2, earlier=1)
+    response, _ = await _get(_row(enabled=True), owner=True, status=status)
+    assert response.content_chunks_enabled is True
+    assert response.content_chunks_effective is False
+    assert response.content_chunks_disabled_reason == "cap"
+    assert response.content_chunks_can_change is True  # off is always allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gated", "reason"),
+    [
+        ({"plan_name": "basic", "limit": 1, "in_use": 1}, "cap"),
+        ({"plan_name": "free", "plan_has_feature": False, "limit": 0, "in_use": 0}, "plan"),
+    ],
+)
+async def test_get_disables_turning_on_for_the_owner_by_plan_or_cap(gated, reason):
+    response, _ = await _get(_row(enabled=False), owner=True, status=_status(False, **gated))
+    assert response.content_chunks_can_change is False
+    assert response.content_chunks_disabled_reason == reason
+    assert response.content_chunks_effective is False
+
+
+@pytest.mark.asyncio
+async def test_get_names_permission_only_when_nothing_else_blocks():
+    editor, _ = await _get(_row(enabled=False), owner=False)
+    assert editor.content_chunks_disabled_reason == "permission"
+    assert editor.content_chunks_can_change is False
+    owner, _ = await _get(_row(enabled=False), owner=True)
+    assert owner.content_chunks_disabled_reason is None
+    assert owner.content_chunks_limit is None  # not gated
+    blocked = _status(False, plan_name="basic", limit=1, in_use=1)
+    capped_editor, _ = await _get(_row(enabled=False), owner=False, status=blocked)
+    assert capped_editor.content_chunks_disabled_reason == "cap"
