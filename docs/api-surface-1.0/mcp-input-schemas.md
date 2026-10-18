@@ -536,3 +536,5 @@ Recurring inconsistencies (each instance flagged inline above):
 Additions after this inventory was frozen; each is optional and leaves every existing call unchanged.
 
 - `update_memory.expected_version` — integer, `minimum` 1, in-place mode only ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)). The edit applies only while the memory is at that version; otherwise the error `version_conflict` carries `current_version` and nothing is written. Omitted: last writer wins, as before. With `external_id` it is refused (`validation_error`).
+- `changes_since.session_id` — string, ≤ 128 characters of `[A-Za-z0-9._-]` ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)): only that session's own write events, matched with the caller's principal. `kinds` gains `restored` (with `session_id` only). Omitted: the change log as before.
+- `rollback_session(context_id, session_id, dry_run=true)` — a new tool (#2044); `dry_run` defaults to `true`.
