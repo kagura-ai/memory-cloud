@@ -24,6 +24,7 @@ paths:
 - Synchronous engine only for OAuth2 server (Authlib requirement)
 - Pool config: `pool_pre_ping=True`; size and wait come from Settings `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` (defaults 5 / 10 / 30), shared by the async and the sync OAuth2 engine (#1980); `DB_NULL_POOL=true` (test processes only, #1988) swaps both for `NullPool` because asyncpg connections are bound to the event loop that opened them, and `SCHEDULER_LEADER_ENABLED=false` keeps a test process from starting the scheduler leader
 - Multi-row UPDATEs lock rows in id order via an ordered `FOR UPDATE` subquery (`MemoryRepository.bulk_update_access_stats`); row writes that are statistics belong after the read transaction commits, in an isolated session, and use `SKIP LOCKED` so they never wait (a bump can be skipped under contention). Writes to a user's `neural_memory_edges` take the `hebbian:<user_id>` transaction advisory lock first (`db/graph_learning_lock.py`; recall try-locks and skips, the batch tasks and the Sleep orchestrator wait and hold it for their run) (#1985)
+- Migrations: `alembic/env.py` runs a whole upgrade in one transaction, so a constraint added `NOT VALID` is VALIDATEd inside `op.get_context().autocommit_block()` (the e65_1275 / f00_2019 form); in the same transaction the scan holds the ALTER's ACCESS EXCLUSIVE lock. A conditional downgrade VALIDATE checks for leftover rows first. Pinned by `tests/test_check_validate_outside_alter_tx.py` (#2073)
 
 ## Datetime / UTC
 

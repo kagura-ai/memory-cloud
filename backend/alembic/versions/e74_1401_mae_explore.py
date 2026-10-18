@@ -18,11 +18,13 @@ db.commit()`` inline, awaited by recall/reference/remember/explore/permission
 checks). A plain ``ADD CONSTRAINT ... CHECK`` (as emitted by
 ``op.create_check_constraint``) validates every existing row while holding
 ACCESS EXCLUSIVE, stalling those audit writes for the scan's duration. So this
-uses the house zero-downtime pattern (``d05_523``/``d07_495``): an atomic
-``DROP ... , ADD ... NOT VALID`` followed by a separate ``VALIDATE CONSTRAINT``
-(which runs under SHARE UPDATE EXCLUSIVE — reads/writes continue). Because each
-new CHECK only WIDENS the vocabulary, every existing row already satisfies it
-and VALIDATE is an effectively free scan.
+uses the house zero-downtime pattern: an atomic ``DROP ... , ADD ... NOT
+VALID`` followed by ``VALIDATE CONSTRAINT`` inside ``autocommit_block()``.
+``alembic/env.py`` runs an upgrade in one transaction, so a VALIDATE in that
+transaction would scan under the ALTER's ACCESS EXCLUSIVE lock until commit
+(#2073); the block commits the NOT VALID add first, and VALIDATE then holds
+only SHARE UPDATE EXCLUSIVE (reads/writes continue). Because each new CHECK
+only WIDENS the vocabulary, every existing row already satisfies it.
 
 Revision ID: e74_1401_mae_explore
 Revises: e73_1377_locale_backfill
@@ -49,12 +51,25 @@ _NEW_CHECK = (
 )
 
 
+def _validate() -> None:
+    """VALIDATE outside the ALTER's transaction (#2073).
+
+    ``autocommit_block()`` commits the preceding transaction, releasing the
+    NOT VALID add's ACCESS EXCLUSIVE lock, so the scan runs under SHARE UPDATE
+    EXCLUSIVE only. Offline (``--sql``) it emits ``COMMIT;`` / ``BEGIN;``.
+    """
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
+        )
+
+
 def upgrade() -> None:
     """Add 'explore' to the valid_mae_operation CHECK (zero-downtime).
 
     DROP + ADD are combined in one ALTER TABLE so the catalog mutation is
-    atomic (no window where the table has no operation CHECK); VALIDATE is a
-    separate statement per Postgres semantics.
+    atomic (no window where the table has no operation CHECK); VALIDATE runs
+    after that ALTER commits (see the module docstring).
     """
     op.execute(
         sa.text(
@@ -63,15 +78,19 @@ def upgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
+    _validate()
 
 
 def downgrade() -> None:
-    """Remove 'explore' from the valid_mae_operation CHECK constraint.
+    """Remove 'explore' from the valid_mae_operation CHECK, keeping the audit rows.
 
-    Note: fails at VALIDATE if any rows with operation='explore' exist. Delete
-    them first:
-        DELETE FROM memory_access_events WHERE operation = 'explore';
+    The previous CHECK is restored ``NOT VALID`` and VALIDATEd only when no
+    ``operation='explore'`` row exists (the e84_1619 form). The VALIDATE runs
+    after the ALTER commits (#2073), so an unguarded VALIDATE failing on such a
+    row would leave the old CHECK committed under an e74 ``alembic_version``.
+    The check runs while the ALTER's lock is held and, once that commits, the
+    NOT VALID CHECK rejects new such rows. With rows present the constraint
+    stays ``convalidated = false``; re-running the upgrade validates it again.
     """
     op.execute(
         sa.text(
@@ -80,4 +99,10 @@ def downgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_OLD_CHECK}) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
+    leftover = (
+        op.get_bind()
+        .execute(sa.text("SELECT 1 FROM memory_access_events WHERE operation = 'explore' LIMIT 1"))
+        .first()
+    )
+    if leftover is None:
+        _validate()

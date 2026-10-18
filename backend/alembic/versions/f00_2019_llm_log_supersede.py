@@ -14,10 +14,14 @@ tuple in ``models/llm_call_log.py`` (pinned by
 New values are APPENDED, never reordered.
 
 ``llm_call_log`` is written on the recall path, so this uses the house
-zero-downtime pattern (``e74_1401`` / ``e98_2007``): an atomic
-``DROP ..., ADD ... NOT VALID`` followed by a separate ``VALIDATE CONSTRAINT``
-(SHARE UPDATE EXCLUSIVE — reads and writes continue). The new CHECK only
-widens the vocabulary, so every existing row satisfies it.
+zero-downtime pattern (``e65_1275`` / ``e67_1281``): an atomic
+``DROP ..., ADD ... NOT VALID`` (ACCESS EXCLUSIVE, but no scan), then
+``VALIDATE CONSTRAINT`` inside ``autocommit_block()``. ``alembic/env.py`` runs
+an upgrade in one transaction, so a VALIDATE in that transaction would scan
+under the ALTER's ACCESS EXCLUSIVE lock until commit (#2073); the block commits
+the NOT VALID add first, and VALIDATE then holds only SHARE UPDATE EXCLUSIVE
+(reads and writes continue). The new CHECK only widens the vocabulary, so every
+existing row satisfies it.
 
 Revision ID: f00_2019_llm_log_supersede
 Revises: e99_2022_supersede_cand_null
@@ -38,11 +42,24 @@ _OLD_CHECK = "caller IN ('sleep', 'recall', 'rerank', 'ask', 'admin')"
 _NEW_CHECK = "caller IN ('sleep', 'recall', 'rerank', 'ask', 'admin', 'supersede_verify')"
 
 
+def _validate() -> None:
+    """VALIDATE outside the ALTER's transaction (#2073).
+
+    ``autocommit_block()`` commits the preceding transaction, releasing the
+    NOT VALID add's ACCESS EXCLUSIVE lock, so the scan runs under SHARE UPDATE
+    EXCLUSIVE only. Offline (``--sql``) it emits ``COMMIT;`` / ``BEGIN;``.
+    """
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text("ALTER TABLE llm_call_log VALIDATE CONSTRAINT valid_llm_call_log_caller")
+        )
+
+
 def upgrade() -> None:
     """Widen the valid_llm_call_log_caller CHECK (zero-downtime).
 
     DROP + ADD are one ALTER TABLE so there is no window without a caller
-    CHECK; VALIDATE is a separate statement per Postgres semantics.
+    CHECK; VALIDATE runs after that ALTER commits (see the module docstring).
     """
     op.execute(
         sa.text(
@@ -51,7 +68,7 @@ def upgrade() -> None:
             f"ADD CONSTRAINT valid_llm_call_log_caller CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE llm_call_log VALIDATE CONSTRAINT valid_llm_call_log_caller"))
+    _validate()
 
 
 def downgrade() -> None:
@@ -61,8 +78,11 @@ def downgrade() -> None:
     rows are never deleted here (the e84_1619 / e98_2007 form). The previous
     CHECK is restored ``NOT VALID`` — enforced on every new INSERT / UPDATE,
     and a downgraded server never writes this caller — and is VALIDATEd only
-    when no such row exists. With rows present the constraint stays
-    ``convalidated = false``; re-running the upgrade validates it again.
+    when no such row exists. The check runs while the ALTER's lock is held and,
+    once that commits, the NOT VALID CHECK rejects new such rows, so the
+    VALIDATE that follows cannot fail on a row written in between. With rows
+    present the constraint stays ``convalidated = false``; re-running the
+    upgrade validates it again.
     """
     op.execute(
         sa.text(
@@ -77,6 +97,4 @@ def downgrade() -> None:
         .first()
     )
     if leftover is None:
-        op.execute(
-            sa.text("ALTER TABLE llm_call_log VALIDATE CONSTRAINT valid_llm_call_log_caller")
-        )
+        _validate()
