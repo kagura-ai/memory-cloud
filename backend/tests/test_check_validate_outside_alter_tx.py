@@ -7,11 +7,17 @@ scans the table while the ALTER's ACCESS EXCLUSIVE lock is still held, blocking
 reads and writes. Each VALIDATE must run in ``autocommit_block()``: the NOT
 VALID add commits first, and VALIDATE then takes only SHARE UPDATE EXCLUSIVE.
 
-Each migration runs under a real offline (``--sql``) PostgreSQL context, so the
+Each migration runs under an offline (``--sql``) PostgreSQL context, so the
 captured script carries the ``COMMIT;`` / ``BEGIN;`` alembic emits around an
-autocommit block. The offline context's connection is a recorder, so the reads
-some of these migrations make (the INVALID-index probe, the downgrade leftover
-check) land in the script in order and find no rows. No database is used.
+autocommit block. The offline context's connection is replaced by a recorder,
+so the reads some of these migrations make (e84's INVALID-index probe, every
+downgrade's leftover check) land in the script in order and find no rows. No
+database is used.
+
+That recorder is what lets the reads run here; a real ``alembic --sql`` run
+has none. Offline, only the e74, e98 and f00 upgrades run: each downgrade's
+leftover probe and e84's upgrade probe need a live connection
+(``test_offline_support_is_upgrade_only`` pins which).
 """
 
 from __future__ import annotations
@@ -111,3 +117,22 @@ def test_every_new_validate_uses_an_autocommit_block():
         if "VALIDATE CONSTRAINT" in (text := path.read_text()) and "autocommit_block()" not in text
     }
     assert offenders == _LEGACY_IN_TRANSACTION
+
+
+@pytest.mark.parametrize(("revision", "direction"), _CASES)
+def test_offline_support_is_upgrade_only(revision, direction):
+    """What the ``_validate()`` docstrings claim for a real ``alembic --sql`` run:
+    no recorder, so a probe that reads the database fails on the mock bind."""
+    module = importlib.import_module(revision)
+    ctx = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": io.StringIO(), "transactional_ddl": True},
+    )
+    runs_offline = direction == "upgrade" and revision != "e84_1619_tool_guardrails"
+    with Operations.context(ctx):
+        if runs_offline:
+            getattr(module, direction)()
+        else:
+            # The mock connection returns None for a read; ``.first()`` fails.
+            with pytest.raises(AttributeError):
+                getattr(module, direction)()

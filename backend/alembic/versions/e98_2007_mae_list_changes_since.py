@@ -55,7 +55,9 @@ def _validate() -> None:
 
     ``autocommit_block()`` commits the preceding transaction, releasing the
     NOT VALID add's ACCESS EXCLUSIVE lock, so the scan runs under SHARE UPDATE
-    EXCLUSIVE only. Offline (``--sql``) it emits ``COMMIT;`` / ``BEGIN;``.
+    EXCLUSIVE only. Offline (``--sql``) it emits ``COMMIT;`` / ``BEGIN;`` —
+    for the upgrade only: the downgrade's leftover probe reads the table, so
+    it needs a live connection.
     """
     with op.get_context().autocommit_block():
         op.execute(
