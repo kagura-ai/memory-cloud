@@ -121,6 +121,7 @@ async def handle_rollback_session(
                 session_id=session_id,
                 principal=addressable_principal(user_id, role),
             )
+            timeout = get_tool_timeout("rollback_session")
             result = await execute_with_timeout(
                 rollback_session(
                     db,
@@ -133,8 +134,9 @@ async def handle_rollback_session(
                     # Half the tool timeout: no item starts after it, so the
                     # call commits what it finished instead of timing out and
                     # replaying the same batch (v0.113.0 review F2).
-                    time_budget=get_tool_timeout("rollback_session") * _TIME_BUDGET_SHARE,
+                    time_budget=timeout * _TIME_BUDGET_SHARE,
                 ),
+                timeout=timeout,
                 operation_name="rollback_session",
             )
             failed = bool(result.errors)
@@ -151,7 +153,7 @@ async def handle_rollback_session(
                 await db.rollback()  # a dry run writes nothing
             else:
                 await db.commit()
-                await finish(result)
+                await finish(result, db)
         except SessionNotFoundError:
             await db.rollback()
             await _log_tool_usage(

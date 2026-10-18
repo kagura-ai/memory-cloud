@@ -166,7 +166,12 @@ async def test_rollback_commits_then_finishes():
     assert payload["status"] == "in_progress" and payload["remaining"] == 7
     assert payload["rollback_id"] == 9 and payload["rollback_status"] == "in_progress"
     db.commit.assert_awaited_once()
-    db.finish.assert_awaited_once_with(result)
+    db.finish.assert_awaited_once_with(result, db)
+    # v0.113.0 review F2: the call is time-boxed at half the tool timeout.
+    from mcp_server.tools._constants import get_tool_timeout
+
+    budget = db.service.await_args.kwargs["time_budget"]
+    assert budget == get_tool_timeout("rollback_session") * 0.5
 
 
 @pytest.mark.asyncio

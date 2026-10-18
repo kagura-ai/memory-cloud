@@ -208,9 +208,6 @@ def test_scrubbed_blocks_only_a_field_the_event_changed():
         state(version=2, current={"tags": ["mine"]}),
     )
     assert (item.action, item.values) == (ACTION_RESTORE, {"tags": ["orig"]})
-    # A scrubbed field the event did change still counts as lost.
-    _, erased = combined_prior([ev(1, "updated", 2, {"details": {}, "scrubbed": ["details"]})])
-    assert erased
 
 
 def test_tags_null_and_empty_are_the_same_value():
@@ -672,13 +669,16 @@ async def test_a_metadata_restore_patches_the_payload_only_after_the_commit():
     assert sync.memory_id == good.id and sync.collection == "coll" and sync.cascade_chunks
     assert sync.updates["tags"] == ["orig"] and sync.updates["importance"] == 0.5
     assert "updated_at" in sync.updates and "type" not in sync.updates
+    assert sync.fields == ("importance", "tags")
 
 
 @pytest.mark.asyncio
 async def test_finish_applies_payload_syncs_and_survives_a_failure():
     first, second = uuid.uuid4(), uuid.uuid4()
     syncs = [
-        sr.PayloadSync(m, "coll", {"tags": ["a"]}, ("location",) if m == first else (), False)
+        sr.PayloadSync(
+            m, "coll", ("tags",), {"tags": ["a"]}, ("location",) if m == first else (), False
+        )
         for m in (first, second)
     ]
     result = sr.RollbackResult(dry_run=False, items=[], events=0, remaining=0, payload_syncs=syncs)

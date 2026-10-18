@@ -77,7 +77,6 @@ from models.memory import (
 from services.memory_versions import (
     _comparable,  # one "is this the same value" rule with the version bump
     prior_erased,
-    prior_scrubbed,
     prior_values,
     record_edit,
     record_revision,
@@ -343,17 +342,15 @@ def combined_prior(updates: list[SessionEvent]) -> tuple[dict[str, Any], bool]:
     for event in updates:
         # #2043's erasure markers, read only through the memory_versions
         # helpers so the marker keys are never values. ``erased`` names a
-        # field the event changed whose overwritten value is gone. ``scrubbed``
-        # says the live value of a field is gone (the memory's author was
-        # erased); it is on every ``updated`` event of such a memory, whatever
-        # the event changed, so it only counts for a field this event changed
-        # — a session that edited only the tags of an erased author's memory
-        # still gets its tags back (v0.113.0 review F3).
+        # field the event changed whose overwritten value is gone. The
+        # ``scrubbed`` marker is not read: it says the LIVE value is gone (the
+        # memory's author was erased) and sits on every ``updated`` event of
+        # such a memory whatever the event changed, while erasure strips a
+        # changed ``details`` and marks it ``erased`` — so a session that
+        # edited only the tags of an erased author's memory still gets its
+        # tags back (v0.113.0 review F3).
+        lost = set(prior_erased(event.prior))
         kept = prior_values(event.prior)
-        lost = {
-            *prior_erased(event.prior),
-            *(name for name in prior_scrubbed(event.prior) if name in kept),
-        }
         for name in VERSIONED_FIELDS:
             if name in seen:
                 continue
@@ -641,10 +638,16 @@ async def _permitted(
 
 @dataclass(frozen=True)
 class PayloadSync:
-    """One restored memory's vector payload patch, applied after the commit."""
+    """One restored memory's vector payload patch, applied after the commit.
+
+    ``fields`` are the restored versioned fields; ``updates`` /
+    ``delete_keys`` the patch built from the row at the restore, used only
+    when ``finish`` cannot re-read the row.
+    """
 
     memory_id: UUID
     collection: str
+    fields: tuple[str, ...]
     updates: dict[str, Any]
     delete_keys: tuple[str, ...]
     cascade_chunks: bool
@@ -960,12 +963,25 @@ class _Executor:
             PayloadSync(
                 memory_id=memory.id,
                 collection=collection,
+                fields=tuple(sorted(changed)),
                 # Issue #78: date-range filters read the payload's updated_at.
                 updates={**updates, "updated_at": to_utc_iso(memory.updated_at)},
                 delete_keys=tuple(delete_keys),
                 cascade_chunks=cascade,
             )
         )
+
+
+def _sync_patch(sync: PayloadSync, row: Any | None) -> tuple[dict[str, Any], list[str]]:
+    """``sync``'s patch, rebuilt from ``row`` (the row now) when there is one."""
+    if row is None:
+        return sync.updates, list(sync.delete_keys)
+    from services.memory_service import metadata_payload_patch
+
+    updates, delete_keys = metadata_payload_patch(
+        _payload_request(row, set(sync.fields)), None, row.details
+    )
+    return {**updates, "updated_at": to_utc_iso(row.updated_at)}, delete_keys
 
 
 def _payload_request(memory: Any, changed: set[str]) -> Any:
@@ -1131,7 +1147,7 @@ async def rollback_session(
     )
 
 
-async def finish(result: RollbackResult) -> None:
+async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None:
     """After the commit: vector deletes, payload patches, re-embeds and the audit.
 
     The vector store follows Postgres, never the other way round: the
@@ -1143,6 +1159,13 @@ async def finish(result: RollbackResult) -> None:
     re-embed that fails leaves the row ``pending`` for the embedding sweep; a
     payload patch that fails is logged (the payload keeps the session's
     values until the memory's next edit or re-embed).
+
+    With ``db`` (the call's session, committed) the payload patches are
+    built from the rows as they are now, read ``FOR SHARE``: an edit that
+    committed after the rollback is not overwritten by the restored values,
+    and one still in flight (it holds the row lock while it patches the
+    payload) finishes first. Without it the patches queued at the restore are
+    applied as they are.
     """
     if result.forgotten_points and result.collection:
         from db.qdrant import delete_points_from_qdrant
@@ -1156,7 +1179,7 @@ async def finish(result: RollbackResult) -> None:
                 points=len(result.forgotten_points),
                 error_class=type(exc).__name__,
             )
-    await _apply_payload_syncs(result.payload_syncs)
+    await _apply_payload_syncs(result.payload_syncs, db)
     if result.reembed_ids:
         # One task working through the ids, not one task each: a rollback can
         # restore hundreds of texts, and each embedding run holds a database
@@ -1178,31 +1201,78 @@ async def finish(result: RollbackResult) -> None:
     await _emit_access_events(result)
 
 
-async def _apply_payload_syncs(syncs: list[PayloadSync]) -> None:
+#: Rows one payload-sync transaction holds ``FOR SHARE`` while it patches them.
+PAYLOAD_SYNC_GROUP = 50
+
+
+async def _share_lock_rows(db: AsyncSession, ids: list[UUID]) -> dict[UUID, Any]:
+    """The live rows among ``ids``, locked ``FOR SHARE`` in id order."""
+    rows = await db.execute(
+        select(
+            Memory.id,
+            Memory.tags,
+            Memory.importance,
+            Memory.type,
+            Memory.details,
+            Memory.updated_at,
+        )
+        .where(Memory.id.in_(ids), Memory.deleted_at.is_(None))
+        .order_by(Memory.id)
+        .with_for_update(read=True)
+    )
+    return {row.id: row for row in rows}
+
+
+async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None) -> None:
     if not syncs:
         return
     from db.qdrant import update_memory_payload_in_qdrant
 
-    failed: list[str] = []
-    for sync in syncs:
-        try:
-            await update_memory_payload_in_qdrant(
-                memory_id=sync.memory_id,
-                payload_updates=sync.updates,
-                collection_name=sync.collection,
-                delete_keys=list(sync.delete_keys) or None,
-                cascade_chunks=sync.cascade_chunks,
+    failed = 0
+    for start in range(0, len(syncs), PAYLOAD_SYNC_GROUP):
+        group = syncs[start : start + PAYLOAD_SYNC_GROUP]
+        rows: dict[UUID, Any] | None = None
+        if db is not None:
+            try:
+                rows = await _share_lock_rows(db, [sync.memory_id for sync in group])
+            except Exception as exc:
+                logger.warning(
+                    "session_rollback_payload_reread_failed", error_class=type(exc).__name__
+                )
+                await _end_transaction(db, commit=False)
+        for sync in group:
+            if rows is not None and sync.memory_id not in rows:
+                continue  # forgotten or purged since: its payload is not read
+            updates, delete_keys = _sync_patch(
+                sync, rows.get(sync.memory_id) if rows is not None else None
             )
-        except Exception as exc:
-            failed.append(str(sync.memory_id))
-            logger.warning(
-                "session_rollback_payload_sync_failed",
-                memory_id=str(sync.memory_id),
-                collection=sync.collection,
-                error_class=type(exc).__name__,
-            )
+            try:
+                await update_memory_payload_in_qdrant(
+                    memory_id=sync.memory_id,
+                    payload_updates=updates,
+                    collection_name=sync.collection,
+                    delete_keys=delete_keys or None,
+                    cascade_chunks=sync.cascade_chunks,
+                )
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    "session_rollback_payload_sync_failed",
+                    memory_id=str(sync.memory_id),
+                    collection=sync.collection,
+                    error_class=type(exc).__name__,
+                )
+        if rows is not None and db is not None:
+            await _end_transaction(db, commit=True)  # releases the share locks
     if failed:
-        logger.warning("session_rollback_payload_syncs_failed", failed=len(failed), of=len(syncs))
+        logger.warning("session_rollback_payload_syncs_failed", failed=failed, of=len(syncs))
+
+
+async def _end_transaction(db: AsyncSession, *, commit: bool) -> None:
+    try:
+        await (db.commit() if commit else db.rollback())
+    except Exception as exc:
+        logger.warning("session_rollback_payload_tx_end_failed", error_class=type(exc).__name__)
 
 
 async def _emit_access_events(result: RollbackResult) -> None:
@@ -1270,6 +1340,7 @@ def _log_reembed_task(task: asyncio.Task[None]) -> None:
 __all__ = [
     "MAX_ROLLBACK_EVENTS_PER_CALL",
     "MAX_UNFORGETS_PER_CALL",
+    "PAYLOAD_SYNC_GROUP",
     "SKIP_CAUSES",
     "AlreadyRolledBackError",
     "MemoryState",

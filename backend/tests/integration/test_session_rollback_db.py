@@ -574,13 +574,23 @@ async def test_a_metadata_restore_reaches_the_payload_only_after_the_commit(
     done = await _rollback(w, "P1", s, dry_run=False)
     await w.session.commit()
     _stubs["payload"].assert_not_awaited()
-    await sr.finish(done)
+    assert (await w.row(target))["tags"] == ["orig"]
+    # Someone edits the tags after the rollback committed, before finish():
+    # the payload gets the row as it is now, not the restored values.
+    await w.update(target, w.member, "later", tags=["later"])
+    await w.session.commit()
+    await sr.finish(done, w.session)
     _stubs["payload"].assert_awaited_once()
     kwargs = _stubs["payload"].await_args.kwargs
     assert kwargs["memory_id"] == target
-    assert kwargs["payload_updates"]["tags"] == ["orig"]
+    assert kwargs["payload_updates"]["tags"] == ["later"]
     assert kwargs["payload_updates"]["importance"] == 0.5
-    assert (await w.row(target))["tags"] == ["orig"]
+    # A memory forgotten before finish() runs gets no payload patch.
+    _stubs["payload"].reset_mock()
+    await w.forget(target, w.member, "later")
+    await w.session.commit()
+    await sr.finish(done, w.session)
+    _stubs["payload"].assert_not_awaited()
 
 
 async def test_a_spent_time_budget_spreads_the_batch_over_calls(
