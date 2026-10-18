@@ -707,6 +707,10 @@ _SESSION_NOT_FOUND_MESSAGE = (
     "Send a new initialize request without Mcp-Session-Id."
 )
 
+# The methods ``/mcp`` serves, for the ``Allow`` header of its 405s (#2057).
+# GET is not one: the server offers no server-initiated SSE stream.
+_MCP_ALLOWED_METHODS = "POST, DELETE"
+
 
 class _StartTrackingSend:
     """ASGI ``send`` that remembers whether the response has started (#1742).
@@ -876,6 +880,61 @@ async def _end_session(
     await send({"type": "http.response.body", "body": b""})
 
 
+async def _send_method_not_allowed(send: Send) -> None:
+    body = b"Method Not Allowed"
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [
+                [b"allow", _MCP_ALLOWED_METHODS.encode()],
+                [b"content-type", b"text/plain; charset=utf-8"],
+                [b"content-length", str(len(body)).encode()],
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _refuse_get_stream(
+    send: Send,
+    manager: Any,
+    session_id: str | None,
+    user_id: str,
+    workspace_id: "UUID | None",
+) -> None:
+    """``GET /mcp``: 405, since this server offers no server-initiated stream (#2057).
+
+    MCP Streamable HTTP lets a server answer the optional GET stream with an
+    event stream or with ``405 Method Not Allowed``. This server sends no
+    server-initiated requests or notifications, so it is 405; a 200 stream
+    that ended at once made SDK clients reconnect in a tight loop.
+
+    A named session is checked first, without being opened or re-adopted: one
+    ended by DELETE, held by another user or workspace, or never minted here
+    is the spec's 404, as on POST and DELETE. A server-minted id this server
+    does not hold (lost on a restart or the idle timeout) gets 405, not 404:
+    the client's next POST re-adopts it (#1686). No session id: 405, and no
+    session is opened.
+    """
+    if session_id:
+        try:
+            lookup, _session = await manager.get_owned_session(session_id, user_id, workspace_id)
+        except Exception as e:
+            # #1742: same answer as a failed session lookup on POST.
+            logger.error(f"MCP GET /mcp session lookup failed: {e}", exc_info=True)
+            await _send_transport_failure(send, e, body=None, era="legacy")
+            return
+        if lookup in ("terminated", "foreign") or (
+            lookup == "missing" and not is_server_minted_session_id(session_id)
+        ):
+            logger.info(f"MCP GET /mcp: session {session_id[:100]!r} not usable ({lookup})")
+            await _send_session_not_found(send, session_id)
+            return
+    logger.debug("MCP GET /mcp: 405, no server-initiated stream")
+    await _send_method_not_allowed(send)
+
+
 async def _answer_without_session(
     scope: Scope, receive: Receive, send: Send, method: str, path: str
 ) -> None:
@@ -887,9 +946,7 @@ async def _answer_without_session(
     normalized_path = _normalize_mcp_path(path)
     if path in ("/mcp", "/mcp/"):
         logger.warning(f"MCP method not allowed: {method} {path}")
-        await Response(
-            "Method Not Allowed", status_code=405, headers={"Allow": "GET, POST, DELETE"}
-        )(scope, receive, send)
+        await _send_method_not_allowed(send)
     elif method == "GET" and normalized_path == "/sse":
         # Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26)
         logger.warning(f"MCP SSE endpoint removed: {method} {normalized_path}")
@@ -1411,59 +1468,6 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
     )
 
 
-async def handle_streamable_http_get(
-    scope: Scope,
-    receive: Receive,
-    send: Send,
-    session: "MCPSession",
-    headers: dict,
-) -> None:
-    """Handle GET /mcp request (Optional SSE stream for notifications).
-
-    Args:
-        scope: ASGI scope
-        receive: ASGI receive
-        send: ASGI send
-        session: MCP session
-        headers: Request headers dict
-    """
-    logger.info(f"MCP GET stream (Streamable HTTP): session={session.session_id}")
-
-    # Get Last-Event-ID for resumability
-    last_event_id = headers.get(b"last-event-id")
-    if last_event_id:
-        last_event_id = last_event_id.decode()
-        logger.info(f"MCP GET stream resuming from: {last_event_id}")
-
-    # Start SSE stream
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [
-                [b"content-type", b"text/event-stream"],
-                [b"cache-control", b"no-cache"],
-                [b"connection", b"keep-alive"],
-                [b"mcp-session-id", session.session_id.encode()],
-            ],
-        }
-    )
-
-    # Send initial connection event
-    await send(
-        {
-            "type": "http.response.body",
-            "body": b"event: connected\ndata: {}\n\n",
-        }
-    )
-
-    # TODO: Implement server-initiated notification streaming
-    # For now, just keep the connection open
-
-    # Close stream after timeout or client disconnect
-    # (In production, this would listen for server notifications)
-
-
 async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     """ASGI app for MCP over Streamable HTTP with multi-client support.
 
@@ -1471,7 +1475,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
     Supports (Streamable HTTP spec 2025-03-26):
     - POST /mcp: MCP endpoint (tools, prompts, resources)
-    - GET /mcp: Optional streaming endpoint
+    - DELETE /mcp: end the caller's session
+    - GET /mcp: 405, no server-initiated stream (#2057)
 
     Multi-Client Architecture:
         Each client gets an isolated MCP session with its own MCP Server instance.
@@ -1736,23 +1741,28 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     session_manager = get_session_manager()
 
     # Session management logic (#1686)
-    # POST / GET /mcp: open a session when none is named; a named session is
+    # POST /mcp: open a session when none is named; a named session is
     #   used when it is the caller's, re-adopted when this server does not
     #   hold it and the id is server-minted, and answered 404 when another
     #   user or workspace holds it, it was ended by DELETE, or it was never
     #   minted here (#1740).
     # DELETE /mcp: end the caller's session (204) and tombstone its id.
+    # GET /mcp: 405 (no server-initiated stream, #2057) after the same 404
+    #   checks; never opens or re-adopts a session.
     # Anything else — including the removed POST /messages/ and GET /sse
     # endpoints (410) — is answered without touching the session store.
     if method == "DELETE" and path in ("/mcp", "/mcp/"):
         await _end_session(send, session_manager, session_id, user_id, workspace_id)
         return
-    if method in ("POST", "GET") and path in ("/mcp", "/mcp/"):
+    if method == "GET" and path in ("/mcp", "/mcp/"):
+        await _refuse_get_stream(send, session_manager, session_id, user_id, workspace_id)
+        return
+    if method == "POST" and path in ("/mcp", "/mcp/"):
         # NEW: Streamable HTTP endpoint. ``/mcp/`` is what the FastAPI routes
         # hand over for every /mcp, /mcp/ and /mcp/w/{id} request, ``/mcp``
         # the raw ASGI mount: the same rules for both.
         if not session_id:
-            # No session named (``initialize``, or a GET stream): open one
+            # No session named (``initialize``): open one
             # under a server-minted id. Issue #245: context_id removed.
             try:
                 session = await session_manager.get_or_create_session(
@@ -1825,39 +1835,16 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         await _answer_without_session(scope, receive, send, method, path)
         return
 
-    # Normalize path (remove /mcp prefix if present)
-    normalized_path = _normalize_mcp_path(path)
+    logger.info(
+        f"MCP handling: {method} {_normalize_mcp_path(path)} (session={session.session_id})"
+    )
 
-    # Create modified scope with normalized path
-    modified_scope = dict(scope)
-    modified_scope["path"] = normalized_path
-    modified_scope["raw_path"] = normalized_path.encode()
-
-    logger.info(f"MCP handling: {method} {normalized_path} (session={session.session_id})")
-
-    # Handle request based on method
+    # Only POST /mcp gets here: the unified Streamable HTTP endpoint (MCP spec
+    # 2025-03-26). Every other method and path was answered above.
     tracked_send = _StartTrackingSend(send)
     send = tracked_send
     try:
-        # =====================================================================
-        # NEW: Streamable HTTP Transport (MCP Spec 2025-03-26)
-        # =====================================================================
-        if method == "POST" and (path == "/mcp" or path == "/mcp/"):
-            # NEW: Unified POST /mcp endpoint
-            await handle_streamable_http_post(scope, receive, send, session, headers)
-            return
-
-        elif method == "GET" and (path == "/mcp" or path == "/mcp/"):
-            # NEW: Optional GET /mcp stream endpoint
-            await handle_streamable_http_get(scope, receive, send, session, headers)
-            return
-
-        else:
-            # Unsupported path/method
-            logger.warning(f"MCP unsupported: {method} {normalized_path}")
-            error_response = Response("Not Found", status_code=404)
-            await error_response(modified_scope, receive, send)
-
+        await handle_streamable_http_post(scope, receive, send, session, headers)
     except Exception as e:
         if tracked_send.started:
             logger.error(f"MCP handler exception: {e}", exc_info=True)
