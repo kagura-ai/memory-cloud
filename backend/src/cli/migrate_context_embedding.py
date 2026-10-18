@@ -256,8 +256,14 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                     batch_size=args.batch_size,
                 )
             except Exception as exc:  # noqa: BLE001 - one context's failure, the run goes on
+                # The session is shared by every context of --all: end a
+                # transaction the failure may have left aborted.
+                await db.rollback()
+                # Only our own errors' text: a store or provider error can
+                # quote chunk text (content_chunks_* in the log has the class).
+                detail = f": {exc}" if isinstance(exc, MemoryCloudException) else ""
                 print(
-                    f"  chunk rebuild failed, NOT switched ({type(exc).__name__}: {exc}); "
+                    f"  chunk rebuild failed, NOT switched ({type(exc).__name__}{detail}); "
                     "retry with --verify --switch"
                 )
                 return 1

@@ -29,6 +29,7 @@ from services.embedding_migration_service import (  # noqa: E402
     SwitchResult,
     VerifyResult,
 )
+from utils.exceptions import ValidationError  # noqa: E402
 
 _MODEL = "qwen3-embedding:4b"
 
@@ -55,6 +56,7 @@ async def _run(
     verify: VerifyResult | list[VerifyResult] | None = None,
     rebuild: AsyncMock | None = None,
     switch: AsyncMock | None = None,
+    db: MagicMock | None = None,
     **plan_extra,
 ) -> int:
     """``verify`` as a list: one result per verify call, in order."""
@@ -75,7 +77,7 @@ async def _run(
         ),
         patch.object(cli, "switch_context_embedding", switch or AsyncMock(return_value=_SWITCHED)),
     ):
-        return await cli._one_context(MagicMock(), context_id, args)
+        return await cli._one_context(db or MagicMock(), context_id, args)
 
 
 _SWITCHED = SwitchResult(
@@ -262,19 +264,40 @@ async def test_run_stops_before_the_switch_when_chunks_stay_missing(capsys):
 
 @pytest.mark.asyncio
 async def test_a_failed_chunk_rebuild_skips_the_switch_and_the_run_goes_on(capsys):
+    """The shared session is rolled back for the next context of --all, and a
+    store or provider error's text (it can quote chunk text) is not printed."""
     switch = AsyncMock()
+    db = MagicMock()
+    db.rollback = AsyncMock()
     code = await _run(
         ["--run", "--yes"],
         reembed=_reembed([]),
         verify=_chunks_missing(uuid4()),
-        rebuild=AsyncMock(side_effect=RuntimeError("upsert failed")),
+        rebuild=AsyncMock(side_effect=RuntimeError("upsert failed: <chunk text>")),
         switch=switch,
+        db=db,
     )
     assert code == 1
     switch.assert_not_awaited()
-    assert "chunk rebuild failed, NOT switched (RuntimeError: upsert failed)" in (
-        capsys.readouterr().out
+    db.rollback.assert_awaited_once()
+    out = capsys.readouterr().out
+    assert "chunk rebuild failed, NOT switched (RuntimeError); retry" in out
+    assert "chunk text" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_refused_chunk_rebuild_prints_why(capsys):
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    code = await _run(
+        ["--run", "--yes"],
+        reembed=_reembed([]),
+        verify=_chunks_missing(uuid4()),
+        rebuild=AsyncMock(side_effect=ValidationError("already routes to the target")),
+        db=db,
     )
+    assert code == 1
+    assert "(ValidationError: already routes to the target)" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
