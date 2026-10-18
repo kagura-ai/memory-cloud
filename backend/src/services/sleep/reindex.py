@@ -13,7 +13,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
 from services.content_chunk_writer import (
     content_chunks_enabled,
@@ -75,8 +74,8 @@ class ReindexPhase:
             PhaseResult with reindex statistics
         """
         # Call-time import: memory_service is a heavy module and this phase
-        # only needs its point builder.
-        from services.memory_service import build_memory_point
+        # only needs its point writer.
+        from services.memory_service import write_memory_point
 
         result = PhaseResult(phase_name="reindex")
 
@@ -121,60 +120,32 @@ class ReindexPhase:
                 continue
 
             try:
-                if owns_resource_point(memory):
-                    # #2053: a row the resource indexer wrote owns the
-                    # indexer's point (``Memory.point_id``, embedded from the
-                    # document). The path below would embed its label summary
-                    # and write a stray point under the row id; the indexer
-                    # rebuilds its own point instead, as
-                    # process_pending_embedding does (#1870). It has no
-                    # content chunks to rewrite.
-                    if resource_indexer is None:
-                        resource_indexer = ResourceIndexer(self.db)
-                    usage: dict[str, int] = {}
-                    try:
-                        await resource_indexer.rebuild_point(
-                            memory,
-                            collection_name=self.collection_name,
-                            embedding_service=self.embedding_service,
-                            usage=usage,
-                        )
-                    finally:
-                        # Set once the embedding answered: a failed upsert
-                        # still spent it.
-                        if "tokens" in usage:
-                            self._account_embedding(result, usage["tokens"])
+                # #2053 / #2065: a resource-indexer row gets the indexer's own
+                # point back (``write_memory_point``); it has no content chunks
+                # to rewrite. #471: the embedding's tokens are counted once it
+                # answered (0 on a cache hit), also when the write then failed.
+                if resource_indexer is None and owns_resource_point(memory):
+                    resource_indexer = ResourceIndexer(self.db)
+                usage: dict[str, int] = {}
+                try:
+                    written = await write_memory_point(
+                        self.db,
+                        memory,
+                        collection_name=self.collection_name,
+                        embedding_service=self.embedding_service,
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                        usage=usage,
+                        resource_indexer=resource_indexer,
+                    )
+                finally:
+                    if "tokens" in usage:
+                        self._account_embedding(result, usage["tokens"])
+                if written is None:
                     reindexed += 1
                     continue
-
-                # #471: use embed_with_usage() to capture token count for
-                # cost-grade reporting. Cache hits return (vector, 0) which
-                # is the correct cost attribution — cached responses don't
-                # bill API tokens.
-                vector, tokens = await self.embedding_service.embed_with_usage(
-                    memory.summary,
-                    user_id=user_id,
-                    context_id=context_id,
-                    workspace_id=workspace_id,
-                )
-                self._account_embedding(result, tokens)
-                # #2053: the upsert replaces the WHOLE point, so it must be
-                # the point the normal write path builds — BM25 sparse
-                # vector, tokenized/normalized payload and the geo field
-                # (#1332) included. Only the dense vector is built here.
-                payload, sparse_indices, sparse_values = build_memory_point(memory)
-
-                await add_memory_to_qdrant(
-                    user_id=user_id,
-                    memory_id=memory.id,
-                    vector=vector,
-                    payload=payload,
-                    workspace_id=workspace_id,
-                    context_id=context_id,
-                    sparse_indices=sparse_indices,
-                    sparse_values=sparse_values,
-                    collection_name=self.collection_name,
-                )
+                _vector, payload = written
                 # #2015: a content change rewrites the chunk points
                 # (re-embedded, in place). A metadata-only change keeps
                 # their vectors and copies the new payload onto them — a

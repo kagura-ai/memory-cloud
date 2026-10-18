@@ -21,7 +21,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 
 # Third-party imports (PEP8)
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
@@ -306,15 +306,53 @@ def owns_resource_point(memory: Memory) -> bool:
     sets it on memories the API wrote, whose point is their own id. An indexer
     row carries the full natural key and names the point derived from it.
     """
-    if (
-        memory.resource_id is None
-        or memory.resource_doc_id is None
-        or memory.resource_version is None
-    ):
-        return False
-    return memory.summary_embedding_id == resource_point_id(
-        memory.resource_id, memory.resource_doc_id, memory.resource_version
+    return names_own_resource_point(
+        memory.summary_embedding_id,
+        memory.resource_id,
+        memory.resource_doc_id,
+        memory.resource_version,
     )
+
+
+def names_own_resource_point(
+    point_id: UUID | None,
+    resource_id: str | None,
+    doc_id: str | None,
+    version: int | None,
+) -> bool:
+    """``owns_resource_point`` on a row's column values (#2065)."""
+    if resource_id is None or doc_id is None or version is None:
+        return False
+    return point_id == resource_point_id(resource_id, doc_id, version)
+
+
+async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -> UUID | None:
+    """``point_id`` — the row ``memory_id``'s point — or ``None`` when another live row names it.
+
+    A resource point's id is derived from the document (#1829): the same
+    document version indexed into two contexts that share a collection is ONE
+    point for TWO rows, so deleting it for one row would leave the other
+    unsearchable. A row whose point is its own id (``point_id == memory_id``)
+    skips the lookup. Not scoped by context on purpose: the row to find is one
+    in ANOTHER context that shares the collection. Served by the partial index
+    idx_memories_summary_embedding_live (#1869). The rule ``forget`` and the
+    Sleep archive and merge (#2065) delete a memory's point by.
+    """
+    if point_id == memory_id:
+        return point_id
+    shared = await db.execute(
+        select(
+            exists().where(
+                Memory.summary_embedding_id == point_id,
+                Memory.id != memory_id,
+                Memory.deleted_at.is_(None),
+            )
+        )
+    )
+    if shared.scalar():
+        logger.info("memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id))
+        return None
+    return point_id
 
 
 def resource_document_text(projected: dict[str, Any], doc_id: str) -> str:

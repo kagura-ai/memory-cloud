@@ -91,7 +91,7 @@ class TestReindexPhase:
         assert result.details["message"] == "no_memories_to_reindex"
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     async def test_successful_reindex(self, mock_qdrant, reindex_phase, mock_db):
         """Successfully re-embed and upsert memories."""
         mem1 = _make_memory()
@@ -117,7 +117,7 @@ class TestReindexPhase:
         assert mock_qdrant.call_count == 2
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     async def test_skips_deleted_memories(self, mock_qdrant, reindex_phase, mock_db):
         """Deleted memories (not in batch result) are skipped."""
         changed_ids = {uuid4()}
@@ -134,7 +134,7 @@ class TestReindexPhase:
         mock_qdrant.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     async def test_partial_failure(self, mock_qdrant, reindex_phase, mock_db):
         """One failure doesn't stop processing other memories."""
         mem_ok = _make_memory()
@@ -160,7 +160,7 @@ class TestReindexPhase:
         assert result.details["failed"] == 1
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     async def test_all_fail_marks_unsuccessful(self, mock_qdrant, reindex_phase, mock_db):
         """All failures marks phase as unsuccessful."""
         mem = _make_memory()
@@ -185,7 +185,7 @@ class TestReindexContentChunks:
     """#2015: a reindexed memory's chunk points are rewritten too."""
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
     async def test_chunks_rewritten_with_the_flag_read_once(
@@ -215,7 +215,7 @@ class TestReindexPointShape:
     """#2053: the reindexed point is the same point the normal write path builds."""
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
     async def test_upsert_carries_bm25_sparse_and_canonical_payload(
         self, mock_write, mock_qdrant, reindex_phase, mock_db
@@ -259,7 +259,7 @@ class TestReindexResourceRows:
     """#2053: a resource-indexer row gets the indexer's point, not a stray one."""
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
     @patch("services.sleep.reindex.ResourceIndexer")
     async def test_resource_row_is_rebuilt_by_the_indexer(
@@ -298,7 +298,7 @@ class TestReindexResourceRows:
         assert result.embedding_tokens == 27
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.ResourceIndexer")
     async def test_failed_rebuild_counts_as_failed_and_keeps_spent_tokens(
         self, mock_indexer_cls, mock_qdrant, reindex_phase, mock_db
@@ -334,7 +334,7 @@ class TestReindexContentChangedSplit:
         return AsyncMock(side_effect=_write)
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
     async def test_metadata_only_syncs_the_payload_without_a_chunk_embed(
@@ -371,7 +371,7 @@ class TestReindexContentChangedSplit:
         assert result.details["content_chunk_rewrites"] == 1
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
     async def test_unknown_classification_rewrites_every_memorys_chunks(
@@ -396,7 +396,7 @@ class TestReindexContentChangedSplit:
         assert result.embedding_tokens == 14
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
     async def test_a_failed_payload_sync_falls_back_to_a_rewrite(
@@ -424,7 +424,7 @@ class TestReindexContentChangedSplit:
         assert result.embedding_tokens == 10
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     async def test_chunk_tokens_count_when_the_chunk_write_raises(
         self, mock_flag, mock_qdrant, reindex_phase, mock_db
@@ -454,7 +454,7 @@ class TestReindexContentChangedSplit:
         assert result.embedding_calls_used == 2
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     async def test_a_failed_chunk_write_re_queues_the_memory(
         self, mock_flag, mock_qdrant, reindex_phase, mock_db
@@ -492,7 +492,7 @@ class TestReindexContentChangedSplit:
         assert result.success is True
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     async def test_a_row_not_success_is_not_counted_as_re_queued(
         self, mock_flag, mock_qdrant, reindex_phase, mock_db
@@ -521,7 +521,7 @@ class TestReindexContentChangedSplit:
         assert result.details["content_chunk_requeued"] == 0
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     async def test_a_failed_re_queue_counts_the_memory_as_failed(
         self, mock_flag, mock_qdrant, reindex_phase, mock_db
@@ -553,7 +553,7 @@ class TestReindexContentChangedSplit:
         assert result.details["failed_ids"] == [str(mem.id)]
 
     @pytest.mark.asyncio
-    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
     @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
     async def test_no_chunk_call_counted_without_a_provider_request(
         self, mock_flag, mock_qdrant, reindex_phase, mock_db

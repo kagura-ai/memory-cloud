@@ -110,7 +110,10 @@ from utils.tag_normalize import TAG_GROUPS_FILTER_KEY, tag_filter_groups
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from models.memory import Memory
+    from services.resource_indexer import ResourceIndexer
 
 # Issue #886: upper bound for the always-load cap, matching the REST schema's
 # ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
@@ -5846,28 +5849,9 @@ class MemoryService:
 
     async def _point_to_delete(self, memory: Memory) -> UUID | None:
         """``memory``'s vector point id, or ``None`` when another live row owns it too."""
-        point_id = memory.point_id
-        if point_id != memory.id:
-            # Not scoped by context_id on purpose: the row to find is one in
-            # ANOTHER context that shares the collection. Served by the
-            # partial index idx_memories_summary_embedding_live (#1869).
-            shared = await self.db.execute(
-                select(
-                    exists().where(
-                        Memory.summary_embedding_id == point_id,
-                        Memory.id != memory.id,
-                        Memory.deleted_at.is_(None),
-                    )
-                )
-            )
-            if shared.scalar():
-                logger.info(
-                    "memory_point_shared_kept",
-                    memory_id=str(memory.id),
-                    point_id=str(point_id),
-                )
-                return None
-        return point_id
+        from services.resource_indexer import unshared_point_id
+
+        return await unshared_point_id(self.db, memory.id, memory.point_id)
 
     async def _soft_delete_memory(
         self,
@@ -8291,6 +8275,104 @@ def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[
     return payload, sparse_indices, sparse_values
 
 
+async def write_memory_point(
+    db: AsyncSession,
+    memory: Memory,
+    *,
+    collection_name: str,
+    embedding_service: EmbeddingService,
+    user_id: str,
+    workspace_id: str | None,
+    context_id: str | None,
+    usage: dict[str, int] | None = None,
+    on_write: Callable[[], None] | None = None,
+    resource_indexer: ResourceIndexer | None = None,
+    embed_scope: tuple[Any, Any] | None = None,
+) -> tuple[list[float], dict[str, Any]] | None:
+    """Write ``memory``'s own vector point: the one place that picks how (#2065).
+
+    A row the resource indexer wrote owns the indexer's point
+    (``Memory.point_id``, the uuid5 of the document, embedded from the
+    document text with the resource payload). Its summary is only the label
+    ``[resource] doc vN``: the summary path would store a label vector under
+    the row id and leave ``point_id`` naming nothing (#1870, #2053). The
+    indexer rebuilds its own point from the row instead. Every other row gets
+    the summary point ``build_memory_point`` describes, under its row id.
+
+    Shared by the embedding pipeline (``process_pending_embedding``), the Sleep
+    reindex and the Sleep restores, which used to repeat this branch. Content
+    chunk points are the caller's: only a summary point has them.
+
+    Args:
+        user_id, workspace_id, context_id: The point's isolation fields and
+            the embedding call's key scope.
+        usage: Optional out-parameter for a caller that accounts embedding
+            cost: ``usage["tokens"]`` is set once the embedding answered (0 on
+            a cache hit), also when the write then fails.
+        on_write: Called right before the first vector-store write is sent.
+        resource_indexer: Reused for a resource row; one is built otherwise.
+        embed_scope: ``(workspace_id, context_id)`` for the embedding call's key
+            lookup when it is not the point's (the pipeline passes the row's
+            own, ``None`` for a context-less row).
+
+    Returns:
+        ``(vector, payload)`` of the summary point written, or ``None`` for a
+        resource row (it has no summary point, chunks or seed edges).
+
+    Raises:
+        ResourceRebuildError: A resource row whose point cannot be rebuilt.
+        Exception: The embedding or the vector-store write failed.
+    """
+    from services.resource_indexer import ResourceIndexer, owns_resource_point
+
+    if owns_resource_point(memory):
+        if on_write is not None:
+            on_write()
+        indexer = resource_indexer if resource_indexer is not None else ResourceIndexer(db)
+        await indexer.rebuild_point(
+            memory,
+            collection_name=collection_name,
+            embedding_service=embedding_service,
+            usage=usage,
+        )
+        return None
+
+    embed_workspace_id, embed_context_id = (
+        embed_scope if embed_scope is not None else (workspace_id, context_id)
+    )
+    if usage is None:
+        vector = await embedding_service.embed(
+            memory.summary or "",
+            user_id,
+            context_id=embed_context_id,
+            workspace_id=embed_workspace_id,
+        )
+    else:
+        vector, usage["tokens"] = await embedding_service.embed_with_usage(
+            memory.summary or "",
+            user_id=user_id,
+            context_id=embed_context_id,
+            workspace_id=embed_workspace_id,
+        )
+    # Payload + BM25 sparse vector (#1525: the same point every writer builds;
+    # the upsert replaces the whole point, #2053).
+    payload, sparse_indices, sparse_values = build_memory_point(memory)
+    if on_write is not None:
+        on_write()
+    await add_memory_to_qdrant(
+        user_id=user_id,
+        memory_id=memory.id,
+        vector=vector,
+        payload=payload,
+        workspace_id=cast(str, workspace_id),
+        context_id=cast(str, context_id),
+        sparse_indices=sparse_indices,
+        sparse_values=sparse_values,
+        collection_name=collection_name,
+    )
+    return vector, payload
+
+
 async def _requeue_after_lost_claim(db: Any, memory_id: UUID) -> bool:
     """Re-queue a row whose embedding run found its claim lost after writing (#2061).
 
@@ -8409,47 +8491,27 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 db, memory.context_id, default_service=EmbeddingService(db)
             )
 
-            # #1870: a row the resource indexer wrote owns the indexer's point
-            # (``Memory.point_id`` = uuid5 of the document, embedded from the
-            # document text, with the resource payload). Its summary is only
-            # the label ``[resource] doc vN``, so the path below would store a
-            # label vector under the row id and leave ``point_id`` naming
-            # nothing. The indexer rebuilds its own point from the row instead
-            # (a restored context's rows come here, #1804).
-            from services.resource_indexer import ResourceIndexer, owns_resource_point
+            # #1870 / #2065: a resource-indexer row gets the indexer's point
+            # back (a restored context's rows come here, #1804); every other
+            # row its summary point. ``write_memory_point`` picks.
+            def _mark_written() -> None:
+                nonlocal wrote_points
+                wrote_points = True
 
+            written = await write_memory_point(
+                db,
+                memory,
+                collection_name=collection,
+                embedding_service=embed_svc,
+                user_id=memory.user_id,
+                workspace_id=str(memory.workspace_id),
+                context_id=str(memory.context_id),
+                on_write=_mark_written,
+                embed_scope=(memory.workspace_id, memory.context_id),
+            )
             vector: list[float] | None = None
-            if owns_resource_point(memory):
-                wrote_points = True
-                await ResourceIndexer(db).rebuild_point(
-                    memory, collection_name=collection, embedding_service=embed_svc
-                )
-            else:
-                # Generate embedding
-                vector = await embed_svc.embed(
-                    memory.summary,
-                    memory.user_id,
-                    context_id=memory.context_id,
-                    workspace_id=memory.workspace_id,
-                )
-
-                # Payload + BM25 sparse vector (#1525: shared with the
-                # embedding-model migration so both paths write identical points).
-                payload, sparse_indices, sparse_values = build_memory_point(memory)
-
-                wrote_points = True
-                await add_memory_to_qdrant(
-                    user_id=memory.user_id,
-                    memory_id=memory_id,
-                    vector=vector,
-                    payload=payload,
-                    workspace_id=str(memory.workspace_id),
-                    context_id=str(memory.context_id),
-                    sparse_indices=sparse_indices,
-                    sparse_values=sparse_values,
-                    collection_name=collection,
-                )
-
+            if written is not None:
+                vector, payload = written
                 # #2015: on an opted-in context, a long content is also
                 # embedded as chunk points; a no-op (no query) for content
                 # too short to split. #2049: a chunk failure is raised, not

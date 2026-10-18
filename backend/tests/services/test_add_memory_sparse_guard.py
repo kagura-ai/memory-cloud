@@ -105,8 +105,9 @@ def test_guard_scans_real_callers() -> None:
         for _, path in _source_files()
         for call in _upsert_calls(ast.parse(path.read_text(encoding="utf-8")))
     ]
-    # process_pending_embedding, embedding migration, Sleep reindex, Sleep undo.
-    assert len(calls) >= 4
+    # write_memory_point (#2065: the pipeline, Sleep reindex and Sleep undo
+    # write through it) and the embedding migration.
+    assert len(calls) >= 2
 
 
 def test_guard_flags_a_dense_only_call() -> None:
