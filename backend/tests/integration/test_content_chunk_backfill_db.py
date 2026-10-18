@@ -146,3 +146,41 @@ async def test_a_failed_backfill_rolls_the_flag_back(db_session, world):
     )
     assert flag is False
     assert (await _statuses(db_session, rows))["long"].embedding_status == "success"
+
+
+async def _enabled_at(db, ctx):
+    return await db.scalar(
+        select(ContextSearchConfig.content_chunks_enabled_at)
+        .where(ContextSearchConfig.context_id == ctx)
+        .execution_options(populate_existing=True)
+    )
+
+
+async def test_the_enable_is_stamped_and_turning_off_clears_it(db_session, world):
+    """#2103: the plan cap's rank is committed with the flag and its backfill."""
+    ctx, _rows = world
+    repo = ContextSearchConfigRepository(db_session)
+    assert await _enabled_at(db_session, ctx) is None
+    with patch.object(repo, "_purge_chunk_points", AsyncMock()):
+        await repo.update(ctx, _ON)
+        stamped = await _enabled_at(db_session, ctx)
+        assert stamped is not None
+
+        # Another edit while on keeps the stamp (the rank is the enable's).
+        await repo.update(ctx, _ON.model_copy(update={"fetch_factor": 4}))
+        assert await _enabled_at(db_session, ctx) == stamped
+
+        await repo.update(ctx, _ON.model_copy(update={"content_chunks_enabled": False}))
+        assert await _enabled_at(db_session, ctx) is None
+
+
+async def test_a_failed_enable_leaves_no_stamp(db_session, world):
+    ctx, _rows = world
+    repo = ContextSearchConfigRepository(db_session)
+    with (
+        patch.object(repo, "_purge_chunk_points", AsyncMock()),
+        patch.object(repo, "_queue_content_chunk_backfill", AsyncMock(side_effect=RuntimeError)),
+        pytest.raises(RuntimeError),
+    ):
+        await repo.update(ctx, _ON)
+    assert await _enabled_at(db_session, ctx) is None

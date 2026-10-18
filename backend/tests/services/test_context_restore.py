@@ -839,3 +839,45 @@ async def test_rebuild_point_reports_the_embedding_usage_when_asked(db_session, 
     assert service.embed_with_usage.await_args.kwargs["text"] == indexed["doc_1"].payload["content"]
     rebuilt = client.upsert.await_args.kwargs["points"][0]
     assert rebuilt.id == str(point_id) == indexed["doc_1"].id
+
+
+@pytest.mark.asyncio
+async def test_a_restored_context_with_content_chunks_on_ranks_as_enabled_now(db_session, seed):
+    """#2103: its old enable stamp would put it ahead of contexts enabled while
+    it was deleted (the plan's cap keeps the earliest-enabled)."""
+    from datetime import UTC, datetime
+
+    from models.config import ContextSearchConfig
+
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    on, off = seed.context(), seed.context()
+    db_session.add_all([on, off])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ContextSearchConfig(
+                context_id=on.id, content_chunks_enabled=True, content_chunks_enabled_at=old
+            ),
+            ContextSearchConfig(context_id=off.id, content_chunks_enabled=False),
+        ]
+    )
+    await db_session.commit()
+    on_id, off_id = on.id, off.id
+
+    for context_id in (on_id, off_id):
+        await _delete(db_session, context_id)
+        await restore_deleted_context(db_session, context_id, dry_run=False)
+
+    stamps = dict(
+        (
+            await db_session.execute(
+                select(
+                    ContextSearchConfig.context_id, ContextSearchConfig.content_chunks_enabled_at
+                )
+                .where(ContextSearchConfig.context_id.in_([on_id, off_id]))
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    assert stamps[on_id] > old
+    assert stamps[off_id] is None

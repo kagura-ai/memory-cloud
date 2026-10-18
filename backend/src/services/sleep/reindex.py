@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
+from services.content_chunk_policy import content_chunks_status
 from services.content_chunk_writer import (
     content_chunks_enabled,
     requeue_embedding,
@@ -102,13 +103,21 @@ class ReindexPhase:
         memory_map = {m.id: m for m in row.scalars().all()}
 
         # #2015: the context's content-chunk flag, read once for the batch
-        # (None = unknown; the writer then looks it up per memory).
+        # (None = unknown; the writer then looks it up per memory). #2103:
+        # payload syncs follow the stored flag (an inactive context keeps its
+        # points current), chunk writes the effective one.
         chunks_enabled: bool | None = None
+        chunks_stored: bool | None = None
         if context_id:
             try:
-                chunks_enabled = await content_chunks_enabled(self.db, UUID(str(context_id)))
+                ctx_uuid = UUID(str(context_id))
+                chunks_stored = await content_chunks_enabled(self.db, ctx_uuid)
+                chunks_enabled = (
+                    chunks_stored
+                    and (await content_chunks_status(self.db, ctx_uuid, stored=True)).effective
+                )
             except Exception:  # noqa: BLE001 — the writer retries the lookup
-                chunks_enabled = None
+                chunks_enabled = chunks_stored = None
 
         # #2053: built on the first resource-indexer row, then reused.
         resource_indexer: ResourceIndexer | None = None
@@ -156,9 +165,11 @@ class ReindexPhase:
                     memory,
                     base_payload=payload,
                     collection_name=self.collection_name,
-                    chunks_enabled=chunks_enabled,
+                    chunks_enabled=chunks_stored,
                 ):
-                    outcome = await self._write_chunks(result, memory, payload, chunks_enabled)
+                    outcome = await self._write_chunks(
+                        result, memory, payload, chunks_enabled, chunks_stored
+                    )
                     if outcome == "written":
                         chunk_rewrites += 1
                     elif outcome == "requeued":
@@ -207,6 +218,7 @@ class ReindexPhase:
         memory: Memory,
         payload: dict,
         chunks_enabled: bool | None,
+        chunks_stored: bool | None = None,
     ) -> Literal["written", "requeued", "none"]:
         """Rewrite the memory's chunk points.
 
@@ -234,6 +246,7 @@ class ReindexPhase:
                 embed_svc=self.embedding_service,
                 collection_name=self.collection_name,
                 chunks_enabled=chunks_enabled,
+                chunks_stored=chunks_stored,
                 fail_open=False,
                 usage=usage,
             )

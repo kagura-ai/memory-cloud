@@ -1401,8 +1401,10 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     content_chunks_can_change: bool = Field(
         default=False,
         description=(
-            "Whether the caller may change content_chunks_enabled (the context "
-            "owner or a workspace owner/admin)"
+            "Whether the caller may change content_chunks_enabled: the context "
+            "owner or a workspace owner/admin, and, to turn it on, a vector store "
+            "that keeps chunk vectors and (where gated by plan) the plan's feature "
+            "and a free slot under its cap (#2103). Turning it off is always allowed"
         ),
     )
     content_chunks_supported: bool = Field(
@@ -1423,6 +1425,49 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
             "vectors, e.g. the existing memories queued when the flag was turned "
             "on; 0 while it is off"
         ),
+    )
+    # Issue #2103 / #2080: server-computed. content_chunks_enabled stays the
+    # STORED value (a client echoing an effective false back would turn the
+    # flag off and purge the chunks); these say whether it is acted on.
+    content_chunks_effective: bool = Field(
+        default=False,
+        description=(
+            "Whether the context's content chunk vectors are read and written: "
+            "content_chunks_enabled on, a vector store that keeps them, and, where "
+            "the deployment gates them by plan (CONTENT_CHUNKS_REQUIRE_PLAN), a plan "
+            "with the content_chunks feature on which this context is among the "
+            "earliest-enabled max_content_chunk_contexts. An inactive context keeps "
+            "the chunk vectors of unchanged memories; memories written or edited "
+            "meanwhile get chunks only on their next edit or re-embed (nothing is "
+            "re-queued when it becomes active again)"
+        ),
+    )
+    content_chunks_limit: int | None = Field(
+        default=None,
+        description=(
+            "The workspace plan's max_content_chunk_contexts (0 without the "
+            "content_chunks feature); null when the deployment does not gate "
+            "content chunks by plan"
+        ),
+    )
+    content_chunks_in_use: int = Field(
+        default=0,
+        description=(
+            "Live contexts of the workspace with content_chunks_enabled on, this "
+            "one included when it is on"
+        ),
+    )
+    content_chunks_disabled_reason: Literal["permission", "unsupported", "plan", "cap"] | None = (
+        Field(
+            default=None,
+            description=(
+                "Why the toggle cannot be turned on (flag off) or why the chunks are "
+                "inactive (flag on): unsupported (LanceDB), plan (the plan lacks "
+                "content_chunks), cap (max_content_chunk_contexts reached), or "
+                "permission (nothing else blocks, but only the context owner or a "
+                "workspace owner/admin may change it); null when nothing blocks"
+            ),
+        )
     )
     created_at: datetime
     updated_at: datetime

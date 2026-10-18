@@ -211,6 +211,43 @@ class TestReindexContentChunks:
         assert kwargs["base_payload"]["summary"] == "test summary"
 
 
+class TestReindexInactiveContentChunks:
+    """#2103: payload syncs follow the stored flag, chunk writes the effective one."""
+
+    @pytest.mark.asyncio
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.sync_content_chunk_payload", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
+    async def test_an_inactive_context_syncs_payloads_and_writes_no_chunks(
+        self, mock_write, mock_sync, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        from services.content_chunk_policy import ContentChunksStatus
+
+        mock_flag.return_value = True
+        mock_sync.return_value = True
+        mock_write.return_value = 0
+        meta, edited = _make_memory(), _make_memory()
+        _mock_batch_fetch(mock_db, [meta, edited])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+        inactive = ContentChunksStatus(stored=True, supported=True, gated=True, limit=1, earlier=1)
+
+        with patch(
+            "services.sleep.reindex.content_chunks_status", AsyncMock(return_value=inactive)
+        ):
+            await reindex_phase.execute(
+                changed_memory_ids={meta.id, edited.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+                content_changed_memory_ids={edited.id},
+            )
+
+        assert mock_sync.await_args.kwargs["chunks_enabled"] is True
+        kwargs = mock_write.await_args.kwargs
+        assert (kwargs["chunks_enabled"], kwargs["chunks_stored"]) == (False, True)
+
+
 class TestReindexPointShape:
     """#2053: the reindexed point is the same point the normal write path builds."""
 

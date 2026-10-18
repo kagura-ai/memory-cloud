@@ -196,3 +196,10 @@ def test_list_plan_tiers_exposes_xl_only_feature_booleans(client: TestClient) ->
     assert (basic["max_connectors"], pro["max_connectors"]) == (3, 10)
     assert pro["public_calls_per_day"] == 1000
     assert (promax["max_resource_tokens"], promax["max_connectors"]) == (150, 50)
+
+
+def test_list_plan_tiers_exposes_the_content_chunk_cap(client: TestClient) -> None:
+    """#2103: the admin table shows the per-tier context cap and the feature."""
+    tiers = client.get("/api/v1/admin/plans/tiers").json()
+    assert [t["max_content_chunk_contexts"] for t in tiers] == [0, 1, 5, 20]
+    assert ["content_chunks" in t["features"] for t in tiers] == [False, True, True, True]

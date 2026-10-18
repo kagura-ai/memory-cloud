@@ -46,6 +46,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, Context, Workspace
+from models.config import ContextSearchConfig
 from models.file_objects import WorkspaceStorageUsage
 from models.memory import Memory
 from models.resource import Resource, ResourceSchema
@@ -386,6 +387,19 @@ async def restore_deleted_context(
     context.deleted_at = None
     context.deleted_by = None
     context.name = name
+    # #2103: a restored context with content chunks on ranks as enabled now,
+    # last under the plan's cap. Its old stamp would put it ahead of contexts
+    # enabled while it was deleted and turn them inactive behind their
+    # owners' backs; past the cap it is inactive itself (no refusal here).
+    await db.execute(
+        update(ContextSearchConfig)
+        .where(
+            ContextSearchConfig.context_id == context.id,
+            ContextSearchConfig.content_chunks_enabled.is_(True),
+        )
+        .values(content_chunks_enabled_at=func.clock_timestamp())
+        .execution_options(synchronize_session=False)
+    )
     db.add(
         AuditLog(
             user_email=actor_email or actor_id,

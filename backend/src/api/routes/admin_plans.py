@@ -35,6 +35,7 @@ from models.auth import (
 )
 from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
+from services.content_chunk_policy import content_chunk_context_limit
 from services.effective_quota_service import EffectiveQuotaService
 from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
@@ -111,6 +112,8 @@ class QuotaBreakdown(BaseModel):
     max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
     max_connectors: int = 0  # Spec 2026-06-02: tier base for the extra_connectors addon
     memories_per_day: int = 0  # #1975: tier base for the extra_memories_per_day addon
+    # #2103: tier-fixed (no addon); read only where CONTENT_CHUNKS_REQUIRE_PLAN is on.
+    max_content_chunk_contexts: int = 0
 
 
 class AddonValues(BaseModel):
@@ -284,6 +287,8 @@ class PlanTierInfo(BaseModel):
     owned_workspaces: int
     max_resource_tokens: int
     max_connectors: int  # Issue #1551: serve-only cap on M/L, creation cap on XL
+    # Issue #2103: contexts with active content chunks (CONTENT_CHUNKS_REQUIRE_PLAN).
+    max_content_chunk_contexts: int
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
@@ -444,7 +449,10 @@ async def update_workspace_plan(
         request: Update plan request with new plan name and optional reason
 
     Returns:
-        Success message
+        ``message``, and ``content_chunks_deactivated``: the ids of the
+        contexts whose content chunk vectors go inactive under the new plan
+        (#2103; their flag and chunk points are kept; empty where
+        CONTENT_CHUNKS_REQUIRE_PLAN is off)
 
     Raises:
         404: Workspace not found
@@ -543,6 +551,26 @@ async def update_workspace_plan(
                     f"for workspace {workspace_id} (plan change to {request.plan_name})"
                 )
 
+        # Issue #2103: the contexts whose content chunk vectors go inactive
+        # under the new plan (it lacks the feature, or its cap is lower).
+        # Reported only: the stored flag and the chunk points are kept, so a
+        # later upgrade makes them active again with no backfill. Empty where
+        # CONTENT_CHUNKS_REQUIRE_PLAN is off.
+        from services.content_chunk_policy import contexts_losing_content_chunks
+
+        chunks_deactivated = await contexts_losing_content_chunks(
+            db, workspace.id, old_plan, request.plan_name
+        )
+        if chunks_deactivated:
+            logger.info(
+                "content_chunks_deactivated_by_plan",
+                workspace_id=workspace_id,
+                old_plan=old_plan,
+                new_plan=request.plan_name,
+                count=len(chunks_deactivated),
+                context_ids=[str(context_id) for context_id in chunks_deactivated],
+            )
+
         await db.commit()
 
         logger.info(
@@ -554,7 +582,10 @@ async def update_workspace_plan(
             reason=request.reason,
         )
 
-        return {"message": f"Plan changed from {old_plan} to {request.plan_name}"}
+        return {
+            "message": f"Plan changed from {old_plan} to {request.plan_name}",
+            "content_chunks_deactivated": [str(context_id) for context_id in chunks_deactivated],
+        }
 
 
 @router.get("/audit", response_model=list[PlanChangeAuditEntry])
@@ -806,6 +837,7 @@ async def get_workspace_quotas(
                 max_resource_tokens=plan_tier.max_resource_tokens,
                 max_connectors=plan_tier.max_connectors,
                 memories_per_day=plan_tier.memories_per_day,
+                max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -833,6 +865,8 @@ async def get_workspace_quotas(
                 max_resource_tokens=effective["max_resource_tokens"],
                 max_connectors=workspace.effective_max_connectors,
                 memories_per_day=effective["memories_per_day"],
+                # #2103: no addon column; 0 when the tier lacks content_chunks.
+                max_content_chunk_contexts=content_chunk_context_limit(workspace.plan_name),
             ),
             usage=UsageValues(
                 memories=memory_count,

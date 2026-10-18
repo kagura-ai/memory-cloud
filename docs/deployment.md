@@ -1887,6 +1887,53 @@ re-embeds a memory's chunks only when its content changed and counts the
 chunk tokens in `sleep_reports` with the run's other embeddings; metadata-only
 changes copy the new values onto the chunk points without an embedding.
 
+### Content chunk vectors as a plan feature
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `CONTENT_CHUNKS_REQUIRE_PLAN` | `false` | Gate content chunk vectors by plan ([#2103](https://github.com/kagura-ai/memory-cloud/issues/2103)). `false` keeps every workspace able to turn `content_chunks_enabled` on in any number of contexts (the behaviour before it existed). `true`: turning the flag on needs a plan with the `content_chunks` feature (M and above, `403` `FEAT-001`) and a free slot under the plan's `max_content_chunk_contexts` (S 0 / M 1 / L 5 / XL 20, `429` `QUOTA-001`, `quota_type: content_chunk_contexts`); turning it off is always allowed. Shown as `features.content_chunks_require_plan` in `/system/info`. |
+
+With the gate on, a context whose workspace plan lacks the feature, or that
+ranks past the cap, keeps its stored flag and its chunk points but is treated
+as off: recall reads no chunk points for it, and writes, the Sleep rewrite,
+the backfill and the embedding migration's chunk rebuild write none. The
+contexts that stay active are the earliest-enabled ones
+(`context_search_configs.content_chunks_enabled_at`, then the context id), so
+the choice over the cap is deterministic. A downgrade purges nothing; an
+upgrade makes the kept points active again with no backfill. The admin plan
+change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) lists the contexts
+that go inactive (`content_chunks_deactivated`, also logged as
+`content_chunks_deactivated_by_plan`). The search-config response says why a
+context's toggle is disabled (`content_chunks_disabled_reason`).
+
+One gap: nothing is re-queued when a context becomes active again. A memory
+written while its context was inactive has no chunk points, a memory whose
+content was edited then has lost them (they would hold the old text), and an
+embedding model migration run then writes none into the new collection. Such
+memories are still found through their summary point, and get chunks on their
+next content edit or re-embed; points of unchanged memories are kept.
+
+**Before turning the gate on** on a deployment where contexts already have the
+flag on, list the contexts it would make inactive (no write; plan names and
+caps are the code defaults — adjust them to any `PLAN_<KEY>_FEATURES` override):
+
+```sql
+WITH on_ctx AS (
+  SELECT c.id, c.workspace_id, w.plan_name,
+         row_number() OVER (
+           PARTITION BY c.workspace_id
+           ORDER BY coalesce(s.content_chunks_enabled_at, 'infinity'), c.id
+         ) AS rn
+  FROM context_search_configs s
+  JOIN contexts c ON c.id = s.context_id
+  JOIN workspaces w ON w.id = c.workspace_id
+  WHERE s.content_chunks_enabled AND c.deleted_at IS NULL
+)
+SELECT * FROM on_ctx
+WHERE coalesce(plan_name, 'free') NOT IN ('basic', 'pro', 'promax')
+   OR rn > CASE plan_name WHEN 'basic' THEN 1 WHEN 'pro' THEN 5 ELSE 20 END;
+```
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score
@@ -2151,6 +2198,7 @@ Feature availability (the `features` set on each tier):
 | Memory analysis on the platform-managed LLM, no workspace key (`managed_llm`) | – | – | ✓ | ✓ |
 | Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
 | Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
+| Content chunk vectors (`content_chunks`; contexts: `max_content_chunk_contexts` 0 / 1 / 5 / 20), only where `CONTENT_CHUNKS_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
 | Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
 
 **Block-new-only rule.** The three XL-only rows gate *creation* only. A
@@ -2328,6 +2376,7 @@ Current modes:
 | `managed_llm` | `enforced` | Memory Analysis with no BYOK key is refused (`VAL-001`). |
 | `resources` | `enforced` | `setup_resource` / new resource tokens are refused. |
 | `connectors` | `enforced` | `setup_connector` is refused. |
+| `content_chunks` | `conditional` | Turning `content_chunks_enabled` on is refused, and contexts past `max_content_chunk_contexts` are searched and written without chunks, **only** where `CONTENT_CHUNKS_REQUIRE_PLAN` is on; it defaults to off. |
 
 The modes are a property of the **code**, not of a tier, so a
 `PLAN_<KEY>_FEATURES` override does not change them — it only moves which tiers

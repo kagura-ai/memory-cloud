@@ -1060,6 +1060,21 @@ class Settings(BaseSettings):
             "every context created from now on. Needs the Qdrant vector store."
         ),
     )
+    # #2103: content chunks as a plan feature with a per-plan context cap. Off
+    # (the default) keeps self-hosted deployments as they were: every
+    # workspace may turn chunks on in any number of contexts. On, the plan
+    # must have the ``content_chunks`` feature and only the earliest-enabled
+    # ``max_content_chunk_contexts`` contexts of a workspace are active.
+    content_chunks_require_plan: bool = Field(
+        default=False,
+        description=(
+            "Gate content chunk vectors by plan (#2103): turning content_chunks_enabled "
+            "on needs a plan with the 'content_chunks' feature and a free slot under "
+            "its max_content_chunk_contexts cap; contexts past the cap (or on a plan "
+            "without the feature) keep their flag and their chunk points but are "
+            "searched and written without chunks. Default False = every plan, no cap."
+        ),
+    )
 
     @field_validator("default_reranker_model", mode="before")
     @classmethod

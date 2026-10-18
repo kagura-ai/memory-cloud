@@ -87,6 +87,46 @@ class TestCompleteJson:
         assert resp.provider == "openai"
 
     @pytest.mark.asyncio
+    async def test_release_db_before_call_commits_between_lookup_and_call(
+        self, llm_service, mock_db
+    ):
+        """#2070: the credential lookup's transaction ends before the round
+        trip, so the pooled connection is not held while the provider answers."""
+        order: list[str] = []
+
+        async def _resolve(*_a, **_k):
+            order.append("lookup")
+            return mock_provider
+
+        async def _call(**_k):
+            order.append("call")
+            return _make_provider_response('{"ok": true}')
+
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.side_effect = _call
+        mock_db.commit.side_effect = lambda: order.append("commit")
+
+        with patch.object(llm_service, "_get_provider", side_effect=_resolve):
+            await llm_service.complete_json(
+                user_id="user-1", prompt="p", release_db_before_call=True
+            )
+
+        assert order == ["lookup", "commit", "call"]
+        mock_db.rollback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_session_is_left_alone_by_default(self, llm_service, mock_db):
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = _make_provider_response('{"ok": true}')
+
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
+            await llm_service.complete_json(user_id="user-1", prompt="p")
+
+        mock_db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_custom_model_and_provider(self, llm_service):
         """Test passing custom model and provider."""
         mock_provider = AsyncMock()

@@ -334,3 +334,23 @@ async def test_sync_chunk_points_payload_removes_the_given_keys(mock_client):
     call = mock_client.delete_payload.await_args.kwargs
     assert call["keys"] == ["location"]
     assert call["points"].must[0].match == MatchValue(value=str(mid))
+
+
+async def test_chunk_points_content_hash_reads_chunk_zeros_payload(mock_client):
+    """#2103: the hash an inactive context's kept chunks were split from."""
+    from db.qdrant import chunk_points_content_hash
+    from utils.content_chunks import chunk_point_id
+
+    memory_id = uuid4()
+    mock_client.retrieve.return_value = [SimpleNamespace(payload={"content_hash": "h1"})]
+    assert await chunk_points_content_hash(memory_id, "coll") == "h1"
+    kwargs = mock_client.retrieve.await_args.kwargs
+    assert kwargs["collection_name"] == "coll"
+    assert kwargs["ids"] == [chunk_point_id(memory_id, 0)]
+    assert kwargs["with_vectors"] is False
+
+    mock_client.retrieve.return_value = []
+    assert await chunk_points_content_hash(memory_id, "coll") is None
+    mock_client.retrieve.side_effect = RuntimeError("down")
+    with pytest.raises(QdrantError):
+        await chunk_points_content_hash(memory_id, "coll")

@@ -1252,7 +1252,14 @@ async def gate_content_chunks_change(
 
     It also holds a backend limit (#2072): the LanceDB store keeps no content
     chunk points, so turning the flag on there is refused instead of being
-    reported on and doing nothing. Turning it off stays allowed.
+    reported on and doing nothing. And, where the deployment gates content
+    chunks by plan (#2103, ``CONTENT_CHUNKS_REQUIRE_PLAN``), the plan's
+    feature and its cap on contexts with chunks on. Turning it off stays
+    allowed. Order when turning on: store (422), plan (403 ``FEAT-001``),
+    owner (403 ``AUTH-101``), cap (429 ``QUOTA-001``). The cap check takes
+    the workspace's advisory lock, held until the caller's transaction ends:
+    the update must commit on the same session with nothing committing in
+    between (``ContextSearchConfigRepository.update`` is that commit).
 
     Returns:
         The update to apply (``update`` itself, or a copy without the flag).
@@ -1262,6 +1269,11 @@ async def gate_content_chunks_change(
             the context owner or a workspace owner/admin.
         ValidationError: 422 (``VAL-001``) when the change turns the flag on
             and the vector store has no content chunk points.
+        FeatureNotAvailableError: 403 (``FEAT-001``) when the change turns the
+            flag on and the plan lacks ``content_chunks`` (gated only).
+        QuotaExceededError: 429 (``QUOTA-001``) when the change turns the flag
+            on and the workspace is at ``max_content_chunk_contexts`` (gated
+            only).
     """
     if "content_chunks_enabled" not in update.model_fields_set:
         return update
@@ -1269,9 +1281,22 @@ async def gate_content_chunks_change(
         return ContextSearchConfigUpdate(
             **update.model_dump(exclude_unset=True, exclude={"content_chunks_enabled"})
         )
-    # Before the owner check: the answer does not depend on the caller, so an
+    from services.content_chunk_policy import (
+        ensure_content_chunk_capacity,
+        ensure_content_chunks_plan,
+    )
+
+    turning_on = update.content_chunks_enabled is True
+    # Before the owner check: the answers do not depend on the caller, so an
     # editor is not sent to an owner whose request would be refused too.
-    if update.content_chunks_enabled is True and not chunk_points_supported():
-        raise ValidationError(CONTENT_CHUNKS_UNSUPPORTED_MESSAGE, field="content_chunks_enabled")
+    if turning_on:
+        if not chunk_points_supported():
+            raise ValidationError(
+                CONTENT_CHUNKS_UNSUPPORTED_MESSAGE, field="content_chunks_enabled"
+            )
+        await ensure_content_chunks_plan(perm_service.db, context_id)
     await check_content_chunks_change(perm_service, user_id, context_id)
+    # After it: an editor's 403 never takes the cap's lock.
+    if turning_on:
+        await ensure_content_chunk_capacity(perm_service.db, context_id)
     return update

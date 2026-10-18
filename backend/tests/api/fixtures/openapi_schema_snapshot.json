@@ -2521,7 +2521,11 @@
           "bm25_weight": {},
           "content_chunks_backfill_pending": {},
           "content_chunks_can_change": {},
+          "content_chunks_disabled_reason": {},
+          "content_chunks_effective": {},
           "content_chunks_enabled": {},
+          "content_chunks_in_use": {},
+          "content_chunks_limit": {},
           "content_chunks_supported": {},
           "context_id": {},
           "created_at": {},
@@ -6891,6 +6895,9 @@
           "connectors": {
             "type": "boolean"
           },
+          "content_chunks": {
+            "type": "boolean"
+          },
           "display_name": {
             "type": "string"
           },
@@ -6907,6 +6914,9 @@
             "type": "boolean"
           },
           "max_connectors": {
+            "type": "integer"
+          },
+          "max_content_chunk_contexts": {
             "type": "integer"
           },
           "max_contexts": {
@@ -6967,11 +6977,13 @@
         "required": [
           "analysis_runs_per_day",
           "connectors",
+          "content_chunks",
           "display_name",
           "feature_enforcement",
           "managed_embeddings",
           "managed_llm",
           "max_connectors",
+          "max_content_chunk_contexts",
           "max_contexts",
           "max_members",
           "max_resource_tokens",
@@ -7039,6 +7051,9 @@
           "max_connectors": {
             "type": "integer"
           },
+          "max_content_chunk_contexts": {
+            "type": "integer"
+          },
           "max_contexts_per_workspace": {
             "type": "integer"
           },
@@ -7102,6 +7117,7 @@
           "display_name",
           "features",
           "max_connectors",
+          "max_content_chunk_contexts",
           "max_contexts_per_workspace",
           "max_members_per_workspace",
           "max_resource_tokens",
@@ -7478,6 +7494,10 @@
             "type": "integer"
           },
           "max_connectors": {
+            "default": 0,
+            "type": "integer"
+          },
+          "max_content_chunk_contexts": {
             "default": 0,
             "type": "integer"
           },

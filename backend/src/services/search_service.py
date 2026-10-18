@@ -12,7 +12,6 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -22,6 +21,7 @@ from models.llm_call_log import (
     LLM_CALL_LOG_CALLERS,
 )
 from repositories.config_repository import ContextSearchConfigRepository
+from services.content_chunk_policy import content_chunks_effective, content_chunks_effective_ids
 from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
 from services.identity_link_service import linked_user_ids, opens_contexts_as_self
@@ -159,9 +159,15 @@ class SearchService:
         # oversamples and collapses back to fetch_size. `is True`: a duck-typed
         # default config has no such attribute. #2072: the LanceDB store has no
         # chunk points, so a stored flag there changes nothing.
+        # #2103 / #2080: the effective flag — where the deployment gates
+        # content chunks by plan, a stored true past the plan's cap reads as
+        # off (no extra query for a context with the flag off).
         chunks_supported = chunk_points_supported()
         content_chunks_on = (
-            getattr(config, "content_chunks_enabled", False) is True and chunks_supported
+            not isinstance(context_id, list)
+            and getattr(config, "content_chunks_enabled", False) is True
+            and chunks_supported
+            and await content_chunks_effective(self.db, primary_context_id, stored=True)
         )
         # #2015 PR 2a: cross-context recall follows each context's own flag,
         # not the primary's: the dense arm returns chunk points of exactly the
@@ -620,16 +626,15 @@ class SearchService:
         return sorted_results
 
     async def _chunk_enabled_context_ids(self, context_ids: list[str]) -> list[str]:
-        """Those of ``context_ids`` with ``content_chunks_enabled`` on (#2015 PR 2a).
+        """Those of ``context_ids`` whose content chunks are active (#2015 PR 2a, #2103).
 
-        One SELECT, in a savepoint: a failed lookup answers ``[]`` (summary
-        points only, the safe side) and leaves the request's transaction
-        usable for the rest of the recall. Returned in the caller's spelling
-        and order (the vector filter matches them against the payload as
-        given).
+        One SELECT (``content_chunks_effective_ids``: the flag, and where the
+        deployment gates by plan, each context's rank under its plan's cap),
+        in a savepoint: a failed lookup answers ``[]`` (summary points only,
+        the safe side) and leaves the request's transaction usable for the
+        rest of the recall. Returned in the caller's spelling and order (the
+        vector filter matches them against the payload as given).
         """
-        from models.config import ContextSearchConfig
-
         wanted: dict[UUID, str] = {}
         for cid in context_ids:
             try:
@@ -640,13 +645,7 @@ class SearchService:
             return []
         try:
             async with self.db.begin_nested():
-                result = await self.db.execute(
-                    select(ContextSearchConfig.context_id).where(
-                        ContextSearchConfig.context_id.in_(list(wanted)),
-                        ContextSearchConfig.content_chunks_enabled.is_(True),
-                    )
-                )
-                enabled = set(result.scalars().all())
+                enabled = await content_chunks_effective_ids(self.db, list(wanted))
         except Exception as e:  # noqa: BLE001 — fail closed: no chunk points
             logger.warning("content_chunks_flags_load_failed", error_class=type(e).__name__)
             return []
