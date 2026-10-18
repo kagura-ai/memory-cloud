@@ -26,7 +26,7 @@ Merge losers' Qdrant vectors were already hard-deleted at merge time
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Update, case, delete, or_, select, update
@@ -86,10 +86,6 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
     ``embedding_attempted_at`` on an in-session row; the restore paths do not
     read it before they commit.
     """
-    live_context = or_(
-        Memory.context_id.is_(None),
-        Memory.context_id.in_(select(Context.id).where(Context.deleted_at.is_(None))),
-    )
     return (
         update(Memory)
         .where(
@@ -97,17 +93,63 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
             Memory.user_id == user_id,
             Memory.deleted_at.is_not(None),
             Memory.deleted_by == deleted_by,
-            live_context,
+            _live_context(),
         )
-        .values(
-            deleted_at=None,
-            deleted_by=None,
-            embedding_attempted_at=case(
-                (Memory.embedding_status == "success", utcnow()),
-                else_=Memory.embedding_attempted_at,
-            ),
-        )
+        .values(**_untombstone_values())
     )
+
+
+def restore_forget_tombstone_stmt(
+    memory_id: UUID,
+    *,
+    context_id: UUID,
+    deleted_by: str,
+    agent_id: UUID | None,
+    session_id: str | None,
+) -> Update:
+    """The UPDATE that un-forgets a row ``rollback_session`` restores (#2044).
+
+    The sibling of ``restore_sleep_tombstone_stmt`` for a ``forget()``
+    tombstone: ``rowcount == 1`` means "the tombstone this session's forget
+    left is live again" — the row is deleted, ``deleted_by`` is still that
+    forget's actor (a later forget by someone else, or a Sleep tombstone, is
+    refused), it is in the rollback's context and the context is live. Keyed
+    on ``deleted_by`` rather than the creator: in a shared context a member
+    may forget another member's memory. Same embedding clock rule (#2063) and
+    the same ``updated_at`` rule — an un-forget changes no content. The
+    rollback caller becomes the row's last writer.
+    """
+    return (
+        update(Memory)
+        .where(
+            Memory.id == memory_id,
+            Memory.context_id == context_id,
+            Memory.deleted_at.is_not(None),
+            Memory.deleted_by == deleted_by,
+            _live_context(),
+        )
+        .values(**_untombstone_values(), agent_id=agent_id, session_id=session_id)
+    )
+
+
+def _live_context() -> ColumnElement[bool]:
+    """The row's context is not soft-deleted (or it has none)."""
+    return or_(
+        Memory.context_id.is_(None),
+        Memory.context_id.in_(select(Context.id).where(Context.deleted_at.is_(None))),
+    )
+
+
+def _untombstone_values() -> dict[str, Any]:
+    """Clear the tombstone; restart the embedding clock of a ``success`` row (#2063)."""
+    return {
+        "deleted_at": None,
+        "deleted_by": None,
+        "embedding_attempted_at": case(
+            (Memory.embedding_status == "success", utcnow()),
+            else_=Memory.embedding_attempted_at,
+        ),
+    }
 
 
 async def purge_tombstones(

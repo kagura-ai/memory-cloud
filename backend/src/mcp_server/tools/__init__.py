@@ -255,6 +255,7 @@ def _build_registry() -> dict[str, Any]:
         handle_secret_register_pubkey,
         handle_secret_revoke_grant,
     )
+    from mcp_server.tools.session_rollback import handle_rollback_session
     from mcp_server.tools.sleep import (
         handle_get_sleep_history,
         handle_get_sleep_report,
@@ -307,6 +308,7 @@ def _build_registry() -> dict[str, Any]:
         "get_sleep_history": handle_get_sleep_history,
         "get_sleep_report": handle_get_sleep_report,
         "rollback_sleep_run": handle_rollback_sleep_run,
+        "rollback_session": handle_rollback_session,  # #2044
         "setup_resource": handle_setup_resource,
         "setup_connector": handle_setup_connector,
         "ingest_events": handle_ingest_events,

@@ -41,6 +41,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "get_sleep_history": _get_timeout("get_sleep_history", 10.0),
     "get_sleep_report": _get_timeout("get_sleep_report", 15.0),
     "rollback_sleep_run": _get_timeout("rollback_sleep_run", 120.0),
+    "rollback_session": _get_timeout("rollback_session", 120.0),  # #2044
     "setup_resource": _get_timeout("setup_resource", 20.0),
     "ingest_events": _get_timeout("ingest_events", 30.0),
     "get_resource_impact": _get_timeout("get_resource_impact", 10.0),

@@ -13,7 +13,7 @@ When the caller is a workspace owner/admin, it also exercises the v0.49 Agent Co
 (registry, context bindings, and bootstrap composition).
 Optionally exercises the XL-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace plan has the `resources` feature (XL / `promax`; since #1551 lower tiers may only keep serving resources that already exist).
 
-The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**70 tools**). The
+The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**71 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
 stays honest — every registered tool is either exercised here or listed there with a reason. This
 is a live runbook, not a pytest suite, so the run itself checks the count through `describe_tools`
@@ -54,9 +54,9 @@ Use this after deployments, tool description changes, or MCP server updates.
 
 ```
 describe_tools()
--> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 70
+-> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 71
    entries and `count` (the tools the URL leaves out, itemised in `tools`) is 0
--> Verify: len(listed) + count == 70 on any connection — the registry total this runbook is built
+-> Verify: len(listed) + count == 71 on any connection — the registry total this runbook is built
    for. A different sum means a tool was added or removed: reconcile the Coverage cross-check
    (section 8) before trusting the run
 -> ABORT when count > 0 (a default connection answers count=49 with the 21 core tools in
@@ -529,6 +529,10 @@ changes_since(context_id=..., since="2020-01-01T00:00:00Z", kinds=["forgotten"])
 changes_since(context_id=..., since="2020-01-02T00:00:00Z", until="2020-01-01T00:00:00Z")
 -> Verify: status="error", error="validation_error", message "until must be later than since."
 
+changes_since(context_id=..., since="2020-01-01T00:00:00Z", session_id="smoke-unused-session")
+-> Verify: status=success, count=0, session_id="smoke-unused-session" — a session id this caller
+   never wrote under lists nothing (the same answer as another principal's session, #2044)
+
 bootstrap(context_id=...)
 -> Verify: status=success, degraded=false; `context` and `instructions` are present; `since` is
    about 7 days before `generated_at` (the default window)
@@ -618,6 +622,17 @@ rollback_sleep_run(report_id="00000000-0000-0000-0000-000000000000")
 
 rollback_sleep_run(report_id="this-is-not-a-uuid")
 -> Verify: returns `invalid_report_id` error (invalid UUID format)
+```
+
+`rollback_session` is mutating too — an unused session id and a malformed one verify error
+handling without side effects (#2044):
+
+```
+rollback_session(context_id=..., session_id="smoke-unused-session")
+-> Verify: returns `session_not_found` (dry_run defaults to true; nothing is written)
+
+rollback_session(context_id=..., session_id="not a session id!")
+-> Verify: returns `validation_error` (session_id charset)
 ```
 
 ### 7.8. Resource tools (`resources` plan feature only)
@@ -773,14 +788,14 @@ delete_context(context_id=...)
 ### 8. Coverage cross-check (anti-drift)
 
 Reconcile this skill against the canonical registry so the "all MCP tools" claim cannot silently
-rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**70 tools**). Every
+rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**71 tools**). Every
 registered tool must be in exactly one group below. **If the registry and these groups disagree,
 the skill is out of date — add a row (or a documented exclusion) before merging.**
 
 Two checks keep this honest:
 
 - **In the run:** step 0's `describe_tools()` — `len(listed) + count` is the live server's registry
-  size and must equal 70, the number these groups are built for. It replaces the old `grep -c` on
+  size and must equal 71, the number these groups are built for. It replaces the old `grep -c` on
   `_definitions.py`, which needed a repository checkout and said nothing about the server under test.
 - **In CI:** `backend/tests/mcp_server/test_smoke_test_runbook.py` parses the groups below and fails
   when a registered tool is in none of them, when a group's stated size or the total differs from
@@ -789,14 +804,14 @@ Two checks keep this honest:
 "Inline" below means "called by every run"; it has nothing to do with the server's `core` tool
 profile (the default `tools/list` view), which is why the run needs `?profile=full`.
 
-**Exercised inline (41 tools):** `describe_tools`, `guide`, `list_contexts`, `create_context`,
+**Exercised inline (42 tools):** `describe_tools`, `guide`, `list_contexts`, `create_context`,
 `get_context_info`, `update_context`, `update_search_config`, `remember`, `remember_batch`,
 `recall`, `recall_upcoming`, `recall_nearby`, `load_pinned`, `load_guardrails`, `feedback`,
 `set_state`, `get_state`, `reference`, `explore`, `update_memory`, `forget`, `list`,
 `changes_since`, `bootstrap`, `list_edges`, `create_edge`, `update_edge`, `delete_edge`,
 `list_tags`, `list_my_bindings`, `describe_binding`, `merge_contexts`, `get_usage`,
 `list_analyses`, `get_active_analysis`, `get_analysis`, `get_cluster`, `get_sleep_history`,
-`get_sleep_report`, `rollback_sleep_run`, `delete_context`.
+`get_sleep_report`, `rollback_sleep_run`, `rollback_session`, `delete_context`.
 
 **Exercised inline — measurement lane (2 tools):** `record_measurement`, `recall_series`.
 
@@ -825,7 +840,7 @@ profile (the default `tools/list` view), which is why the run needs `?profile=fu
 | `secret_list` | Owner/admin metadata listing; grouped with the secret-store flow. |
 | `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
-41 + 2 + 10 + 5 + 12 = **70** — the full registry. The conditional rows are the 10 owner/admin Agent
+42 + 2 + 10 + 5 + 12 = **71** — the full registry. The conditional rows are the 10 owner/admin Agent
 Control Plane tools and 5 `resources`-gated (XL) tools; the remaining 12 are documented exclusions.
 
 ### 9. Report
@@ -837,7 +852,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 
 | # | Tool | Action | Result |
 |---|------|--------|--------|
-| 1 | describe_tools | Registry count 70, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
+| 1 | describe_tools | Registry count 71, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
 | 2 | describe_tools | Full definition by name + unknown name | PASS/FAIL |
 | 3 | guide | Index topic | PASS/FAIL |
 | 4 | guide | Tool name expands to sections + unknown topic | PASS/FAIL |
@@ -896,24 +911,26 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 57 | changes_since | Created / updated / forgotten kinds, oldest first | PASS/FAIL |
 | 58 | changes_since | kinds=["forgotten"] only | PASS/FAIL |
 | 59 | changes_since | until guard (until <= since → validation_error) | PASS/FAIL |
-| 60 | bootstrap | Default: pinned + upcoming + changes, degraded=false | PASS/FAIL |
-| 61 | bootstrap | Narrowed include=["pinned"], since="1d" | PASS/FAIL |
-| 62 | create_context | Create merge target context | PASS/FAIL |
-| 63 | merge_contexts | Merge source into target | PASS/FAIL |
-| 64 | get_usage | Get workspace usage | PASS/FAIL |
-| 65 | list_analyses | List analysis runs (or gate error) | PASS/FAIL |
-| 66 | get_active_analysis | Get latest succeeded analysis (or gate error) | PASS/FAIL |
-| 67 | get_analysis | Fake run_id (run_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
-| 68 | get_cluster | Fake run_id (cluster_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
-| 69 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
-| 70 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
-| 71 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
-| 72 | update_memory | Unpin pinned memory (delivery_mode="on_recall") | PASS/FAIL |
-| 73 | forget | Delete guardrail memory | PASS/FAIL |
-| 74 | forget | Delete pinned memory | PASS/FAIL |
-| 75 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
-| 76 | forget | Delete memory 2 | PASS/FAIL |
-| 77 | delete_context | Soft-delete source context (agent-state + measurement series go unreachable) | PASS/FAIL |
+| 60 | changes_since | Unused session_id → count=0 | PASS/FAIL |
+| 61 | bootstrap | Default: pinned + upcoming + changes, degraded=false | PASS/FAIL |
+| 62 | bootstrap | Narrowed include=["pinned"], since="1d" | PASS/FAIL |
+| 63 | create_context | Create merge target context | PASS/FAIL |
+| 64 | merge_contexts | Merge source into target | PASS/FAIL |
+| 65 | get_usage | Get workspace usage | PASS/FAIL |
+| 66 | list_analyses | List analysis runs (or gate error) | PASS/FAIL |
+| 67 | get_active_analysis | Get latest succeeded analysis (or gate error) | PASS/FAIL |
+| 68 | get_analysis | Fake run_id (run_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
+| 69 | get_cluster | Fake run_id (cluster_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
+| 70 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
+| 71 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
+| 72 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
+| 73 | rollback_session | Unused session (session_not_found) + malformed id (validation_error) | PASS/FAIL |
+| 74 | update_memory | Unpin pinned memory (delivery_mode="on_recall") | PASS/FAIL |
+| 75 | forget | Delete guardrail memory | PASS/FAIL |
+| 76 | forget | Delete pinned memory | PASS/FAIL |
+| 77 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
+| 78 | forget | Delete memory 2 | PASS/FAIL |
+| 79 | delete_context | Soft-delete source context (agent-state + measurement series go unreachable) | PASS/FAIL |
 | A1 | register_agent | Register temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A2 | list_agents | List registry and find temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A3 | get_agent | Get temporary agent (owner/admin only) | PASS/FAIL/SKIP |
@@ -932,18 +949,18 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | P6 | (REST / Web UI) | Revoke the resource token, then list again → no active token (XL only) | PASS/FAIL/MANUAL/SKIP |
 | P7 | delete_context | Delete resource context (XL only) | PASS/FAIL/SKIP |
 
-**Result: N/77 main rows passed** (+ N/10 Agent Control Plane rows and N/7 XL resource rows
+**Result: N/79 main rows passed** (+ N/10 Agent Control Plane rows and N/7 XL resource rows
 passed, or SKIP when the corresponding gate is unavailable)
 
-Note: the 77 numbered rows are test *steps*, not distinct tools — several tools (describe_tools,
+Note: the 79 numbered rows are test *steps*, not distinct tools — several tools (describe_tools,
 guide, remember, remember_batch, recall, list, changes_since, bootstrap, update_memory, forget,
 delete_context, list_contexts, create_context, list_edges, list_tags, record_measurement,
 recall_series) are exercised in multiple rows. Distinct-tool coverage is reconciled in the
-Coverage cross-check (41 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 70).
+Coverage cross-check (42 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 71).
 "Main rows" are the rows every run executes; the name is unrelated to the server's `core` profile.
 
 Test context: smoke-test-{timestamp} (cleaned up)
-Tool list: full (describe_tools: 70 listed, 0 hidden)
+Tool list: full (describe_tools: 71 listed, 0 hidden)
 Resource token: revoked | MANUAL — token_id rtok_..., resource_id smoke_test_{timestamp} still active | not created (resource rows skipped)
 
 Documented exclusions / gated-skip (see Coverage cross-check) — not counted as FAIL:
@@ -954,7 +971,7 @@ Documented exclusions / gated-skip (see Coverage cross-check) — not counted as
 - File tools: init_file_upload, complete_file_upload, get_file_download_url, delete_file, list_files (multipart S3/R2)
 - Secret tools: secret_register_pubkey, secret_put, secret_get, secret_list, secret_revoke_grant (zero-knowledge: age keypairs + owner approval + ciphertext)
 
-Registry reconciliation: 41 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 70 tools in _definitions.py.
+Registry reconciliation: 42 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 71 tools in _definitions.py.
 ```
 
 If any step fails:

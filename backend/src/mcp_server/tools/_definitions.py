@@ -1199,6 +1199,31 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 },
             },
         },
+        {
+            "name": "rollback_session",
+            "description": """Undo what one session wrote in a context. DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the session's first edit put back (a new version); forgotten → restored and re-embedded. A memory someone else changed since, Sleep merged, someone else forgot, or a resource row is skipped with a cause, never half-reverted. Your own sessions only (same user, same agent credential); a context owner may name any. Editor role required. At most 500 events per call: status 'in_progress' with remaining > 0 means call again. Once finished, a second rollback of the session is refused (already_rolled_back).
+Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, updated_restored, skipped, failed, chunks_requeued, points_requeued, skipped_items, errors}, totals?, context_id, ...}. Errors: session_not_found (also for another principal's session), already_rolled_back, partial_rollback (summary lists what was reversed).""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id", "session_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "The session whose writes to undo: the OTel baggage session (gen_ai.conversation.id / session.id), else the MCP session id.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "true (default): list the plan, change nothing. false: roll back.",
+                    },
+                },
+            },
+        },
         # ====================================================================
         # Resource Management Tools (Issue #46)
         # ====================================================================
@@ -1949,7 +1974,8 @@ Manual: guide(["list"]).""",
             "name": "changes_since",
             "readOnly": True,
             "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory omit summary: memory_id / kind / at only, plus superseded_by on a superseded event. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
-Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
+With session_id: only what that session wrote (its own created / updated / forgotten / restored events, each edit separately), for your own sessions; a context owner may name any. Another principal's or an unused session id lists nothing.
+Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
                 "type": "object",
@@ -1971,9 +1997,14 @@ Manual: guide(["changes_since"]).""",
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["created", "updated", "superseded", "forgotten"],
+                            "enum": ["created", "updated", "superseded", "forgotten", "restored"],
                         },
-                        "description": "Which kinds to include (default all four).",
+                        "description": "Which kinds to include (default all). restored only with session_id; superseded never with it.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "Only this session's writes: your OTel baggage session (gen_ai.conversation.id / session.id), else the MCP session id.",
                     },
                     "limit": {
                         "type": "integer",

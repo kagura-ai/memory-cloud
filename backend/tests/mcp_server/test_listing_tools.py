@@ -93,6 +93,58 @@ async def test_changes_since_rejects_bad_arguments_before_touching_the_database(
     assert needle in payload["message"]
 
 
+# ------------------------------------------------- #2044: the session lane
+
+_SINCE = "2026-10-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "needle"),
+    [
+        # A session id has the correlation-token shape; anything else is refused.
+        ({"session_id": "has space"}, "session_id"),
+        ({"session_id": "x" * 129}, "session_id"),
+        ({"session_id": 7}, "session_id"),
+        # superseded is an edge, not a session's write.
+        ({"session_id": "s1", "kinds": ["superseded"]}, "superseded"),
+        # restored is a rollback event, listed only with a session.
+        ({"kinds": ["created", "restored"]}, "restored"),
+        ({"session_id": "s1", "kinds": ["made"]}, "kinds"),
+        ({"session_id": "s1", "kinds": [{"k": 1}]}, "kinds"),
+    ],
+)
+async def test_changes_since_session_arguments_are_checked_first(args, needle):
+    payload = await _err(handle_changes_since, {"context_id": CTX, "since": _SINCE, **args})
+    assert payload["status"] == "error" and payload["error"] == "validation_error"
+    assert needle in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("kinds", "session", "expected"),
+    [
+        (None, False, ("created", "updated", "superseded", "forgotten")),
+        (None, True, ("created", "updated", "forgotten", "restored")),
+        (["created", "superseded"], True, ("created",)),  # superseded dropped
+        (["restored", "restored"], True, ("restored",)),
+        (["forgotten", "created"], False, ("forgotten", "created")),
+    ],
+)
+def test_parse_kinds_per_lane(kinds, session, expected):
+    from mcp_server.tools.listing import _parse_kinds
+
+    assert _parse_kinds(kinds, session=session) == expected
+
+
+def test_changes_since_schema_offers_the_session_filter():
+    from mcp_server.tools._definitions import get_tool_definitions
+
+    (tool,) = [t for t in get_tool_definitions() if t["name"] == "changes_since"]
+    props = tool["inputSchema"]["properties"]
+    assert props["session_id"]["type"] == "string"
+    assert "restored" in props["kinds"]["items"]["enum"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["list", "changes_since"])
 async def test_the_dispatcher_points_a_missing_context_at_the_manual(name):

@@ -2,7 +2,7 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-70 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+71 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
@@ -11,7 +11,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
 | `/mcp` (or `?profile=core`) | The 21 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 40k chars |
-| `/mcp?profile=full` | All 70 tools | ≈ 102k chars (about 2.6× the default) |
+| `/mcp?profile=full` | All 71 tools | ≈ 102k chars (about 2.6× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.103.0, when `create_context`, `update_context` and `delete_context` joined the core profile (≈ 102k / 35k / 15k at v0.93.0); v0.93.0 is when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
@@ -32,7 +32,7 @@ Every definition in `tools/list` carries a human-readable `title` and the standa
 
 | Class | Tools |
 |-------|-------|
-| Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `delete_file`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
+| Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `rollback_session`, `delete_file`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
 | Destructive, not idempotent | `recall`, `get_agent_bootstrap` (learning writes, below), `update_memory` (`external_id` mode replaces the memory each call), `forget` (`query` mode deletes the next top-k), `merge_contexts`, `ingest_events`, `set_state` (`ttl_seconds` restarts the expiry each call), `secret_put` |
 | Additive writes | `remember`, `remember_batch`, `feedback`, `record_measurement`, `create_context`, `setup_resource`, `setup_connector`, `analyze_context`, `init_file_upload`, `complete_file_upload` (idempotent), `register_agent`, `bind_agent_context`, `secret_register_pubkey` |
 | Read-only | The other 36 tools |
@@ -83,7 +83,7 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 
 > **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `superseded_by`, `contradicts` and `supersede_candidate` (and, under `verbosity="full"`, `tags` and `context_summary`) only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
-## Agent Substrate (11)
+## Agent Substrate (12)
 
 The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](concepts.md#agent-memory-substrate).
 
@@ -98,8 +98,9 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `recall_series` | Read a metric's series bucketed by day/week/month with avg/min/max/sum/count/last | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
 | `list` | Deterministic sibling of `recall`: every live memory of a context matching exact filters (recall's vocabulary plus `details.<key>` equality), ordered by `updated_at` / `created_at` / `importance` with stable pages (`has_more`, `next_cursor`); no ranking, no Hebbian write | Viewer+ |
-| `changes_since` | A context's memory change log since a time, oldest first: `created`, `updated`, `superseded` (with `superseded_by`), `forgotten` (while the soft-deleted row exists; events of a forgotten memory omit `summary`); keyset `next_cursor` | Viewer+ |
+| `changes_since` | A context's memory change log since a time, oldest first: `created`, `updated`, `superseded` (with `superseded_by`), `forgotten` (while the soft-deleted row exists; events of a forgotten memory omit `summary`); keyset `next_cursor`. `session_id` narrows it to one session's own writes (each edit an event, plus `restored`) | Viewer+ |
 | `bootstrap` | The interactive session's one-call start: the context block, its guardrails, the pinned set, upcoming Time Memories and the change log since a time (default 7 days), each bounded like its standalone tool and fail-soft (`degraded`); the user-credential sibling of `get_agent_bootstrap` | Viewer+ |
+| `rollback_session` | Undo what one session wrote in a context: `dry_run=true` (default) lists the plan; created → forgotten, updated → values from before the session's first edit, forgotten → restored. Your own sessions only; a context owner may name any. See [`rollback_session`](#rollback_session) | Editor+ |
 
 ## Server instructions
 
@@ -494,6 +495,8 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 | `plan_required`, `feature_not_available` | The workspace's plan or an operator switch does not include the feature (`gate`, `required_plan`) | None from the model; the workspace owner decides |
 | `conflict` | The target's current state conflicts with the request, for example a locked context | Read the current state before calling again |
 | `version_conflict` | `update_memory(expected_version=N)` found the memory at another version (`current_version`); nothing was written (`retryable: false`) | `reference()` it, then resend with its current version or omit `expected_version` |
+| `session_not_found` | `rollback_session` found no session of yours with that id in the context — also the answer for another principal's session | `changes_since(context_id, since, session_id=...)` with your own session |
+| `already_rolled_back` | The session's rollback in this context is finished (`rollback_status`); a rollback runs once (`retryable: false`) | None; `changes_since` shows what happened |
 | `unknown_tool` | No tool has that name | `tools/list` |
 
 An argument the tool's `inputSchema` does not declare is refused with `invalid_argument` before the tool runs; nothing is stored with defaults in its place. The envelope adds `unknown_arguments` (the names refused), `allowed_arguments` (the names the tool's `inputSchema` declares) and `suggestions`, which maps an unknown name to the closest accepted one when there is one (`{"importanc": "importance"}`). `_meta` is accepted on every tool and ignored, and `merge_contexts` still accepts its deprecated `source_id` / `target_id`. `arguments` itself must be a JSON object (or absent): anything else is `invalid_argument` from the dispatcher and JSON-RPC `-32602` "Invalid params: 'arguments' must be an object" from both transports. `missing_fields` from `remember` lists only the fields actually missing, also as a `missing_fields` array.
@@ -751,6 +754,8 @@ Always verify before deleting: show the memory's summary, warn when `importance 
 
 **"What changed since my last session?"** `changes_since(context_id, since, until?)` returns the context's memory-level change log, oldest first: `created` (`created_at` in the window), `updated` (`updated_at` in the window and later than `created_at` — an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry: the embedding pipeline keeps its own clock), `superseded` (a `supersedes` edge in the window — `at` is when the edge became `supersedes`, `superseded_by` the newer memory, the older memory's summary is shown) and `forgotten` (`deleted_at` in the window, listed while the soft-deleted row still exists; its earlier events stay in the log). Events of a forgotten memory, of any kind, omit `summary` — they carry `memory_id` / `kind` / `at` only, plus `superseded_by` on a `superseded` event — so `forget` retracts the text here as it does from `list`, `recall` and `reference` while the log keeps the event. `since` is inclusive, `until` exclusive. `next_cursor` is a keyset token over `(at, kind, id)` — pass it back unchanged; rows written after the first read never shift a page. Remember the last `since` you processed with `set_state` / `get_state`.
 
+**One session's writes** ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)). `changes_since(context_id, since, session_id=...)` reads the revision log instead: every `created` / `updated` / `forgotten` / `restored` event that session wrote in the context, each edit a separate event dated by the event itself; `superseded` is not session-attributed and is not listed (`kinds=["superseded"]` with `session_id` is a `validation_error`, `restored` without it too). The session is the one your writes were recorded under — your OTel baggage session (`gen_ai.conversation.id` / `session.id`), else the MCP session id — and it is matched only with its principal: your user and your credential's agent. Another principal's session id, or one never used, lists nothing; a context owner (user credential) may name any session in the context. Writes made before #2044 have no session.
+
 ### `bootstrap`
 
 **Session start in one call.** `bootstrap(context_id, since?, include?, max_chars?)` composes the deterministic session-start reads for a user credential (the agent-side sibling is `get_agent_bootstrap`): `context` + `instructions` (the `get_context_info` block), `guardrails` (the same block `get_context_info` returns; absent with `?guardrails=off`, `null` when the read failed), and `components.pinned` (`load_pinned`, trusted tier, cap 20), `components.upcoming` (`recall_upcoming` from now, k 20, trusted tier) and `components.changes` (`changes_since` over `[since, now)`, all four kinds, first 50 with a keyset `next_cursor`). `since` is ISO 8601 (naive = UTC) or `"<N>d"` for N days back, `"0d"` to `"999d"`; the default is `"7d"`. `include` narrows the components. There is no recall component on purpose — recall by topic afterwards when the change list does not answer the question.
@@ -818,6 +823,22 @@ Weights run from 0.0 to 3.0; the default 1.0 is a full-confidence manual edge, s
 ### Sleep Maintenance
 
 `rollback_sleep_run` reverses each recorded action in order: `create_edge` → the edge is deleted; `merge` → the soft-deleted loser memory is restored and re-embedded; `update_importance` → the previous value is restored; `promote` → scope goes back to `working`; `archive` → the memory is restored and re-embedded. It works on reports with status `completed` or `degraded` — a degraded run (partial judge-LLM failures, [#1183](https://github.com/kagura-ai/memory-cloud/issues/1183)) still executed real merges — and marks the report `rolled_back`. Reports created before action recording existed have nothing to roll back. `merges_unreversible` ([#1450](https://github.com/kagura-ai/memory-cloud/issues/1450)) counts shadow merges that were not reversed because a later writer changed or removed the edge; restoring the pre-merge state would have discarded that newer state, so the run reports `partial_rollback`. `chunks_requeued` ([#2061](https://github.com/kagura-ai/memory-cloud/issues/2061)) counts restored memories whose content chunks could not be rebuilt during the rollback; they are queued for re-embedding, and the embedding sweep rebuilds them. `points_requeued` ([#2065](https://github.com/kagura-ai/memory-cloud/issues/2065)) counts restored memories whose vector could not be rebuilt during the rollback (for a resource document, its schema may be gone; or the embedding provider failed): the memory is restored and queued the same way, and is not found by vector search until the sweep rebuilds it. They are not errors. An undo that fails is rolled back on its own: the memory stays deleted and the action is listed under `errors`, while the run's other actions are still reversed.
+
+### `rollback_session`
+
+`rollback_session(context_id, session_id, dry_run=true)` ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)) undoes what one session wrote in a context. The dry run (the default) returns `plan` (`{forget, restore, unforget, skip}`) and `items` (`{memory_id, kind, action, cause?, fields?}`, at most 100 listed) and writes nothing; `dry_run=false` does exactly what the dry run listed. Per memory, the session's own events decide:
+
+| The session | rollback_session |
+|---|---|
+| created the memory (and maybe edited it) | forgets it, like `forget` |
+| edited it | puts back the values from before the session's first edit of each field — a new version, recorded as `updated` with `writer: rollback` |
+| forgot it | restores the tombstone its forget left and re-embeds it (`restored`); edits it made before the forget are put back too |
+
+A memory is skipped, never half-reverted, and listed under `summary.skipped_items` with its `cause`: `modified_since` (someone else wrote it after the session's first event), `merged_by_sleep` (Sleep merged or archived it — undo that with `rollback_sleep_run`), `deleted_by_other`, `already_forgotten`, `already_restored`, `resource_row` (the resource indexer owns it), `not_permitted`, `prior_erased` (an earlier value was removed by an account erasure) or `purged`. Neural edges that the session's `forget` deleted are not restored, and Sleep's later tag union or importance change on a restored memory is overwritten (Sleep does not version; its next run re-applies).
+
+Who: the editor role on the context. A session is addressed only together with its principal — your user and your credential's agent — so another user's session, your own unbound session from an agent key, and an id never used all answer the same `session_not_found`. A context owner (or workspace owner/admin) on a user credential may name any session in the context, covering every principal's events under that id; an agent credential never gets that override.
+
+One call handles at most 500 events (a memory's events are never split): `status: "in_progress"` with `remaining > 0` means call again, and the next call continues where this one stopped — nothing is reversed twice. When every event is handled the rollback is final (`rollback_status` `completed`, or `partial` when an item failed) and a further `rollback_session` of the session is refused with `already_rolled_back` (`retryable: false`). Each item runs in its own transaction savepoint: a failed one is rolled back alone, listed in `summary.errors` as `Memory <id> (<action>) failed: <cause> (correlation_id <id>)`, not retried, and the call answers `partial_rollback` with `summary` and `totals` (the running counts). The rollback's own writes carry your current session, so they show in `changes_since` under it, and they are never themselves reversed by a `rollback_session`.
 
 ### Files
 

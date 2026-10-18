@@ -4,8 +4,10 @@
 live memory of one context that matches exact filters, ordered and paged;
 ``changes_since`` returns the context's memory-level change log — created,
 updated, superseded, forgotten — in time order with a keyset cursor; every
-event of a forgotten memory is listed without its summary (#1876). Plain SQL:
-no embedding, no Hebbian write, so both are cheap enough for a session start.
+event of a forgotten memory is listed without its summary (#1876). With a
+session (#2044) it reads that session's own write events from
+``memory_revisions`` instead (``changes_in_session``). Plain SQL: no
+embedding, no Hebbian write, so both are cheap enough for a session start.
 
 Scoping is the REST list's: the caller must read the context; in a private
 context only the owner's rows (identity-link aware, ``owned_by``) are visible;
@@ -28,9 +30,16 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql import ColumnElement
 
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
-from models.memory import EDGE_TYPE_SUPERSEDES, SOURCE_TYPE_CONNECTOR, Memory, NeuralMemoryEdge
+from models.memory import (
+    EDGE_TYPE_SUPERSEDES,
+    SOURCE_TYPE_CONNECTOR,
+    Memory,
+    MemoryRevision,
+    NeuralMemoryEdge,
+)
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
+from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 
 ORDER_COLUMNS = {
@@ -42,6 +51,11 @@ DIRECTIONS = ("asc", "desc")
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
 KINDS = ("created", "updated", "superseded", "forgotten")
+# #2044: the kinds of a session's own write events (``memory_revisions``).
+# ``superseded`` is an edge, not a write a session is recorded for;
+# ``restored`` is a rollback_session un-forget.
+SESSION_KINDS = ("created", "updated", "forgotten", "restored")
+_CURSOR_KINDS = frozenset(KINDS) | frozenset(SESSION_KINDS)
 # Widest continuation token the change log emits: base64 of "<iso>|<kind>|<uuid>"
 # (~90 characters). Envelopes that append next_cursor after measuring reserve it.
 CHANGE_CURSOR_RESERVE = 96
@@ -323,7 +337,7 @@ def decode_change_cursor(cursor: str) -> tuple[datetime, str, UUID]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         at_s, kind, mid = base64.urlsafe_b64decode(padded.encode()).decode().split("|")
-        if kind not in KINDS:
+        if kind not in _CURSOR_KINDS:
             raise ValueError
         return datetime.fromisoformat(at_s), kind, UUID(mid)
     except Exception as e:  # any malformed token is a caller error
@@ -465,6 +479,91 @@ async def changes_since(
             summary=r.summary,
             superseded_by=r.superseded_by,
         )
+        for r in rows[:limit]
+    ]
+    next_cursor = encode_change_cursor(changes[-1]) if len(rows) > limit and changes else None
+    return ChangePage(changes=changes, next_cursor=next_cursor)
+
+
+async def changes_in_session(
+    db: AsyncSession,
+    *,
+    context_id: UUID,
+    session_id: str,
+    principal: SessionPrincipal | None,
+    owner_user_id: str | None,
+    since: datetime,
+    until: datetime | None,
+    kinds: tuple[str, ...] = SESSION_KINDS,
+    cursor: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> ChangePage:
+    """One session's write events in the context in ``[since, until)``, oldest first (#2044).
+
+    Read from ``memory_revisions``: every ``created`` / ``updated`` /
+    ``forgotten`` / ``restored`` event the session wrote, ``at`` being the
+    event's own time, so two edits of one memory are two events. The session
+    is addressed with its principal (``principal``: the caller sub and the
+    credential's agent) — another principal's session under the same id
+    selects nothing, exactly like an id never used. ``principal=None`` is the
+    context owner's view: every principal's events under that id.
+
+    ``summary`` is the memory's live one, omitted when the memory is
+    forgotten (the #1876 rule). The private-context owner filter and the
+    agent-binding predicate apply as in ``changes_since``; the cursor is its
+    ``(at, kind, memory_id)`` keyset.
+    """
+    for kind in kinds:
+        if kind not in SESSION_KINDS:
+            raise ValueError(f"kinds must be a subset of {', '.join(SESSION_KINDS)}")
+    if until is not None and until <= since:
+        raise ValueError("until must be later than since")
+    where: list[Any] = [
+        MemoryRevision.context_id == context_id,
+        MemoryRevision.session_id == session_id,
+        MemoryRevision.kind.in_(kinds),
+        MemoryRevision.at >= since,
+        # The revision's context is copied from the row; never list a row
+        # that is not in the context the caller was authorized for.
+        Memory.context_id == context_id,
+    ]
+    if until is not None:
+        where.append(MemoryRevision.at < until)
+    if principal is not None:
+        where.append(
+            principal_predicate(MemoryRevision.actor_user_id, MemoryRevision.agent_id, principal)
+        )
+    if owner_user_id is not None:
+        where.append(owned_by(Memory.user_id, owner_user_id))
+    binding = await binding_memory_sql_predicate(db)
+    if binding is not None:
+        where.append(binding)
+    live_summary = case(
+        (Memory.deleted_at.is_not(None), literal(None).cast(Memory.summary.type)),
+        else_=Memory.summary,
+    )
+    query = (
+        select(
+            MemoryRevision.memory_id,
+            MemoryRevision.kind,
+            MemoryRevision.at,
+            live_summary.label("summary"),
+        )
+        .join(Memory, Memory.id == MemoryRevision.memory_id)
+        .where(*where)
+    )
+    if cursor:
+        at, kind, mid = decode_change_cursor(cursor)
+        query = query.where(
+            tuple_(MemoryRevision.at, cast(MemoryRevision.kind, String), MemoryRevision.memory_id)
+            > tuple_(literal(at), literal(kind), literal(mid))
+        )
+    query = query.order_by(
+        MemoryRevision.at.asc(), MemoryRevision.kind.asc(), MemoryRevision.memory_id.asc()
+    ).limit(limit + 1)
+    rows = (await db.execute(query)).all()
+    changes = [
+        Change(memory_id=r.memory_id, kind=r.kind, at=r.at, summary=r.summary, superseded_by=None)
         for r in rows[:limit]
     ]
     next_cursor = encode_change_cursor(changes[-1]) if len(rows) > limit and changes else None

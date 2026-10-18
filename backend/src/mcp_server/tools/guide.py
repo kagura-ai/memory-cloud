@@ -510,7 +510,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "text. After a Sleep run expect "
         "updated events for memories nobody edited; narrow with kinds when only "
         "new or removed memories matter. since is inclusive, until exclusive; naive "
-        "ISO 8601 is UTC. next_cursor "
+        "ISO 8601 is UTC. session_id narrows the log to one session's own writes "
+        "(created / updated / forgotten / restored, each edit separately; no "
+        "superseded): your own sessions only — the session is your OTel baggage "
+        "session, else the MCP session id — and a context owner may name any. "
+        "The tool that undoes such a session is outside the core profile: "
+        'describe_tools(["rollback_session"]) has its schema. next_cursor '
         "is a keyset token over (at, kind, id): pass it back unchanged, and a page is "
         "never shifted by rows written after you read it. Pair it with "
         'set_state / get_state — outside the core profile, describe_tools(["set_state", '

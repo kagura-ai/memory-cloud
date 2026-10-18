@@ -1021,6 +1021,30 @@
     }
   },
   {
+    "name": "rollback_session",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id",
+        "session_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "session_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "setup_resource",
     "inputSchema": {
       "type": "object",
@@ -1721,9 +1745,14 @@
               "created",
               "updated",
               "superseded",
-              "forgotten"
+              "forgotten",
+              "restored"
             ]
           }
+        },
+        "session_id": {
+          "type": "string",
+          "maxLength": 128
         },
         "limit": {
           "type": "integer",

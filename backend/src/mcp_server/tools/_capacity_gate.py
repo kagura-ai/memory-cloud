@@ -76,6 +76,9 @@ CAPACITY_LOCK_BLOCKED_TOOLS: frozenset[str] = frozenset(
         "update_search_config",
         # Restores memories a sleep run consolidated — it adds data back.
         "rollback_sleep_run",
+        # #2044: un-forgets and restores earlier values — adds data back, and
+        # its dry run lists the session's memories (parity with the above).
+        "rollback_session",
     }
 )
 

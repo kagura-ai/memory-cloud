@@ -370,6 +370,8 @@ Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, 
 
 Read the memory again (`GET /reference/{memory_id}`) and decide. Two patches racing with the same `expected_version` serialize on the row: one applies, the other gets the `409`. Without `expected_version` the last writer wins. `404`: no such memory or no access; `410`: the memory was forgotten; `422`: an invalid body (a body with only `expected_version` is one).
 
+Every write records its session ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)): a REST `PATCH` (and the other memory writes) takes it from the `gen_ai.conversation.id` / `session.id` baggage key of the request, the agent from the API key's agent binding only — a `gen_ai.agent.id` baggage value never becomes the writer's agent. MCP `changes_since(session_id=...)` lists one session's writes and `rollback_session` undoes them ([MCP Tools](mcp-tools.md#rollback_session)); there is no REST route for either.
+
 ---
 
 ### DELETE /api/v1/memory/forget
@@ -1651,7 +1653,7 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 70 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 71 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### Authentication and sessions on /mcp
 

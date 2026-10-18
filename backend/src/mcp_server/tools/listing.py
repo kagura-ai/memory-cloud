@@ -31,7 +31,9 @@ from services.memory_listing import (
     KINDS,
     MAX_LIMIT,
     ORDER_COLUMNS,
+    SESSION_KINDS,
     change_item,
+    changes_in_session,
     changes_since,
     compile_memory_filters,
     encode_change_cursor,
@@ -179,6 +181,42 @@ async def handle_list(
     return _error_response("internal_error", "Database session unavailable")
 
 
+def _parse_kinds(kinds_arg: Any, *, session: bool) -> tuple[str, ...] | list[TextContent]:
+    """``kinds`` for the change log (``KINDS``) or a session's lane (#2044).
+
+    A session lane lists the session's own write events, so ``superseded`` (an
+    edge, not a recorded write) is dropped from it and ``restored`` (a
+    rollback_session un-forget) is added; asking for ``superseded`` alone
+    there, or for ``restored`` without a session, is refused.
+    """
+    allowed = SESSION_KINDS if session else KINDS
+    if kinds_arg is None:
+        return allowed
+    if (
+        not isinstance(kinds_arg, list)
+        or not kinds_arg
+        or not all(isinstance(k, str) for k in kinds_arg)
+    ):
+        return _error_response(
+            "validation_error", f"kinds must be a non-empty subset of {', '.join(allowed)}."
+        )
+    known = set(KINDS) | set(SESSION_KINDS)
+    picked = tuple(dict.fromkeys(k for k in kinds_arg if k in allowed))
+    if any(k not in known for k in kinds_arg) or not picked:
+        hint = " (with session_id: superseded is not session-attributed)" if session else ""
+        return _error_response(
+            "validation_error",
+            f"kinds must be a non-empty subset of {', '.join(allowed)}{hint}.",
+        )
+    if not session and len(picked) != len(dict.fromkeys(kinds_arg)):
+        return _error_response(
+            "validation_error",
+            f"kinds must be a non-empty subset of {', '.join(KINDS)} "
+            "(restored is listed only with session_id).",
+        )
+    return picked
+
+
 async def handle_changes_since(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -199,15 +237,19 @@ async def handle_changes_since(
         return _error_response("validation_error", str(e))
     if until is not None and until <= since:
         return _error_response("validation_error", "until must be later than since.")
-    kinds_arg = args.get("kinds")
-    if kinds_arg is None:
-        kinds: tuple[str, ...] = KINDS
-    elif isinstance(kinds_arg, list) and kinds_arg and all(k in KINDS for k in kinds_arg):
-        kinds = tuple(dict.fromkeys(kinds_arg))
-    else:
-        return _error_response(
-            "validation_error", f"kinds must be a non-empty subset of {', '.join(KINDS)}."
-        )
+    session_id = args.get("session_id")
+    if session_id is not None:
+        from api.correlation import validate_correlation_token
+
+        if not isinstance(session_id, str) or validate_correlation_token(session_id) is None:
+            return _error_response(
+                "validation_error",
+                "session_id must be 1-128 characters of A-Z, a-z, 0-9, '.', '_' or '-'.",
+            )
+    kinds_or_error = _parse_kinds(args.get("kinds"), session=session_id is not None)
+    if not isinstance(kinds_or_error, tuple):
+        return kinds_or_error
+    kinds = kinds_or_error
     cursor = args.get("cursor")
     if cursor is not None and not isinstance(cursor, str):
         return _error_response(
@@ -229,8 +271,29 @@ async def handle_changes_since(
                 db, user_id, context_id, operation="changes_since"
             )
             owner = user_id if context.is_private else None
-            page = await execute_with_timeout(
-                changes_since(
+            if session_id is not None:
+                from services.session_rollback import addressable_principal, context_role
+
+                # #2044: the caller's own session (same sub, same agent
+                # credential); a context owner may name any. Another
+                # principal's session id lists nothing, like an unused one.
+                principal = addressable_principal(
+                    user_id, await context_role(db, user_id, context_id)
+                )
+                lane = changes_in_session(
+                    db,
+                    context_id=context_id,
+                    session_id=session_id,
+                    principal=principal,
+                    owner_user_id=owner,
+                    since=since_naive,
+                    until=until_naive,
+                    kinds=kinds,
+                    cursor=cursor or None,
+                    limit=limit,
+                )
+            else:
+                lane = changes_since(
                     db,
                     context_id=context_id,
                     owner_user_id=owner,
@@ -239,9 +302,8 @@ async def handle_changes_since(
                     kinds=kinds,
                     cursor=cursor or None,
                     limit=limit,
-                ),
-                operation_name="changes_since",
-            )
+                )
+            page = await execute_with_timeout(lane, operation_name="changes_since")
             await _log_tool_usage(
                 db, user_id, "changes_since", start, 200, context_id, workspace_id
             )
@@ -253,6 +315,7 @@ async def handle_changes_since(
                 "next_cursor": page.next_cursor,
                 "since": to_utc_iso(since_naive),
                 "until": to_utc_iso(until_naive),
+                **({"session_id": session_id} if session_id is not None else {}),
                 **_context_response_fields(context),
             }
             envelope, kept = _bound(envelope, "changes", max_chars)

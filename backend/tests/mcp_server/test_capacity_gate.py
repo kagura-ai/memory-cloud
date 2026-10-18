@@ -152,6 +152,7 @@ class TestTheSplit:
             "recall_upcoming",
             "record_measurement",
             "rollback_sleep_run",
+            "rollback_session",
             "set_state",
             "setup_connector",
             "setup_resource",

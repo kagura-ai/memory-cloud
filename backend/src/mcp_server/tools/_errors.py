@@ -119,6 +119,7 @@ _VERIFY_WITH: dict[str, str] = {
     "update_context": "get_context_info",
     "update_search_config": "get_context_info",
     "rollback_sleep_run": "get_sleep_report",
+    "rollback_session": "changes_since",  # #2044: lists the session's writes
     "setup_resource": "list_resource_tokens",
     "setup_connector": "list_resource_tokens",
     "ingest_events": "get_resource_impact",
