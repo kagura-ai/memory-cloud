@@ -340,7 +340,7 @@ def test_f03_round_trip_reads_existing_rows_at_version_one() -> None:
         _upgrade_to,
     )
 
-    f03, prior_head = "f03_2043_memory_versions", "f01_2015_content_chunks"
+    f03, prior_head = "f03_2043_memory_versions", "f02_2103_chunks_enabled_at"
     user = f"f03-migration-{uuid.uuid4().hex[:8]}"
     _reset_alembic_state()
     engine = _sync_engine()

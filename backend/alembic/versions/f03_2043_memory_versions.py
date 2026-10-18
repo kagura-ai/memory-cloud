@@ -16,7 +16,7 @@ The CHECK literals are byte-identical to ``REVISION_KINDS`` /
 ``tests/test_memory_revision_constants.py``).
 
 Revision ID: f03_2043_memory_versions
-Revises: f01_2015_content_chunks
+Revises: f02_2103_chunks_enabled_at
 """
 
 import sqlalchemy as sa
@@ -26,7 +26,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f03_2043_memory_versions"
-down_revision: str | None = "f01_2015_content_chunks"
+down_revision: str | None = "f02_2103_chunks_enabled_at"
 branch_labels: str | None = None
 depends_on: str | None = None
 
