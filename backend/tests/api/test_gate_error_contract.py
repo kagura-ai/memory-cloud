@@ -147,8 +147,25 @@ def _connector_seat_cap() -> MemoryCloudException:
     return exc.value
 
 
+def _content_chunk_cap() -> MemoryCloudException:
+    """The real #2103 cap refusal (``_raise_cap`` touches no DB)."""
+    from services.content_chunk_policy import _raise_cap
+
+    with pytest.raises(MemoryCloudException) as exc:
+        _raise_cap(PlanName.BASIC, 1, 1)
+    return exc.value
+
+
 REFUSALS: list[Refusal] = [
     # ---- FEAT-001, gate "plan" ------------------------------------------
+    # #2103: turning content chunks on, where CONTENT_CHUNKS_REQUIRE_PLAN is on.
+    Refusal(
+        id="plan/content_chunks",
+        site="services.content_chunk_policy:ensure_content_chunks_plan",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "content_chunks"),
+        site_literal="content_chunks",
+        carries_counts=False,
+    ),
     Refusal(
         id="plan/team_invitations",
         site="api.routes.invitations:create_invitation",
@@ -484,6 +501,12 @@ REFUSALS: list[Refusal] = [
             ),
         ),
         site_literal="resource_tokens",
+    ),
+    Refusal(
+        id="quota/content_chunk_contexts",
+        site="services.content_chunk_policy:_raise_cap",
+        exc=_content_chunk_cap(),
+        site_literal="content_chunk_contexts",
     ),
     Refusal(
         id="quota/connectors",
@@ -1457,6 +1480,44 @@ async def _mcp_public_flag(exc: MemoryCloudException) -> dict:
     return _mcp_payload(error)
 
 
+async def _mcp_update_search_config(exc: MemoryCloudException) -> dict:
+    """``update_search_config`` turning content chunks on, refused by plan or cap (#2103)."""
+    from mcp_server.tools.search_config import handle_update_search_config
+
+    get_db, _ = _db_yielding()
+    perms = MagicMock(check_context_write=AsyncMock())
+    config = SimpleNamespace(
+        content_chunks_enabled=False,
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+        reranker_provider="voyage",
+        reranker_model="rerank-2",
+        reinforce_enabled=True,
+        reinforce_max_boost=0.15,
+        reinforce_require_host_arbitration=False,
+        routing_mode="off",
+    )
+    repo = MagicMock(get_by_context=AsyncMock(return_value=config))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch("services.permission_service.PermissionService", return_value=perms),
+        patch("services.plan_suspension.ensure_context_writable", new=AsyncMock()),
+        patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
+        patch(
+            "services.permission_service.gate_content_chunks_change",
+            new=AsyncMock(side_effect=exc),
+        ),
+        patch("mcp_server.tools.search_config._log_tool_usage", new_callable=AsyncMock),
+    ):
+        return _mcp_payload(
+            await handle_update_search_config(
+                {"context_id": str(uuid4()), "content_chunks_enabled": True}, "u", uuid4()
+            )
+        )
+
+
 @dataclass(frozen=True)
 class McpRoute:
     """One MCP door to a refusal.
@@ -1551,6 +1612,9 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
     ),
     "quota/storage_bytes": (McpRoute(_mcp_files, _QUOTA),),
     "quota/agents": (McpRoute(_mcp_register_agent, _QUOTA),),
+    # #2103: update_search_config's tool-exception mapper forwards the details.
+    "plan/content_chunks": (McpRoute(_mcp_update_search_config, _FEAT),),
+    "quota/content_chunk_contexts": (McpRoute(_mcp_update_search_config, _QUOTA),),
 }
 
 # Every other refusal, and why no MCP tool sees it. A new refusal must land

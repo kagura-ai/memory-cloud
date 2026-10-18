@@ -45,7 +45,13 @@ async def handle_update_search_config(
                 gate_content_chunks_change,
             )
             from services.reranker_service import default_reranker_model_for
-            from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
+            from utils.exceptions import (
+                AuthorizationError,
+                FeatureNotAvailableError,
+                NotFoundException,
+                QuotaExceededError,
+                ValidationError,
+            )
 
             # Parse context_id
             try:
@@ -158,6 +164,13 @@ async def handle_update_search_config(
                 if config_err.details.get("field") != "content_chunks_enabled":
                     raise
                 return _error_response("invalid_search_config", config_err.message)
+            except (FeatureNotAvailableError, QuotaExceededError) as gate_err:
+                # #2103: the plan lacks content chunks, or the workspace is at
+                # its cap — the vocabulary code (feature_not_available /
+                # quota_exceeded) with the REST gate details, not this tool's
+                # catch-all code.
+                await db.rollback()
+                return _tool_exception_response("update_search_config", gate_err)
 
             # Apply via repository (same as REST API)
             config = await repo.update(ctx_uuid, update_data)

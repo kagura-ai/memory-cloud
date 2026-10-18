@@ -1,0 +1,337 @@
+"""#2103 / #2080: whether a context's content chunks are active, and the enable gates."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.dialects import postgresql
+
+from services import content_chunk_policy as policy
+from services.content_chunk_policy import ContentChunksStatus
+from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def gate():
+    """``gate(True)`` turns CONTENT_CHUNKS_REQUIRE_PLAN on for the test."""
+    state = {"on": False}
+    with patch.object(
+        policy,
+        "get_settings",
+        lambda: SimpleNamespace(content_chunks_require_plan=state["on"]),
+    ):
+        yield lambda on: state.__setitem__("on", on)
+
+
+@pytest.fixture(autouse=True)
+def _qdrant():
+    with patch.object(policy, "chunk_points_supported", return_value=True) as supported:
+        yield supported
+
+
+def _db(*results):
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=list(results))
+
+    @asynccontextmanager
+    async def _nested():
+        yield
+
+    db.begin_nested = MagicMock(side_effect=_nested)
+    return db
+
+
+def _scalar(value):
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    result.scalar_one.return_value = value
+    return result
+
+
+def _usage(plan, in_use, earlier, workspace_id=None):
+    result = MagicMock()
+    result.one_or_none.return_value = SimpleNamespace(
+        workspace_id=workspace_id or uuid4(), plan_name=plan, in_use=in_use, earlier=earlier
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# The status truth table
+# ---------------------------------------------------------------------------
+
+
+def _gated(**kw):
+    base = {"stored": True, "supported": True, "gated": True, "plan_name": "basic"}
+    base.update(plan_has_feature=True, limit=1, in_use=1, earlier=0)
+    base.update(kw)
+    return ContentChunksStatus(**base)
+
+
+@pytest.mark.parametrize(
+    ("status", "effective", "can_enable", "reason"),
+    [
+        # Gate off: the flag and the store decide (#2080 exactly).
+        (ContentChunksStatus(stored=True, supported=True, gated=False), True, True, None),
+        (ContentChunksStatus(stored=False, supported=True, gated=False), False, True, None),
+        (
+            ContentChunksStatus(stored=True, supported=False, gated=False),
+            False,
+            False,
+            "unsupported",
+        ),
+        (
+            ContentChunksStatus(stored=False, supported=False, gated=False),
+            False,
+            False,
+            "unsupported",
+        ),
+        # Gated, stored on: the earliest `limit` contexts are active.
+        (_gated(earlier=0), True, False, None),
+        (_gated(earlier=1, in_use=2), False, False, "cap"),
+        (_gated(plan_has_feature=False, limit=0, plan_name="free"), False, False, "plan"),
+        (_gated(supported=False), False, False, "unsupported"),
+        # Gated, stored off: the toggle needs the feature and a free slot.
+        (_gated(stored=False, in_use=0, earlier=None), False, True, None),
+        (_gated(stored=False, in_use=1, earlier=None), False, False, "cap"),
+        (
+            _gated(stored=False, plan_has_feature=False, limit=0, in_use=0, earlier=None),
+            False,
+            False,
+            "plan",
+        ),
+        # A feature on a tier whose cap is 0 (a PLAN_<KEY>_FEATURES override).
+        (_gated(stored=False, limit=0, in_use=0, earlier=None), False, False, "cap"),
+        (_gated(limit=0, earlier=0), False, False, "cap"),
+    ],
+)
+def test_status_truth_table(status, effective, can_enable, reason):
+    assert status.effective is effective
+    assert status.can_enable is can_enable
+    assert status.reason == reason
+
+
+def test_an_uncounted_gated_status_never_claims_it_can_enable():
+    assert ContentChunksStatus(stored=False, supported=True, gated=True).can_enable is False
+
+
+@pytest.mark.parametrize(
+    ("plan", "limit"),
+    [("free", 0), ("basic", 1), ("pro", 5), ("promax", 20), (None, 0), ("nope", 0)],
+)
+def test_the_per_plan_limit(plan, limit):
+    assert policy.content_chunk_context_limit(plan) == limit
+
+
+def test_a_tier_without_the_feature_has_no_slots_whatever_its_number():
+    with patch.object(policy, "has_feature", return_value=False):
+        assert policy.content_chunk_context_limit("pro") == 0
+
+
+# ---------------------------------------------------------------------------
+# content_chunks_status / content_chunks_effective
+# ---------------------------------------------------------------------------
+
+
+async def test_gate_off_reads_only_the_flag(gate):
+    db = _db(_scalar(True))
+    status = await policy.content_chunks_status(db, uuid4())
+    assert status.effective is True
+    assert db.execute.await_count == 1
+
+
+async def test_gate_off_with_a_known_flag_reads_nothing(gate):
+    db = _db()
+    assert (await policy.content_chunks_status(db, uuid4(), stored=True)).effective is True
+    assert await policy.content_chunks_effective(db, uuid4(), stored=True) is True
+    assert await policy.content_chunks_effective(db, uuid4(), stored=False) is False
+    db.execute.assert_not_awaited()
+
+
+async def test_gate_off_counts_only_when_asked(gate):
+    db = _db(_usage(None, 3, 1))
+    status = await policy.content_chunks_status(db, uuid4(), stored=False, include_usage=True)
+    assert (status.in_use, status.limit, status.can_enable) == (3, None, True)
+
+
+async def test_gated_stored_on_reads_plan_and_rank_in_one_query(gate):
+    gate(True)
+    db = _db(_usage("basic", 2, 1))
+    status = await policy.content_chunks_status(db, uuid4(), stored=True)
+    assert db.execute.await_count == 1
+    assert (status.limit, status.earlier, status.effective, status.reason) == (1, 1, False, "cap")
+
+
+async def test_gated_stored_off_reads_no_counts_for_effective(gate):
+    gate(True)
+    db = _db()
+    assert await policy.content_chunks_effective(db, uuid4(), stored=False) is False
+    db.execute.assert_not_awaited()
+
+
+async def test_gated_on_a_missing_context_is_inactive(gate):
+    gate(True)
+    missing = MagicMock()
+    missing.one_or_none.return_value = None
+    status = await policy.content_chunks_status(_db(missing), uuid4(), stored=True)
+    assert status.effective is False
+
+
+async def test_effective_fails_closed_in_a_savepoint(gate):
+    gate(True)
+    db = _db(RuntimeError("db down"))
+    assert await policy.content_chunks_effective(db, uuid4(), stored=True) is False
+    db.begin_nested.assert_called_once()
+
+
+async def test_the_lancedb_store_has_no_active_chunks(gate, _qdrant):
+    _qdrant.return_value = False
+    db = _db(_scalar(True))
+    assert (await policy.content_chunks_status(db, uuid4())).effective is False
+    assert await policy.content_chunks_stored(_db(_scalar(True)), uuid4()) is False
+
+
+def test_the_usage_query_ranks_by_enable_then_context_id():
+    sql = str(
+        policy._usage_query(uuid4()).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "coalesce(other.content_chunks_enabled_at, 'infinity'::timestamptz)" in sql
+    assert "FILTER (WHERE" in sql
+    assert "other_ctx.deleted_at IS NULL" in sql
+
+
+# ---------------------------------------------------------------------------
+# Cross-context recall
+# ---------------------------------------------------------------------------
+
+
+async def test_effective_ids_gate_off_is_the_flag(gate):
+    a, b = uuid4(), uuid4()
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [a]
+    db = _db(result)
+    assert await policy.content_chunks_effective_ids(db, [a, b]) == {a}
+
+
+async def test_effective_ids_keep_the_first_limit_per_plan(gate):
+    gate(True)
+    a, b, c = uuid4(), uuid4(), uuid4()
+    result = MagicMock()
+    result.all.return_value = [(a, "basic", 1), (b, "basic", 2), (c, "free", 1)]
+    db = _db(result)
+    assert await policy.content_chunks_effective_ids(db, [a, b, c]) == {a}
+
+
+async def test_effective_ids_none_on_lancedb(gate, _qdrant):
+    _qdrant.return_value = False
+    db = _db()
+    assert await policy.content_chunks_effective_ids(db, [uuid4()]) == set()
+    db.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The enable gates
+# ---------------------------------------------------------------------------
+
+
+def _workspace(plan, workspace_id=None):
+    result = MagicMock()
+    result.one_or_none.return_value = SimpleNamespace(
+        workspace_id=workspace_id or uuid4(), plan_name=plan
+    )
+    return result
+
+
+async def test_the_gates_do_nothing_with_the_switch_off(gate):
+    db = _db()
+    await policy.ensure_content_chunks_plan(db, uuid4())
+    await policy.ensure_content_chunk_capacity(db, uuid4())
+    assert await policy.contexts_losing_content_chunks(db, uuid4(), "pro", "free") == []
+    db.execute.assert_not_awaited()
+
+
+async def test_a_plan_without_the_feature_is_refused_with_feat001(gate):
+    gate(True)
+    with pytest.raises(FeatureNotAvailableError) as exc:
+        await policy.ensure_content_chunks_plan(_db(_workspace("free")), uuid4())
+    assert exc.value.status_code == 403
+    assert exc.value.details["gate"] == "plan"
+    assert exc.value.details["feature"] == "content_chunks"
+    assert exc.value.details["required_plan"] == "basic"
+    assert exc.value.details["required_plan_display"] == "M"
+    await policy.ensure_content_chunks_plan(_db(_workspace("basic")), uuid4())
+
+
+async def test_the_cap_locks_then_counts(gate):
+    gate(True)
+    ws = uuid4()
+    db = _db(_workspace("pro", ws), MagicMock(), _scalar(4))
+    await policy.ensure_content_chunk_capacity(db, uuid4())
+    lock = db.execute.await_args_list[1].args[0]
+    assert "pg_advisory_xact_lock" in str(lock)
+    assert lock.compile().params == {"key": f"content_chunk_contexts:{ws}"}
+
+
+async def test_at_the_cap_the_enable_is_refused_with_quota001(gate):
+    gate(True)
+    db = _db(_workspace("basic"), MagicMock(), _scalar(1))
+    with pytest.raises(QuotaExceededError) as exc:
+        await policy.ensure_content_chunk_capacity(db, uuid4())
+    assert exc.value.status_code == 429
+    details = exc.value.details
+    assert (details["quota_type"], details["current"], details["limit"]) == (
+        "content_chunk_contexts",
+        1,
+        1,
+    )
+    assert (details["required_plan"], details["feature"]) == ("pro", "content_chunks")
+    assert "1 of the 1 context(s) the M plan allows" in exc.value.message
+
+
+async def test_the_top_tier_cap_offers_no_upgrade(gate):
+    gate(True)
+    db = _db(_workspace("promax"), MagicMock(), _scalar(20))
+    with pytest.raises(QuotaExceededError) as exc:
+        await policy.ensure_content_chunk_capacity(db, uuid4())
+    assert exc.value.details["required_plan"] is None
+    assert "upgrade" not in exc.value.message
+
+
+async def test_a_zero_cap_is_refused_without_the_lock(gate):
+    gate(True)
+    with patch.object(policy, "has_feature", return_value=True):
+        db = _db(_workspace("free"), _scalar(0))
+        with pytest.raises(QuotaExceededError):
+            await policy.ensure_content_chunk_capacity(db, uuid4())
+    assert all("pg_advisory" not in str(c.args[0]) for c in db.execute.await_args_list)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "offset", "limit"),
+    [("pro", "basic", 1, 4), ("promax", "free", 0, 20), ("pro", "free", 0, 5)],
+)
+async def test_a_downgrade_reports_the_ranks_between_the_two_limits(gate, old, new, offset, limit):
+    gate(True)
+    ids = [uuid4()]
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = ids
+    db = _db(result)
+    assert await policy.contexts_losing_content_chunks(db, uuid4(), old, new) == ids
+    stmt = db.execute.await_args.args[0]
+    assert (stmt._offset_clause.value, stmt._limit_clause.value) == (offset, limit)
+
+
+@pytest.mark.parametrize(("old", "new"), [("basic", "pro"), ("free", "basic"), ("pro", "pro")])
+async def test_an_upgrade_or_no_change_reports_nothing(gate, old, new):
+    gate(True)
+    db = _db()
+    assert await policy.contexts_losing_content_chunks(db, uuid4(), old, new) == []
+    db.execute.assert_not_awaited()

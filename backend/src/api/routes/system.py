@@ -175,6 +175,10 @@ async def system_info():
             # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
             # default has no endpoint; the web UI then disables the reranker card.
             "reranking": settings.enable_reranking and rerank_configured,
+            # Issue #2103: default-off. When true, content chunk vectors are a
+            # plan feature with a per-plan context cap (CONTENT_CHUNKS_REQUIRE_PLAN);
+            # the search-config response says why a context's toggle is disabled.
+            "content_chunks_require_plan": settings.content_chunks_require_plan,
         },
     }
 

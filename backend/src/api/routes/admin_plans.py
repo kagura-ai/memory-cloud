@@ -111,6 +111,8 @@ class QuotaBreakdown(BaseModel):
     max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
     max_connectors: int = 0  # Spec 2026-06-02: tier base for the extra_connectors addon
     memories_per_day: int = 0  # #1975: tier base for the extra_memories_per_day addon
+    # #2103: tier-fixed (no addon); read only where CONTENT_CHUNKS_REQUIRE_PLAN is on.
+    max_content_chunk_contexts: int = 0
 
 
 class AddonValues(BaseModel):
@@ -284,6 +286,8 @@ class PlanTierInfo(BaseModel):
     owned_workspaces: int
     max_resource_tokens: int
     max_connectors: int  # Issue #1551: serve-only cap on M/L, creation cap on XL
+    # Issue #2103: contexts with active content chunks (CONTENT_CHUNKS_REQUIRE_PLAN).
+    max_content_chunk_contexts: int
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
@@ -806,6 +810,7 @@ async def get_workspace_quotas(
                 max_resource_tokens=plan_tier.max_resource_tokens,
                 max_connectors=plan_tier.max_connectors,
                 memories_per_day=plan_tier.memories_per_day,
+                max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -833,6 +838,8 @@ async def get_workspace_quotas(
                 max_resource_tokens=effective["max_resource_tokens"],
                 max_connectors=workspace.effective_max_connectors,
                 memories_per_day=effective["memories_per_day"],
+                # #2103: no addon column — the effective cap is the tier's.
+                max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
             ),
             usage=UsageValues(
                 memories=memory_count,

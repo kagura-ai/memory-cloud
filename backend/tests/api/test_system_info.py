@@ -22,6 +22,7 @@ _RERANK_ENV = [
     "DEFAULT_USE_RERANK",
     "DEFAULT_RERANKER_MODEL",
     "DEFAULT_CONTENT_CHUNKS_ENABLED",
+    "CONTENT_CHUNKS_REQUIRE_PLAN",
 ]
 
 
@@ -152,3 +153,11 @@ def test_system_info_shows_the_content_chunks_default(info_with) -> None:
     """#2015 D8: what new contexts get from DEFAULT_CONTENT_CHUNKS_ENABLED."""
     body = info_with(default_content_chunks_enabled=True).json()
     assert body["search_defaults"]["content_chunks_enabled"] is True
+
+
+def test_system_info_exposes_the_content_chunks_plan_gate_default_off(info_with) -> None:
+    """#2103: the search settings UI reads whether content chunks are a plan
+    feature here. Default OFF: self-hosted deployments keep every plan, no cap."""
+    assert info_with().json()["features"]["content_chunks_require_plan"] is False
+    gated = info_with(content_chunks_require_plan=True).json()
+    assert gated["features"]["content_chunks_require_plan"] is True
