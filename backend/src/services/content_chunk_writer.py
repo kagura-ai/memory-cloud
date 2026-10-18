@@ -29,9 +29,9 @@ an edit that landed while the chunks were embedded. ``updated_at`` is not
 used: metadata-only changes move it without a re-embed, so skipping on it
 would leave the memory without chunks. What remains is the gap between the
 second check and the upsert (one round trip): a newer run that deletes inside
-it can still be overwritten by this run's upsert. A content hash or version
-in the chunk payload would close it. The summary point has the same race and
-is not guarded here.
+it can still be overwritten by this run's upsert. Comparing the
+``content_hash`` every chunk point now carries would close it; nothing
+compares it yet. The summary point has the same race and is not guarded here.
 
 A failed delete of the old chunk points is raised (the row is retried, the
 old body never survives an edit). Any other failure is logged
@@ -53,10 +53,21 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import chunk_points_supported, delete_chunk_points, upsert_chunk_points
+from db.qdrant import (
+    chunk_points_supported,
+    delete_chunk_points,
+    sync_chunk_points_payload,
+    upsert_chunk_points,
+)
 from models.config import ContextSearchConfig
 from models.memory import Memory
-from utils.content_chunks import build_chunk_payload, chunk_point_id, split_content
+from utils.content_chunks import (
+    build_chunk_payload,
+    chunk_payload_updates,
+    chunk_point_id,
+    content_hash,
+    split_content,
+)
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
@@ -204,6 +215,7 @@ async def write_content_chunks(
     chunks_enabled: bool | None = None,
     fail_open: bool = True,
     claim: EmbeddingClaim | None = None,
+    usage: dict[str, int] | None = None,
 ) -> int:
     """Replace the memory's chunk points; return how many were written.
 
@@ -228,6 +240,10 @@ async def write_content_chunks(
             while the run works, is what the superseded checks compare.
             ``None`` (the Sleep paths) compares no stamp, only the content,
             the soft delete and a re-queue.
+        usage: Optional out-parameter, filled by ``embed_batch`` (``cached``,
+            ``requests``, ``tokens``) when the chunks were embedded — set even
+            when the write then fails, since the provider has billed them.
+            The Sleep reindex adds it to its embedding accounting.
 
     Raises:
         Exception: a failed delete of the old chunk points; with
@@ -254,19 +270,27 @@ async def write_content_chunks(
     if not chunks:
         return 0
     points: list[tuple[str, list[float], dict[str, Any]]] = []
+    if usage is None:
+        usage = {}
+    digest = content_hash(content)
     try:
         vectors = await embed_svc.embed_batch(
             chunks,
             memory.user_id,
             context_id=memory.context_id,
             workspace_id=memory.workspace_id,
+            usage=usage,
         )
         points = [
             (
                 chunk_point_id(memory.id, index),
                 vector,
                 build_chunk_payload(
-                    base_payload, memory_id=memory.id, chunk_index=index, chunk_text=text
+                    base_payload,
+                    memory_id=memory.id,
+                    chunk_index=index,
+                    chunk_text=text,
+                    content_hash=digest,
                 ),
             )
             for index, (text, vector) in enumerate(zip(chunks, vectors, strict=True))
@@ -303,8 +327,48 @@ async def write_content_chunks(
         collection=collection_name,
         chunks=len(points),
         chars=len(content or ""),
+        tokens=usage.get("tokens", 0),
+        cached=usage.get("cached", 0),
     )
     return len(points)
+
+
+async def sync_content_chunk_payload(
+    db: AsyncSession,
+    memory: Memory,
+    *,
+    base_payload: dict[str, Any],
+    collection_name: str,
+    chunks_enabled: bool | None = None,
+) -> bool:
+    """Copy the memory's new summary-point payload onto its chunk points; no embedding.
+
+    For a memory whose metadata changed but whose content did not (#2015 D5:
+    the Sleep importance re-eval and promotions), so its chunk vectors are
+    still right. A promotion moves ``scope`` in Postgres only, so this is what
+    carries it to the chunk points. Every copied field is set, not only the
+    changed ones (the payload is rebuilt from the row).
+
+    Returns:
+        True when the chunk points need nothing more: they carry the payload,
+        the context has the flag off (it has no chunk points) or the store
+        keeps none. False when they could not be updated (they were deleted,
+        or the flag lookup or the delete failed): the caller rewrites them
+        with :func:`write_content_chunks`. Never raises.
+    """
+    if _is_resource_row(memory):
+        return True
+    try:
+        if chunks_enabled is None:
+            chunks_enabled = await content_chunks_enabled(db, memory.context_id)
+        if not chunks_enabled or not chunk_points_supported():
+            return True
+        return await sync_chunk_points_payload(
+            memory.id, chunk_payload_updates(base_payload), collection_name
+        )
+    except Exception as e:
+        _log_failure(memory, collection_name, e)
+        return False
 
 
 class ContentChunkWriteError(RuntimeError):
@@ -349,6 +413,7 @@ async def rebuild_content_chunks(
     embed_svc: Any,
     collection_name: str,
     context_id: Any,
+    usage: dict[str, int] | None = None,
 ) -> int:
     """Rebuild the chunk points of a page of one context's memories in ``collection_name``.
 
@@ -370,6 +435,8 @@ async def rebuild_content_chunks(
         embed_svc: The target model's embedding service.
         collection_name: The target collection.
         context_id: The context of ``rows``.
+        usage: Optional out-parameter: the page's ``embed_batch`` usage summed
+            (``cached``, ``requests``, ``tokens``).
 
     Returns:
         The number of chunk points written.
@@ -405,18 +472,28 @@ async def rebuild_content_chunks(
     if not by_user:
         return 0
     vectors: dict[tuple[Any, int], list[float]] = {}
+    digests = {memory.id: content_hash(memory.content) for memory in plain}
+    total: dict[str, int] = usage if usage is not None else {}
+    for key in ("cached", "requests", "tokens"):
+        total.setdefault(key, 0)
     current: Memory | None = None
     try:
         for user_id, jobs in by_user.items():
             for start in range(0, len(jobs), CHUNK_EMBED_BATCH_SIZE):
                 part = jobs[start : start + CHUNK_EMBED_BATCH_SIZE]
                 current = part[0][0]
-                got = await embed_svc.embed_batch(
-                    [text for _, _, text in part],
-                    user_id,
-                    context_id=str(context_id),
-                    workspace_id=str(current.workspace_id),
-                )
+                batch_usage: dict[str, int] = {}
+                try:
+                    got = await embed_svc.embed_batch(
+                        [text for _, _, text in part],
+                        user_id,
+                        context_id=str(context_id),
+                        workspace_id=str(current.workspace_id),
+                        usage=batch_usage,
+                    )
+                finally:
+                    for key, value in batch_usage.items():
+                        total[key] = total.get(key, 0) + value
                 if len(got) != len(part):
                     raise RuntimeError(
                         f"embed_batch returned {len(got)} vectors for {len(part)} texts"
@@ -446,6 +523,7 @@ async def rebuild_content_chunks(
                                 memory_id=memory.id,
                                 chunk_index=index,
                                 chunk_text=text,
+                                content_hash=digests[memory.id],
                             ),
                         )
                         for memory, index, text in part
@@ -466,5 +544,7 @@ async def rebuild_content_chunks(
         collection=collection_name,
         memories=sum(1 for _, chunks in split if chunks),
         chunks=written,
+        tokens=total["tokens"],
+        cached=total["cached"],
     )
     return written

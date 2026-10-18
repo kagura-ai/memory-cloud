@@ -24,8 +24,11 @@ This module is pure: no I/O, no settings.
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 from uuid import UUID, uuid5
+
+import xxhash
 
 #: Payload key that marks a chunk point and names its memory.
 CHUNK_OF_FIELD = "chunk_of"
@@ -61,12 +64,28 @@ _TOKEN_FIELDS = frozenset(
 
 # Chunk-only payload fields, removed when a collapsed hit falls back to a
 # chunk point's payload.
-_CHUNK_FIELDS = (CHUNK_OF_FIELD, "chunk_index", "chunk_text")
+_CHUNK_FIELDS = (CHUNK_OF_FIELD, "chunk_index", "chunk_text", "content_hash")
 
 
 def chunk_payload_updates(payload_updates: dict[str, Any]) -> dict[str, Any]:
-    """The part of a summary-point payload update that applies to chunk points."""
+    """The part of a summary-point payload (or payload update) that chunk points copy.
+
+    Every field but the BM25 token fields. ``build_chunk_payload`` starts from
+    it, and the Sleep reindex applies it to a memory's existing chunk points
+    when only the metadata changed.
+    """
     return {k: v for k, v in payload_updates.items() if k not in _TOKEN_FIELDS}
+
+
+def content_hash(content: str | None) -> str:
+    """Hash of the content a memory's chunks were split from (``content_hash`` payload).
+
+    xxh64 of the NFC-normalized text, the embedding cache's normalization.
+    Written on every chunk point so a later writer can tell whether the
+    chunks it would write are already there; nothing reads it yet.
+    """
+    normalized = unicodedata.normalize("NFC", content or "")
+    return xxhash.xxh64(normalized.encode()).hexdigest()
 
 
 def split_content(content: str | None) -> list[str]:
@@ -114,17 +133,21 @@ def build_chunk_payload(
     memory_id: UUID | str,
     chunk_index: int,
     chunk_text: str,
+    content_hash: str | None = None,
 ) -> dict[str, Any]:
     """Payload of a chunk point, derived from the memory's summary-point payload.
 
     Keeps every filterable field (and ``summary`` / ``context_summary``, which
     the reranker reads), drops the BM25 token fields, and adds the chunk
-    fields. ``base_payload`` is not modified.
+    fields (``content_hash`` when given, see :func:`content_hash`).
+    ``base_payload`` is not modified.
     """
-    payload = {k: v for k, v in base_payload.items() if k not in _TOKEN_FIELDS}
+    payload = chunk_payload_updates(base_payload)
     payload[CHUNK_OF_FIELD] = str(memory_id)
     payload["chunk_index"] = chunk_index
     payload["chunk_text"] = chunk_text
+    if content_hash is not None:
+        payload["content_hash"] = content_hash
     return payload
 
 

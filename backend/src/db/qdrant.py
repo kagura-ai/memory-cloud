@@ -1065,7 +1065,7 @@ async def _cascade_payload_to_chunks(
     payload_updates: dict[str, Any],
     delete_keys: list[str] | None,
     collection_name: str,
-) -> None:
+) -> bool:
     """Apply a summary-point payload change to the memory's chunk points (#2015).
 
     Chunk points copy the filterable fields of their summary point, so a tag /
@@ -1077,10 +1077,14 @@ async def _cascade_payload_to_chunks(
     On failure the memory's chunk points are deleted instead (its next
     re-embed rebuilds them), so no chunk keeps stale metadata. Only when that
     delete fails too is :class:`QdrantError` raised.
+
+    Returns:
+        True when the chunk points (if any) carry the change, False when they
+        were deleted instead.
     """
     chunk_updates = chunk_payload_updates(payload_updates)
     if not chunk_updates and not delete_keys:
-        return
+        return True
     chunk_filter = Filter(
         must=[FieldCondition(key=CHUNK_OF_FIELD, match=MatchValue(value=str(memory_id)))]
     )
@@ -1109,6 +1113,35 @@ async def _cascade_payload_to_chunks(
             raise QdrantError(
                 f"Failed to update or remove content chunks of {memory_id}: {delete_error}"
             ) from delete_error
+        return False
+    return True
+
+
+async def sync_chunk_points_payload(
+    memory_id: UUID,
+    payload: dict[str, Any],
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> bool:
+    """Copy a memory's summary-point payload onto its content chunk points (#2015).
+
+    No embedding: the Sleep reindex uses it for a memory whose metadata, not
+    its content, changed (an importance re-eval, a promotion), so the chunk
+    vectors stay and only the copied fields move. Same failure contract as a
+    payload cascade: chunks that cannot be updated are deleted.
+
+    Returns:
+        True when the chunk points (if any) carry ``payload``, False when they
+        were deleted instead (the caller rewrites them). Always True on a
+        store without chunk points.
+
+    Raises:
+        QdrantError: The update and the fallback delete both failed.
+    """
+    if _active_store() is not None:
+        return True
+    return await _cascade_payload_to_chunks(
+        get_qdrant_client(), memory_id, payload, None, collection_name
+    )
 
 
 def chunk_points_supported() -> bool:

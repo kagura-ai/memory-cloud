@@ -208,3 +208,29 @@ def test_expected_chunk_count_matches_split_content():
 
     for length in [*range(0, 3000, 1), *range(3000, 40000, 37)]:
         assert expected_chunk_count(length) == len(split_content("x" * length)), length
+
+
+class TestContentHash:
+    """#2015 PR 2b: the ``content_hash`` chunk payload field."""
+
+    def test_nfc_normalized_and_stable(self):
+        from utils.content_chunks import content_hash
+
+        decomposed = "Café"
+        assert content_hash(decomposed) == content_hash("Café")
+        assert content_hash("a") != content_hash("b")
+        assert content_hash(None) == content_hash("")
+        assert len(content_hash("a")) == 16
+
+    def test_written_when_given_and_dropped_on_a_collapsed_chunk_hit(self):
+        payload = build_chunk_payload(
+            {"summary": "s"}, memory_id=uuid4(), chunk_index=0, chunk_text="t", content_hash="h"
+        )
+        assert payload["content_hash"] == "h"
+        assert "content_hash" not in build_chunk_payload(
+            {"summary": "s"}, memory_id=uuid4(), chunk_index=0, chunk_text="t"
+        )
+        # A memory found through a chunk only: its fallback payload has no
+        # chunk fields, content_hash included.
+        out = collapse_chunk_hits([{"id": "p", "score": 0.5, "payload": payload}])
+        assert "content_hash" not in out[0]["payload"]

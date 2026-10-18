@@ -798,6 +798,7 @@ class EmbeddingService:
         context_id: str | None = None,
         workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
         disallow_env_fallback: bool = False,
+        usage: dict[str, int] | None = None,
     ) -> list[list[float]]:
         """Generate embeddings for multiple texts with Redis caching.
 
@@ -809,6 +810,12 @@ class EmbeddingService:
             disallow_env_fallback: Issue #708 loop 7. Forwarded to
                 ``_get_user_api_key`` — no ``OPENAI_API_KEY`` env fallback
                 when True. Used by Option A shared-context reads.
+            usage: Optional out-parameter, like ``embed_with_usage``'s
+                ``outcome`` (#2015): ``cached`` (texts served from the cache),
+                ``requests`` (provider calls, 0 or 1) and ``tokens`` (the
+                provider's input tokens; 0 for a cache-only batch and for
+                providers without usage accounting). Set after the cache
+                check, so a failed provider call still reports its hits.
 
         Returns:
             List of embedding vectors
@@ -839,6 +846,9 @@ class EmbeddingService:
                     results.append(None)
                     uncached_indices.append(i)
                     uncached_texts.append(text)
+
+            if usage is not None:
+                usage.update(cached=len(texts) - len(uncached_texts), requests=0, tokens=0)
 
             cache_hit_rate = (len(texts) - len(uncached_texts)) / len(texts) * 100 if texts else 0
 
@@ -890,23 +900,25 @@ class EmbeddingService:
                     generated=len(uncached_texts),
                 )
 
+                response_usage = getattr(response, "usage", None)
+                batch_tokens = 0
+                if response_usage is not None:
+                    batch_tokens = (
+                        getattr(response_usage, "prompt_tokens", None)
+                        or getattr(response_usage, "total_tokens", None)
+                        or 0
+                    )
+                if usage is not None:
+                    usage.update(requests=1, tokens=batch_tokens)
+
                 # Issue #709: post-call record (one batch = one usage row).
-                if cap_svc is not None and cap_workspace is not None:
-                    usage = getattr(response, "usage", None)
-                    batch_tokens = 0
-                    if usage is not None:
-                        batch_tokens = (
-                            getattr(usage, "prompt_tokens", None)
-                            or getattr(usage, "total_tokens", None)
-                            or 0
-                        )
-                    if batch_tokens > 0:
-                        await cap_svc.record_spend_from_tokens(
-                            cap_workspace,
-                            provider=self.provider,
-                            model=self.model,
-                            tokens=batch_tokens,
-                        )
+                if cap_svc is not None and cap_workspace is not None and batch_tokens > 0:
+                    await cap_svc.record_spend_from_tokens(
+                        cap_workspace,
+                        provider=self.provider,
+                        model=self.model,
+                        tokens=batch_tokens,
+                    )
 
             # Return all vectors (cached + newly generated)
             return [v for v in results if v is not None]

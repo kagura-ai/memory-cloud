@@ -230,3 +230,37 @@ async def test_a_store_without_chunk_points_is_a_no_op():
         )
     assert n == 0
     flag.assert_not_awaited()
+
+
+async def test_page_usage_is_summed_over_the_batches_and_hashes_are_written():
+    """#2015 PR 2b: the page's embed usage, and each point's content_hash."""
+    from utils.content_chunks import content_hash
+
+    rows = [_memory(LONG), _memory(LONG, user_id="v")]  # two users, two requests
+    svc = MagicMock()
+
+    async def _embed(texts, *a, usage=None, **k):
+        usage.update(cached=1, requests=1, tokens=10 * len(texts))
+        return [[0.0] for _ in texts]
+
+    svc.embed_batch = AsyncMock(side_effect=_embed)
+    usage: dict[str, int] = {}
+    flag = AsyncMock(side_effect=[True, True])
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "content_chunks_enabled", flag),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        await writer.rebuild_content_chunks(
+            _db(),
+            rows,
+            base_payloads={m.id: {"summary": "s"} for m in rows},
+            embed_svc=svc,
+            collection_name=TARGET,
+            context_id=CTX,
+            usage=usage,
+        )
+    assert usage == {"cached": 2, "requests": 2, "tokens": 100}
+    hashes = {p[2]["content_hash"] for call in upsert.await_args_list for p in call.args[0]}
+    assert hashes == {content_hash(LONG)}

@@ -272,6 +272,56 @@ class TestEmbeddingService:
                 # All users should use the same API key (from env)
                 assert mock_client.embeddings.create.call_count == len(users)
 
+    @pytest.mark.asyncio
+    async def test_embed_batch_reports_usage(self, service, patch_cache):
+        """#2015: ``usage`` gets the cache hits, the provider call and its tokens."""
+        import json
+
+        get_cache, _ = patch_cache
+        get_cache.side_effect = [json.dumps([0.5]), None, None]
+        response = MagicMock()
+        response.data = [MagicMock(embedding=[0.1]), MagicMock(embedding=[0.2])]
+        response.usage = MagicMock(prompt_tokens=42)
+        client = MagicMock()
+        client.embeddings.create = AsyncMock(return_value=response)
+        service._prepare_spend_cap_gate = AsyncMock(return_value=(None, None))
+        service._get_client = AsyncMock(return_value=client)
+
+        usage: dict[str, int] = {}
+        vectors = await service.embed_batch(["a", "b", "c"], "u", usage=usage)
+
+        assert vectors == [[0.5], [0.1], [0.2]]
+        assert usage == {"cached": 1, "requests": 1, "tokens": 42}
+
+    @pytest.mark.asyncio
+    async def test_embed_batch_usage_on_a_full_cache_hit(self, service, patch_cache):
+        import json
+
+        get_cache, _ = patch_cache
+        get_cache.return_value = json.dumps([0.5])
+        service._get_client = AsyncMock()
+
+        usage: dict[str, int] = {}
+        await service.embed_batch(["a", "b"], "u", usage=usage)
+
+        assert usage == {"cached": 2, "requests": 0, "tokens": 0}
+        service._get_client.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_embed_batch_usage_without_provider_accounting(self, service):
+        """A provider without ``usage`` (Ollama) still counts the request, 0 tokens."""
+        response = MagicMock(spec=["data"])
+        response.data = [MagicMock(embedding=[0.1])]
+        client = MagicMock()
+        client.embeddings.create = AsyncMock(return_value=response)
+        service._prepare_spend_cap_gate = AsyncMock(return_value=(None, None))
+        service._get_client = AsyncMock(return_value=client)
+
+        usage: dict[str, int] = {}
+        await service.embed_batch(["a"], "u", usage=usage)
+
+        assert usage == {"cached": 0, "requests": 1, "tokens": 0}
+
 
 class TestContextAwareBYOKThreading:
     """#708 loop 4: context_id MUST thread through the BYOK probe chain.

@@ -676,3 +676,120 @@ async def test_fail_closed_never_raises_the_chunk_text():
     assert "secret body text" not in str(err.value)
     assert "ValueError" in str(err.value)
     assert err.value.__cause__ is None and err.value.__suppress_context__
+
+
+# --- #2015 PR 2b: usage, content_hash, metadata-only payload sync ----------
+
+
+def _usage_embed_svc(tokens=30, cached=1):
+    async def embed_batch(texts, *args, usage=None, **kwargs):
+        if usage is not None:
+            usage.update(cached=cached, requests=1, tokens=tokens)
+        return [[0.1] for _ in texts]
+
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=embed_batch)
+    return svc
+
+
+async def test_usage_and_content_hash_reach_the_caller_and_the_points():
+    import structlog
+
+    from utils.content_chunks import content_hash
+
+    memory = _memory(LONG)
+    usage: dict[str, int] = {}
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        n = await writer.write_content_chunks(
+            _db(True),
+            memory,
+            base_payload={"summary": "s"},
+            embed_svc=_usage_embed_svc(),
+            collection_name="c",
+            usage=usage,
+        )
+    assert n == len(split_content(LONG))
+    assert usage == {"cached": 1, "requests": 1, "tokens": 30}
+    points = upsert.await_args.args[0]
+    assert {p[2]["content_hash"] for p in points} == {content_hash(LONG)}
+    event = next(e for e in logs if e["event"] == "content_chunks_written")
+    assert (event["tokens"], event["cached"]) == (30, 1)
+
+
+async def test_usage_is_kept_when_the_upsert_fails():
+    """The provider billed the chunks even though they were not stored."""
+    usage: dict[str, int] = {}
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock(side_effect=RuntimeError("x"))),
+    ):
+        n = await writer.write_content_chunks(
+            _db(True),
+            _memory(LONG),
+            base_payload={},
+            embed_svc=_usage_embed_svc(tokens=12),
+            collection_name="c",
+            usage=usage,
+        )
+    assert n == 0
+    assert usage["tokens"] == 12
+
+
+async def test_sync_copies_the_payload_without_embedding():
+    memory = _memory(LONG)
+    base = {"summary": "s", "importance": 0.9, "scope": "persistent", "summary_tokens": "t"}
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "sync_chunk_points_payload", AsyncMock(return_value=True)) as sync,
+    ):
+        ok = await writer.sync_content_chunk_payload(
+            _db(True), memory, base_payload=base, collection_name="c"
+        )
+    assert ok is True
+    # The BM25 token fields are not copied (chunk points have no sparse vector).
+    sync.assert_awaited_once_with(
+        memory.id, {"summary": "s", "importance": 0.9, "scope": "persistent"}, "c"
+    )
+
+
+@pytest.mark.parametrize(
+    ("flag", "supported", "resource"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+)
+async def test_sync_is_a_no_op_without_chunk_points(flag, supported, resource):
+    extra = {"resource_id": "r"} if resource else {}
+    memory = _memory(LONG, **extra)
+    with (
+        patch.object(writer, "_is_resource_row", return_value=resource),
+        patch.object(writer, "chunk_points_supported", return_value=supported),
+        patch.object(writer, "sync_chunk_points_payload", AsyncMock()) as sync,
+    ):
+        ok = await writer.sync_content_chunk_payload(
+            _db(flag), memory, base_payload={"summary": "s"}, collection_name="c"
+        )
+    assert ok is True
+    sync.assert_not_awaited()
+
+
+@pytest.mark.parametrize("outcome", [False, RuntimeError("qdrant down")])
+async def test_sync_reports_chunks_it_could_not_update(outcome):
+    """Deleted instead of updated, or not even deleted: the caller rewrites them."""
+    side_effect = outcome if isinstance(outcome, Exception) else None
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(
+            writer,
+            "sync_chunk_points_payload",
+            AsyncMock(return_value=outcome, side_effect=side_effect),
+        ),
+    ):
+        ok = await writer.sync_content_chunk_payload(
+            _db(True), _memory(LONG), base_payload={"summary": "s"}, collection_name="c"
+        )
+    assert ok is False

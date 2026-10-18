@@ -268,3 +268,35 @@ async def test_admin_context_scroll_leaves_chunk_points_out(mock_client):
     flt = mock_client.scroll.await_args.kwargs["scroll_filter"]
     assert any(_is_chunk_exclusion(c) for c in flt.must)
     assert any(isinstance(c, FieldCondition) and c.key == "context_id" for c in flt.must)
+
+
+async def test_sync_chunk_points_payload_sets_only_the_chunks(mock_client):
+    """#2015 PR 2b: a metadata-only Sleep change, no summary point touched."""
+    from db.qdrant import sync_chunk_points_payload
+
+    mid = uuid4()
+    ok = await sync_chunk_points_payload(mid, {"scope": "persistent", "summary_tokens": "t"}, "c")
+    assert ok is True
+    call = mock_client.set_payload.await_args.kwargs
+    assert call["payload"] == {"scope": "persistent"}
+    assert call["points"].must[0].match == MatchValue(value=str(mid))
+    assert mock_client.set_payload.await_count == 1
+    mock_client.delete.assert_not_awaited()
+
+
+async def test_sync_chunk_points_payload_reports_a_fallback_delete(mock_client):
+    from db.qdrant import sync_chunk_points_payload
+
+    mock_client.set_payload.side_effect = RuntimeError("down")
+    assert await sync_chunk_points_payload(uuid4(), {"scope": "persistent"}, "c") is False
+    mock_client.delete.assert_awaited_once()
+
+
+async def test_sync_chunk_points_payload_is_a_no_op_off_qdrant(monkeypatch):
+    from db.qdrant import sync_chunk_points_payload
+
+    client = AsyncMock()
+    monkeypatch.setattr(qmod, "get_qdrant_client", lambda: client)
+    monkeypatch.setattr(qmod, "_active_store", lambda: object())
+    assert await sync_chunk_points_payload(uuid4(), {"scope": "persistent"}, "c") is True
+    client.set_payload.assert_not_awaited()
