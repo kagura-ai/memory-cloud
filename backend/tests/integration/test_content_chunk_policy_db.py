@@ -301,3 +301,40 @@ async def test_without_the_lock_the_same_race_goes_over_the_cap(
     results = await asyncio.gather(*(attempt(c) for c in contexts), return_exceptions=True)
     assert all(isinstance(r, bool) for r in results), results
     assert await _count_on(session_maker, ws) > _CAP
+
+
+async def test_default_on_creations_stop_at_the_cap(async_engine, race_world, gated):
+    """v0.113.0 review chunks F1: with DEFAULT_CONTENT_CHUNKS_ENABLED on, N
+    contexts created at once store the flag on only up to the plan's cap
+    (counted under the cap's lock, held to each creation's commit)."""
+    ws, _ = race_world
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def create() -> bool:
+        async with session_maker() as session:
+            async with session.begin():
+                ctx = Context(
+                    id=uuid4(), workspace_id=ws, name=f"ccp-{uuid4().hex[:8]}", created_by=_USER
+                )
+                session.add(ctx)
+                await session.flush()
+                on = await policy.new_context_content_chunks(session, ws, default_on=True)
+                session.add(
+                    ContextSearchConfig(
+                        context_id=ctx.id,
+                        content_chunks_enabled=on,
+                        content_chunks_enabled_at=func.clock_timestamp() if on else None,
+                    )
+                )
+                return on
+
+    results = await asyncio.gather(*(create() for _ in range(_ATTEMPTS)), return_exceptions=True)
+    assert all(isinstance(r, bool) for r in results), results
+    assert sum(results) == _CAP
+    assert await _count_on(session_maker, ws) == _CAP
+
+
+async def test_default_on_without_the_feature_stores_off(db_session, cleanup, gated):
+    ws = await _workspace(db_session, "free")
+    cleanup.append(ws)
+    assert await policy.new_context_content_chunks(db_session, ws, default_on=True) is False

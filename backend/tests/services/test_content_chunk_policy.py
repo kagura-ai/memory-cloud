@@ -351,3 +351,118 @@ async def test_an_upgrade_or_no_change_reports_nothing(gate, old, new):
     db = _db()
     assert await policy.contexts_losing_content_chunks(db, uuid4(), old, new) == []
     db.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# v0.113.0 review F1: a new context's default under the plan gate
+# ---------------------------------------------------------------------------
+
+
+async def test_new_context_default_off_or_ungated_reads_nothing(gate):
+    db = _db()
+    assert await policy.new_context_content_chunks(db, uuid4(), default_on=False) is False
+    gate(False)
+    assert await policy.new_context_content_chunks(db, uuid4(), default_on=True) is True
+    db.execute.assert_not_awaited()
+
+
+async def test_new_context_default_on_without_the_feature_is_stored_off(gate):
+    gate(True)
+    db = _db(_scalar("free"))
+    assert await policy.new_context_content_chunks(db, uuid4(), default_on=True) is False
+    assert db.execute.await_count == 1  # the plan read; no lock, no count
+
+
+@pytest.mark.parametrize(("in_use", "expected"), [(0, True), (1, False), (3, False)])
+async def test_new_context_default_on_takes_a_free_slot_under_the_lock(gate, in_use, expected):
+    """M (``basic``) allows one context: the default is stored on only while
+    the workspace is below its cap, counted under the cap's advisory lock."""
+    gate(True)
+    ws = uuid4()
+    db = _db(_scalar("basic"), MagicMock(), _scalar(in_use))
+    assert await policy.new_context_content_chunks(db, ws, default_on=True) is expected
+    lock_stmt = db.execute.await_args_list[1].args[0]
+    assert "pg_advisory_xact_lock" in str(lock_stmt)
+    assert lock_stmt.compile().params["key"] == f"content_chunk_contexts:{ws}"
+
+
+async def test_create_context_stores_the_gated_default(monkeypatch):
+    """create_context writes what the gate allows, not the raw setting."""
+    from config.settings import Settings
+    from models.config import ContextSearchConfig
+    from services.context_service import ContextService
+
+    for key in ("DEFAULT_CONTENT_CHUNKS_ENABLED", "KAGURA_VECTOR_BACKEND", "VECTOR_BACKEND"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings(_env_file=None, default_content_chunks_enabled=True)
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    service = ContextService(db=db)
+    gated = AsyncMock(return_value=False)
+    with (
+        patch("services.context_service.get_settings", return_value=settings),
+        patch.object(policy, "new_context_content_chunks", gated),
+        patch.object(type(service), "validate_context_name", MagicMock(return_value=None)),
+        patch.object(service, "get_context_by_name_for_workspace", AsyncMock(return_value=None)),
+    ):
+        ws = uuid4()
+        await service.create_context(
+            workspace_id=ws, name="fresh", is_private=True, create_collection=False
+        )
+    (config,) = [
+        c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], ContextSearchConfig)
+    ]
+    assert config.content_chunks_enabled is False and config.content_chunks_enabled_at is None
+    assert gated.await_args.args[1] == ws
+    assert gated.await_args.kwargs == {"default_on": True}
+
+
+# ---------------------------------------------------------------------------
+# v0.113.0 review F2: a same-context double enable
+# ---------------------------------------------------------------------------
+
+
+async def test_a_second_enable_of_the_same_context_keeps_the_first_one(monkeypatch):
+    """The row was loaded (off) before the cap's lock; the first enable
+    committed meanwhile. The update re-reads the flag under the row lock and
+    sees it on: no new stamp, no second purge, no second backfill."""
+    from models.schemas import ContextSearchConfigUpdate
+    from repositories.config_repository import ContextSearchConfigRepository
+
+    stamp = object()
+    stale = SimpleNamespace(
+        content_chunks_enabled=False,
+        content_chunks_enabled_at=None,
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    refreshed: list[tuple] = []
+
+    async def refresh(obj, attribute_names=None, with_for_update=None):
+        refreshed.append((tuple(attribute_names or ()), with_for_update))
+        if attribute_names:  # the committed values
+            obj.content_chunks_enabled, obj.content_chunks_enabled_at = True, stamp
+
+    db.refresh = refresh
+    repo = ContextSearchConfigRepository(db)
+    monkeypatch.setattr(repo, "get_by_context", AsyncMock(return_value=stale))
+    purge, backfill = AsyncMock(), AsyncMock(return_value=0)
+    monkeypatch.setattr(repo, "_purge_chunk_points", purge)
+    monkeypatch.setattr(repo, "_queue_content_chunk_backfill", backfill)
+
+    enable = ContextSearchConfigUpdate.model_construct(
+        _fields_set={"content_chunks_enabled"}, content_chunks_enabled=True
+    )
+    await repo.update(uuid4(), enable)
+
+    assert refreshed[0] == (("content_chunks_enabled", "content_chunks_enabled_at"), True)
+    assert stale.content_chunks_enabled_at is stamp
+    purge.assert_not_awaited()
+    backfill.assert_not_awaited()

@@ -462,6 +462,37 @@ async def ensure_content_chunk_capacity(db: AsyncSession, context_id: UUID) -> N
         _raise_cap(plan_name, in_use, limit)
 
 
+async def new_context_content_chunks(
+    db: AsyncSession, workspace_id: UUID, *, default_on: bool | None = None
+) -> bool:
+    """``content_chunks_enabled`` for a NEW context of ``workspace_id``.
+
+    ``DEFAULT_CONTENT_CHUNKS_ENABLED`` (or ``default_on``), and — where the
+    deployment gates content chunks — only when turning the flag on would
+    pass: the plan has the feature and the workspace is below its cap. The
+    count is taken under the cap's advisory lock, so contexts created (or
+    enabled) concurrently cannot together go past it; the lock is held until
+    the caller's transaction ends, so the caller must insert the row before
+    it commits. Without this a default-on deployment created every context
+    stored-on and counted toward the cap (in use 3 of 1), inactive past it
+    and never on a plan without the feature (v0.113.0 review chunks F1).
+    """
+    if default_on is None:
+        default_on = bool(get_settings().default_content_chunks_enabled)
+    if not default_on:
+        return False
+    if not content_chunks_gated():
+        return True
+    plan_name = (
+        await db.execute(select(Workspace.plan_name).where(Workspace.id == workspace_id))
+    ).scalar_one_or_none()
+    limit = content_chunk_context_limit(plan_name)
+    if limit <= 0:
+        return False
+    await db.execute(_CAP_LOCK_SQL.bindparams(key=f"content_chunk_contexts:{workspace_id}"))
+    return await _count_in_use(db, workspace_id) < limit
+
+
 async def contexts_losing_content_chunks(
     db: AsyncSession, workspace_id: UUID, old_plan: str | None, new_plan: str | None
 ) -> list[UUID]:

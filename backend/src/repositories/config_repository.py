@@ -82,7 +82,9 @@ def new_search_config_defaults(settings: Settings) -> dict[str, Any]:
     }
 
 
-def new_search_config_row(settings: Settings) -> dict[str, Any]:
+def new_search_config_row(
+    settings: Settings, *, content_chunks_enabled: bool | None = None
+) -> dict[str, Any]:
     """:func:`new_search_config_defaults` plus ``content_chunks_enabled_at`` (#2103).
 
     What ``ContextSearchConfig(...)`` is built with for a NEW context. A row
@@ -90,8 +92,14 @@ def new_search_config_row(settings: Settings) -> dict[str, Any]:
     :meth:`ContextSearchConfigRepository.update` does, so the plan's cap
     ranks it among the workspace's other contexts. Not in ``/system/info``
     (that serves :func:`new_search_config_defaults`).
+
+    ``content_chunks_enabled`` overrides the deployment default: the creation
+    paths pass ``services.content_chunk_policy.new_context_content_chunks``,
+    which keeps it off where the plan gate would refuse turning it on.
     """
     defaults = new_search_config_defaults(settings)
+    if content_chunks_enabled is not None:
+        defaults["content_chunks_enabled"] = content_chunks_enabled
     return {
         **defaults,
         "content_chunks_enabled_at": (
@@ -205,8 +213,20 @@ class ContextSearchConfigRepository:
 
         # Update fields
         backfill_queued: int | None = None
-        chunks_were_on = getattr(config, "content_chunks_enabled", False) is True
         update_dict = update_data.model_dump(exclude_unset=True)
+        if "content_chunks_enabled" in update_dict:
+            # The flag as committed, under the row lock: the caller loaded this
+            # row before it took the cap's lock, and the identity map would
+            # keep that stale value. A second enable of the same context
+            # (a double click, a retry) then sees "already on" and keeps the
+            # first enable's stamp, purge and backfill instead of re-ranking
+            # the context and doing them again (v0.113.0 review chunks F2).
+            await self.db.refresh(
+                config,
+                ["content_chunks_enabled", "content_chunks_enabled_at"],
+                with_for_update=True,
+            )
+        chunks_were_on = getattr(config, "content_chunks_enabled", False) is True
         for key, value in update_dict.items():
             setattr(config, key, value)
 

@@ -311,7 +311,13 @@ class ContextService:
         # Create context search config with embedding settings (Issue #146)
         from models.config import ContextSearchConfig
         from repositories.config_repository import new_search_config_row
+        from services.content_chunk_policy import new_context_content_chunks
 
+        # #2103 review F1: the default turns chunks on only where the plan gate
+        # would let the owner do it (under the cap's lock, held to the commit).
+        chunks_on = await new_context_content_chunks(
+            self.db, workspace_id, default_on=settings.default_content_chunks_enabled
+        )
         search_config = ContextSearchConfig(
             context_id=context.id,
             semantic_weight=0.6,  # Default
@@ -321,7 +327,7 @@ class ContextService:
             # today's values (off / voyage / rerank-2). #2015: content chunks
             # follow DEFAULT_CONTENT_CHUNKS_ENABLED (off unless set), #2103 with
             # the enable recorded.
-            **new_search_config_row(settings),
+            **new_search_config_row(settings, content_chunks_enabled=chunks_on),
             embedding_model=actual_embedding_model,
             embedding_dimensions=actual_dimensions,
         )
