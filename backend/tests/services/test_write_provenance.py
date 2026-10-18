@@ -152,7 +152,7 @@ def test_a_contextless_row_is_neither_logged_nor_stamped():
     rows, and a token stamped without one would survive it."""
     db = MagicMock()
     memory = SimpleNamespace(
-        id=uuid.uuid4(), context_id=None, version=1, agent_id=None, session_id=None
+        id=uuid.uuid4(), context_id=None, version=1, agent_id=AGENT, session_id="stale"
     )
     record_revision(
         db,
@@ -162,7 +162,7 @@ def test_a_contextless_row_is_neither_logged_nor_stamped():
         provenance=WriteProvenance(AGENT, "sess-x"),
     )
     db.add.assert_not_called()  # no context, no revision (PR1 rule)
-    assert memory.session_id is None and memory.agent_id is None
+    assert memory.session_id is None and memory.agent_id is None  # a stale stamp is cleared
     stamp_writer(memory, WriteProvenance(AGENT, "sess-x"))
     assert memory.session_id is None and memory.agent_id is None
 

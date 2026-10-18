@@ -157,13 +157,14 @@ def stamp_writer(memory: Any, provenance: WriteProvenance) -> None:
     Assigns only what differs, so a row that already carries these values
     (set when it was built) is not made dirty again after its INSERT.
 
-    A legacy row without a context is never stamped: it gets no revision row
-    (``record_revision``), and account erasure finds the session tokens to
-    scrub on ``memories`` through the subject's revision rows — a token
-    stamped without one would survive the erasure (v0.113.0 review F4).
+    A legacy row without a context is never stamped, and a stamp it carries
+    is cleared: it gets no revision row (``record_revision``), and account
+    erasure finds the session tokens to scrub on ``memories`` through the
+    subject's revision rows — a token stamped without one would survive the
+    erasure, and a stale one would name an earlier writer (v0.113.0 review F4).
     """
     if getattr(memory, "context_id", None) is None:
-        return
+        provenance = WriteProvenance(None, None)
     if getattr(memory, "agent_id", None) != provenance.agent_id:
         memory.agent_id = provenance.agent_id
     if getattr(memory, "session_id", None) != provenance.session_id:
