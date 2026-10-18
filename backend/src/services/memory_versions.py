@@ -156,7 +156,14 @@ def stamp_writer(memory: Any, provenance: WriteProvenance) -> None:
 
     Assigns only what differs, so a row that already carries these values
     (set when it was built) is not made dirty again after its INSERT.
+
+    A legacy row without a context is never stamped: it gets no revision row
+    (``record_revision``), and account erasure finds the session tokens to
+    scrub on ``memories`` through the subject's revision rows — a token
+    stamped without one would survive the erasure (v0.113.0 review F4).
     """
+    if getattr(memory, "context_id", None) is None:
+        return
     if getattr(memory, "agent_id", None) != provenance.agent_id:
         memory.agent_id = provenance.agent_id
     if getattr(memory, "session_id", None) != provenance.session_id:
@@ -182,8 +189,8 @@ def record_revision(
     row's ``created_at`` holds). The row's ``agent_id`` / ``session_id`` are
     the writer's (#2044), which also become the memory's last writer.
 
-    A legacy row without a context gets no revision: the column is NOT NULL
-    and no context-scoped read can reach such a row.
+    A legacy row without a context gets no revision and no writer stamp:
+    the column is NOT NULL and no context-scoped read can reach such a row.
 
     Args:
         db: The session that writes the event; the caller commits.
@@ -235,6 +242,11 @@ def record_edit(
         actor_user_id: The caller who made the edit.
         writer: ``rollback`` when ``rollback_session`` restores (#2044).
         provenance: The writer's agent and session (default: the request's).
+
+    A legacy row without a context still moves its version (so a PATCH's
+    ``expected_version`` keeps refusing a stale edit) but logs nothing:
+    ``reference(version=N)`` below its current version answers
+    ``UnknownVersionError``, as for any version the log cannot rebuild.
 
     Returns:
         True when the version moved.

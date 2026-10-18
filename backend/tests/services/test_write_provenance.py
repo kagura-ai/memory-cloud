@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from api.correlation import CorrelationContext, get_correlation, set_correlation
 from auth.agent_scope import AgentScope, set_agent_scope
 from models.memory import MemoryRevision
-from services.memory_versions import record_revision, revision_values
+from services.memory_versions import record_revision, revision_values, stamp_writer
 from services.write_provenance import (
     SessionPrincipal,
     WriteProvenance,
@@ -129,10 +129,10 @@ def test_record_revision_stamps_the_row_and_the_memory():
     assert (memory.agent_id, memory.session_id) == (AGENT, "sess-1")
 
 
-def test_explicit_provenance_wins_and_a_contextless_row_is_still_stamped():
+def test_explicit_provenance_wins():
     db = MagicMock()
     memory = SimpleNamespace(
-        id=uuid.uuid4(), context_id=None, version=1, agent_id=AGENT, session_id=None
+        id=uuid.uuid4(), context_id=uuid.uuid4(), version=1, agent_id=AGENT, session_id=None
     )
     record_revision(
         db,
@@ -141,8 +141,30 @@ def test_explicit_provenance_wins_and_a_contextless_row_is_still_stamped():
         actor_user_id="u1",
         provenance=WriteProvenance(None, "explicit"),
     )
-    db.add.assert_not_called()  # no context, no revision (PR1 rule)
+    (row,) = [c.args[0] for c in db.add.call_args_list]
+    assert (row.agent_id, row.session_id) == (None, "explicit")
     assert memory.session_id == "explicit" and memory.agent_id is None
+
+
+def test_a_contextless_row_is_neither_logged_nor_stamped():
+    """v0.113.0 review F4: no revision row, so no session token either —
+    erasure scrubs ``memories.session_id`` through the subject's revision
+    rows, and a token stamped without one would survive it."""
+    db = MagicMock()
+    memory = SimpleNamespace(
+        id=uuid.uuid4(), context_id=None, version=1, agent_id=None, session_id=None
+    )
+    record_revision(
+        db,
+        memory,
+        kind="updated",
+        actor_user_id="u1",
+        provenance=WriteProvenance(AGENT, "sess-x"),
+    )
+    db.add.assert_not_called()  # no context, no revision (PR1 rule)
+    assert memory.session_id is None and memory.agent_id is None
+    stamp_writer(memory, WriteProvenance(AGENT, "sess-x"))
+    assert memory.session_id is None and memory.agent_id is None
 
 
 def test_revision_values_carry_the_provenance_and_writer():
