@@ -293,6 +293,8 @@ async def test_without_the_lock_the_same_race_goes_over_the_cap(
             try:
                 await all_counted.abort()
             except Exception:
+                # Best effort: release the other attempts from the barrier;
+                # the original error below is the one the test reports.
                 pass
             raise
 
