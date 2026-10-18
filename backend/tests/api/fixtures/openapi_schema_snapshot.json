@@ -5794,7 +5794,8 @@
           "superseded_by": {},
           "tags": {},
           "type": {},
-          "updated_at": {}
+          "updated_at": {},
+          "version": {}
         },
         "required": [
           "client",
@@ -6581,6 +6582,17 @@
               {
                 "additionalProperties": true,
                 "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -7774,7 +7786,8 @@
           "supersede_candidate": {},
           "tags": {},
           "type": {},
-          "updated_at": {}
+          "updated_at": {},
+          "version": {}
         },
         "required": [
           "client",
@@ -7789,7 +7802,8 @@
           "summary",
           "tags",
           "type",
-          "updated_at"
+          "updated_at",
+          "version"
         ],
         "type": "object"
       },
@@ -8146,6 +8160,10 @@
           "status": {
             "default": "success",
             "type": "string"
+          },
+          "version": {
+            "default": 1,
+            "type": "integer"
           }
         },
         "required": [

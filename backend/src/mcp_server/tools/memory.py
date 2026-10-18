@@ -47,6 +47,7 @@ from utils.exceptions import (
     ContentSizeExceededError,
     NotFoundException,
     QuotaExceededError,
+    VersionConflictError,
 )
 from utils.recall_projection import RECALL_VERBOSITIES, recall_result_item
 from utils.response_budget import (
@@ -329,6 +330,7 @@ async def handle_remember(
                             "status": "success",
                             "memory_id": str(result.memory_id),
                             "scope": result.scope,
+                            "version": result.version,  # #2043
                             # #1505: scope alone reads as "not saved yet" — say
                             # what it actually implies for durability.
                             **_persistence_response_field(result.persistence, verbose=verbose),
@@ -484,6 +486,8 @@ async def handle_update_memory(
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
             # #1504: rejection path for a supersede suggestion.
             dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
+            # #2043: optimistic concurrency (None = last writer wins).
+            expected_version=args.get("expected_version"),
         )
     except ValidationError as e:
         # #1323: plain field/constraint summary — no pydantic internals.
@@ -536,6 +540,7 @@ async def handle_update_memory(
                             "operation": result.operation,
                             "re_embedded": result.re_embedded,
                             "scope": result.scope,
+                            "version": result.version,  # #2043
                             **_persistence_response_field(
                                 result.persistence, verbose=verbose
                             ),  # #1505
@@ -559,6 +564,25 @@ async def handle_update_memory(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except VersionConflictError as e:
+            # #2043: another edit landed since the caller read the memory;
+            # nothing was written. Not retryable as is — re-read, then decide.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 409, current_context_id, workspace_id
+            )
+            return _error_response(
+                "version_conflict",
+                e.message,
+                memory_id=str(e.memory_id),
+                expected_version=e.expected_version,
+                current_version=e.current_version,
+                retryable=False,
+                help=(
+                    "reference() the memory and resend with its current version, "
+                    "or omit expected_version to overwrite."
+                ),
+            )
         except NotFoundException as e:
             # #1323: structured envelope for a missing/inaccessible memory,
             # mirroring handle_reference — previously this fell through to the
@@ -1813,6 +1837,7 @@ async def handle_reference(
                 "context": result.context,
                 "created_at": to_utc_iso(result.created_at),
                 "updated_at": to_utc_iso(result.updated_at),
+                "version": result.version,  # #2043: update_memory's expected_version
                 "client": result.client,
                 "source_uri": result.source_uri,
                 "source_type": result.source_type,

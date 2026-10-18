@@ -42,6 +42,7 @@ def _source(target_id: uuid.UUID) -> SimpleNamespace:
         scope="working",
         created_at=datetime(2026, 10, 1),
         updated_at=None,
+        version=1,  # #2043
         last_used_at=None,
         access_count=0,
         accessed_by_clients=None,

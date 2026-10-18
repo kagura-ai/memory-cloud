@@ -38,9 +38,13 @@ from models.memory import (
     EDGE_ORIGIN_SEMANTIC,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     MEMORY_TYPE_TIME,
+    REVISION_KIND_CREATED,
+    REVISION_KIND_FORGOTTEN,
+    REVISION_WRITER_API,
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
     Memory,
+    MemoryRevision,
     tool_triggered_predicate,
 )
 from models.schemas import (
@@ -81,6 +85,12 @@ from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.identity_link_service import link_set_reads, owned_by
+from services.memory_versions import (
+    check_expected_version,
+    record_edit,
+    record_revision,
+    versioned_snapshot,
+)
 from services.persistence import persistence_info
 from services.query_router import classify_query
 from services.recall_selection import (
@@ -758,6 +768,10 @@ class MemoryService:
         )
         try:
             await self.memory_repo.create(prepared.memory)
+            # #2043: the created event commits with the row.
+            record_revision(
+                self.db, prepared.memory, kind=REVISION_KIND_CREATED, actor_user_id=user_id
+            )
             await self.db.commit()
             return await self._finish_remember(prepared)
         except Exception as e:
@@ -977,6 +991,9 @@ class MemoryService:
             # tombstone tells the post-embed detection this write was declared
             # a non-duplicate (is_dismissed reads it as "still rejected").
             supersede_candidate=unconditional_tombstone() if dedupe == DEDUPE_OFF else None,
+            # #2043: explicit, so the version is known before the INSERT applies
+            # the column default (the created revision and the response read it).
+            version=1,
         )
         # Issue #886: pin-on-write. delivery_mode='always' pins straight to
         # persistent (so it is exempt from sleep consolidation — which only acts
@@ -1042,6 +1059,7 @@ class MemoryService:
         return RememberResponse(
             memory_id=memory_id,
             scope=memory.scope,
+            version=memory.version,  # #2043
             # #1505: say what 'working' means for durability instead of
             # leaving the caller to guess.
             persistence=persistence_info(
@@ -1168,6 +1186,9 @@ class MemoryService:
                         tag_canonical=tag_canonical,
                     )
                     await self.memory_repo.create(item.memory)
+                    record_revision(  # #2043: in the batch's one transaction
+                        self.db, item.memory, kind=REVISION_KIND_CREATED, actor_user_id=user_id
+                    )
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc
                 prepared.append(item)
@@ -1253,6 +1274,7 @@ class MemoryService:
         return RememberResponse(
             memory_id=memory.id,
             scope=memory.scope,
+            version=memory.version,  # #2043
             persistence=persistence_info(
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -1533,6 +1555,10 @@ class MemoryService:
         await self._ensure_capacity(
             user_id, workspace_id=memory.workspace_id, write_context_id=memory.context_id
         )
+        # #2043: re-read under a row lock, then compare the version — before any
+        # field is applied, so a refused edit writes nothing.
+        memory = await self._lock_for_edit(memory.id)
+        check_expected_version(memory, request.expected_version)
 
         # Tool guardrails: any edit of a guardrail row, or a details write that
         # adds / changes / removes tool_trigger, needs context EDITOR or above
@@ -1582,6 +1608,7 @@ class MemoryService:
         )
 
         self._update_guard_size(memory, request, normalized_summary, normalized_ctx_summary)
+        before = versioned_snapshot(memory)
         effective_details = self._update_apply_fields(
             memory, request, normalized_summary, normalized_ctx_summary
         )
@@ -1599,6 +1626,11 @@ class MemoryService:
 
         if request.dismiss_supersede_candidate and not edits_requested:
             memory.updated_at = updated_at_before
+
+        # #2043: a changed versioned field is a new version and one revision row,
+        # in this transaction (the dismissal / delivery_mode-only / no-op edits
+        # change none and leave the version alone).
+        record_edit(self.db, memory, before, actor_user_id=user_id)
 
         if needs_reembed:
             # Async embedding via create_task (same pattern as remember)
@@ -1640,6 +1672,7 @@ class MemoryService:
             operation="updated",
             re_embedded=needs_reembed,
             scope=memory.scope,
+            version=memory.version,  # #2043
             persistence=persistence_info(  # #1505
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -1778,6 +1811,29 @@ class MemoryService:
             similarity=stored.get("similarity"),
         )
         return dismissed_id
+
+    async def _lock_for_edit(self, memory_id: UUID, *, include_deleted: bool = False) -> Any:
+        """Re-read an authorized edit target under ``FOR UPDATE`` (#2043).
+
+        The edit paths authorize on an unlocked read, then lock the row here so
+        the ``expected_version`` check, the diff of the versioned fields and the
+        version bump all see the latest commit and hold until this edit
+        commits. One row, so no lock-order hazard with Sleep's two-row lock.
+
+        Args:
+            memory_id: The target the caller was authorized for.
+            include_deleted: PATCH reads tombstones (its 410 contract).
+
+        Raises:
+            NotFoundException: the row was hard-deleted, or (without
+                ``include_deleted``) forgotten, since the authorized read.
+        """
+        memory = await self.memory_repo.get(
+            memory_id, include_deleted=include_deleted, for_update=True
+        )
+        if not memory:
+            raise NotFoundException("Memory", str(memory_id))
+        return memory
 
     async def _update_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
         """Load the update target, or 404 (MCP-reachable in-place update path).
@@ -2286,6 +2342,7 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             updated_at=memory.updated_at or memory.created_at,
+            version=memory.version,  # #2043
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,
@@ -2345,6 +2402,12 @@ class MemoryService:
         await self._ensure_capacity(
             user_id, workspace_id=memory.workspace_id, write_context_id=memory.context_id
         )
+        # #2043: lock, then the version check — before any field is applied.
+        # A forget that committed since the authorized read is still a 410.
+        memory = await self._lock_for_edit(memory.id, include_deleted=True)
+        if memory.deleted_at is not None:
+            raise MemoryGoneError("Memory", str(memory_id))
+        check_expected_version(memory, request.expected_version)
 
         # `model_fields_set` is the set of field names the client EXPLICITLY
         # sent (including those set to None), so `{"details": null}` puts
@@ -2372,9 +2435,11 @@ class MemoryService:
             needs_reembed = True
 
         self._patch_guard_size(memory, request, provided_fields, normalized_summary)
+        before = versioned_snapshot(memory)
         effective_details = self._patch_apply_fields(
             memory, request, provided_fields, normalized_summary
         )
+        record_edit(self.db, memory, before, actor_user_id=user_id)  # #2043
 
         memory_workspace_id = str(memory.workspace_id)
         memory_context_id = str(memory.context_id) if memory.context_id else None
@@ -2532,6 +2597,7 @@ class MemoryService:
             operation=operation,
             re_embedded=True,
             scope=result.scope,
+            version=result.version,  # #2043: the new row's version (1)
             # #1505/#1519: remember() already built the block from the row it
             # actually wrote (pinned flag included) — reuse it like lint below.
             persistence=result.persistence,
@@ -2599,6 +2665,7 @@ class MemoryService:
         # semantics explicit: an access bump is not a meaningful edit, so the
         # dialog's "Updated At" reflects the last real change, not "now".
         snapshot_updated_at = memory.updated_at or memory.created_at
+        snapshot_version = memory.version  # #2043, read with the row (as updated_at)
 
         # Update access stats. reference() is the canonical *adoption* signal
         # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
@@ -2669,6 +2736,7 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             updated_at=snapshot_updated_at,
+            version=snapshot_version,
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,
@@ -4554,6 +4622,7 @@ class MemoryService:
                     contradicts=contradiction_map.get(memory.id, []),
                     # #1403: near-duplicate this memory may supersede (or None).
                     supersede_candidate=supersede_candidates.get(memory.id),
+                    version=memory.version,  # #2043
                 )
             )
         return responses
@@ -5879,6 +5948,15 @@ class MemoryService:
         # updated_at — else changes_since lists an "updated" event
         # after the "forgotten" one (#1924).
         await self.memory_repo.update(memory.id, memory, touch=False)
+        # #2043: the forgotten event, at the version it was forgotten at (a
+        # forget is not an edit: no bump).
+        record_revision(
+            self.db,
+            memory,
+            kind=REVISION_KIND_FORGOTTEN,
+            actor_user_id=user_id,
+            at=memory.deleted_at,
+        )
 
         # Hard delete from Qdrant (remove from search index) — by the
         # row's point id, not its row id (#1829).
@@ -5914,18 +5992,20 @@ class MemoryService:
 
         One UPDATE stamps ``deleted_at`` / ``deleted_by`` (and nothing else:
         ``updated_at`` stays, #1924) on the chunk's still-live rows of the
-        context; one SELECT keeps every shared point another live row still
-        owns (#1829); one DELETE drops the deleted nodes' neural edges with
+        context; one multi-row INSERT logs their ``forgotten`` events (#2043);
+        one SELECT keeps every shared point another live row still owns
+        (#1829); one DELETE drops the deleted nodes' neural edges with
         forget's (user, workspace, context) isolation. Returns the deleted ids
         and the point ids to remove from the index. The caller deletes the
         points and commits.
         """
-        from sqlalchemy import update
+        from sqlalchemy import insert, update
 
         from repositories.neural_edge import NeuralEdgeRepository
 
         if not ids:
             return [], []
+        deleted_at = utcnow()
         rows = (
             await self.db.execute(
                 update(Memory)
@@ -5934,12 +6014,31 @@ class MemoryService:
                     Memory.context_id == UUID(context_id),
                     Memory.deleted_at.is_(None),
                 )
-                .values(deleted_at=utcnow(), deleted_by=user_id)
-                .returning(Memory.id, Memory.summary_embedding_id)
+                .values(deleted_at=deleted_at, deleted_by=user_id)
+                .returning(Memory.id, Memory.summary_embedding_id, Memory.version)
                 .execution_options(synchronize_session=False)
             )
         ).all()
         deleted = [row.id for row in rows]
+        if rows:
+            # #2043: the rows' forgotten events, from the ids the UPDATE returned.
+            await self.db.execute(
+                insert(MemoryRevision).values(
+                    [
+                        {
+                            "memory_id": row.id,
+                            "context_id": UUID(context_id),
+                            "version": row.version,
+                            "kind": REVISION_KIND_FORGOTTEN,
+                            "prior": {},
+                            "writer": REVISION_WRITER_API,
+                            "actor_user_id": user_id,
+                            "at": deleted_at,
+                        }
+                        for row in rows
+                    ]
+                )
+            )
         points = {row.id: (row.summary_embedding_id or row.id) for row in rows}
         shared = {p for mid, p in points.items() if p != mid}
         kept: set[UUID | None] = set()

@@ -73,7 +73,7 @@ from models.erasure import (
     VALID_REASON_CODES,
     ErasureRequest,
 )
-from models.memory import Memory
+from models.memory import Memory, MemoryRevision
 from services.billing_contract import (
     ensure_no_billing_contract,
     owned_workspaces_under_contract,
@@ -1278,6 +1278,11 @@ class AccountErasureService:
         # which also NULLs the generated columns (location_lat/lon,
         # trigger_from/until) derived from it. Runs AFTER the workspace
         # cascade so the count reflects only survivors.
+        # #2043: the revision log of surviving memories. BEFORE the memory
+        # scrub: it still finds the subject's memories by their raw user_id,
+        # and the subject's tombstones (hard-deleted there) take their
+        # revisions with them through the FK cascade either way.
+        counts["memory_revisions_pseudonymized"] = await self._erase_memory_revisions(user_id)
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
         # #1365 review sweep: neural graph edges, analysis runs, retrieval
@@ -1420,6 +1425,45 @@ class AccountErasureService:
             ),
         )
         return (actor.rowcount or 0) + (recipient.rowcount or 0)
+
+    async def _erase_memory_revisions(self, user_id: str) -> int:
+        """Scrub the erased subject out of ``memory_revisions`` (#2043).
+
+        Two UPDATEs:
+
+        - ``prior`` loses its ``details`` key on every revision the subject
+          wrote and on every revision of a memory the subject authored — the
+          revision-log twin of ``_scrub_surviving_memories`` NULLing the
+          surviving memories' ``details`` (an overwritten ``details`` would
+          otherwise keep the structured payload the scrub removes). The
+          overwritten text stays, as the memory text itself does.
+        - the subject's own events get the salted pseudonym as
+          ``actor_user_id`` (the same pseudonym as the memories, so the log
+          still lines up) and a NULL ``session_id`` (the
+          ``memory_access_events`` rule: an opaque session token has no
+          post-erasure value).
+
+        Returns:
+            How many revision rows were pseudonymized.
+        """
+        await self.db.execute(
+            update(MemoryRevision)
+            .where(
+                MemoryRevision.prior.has_key("details"),
+                (MemoryRevision.actor_user_id == user_id)
+                | MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id)),
+            )
+            .values(prior=MemoryRevision.prior.delete_path(["details"]))
+        )
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(MemoryRevision)
+                .where(MemoryRevision.actor_user_id == user_id)
+                .values(actor_user_id=self._pseudonym(user_id), session_id=None)
+            ),
+        )
+        return result.rowcount or 0
 
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).

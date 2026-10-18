@@ -59,6 +59,7 @@ def _memory_item(m: Any, *, include_details: bool) -> dict[str, Any]:
         "source_type": m.source_type,
         "created_at": to_utc_iso(m.created_at),
         "updated_at": to_utc_iso(m.updated_at),
+        "version": m.version,  # #2043
     }
     if include_details:
         item["details"] = m.details

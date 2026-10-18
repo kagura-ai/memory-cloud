@@ -294,7 +294,9 @@ async def test_remember_bumps_context():
     # The optional write-response blocks the handler forwards (#1502/#1505);
     # this test is about the context touch, not their contents.
     service.remember = AsyncMock(
-        return_value=SimpleNamespace(memory_id=uuid4(), scope="personal", persistence=None, lint=[])
+        return_value=SimpleNamespace(
+            memory_id=uuid4(), scope="personal", version=1, persistence=None, lint=[]
+        )
     )
 
     with _patched_write_handler(ctx, service) as db:
@@ -325,6 +327,7 @@ async def test_update_memory_bumps_context():
             operation="update",
             re_embedded=False,
             scope="personal",
+            version=2,  # #2043, not under test here
             persistence=None,  # #1505 block, not under test here
             supersede_candidate_dismissed=None,  # #1504, not under test here
             lint=[],  # #1502 hints, not under test here
@@ -385,6 +388,7 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
         context=None,
         created_at=datetime.now(UTC),
         updated_at=None,
+        version=1,  # #2043
         client="mcp",
         source_uri=None,
         source_type=None,

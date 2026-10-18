@@ -35,6 +35,7 @@ def _memory(memory_id):
         last_used_at=None,
         access_count=0,
         confidence=1.0,
+        version=1,  # #2043
     )
 
 

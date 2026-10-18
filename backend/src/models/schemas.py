@@ -282,6 +282,9 @@ class RememberResponse(BaseModel):
     status: str = "success"
     memory_id: UUID
     scope: str
+    # #2043: a new memory starts at version 1 — the value to pass as
+    # update_memory's expected_version.
+    version: int = 1
     # Issue #1505: durability transparency. Derived from ``scope`` at
     # construction time by ``services.persistence.persistence_info``.
     persistence: PersistenceInfo | None = None
@@ -407,6 +410,8 @@ class MemoryResponse(TZAwareBaseModel):
     # #1403: liveness-guarded supersede suggestion (top-1 near-duplicate detected
     # at ingest). None unless this memory has a still-actionable candidate.
     supersede_candidate: SupersedeCandidate | None = None
+    # #2043: the memory's version (update_memory's expected_version).
+    version: int | None = None
 
     class Config:
         from_attributes = True
@@ -734,6 +739,8 @@ class ReferenceResponse(TZAwareBaseModel):
     context: dict | None
     created_at: datetime
     updated_at: datetime
+    # #2043: the version read here — the expected_version of an edit based on it.
+    version: int
     client: str
     # Optional origin metadata (Issue #215). Surfaced so the detail UI can
     # show where a memory came from (vault://, file://, https://, etc.).
@@ -976,6 +983,13 @@ class ForgetBulkResponse(BaseModel):
     next_cursor: str | None = None
 
 
+def _reject_bool_version(v: Any) -> Any:
+    """#2043: ``true`` is not version 1 (pydantic's lax int would take it)."""
+    if isinstance(v, bool):
+        raise ValueError("expected_version must be an integer")
+    return v
+
+
 class UpdateMemoryRequest(BaseModel):
     """Request schema for update_memory() API.
 
@@ -1033,6 +1047,22 @@ class UpdateMemoryRequest(BaseModel):
             "materially. In-place mode only."
         ),
     )
+    # #2043: optimistic concurrency. The edit applies only while the memory is
+    # still at this version; otherwise nothing is written and the caller gets
+    # version_conflict with the current version. None = last writer wins.
+    expected_version: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Apply the edit only if the memory is still at this version "
+            "(version_conflict otherwise, nothing written). In-place mode only."
+        ),
+    )
+
+    @field_validator("expected_version", mode="before")
+    @classmethod
+    def _expected_version_not_bool(cls, v: Any) -> Any:
+        return _reject_bool_version(v)
 
     @model_validator(mode="after")
     def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":
@@ -1052,6 +1082,14 @@ class UpdateMemoryRequest(BaseModel):
             raise ValueError(
                 "dismiss_supersede_candidate requires memory_id (in-place mode); "
                 "an external_id upsert replaces the memory and its suggestion."
+            )
+        # #2043: the upsert replaces the row under a new memory_id (forget +
+        # remember), so there is no version to compare — refuse rather than
+        # silently write without the check the caller asked for.
+        if has_external_id and self.expected_version is not None:
+            raise ValueError(
+                "expected_version requires memory_id (in-place mode); an external_id "
+                "upsert replaces the memory under a new id."
             )
 
         # For upsert-by-external_id mode, enforce required fields
@@ -1082,6 +1120,9 @@ class UpdateMemoryResponse(BaseModel):
     operation: str  # "updated" | "created" | "replaced"
     re_embedded: bool
     scope: str
+    # #2043: the version after this call (1 for an upsert's new row; unchanged
+    # when the call changed no versioned field).
+    version: int
     # Issue #1505: same durability transparency as RememberResponse — an upsert
     # that lands as "created" starts a fresh working-scope lifecycle.
     persistence: PersistenceInfo | None = None
@@ -1120,6 +1161,14 @@ class PatchMemoryRequest(BaseModel):
     # PG ARRAY column. Both surfaces are now closed.
     tags: list[str] | None = Field(None, max_length=100)
     details: dict | None = None
+    # #2043: apply the patch only while the memory is at this version (409
+    # version_conflict otherwise, nothing written). Omitted = last writer wins.
+    expected_version: int | None = Field(None, ge=1)
+
+    @field_validator("expected_version", mode="before")
+    @classmethod
+    def _expected_version_not_bool(cls, v: Any) -> Any:
+        return _reject_bool_version(v)
 
     @field_validator("tags")
     @classmethod
@@ -1141,7 +1190,8 @@ class PatchMemoryRequest(BaseModel):
         # request (including `details` JSON) just to check emptiness — the
         # service layer already prefers `model_fields_set` for the same
         # reason, so the validator is now consistent with it.
-        if not self.model_fields_set:
+        # expected_version is a precondition, not a field to update.
+        if not (self.model_fields_set - {"expected_version"}):
             raise ValueError("PATCH request must include at least one field to update")
         # Reject explicit `null` for fields that either map to NOT NULL DB
         # columns (`summary`/`content`/`type`/`importance`) — would 500 with a

@@ -255,6 +255,8 @@ def _memory(details, **overrides):
     m.updated_at = None
     m.supersede_candidate = None
     m.source_type = "manual"
+    m.version = 1  # #2043
+    m.deleted_at = None
     for k, v in overrides.items():
         setattr(m, k, v)
     return m
@@ -262,6 +264,7 @@ def _memory(details, **overrides):
 
 def _prime_update(service, memory):
     service._update_load_authorized = AsyncMock(return_value=memory)
+    service._lock_for_edit = AsyncMock(return_value=memory)  # #2043 re-read
     service._update_sync_qdrant_payload = AsyncMock()
     service._lint_write = AsyncMock(return_value=[])
 
@@ -342,6 +345,7 @@ async def test_update_non_editor_is_denied_before_fields_are_applied(service, pe
 
 def _prime_patch(service, memory):
     service._patch_load_authorized = AsyncMock(return_value=memory)
+    service._lock_for_edit = AsyncMock(return_value=memory)  # #2043 re-read
     service._patch_sync_qdrant_payload = AsyncMock()
     service._patch_build_response = AsyncMock(return_value=MagicMock())
 

@@ -75,6 +75,7 @@ def _response(
         context={"file_path": "x.py"} if context is None else context,
         created_at=datetime(2026, 6, 1, 12, 0, 0),
         updated_at=datetime(2026, 6, 2, 9, 30, 0),
+        version=3,
         client="api",
         source_uri="vault://v/note.md",
         source_type="vault",
@@ -131,7 +132,8 @@ def _error(text: str) -> dict:
 
 
 def _legacy_text(result: ReferenceResponse) -> str:
-    """The exact text reference() returned before #1685, rebuilt independently."""
+    """The exact text reference() returned before #1685, rebuilt independently
+    (plus #2043's light ``version`` key after ``updated_at``)."""
     memory = {
         "memory_id": str(result.memory_id),
         "summary": result.summary,
@@ -145,6 +147,7 @@ def _legacy_text(result: ReferenceResponse) -> str:
         "context": result.context,
         "created_at": "2026-06-01T12:00:00Z",
         "updated_at": "2026-06-02T09:30:00Z",
+        "version": result.version,
         "client": result.client,
         "source_uri": result.source_uri,
         "source_type": result.source_type,

@@ -429,13 +429,13 @@ class TestResumeCursor:
 class TestTheChunkIsAFixedNumberOfStatements:
     @pytest.mark.asyncio
     async def test_update_shared_point_read_and_edge_delete(self) -> None:
-        """One UPDATE, one shared-point SELECT, one edge DELETE per chunk —
-        whatever the chunk size."""
+        """One UPDATE, one revision INSERT, one shared-point SELECT, one edge
+        DELETE per chunk — whatever the chunk size."""
         own = [uuid4() for _ in range(3)]
         shared_point = uuid4()
         resource_row = uuid4()
-        returned = [SimpleNamespace(id=i, summary_embedding_id=i) for i in own] + [
-            SimpleNamespace(id=resource_row, summary_embedding_id=shared_point)
+        returned = [SimpleNamespace(id=i, summary_embedding_id=i, version=1) for i in own] + [
+            SimpleNamespace(id=resource_row, summary_embedding_id=shared_point, version=3)
         ]
         statements: list = []
 
@@ -444,7 +444,7 @@ class TestTheChunkIsAFixedNumberOfStatements:
             r = MagicMock()
             if len(statements) == 1:
                 r.all.return_value = returned
-            elif len(statements) == 2:
+            elif len(statements) == 3:
                 r.scalars.return_value = [shared_point]  # still owned by a live row
             else:
                 r.rowcount = 4
@@ -455,14 +455,22 @@ class TestTheChunkIsAFixedNumberOfStatements:
         deleted, points = await service._soft_delete_chunk(
             "u1", [*own, resource_row], str(WS), str(CTX)
         )
-        assert len(statements) == 3
+        assert len(statements) == 4
         sqls = [str(st.compile(dialect=postgresql.dialect())) for st in statements]
         assert sqls[0].startswith("UPDATE memories SET deleted_at=")
         assert "deleted_by" in sqls[0] and "updated_at" not in sqls[0]  # #1924
         assert "memories.context_id =" in sqls[0]
-        assert sqls[2].startswith("DELETE FROM neural_memory_edges")
+        assert "memories.version" in sqls[0]  # RETURNING feeds the revision rows
+        # #2043: the chunk's forgotten events, one multi-row INSERT at the
+        # versions the UPDATE returned (a forget does not bump them).
+        assert sqls[1].startswith("INSERT INTO memory_revisions")
+        params = statements[1].compile(dialect=postgresql.dialect()).params
+        assert sorted(v for k, v in params.items() if k.startswith("version")) == [1, 1, 1, 3]
+        assert {v for k, v in params.items() if k.startswith("kind")} == {"forgotten"}
+        assert {v for k, v in params.items() if k.startswith("actor_user_id")} == {"u1"}
+        assert sqls[3].startswith("DELETE FROM neural_memory_edges")
         for fragment in ("user_id", "workspace_id", "context_id"):
-            assert f"neural_memory_edges.{fragment} =" in sqls[2]
+            assert f"neural_memory_edges.{fragment} =" in sqls[3]
         assert deleted == [*own, resource_row]
         # The shared point another live row owns is kept out of the index delete.
         assert points == [str(i) for i in own]
@@ -475,13 +483,34 @@ class TestTheChunkIsAFixedNumberOfStatements:
         async def execute(stmt):
             statements.append(stmt)
             r = MagicMock()
-            r.all.return_value = [SimpleNamespace(id=i, summary_embedding_id=None) for i in own]
+            r.all.return_value = [
+                SimpleNamespace(id=i, summary_embedding_id=None, version=1) for i in own
+            ]
             r.rowcount = 0
             return r
 
         service = MemoryService(MagicMock(execute=AsyncMock(side_effect=execute)))
         await service._soft_delete_chunk("u1", own, str(WS), str(CTX))
-        assert len(statements) == 2
+        assert len(statements) == 3  # UPDATE, revision INSERT, edge DELETE
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_that_deleted_nothing_logs_nothing(self) -> None:
+        """#2043: rows another call already forgot are not returned, so no
+        forgotten event is written for them."""
+        statements: list = []
+
+        async def execute(stmt):
+            statements.append(stmt)
+            r = MagicMock()
+            r.all.return_value = []
+            r.rowcount = 0
+            return r
+
+        service = MemoryService(MagicMock(execute=AsyncMock(side_effect=execute)))
+        deleted, _ = await service._soft_delete_chunk("u1", [uuid4()], str(WS), str(CTX))
+        assert deleted == []
+        sqls = [str(st.compile(dialect=postgresql.dialect())) for st in statements]
+        assert not any(q.startswith("INSERT INTO memory_revisions") for q in sqls)
 
 
 class TestForgetByQueryIsAllOrNothing:

@@ -181,6 +181,10 @@
           "type": "string",
           "format": "uuid"
         },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1
+        },
         "external_id": {
           "type": "string"
         },

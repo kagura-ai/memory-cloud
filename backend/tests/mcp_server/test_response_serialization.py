@@ -249,6 +249,7 @@ async def test_reference_returns_japanese_as_is():
         context=None,
         created_at=now,
         updated_at=None,
+        version=1,  # #2043
         client="mcp",
         source_uri=None,
         source_type=None,

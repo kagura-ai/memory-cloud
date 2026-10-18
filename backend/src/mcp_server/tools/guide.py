@@ -339,11 +339,15 @@ GUIDE_TOPICS: dict[str, str] = {
         "memories, so the suggestion stops resurfacing; nothing is deleted or "
         "shadowed, and detection resumes if their similarity changes materially. To "
         "accept instead: create_edge(edge_type='supersedes'), outside the core profile "
-        '(describe_tools(["create_edge"]) has its schema).'
+        '(describe_tools(["create_edge"]) has its schema). expected_version=N '
+        "(memory_id only): apply the edit only while the memory is at version N — the "
+        "version reference() returned — so a concurrent edit is never overwritten "
+        "unseen; otherwise version_conflict with current_version and nothing is written. "
+        "Omit it for last-writer-wins."
     ),
     "update_memory.returns": (
         "Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', "
-        "re_embedded, scope, persistence?: {scope, committed, promotes_via, "
+        "re_embedded, scope, version, persistence?: {scope, committed, promotes_via, "
         "consolidation_archive_min_age_days, detail}, supersede_candidate_dismissed?, "
         "lint?: [{code, hint, subject?}], context_id, context_name, "
         "context_display_name, context_is_private, context_is_locked}. re_embedded is "
@@ -352,14 +356,15 @@ GUIDE_TOPICS: dict[str, str] = {
         "reflects the memory AFTER the update); supersede_candidate_dismissed is the "
         "rejected candidate's memory_id, absent when nothing was dismissed (also when no "
         "live suggestion existed). The write "
-        "is committed before this returns. Errors to branch on: memory_not_found, "
-        "validation_error."
+        "is committed before this returns. version moves by one only when summary, "
+        "context_summary, content, details, type, importance or tags changed. Errors "
+        "to branch on: memory_not_found, validation_error, version_conflict."
     ),
     # --------------------------------------------------------------- reference
     "reference.returns": (
         "Returns: {status, memory: {memory_id, summary, context_summary, content, "
         "details, type, scope, importance, tags, context, created_at, updated_at, "
-        "client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, "
+        "version, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, "
         "importance, weight, created_at}], outgoing_has_more, incoming_links: [...], "
         "incoming_has_more, supersede_candidate}}. updated_at is a staleness cue. "
         "supersede_candidate is null, or {memory_id, summary, similarity, "

@@ -220,6 +220,28 @@ class DuplicateFileError(ConflictError):
         self.existing_file: dict[str, Any] | None = None
 
 
+class VersionConflictError(ConflictError):
+    """``expected_version`` no longer matches the memory's version (409, #2043).
+
+    Raised by an in-place update / PATCH carrying ``expected_version`` when
+    another edit landed first; nothing was written. ``details`` carries the
+    ``reason`` discriminator (the beta-invite / connector convention) and the
+    current version, so a client can re-read and resend.
+    """
+
+    def __init__(self, *, memory_id: Any, expected_version: int, current_version: int) -> None:
+        super().__init__(
+            f"Memory {memory_id} is at version {current_version}, not the expected "
+            f"version {expected_version}. Read it again and resend with its current version.",
+            reason="version_conflict",
+            expected_version=expected_version,
+            current_version=current_version,
+        )
+        self.memory_id = memory_id
+        self.expected_version = expected_version
+        self.current_version = current_version
+
+
 # Platform team already connected (#1753)
 #
 # Both stay ``RES-002`` / 409 — the code a client already sees for this

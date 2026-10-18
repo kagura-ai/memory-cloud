@@ -543,12 +543,16 @@ async def patch_memory(
 
     Accepts any subset of ``summary``/``content``/``type``/``importance``/
     ``tags``/``details``. Omitted fields preserve their current value;
-    ``tags`` follows replace-all semantics.
+    ``tags`` follows replace-all semantics. ``expected_version`` (#2043)
+    makes the patch conditional on the memory's current version.
 
     Status codes:
         200: Updated successfully. Body is the full ``ReferenceResponse``.
         404: Memory does not exist OR the caller lacks access (existence
              is intentionally not leaked).
+        409: ``expected_version`` is not the memory's current version
+             (``details.reason`` = ``version_conflict``, ``details.
+             current_version``); nothing was written (#2043).
         410: Memory was soft-deleted; the tombstone exists but the resource
              is gone. Distinguishing 410 from 404 lets clients stop retrying.
         422: Request body validation failed (empty patch, importance out of

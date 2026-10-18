@@ -40,6 +40,7 @@ def _ref_response(mem_id, link_id):
         context={"file_path": "x.py"},
         created_at=datetime(2026, 6, 1, 12, 0, 0),
         updated_at=datetime(2026, 6, 2, 9, 30, 0),
+        version=4,
         client="api",
         source_uri="vault://v/note.md",
         source_type="vault",
@@ -92,6 +93,8 @@ async def test_reference_surfaces_links_scope_provenance():
     # #434: scope + updated_at (staleness cue) — previously dropped
     assert m["scope"] == "working"
     assert m["updated_at"].startswith("2026-06-02")
+    # #2043: the version an edit passes as expected_version
+    assert m["version"] == 4
     # #215: provenance — previously dropped
     assert m["source_uri"] == "vault://v/note.md"
     assert m["source_type"] == "vault"

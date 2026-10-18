@@ -42,6 +42,7 @@ def _memory(**overrides) -> SimpleNamespace:
         "context": None,
         "source_uri": None,
         "source_type": None,
+        "version": 1,  # #2043
     }
     values.update(overrides)
     return SimpleNamespace(**values)

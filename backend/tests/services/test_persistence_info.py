@@ -812,6 +812,7 @@ async def test_remember_tool_json_carries_the_block(sleep_pass):
         return_value=SimpleNamespace(
             memory_id=uuid4(),
             scope="working",
+            version=1,  # #2043, not under test here
             persistence=persistence_info("working"),
             lint=[],  # #1502 hints, not under test here
         )
@@ -852,6 +853,7 @@ async def test_update_memory_tool_json_carries_the_block(sleep_pass):
             operation="updated",
             re_embedded=False,
             scope="persistent",
+            version=2,  # #2043, not under test here
             persistence=persistence_info("persistent"),
             supersede_candidate_dismissed=None,  # #1504, not under test here
             lint=[],  # #1502, not under test here

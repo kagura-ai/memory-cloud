@@ -130,7 +130,9 @@ class MemoryRepository(BaseRepository[Memory]):
         """
         self.db = db
 
-    async def get(self, id: UUID, *, include_deleted: bool = False) -> Memory | None:
+    async def get(
+        self, id: UUID, *, include_deleted: bool = False, for_update: bool = False
+    ) -> Memory | None:
         """Get memory by ID.
 
         #1316/#1320: soft-deleted (tombstoned) rows are EXCLUDED by default —
@@ -143,6 +145,11 @@ class MemoryRepository(BaseRepository[Memory]):
         Args:
             id: Memory UUID
             include_deleted: When True, return the row even if soft-deleted.
+            for_update: #2043 — lock the row (``SELECT ... FOR UPDATE``) until
+                the transaction ends, and overwrite an already-loaded instance
+                with the locked state (``populate_existing``). The edit paths
+                re-read their target this way after authorization, so the
+                version check and the version bump see the latest commit.
 
         Returns:
             Memory or None
@@ -150,6 +157,8 @@ class MemoryRepository(BaseRepository[Memory]):
         stmt = select(Memory).where(Memory.id == id)
         if not include_deleted:
             stmt = stmt.where(Memory.deleted_at.is_(None))
+        if for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 

@@ -176,6 +176,7 @@ class TestReferenceResponseSerialization:
             context=None,
             created_at=datetime(2026, 4, 28, 17, 50, 22),
             updated_at=datetime(2026, 4, 28, 18, 0, 0),
+            version=1,
             client="t",
         )
         body = json.loads(r.model_dump_json())
@@ -196,6 +197,7 @@ class TestReferenceResponseSerialization:
             context=None,
             created_at=datetime(2026, 4, 28, 17, 50, 22, tzinfo=UTC),
             updated_at=datetime(2026, 4, 28, 18, 0, 0, tzinfo=UTC),
+            version=1,
             client="t",
         )
         body = json.loads(r.model_dump_json())

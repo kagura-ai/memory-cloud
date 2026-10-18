@@ -133,6 +133,11 @@ def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
             "updated_at": to_utc_iso(r.updated_at),
         }
     )
+    # #2043: the version to pass as update_memory's expected_version. Full
+    # only: compact is the judge-and-fetch pass, and an edit reads the memory
+    # (reference, which carries it) first. Absent when the row did not say.
+    if r.version is not None:
+        item["version"] = r.version
     # #1851: an untagged result says nothing with ``"tags": []``; absent like
     # the other empty annotations.
     if r.tags:
