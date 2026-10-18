@@ -114,6 +114,8 @@ async def update_context_search_config(
     Raises:
         HTTPException: 400 if validation fails, 403 if the caller may not
             change content_chunks_enabled, 404 if context not found, 500 on error
+        ValidationError: 422 when turning content_chunks_enabled on with the
+            LanceDB vector store, which has no content chunk vectors (#2072)
     """
     user_id = user.get("user_id")
     logger.info(

@@ -19,13 +19,14 @@ from auth.workspace_roles import (
 from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
+from db.qdrant import chunk_points_supported
 from models.auth import Context, ContextMember, Workspace, WorkspaceMember
 from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
 from services.plan_suspension import ensure_context_writable, ensure_member_seated
 from services.workspace_service import WorkspaceService
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1203,6 +1204,12 @@ CONTENT_CHUNKS_OWNER_ONLY_MESSAGE = (
     "Only the context owner or a workspace owner/admin can change content_chunks_enabled"
 )
 
+CONTENT_CHUNKS_UNSUPPORTED_MESSAGE = (
+    "content_chunks_enabled cannot be turned on with the LanceDB vector store "
+    "(KAGURA_VECTOR_BACKEND=lance): it keeps one vector per memory and has no "
+    "content chunk vectors. Content chunks need the Qdrant backend."
+)
+
 
 async def check_content_chunks_change(
     perm_service: PermissionService, user_id: str, context_id: UUID
@@ -1243,12 +1250,18 @@ async def gate_content_chunks_change(
     may send it, and the field is dropped from the update so the write never
     touches the flag (a concurrent owner change is not overwritten by it).
 
+    It also holds a backend limit (#2072): the LanceDB store keeps no content
+    chunk points, so turning the flag on there is refused instead of being
+    reported on and doing nothing. Turning it off stays allowed.
+
     Returns:
         The update to apply (``update`` itself, or a copy without the flag).
 
     Raises:
         AuthorizationError: 403 when the flag changes and the caller is not
             the context owner or a workspace owner/admin.
+        ValidationError: 422 (``VAL-001``) when the change turns the flag on
+            and the vector store has no content chunk points.
     """
     if "content_chunks_enabled" not in update.model_fields_set:
         return update
@@ -1256,5 +1269,9 @@ async def gate_content_chunks_change(
         return ContextSearchConfigUpdate(
             **update.model_dump(exclude_unset=True, exclude={"content_chunks_enabled"})
         )
+    # Before the owner check: the answer does not depend on the caller, so an
+    # editor is not sent to an owner whose request would be refused too.
+    if update.content_chunks_enabled is True and not chunk_points_supported():
+        raise ValidationError(CONTENT_CHUNKS_UNSUPPORTED_MESSAGE, field="content_chunks_enabled")
     await check_content_chunks_change(perm_service, user_id, context_id)
     return update

@@ -66,7 +66,7 @@ _DENSE = [
 ]
 
 
-async def _search(config, dense, search_mode="semantic", k=5):
+async def _search(config, dense, search_mode="semantic", k=5, chunk_points=True):
     service = SearchService(MagicMock())
     service._get_search_config = AsyncMock(return_value=config)
     ctx_svc = MagicMock()
@@ -76,6 +76,7 @@ async def _search(config, dense, search_mode="semantic", k=5):
         patch("services.search_service.search_memories_qdrant", new=qdrant),
         patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])),
         patch("services.context_service.ContextService", return_value=ctx_svc),
+        patch("services.search_service.chunk_points_supported", return_value=chunk_points),
     ):
         results = await service.hybrid_search(
             query="q",
@@ -92,6 +93,16 @@ async def _search(config, dense, search_mode="semantic", k=5):
 async def test_flag_off_call_is_unchanged(flag):
     plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
     results, kwargs = await _search(_config(flag), plain)
+    assert "include_chunks" not in kwargs
+    assert kwargs["limit"] == 5 * 3
+    assert [r["id"] for r in results] == ["m2"]
+
+
+async def test_flag_on_without_chunk_point_support_keeps_the_plain_call():
+    """#2072: the LanceDB store has no chunk points, so a stored flag (e.g.
+    from a Qdrant deployment) neither oversamples nor asks for chunks."""
+    plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
+    results, kwargs = await _search(_config(True), plain, chunk_points=False)
     assert "include_chunks" not in kwargs
     assert kwargs["limit"] == 5 * 3
     assert [r["id"] for r in results] == ["m2"]

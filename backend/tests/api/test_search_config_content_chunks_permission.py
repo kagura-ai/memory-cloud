@@ -183,3 +183,59 @@ async def test_a_missing_config_row_still_runs_the_gate():
         )
     perms.check_context_owner.assert_awaited()
     repo.update.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #2072: the LanceDB store holds no chunk points, so turning the flag on there
+# is refused (it would be reported on and do nothing); turning it off is not.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [True, False])
+async def test_turning_the_flag_on_is_refused_without_chunk_point_support(owner):
+    """Refused before the owner check: an editor is not sent to an owner whose
+    request would be refused too."""
+    from api.routes.context_search_config import update_context_search_config
+    from utils.exceptions import ValidationError
+
+    perms, repo = _perms(owner=owner), _repo(False)
+    with (
+        patch("services.permission_service.chunk_points_supported", return_value=False),
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        pytest.raises(ValidationError) as exc,
+    ):
+        await update_context_search_config(
+            uuid4(),
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True),
+            {"user_id": "u-1"},
+            db=AsyncMock(),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.error_code == "VAL-001"
+    assert exc.value.details["field"] == "content_chunks_enabled"
+    repo.update.assert_not_awaited()
+    perms.check_context_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_turning_the_flag_off_is_allowed_without_chunk_point_support():
+    with patch("services.permission_service.chunk_points_supported", return_value=False):
+        _, repo = await _put(
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False),
+            stored=True,
+            owner=True,
+        )
+    assert repo.update.await_args.args[1].content_chunks_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_sending_the_stored_on_value_is_a_no_op_without_chunk_point_support():
+    with patch("services.permission_service.chunk_points_supported", return_value=False):
+        _, repo = await _put(
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True),
+            stored=True,
+            owner=False,
+        )
+    assert "content_chunks_enabled" not in repo.update.await_args.args[1].model_fields_set

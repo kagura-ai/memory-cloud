@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from db.qdrant import search_memories_fulltext, search_memories_qdrant
+from db.qdrant import chunk_points_supported, search_memories_fulltext, search_memories_qdrant
 from models.llm_call_log import (
     LLM_CALL_LOG_CALL_TYPES,
     LLM_CALL_LOG_CALLERS,
@@ -156,8 +156,11 @@ class SearchService:
         # #2015: a context with content chunk vectors returns chunk points from
         # the dense arm; several of one memory collapse into one, so that arm
         # oversamples and collapses back to fetch_size. `is True`: a duck-typed
-        # default config has no such attribute.
-        content_chunks_on = getattr(config, "content_chunks_enabled", False) is True
+        # default config has no such attribute. #2072: the LanceDB store has no
+        # chunk points, so a stored flag there changes nothing.
+        content_chunks_on = (
+            getattr(config, "content_chunks_enabled", False) is True and chunk_points_supported()
+        )
 
         # Issue #XXX: Team collaboration - workspace membership + context privacy check
         from uuid import UUID

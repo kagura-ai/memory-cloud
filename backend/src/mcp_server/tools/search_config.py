@@ -45,7 +45,7 @@ async def handle_update_search_config(
                 gate_content_chunks_change,
             )
             from services.reranker_service import default_reranker_model_for
-            from utils.exceptions import AuthorizationError, NotFoundException
+            from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 
             # Parse context_id
             try:
@@ -153,6 +153,11 @@ async def handle_update_search_config(
                         "editor access."
                     ),
                 )
+            except ValidationError as config_err:
+                # #2072: the vector store has no content chunk points (LanceDB).
+                if config_err.details.get("field") != "content_chunks_enabled":
+                    raise
+                return _error_response("invalid_search_config", config_err.message)
 
             # Apply via repository (same as REST API)
             config = await repo.update(ctx_uuid, update_data)
