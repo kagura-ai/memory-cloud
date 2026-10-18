@@ -1410,7 +1410,8 @@ class ContextSearchConfigUpdate(BaseModel):
         "When on, memory content (not only summaries) is sent to the embedding "
         "and rerank providers. Changing it takes the context owner or a "
         "workspace owner/admin (403 for an editor); sending the stored value is "
-        "a no-op",
+        "a no-op. Needs the Qdrant vector store: turning it on with LanceDB is "
+        "refused (422)",
     )
 
     @model_validator(mode="after")

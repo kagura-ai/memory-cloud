@@ -157,8 +157,12 @@ class SearchService:
         # #2015: a context with content chunk vectors returns chunk points from
         # the dense arm; several of one memory collapse into one, so that arm
         # oversamples and collapses back to fetch_size. `is True`: a duck-typed
-        # default config has no such attribute.
-        content_chunks_on = getattr(config, "content_chunks_enabled", False) is True
+        # default config has no such attribute. #2072: the LanceDB store has no
+        # chunk points, so a stored flag there changes nothing.
+        chunks_supported = chunk_points_supported()
+        content_chunks_on = (
+            getattr(config, "content_chunks_enabled", False) is True and chunks_supported
+        )
         # #2015 PR 2a: cross-context recall follows each context's own flag,
         # not the primary's: the dense arm returns chunk points of exactly the
         # listed contexts that opted in (a filter, so a leftover chunk of a
@@ -167,7 +171,7 @@ class SearchService:
         if isinstance(context_id, list):
             chunk_context_ids = (
                 await self._chunk_enabled_context_ids(context_id)
-                if search_mode != "keyword" and chunk_points_supported()
+                if search_mode != "keyword" and chunks_supported
                 else []
             )
             content_chunks_on = bool(chunk_context_ids)

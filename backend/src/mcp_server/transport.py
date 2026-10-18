@@ -198,13 +198,13 @@ def _extract_session_id(
         # /mcp/messages/mcp-xxx/ -> mcp-xxx
         path_parts = path.strip("/").split("/")
         if len(path_parts) >= 3:  # ['mcp', 'messages', 'session_id']
-            logger.info(f"MCP session_id from path: {path_parts[2]}")
+            logger.debug(f"MCP session_id from path: {path_parts[2]}")
             return path_parts[2]
 
     session_id_header = headers.get(b"mcp-session-id")
     if session_id_header:
         session_id = session_id_header.decode("utf-8")
-        logger.info(f"MCP session_id from header: {session_id}")
+        logger.debug(f"MCP session_id from header: {session_id}")
         return session_id
 
     # "replace", not strict: bytes that are not UTF-8 name no session, and must
@@ -214,7 +214,7 @@ def _extract_session_id(
         for param in query.split("&"):
             if param.startswith("session_id="):
                 session_id = param.split("=", 1)[1]
-                logger.info(f"MCP session_id from query: {session_id}")
+                logger.debug(f"MCP session_id from query: {session_id}")
                 return session_id
 
     return None
@@ -1150,7 +1150,7 @@ async def _handle_batch(scope: Scope, send: Send, session: "MCPSession", batch: 
         if challenge is None and captured.status == 403:
             challenge = captured.headers.get(b"www-authenticate")
 
-    logger.info(
+    logger.debug(
         f"MCP batch (Streamable HTTP): messages={len(batch)}, answers={len(answers)}, "
         f"session={session.session_id}"
     )
@@ -1212,7 +1212,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
     # A valid notification (string method, no "id") expects no response.
     if "id" not in body:
         shown = method[:100]
-        logger.info(f"MCP notification: method={shown!r}, session={session.session_id}")
+        logger.debug(f"MCP notification: method={shown!r}, session={session.session_id}")
         await send({"type": "http.response.start", "status": 202, "headers": []})
         await send({"type": "http.response.body", "body": b""})
         return
@@ -1265,7 +1265,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
     # Handle tools/list request
     elif method == "tools/list":
-        logger.info(f"MCP tools/list (Streamable HTTP): session={session.session_id}")
+        logger.debug(f"MCP tools/list (Streamable HTTP): session={session.session_id}")
 
         from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
@@ -1299,7 +1299,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
     # Handle tools/call request
     elif method == "tools/call":
-        logger.info(f"MCP tools/call (Streamable HTTP): session={session.session_id}")
+        logger.debug(f"MCP tools/call (Streamable HTTP): session={session.session_id}")
 
         # Params first (#1686), as the stateless era does: a call without a
         # tool name is invalid params, whatever the token's scope.
@@ -1358,7 +1358,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
             tool_name = params.get("name")
             arguments = params.get("arguments") or {}
 
-            logger.info(f"MCP calling tool: {tool_name}")
+            logger.debug(f"MCP calling tool: {tool_name}")
 
             # Call the tool through extracted helper function
             from mcp_server.tools import execute_tool_call
@@ -1421,7 +1421,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
     # Handle ping request (spec utility; MUST answer with an empty result)
     elif method == "ping":
-        logger.info(f"MCP ping (Streamable HTTP): session={session.session_id}")
+        logger.debug(f"MCP ping (Streamable HTTP): session={session.session_id}")
         await _send_jsonrpc_result(send, session, request_id, {})
         return
 
@@ -1430,7 +1430,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
     # handler (#1544), so this branch only keeps the handler total for direct
     # callers.
     elif method == "server/discover":
-        logger.info(f"MCP server/discover (Streamable HTTP): session={session.session_id}")
+        logger.debug(f"MCP server/discover (Streamable HTTP): session={session.session_id}")
         from mcp_server.tools._helpers import get_mcp_key_workspace_scope
 
         instructions, private = await build_instructions(
@@ -1498,7 +1498,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     method = scope.get("method", "UNKNOWN")
     path = scope.get("path", "")
 
-    logger.info(f"MCP request: {method} {path}")
+    logger.debug(f"MCP request: {method} {path}")
 
     # Extract headers
     headers = dict(scope.get("headers", []))
@@ -1580,7 +1580,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         else:
             workspace_id = await _get_user_workspace_id(user_id)
 
-        logger.info(f"MCP authenticated: user={user_id}, workspace={workspace_id}")
+        logger.debug(f"MCP authenticated: user={user_id}, workspace={workspace_id}")
 
         # Issue #XXX: Validate workspace_id from URL matches API key workspace
         # This enables workspace-scoped URLs for Claude Desktop multi-workspace support
@@ -1640,7 +1640,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
                         if member:
                             workspace_id = workspace_uuid
-                            logger.info(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
+                            logger.debug(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
                         else:
                             logger.warning(
                                 f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
@@ -1821,7 +1821,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                         f"for user={user_id}"
                     )
             elif session is not None:
-                logger.info(f"MCP {method} /mcp: using existing session: {session.session_id}")
+                logger.debug(f"MCP {method} /mcp: using existing session: {session.session_id}")
             if session is None:
                 # Another user's or workspace's session, a terminated one, or
                 # an id this server never minted: MCP session management —
@@ -1835,7 +1835,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         await _answer_without_session(scope, receive, send, method, path)
         return
 
-    logger.info(
+    logger.debug(
         f"MCP handling: {method} {_normalize_mcp_path(path)} (session={session.session_id})"
     )
 

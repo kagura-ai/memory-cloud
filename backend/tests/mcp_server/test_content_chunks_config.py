@@ -297,3 +297,30 @@ async def test_mcp_an_owner_or_workspace_admin_can_change_the_flag(stored, reque
     assert payload["status"] == "success"
     perms.check_context_owner.assert_awaited_once()
     assert repo.update.await_args.args[1].content_chunks_enabled is requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [True, False])
+async def test_mcp_turning_the_flag_on_is_refused_without_chunk_point_support(owner):
+    """#2072: the LanceDB store holds no chunk points."""
+    from unittest.mock import patch
+
+    with patch("services.permission_service.chunk_points_supported", return_value=False):
+        payload, _, repo = await _call_update(
+            {"content_chunks_enabled": True}, stored=False, owner=owner
+        )
+    assert payload["error"] == "invalid_search_config"
+    assert "content_chunks_enabled" in payload["message"]
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_turning_the_flag_off_is_allowed_without_chunk_point_support():
+    from unittest.mock import patch
+
+    with patch("services.permission_service.chunk_points_supported", return_value=False):
+        payload, _, repo = await _call_update(
+            {"content_chunks_enabled": False}, stored=True, owner=True
+        )
+    assert payload["status"] == "success"
+    assert repo.update.await_args.args[1].content_chunks_enabled is False

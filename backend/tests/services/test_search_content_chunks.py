@@ -66,7 +66,7 @@ _DENSE = [
 ]
 
 
-async def _search(config, dense, search_mode="semantic", k=5):
+async def _search(config, dense, search_mode="semantic", k=5, chunk_points=True):
     service = SearchService(MagicMock())
     service._get_search_config = AsyncMock(return_value=config)
     ctx_svc = MagicMock()
@@ -76,6 +76,7 @@ async def _search(config, dense, search_mode="semantic", k=5):
         patch("services.search_service.search_memories_qdrant", new=qdrant),
         patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])),
         patch("services.context_service.ContextService", return_value=ctx_svc),
+        patch("services.search_service.chunk_points_supported", return_value=chunk_points),
     ):
         results = await service.hybrid_search(
             query="q",
@@ -92,6 +93,16 @@ async def _search(config, dense, search_mode="semantic", k=5):
 async def test_flag_off_call_is_unchanged(flag):
     plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
     results, kwargs = await _search(_config(flag), plain)
+    assert "include_chunks" not in kwargs
+    assert kwargs["limit"] == 5 * 3
+    assert [r["id"] for r in results] == ["m2"]
+
+
+async def test_flag_on_without_chunk_point_support_keeps_the_plain_call():
+    """#2072: the LanceDB store has no chunk points, so a stored flag (e.g.
+    from a Qdrant deployment) neither oversamples nor asks for chunks."""
+    plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
+    results, kwargs = await _search(_config(True), plain, chunk_points=False)
     assert "include_chunks" not in kwargs
     assert kwargs["limit"] == 5 * 3
     assert [r["id"] for r in results] == ["m2"]
@@ -142,7 +153,7 @@ async def test_reranker_sees_the_matched_chunk_text():
 _CTX2 = "00000000-0000-0000-0000-000000000003"
 
 
-async def _search_contexts(config, dense, chunk_contexts):
+async def _search_contexts(config, dense, chunk_contexts, chunk_points=True):
     service = SearchService(MagicMock())
     service._get_search_config = AsyncMock(return_value=config)
     service._chunk_enabled_context_ids = AsyncMock(return_value=chunk_contexts)
@@ -150,6 +161,7 @@ async def _search_contexts(config, dense, chunk_contexts):
     with (
         patch("services.search_service.search_memories_qdrant", new=qdrant),
         patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])),
+        patch("services.search_service.chunk_points_supported", return_value=chunk_points),
     ):
         results = await service.hybrid_search(
             query="q",
@@ -159,7 +171,10 @@ async def _search_contexts(config, dense, chunk_contexts):
             k=5,
             search_mode="semantic",
         )
-    service._chunk_enabled_context_ids.assert_awaited_once_with([_CTX, _CTX2])
+    if chunk_points:
+        service._chunk_enabled_context_ids.assert_awaited_once_with([_CTX, _CTX2])
+    else:
+        service._chunk_enabled_context_ids.assert_not_awaited()
     return results, qdrant.await_args.kwargs
 
 
@@ -178,6 +193,18 @@ async def test_cross_context_primary_on_admits_only_the_contexts_that_opted_in()
 async def test_cross_context_none_opted_in_is_the_summary_only_call():
     plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
     results, kwargs = await _search_contexts(_config(True), plain, [])
+    assert "include_chunks" not in kwargs
+    assert kwargs["limit"] == 5 * 3
+    assert [r["id"] for r in results] == ["m2"]
+
+
+async def test_cross_context_without_chunk_point_support_reads_no_flags():
+    """#2072: on LanceDB every listed context is treated as flag-off, the
+    opted-in ones included, and no flag lookup is made."""
+    plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
+    results, kwargs = await _search_contexts(
+        _config(True), plain, [_CTX, _CTX2], chunk_points=False
+    )
     assert "include_chunks" not in kwargs
     assert kwargs["limit"] == 5 * 3
     assert [r["id"] for r in results] == ["m2"]

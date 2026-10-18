@@ -247,7 +247,7 @@ async def _call_tool(
     from mcp_server.tools import execute_tool_call
 
     tool_name = params["name"]
-    logger.info(f"MCP calling tool (stateless): {_shown(tool_name)!r}")
+    logger.debug(f"MCP calling tool (stateless): {_shown(tool_name)!r}")
 
     try:
         # ``_meta`` is protocol metadata: only ``arguments`` reaches the tool.
@@ -350,7 +350,7 @@ async def handle_stateless_post(
     # This revision defines no client-to-server notification over HTTP, but
     # the transport rule for one is unchanged: accept, no body.
     if is_notification:
-        logger.info(f"MCP notification (stateless): method={_shown(method)!r}")
+        logger.debug(f"MCP notification (stateless): method={_shown(method)!r}")
         await send({"type": "http.response.start", "status": 202, "headers": []})
         await send({"type": "http.response.body", "body": b""})
         return
@@ -358,7 +358,7 @@ async def handle_stateless_post(
     meta = params.get("_meta") or {}
     client_info = meta.get(CLIENT_INFO_META_KEY)
     client_name = client_info.get("name") if isinstance(client_info, dict) else None
-    logger.info(
+    logger.debug(
         f"MCP {_shown(method)!r} (stateless, {_shown(meta.get(PROTOCOL_VERSION_META_KEY))}): "
         f"client={_shown(client_name)!r}, user={user_id}"
     )

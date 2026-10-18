@@ -22,12 +22,14 @@ The literal is kept byte-identical to the ordered ``MAE_OPERATIONS`` tuple in
 ``tests/test_memory_access_event_constants.py``) and uses the e74_1401
 zero-downtime pattern (``DROP ..., ADD ... NOT VALID`` then ``VALIDATE``):
 the table is written synchronously on the request path, and a plain ``ADD
-CONSTRAINT CHECK`` would scan it under ACCESS EXCLUSIVE.
+CONSTRAINT CHECK`` would scan it under ACCESS EXCLUSIVE. The VALIDATE runs in
+an autocommit block, after the NOT VALID add has committed and released its
+ACCESS EXCLUSIVE lock (#2073).
 
-Ordering: the CHECK first (transactional; it commits when the autocommit block
-opens), then the concurrent index — the same sequencing e32 used, so a
-mid-build index failure leaves the CHECK committed and the whole upgrade
-re-runnable (``IF NOT EXISTS`` + the INVALID-leftover guard).
+Ordering: the CHECK swap first (transactional; it commits when the first
+autocommit block opens), then VALIDATE, then the concurrent index — the same
+sequencing e32 used, so a mid-build index failure leaves the CHECK committed and the whole
+upgrade re-runnable (``IF NOT EXISTS`` + the INVALID-leftover guard).
 
 Revision ID: e84_1619_tool_guardrails
 Revises: e83_1595_beta_invite_label
@@ -81,10 +83,23 @@ def _index_is_invalid(name: str) -> bool:
     return row is not None
 
 
+def _validate() -> None:
+    """VALIDATE outside the ALTER's transaction (#2073).
+
+    ``autocommit_block()`` commits the preceding transaction, releasing the
+    NOT VALID add's ACCESS EXCLUSIVE lock, so the scan runs under SHARE UPDATE
+    EXCLUSIVE only (audit writes continue). Offline it emits ``COMMIT;`` /
+    ``BEGIN;``.
+    """
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
+        )
+
+
 def upgrade() -> None:
     # CHECK swap first (transactional). DROP + ADD are one ALTER so there is no
-    # window without an operation CHECK; VALIDATE runs under SHARE UPDATE
-    # EXCLUSIVE so audit writes continue. Written inline (the e74 form) so the
+    # window without an operation CHECK. Written inline (the e74 form) so the
     # schema-drift test can read the literal out of the f-string.
     op.execute(
         sa.text(
@@ -93,7 +108,7 @@ def upgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
+    _validate()
     # Index must be built CONCURRENTLY (no table lock) → outside the transaction.
     invalid = _index_is_invalid(_INDEX_NAME)
     with op.get_context().autocommit_block():
@@ -133,6 +148,4 @@ def downgrade() -> None:
         .first()
     )
     if leftover is None:
-        op.execute(
-            sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
-        )
+        _validate()

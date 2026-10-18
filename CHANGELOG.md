@@ -66,7 +66,7 @@ Retrieval that can see content and a reranker that cannot quietly make recall wo
 ### Notes
 - Migrations, in order:
   1. `e99_2022_supersede_cand_null`: data only, batched and resumable.
-  2. `f00_2019_llm_log_supersede`: widens the `llm_call_log` caller CHECK without downtime.
+  2. `f00_2019_llm_log_supersede`: widens the `llm_call_log` caller CHECK. Before v0.112.0, ledger writes wait while existing rows are checked ([#2073](https://github.com/kagura-ai/memory-cloud/issues/2073)).
   3. `f01_2015_content_chunks`: adds a NOT NULL bool column with a server default.
 - New optional environment variables: `RERANK_PROMPT_FORMAT`, `RERANK_INSTRUCTION`, `API_LOG_MAX_SIZE`, `API_LOG_MAX_FILE`, `LOG_MAX_SIZE`, `LOG_MAX_FILE`.
 - New log rotation values take effect only when a container is recreated. A reboot recreates every service whose configuration changed.
