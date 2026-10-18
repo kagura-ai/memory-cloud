@@ -342,6 +342,8 @@ class TestJudgePair:
         assert "SECRET-OLD" in call["prompt"] and "SECRET-NEW" in call["prompt"]
         assert call["provider"] == "openai" and call["model"] == "gpt-5-nano"
         assert call["platform_only"] is False
+        # #2070: the task's connection goes back to the pool for the round trip.
+        assert call["release_db_before_call"] is True
         logged = " ".join(str(c.kwargs) for c in log.info.call_args_list)
         assert "SECRET" not in logged
         assert [c.args[0] for c in log.info.call_args_list] == ["supersede_verify_judged"]

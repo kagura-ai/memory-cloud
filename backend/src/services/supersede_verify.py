@@ -406,9 +406,9 @@ async def _record_judge_call(
     The row goes through ``isolated_session`` (the #1985 recipe): it must land
     whatever the ingest path does next (it may return without committing), and
     a failed ledger write must not leave the embedding task's session needing a
-    rollback, which would expire the memory it is still working on. The cost
-    is a second pooled connection held beside the task's own for the length
-    of this short write.
+    rollback, which would expire the memory it is still working on. The
+    task's own session gave its connection back before the judge call
+    (#2070), so this short write is the only connection the task holds.
     """
     from services.llm_call_log_writer import LLMCallLogWriter
 
@@ -503,7 +503,9 @@ async def judge_pair(
     task and must never affect memory creation.
 
     Args:
-        db: Session for the LLM service's credential lookup.
+        db: Session for the LLM service's credential lookup. It is committed
+            before the judge's round trip (#2070), so it must hold nothing
+            pending.
         config: The resolved ``NeuralMemoryConfig`` (``sleep_llm_*`` pair,
             ``supersede_verify_*`` fields).
         user_id: The writing user (audit only, as for Sleep).
@@ -559,6 +561,12 @@ async def judge_pair(
             provider=provider,
             max_tokens=512,
             platform_only=judge_platform_only(config),
+            # #2070: this runs in the embedding task, one per remember with no
+            # concurrency limit; holding its connection for the round trip
+            # lets a burst of near-duplicates drain the pool. Nothing is
+            # pending on the session here, and the caller re-reads the row
+            # before it writes the verdict.
+            release_db_before_call=True,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, never blocks ingest
         # An attempt that answered was billed even though the call failed
