@@ -82,6 +82,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/memory/pinned"): BLOCKED,
     ("POST", "/api/v1/memory/remember"): BLOCKED,
     ("PATCH", "/api/v1/memory/{memory_id}"): BLOCKED,
+    ("GET", "/api/v1/memory/{memory_id}/revisions"): BLOCKED,  # #2043, parity with reference
     ("POST", "/api/v1/memory/guardrails"): ALLOWED,  # a safety rail, like MCP load_guardrails
     ("GET", "/api/v1/memory/guardrails/digest"): ALLOWED,  # MCP load_guardrails
     ("POST", "/api/v1/memory/forget"): ALLOWED,
@@ -250,6 +251,7 @@ SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/memory/pinned"),
         ("POST", "/api/v1/memory/remember"),
         ("PATCH", "/api/v1/memory/{memory_id}"),
+        ("GET", "/api/v1/memory/{memory_id}/revisions"),  # MemoryService.list_revisions
         ("POST", "/api/v1/contexts"),
         ("POST", "/api/v1/files/reserve"),
         ("POST", "/api/v1/files/{file_id}/confirm"),

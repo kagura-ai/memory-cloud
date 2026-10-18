@@ -57,6 +57,8 @@ from models.schemas import (
     LoadGuardrailsResponse,
     LoadPinnedResponse,
     MemoryResponse,
+    MemoryRevisionItem,
+    MemoryRevisionsResponse,
     MemoryStatsResponse,
     PatchMemoryRequest,
     PinnedMemoryItem,
@@ -2607,26 +2609,11 @@ class MemoryService:
             lint=result.lint,
         )
 
-    async def reference(
-        self, memory_id: UUID, user_id: str, *, record_access: bool = True
-    ) -> ReferenceResponse:
-        """Get full memory details (Layer 3).
-
-        Args:
-            memory_id: Memory UUID
-            user_id: User ID (for access control)
-            record_access: Record the read in the memory's access stats
-                (access_count, the #1046 adoption signal reference_count,
-                last_used_at). The MCP handler passes False for a
-                continuation page of a read it already recorded, and for a
-                call that returns no Layer-3 field (#1685). The access check
-                and the access audit event run either way.
-
-        Returns:
-            ReferenceResponse with full details
-
-        Raises:
-            NotFoundException: If memory not found
+    async def _load_readable_memory(self, memory_id: UUID, user_id: str) -> Memory:
+        """The live memory ``user_id`` may read, the gate of ``reference`` and
+        ``list_revisions`` (#2043): a tombstone, a missing row and a denied
+        read are the same ``NotFoundException``; the capacity lock is checked
+        after the access check, so it is no existence oracle (#1941).
         """
         # #1316: repo.get() excludes soft-deleted rows by default — a forgotten
         # memory must not be readable by direct-id fetch during the retention
@@ -2645,7 +2632,10 @@ class MemoryService:
             memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
-            operation="reference",  # #1286 (P0-5): deny-capture audit identity
+            # #1286 (P0-5): deny-capture audit identity. list_revisions reads
+            # the same memory's metadata, so it audits as a reference read
+            # (memory_access_events.operation has no value of its own for it).
+            operation="reference",
             memory_id=memory_id,
             memory_type=memory.type,  # #1299: per-memory type/source filter
             memory_source_type=memory.source_type,
@@ -2656,6 +2646,88 @@ class MemoryService:
 
         # #1941: after the access check, so the lock is no existence oracle.
         await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
+        return memory
+
+    async def list_revisions(
+        self,
+        memory_id: UUID,
+        user_id: str,
+        *,
+        before_id: int | None = None,
+        limit: int = 20,
+    ) -> MemoryRevisionsResponse:
+        """One page of a memory's revision log, newest first (#2043).
+
+        Same gate as ``reference`` (a forgotten memory answers not-found, so
+        its log is unreadable too). Records no access stats: the log is
+        metadata, not an adoption of the memory.
+
+        Args:
+            memory_id: Memory UUID.
+            user_id: The caller.
+            before_id: Keyset cursor — the ``id`` of the last row of the
+                previous page; None for the newest page.
+            limit: Rows per page.
+
+        Raises:
+            NotFoundException: No such live memory, or no access.
+        """
+        from services.identity_link_service import linked_user_ids
+        from services.memory_versions import list_revision_rows, revision_item
+
+        memory = await self._load_readable_memory(memory_id, user_id)
+        rows, has_more = await list_revision_rows(
+            self.db, memory.id, before_id=before_id, limit=limit
+        )
+        caller_ids = await linked_user_ids(self.db, user_id)
+        revisions = []
+        for row in rows:
+            item = MemoryRevisionItem(**revision_item(row, caller_ids=caller_ids))
+            item._cursor = str(row.id)
+            revisions.append(item)
+        return MemoryRevisionsResponse(
+            memory_id=memory.id,
+            current_version=memory.version,
+            revisions=revisions,
+            has_more=has_more,
+            next_cursor=str(rows[-1].id) if has_more and rows else None,
+        )
+
+    async def reference(
+        self,
+        memory_id: UUID,
+        user_id: str,
+        *,
+        record_access: bool = True,
+        version: int | None = None,
+    ) -> ReferenceResponse:
+        """Get full memory details (Layer 3).
+
+        Args:
+            memory_id: Memory UUID
+            user_id: User ID (for access control)
+            record_access: Record the read in the memory's access stats
+                (access_count, the #1046 adoption signal reference_count,
+                last_used_at). The MCP handler passes False for a
+                continuation page of a read it already recorded, and for a
+                call that returns no Layer-3 field (#1685). The access check
+                and the access audit event run either way.
+            version: An earlier version to read (#2043): the versioned fields
+                are rebuilt from the revision log, ``historical`` is true and
+                the links / supersede suggestion (which describe the memory
+                now) are left empty. None or the current version reads the
+                memory as it is. A historical read records no access stats.
+
+        Returns:
+            ReferenceResponse with full details
+
+        Raises:
+            NotFoundException: If memory not found
+            ValidationError: ``version`` is not a version of the memory.
+        """
+        memory = await self._load_readable_memory(memory_id, user_id)
+        if version is not None and version != memory.version:
+            return await self._reference_historical(memory, user_id, version)
 
         # Snapshot ``updated_at`` before bumping access stats. #1317 removed
         # the column's ``onupdate=func.now()``, so ``update_access_stats`` no
@@ -2744,6 +2816,58 @@ class MemoryService:
             outgoing_has_more=outgoing_has_more,
             incoming_links=incoming_links,
             incoming_has_more=incoming_has_more,
+        )
+
+    async def _reference_historical(
+        self, memory: Memory, user_id: str, version: int
+    ) -> ReferenceResponse:
+        """``reference(version=N)`` for an earlier version (#2043)."""
+        from services.memory_versions import UnknownVersionError, load_version
+
+        try:
+            historical = await load_version(self.db, memory, version)
+        except UnknownVersionError as e:
+            raise ValidationError(str(e), field="version", current_version=e.current_version) from e
+
+        logger.info(
+            "memory_referenced",
+            memory_id=str(memory.id),
+            user_id=user_id,
+            version=version,
+            historical=True,
+        )
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="reference",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory.id,
+        )
+
+        values = historical.values
+        return ReferenceResponse(
+            memory_id=memory.id,
+            summary=values["summary"],
+            context_summary=values["context_summary"],
+            content=values["content"],
+            details=values["details"],
+            type=values["type"],
+            scope=memory.scope,
+            importance=values["importance"],
+            tags=values["tags"] or [],
+            context=memory.context,
+            created_at=memory.created_at,
+            updated_at=historical.at or memory.created_at,
+            version=historical.version,
+            historical=True,
+            current_version=memory.version,
+            unavailable_fields=list(historical.unavailable) or None,
+            client=memory.client,
+            source_uri=memory.source_uri,
+            source_type=memory.source_type,
         )
 
     async def _fetch_declared_link_refs(

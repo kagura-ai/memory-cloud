@@ -28,6 +28,7 @@ from models.schemas import (
     LoadGuardrailsResponse,
     LoadPinnedRequest,
     LoadPinnedResponse,
+    MemoryRevisionsResponse,
     MemoryStatsResponse,
     PatchMemoryRequest,
     RecallRequest,
@@ -174,7 +175,8 @@ async def reference(
 
     Request:
         {
-            "memory_id": "uuid"
+            "memory_id": "uuid",
+            "version": 3            // optional (#2043): an earlier version
         }
 
     Response:
@@ -198,7 +200,9 @@ async def reference(
     """
     logger.info("reference_request", user_id=user["user_id"], memory_id=str(request.memory_id))
 
-    result = await memory_service.reference(request.memory_id, user_id=user["user_id"])
+    result = await memory_service.reference(
+        request.memory_id, user_id=user["user_id"], version=request.version
+    )
 
     return result
 
@@ -596,6 +600,39 @@ async def patch_memory(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
 
+@router.get("/{memory_id}/revisions", response_model=MemoryRevisionsResponse)
+async def list_memory_revisions(
+    memory_id: UUID,
+    user: APIKeyOrSessionUser,
+    memory_service: MemoryServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(pattern=r"^[0-9]{1,18}$")] = None,
+):
+    """A memory's revision log, newest first (#2043).
+
+    One item per write event — ``created``, ``updated`` (with the fields it
+    changed), ``forgotten``, ``restored`` — with the version after it. Read
+    an earlier version's text with ``POST /reference`` and ``version``.
+
+    Status codes:
+        200: A page; ``next_cursor`` (with ``has_more``) continues it.
+        404: No such memory, the caller lacks access, or it was forgotten
+             (the same answer as ``reference``).
+        422: ``limit`` outside 1-100 or a malformed ``cursor``.
+
+    Permission: the same as ``reference`` (``PermissionService.
+    can_access_memory``). No member identity is returned: ``by_you`` marks
+    the caller's own events, and only those carry ``agent_id`` /
+    ``session_id``.
+    """
+    return await memory_service.list_revisions(
+        memory_id,
+        user_id=user["user_id"],
+        before_id=int(cursor) if cursor else None,
+        limit=limit,
+    )
+
+
 @router.post("/forget", response_model=ForgetResponse)
 async def forget(
     request: ForgetRequest,
@@ -606,7 +643,8 @@ async def forget(
 
     Request:
         {
-            "memory_id": "uuid"
+            "memory_id": "uuid",
+            "version": 3            // optional (#2043): an earlier version
         }
 
     Response:

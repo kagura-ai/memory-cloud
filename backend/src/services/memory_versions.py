@@ -14,10 +14,13 @@ caller owns the transaction (the row commits with the write it describes).
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
@@ -27,6 +30,13 @@ from models.memory import (
     MemoryRevision,
 )
 from utils.exceptions import VersionConflictError
+
+# Account erasure drops the subject's overwritten ``details`` from ``prior``
+# and lists the dropped fields under this key, so a reader can tell "erased"
+# from "unchanged" (an absent key). It is not a versioned field: whatever
+# applies a ``prior`` (version reconstruction, a session rollback) reads it
+# through ``prior_values``.
+PRIOR_ERASED_KEY = "erased"
 
 
 def versioned_snapshot(memory: Any) -> dict[str, Any]:
@@ -205,3 +215,186 @@ def record_edit(
         prior=prior,
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Reading the log (#2043 PR2): list_revisions and reference(version=N)
+# ---------------------------------------------------------------------------
+
+
+def prior_values(prior: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The versioned values a ``prior`` holds — never the erasure marker."""
+    return {k: v for k, v in (prior or {}).items() if k in VERSIONED_FIELDS}
+
+
+def prior_erased(prior: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The versioned fields whose overwritten value erasure removed."""
+    erased = (prior or {}).get(PRIOR_ERASED_KEY)
+    if not isinstance(erased, list):
+        return ()
+    return tuple(f for f in VERSIONED_FIELDS if f in erased)
+
+
+def changed_fields(prior: Mapping[str, Any] | None) -> list[str]:
+    """The fields an ``updated`` event changed, in ``VERSIONED_FIELDS`` order
+    (an erased value still names its field: the change happened)."""
+    kept, erased = prior_values(prior), prior_erased(prior)
+    return [f for f in VERSIONED_FIELDS if f in kept or f in erased]
+
+
+class UnknownVersionError(Exception):
+    """``version`` names no version of the memory that can be rebuilt."""
+
+    def __init__(self, version: int, current_version: int) -> None:
+        super().__init__(
+            f"Version {version} is not a version of this memory: it is at version "
+            f"{current_version}, and earlier versions run from 1."
+        )
+        self.version = version
+        self.current_version = current_version
+
+
+@dataclass(frozen=True)
+class HistoricalVersion:
+    """One earlier version of a memory, rebuilt from the revision log.
+
+    Attributes:
+        version: The version rebuilt.
+        values: ``VERSIONED_FIELDS`` as they stood at ``version``; a field in
+            ``unavailable`` is None.
+        unavailable: Fields whose value at ``version`` account erasure
+            removed from the log.
+        at: When ``version`` was written (the ``updated`` event that made
+            it); None for version 1 (the memory's ``created_at``).
+    """
+
+    version: int
+    values: dict[str, Any]
+    unavailable: tuple[str, ...]
+    at: datetime | None
+
+
+def reconstruct_version(
+    live: Mapping[str, Any],
+    current_version: int,
+    updates: Iterable[Any],
+    target: int,
+) -> HistoricalVersion:
+    """Rebuild version ``target`` from the live row and its ``updated`` events.
+
+    Version K is the memory as it stood just before the edit that made K+1 —
+    maintenance that never moves the version (Sleep, the resource indexer,
+    a connector re-index) included, as the live row carries it. Each
+    ``updated`` event above ``target`` is undone newest first by laying its
+    ``prior`` (the values it overwrote) over the state. A value erasure
+    removed makes its field unavailable until an older event names it again.
+
+    Pure: ``updates`` is any iterable of rows with ``version``, ``kind``,
+    ``prior`` and ``at``; rows of another kind, at or below ``target`` (bar
+    the one that made it, read for ``at``) or above ``current_version`` are
+    ignored.
+
+    Args:
+        live: ``versioned_snapshot`` of the live row.
+        current_version: The live row's version.
+        updates: The memory's revision rows (at least the ``updated`` ones
+            from ``target`` up).
+        target: The version to rebuild.
+
+    Returns:
+        The rebuilt version (``target == current_version`` returns ``live``).
+
+    Raises:
+        UnknownVersionError: ``target`` is not in ``[1, current_version]``, or
+            the log lacks an event between it and the live row.
+    """
+    if target < 1 or target > current_version:
+        raise UnknownVersionError(target, current_version)
+    rows = [r for r in updates if r.kind == REVISION_KIND_UPDATED]
+    made_target = next((r for r in rows if r.version == target), None)
+    undo = sorted(
+        (r for r in rows if target < r.version <= current_version),
+        key=lambda r: r.version,
+        reverse=True,
+    )
+    # Every version above the target was made by exactly one edit; a gap means
+    # the log cannot say what the memory held (never by construction).
+    if [r.version for r in undo] != list(range(current_version, target, -1)):
+        raise UnknownVersionError(target, current_version)
+    state = {f: copy.deepcopy(live.get(f)) for f in VERSIONED_FIELDS}
+    unavailable: set[str] = set()
+    for row in undo:
+        for field in prior_erased(row.prior):
+            state[field] = None
+            unavailable.add(field)
+        for field, value in prior_values(row.prior).items():
+            state[field] = copy.deepcopy(value)
+            unavailable.discard(field)
+    return HistoricalVersion(
+        version=target,
+        values=state,
+        unavailable=tuple(f for f in VERSIONED_FIELDS if f in unavailable),
+        at=made_target.at if made_target is not None else None,
+    )
+
+
+async def load_version(db: AsyncSession, memory: Any, target: int) -> HistoricalVersion:
+    """Rebuild version ``target`` of ``memory`` (an authorized live row).
+
+    Raises:
+        UnknownVersionError: as ``reconstruct_version``.
+    """
+    if target < 1 or target > memory.version:
+        raise UnknownVersionError(target, memory.version)
+    result = await db.execute(
+        select(
+            MemoryRevision.version,
+            MemoryRevision.kind,
+            MemoryRevision.prior,
+            MemoryRevision.at,
+        )
+        .where(
+            MemoryRevision.memory_id == memory.id,
+            MemoryRevision.kind == REVISION_KIND_UPDATED,
+            MemoryRevision.version >= target,
+        )
+        .order_by(MemoryRevision.version.desc(), MemoryRevision.id.desc())
+    )
+    return reconstruct_version(versioned_snapshot(memory), memory.version, result.all(), target)
+
+
+async def list_revision_rows(
+    db: AsyncSession, memory_id: UUID, *, before_id: int | None, limit: int
+) -> tuple[list[MemoryRevision], bool]:
+    """One page of a memory's revision rows, newest first (keyset on ``id``).
+
+    Returns:
+        The rows (at most ``limit``) and whether older rows remain.
+    """
+    stmt = select(MemoryRevision).where(MemoryRevision.memory_id == memory_id)
+    if before_id is not None:
+        stmt = stmt.where(MemoryRevision.id < before_id)
+    result = await db.execute(stmt.order_by(MemoryRevision.id.desc()).limit(limit + 1))
+    rows = list(result.scalars().all())
+    return rows[:limit], len(rows) > limit
+
+
+def revision_item(row: Any, *, caller_ids: frozenset[str]) -> dict[str, Any]:
+    """One ``list_revisions`` item. Never a member's sub: ``by_you`` says
+    whether the caller (or an account linked to them) wrote the event, and
+    the agent and session of an event show only on the caller's own."""
+    by_you = row.actor_user_id in caller_ids
+    item: dict[str, Any] = {
+        "version": row.version,
+        "kind": row.kind,
+        "at": row.at,
+        "changed_fields": changed_fields(row.prior) if row.kind == REVISION_KIND_UPDATED else [],
+        "writer": row.writer,
+        "by_you": by_you,
+    }
+    if by_you:
+        if row.agent_id is not None:
+            item["agent_id"] = str(row.agent_id)
+        if row.session_id is not None:
+            item["session_id"] = row.session_id
+    return item

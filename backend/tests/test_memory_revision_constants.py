@@ -50,3 +50,15 @@ def test_classified_raw_exportable() -> None:
     from models.data_boundary import RAW_EXPORTABLE_TABLES
 
     assert "memory_revisions" in RAW_EXPORTABLE_TABLES
+
+
+def test_revision_item_schema_follows_the_vocabularies() -> None:
+    """#2043 PR2: the REST item spells the kinds / writers as Literals; a value
+    appended to the tuples must reach the response schema too."""
+    from typing import get_args
+
+    from models.schemas import MemoryRevisionItem
+
+    fields = MemoryRevisionItem.model_fields
+    assert get_args(fields["kind"].annotation) == REVISION_KINDS
+    assert get_args(fields["writer"].annotation) == REVISION_WRITERS
