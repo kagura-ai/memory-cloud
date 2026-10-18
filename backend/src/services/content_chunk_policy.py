@@ -23,10 +23,12 @@ Two predicates, deliberately:
 A plan that drops the feature, or a cap that shrinks, never changes the
 stored flag and never purges points: the earliest-enabled contexts stay
 active, the rest go inactive, and an upgrade makes them active again with
-the points they kept. A memory whose content is edited while its context is
-inactive loses its chunk points (they would hold the old text) and is not
-re-queued when the context becomes active again; its summary point still
-finds it.
+the points they kept. Nothing is re-queued when a context becomes active
+again: a memory written while it was inactive has no chunk points, one whose
+content was edited then lost them (they would hold the old text), and an
+embedding migration run then wrote none into the new collection. Their
+summary points still find them; their chunks come with the next content
+edit or re-embed.
 
 Nothing here is cached across requests (#2061): a cached "off" would hide a
 concurrent enable. With the gate off every function answers from the flag and
@@ -45,10 +47,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from config.plan_tiers import (
+    PLAN_ORDER,
     PLAN_TIERS,
     PlanName,
     has_feature,
-    lowest_tier_with_limit,
     plan_display_name,
     quota_gate_details,
 )
@@ -401,15 +403,25 @@ async def _count_in_use(db: AsyncSession, workspace_id: UUID) -> int:
     return int(result.scalar_one() or 0)
 
 
+def _lowest_plan_above(limit: int) -> str | None:
+    """Lowest tier whose content chunk limit (feature included) exceeds ``limit``."""
+    return next((name for name in PLAN_ORDER if content_chunk_context_limit(name) > limit), None)
+
+
 def _raise_cap(plan_name: str | None, in_use: int, limit: int) -> None:
-    required = lowest_tier_with_limit("max_content_chunk_contexts", limit)
-    upgrade = " or upgrade" if required else ""
-    raise QuotaExceededError(
-        (
+    required = _lowest_plan_above(limit)
+    plan = plan_display_name(plan_name)
+    if limit <= 0:
+        message = f"The {plan} plan allows no contexts with content chunk vectors."
+        message += " Upgrade to turn them on." if required else ""
+    else:
+        upgrade = " or upgrade" if required else ""
+        message = (
             f"Content chunk vectors are on in {in_use} of the {limit} context(s) the "
-            f"{plan_display_name(plan_name)} plan allows. Turn them off in another "
-            f"context{upgrade}."
-        ),
+            f"{plan} plan allows. Turn them off in another context{upgrade}."
+        )
+    raise QuotaExceededError(
+        message,
         **quota_gate_details(
             plan_name,
             "content_chunk_contexts",

@@ -1392,8 +1392,9 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
             "the deployment gates them by plan (CONTENT_CHUNKS_REQUIRE_PLAN), a plan "
             "with the content_chunks feature on which this context is among the "
             "earliest-enabled max_content_chunk_contexts. An inactive context keeps "
-            "its chunk vectors; a memory edited meanwhile gets new ones only on its "
-            "next edit or re-embed"
+            "the chunk vectors of unchanged memories; memories written or edited "
+            "meanwhile get chunks only on their next edit or re-embed (nothing is "
+            "re-queued when it becomes active again)"
         ),
     )
     content_chunks_limit: int | None = Field(

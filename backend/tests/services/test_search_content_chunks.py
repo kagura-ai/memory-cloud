@@ -197,6 +197,14 @@ async def _search_contexts(config, dense, chunk_contexts, chunk_points=True):
     return results, qdrant.await_args.kwargs
 
 
+async def test_cross_context_recall_asks_nothing_about_the_primary_alone():
+    """The per-context set decides; the primary's own flag is not read twice."""
+    effective = AsyncMock(return_value=True)
+    with patch("services.search_service.content_chunks_effective", new=effective):
+        await _search_contexts(_config(True), [], [_CTX])
+    effective.assert_not_awaited()
+
+
 async def test_cross_context_primary_off_still_gets_an_opted_in_secondarys_chunks():
     results, kwargs = await _search_contexts(_config(False), _DENSE, [_CTX2])
     assert kwargs["include_chunks"] == [_CTX2]

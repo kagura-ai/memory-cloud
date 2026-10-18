@@ -550,3 +550,26 @@ async def test_get_names_permission_only_when_nothing_else_blocks():
     blocked = _status(False, plan_name="basic", limit=1, in_use=1)
     capped_editor, _ = await _get(_row(enabled=False), owner=False, status=blocked)
     assert capped_editor.content_chunks_disabled_reason == "cap"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_count_degrades_the_fields_not_the_response():
+    """The PUT has already committed when the response is built: a failed
+    count must not answer 500 for a change that landed."""
+    status = AsyncMock(side_effect=RuntimeError("statement timeout"))
+    from api.routes.context_search_config import get_context_search_config
+
+    repo = MagicMock()
+    repo.create_or_get = AsyncMock(return_value=_row(enabled=True))
+    repo.content_chunk_backfill_pending = AsyncMock(return_value=0)
+    with (
+        patch(f"{_MODULE}.PermissionService", return_value=_perms(owner=True)),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        patch(f"{_MODULE}.chunk_points_supported", return_value=True),
+        patch(f"{_MODULE}.content_chunks_gated", return_value=False),
+        patch(f"{_MODULE}.content_chunks_status", status),
+    ):
+        response = await get_context_search_config(uuid4(), {"user_id": "u-1"}, db=AsyncMock())
+    assert response.content_chunks_enabled is True
+    assert response.content_chunks_effective is True  # ungated: flag and store
+    assert response.content_chunks_in_use == 0

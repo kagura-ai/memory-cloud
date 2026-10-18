@@ -18,7 +18,11 @@ from models.config import ContextSearchConfig
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.capacity_lock import CapacityPolicy
-from services.content_chunk_policy import content_chunks_status
+from services.content_chunk_policy import (
+    ContentChunksStatus,
+    content_chunks_gated,
+    content_chunks_status,
+)
 from services.permission_service import (
     PermissionService,
     check_content_chunks_change,
@@ -55,7 +59,23 @@ async def build_search_config_response(
     except AuthorizationError:
         owner = False
     stored = config.content_chunks_enabled is True
-    chunks = await content_chunks_status(repo.db, context_id, stored=stored, include_usage=True)
+    try:
+        # A savepoint: the PUT has already committed, and a failed count must
+        # not turn its response into a 500. The fallback has no counts, so
+        # where gated it reads inactive / not enable-able (the PUT re-checks).
+        async with repo.db.begin_nested():
+            chunks = await content_chunks_status(
+                repo.db, context_id, stored=stored, include_usage=True
+            )
+    except Exception as e:  # noqa: BLE001 — informational fields only
+        logger.warning(
+            "content_chunks_status_load_failed",
+            context_id=str(context_id),
+            error_class=type(e).__name__,
+        )
+        chunks = ContentChunksStatus(
+            stored=stored, supported=chunk_points_supported(), gated=content_chunks_gated()
+        )
     can_change = owner and (stored or chunks.can_enable)
     reason = chunks.reason or (None if owner else "permission")
     model = config.embedding_model

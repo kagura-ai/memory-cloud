@@ -164,7 +164,8 @@ class SearchService:
         # off (no extra query for a context with the flag off).
         chunks_supported = chunk_points_supported()
         content_chunks_on = (
-            getattr(config, "content_chunks_enabled", False) is True
+            not isinstance(context_id, list)
+            and getattr(config, "content_chunks_enabled", False) is True
             and chunks_supported
             and await content_chunks_effective(self.db, primary_context_id, stored=True)
         )

@@ -94,7 +94,9 @@ def new_search_config_row(settings: Settings) -> dict[str, Any]:
     defaults = new_search_config_defaults(settings)
     return {
         **defaults,
-        "content_chunks_enabled_at": func.now() if defaults["content_chunks_enabled"] else None,
+        "content_chunks_enabled_at": (
+            func.clock_timestamp() if defaults["content_chunks_enabled"] else None
+        ),
     }
 
 
@@ -223,7 +225,10 @@ class ContextSearchConfigRepository:
         if flag_changed:
             # #2103: the enable's rank under the plan's cap, committed with the
             # flag and its backfill (a failed enable rolls all three back).
-            config.content_chunks_enabled_at = func.now() if chunks_now_on else None
+            # clock_timestamp(), not now(): now() is the transaction's start,
+            # and a request that waited on the cap's lock behind an earlier
+            # enable would otherwise rank before it.
+            config.content_chunks_enabled_at = func.clock_timestamp() if chunks_now_on else None
             try:
                 await self._purge_chunk_points(context_id, config)
                 if chunks_now_on:

@@ -314,6 +314,22 @@ async def test_a_zero_cap_is_refused_without_the_lock(gate):
     assert all("pg_advisory" not in str(c.args[0]) for c in db.execute.await_args_list)
 
 
+def test_a_zero_cap_refusal_says_the_plan_allows_none():
+    with pytest.raises(QuotaExceededError) as exc:
+        policy._raise_cap("free", 0, 0)
+    assert exc.value.message == (
+        "The S plan allows no contexts with content chunk vectors. Upgrade to turn them on."
+    )
+    assert exc.value.details["required_plan"] == "basic"
+
+
+def test_the_upgrade_names_a_tier_that_has_the_feature():
+    """A tier above the limit but without the feature (an override) is skipped."""
+    real = policy.has_feature
+    with patch.object(policy, "has_feature", lambda plan, f: plan != "pro" and real(plan, f)):
+        assert policy._lowest_plan_above(1) == "promax"
+
+
 @pytest.mark.parametrize(
     ("old", "new", "offset", "limit"),
     [("pro", "basic", 1, 4), ("promax", "free", 0, 20), ("pro", "free", 0, 5)],

@@ -11,9 +11,10 @@ and callers on such a context can skip the chunk cascade.
   ``purge_context_chunk_points``).
 - Flag on but inactive (#2103: the plan lacks content chunks, or the context
   ranks past the plan's cap; ``services.content_chunk_policy``): no chunk is
-  written, and a content write deletes the memory's own chunk points, which
-  would hold the old text. Payload syncs and metadata cascades still reach the
-  points the context keeps, so they are current when it becomes active again.
+  written, and a write whose content changed deletes the memory's chunk
+  points, which would hold the old text (points of the unchanged content are
+  kept). Payload syncs and metadata cascades still reach the points the
+  context keeps, so they are current when it becomes active again.
 - Flag on: the chunks are replaced in place (#2061). The chunks of the
   current content are upserted over the old ones (chunk ids are
   deterministic per index), then the old chunks past the new count are
@@ -70,6 +71,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import (
+    chunk_points_content_hash,
     chunk_points_supported,
     delete_chunk_points,
     delete_chunk_points_from,
@@ -115,14 +117,22 @@ async def _chunk_flags(db: AsyncSession, context_id: Any) -> tuple[bool, bool]:
     return True, (await content_chunks_status(db, context_id, stored=True)).effective
 
 
-async def _drop_inactive_chunks(memory: Memory, collection_name: str) -> None:
-    """Delete the memory's chunk points on a context whose chunks are inactive (#2103).
+async def _drop_inactive_chunks(memory: Memory, content: str | None, collection_name: str) -> None:
+    """Delete the memory's stale chunk points on a context whose chunks are inactive (#2103).
 
-    A content write is not turned into chunks there, so the points the memory
-    had would keep its old text, and come back with it when the context is
-    active again. Best effort: a failure is logged (error class only).
+    No new chunks are written there, so points split from an older content
+    would keep the old text, and come back with it when the context is
+    active again. Points of the CURRENT content (``content_hash`` of chunk 0
+    matches: a re-embed without a content change, e.g. a re-queue, a
+    migration switch or a restore) are kept, so they are still there when
+    the context is active again. Best effort: a failure is logged (error
+    class only).
     """
     try:
+        if split_content(content) and await chunk_points_content_hash(
+            memory.id, collection_name
+        ) == content_hash(content):
+            return
         await delete_chunk_points([memory.id], collection_name)
     except Exception as e:  # noqa: BLE001 — best effort, logged
         _log_failure(memory, collection_name, e)
@@ -397,7 +407,7 @@ async def write_content_chunks(
         return 0
     if not chunks_enabled:
         if chunks_stored:
-            await _drop_inactive_chunks(memory, collection_name)
+            await _drop_inactive_chunks(memory, content, collection_name)
         return 0
     if await _superseded_before_write(db, memory, content, claim):
         return 0
@@ -441,7 +451,7 @@ async def write_content_chunks(
         stored_now, active_now = await _chunk_flags(db, memory.context_id)
         if not active_now:
             if stored_now:
-                await _drop_inactive_chunks(memory, collection_name)
+                await _drop_inactive_chunks(memory, content, collection_name)
                 logger.info("content_chunks_skipped_plan", memory_id=str(memory.id))
             else:
                 logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))

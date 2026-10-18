@@ -1906,10 +1906,12 @@ that go inactive (`content_chunks_deactivated`, also logged as
 `content_chunks_deactivated_by_plan`). The search-config response says why a
 context's toggle is disabled (`content_chunks_disabled_reason`).
 
-One gap: a memory whose content is edited while its context is inactive has
-its chunk points deleted (they would hold the old text) and is not re-queued
-when the context becomes active again; it is still found through its summary
-point, and its chunks come back on its next content edit or re-embed.
+One gap: nothing is re-queued when a context becomes active again. A memory
+written while its context was inactive has no chunk points, a memory whose
+content was edited then has lost them (they would hold the old text), and an
+embedding model migration run then writes none into the new collection. Such
+memories are still found through their summary point, and get chunks on their
+next content edit or re-embed; points of unchanged memories are kept.
 
 **Before turning the gate on** on a deployment where contexts already have the
 flag on, list the contexts it would make inactive (no write; plan names and
@@ -1928,7 +1930,7 @@ WITH on_ctx AS (
   WHERE s.content_chunks_enabled AND c.deleted_at IS NULL
 )
 SELECT * FROM on_ctx
-WHERE plan_name = 'free'
+WHERE coalesce(plan_name, 'free') NOT IN ('basic', 'pro', 'promax')
    OR rn > CASE plan_name WHEN 'basic' THEN 1 WHEN 'pro' THEN 5 ELSE 20 END;
 ```
 

@@ -35,6 +35,7 @@ from models.auth import (
 )
 from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
+from services.content_chunk_policy import content_chunk_context_limit
 from services.effective_quota_service import EffectiveQuotaService
 from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
@@ -864,8 +865,8 @@ async def get_workspace_quotas(
                 max_resource_tokens=effective["max_resource_tokens"],
                 max_connectors=workspace.effective_max_connectors,
                 memories_per_day=effective["memories_per_day"],
-                # #2103: no addon column — the effective cap is the tier's.
-                max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
+                # #2103: no addon column; 0 when the tier lacks content_chunks.
+                max_content_chunk_contexts=content_chunk_context_limit(workspace.plan_name),
             ),
             usage=UsageValues(
                 memories=memory_count,

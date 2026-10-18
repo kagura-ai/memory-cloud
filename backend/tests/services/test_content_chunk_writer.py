@@ -1166,6 +1166,13 @@ async def test_the_cleanup_fence_compares_only_the_claim():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _kept_hash():
+    """The hash on the memory's chunk point 0: none of the current content."""
+    with patch.object(writer, "chunk_points_content_hash", AsyncMock(return_value="old")) as h:
+        yield h
+
+
 @pytest.fixture
 def inactive():
     """CONTENT_CHUNKS_REQUIRE_PLAN on and the context past its plan's cap."""
@@ -1284,3 +1291,35 @@ async def test_an_inactive_contexts_points_still_get_the_new_payload(inactive):
 async def test_the_cascade_follows_the_stored_flag(inactive):
     assert await writer.chunk_cascade_needed(_db(True), CTX) is True
     inactive.assert_not_awaited()
+
+
+async def test_an_inactive_context_keeps_the_chunks_of_unchanged_content(inactive, _kept_hash):
+    """A re-embed without a content change (re-queue, migration switch,
+    restore) must not lose points that are still right."""
+    from utils.content_chunks import content_hash
+
+    memory = _memory(LONG)
+    _kept_hash.return_value = content_hash(LONG)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+    ):
+        n = await writer.write_content_chunks(
+            _db(True), memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n == 0
+    _kept_hash.assert_awaited_once_with(memory.id, "c")
+    delete.assert_not_awaited()
+
+
+async def test_an_inactive_context_drops_chunks_of_content_now_too_short(inactive, _kept_hash):
+    memory = _memory("short")
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+    ):
+        await writer.write_content_chunks(
+            _db(True), memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    _kept_hash.assert_not_awaited()
+    delete.assert_awaited_once_with([memory.id], "c")
