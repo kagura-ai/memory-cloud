@@ -30,9 +30,11 @@ memory rows in id order, and runs each item (each forget chunk) in a SAVEPOINT
 of its own: a failed item leaves nothing behind and the rest still runs. Every
 event a call handles — reversed, skipped or failed — gets the rollback row's
 id in ``undone_by``, so a call that stops at ``MAX_ROLLBACK_EVENTS_PER_CALL``
-is continued by the next call, and nothing is ever reversed twice. A rollback
-whose events are all handled is final (``completed``, or ``partial`` when an
-item failed); the next call is refused (``AlreadyRolledBackError``).
+(or at ``MAX_UNFORGETS_PER_CALL`` un-forgets, each of which re-embeds inside
+the call) is continued by the next call, and nothing is ever reversed twice.
+A rollback whose events are all handled is final (``completed``, or
+``partial`` when an item failed); the next call is refused
+(``AlreadyRolledBackError``).
 
 No MCP types here; ``mcp_server/tools/session_rollback.py`` is the tool.
 """
@@ -40,7 +42,6 @@ No MCP types here; ``mcp_server/tools/session_rollback.py`` is the tool.
 from __future__ import annotations
 
 import asyncio
-import functools
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -87,6 +88,12 @@ logger = get_logger(__name__)
 #: next call. A memory's events are never split across calls (its earliest
 #: edit decides what is put back), so one large memory may exceed it alone.
 MAX_ROLLBACK_EVENTS_PER_CALL = 500
+#: Un-forgets one call performs at most: each rebuilds a vector (an embedding
+#: call and its chunk points) inside the call, so a session that forgot many
+#: memories is spread over several calls instead of running into the tool
+#: timeout and repeating the same batch forever. The rest wait for the next
+#: call.
+MAX_UNFORGETS_PER_CALL = 100
 #: Memories one forget statement (and one SAVEPOINT) covers.
 FORGET_CHUNK = 100
 #: Plan items a response lists; the counts always cover every item.
@@ -553,6 +560,7 @@ async def _read_batch(
                 current=versioned_snapshot(memory),
             )
         items.append(plan_memory(session_events, state))
+    items = _defer_extra_unforgets(items)
     events_taken = sum(len(item.event_ids) for item in items)
     return _Batch(
         items=items,
@@ -560,6 +568,22 @@ async def _read_batch(
         events=events_taken,
         remaining=max(total - events_taken, 0),
     )
+
+
+def _defer_extra_unforgets(items: list[PlanItem]) -> list[PlanItem]:
+    """Keep the first ``MAX_UNFORGETS_PER_CALL`` un-forgets; later ones wait.
+
+    A deferred item's events stay unhandled, so the next call plans it again.
+    """
+    kept: list[PlanItem] = []
+    unforgets = 0
+    for item in items:
+        if item.unforget:
+            unforgets += 1
+            if unforgets > MAX_UNFORGETS_PER_CALL:
+                continue
+        kept.append(item)
+    return kept
 
 
 async def _permitted(
@@ -980,13 +1004,12 @@ async def finish(result: RollbackResult) -> None:
     fails leaves the row ``pending`` for the embedding sweep; chunk points of
     a tombstone are removed by the orphan sweep after its grace period.
     """
-    from services.memory_service import _log_embedding_task_result, process_pending_embedding
-
-    for memory_id in result.reembed_ids:
-        task = asyncio.create_task(process_pending_embedding(memory_id))
-        task.add_done_callback(
-            functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
-        )
+    if result.reembed_ids:
+        # One task working through the ids, not one task each: a rollback can
+        # restore hundreds of texts, and each embedding run holds a database
+        # connection while it calls the provider.
+        task = asyncio.create_task(_reembed_in_turn(list(result.reembed_ids)))
+        task.add_done_callback(_log_reembed_task)
     if result.forgotten_ids and result.collection:
         from db.qdrant import delete_chunk_points
 
@@ -1001,8 +1024,35 @@ async def finish(result: RollbackResult) -> None:
             )
 
 
+async def _reembed_in_turn(memory_ids: list[UUID]) -> None:
+    """Embed the restored texts one after another; a failure skips to the next.
+
+    A row whose run fails stays ``pending`` for the embedding sweep.
+    """
+    from services.memory_service import process_pending_embedding
+
+    for memory_id in memory_ids:
+        try:
+            await process_pending_embedding(memory_id)
+        except Exception as exc:
+            logger.warning(
+                "session_rollback_reembed_failed",
+                memory_id=str(memory_id),
+                error_class=type(exc).__name__,
+            )
+
+
+def _log_reembed_task(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(
+            "session_rollback_reembed_task_failed",
+            error_class=type(task.exception()).__name__,
+        )
+
+
 __all__ = [
     "MAX_ROLLBACK_EVENTS_PER_CALL",
+    "MAX_UNFORGETS_PER_CALL",
     "SKIP_CAUSES",
     "AlreadyRolledBackError",
     "MemoryState",

@@ -388,3 +388,33 @@ def test_principal_predicates_compile_index_friendly():
     owner = sql(sr.SessionScope(ctx, "s", None))
     assert "actor_user_id" not in owner and "agent_id" not in owner
     assert "memory_revisions.session_id = 's'" in owner
+
+
+def test_unforgets_beyond_the_per_call_cap_wait_for_the_next_call():
+    items = [
+        PlanItem(uuid.uuid4(), "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(i,))
+        for i in range(3)
+    ] + [PlanItem(uuid.uuid4(), "created", ACTION_FORGET, event_ids=(9,))]
+    with patch.object(sr, "MAX_UNFORGETS_PER_CALL", 2):
+        kept = sr._defer_extra_unforgets(items)
+    assert kept == [items[0], items[1], items[3]]
+
+
+@pytest.mark.asyncio
+async def test_finish_reembeds_one_after_another_and_survives_a_failure():
+    import asyncio
+
+    order: list[uuid.UUID] = []
+    ids = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
+
+    async def embed(memory_id: uuid.UUID) -> None:
+        order.append(memory_id)
+        if memory_id == ids[0]:
+            raise RuntimeError("provider down")
+
+    result = sr.RollbackResult(dry_run=False, items=[], events=0, remaining=0, reembed_ids=ids)
+    with patch("services.memory_service.process_pending_embedding", embed):
+        await sr.finish(result)
+        for _ in range(10):
+            await asyncio.sleep(0)
+    assert order == ids
