@@ -81,7 +81,7 @@ async def sweep_pending_embeddings() -> None:
     """Find and process memories stuck in pending/processing/failed status.
 
     - pending older than 10s: create_task likely failed or never fired
-    - processing older than 60s: worker crashed mid-processing (stale)
+    - processing older than STALE_CLAIM_SECONDS: worker crashed mid-processing (stale)
     - failed past the retry backoff with budget left (#979): a transient
       embedding/Qdrant blip self-heals instead of needing the manual admin
       retry endpoint, bounded by MAX_EMBEDDING_RETRIES so a poison row stops.

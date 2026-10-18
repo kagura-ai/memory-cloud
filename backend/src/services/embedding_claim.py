@@ -2,7 +2,7 @@
 
 ``process_pending_embedding`` claims a row by setting it ``processing`` and
 stamping ``embedding_attempted_at``. The embedding sweep reclaims a
-``processing`` row whose stamp is older than the 60 s stale cutoff: that is the
+``processing`` row whose stamp is older than ``STALE_CLAIM_SECONDS``: that is the
 crash recovery for a worker that died mid-run. The stamp is also the run's
 claim token. The chunk writer's superseded checks and the run's outcome writes
 match on it, so a reclaimed run neither writes its chunks over the newer
@@ -46,9 +46,12 @@ logger = get_logger(__name__)
 # A ``processing`` row whose stamp is older than this is reclaimed: by the
 # embedding sweep and by a new run's claim (crash recovery).
 STALE_CLAIM_SECONDS = 60.0
-# After a renewal at T, the next ones start at T+15 and T+35; each waits at
-# most RENEW_CHECKOUT_TIMEOUT_SECONDS for a connection, so when both fail the
-# third still starts at T+55, inside the cutoff (#2070).
+# Renewals start on a fixed cadence, one interval after the previous one
+# started however long it waited, and each waits at most
+# RENEW_CHECKOUT_TIMEOUT_SECONDS for a connection. After a renewal that
+# started at T (its stamp is no earlier), the next ones start at T+15, T+30
+# and T+45: two can fail outright and the third has its connection by T+50,
+# inside the cutoff (#2070).
 RENEW_INTERVAL_SECONDS = 15.0
 RENEW_CHECKOUT_TIMEOUT_SECONDS = 5.0
 # Longer than any healthy run; a run still going after this is presumed hung.
@@ -70,8 +73,7 @@ class EmbeddingClaim:
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._renewing = False
-        self._gone = False
-        # When a renewal found the claim gone (``loss_reason``).
+        # When a renewal found the claim gone; it stops renewing for good.
         self._gone_seen_at: datetime | None = None
 
     @asynccontextmanager
@@ -119,15 +121,19 @@ class EmbeddingClaim:
 
     async def _renew_loop(self) -> None:
         deadline = time.monotonic() + MAX_RENEW_SECONDS
-        while not self._gone:
+        next_at = time.monotonic() + RENEW_INTERVAL_SECONDS
+        while self._gone_seen_at is None:
             try:
-                await asyncio.wait_for(self._stop.wait(), RENEW_INTERVAL_SECONDS)
+                await asyncio.wait_for(self._stop.wait(), max(0.0, next_at - time.monotonic()))
                 return
             except TimeoutError:
                 pass
             if time.monotonic() >= deadline:
                 logger.warning("embedding_claim_renewal_expired", memory_id=str(self.memory_id))
                 return
+            # The cadence counts from each attempt's start, so a renewal that
+            # waited for a connection does not push the next one back.
+            next_at = time.monotonic() + RENEW_INTERVAL_SECONDS
             try:
                 await self._renew()
             except Exception as e:
@@ -169,7 +175,6 @@ class EmbeddingClaim:
                         self.stamp = new_stamp
                     else:
                         # Re-queued or reclaimed; the outcome write logs it.
-                        self._gone = True
                         self._gone_seen_at = new_stamp
                 finally:
                     self._renewing = False

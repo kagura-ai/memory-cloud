@@ -264,12 +264,37 @@ async def test_a_renewal_gives_up_on_a_slow_checkout_and_tries_again(fast_renewa
 
 
 def test_two_failed_renewals_still_leave_a_third_before_the_stale_cutoff():
-    # A success at T; the next two renewals start at T+15 and T+35 and each
-    # waits at most 5 s for a connection; the third starts at T+55.
+    # A renewal that started at T; the next three start at T+15, T+30, T+45 and
+    # each has its connection, or gives up, within 5 s.
     interval = embedding_claim.RENEW_INTERVAL_SECONDS
     checkout = embedding_claim.RENEW_CHECKOUT_TIMEOUT_SECONDS
-    third_start = 3 * interval + 2 * checkout
-    assert third_start < embedding_claim.STALE_CLAIM_SECONDS
+    third_connected_by = 3 * interval + checkout
+    assert third_connected_by < embedding_claim.STALE_CLAIM_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_slow_checkout_does_not_push_the_next_renewal_back():
+    starts: list[float] = []
+
+    async def _pool_exhausted() -> None:
+        starts.append(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    sessions = _Sessions([_row(True)])
+    sessions.session.connection = AsyncMock(side_effect=_pool_exhausted)
+    claim = _claim()
+    with (
+        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.2),
+        patch.object(embedding_claim, "RENEW_CHECKOUT_TIMEOUT_SECONDS", 0.15),
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch.object(embedding_claim, "logger"),
+    ):
+        claim.start_renewal()
+        await _until(lambda: len(starts) >= 3, timeout=5.0)
+        await claim.stop_renewal()
+    # One interval apart, not interval + checkout wait (0.35).
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    assert all(gap < 0.3 for gap in gaps), gaps
 
 
 # #2070: ``embedding_claim_lost`` says why the claim went. A row is reclaimable

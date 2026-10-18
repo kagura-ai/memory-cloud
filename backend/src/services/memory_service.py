@@ -8431,8 +8431,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
         wrote_points = False
         try:
             # Claim: atomically set pending/stale-processing → processing
-            # Stale processing: embedding_attempted_at older than 60s (crash
-            # recovery)
+            # Stale processing: embedding_attempted_at older than
+            # STALE_CLAIM_SECONDS (crash recovery)
             stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
             # #979: a `failed` row is also eligible for auto-retry once its
             # backoff has elapsed and it still has retry budget. The shared
