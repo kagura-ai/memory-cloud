@@ -665,8 +665,9 @@ def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition
 #: terminator until that ACK: a ~40 ms stall on some response sizes (the
 #: oversampled chunk query hit it). An identity response has
 #: ``Content-Length`` and no terminator. The cost is more bytes on the wire,
-#: which a co-located Qdrant does not notice. Lowercase: also valid gRPC
-#: metadata, where qdrant-client sends the same headers.
+#: which a co-located Qdrant does not notice; a Qdrant across a WAN can turn
+#: compression back on with ``QDRANT_HTTP_COMPRESSION=true``. Lowercase: also
+#: valid gRPC metadata, where qdrant-client sends the same headers.
 QDRANT_REST_HEADERS: dict[str, str] = {"accept-encoding": "identity"}
 
 
@@ -674,6 +675,8 @@ def get_qdrant_client() -> AsyncQdrantClient:
     """Get singleton Qdrant client.
 
     Issue #273 Security: Supports API key authentication for production.
+    Issue #2112: asks for uncompressed responses unless
+    ``qdrant_http_compression`` is set (see ``QDRANT_REST_HEADERS``).
 
     Returns:
         AsyncQdrantClient instance
@@ -689,19 +692,18 @@ def get_qdrant_client() -> AsyncQdrantClient:
 
             settings = get_settings()
 
+            client_kwargs: dict[str, Any] = {"url": QDRANT_URL}
+            if not settings.qdrant_http_compression:
+                client_kwargs["headers"] = QDRANT_REST_HEADERS
             # Issue #273 Security Review: Add API key auth for production
             if settings.qdrant_api_key:
-                _qdrant_client = AsyncQdrantClient(
-                    url=QDRANT_URL,
-                    api_key=settings.qdrant_api_key,
-                    headers=dict(QDRANT_REST_HEADERS),
-                )
-                logger.info("qdrant_client_initialized", url=QDRANT_URL, authenticated=True)
-            else:
-                _qdrant_client = AsyncQdrantClient(
-                    url=QDRANT_URL, headers=dict(QDRANT_REST_HEADERS)
-                )
-                logger.info("qdrant_client_initialized", url=QDRANT_URL, authenticated=False)
+                client_kwargs["api_key"] = settings.qdrant_api_key
+            _qdrant_client = AsyncQdrantClient(**client_kwargs)
+            logger.info(
+                "qdrant_client_initialized",
+                url=QDRANT_URL,
+                authenticated=bool(settings.qdrant_api_key),
+            )
         except Exception as e:
             raise QdrantError(f"Failed to connect to Qdrant: {e}") from e
 

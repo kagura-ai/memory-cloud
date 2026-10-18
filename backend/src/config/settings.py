@@ -628,6 +628,18 @@ class Settings(BaseSettings):
         default="", description="Qdrant API key (REQUIRED in production, empty for local dev)"
     )
 
+    # #2112: compressed Qdrant responses are streamed chunked, and at some
+    # sizes the chunk terminator waits ~40 ms on Nagle + delayed ACK. Off by
+    # default (the client asks for identity); turn it on only for a Qdrant
+    # reached across a slow link, where the bytes cost more than the stall.
+    qdrant_http_compression: bool = Field(
+        default=False,
+        description=(
+            "Let Qdrant compress REST responses. Off (default): the client asks for "
+            "uncompressed responses, which avoids a ~40 ms stall on a local network."
+        ),
+    )
+
     # Dense vector storage layout (#1990). Both default to the historical
     # behaviour (fp32, RAM-resident). "int8" turns on Qdrant scalar
     # quantization for the ``dense`` named vector (about a quarter of the fp32
