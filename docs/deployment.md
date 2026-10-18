@@ -175,7 +175,19 @@ Check a recreated container with
 **Who made an MCP request.** Since #2025 the per-request
 `MCP auth success: method=…, user=…` line is logged at DEBUG, so the INFO log
 no longer names the principal of each MCP request (failed auths still log at
-WARNING). For incident tracing, agent-bound requests leave an append-only
+WARNING). Since #2032 the rest of the per-request transport lines are DEBUG as
+well: `MCP request`, `MCP authenticated`, `MCP session_id from …`,
+`MCP OAuth2 workspace switch`, `MCP handling`, `using existing session`, the
+per-method `MCP tools/list` / `tools/call` / `calling tool` / `ping` /
+`server/discover` / `batch` / `notification` lines, and the stateless-era
+`MCP '<method>' (stateless, <revision>): client=…` line. So the INFO log no
+longer names the tool a successful call ran, nor which client and protocol
+revision a stateless request used; `LOG_LEVEL=debug` brings those back too.
+Session lifecycle (`initialize`, created, terminated, re-adopted, ended by
+`DELETE`), refusals, failed auths and errors keep their levels, as do
+`mcp_guardrail_digest_served` / `mcp_guardrails_param_ignored` (on
+`initialize` and `server/discover`) and `mcp_tool_profile_names_ignored` (a
+`?tools=` value naming an unknown tool). For incident tracing, agent-bound requests leave an append-only
 `memory_access_events` row (user, principal type, API key prefix, agent,
 context, operation, outcome; see
 [memory_access_events retention](ops/memory-access-events-retention.md)), and

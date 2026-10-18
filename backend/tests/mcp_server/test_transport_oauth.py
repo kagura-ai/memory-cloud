@@ -172,6 +172,7 @@ def app(monkeypatch):
         path: str = "/mcp/",
         method: str = "POST",
         token: str | None = "opaque-oauth-token",
+        scope_extra: dict | None = None,
     ) -> _Recorder:
         request_headers = dict(headers or {})
         if token is not None:
@@ -188,6 +189,7 @@ def app(monkeypatch):
             "path": path,
             "query_string": b"",
             "headers": list(request_headers.items()),
+            **(scope_extra or {}),
         }
         await mcp_asgi_app(scope, receive, send)
         return send
@@ -999,6 +1001,99 @@ async def test_post_and_delete_still_serve_the_session_a_get_was_refused_on(app)
 
 
 # ------------------------------------------------------------------ logging
+
+
+def _info_lines(caplog) -> list[str]:
+    """INFO-and-above lines the MCP server modules wrote."""
+    return [
+        f"{r.levelname} {r.name}: {r.getMessage()}"
+        for r in caplog.records
+        if r.name.startswith("mcp_server") and r.levelno >= logging.INFO
+    ]
+
+
+@pytest.mark.asyncio
+async def test_successful_legacy_requests_write_no_info_lines(app, caplog):
+    """#2032: a client polling an open session must not fill the INFO log —
+    the per-request transport lines are DEBUG (the access log keeps one line
+    per request)."""
+    session = await _initialize(app)
+    notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    batch = [_rpc("ping", 7), _rpc("tools/list", 8)]
+    caplog.clear()  # opening the session is logged at INFO, and stays so
+
+    with caplog.at_level(logging.DEBUG):
+        assert (await app.call(_rpc("tools/list", 2), headers=session)).status == 200
+        assert (await app.call(_rpc("ping", 3), headers=session)).status == 200
+        call = await app.call(_rpc("tools/call", 4, name="list_contexts"), headers=session)
+        assert call.status == 200
+        assert (await app.call(notification, headers=session)).status == 202
+        assert (await app.call(batch, headers=session)).status == 200
+
+    assert app.executed == ["list_contexts"]
+    assert _info_lines(caplog) == []
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "MCP handling" in logged  # still there at DEBUG
+
+
+@pytest.mark.asyncio
+async def test_successful_workspace_url_requests_write_no_info_lines(app, monkeypatch, caplog):
+    """``/mcp/w/{id}``: the membership check that lets an OAuth caller into
+    the workspace runs on every request, so it logs at DEBUG too."""
+    from uuid import uuid4
+
+    class _MemberDb:
+        async def execute(self, _stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: object())
+
+    async def get_db():
+        yield _MemberDb()
+
+    monkeypatch.setattr("db.base.get_db", get_db)
+    workspace = {"workspace_id_from_url": str(uuid4())}
+    opened = await app.call(_rpc("initialize", protocolVersion="2025-03-26"), scope_extra=workspace)
+    assert opened.status == 200
+    session = {b"mcp-session-id": opened.headers[b"mcp-session-id"]}
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG):
+        listed = await app.call(_rpc("tools/list", 2), headers=session, scope_extra=workspace)
+        assert listed.status == 200
+        call = await app.call(
+            _rpc("tools/call", 3, name="list_contexts"), headers=session, scope_extra=workspace
+        )
+        assert call.status == 200
+
+    assert app.executed == ["list_contexts"]
+    assert _info_lines(caplog) == []
+    assert "workspace switch" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_successful_stateless_requests_write_no_info_lines(app, caplog):
+    with caplog.at_level(logging.DEBUG):
+        for request_id, (method, params) in enumerate(
+            [("tools/list", {}), ("ping", {}), ("tools/call", {"name": "list_contexts"})], 1
+        ):
+            body, headers = _modern(method, request_id, **params)
+            assert (await app.call(body, headers=headers)).status == 200
+
+    assert app.executed == ["list_contexts"]
+    assert _info_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_session_lifecycle_and_auth_failures_stay_at_info_or_above(app, caplog):
+    with caplog.at_level(logging.INFO):
+        session = await _initialize(app)
+        assert (await app.call(None, method="DELETE", headers=session)).status == 204
+        app.grant = None
+        assert (await app.call(_rpc("tools/list", 2))).status == 401
+
+    lines = "\n".join(_info_lines(caplog))
+    assert "created new session" in lines
+    assert "ended by user" in lines
+    assert "WARNING mcp_server.transport: MCP auth failed" in lines
 
 
 @pytest.mark.asyncio
