@@ -282,7 +282,8 @@ async def test_the_cap_locks_then_counts(gate):
 
 async def test_at_the_cap_the_enable_is_refused_with_quota001(gate):
     gate(True)
-    db = _db(_workspace("basic"), MagicMock(), _scalar(1))
+    # The count, then this context's stored flag (off).
+    db = _db(_workspace("basic"), MagicMock(), _scalar(1), _scalar(False))
     with pytest.raises(QuotaExceededError) as exc:
         await policy.ensure_content_chunk_capacity(db, uuid4())
     assert exc.value.status_code == 429
@@ -298,7 +299,7 @@ async def test_at_the_cap_the_enable_is_refused_with_quota001(gate):
 
 async def test_the_top_tier_cap_offers_no_upgrade(gate):
     gate(True)
-    db = _db(_workspace("promax"), MagicMock(), _scalar(20))
+    db = _db(_workspace("promax"), MagicMock(), _scalar(20), _scalar(False))
     with pytest.raises(QuotaExceededError) as exc:
         await policy.ensure_content_chunk_capacity(db, uuid4())
     assert exc.value.details["required_plan"] is None
@@ -386,6 +387,21 @@ async def test_new_context_default_on_takes_a_free_slot_under_the_lock(gate, in_
     assert lock_stmt.compile().params["key"] == f"content_chunk_contexts:{ws}"
 
 
+async def test_a_resource_context_is_created_off_under_the_gate(gate):
+    gate(True)
+    db = _db()
+    assert (
+        await policy.new_context_content_chunks(db, uuid4(), default_on=True, resource_context=True)
+        is False
+    )
+    db.execute.assert_not_awaited()
+    gate(False)  # ungated: the deployment default, as before
+    assert (
+        await policy.new_context_content_chunks(db, uuid4(), default_on=True, resource_context=True)
+        is True
+    )
+
+
 async def test_create_context_stores_the_gated_default(monkeypatch):
     """create_context writes what the gate allows, not the raw setting."""
     from config.settings import Settings
@@ -466,3 +482,20 @@ async def test_a_second_enable_of_the_same_context_keeps_the_first_one(monkeypat
     assert stale.content_chunks_enabled_at is stamp
     purge.assert_not_awaited()
     backfill.assert_not_awaited()
+
+
+async def test_a_repeated_enable_at_the_cap_passes_when_the_flag_is_already_on(gate):
+    """v0.113.0 review chunks F2 (cap side): the first request of a double
+    click committed the enable; the second, counted under the lock at the
+    cap, sees its own context already on and is not refused."""
+    gate(True)
+    ws = uuid4()
+    ctx = uuid4()
+    workspace = MagicMock()
+    workspace.one_or_none.return_value = SimpleNamespace(workspace_id=ws, plan_name="basic")
+    db = _db(workspace, MagicMock(), _scalar(1), _scalar(True))
+    await policy.ensure_content_chunk_capacity(db, ctx)  # no QuotaExceededError
+    # Another context at the same count is still refused.
+    db = _db(workspace, MagicMock(), _scalar(1), _scalar(False))
+    with pytest.raises(QuotaExceededError):
+        await policy.ensure_content_chunk_capacity(db, uuid4())

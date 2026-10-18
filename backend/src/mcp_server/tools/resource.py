@@ -1071,19 +1071,17 @@ async def handle_setup_resource(
             from repositories.config_repository import new_search_config_row
             from services.content_chunk_policy import new_context_content_chunks
 
-            chunk_settings = get_settings()
+            # #2103 review F1: within the plan gate; under it a resource
+            # context is created off. Takes the cap's lock (when gated and
+            # on), held to this transaction's commit below.
+            chunks_on = await new_context_content_chunks(db, workspace_id, resource_context=True)
             search_config = ContextSearchConfig(
                 context_id=context.id,
                 semantic_weight=0.6,
                 fetch_factor=3,
                 # #1572 / #2015: same deployment default as
-                # ContextService.create_context, #2103 within the plan gate.
-                **new_search_config_row(
-                    chunk_settings,
-                    content_chunks_enabled=await new_context_content_chunks(
-                        db, workspace_id, default_on=chunk_settings.default_content_chunks_enabled
-                    ),
-                ),
+                # ContextService.create_context.
+                **new_search_config_row(get_settings(), content_chunks_enabled=chunks_on),
                 embedding_model=actual_embedding_model,
                 embedding_dimensions=actual_dimensions,
             )

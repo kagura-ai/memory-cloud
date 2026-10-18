@@ -403,6 +403,16 @@ async def _count_in_use(db: AsyncSession, workspace_id: UUID) -> int:
     return int(result.scalar_one() or 0)
 
 
+async def _count_in_use_locked(db: AsyncSession, workspace_id: UUID) -> int:
+    """``_count_in_use`` under the workspace's cap lock (held to the transaction end).
+
+    The one place the lock key is built: every path that may turn a
+    context's flag on counts through it.
+    """
+    await db.execute(_CAP_LOCK_SQL.bindparams(key=f"content_chunk_contexts:{workspace_id}"))
+    return await _count_in_use(db, workspace_id)
+
+
 def _lowest_plan_above(limit: int) -> str | None:
     """Lowest tier whose content chunk limit (feature included) exceeds ``limit``."""
     return next((name for name in PLAN_ORDER if content_chunk_context_limit(name) > limit), None)
@@ -442,7 +452,10 @@ async def ensure_content_chunk_capacity(db: AsyncSession, context_id: UUID) -> N
     (as in #1927): nothing between this call and the enable's commit
     (``ContextSearchConfigRepository.update``) may commit the session — a
     commit releases the lock. A plan whose cap is 0 is refused without the
-    lock.
+    lock. A context whose stored flag is already on, read under the lock,
+    passes: a repeated enable (a double click) whose first request committed
+    meanwhile is one of the counted contexts, and the update keeps that first
+    enable (v0.113.0 review chunks F2).
 
     Raises:
         QuotaExceededError: 429 ``QUOTA-001``,
@@ -456,14 +469,17 @@ async def ensure_content_chunk_capacity(db: AsyncSession, context_id: UUID) -> N
     limit = content_chunk_context_limit(plan_name)
     if limit <= 0:
         _raise_cap(plan_name, await _count_in_use(db, workspace_id), limit)
-    await db.execute(_CAP_LOCK_SQL.bindparams(key=f"content_chunk_contexts:{workspace_id}"))
-    in_use = await _count_in_use(db, workspace_id)
-    if in_use >= limit:
+    in_use = await _count_in_use_locked(db, workspace_id)
+    if in_use >= limit and not await _stored_flag(db, context_id):
         _raise_cap(plan_name, in_use, limit)
 
 
 async def new_context_content_chunks(
-    db: AsyncSession, workspace_id: UUID, *, default_on: bool | None = None
+    db: AsyncSession,
+    workspace_id: UUID,
+    *,
+    default_on: bool | None = None,
+    resource_context: bool = False,
 ) -> bool:
     """``content_chunks_enabled`` for a NEW context of ``workspace_id``.
 
@@ -476,6 +492,10 @@ async def new_context_content_chunks(
     it commits. Without this a default-on deployment created every context
     stored-on and counted toward the cap (in use 3 of 1), inactive past it
     and never on a plan without the feature (v0.113.0 review chunks F1).
+
+    A ``setup_resource`` context (``resource_context``) is created off under
+    the gate: its indexer rows are never chunked, so the flag would only take
+    one of the plan's slots from the owner's own contexts.
     """
     if default_on is None:
         default_on = bool(get_settings().default_content_chunks_enabled)
@@ -483,14 +503,15 @@ async def new_context_content_chunks(
         return False
     if not content_chunks_gated():
         return True
+    if resource_context:
+        return False
     plan_name = (
         await db.execute(select(Workspace.plan_name).where(Workspace.id == workspace_id))
     ).scalar_one_or_none()
     limit = content_chunk_context_limit(plan_name)
     if limit <= 0:
         return False
-    await db.execute(_CAP_LOCK_SQL.bindparams(key=f"content_chunk_contexts:{workspace_id}"))
-    return await _count_in_use(db, workspace_id) < limit
+    return await _count_in_use_locked(db, workspace_id) < limit
 
 
 async def contexts_losing_content_chunks(
