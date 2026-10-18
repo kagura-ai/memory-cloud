@@ -69,6 +69,9 @@ A **Memory** is a single piece of knowledge stored in Kagura Memory Cloud. Each 
 - **importance** — `0.0-1.0` (critical=0.9+, useful=0.6-0.8, reference=0.3-0.5)
 - **tags** — For categorization and filtering (e.g., `["python", "auth", "jwt"]`)
 - **scope** — `working` (short-term) or `persistent` (long-term)
+- **version** — 1 on create, +1 for each edit that changes the summary, context summary, content, details, type, importance or tags ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043))
+
+**Versions and the revision log.** Several agents can share a context, so an edit can be made conditional: `update_memory(expected_version=N)` (REST: `PATCH` with `expected_version`) applies only while the memory is still at version N, and otherwise fails with `version_conflict` and the current version — nothing is lost to a concurrent edit. Each versioned edit records the values it overwrote (the changed fields only) and who made it in the memory's revision log, next to `created` and `forgotten` events. Maintenance that is not an edit — `forget`, Sleep's importance re-evaluation and tag merges, promotion, re-embedding, access statistics — never moves the version. The log is not embedded or searchable; it stays with a forgotten memory's tombstone and goes when the memory is purged.
 
 ## Hybrid Search
 

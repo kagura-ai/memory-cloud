@@ -334,9 +334,12 @@ Retrieve complete details (Layer 3) of a specific memory by ID.
   "tags": ["python", "oauth2"],
   "importance": 0.9,
   "created_at": "2025-11-20T15:00:00Z",
-  "updated_at": "2025-11-20T15:00:00Z"
+  "updated_at": "2025-11-20T15:00:00Z",
+  "version": 1
 }
 ```
+
+`version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) is 1 when the memory is created and moves by one with each edit that changes `summary`, `context_summary`, `content`, `details`, `type`, `importance` or `tags`; `remember` and `recall` results carry it too. Pass it as `expected_version` to `PATCH` below.
 
 **Example (Python):**
 
@@ -348,6 +351,24 @@ response = requests.get(
 )
 print(response.json()["content"])
 ```
+
+---
+
+### PATCH /api/v1/memory/{memory_id}
+
+Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, `details`; omitted fields keep their value, `tags` replaces the list and `"details": null` clears it. The response is the updated memory in the `reference` shape, `version` included.
+
+`expected_version` (optional, integer ≥ 1) makes the patch conditional: it applies only while the memory is still at that version. Otherwise nothing is written and the call answers `409`:
+
+```json
+{
+  "error": "RES-002",
+  "message": "Memory 550e8400-… is at version 4, not the expected version 3. Read it again and resend with its current version.",
+  "details": {"reason": "version_conflict", "expected_version": 3, "current_version": 4}
+}
+```
+
+Read the memory again (`GET /reference/{memory_id}`) and decide. Two patches racing with the same `expected_version` serialize on the row: one applies, the other gets the `409`. Without `expected_version` the last writer wins. `404`: no such memory or no access; `410`: the memory was forgotten; `422`: an invalid body (a body with only `expected_version` is one).
 
 ---
 

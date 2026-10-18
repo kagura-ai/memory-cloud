@@ -211,6 +211,8 @@ running  →  completed | failed | cancelled | rolled_back
 
 Restored memories are re-embedded back into Qdrant. On full success the report moves to `rolled_back`; if any action fails to reverse, the report is marked `failed` and the partial state is recorded in the audit log.
 
+Sleep does not move a memory's `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) and writes no `memory_revisions` rows: importance re-evaluation, the tag union of a merge, promotion, archiving and every rollback above are maintenance with their own record in `sleep_actions`, so an agent's `update_memory(expected_version=N)` is never refused because a Sleep run touched the memory in between.
+
 ### Per-merge undo (#1209)
 
 `rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the Sleep retention window (`sleep_merge_retention_days`) or the platform cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`) — reversibility is bounded by whichever window is shorter, and both bounds are named, never silent.

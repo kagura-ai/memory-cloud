@@ -530,3 +530,9 @@ Recurring inconsistencies (each instance flagged inline above):
 - **P2** Move prose constraints into schema: minLength/maxLength for summary/context_summary/key/note, `maxItems: 100` on ingest_events.events, `pattern` for context name and sha256, numeric `minimum`/`maximum` for weights/importance/limits; add explicit `default` values where prose states them.
 - **P2** Converge pagination on cursor style (deprecate list_resource_tokens `offset`); flip `include_revoked` default to false for consistency with other list tools.
 - **P2** Align recall's optional `context_id` (and feedback/set_state requiredness) with the rest of the surface's "always specify context_id" contract; document the `context_id`/`context_ids` override pattern as the frozen multi-context idiom.
+
+## Additive since v0.113.0
+
+Additions after this inventory was frozen; each is optional and leaves every existing call unchanged.
+
+- `update_memory.expected_version` — integer, `minimum` 1, in-place mode only ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)). The edit applies only while the memory is at that version; otherwise the error `version_conflict` carries `current_version` and nothing is written. Omitted: last writer wins, as before. With `external_id` it is refused (`validation_error`).
