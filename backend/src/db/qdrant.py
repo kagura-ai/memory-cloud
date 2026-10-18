@@ -897,7 +897,7 @@ async def search_memories_qdrant(
             _validate_uuid_format(cid, "include_chunks")
         per_context_chunks = Filter(
             should=[
-                IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD)),
+                summary_points_condition(),
                 FieldCondition(key="context_id", match=MatchAny(any=chunk_contexts)),
             ]
         )
@@ -1196,7 +1196,7 @@ async def purge_context_chunk_points(
                         FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
                         FieldCondition(key="context_id", match=MatchValue(value=context_id)),
                     ],
-                    must_not=[IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))],
+                    must_not=[summary_points_condition()],
                 )
             ),
         )
@@ -1302,7 +1302,7 @@ async def count_context_chunk_points(
             FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
             FieldCondition(key="context_id", match=MatchValue(value=context_id)),
         ],
-        must_not=[IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))],
+        must_not=[summary_points_condition()],
     )
     counts: dict[str, int] = {}
     offset = None

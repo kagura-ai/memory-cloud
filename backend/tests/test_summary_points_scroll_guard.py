@@ -33,6 +33,9 @@ ALLOWED: dict[str, str] = {
     "db/qdrant.py::scroll_point_refs": (
         "orphan sweep: judges every point, chunk points included, by its memory row"
     ),
+    "db/qdrant.py::count_context_chunk_points": (
+        "migration verify counts chunk points per memory; it wants chunk points only"
+    ),
 }
 
 
