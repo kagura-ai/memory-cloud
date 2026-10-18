@@ -7,7 +7,8 @@ window — the forget lane used to be defined as "everything that is not the
 merge sentinel", which is exactly the shape that breaks when a value is added.
 """
 
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -92,6 +93,27 @@ class TestLanePredicates:
         assert "memories.deleted_at IS NOT NULL" in sql
         assert "memories.deleted_by = 'sleep_consolidation'" in sql
         assert "contexts.deleted_at IS NULL" in sql
+
+    def test_restore_stamps_the_embedding_clock_of_a_success_row_only(self):
+        """#2063: an embedding-model switch re-queues rows embedded since its
+        re-embed started, and a restore re-embeds the row, so it stamps the
+        pipeline's clock — for a ``success`` row only (any other row is
+        re-queued by its status, and its stamp belongs to the claim fence and
+        the retry backoff). ``updated_at`` is left alone: dedup reads it as the
+        fact's currency."""
+        stmt = restore_sleep_tombstone_stmt(uuid4(), "u", deleted_by="sleep_maintenance")
+        compiled = stmt.compile()
+        sql = str(compiled)
+        set_clause = sql[sql.index(" SET ") : sql.index(" WHERE ")]
+        stamp = re.search(
+            r"embedding_attempted_at=CASE WHEN \(memories\.embedding_status = :(\w+)\) "
+            r"THEN :(\w+) ELSE memories\.embedding_attempted_at END",
+            set_clause,
+        )
+        assert stamp is not None, set_clause
+        assert compiled.params[stamp.group(1)] == "success"
+        assert isinstance(compiled.params[stamp.group(2)], datetime)
+        assert "updated_at" not in set_clause
 
     def test_user_lane_excludes_both_sentinels_and_keeps_null(self):
         sql = str(user_tombstone_predicate().compile(compile_kwargs={"literal_binds": True}))
