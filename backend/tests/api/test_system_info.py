@@ -21,6 +21,7 @@ _RERANK_ENV = [
     "DEFAULT_RERANKER_PROVIDER",
     "DEFAULT_USE_RERANK",
     "DEFAULT_RERANKER_MODEL",
+    "DEFAULT_CONTENT_CHUNKS_ENABLED",
 ]
 
 
@@ -111,6 +112,7 @@ def test_system_info_reranking_on_and_todays_defaults_when_unset(info_with) -> N
         "use_rerank": False,
         "reranker_provider": "voyage",
         "reranker_model": "rerank-2",
+        "content_chunks_enabled": False,
     }
 
 
@@ -140,6 +142,13 @@ def test_system_info_self_hosted_default_with_endpoint_exposes_model_not_url(inf
         "use_rerank": True,
         "reranker_provider": "self_hosted",
         "reranker_model": "qwen3-reranker-4b",
+        "content_chunks_enabled": False,
     }
     # Public endpoint: provider/model names only, never the internal URL.
     assert "gpu-rig.internal" not in resp.text
+
+
+def test_system_info_shows_the_content_chunks_default(info_with) -> None:
+    """#2015 D8: what new contexts get from DEFAULT_CONTENT_CHUNKS_ENABLED."""
+    body = info_with(default_content_chunks_enabled=True).json()
+    assert body["search_defaults"]["content_chunks_enabled"] is True

@@ -134,6 +134,7 @@ def get_config_categories() -> dict[str, list[str]]:
             "DEFAULT_USE_RERANK",
             "DEFAULT_RERANKER_PROVIDER",
             "DEFAULT_RERANKER_MODEL",
+            "DEFAULT_CONTENT_CHUNKS_ENABLED",
             "RERANK_BASE_URL",
             "RERANK_MODEL",
         ],
@@ -847,6 +848,19 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             default_value="",
             requires_restart=True,
             impact="Empty = the provider's default model.",
+        ),
+        "DEFAULT_CONTENT_CHUNKS_ENABLED": ConfigKeySchema(
+            key="DEFAULT_CONTENT_CHUNKS_ENABLED",
+            type="boolean",
+            category="hosted",
+            description="content_chunks_enabled written to new context search configs (#2015)",
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Applies to contexts created from now on; existing contexts are never rewritten. "
+                "True sends long memory content to the embedding provider. Qdrant only."
+            ),
+            examples=["true", "false"],
         ),
         "RERANK_BASE_URL": ConfigKeySchema(
             key="RERANK_BASE_URL",

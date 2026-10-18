@@ -1048,6 +1048,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # #2015 D8: content chunk vectors for new contexts. Not part of a reset and
+    # never applied to an existing context (turning the flag on there takes
+    # the context owner).
+    default_content_chunks_enabled: bool = Field(
+        default=False,
+        description=(
+            "content_chunks_enabled written to NEW context search configs only. "
+            "True sends the content of long memories (not only summaries) to the "
+            "embedding provider, and the matched passage to the reranker, for "
+            "every context created from now on. Needs the Qdrant vector store."
+        ),
+    )
+
     @field_validator("default_reranker_model", mode="before")
     @classmethod
     def _strip_default_reranker_model(cls, v: object) -> object:
@@ -1078,6 +1091,22 @@ class Settings(BaseSettings):
                 "DEFAULT_USE_RERANK=true with DEFAULT_RERANKER_PROVIDER=self_hosted "
                 "requires a reranker backend: set RERANK_BASE_URL (batched /v1/rerank) "
                 "or SELF_HOSTED_BASE_URL (prompt scoring)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_content_chunks_default(self) -> "Settings":
+        """Content chunk vectors by default need a store that keeps them (#2015).
+
+        The LanceDB store has no chunk points, and turning the flag on there is
+        refused per context (422); a deployment default that every new
+        context would carry without effect is refused at startup instead.
+        """
+        backend = (self.vector_backend or "qdrant").strip().lower()
+        if self.default_content_chunks_enabled and backend == "lance":
+            raise ValueError(
+                "DEFAULT_CONTENT_CHUNKS_ENABLED=true needs the Qdrant vector store: "
+                "KAGURA_VECTOR_BACKEND=lance keeps no content chunk vectors."
             )
         return self
 

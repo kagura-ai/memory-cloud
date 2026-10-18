@@ -114,7 +114,7 @@ async def system_info():
         }
     """
     from config.settings import get_settings
-    from repositories.config_repository import search_config_defaults
+    from repositories.config_repository import new_search_config_defaults
 
     settings = get_settings()
 
@@ -134,7 +134,8 @@ async def system_info():
         # #1572: the reranker values new contexts are created with, so the web
         # UI renders the real deployment default instead of baked copy.
         # Provider/model names only — never URLs or keys (public endpoint).
-        "search_defaults": search_config_defaults(settings),
+        # #2015: content_chunks_enabled too (DEFAULT_CONTENT_CHUNKS_ENABLED).
+        "search_defaults": new_search_config_defaults(settings),
         # Issue #1665: the current terms-of-service version, or null when
         # TERMS_VERSION is empty (server-side acceptance disabled). The sign-in
         # pages send it back as ``accepted_terms`` once the box is ticked.

@@ -20,6 +20,7 @@ from models.config import ContextSearchConfig
 from models.schemas import ContextSearchConfigUpdate
 from repositories.config_repository import (
     ContextSearchConfigRepository,
+    new_search_config_defaults,
     search_config_defaults,
 )
 from services.reranker_service import (
@@ -36,6 +37,9 @@ _RERANK_ENV = [
     "DEFAULT_RERANKER_PROVIDER",
     "DEFAULT_USE_RERANK",
     "DEFAULT_RERANKER_MODEL",
+    "DEFAULT_CONTENT_CHUNKS_ENABLED",
+    "KAGURA_VECTOR_BACKEND",
+    "VECTOR_BACKEND",
 ]
 
 
@@ -273,3 +277,83 @@ class TestCreateContext:
             "voyage",
             "rerank-2",
         )
+
+
+# ---------------------------------------------------------------------------
+# #2015 D8: DEFAULT_CONTENT_CHUNKS_ENABLED, new configs only
+# ---------------------------------------------------------------------------
+
+
+class TestContentChunksDefault:
+    def test_new_configs_get_the_flag_and_nothing_else_does(self):
+        s = _settings(default_content_chunks_enabled=True)
+        assert new_search_config_defaults(s) == {
+            **search_config_defaults(s),
+            "content_chunks_enabled": True,
+        }
+        assert new_search_config_defaults(_settings())["content_chunks_enabled"] is False
+        # The shared helper feeds reset_to_default, apply_rerank_defaults and
+        # the migration's legacy-row materialisation: never the flag.
+        assert "content_chunks_enabled" not in search_config_defaults(s)
+
+    def test_lance_refuses_a_content_chunks_default(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="DEFAULT_CONTENT_CHUNKS_ENABLED"):
+            _settings(default_content_chunks_enabled=True, vector_backend="lance")
+        # Off with lance, and on with qdrant, both start.
+        _settings(vector_backend="lance")
+        _settings(default_content_chunks_enabled=True)
+
+    async def test_create_context_writes_the_default(self):
+        on = await TestCreateContext()._create(_settings(default_content_chunks_enabled=True))
+        off = await TestCreateContext()._create(_settings())
+        assert on.content_chunks_enabled is True
+        assert off.content_chunks_enabled is False
+
+    @pytest.mark.parametrize("default", [True, False])
+    async def test_create_or_get_backfills_a_materialised_row_that_is_on(
+        self, monkeypatch, default
+    ):
+        """A row-less legacy context can hold memories: an "on" default queues them."""
+        monkeypatch.setattr(
+            "repositories.config_repository.get_settings",
+            lambda: _settings(default_content_chunks_enabled=default),
+        )
+        order: list[str] = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+        db.flush = AsyncMock()
+        db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+
+        async def _refresh(obj):
+            obj.semantic_weight, obj.bm25_weight, obj.fetch_factor = 0.6, 0.4, 3
+
+        db.refresh = _refresh
+        repo = ContextSearchConfigRepository(db)
+        backfill = AsyncMock(side_effect=lambda _ctx: order.append("backfill") or 2)
+        monkeypatch.setattr(repo, "_queue_content_chunk_backfill", backfill)
+
+        row = await repo.create_or_get(uuid4())
+
+        assert row.content_chunks_enabled is default
+        assert order == (["backfill", "commit"] if default else ["commit"])
+
+    async def test_reset_never_turns_the_flag_on(self, monkeypatch):
+        monkeypatch.setattr(
+            "repositories.config_repository.get_settings",
+            lambda: _settings(default_content_chunks_enabled=True),
+        )
+        repo = ContextSearchConfigRepository(MagicMock())
+        captured: list = []
+
+        async def _update(context_id, update_data):
+            captured.append(update_data)
+            return MagicMock()
+
+        monkeypatch.setattr(repo, "update", _update)
+        await repo.reset_to_default(uuid4(), reset_content_chunks=False)
+        await repo.reset_to_default(uuid4())
+
+        assert "content_chunks_enabled" not in captured[0].model_fields_set
+        assert captured[1].content_chunks_enabled is False
