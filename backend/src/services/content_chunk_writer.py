@@ -204,10 +204,28 @@ async def _superseded_before_write(
     return superseded
 
 
+async def _claim_taken(db: AsyncSession, memory_id: Any, claim: EmbeddingClaim) -> bool:
+    """Whether a newer run has claimed the row: it still exists, but its
+    ``embedding_attempted_at`` is no longer this run's stamp.
+
+    Only the claim, unlike ``_superseded``: an edit, a re-queue or a soft
+    delete since this run started wrote no chunks, so the old ones are still
+    nobody else's. In a SAVEPOINT, as there.
+    """
+    async with claim.held() as stamp:
+        async with db.begin_nested():
+            result = await db.execute(
+                select(Memory.id).where(
+                    Memory.id == memory_id,
+                    Memory.embedding_attempted_at.is_distinct_from(stamp),
+                )
+            )
+    return result.scalar_one_or_none() is not None
+
+
 async def _drop_chunks_after_failure(
     db: AsyncSession,
     memory: Memory,
-    content: str | None,
     claim: EmbeddingClaim,
     collection_name: str,
 ) -> None:
@@ -219,14 +237,15 @@ async def _drop_chunks_after_failure(
     It must not stay searchable meanwhile: the retry writes the new chunks.
     Best effort (a failure is logged): the failure is raised either way.
 
-    Fenced on the claim like the write: when a newer run has claimed the row
-    (or it was edited, re-queued or forgotten) the chunks are that run's, so
-    they stay. A failed check does not stop the drop — the stale body text
-    is what must not stay searchable. The fence narrows the race, it cannot
-    close it: Qdrant is not in the transaction.
+    Fenced on the claim: when a newer run (or a Sleep restore, which stamps
+    the same clock) has claimed the row since, the chunks may be its, so they
+    stay. An edit, a re-queue or a soft delete alone does not stop the drop:
+    nothing newer has written chunks then. A failed check does not stop it
+    either — the stale body text is what must not stay searchable. The fence
+    narrows the race, it cannot close it: Qdrant is not in the transaction.
     """
     try:
-        superseded = await _check_superseded(db, memory.id, content, claim)
+        taken = await _claim_taken(db, memory.id, claim)
     except Exception as e:
         logger.warning(
             "content_chunks_superseded_check_failed",
@@ -234,8 +253,8 @@ async def _drop_chunks_after_failure(
             stage="cleanup",
             error_class=type(e).__name__,
         )
-        superseded = False
-    if superseded:
+        taken = False
+    if taken:
         logger.info("content_chunks_cleanup_skipped_superseded", memory_id=str(memory.id))
         return
     try:
@@ -412,7 +431,7 @@ async def write_content_chunks(
     except Exception as e:
         _log_failure(memory, collection_name, e)
         if claim is not None and chunks:
-            await _drop_chunks_after_failure(db, memory, content, claim, collection_name)
+            await _drop_chunks_after_failure(db, memory, claim, collection_name)
         if not fail_open:
             raise _without_text(e) from None
         return 0

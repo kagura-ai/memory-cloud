@@ -1070,6 +1070,10 @@ async def test_a_failed_write_of_an_embedding_run_removes_the_old_chunks(cleanup
 
     memory = _memory(LONG)
     db = _db(True)
+    # Flag on and the claim still this run's: no row with another stamp.
+    still_ours = MagicMock()
+    still_ours.scalar_one_or_none.return_value = None
+    db.execute = AsyncMock(side_effect=[db.execute.return_value] * 2 + [still_ours])
     svc = MagicMock()
     svc.embed_batch = AsyncMock(side_effect=SelfHostedUnreachableError("down"))
     delete = AsyncMock(side_effect=RuntimeError("q") if cleanup_fails else None)
@@ -1106,12 +1110,10 @@ async def test_a_reclaimed_run_keeps_the_newer_runs_chunks_on_failure(check_fail
     memory = _memory(LONG)
     current = MagicMock()
     current.scalar_one_or_none.return_value = memory.id
-    reclaimed = MagicMock()
-    reclaimed.scalar_one_or_none.return_value = None
     db = MagicMock()
     # The check before the write sees this run's claim; by the failure a newer
-    # run has claimed (and written) the row.
-    db.execute = AsyncMock(side_effect=[current, RuntimeError("db") if check_fails else reclaimed])
+    # run has claimed (and written) the row: its stamp is not this run's.
+    db.execute = AsyncMock(side_effect=[current, RuntimeError("db") if check_fails else current])
     svc = MagicMock()
     svc.embed_batch = AsyncMock(side_effect=SelfHostedUnreachableError("down"))
     delete = AsyncMock()
@@ -1139,3 +1141,21 @@ async def test_a_reclaimed_run_keeps_the_newer_runs_chunks_on_failure(check_fail
         delete.assert_not_awaited()
         skipped = next(e for e in logs if e["event"] == "content_chunks_cleanup_skipped_superseded")
         assert skipped["memory_id"] == str(memory.id)
+
+
+async def test_the_cleanup_fence_compares_only_the_claim():
+    """An edit, a re-queue or a soft delete since the run started wrote no
+    chunks: only a different claim stamp keeps them (#2061)."""
+    from datetime import datetime
+
+    from services.embedding_claim import EmbeddingClaim
+
+    memory = _memory(LONG)
+    claimed_at = datetime(2026, 1, 2, 3, 4, 5)
+    db = _db(None)
+    await writer._claim_taken(db, memory.id, EmbeddingClaim(db, memory.id, claimed_at))
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+    assert "embedding_attempted_at IS DISTINCT FROM" in sql
+    for column in ("content", "deleted_at", "embedding_status"):
+        assert f"memories.{column}" not in sql.split("WHERE", 1)[1]

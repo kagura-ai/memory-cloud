@@ -170,3 +170,63 @@ async def test_requeue_sees_a_restore_in_the_same_uncommitted_transaction(db_ses
     assert await requeue_embedding(db_session, row.id, reason="test") is True
     await db_session.commit()
     assert (await _state(db_session, row))[0] == "pending"
+
+
+# --------------------------------------------------------------------- #2061
+# The drop after a failed embedding-run write is fenced on the claim only.
+
+
+def _claim(db: AsyncSession, memory: Memory, stamp):
+    from services.embedding_claim import EmbeddingClaim
+
+    return EmbeddingClaim(db, memory.id, stamp)
+
+
+async def test_the_cleanup_fence_holds_for_the_runs_own_claim(db_session, row):
+    claimed = row.embedding_attempted_at
+    assert (
+        await content_chunk_writer._claim_taken(
+            db_session, row.id, _claim(db_session, row, claimed)
+        )
+        is False
+    )
+
+
+async def test_the_cleanup_fence_matches_a_null_stamp(db_session, row):
+    await _set(db_session, row, embedding_attempted_at=None)
+    assert (
+        await content_chunk_writer._claim_taken(db_session, row.id, _claim(db_session, row, None))
+        is False
+    )
+
+
+async def test_a_newer_claim_takes_the_chunks_from_the_cleanup(db_session, row):
+    claimed = row.embedding_attempted_at
+    await _set(db_session, row, embedding_attempted_at=claimed + timedelta(seconds=61))
+    assert (
+        await content_chunk_writer._claim_taken(
+            db_session, row.id, _claim(db_session, row, claimed)
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"content": _CONTENT + " edited", "embedding_status": "pending"},
+        {"deleted_at": datetime(2026, 1, 3)},
+    ],
+    ids=["edited_and_requeued", "soft_deleted"],
+)
+async def test_an_edit_or_a_forget_alone_keeps_the_cleanup(db_session, row, values):
+    """Nothing newer wrote chunks: the old ones (stale body text, or a
+    forgotten memory's) still go."""
+    claimed = row.embedding_attempted_at
+    await _set(db_session, row, **values)
+    assert (
+        await content_chunk_writer._claim_taken(
+            db_session, row.id, _claim(db_session, row, claimed)
+        )
+        is False
+    )
