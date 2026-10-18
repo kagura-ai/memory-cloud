@@ -119,6 +119,8 @@ class _CostTotals:
     output_tokens: int
     cached_input_tokens: int
     calls: int
+    # #2060: Anthropic cache-creation tokens, priced at their own rate.
+    cache_write_tokens: int = 0
 
 
 def _aggregate_breakdown_totals(
@@ -134,12 +136,15 @@ def _aggregate_breakdown_totals(
     total_input = 0
     total_output = 0
     total_cached = 0
+    total_cache_write = 0
     total_calls = 0
     for cl in cluster_labels:
         # #1289: prior_breakdowns carry fallback-attempt usage attributed
         # to its own (provider, model). Including them here keeps the
         # totals — and thus cost_actual_cents — counting every billed
-        # call, exactly as when they were folded into the winner.
+        # call, exactly as when they were folded into the winner. A cluster
+        # whose whole chain failed carries its billed attempts there too
+        # (#2060, calls=0).
         for b in (cl.breakdown, *cl.prior_breakdowns):
             if b is None:
                 continue
@@ -147,12 +152,14 @@ def _aggregate_breakdown_totals(
             total_input += b.input_tokens
             total_output += b.output_tokens
             total_cached += b.cached_input_tokens
+            total_cache_write += b.cache_write_tokens
             total_calls += b.calls
     return breakdowns, _CostTotals(
         input_tokens=total_input,
         output_tokens=total_output,
         cached_input_tokens=total_cached,
         calls=total_calls,
+        cache_write_tokens=total_cache_write,
     )
 
 
@@ -175,6 +182,11 @@ def _compute_actual_cost_cents(
     ``cache_read_tokens`` rate may be absent: cached input then falls back
     to 10% of the input rate (the Anthropic / OpenAI discount range;
     gpt-5-nano's seeded rate confirms 10%).
+
+    ``cache_write_tokens`` (#2060, Anthropic only) use the snapshot's
+    ``cache_write_tokens`` rate; without one they fall back to 1.25x the input
+    rate, Anthropic's 5-minute cache-write premium (the seeded Anthropic rows
+    carry exactly that).
     """
     rates = model_snapshot.get("rates", {})
     if rates.get("input_tokens") is None or rates.get("output_tokens") is None:
@@ -182,11 +194,13 @@ def _compute_actual_cost_cents(
     input_per_m = float(rates["input_tokens"])
     output_per_m = float(rates["output_tokens"])
     cached_per_m = float(rates.get("cache_read_tokens", input_per_m / 10.0))
+    cache_write_per_m = float(rates.get("cache_write_tokens", input_per_m * 1.25))
 
     cost_usd = (
         totals.input_tokens * input_per_m
         + totals.output_tokens * output_per_m
         + totals.cached_input_tokens * cached_per_m
+        + totals.cache_write_tokens * cache_write_per_m
     ) / 1_000_000.0
     return max(1, math.ceil(cost_usd * 100)) if cost_usd > 0 else 0
 
@@ -441,7 +455,12 @@ async def persist_results(
         phase_name=_PHASE_CLUSTER_LABELING,
         success=True,
         llm_calls_used=totals.calls,
-        tokens_used=totals.input_tokens + totals.output_tokens + totals.cached_input_tokens,
+        tokens_used=(
+            totals.input_tokens
+            + totals.output_tokens
+            + totals.cached_input_tokens
+            + totals.cache_write_tokens
+        ),
         memories_processed=len(memories),
         details={
             "n_clusters": n_clusters,

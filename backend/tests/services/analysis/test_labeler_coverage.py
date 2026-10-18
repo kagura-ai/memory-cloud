@@ -695,6 +695,56 @@ class TestLabelOneCluster:
         # On failure the rep ids are still recorded (from the labeler's reps).
         assert cl.representative_memory_ids == rep_ids
         assert cl.breakdown is None
+        assert cl.prior_breakdowns == ()
+
+    async def test_failed_chain_keeps_the_billed_attempts(self, monkeypatch) -> None:
+        """#2060: a fully failed fallback chain still billed its attempts. They
+        land in ``prior_breakdowns``, one entry per (provider, model), with
+        calls=0 — tokens count, failed calls do not."""
+        import asyncio
+
+        def _billed(model: str, input_tokens: int, cache_write: int = 0) -> LLMResponse:
+            return LLMResponse(
+                parsed={},
+                total_tokens=input_tokens + 10 + cache_write,
+                input_tokens=input_tokens,
+                output_tokens=10,
+                cached_input_tokens=0,
+                cache_write_tokens=cache_write,
+                provider="openai",
+                model=model,
+            )
+
+        async def _raise(**_kwargs):  # noqa: ANN003
+            raise AnalysisLLMUpstreamError(
+                "all models down",
+                attempted_models=["gpt-5-nano", "gpt-5.5"],
+                prior_usages=(
+                    _billed("gpt-5-nano", 40),
+                    _billed("gpt-5-nano", 20, cache_write=5),
+                    _billed("gpt-5.5", 70),
+                ),
+            )
+
+        monkeypatch.setattr(labeler, "call_with_fallback", _raise)
+
+        cl = await _label_one_cluster(
+            cluster_index=1,
+            reps=[_mem()],
+            user_id="u",
+            workspace_id="w",
+            context_id=None,
+            sem=asyncio.Semaphore(1),
+        )
+
+        assert cl.failed is True
+        assert cl.breakdown is None
+        by_model = {b.model: b for b in cl.prior_breakdowns}
+        assert set(by_model) == {"gpt-5-nano", "gpt-5.5"}
+        assert by_model["gpt-5-nano"].input_tokens == 60
+        assert by_model["gpt-5-nano"].cache_write_tokens == 5
+        assert by_model["gpt-5.5"].input_tokens == 70
+        assert all(b.calls == 0 for b in cl.prior_breakdowns)
 
 
 # --------------------------------------------------------------------------- #

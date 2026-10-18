@@ -59,6 +59,7 @@ from services.sleep.prompts import (
 )
 from services.sleep.reporter import (
     LLMCallBreakdown,
+    LLMSpendTracker,
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
@@ -247,7 +248,7 @@ class _MergeTally:
     skipped_pinned: int = 0
 
 
-class DedupMergePhase:
+class DedupMergePhase(LLMSpendTracker):
     """Detect and merge duplicate memories."""
 
     def __init__(
@@ -733,18 +734,7 @@ class DedupMergePhase:
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
-        result.tokens_used = self._tokens_used
-        result.llm_call_failures = self._llm_failures  # #1183
-        # #471: attach per-(provider, model) breakdown for child-row write.
-        if self._llm_breakdown is not None:
-            result.llm_breakdown = [self._llm_breakdown]
-        # #475: surface embedding usage; skip identity when no calls
-        # happened so no-memory early-returns don't fabricate it.
-        result.embedding_calls_used = self._embedding_calls_used
-        result.embedding_tokens = self._embedding_tokens_used
-        if self._embedding_calls_used > 0:
-            result.embedding_provider = self.embedding_service.provider
-            result.embedding_model = self.embedding_service.model
+        self.record_spend(result)
 
         logger.info(
             "dedup_merge_phase_completed",
@@ -754,6 +744,17 @@ class DedupMergePhase:
         )
 
         return result
+
+    def record_spend(self, result: PhaseResult) -> None:
+        """LLM spend (``LLMSpendTracker``) plus the #475 embedding usage."""
+        super().record_spend(result)
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
+        result.embedding_calls_used = self._embedding_calls_used
+        result.embedding_tokens = self._embedding_tokens_used
+        if self._embedding_calls_used > 0:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
 
     async def _fetch_active_memories(
         self,
@@ -1054,9 +1055,6 @@ class DedupMergePhase:
             budget.consume(llm_calls=1)
             self._tokens_used += llm_resp.total_tokens
             self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
-
-            return self._parse_dedup_response(llm_resp.parsed, label_to_id)
-
         except Exception as e:
             self._llm_failures += 1  # #1183
             logger.warning("dedup_llm_judge_failed", error=str(e))
@@ -1068,6 +1066,15 @@ class DedupMergePhase:
                 self._llm_breakdown = accumulate_llm_response(
                     self._llm_breakdown, usage, count_call=False
                 )
+            return []
+
+        # #2060: parse OUTSIDE the LLM try. The call above answered and is
+        # counted once, as a success; a response that then fails to parse
+        # used to also count as a judge failure. It merges nothing, as before.
+        try:
+            return self._parse_dedup_response(llm_resp.parsed, label_to_id)
+        except Exception as e:
+            logger.warning("dedup_llm_response_unparseable", error=str(e))
             return []
 
     def _parse_dedup_response(

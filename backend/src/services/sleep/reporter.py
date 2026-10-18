@@ -48,6 +48,10 @@ class LLMCallBreakdown:
     cached_input_tokens: int = 0
     calls: int = 0
     tokenizer_version: str | None = None
+    # #2060: Anthropic cache-creation tokens, billed at their own (premium)
+    # rate. Written to ``sleep_report_llm_usage.cache_write_tokens``, which
+    # the cost aggregation prices; other providers leave it at 0.
+    cache_write_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -62,8 +66,17 @@ class LLMCallBreakdown:
         ``cached_input_tokens`` is a sub-component of ``prompt_tokens``,
         not an additional axis. Use the per-class fields directly when
         computing cost.
+
+        ``cache_write_tokens`` (#2060) is added too: ``LLMResponse.total_tokens``
+        already counts Anthropic's cache-creation tokens, so leaving them out
+        here would make the breakdown disagree with ``tokens_used``.
         """
-        return self.input_tokens + self.output_tokens + self.cached_input_tokens
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cached_input_tokens
+            + self.cache_write_tokens
+        )
 
     def add_call(
         self,
@@ -71,6 +84,7 @@ class LLMCallBreakdown:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int,
+        cache_write_tokens: int = 0,
         count_call: bool = True,
     ) -> None:
         """Accumulate one LLM call's tokens into this breakdown.
@@ -86,6 +100,7 @@ class LLMCallBreakdown:
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cached_input_tokens += cached_input_tokens
+        self.cache_write_tokens += cache_write_tokens
         if count_call:
             self.calls += 1
 
@@ -116,6 +131,7 @@ def accumulate_llm_response(
         input_tokens=resp.input_tokens,
         output_tokens=resp.output_tokens,
         cached_input_tokens=resp.cached_input_tokens,
+        cache_write_tokens=resp.cache_write_tokens,
         count_call=count_call,
     )
     return breakdown
@@ -158,6 +174,36 @@ class PhaseResult:
     embedding_provider: str | None = None
     embedding_model: str | None = None
     embedding_tokens: int = 0
+
+
+class LLMSpendTracker:
+    """The LLM spend a Sleep phase accumulates while it runs (#2060).
+
+    The four LLM phases add every judge call's tokens here as they go. The
+    class-level defaults make the accumulators readable before ``execute()``
+    resets them, so ``record_spend`` works on a phase that raised early.
+
+    ``SleepOrchestrator._run_phase`` calls ``record_spend`` on a phase that
+    raised: the savepoint discards the phase's DB work, but the provider has
+    already billed the tokens, so they still go into the run's totals and
+    ``sleep_report_llm_usage`` rows.
+    """
+
+    _tokens_used: int = 0
+    _llm_failures: int = 0
+    _llm_breakdown: LLMCallBreakdown | None = None
+
+    def record_spend(self, result: PhaseResult) -> None:
+        """Copy the accumulated LLM spend onto ``result``.
+
+        ``llm_calls_used`` is left to the caller: it is the phase's share of
+        the shared ``SleepBudget``, which only the caller can measure.
+        """
+        result.tokens_used = self._tokens_used
+        result.llm_call_failures = self._llm_failures  # #1183
+        # #471: attach the per-(provider, model) breakdown for the child-row write.
+        if self._llm_breakdown is not None:
+            result.llm_breakdown = [self._llm_breakdown]
 
 
 @dataclass
@@ -352,6 +398,7 @@ class SleepReporter:
                         input_tokens=breakdown.input_tokens,
                         output_tokens=breakdown.output_tokens,
                         cached_input_tokens=breakdown.cached_input_tokens,
+                        cache_write_tokens=breakdown.cache_write_tokens,  # #2060
                         calls=breakdown.calls,
                         tokenizer_version=breakdown.tokenizer_version,
                     )
@@ -407,6 +454,7 @@ class SleepReporter:
                         "input_tokens": b.input_tokens,
                         "output_tokens": b.output_tokens,
                         "cached_input_tokens": b.cached_input_tokens,
+                        "cache_write_tokens": b.cache_write_tokens,  # #2060
                         "calls": b.calls,
                     }
                     for b in result.llm_breakdown

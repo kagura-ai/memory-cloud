@@ -33,7 +33,7 @@ from services.sleep.importance_reeval import ImportanceReevalPhase
 from services.sleep.measurement_retention import MeasurementRetentionPhase
 from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
-from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
+from services.sleep.reporter import LLMSpendTracker, PhaseResult, SleepBudget, SleepReporter
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -222,6 +222,8 @@ class SleepOrchestrator:
                 skip_reason="budget_exhausted",
             )
 
+        # #2060: the phase's share of the shared budget, for a phase that raises.
+        llm_calls_before = budget.llm_calls_used
         try:
             # #1229: every phase runs inside its own SAVEPOINT. A phase that
             # dies mid-flush used to invalidate the WHOLE shared transaction
@@ -260,11 +262,18 @@ class SleepOrchestrator:
                 error=str(e),
                 exc_info=True,
             )
-            return PhaseResult(
+            result = PhaseResult(
                 phase_name=name,
                 success=False,
                 error=str(e),
             )
+            # #2060: the savepoint rolled back the phase's DB work, but the
+            # LLM calls it made before raising were billed. Carry that spend
+            # so it reaches sleep_reports and sleep_report_llm_usage.
+            if isinstance(phase, LLMSpendTracker):
+                phase.record_spend(result)
+                result.llm_calls_used = budget.llm_calls_used - llm_calls_before
+            return result
 
     async def _get_sleep_mode(self, context_id: str | None) -> str:
         """Get the effective sleep_mode for a context.

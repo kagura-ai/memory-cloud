@@ -48,6 +48,7 @@ from services.sleep.prompts import (
 )
 from services.sleep.reporter import (
     LLMCallBreakdown,
+    LLMSpendTracker,
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
@@ -351,7 +352,7 @@ def _build_confidence_histogram(confidences: list[float]) -> dict[str, int]:
     return histogram
 
 
-class EdgeDiscoveryPhase:
+class EdgeDiscoveryPhase(LLMSpendTracker):
     """Discover missing edges between semantically related memories."""
 
     def __init__(
@@ -378,6 +379,17 @@ class EdgeDiscoveryPhase:
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
 
+    def record_spend(self, result: PhaseResult) -> None:
+        """LLM spend (``LLMSpendTracker``) plus the #475 embedding usage."""
+        super().record_spend(result)
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
+        result.embedding_calls_used = self._embedding_calls_used
+        result.embedding_tokens = self._embedding_tokens_used
+        if self._embedding_calls_used > 0:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
+
     async def execute(
         self,
         config: NeuralMemoryConfig,
@@ -393,6 +405,9 @@ class EdgeDiscoveryPhase:
         result = PhaseResult(phase_name="edge_discovery")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #2060: judge calls that raised, for ``record_spend`` when the phase
+        # itself raises (a completed run reports ``agg.failures``, the same count).
+        self._llm_failures = 0
         self._llm_breakdown = None
         self._embedding_calls_used = 0
         self._embedding_tokens_used = 0
@@ -503,18 +518,8 @@ class EdgeDiscoveryPhase:
 
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
-        result.tokens_used = self._tokens_used
+        self.record_spend(result)
         result.llm_call_failures = agg.failures  # #1183: feeds run-status grading
-        # #471: attach per-(provider, model) breakdown for child-row write.
-        if self._llm_breakdown is not None:
-            result.llm_breakdown = [self._llm_breakdown]
-        # #475: surface embedding usage; skip identity when no calls
-        # happened so no-memory early-returns don't fabricate it.
-        result.embedding_calls_used = self._embedding_calls_used
-        result.embedding_tokens = self._embedding_tokens_used
-        if self._embedding_calls_used > 0:
-            result.embedding_provider = self.embedding_service.provider
-            result.embedding_model = self.embedding_service.model
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),
@@ -896,6 +901,7 @@ class EdgeDiscoveryPhase:
         except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))
             stats.failures = 1
+            self._llm_failures += 1  # #2060: survives a later raise in the phase
             if (usage := billed_usage(e)) is not None:
                 # #2038: the failed call still spent these tokens — count them in the
                 # run's totals, but not as a successful call (the budget was

@@ -40,6 +40,7 @@ from services.sleep.prompts import (
 )
 from services.sleep.reporter import (
     LLMCallBreakdown,
+    LLMSpendTracker,
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
@@ -61,7 +62,7 @@ STALENESS_DAYS = 7
 BATCH_SIZE = 10
 
 
-class ImportanceReevalPhase:
+class ImportanceReevalPhase(LLMSpendTracker):
     """Re-evaluate memory importance using LLM + EMA smoothing."""
 
     def __init__(
@@ -203,11 +204,7 @@ class ImportanceReevalPhase:
 
         result.memories_processed = updated_count
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
-        result.tokens_used = self._tokens_used
-        result.llm_call_failures = self._llm_failures  # #1183
-        # #471: attach per-(provider, model) breakdown.
-        if self._llm_breakdown is not None:
-            result.llm_breakdown = [self._llm_breakdown]
+        self.record_spend(result)  # tokens, #1183 failures, #471 breakdown
         result.details = {
             "candidates": len(candidates),
             "updated": updated_count,

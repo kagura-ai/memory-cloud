@@ -569,3 +569,130 @@ class TestPhaseFailureIsolation:
         assert result.success is True
         db.begin_nested.assert_called_once()
         db.rollback.assert_not_awaited()
+
+
+class TestRaisedPhaseKeepsItsSpend:
+    """#2060: a phase that raises still reports the LLM spend it already made.
+
+    The savepoint discards the phase's DB work, but the provider billed the
+    tokens; the failed ``PhaseResult`` used to be bare, so that spend never
+    reached ``sleep_reports`` / ``sleep_report_llm_usage``.
+    """
+
+    @staticmethod
+    def _orchestrator():
+        db = AsyncMock()
+        db.begin_nested = MagicMock(return_value=AsyncMock())
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter"),
+        ):
+            return SleepOrchestrator(db)
+
+    @staticmethod
+    def _spending_phase():
+        from services.sleep.reporter import LLMCallBreakdown, LLMSpendTracker
+
+        class SpendThenRaise(LLMSpendTracker):
+            async def execute(self, config, user_id, workspace_id, context_id, budget, **kwargs):
+                # Two judge calls billed (one succeeded, one failed with usage)
+                # and one unbilled failure, then the phase dies.
+                budget.consume(llm_calls=2)
+                self._tokens_used = 170
+                self._llm_failures = 2
+                self._llm_breakdown = LLMCallBreakdown(
+                    provider="openai",
+                    model="gpt-5-nano",
+                    input_tokens=120,
+                    output_tokens=50,
+                    calls=1,
+                )
+                raise RuntimeError("died after the judge")
+
+        return SpendThenRaise()
+
+    @pytest.mark.asyncio
+    async def test_failed_phase_result_carries_the_spend(self):
+        budget = SleepBudget()
+        budget.consume(llm_calls=5)  # earlier phases
+
+        result = await self._orchestrator()._run_phase(
+            "consolidation",
+            self._spending_phase(),
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            budget,
+            uuid4(),
+        )
+
+        assert result.success is False
+        assert "died after the judge" in (result.error or "")
+        # Only this phase's share of the shared budget.
+        assert result.llm_calls_used == 2
+        assert result.tokens_used == 170
+        assert result.llm_call_failures == 2
+        assert len(result.llm_breakdown) == 1
+        assert result.llm_breakdown[0].total_tokens == 170
+        # Grading invariant: breakdown calls never exceed llm_calls_used.
+        assert sum(b.calls for b in result.llm_breakdown) <= result.llm_calls_used
+
+    @pytest.mark.asyncio
+    async def test_phase_without_spend_tracking_stays_bare(self):
+        phase = MagicMock()
+        phase.execute = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await self._orchestrator()._run_phase(
+            "merge_retention",
+            phase,
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            SleepBudget(),
+            uuid4(),
+        )
+
+        assert result.success is False
+        assert result.tokens_used == 0
+        assert result.llm_breakdown == []
+
+    def test_llm_phases_track_spend(self):
+        from services.sleep.consolidation import ConsolidationPhase
+        from services.sleep.dedup_merge import DedupMergePhase
+        from services.sleep.edge_discovery import EdgeDiscoveryPhase
+        from services.sleep.importance_reeval import ImportanceReevalPhase
+        from services.sleep.reporter import LLMSpendTracker
+
+        for phase_cls in (
+            EdgeDiscoveryPhase,
+            DedupMergePhase,
+            ImportanceReevalPhase,
+            ConsolidationPhase,
+        ):
+            assert issubclass(phase_cls, LLMSpendTracker), phase_cls.__name__
+
+    @pytest.mark.parametrize("phase_name", ["edge_discovery", "dedup_merge"])
+    def test_record_spend_carries_embedding_usage(self, phase_name):
+        from services.sleep.dedup_merge import DedupMergePhase
+        from services.sleep.edge_discovery import EdgeDiscoveryPhase
+
+        phase_cls = EdgeDiscoveryPhase if phase_name == "edge_discovery" else DedupMergePhase
+        with patch(f"services.sleep.{phase_name}.EmbeddingService") as MockEmb:
+            MockEmb.return_value.provider = "openai"
+            MockEmb.return_value.model = "text-embedding-3-small"
+            phase = phase_cls(AsyncMock(), MagicMock())
+        phase._embedding_calls_used = 3
+        phase._embedding_tokens_used = 900
+
+        result = PhaseResult(phase_name=phase_name, success=False)
+        phase.record_spend(result)
+
+        assert result.embedding_calls_used == 3
+        assert result.embedding_tokens == 900
+        assert result.embedding_provider == "openai"
+        assert result.embedding_model == "text-embedding-3-small"
+        # No LLM call happened: no fabricated breakdown row.
+        assert result.llm_breakdown == []
+        assert result.tokens_used == 0

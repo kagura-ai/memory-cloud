@@ -91,6 +91,7 @@ def _make_llm_response(parsed):
     resp.input_tokens = 80
     resp.output_tokens = 40
     resp.cached_input_tokens = 0
+    resp.cache_write_tokens = 0
     resp.provider = "openai"
     resp.model = "gpt-5-nano"
     resp.tokenizer_version = "v1"
@@ -434,6 +435,32 @@ class TestLLMJudge:
         else:
             assert dedup_phase._tokens_used == 0
             assert dedup_phase._llm_breakdown is None
+
+    async def test_parse_failure_counts_the_call_once(self, dedup_phase):
+        """#2060: a response that answered but fails to parse is ONE successful
+        call — not also a judge failure (the parse used to run inside the LLM try).
+        """
+        mem_a = _make_memory()
+        mem_b = _make_memory()
+        scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
+        budget = SleepBudget()
+        # A judgment that is not an object makes _parse_dedup_response raise.
+        parsed = {"judgments": ["not-an-object"]}
+        dedup_phase.llm_service.complete_json = AsyncMock(return_value=_make_llm_response(parsed))
+        dedup_phase._tokens_used = 0
+        dedup_phase._llm_breakdown = None
+        dedup_phase._llm_failures = 0
+
+        decisions = await dedup_phase._llm_judge(
+            [mem_a, mem_b], scores, "u", "ctx", "ws", budget, _make_config()
+        )
+
+        assert decisions == []
+        assert dedup_phase._llm_failures == 0
+        assert budget.llm_calls_used == 1
+        assert dedup_phase._tokens_used == 120
+        assert dedup_phase._llm_breakdown is not None
+        assert dedup_phase._llm_breakdown.calls == 1
 
 
 # ---------------------------------------------------------------------------

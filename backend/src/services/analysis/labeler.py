@@ -84,7 +84,7 @@ from services.analysis.prompts import (
     CLUSTER_LABEL_USER_JA,
 )
 from services.analysis.vector_pull import MemoryRecord
-from services.llm_service import LLMService
+from services.llm_service import LLMResponse, LLMService
 from services.sleep.reporter import LLMCallBreakdown, accumulate_llm_response
 from utils.logger import get_logger
 
@@ -207,6 +207,30 @@ def _format_representatives(reps: list[MemoryRecord]) -> str:
     return "\n".join(lines)
 
 
+def _prior_breakdowns(
+    prior_usages: tuple[LLMResponse, ...],
+    *,
+    winner: LLMCallBreakdown | None = None,
+    count_call: bool = True,
+) -> tuple[LLMCallBreakdown, ...]:
+    """Fold failed fallback attempts' billed usage into breakdowns (#1289).
+
+    Each attempt is attributed to the (provider, model) that billed it. An
+    attempt on the ``winner``'s pair folds into ``winner``; the others get
+    one entry per pair, which is returned. ``count_call=False`` (#2060) is
+    for a chain that failed end to end: its tokens count, its calls do not.
+    """
+    winner_pair = (winner.provider, winner.model) if winner is not None else None
+    by_pair: dict[tuple[str, str], LLMCallBreakdown] = {}
+    for prior in prior_usages:
+        pair = (prior.provider, prior.model)
+        if winner is not None and pair == winner_pair:
+            accumulate_llm_response(winner, prior, count_call=count_call)
+        else:
+            by_pair[pair] = accumulate_llm_response(by_pair.get(pair), prior, count_call=count_call)
+    return tuple(by_pair.values())
+
+
 async def _label_one_cluster(
     *,
     cluster_index: int,
@@ -285,6 +309,9 @@ async def _label_one_cluster(
                     cluster_index=cluster_index,
                     error=str(e),
                 )
+                # #2060: the failed attempts may still have billed tokens
+                # (an answer that would not parse). Keep them, not as calls,
+                # so the run's cost and usage rows include them.
                 return ClusterLabel(
                     cluster_index=cluster_index,
                     label="(unlabeled)",
@@ -293,6 +320,7 @@ async def _label_one_cluster(
                     representative_memory_ids=rep_ids,
                     breakdown=None,
                     failed=True,
+                    prior_breakdowns=_prior_breakdowns(e.prior_usages, count_call=False),
                 )
 
     # Frozenset guard: defense in depth across prompt evolutions —
@@ -320,18 +348,7 @@ async def _label_one_cluster(
     # so no LLMService shape change was needed. Same-pair attempts fold
     # into the winner's breakdown; different-pair attempts get one entry
     # per pair in ``prior_breakdowns``.
-    winner_pair = (result.response.provider, result.response.model)
-    prior_by_pair: dict[tuple[str, str], LLMCallBreakdown] = {}
-    for prior in result.prior_usages:
-        if (prior.provider, prior.model) == winner_pair:
-            breakdown.add_call(
-                input_tokens=prior.input_tokens,
-                output_tokens=prior.output_tokens,
-                cached_input_tokens=prior.cached_input_tokens,
-            )
-        else:
-            pair = (prior.provider, prior.model)
-            prior_by_pair[pair] = accumulate_llm_response(prior_by_pair.get(pair), prior)
+    prior_breakdowns = _prior_breakdowns(result.prior_usages, winner=breakdown)
 
     return ClusterLabel(
         cluster_index=cluster_index,
@@ -341,7 +358,7 @@ async def _label_one_cluster(
         representative_memory_ids=filtered_reps,
         breakdown=breakdown,
         failed=False,
-        prior_breakdowns=tuple(prior_by_pair.values()),
+        prior_breakdowns=prior_breakdowns,
     )
 
 

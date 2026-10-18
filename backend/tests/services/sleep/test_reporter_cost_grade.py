@@ -275,3 +275,69 @@ class TestReporterCostGradeChildRows:
         assert report.dedup_result["embedding_tokens"] == 1000
         assert report.reindex_result["embedding_calls"] == 8
         assert report.reindex_result["embedding_tokens"] == 4096
+
+
+class TestCacheWriteTokens:
+    """#2060: Anthropic cache-write tokens are carried and written, so they get priced."""
+
+    def test_add_call_accumulates_cache_write(self):
+        b = LLMCallBreakdown(provider="anthropic", model="claude-sonnet-4-6")
+        b.add_call(
+            input_tokens=100, output_tokens=50, cached_input_tokens=10, cache_write_tokens=40
+        )
+        b.add_call(input_tokens=0, output_tokens=0, cached_input_tokens=0)
+        assert b.cache_write_tokens == 40
+        # total_tokens rebuilds LLMResponse.total_tokens, which includes the
+        # cache-write tokens (anthropic_provider.extract_usage).
+        assert b.total_tokens == 200
+
+    def test_accumulate_llm_response_carries_cache_write(self):
+        resp = LLMResponse(
+            parsed={},
+            total_tokens=230,
+            input_tokens=100,
+            output_tokens=50,
+            cached_input_tokens=30,
+            cache_write_tokens=50,
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+        )
+        b = accumulate_llm_response(None, resp)
+        assert b.cache_write_tokens == 50
+        assert b.total_tokens == resp.total_tokens
+        b = accumulate_llm_response(b, resp, count_call=False)
+        assert b.cache_write_tokens == 100
+        assert b.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_complete_report_writes_cache_write_tokens(self):
+        db = AsyncMock()
+        db.add = MagicMock()
+        reporter = SleepReporter(db)
+        report = MagicMock()
+        report.id = uuid4()
+        report.embedding_provider = None
+        report.consolidation_result = None
+        breakdown = LLMCallBreakdown(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            input_tokens=100,
+            output_tokens=50,
+            cache_write_tokens=40,
+            calls=1,
+        )
+        result = PhaseResult(
+            phase_name="consolidation",
+            llm_calls_used=1,
+            tokens_used=190,
+            llm_breakdown=[breakdown],
+        )
+
+        await reporter.complete_report(report, [result])
+
+        rows = [
+            c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], SleepReportLLMUsage)
+        ]
+        assert len(rows) == 1
+        assert rows[0].cache_write_tokens == 40
+        assert report.consolidation_result["llm_breakdown"][0]["cache_write_tokens"] == 40

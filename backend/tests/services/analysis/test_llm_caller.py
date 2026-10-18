@@ -341,3 +341,62 @@ async def test_configuration_error_propagates_without_fallback() -> None:
             prompt="p",
         )
     assert llm_service.complete_json.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_chain_carries_the_billed_attempts() -> None:
+    """#2060: when every model fails, the error carries the usage the failed
+    attempts still billed, so the labeler can count it."""
+
+    def _usage(model: str, input_tokens: int) -> LLMResponse:
+        return LLMResponse(
+            parsed={},
+            total_tokens=input_tokens + 10,
+            input_tokens=input_tokens,
+            output_tokens=10,
+            cached_input_tokens=0,
+            provider="openai",
+            model=model,
+        )
+
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(
+        side_effect=[
+            LLMServiceError("nano unparseable", usage=_usage("gpt-5-nano", 50)),
+            LLMServiceError("5.5 unparseable", usage=_usage("gpt-5.5", 70)),
+        ]
+    )
+
+    with pytest.raises(AnalysisLLMUpstreamError) as excinfo:
+        await call_with_fallback(
+            llm_service,
+            user_id="u1",
+            workspace_id="w1",
+            context_id=None,
+            system_prompt="sys",
+            prompt="p",
+        )
+
+    priors = excinfo.value.prior_usages
+    assert [(u.model, u.input_tokens) for u in priors] == [("gpt-5-nano", 50), ("gpt-5.5", 70)]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_chain_without_usage_carries_none() -> None:
+    """#2060: failures that never answered leave ``prior_usages`` empty."""
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(
+        side_effect=[LLMServiceError("nano down"), LLMServiceError("5.5 down")]
+    )
+
+    with pytest.raises(AnalysisLLMUpstreamError) as excinfo:
+        await call_with_fallback(
+            llm_service,
+            user_id="u1",
+            workspace_id="w1",
+            context_id=None,
+            system_prompt="sys",
+            prompt="p",
+        )
+
+    assert excinfo.value.prior_usages == ()

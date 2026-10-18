@@ -74,9 +74,21 @@ class AnalysisLLMUpstreamError(ExternalServiceError):
     ``MemoryCloudException`` hierarchy — distinct from
     ``OpenAIError`` (EXT-201) which is used by other services for
     direct OpenAI errors that did not exhaust a fallback chain.
+
+    ``prior_usages`` (#2060) is the usage the failed attempts still billed
+    (same shape as ``CallResult.prior_usages``), so the labeler counts the
+    spend of a chain that failed end to end. It stays off ``details``: it is
+    cost data for the caller, not part of the API error body.
     """
 
-    def __init__(self, message: str, attempted_models: list[str], provider: str = "openai") -> None:
+    def __init__(
+        self,
+        message: str,
+        attempted_models: list[str],
+        provider: str = "openai",
+        prior_usages: tuple[LLMResponse, ...] = (),
+    ) -> None:
+        self.prior_usages = prior_usages
         super().__init__(
             provider,
             message,
@@ -212,6 +224,7 @@ async def call_with_fallback(
         ),
         attempted_models=list(fallback_chain),
         provider=provider,
+        prior_usages=tuple(prior_usages),
     )
 
 

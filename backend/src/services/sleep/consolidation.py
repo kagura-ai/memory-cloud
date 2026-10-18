@@ -48,6 +48,7 @@ from services.sleep.prompts import (
 )
 from services.sleep.reporter import (
     LLMCallBreakdown,
+    LLMSpendTracker,
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
@@ -147,7 +148,7 @@ class _ConsolidationTally:
     llm_archive_guarded: int = 0
 
 
-class ConsolidationPhase:
+class ConsolidationPhase(LLMSpendTracker):
     """Consolidate working memories with optional LLM judgment."""
 
     def __init__(
@@ -472,11 +473,7 @@ class ConsolidationPhase:
 
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
-        result.tokens_used = self._tokens_used
-        result.llm_call_failures = self._llm_failures  # #1183
-        # #471: attach per-(provider, model) breakdown.
-        if self._llm_breakdown is not None:
-            result.llm_breakdown = [self._llm_breakdown]
+        self.record_spend(result)  # tokens, #1183 failures, #471 breakdown
         result.details = {
             "working_count": len(working),
             "rule_promoted": tally.promoted,

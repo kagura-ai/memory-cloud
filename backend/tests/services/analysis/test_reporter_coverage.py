@@ -189,6 +189,34 @@ class TestAggregateBreakdownTotals:
         assert totals.cached_input_tokens == 5
         assert totals.calls == 2
 
+    def test_failed_cluster_spend_and_cache_writes_ride_totals(self):
+        """#2060: a cluster whose whole fallback chain failed still carries the
+        billed attempts in ``prior_breakdowns`` (calls=0); its tokens, cache
+        writes included, reach the totals while ``calls`` stays the success count."""
+        labels = [
+            _cluster_label(
+                cluster_index=0,
+                breakdown=None,
+                failed=True,
+                prior_breakdowns=(
+                    LLMCallBreakdown(
+                        provider="openai",
+                        model="gpt-5-nano",
+                        input_tokens=60,
+                        output_tokens=30,
+                        cache_write_tokens=12,
+                        calls=0,
+                    ),
+                ),
+            ),
+        ]
+        breakdowns, totals = _aggregate_breakdown_totals(labels)
+        assert len(breakdowns) == 1
+        assert totals.input_tokens == 60
+        assert totals.output_tokens == 30
+        assert totals.cache_write_tokens == 12
+        assert totals.calls == 0
+
 
 class TestComputeActualCostCents:
     """``_compute_actual_cost_cents``: snapshot-priced rounded-up cents."""
@@ -250,6 +278,35 @@ class TestComputeActualCostCents:
         snapshot = {"rates": {"input_tokens": 1.0, "output_tokens": 0.0}}
         # cached_per_m = 1.0 / 10 = 0.1 → 10M * 0.1 / 1M = $1.00 → 100 cents.
         assert _compute_actual_cost_cents(totals, snapshot) == 100
+
+    def test_cache_write_priced_from_the_snapshot(self):
+        """#2060: Anthropic cache-write tokens are priced at the snapshot's rate."""
+        totals = _CostTotals(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            calls=1,
+            cache_write_tokens=1_000_000,
+        )
+        snapshot = {
+            "rates": {"input_tokens": 3.0, "output_tokens": 15.0, "cache_write_tokens": 3.75}
+        }
+        # 1M * $3.75 / M = $3.75 → 375 cents.
+        assert _compute_actual_cost_cents(totals, snapshot) == 375
+
+    def test_cache_write_rate_defaults_to_input_premium(self):
+        """#2060: without a ``cache_write_tokens`` rate, a cache write costs
+        1.25x the input rate (Anthropic's 5-minute cache-write premium)."""
+        totals = _CostTotals(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            calls=1,
+            cache_write_tokens=1_000_000,
+        )
+        snapshot = {"rates": {"input_tokens": 4.0, "output_tokens": 0.0}}
+        # 1M * (4.0 * 1.25) / M = $5.00 → 500 cents.
+        assert _compute_actual_cost_cents(totals, snapshot) == 500
 
 
 class TestIndexMembersByCluster:

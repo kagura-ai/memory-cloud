@@ -77,6 +77,7 @@ def _make_llm_response(decisions, *, total_tokens=42):
     resp.input_tokens = 30
     resp.output_tokens = 10
     resp.cached_input_tokens = 2
+    resp.cache_write_tokens = 0
     resp.provider = "openai"
     resp.model = "gpt-5-nano"
     resp.tokenizer_version = "o200k_base"
