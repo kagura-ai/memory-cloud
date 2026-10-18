@@ -333,6 +333,13 @@ async def write_content_chunks(
     return len(points)
 
 
+#: Summary-point payload keys ``build_memory_point`` writes only when the
+#: memory has the value: a payload sync removes them from the chunk points
+#: when the memory no longer does (a cleared location must not keep matching
+#: ``filters.near`` through a chunk).
+_OPTIONAL_PAYLOAD_KEYS = ("context", "location")
+
+
 async def sync_content_chunk_payload(
     db: AsyncSession,
     memory: Memory,
@@ -347,7 +354,8 @@ async def sync_content_chunk_payload(
     the Sleep importance re-eval and promotions), so its chunk vectors are
     still right. A promotion moves ``scope`` in Postgres only, so this is what
     carries it to the chunk points. Every copied field is set, not only the
-    changed ones (the payload is rebuilt from the row).
+    changed ones (the payload is rebuilt from the row), and the optional
+    fields the payload no longer has are removed.
 
     Returns:
         True when the chunk points need nothing more: they carry the payload,
@@ -364,7 +372,10 @@ async def sync_content_chunk_payload(
         if not chunks_enabled or not chunk_points_supported():
             return True
         return await sync_chunk_points_payload(
-            memory.id, chunk_payload_updates(base_payload), collection_name
+            memory.id,
+            chunk_payload_updates(base_payload),
+            collection_name,
+            delete_keys=[k for k in _OPTIONAL_PAYLOAD_KEYS if k not in base_payload] or None,
         )
     except Exception as e:
         _log_failure(memory, collection_name, e)
@@ -413,7 +424,6 @@ async def rebuild_content_chunks(
     embed_svc: Any,
     collection_name: str,
     context_id: Any,
-    usage: dict[str, int] | None = None,
 ) -> int:
     """Rebuild the chunk points of a page of one context's memories in ``collection_name``.
 
@@ -435,8 +445,6 @@ async def rebuild_content_chunks(
         embed_svc: The target model's embedding service.
         collection_name: The target collection.
         context_id: The context of ``rows``.
-        usage: Optional out-parameter: the page's ``embed_batch`` usage summed
-            (``cached``, ``requests``, ``tokens``).
 
     Returns:
         The number of chunk points written.
@@ -473,9 +481,8 @@ async def rebuild_content_chunks(
         return 0
     vectors: dict[tuple[Any, int], list[float]] = {}
     digests = {memory.id: content_hash(memory.content) for memory in plain}
-    total: dict[str, int] = usage if usage is not None else {}
-    for key in ("cached", "requests", "tokens"):
-        total.setdefault(key, 0)
+    # The page's embed usage, summed for the log line.
+    total = {"cached": 0, "requests": 0, "tokens": 0}
     current: Memory | None = None
     try:
         for user_id, jobs in by_user.items():

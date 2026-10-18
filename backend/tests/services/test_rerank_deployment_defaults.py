@@ -311,33 +311,29 @@ class TestContentChunksDefault:
         assert on.content_chunks_enabled is True
         assert off.content_chunks_enabled is False
 
-    @pytest.mark.parametrize("default", [True, False])
-    async def test_create_or_get_backfills_a_materialised_row_that_is_on(
-        self, monkeypatch, default
-    ):
-        """A row-less legacy context can hold memories: an "on" default queues them."""
+    async def test_create_or_get_never_turns_the_flag_on(self, monkeypatch):
+        """A row-less legacy context already holds memories and any reader
+        materialises its row: turning chunks on stays its owner's choice."""
         monkeypatch.setattr(
             "repositories.config_repository.get_settings",
-            lambda: _settings(default_content_chunks_enabled=default),
+            lambda: _settings(default_content_chunks_enabled=True),
         )
-        order: list[str] = []
         db = MagicMock()
         db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
-        db.flush = AsyncMock()
-        db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        db.commit = AsyncMock()
 
         async def _refresh(obj):
             obj.semantic_weight, obj.bm25_weight, obj.fetch_factor = 0.6, 0.4, 3
 
         db.refresh = _refresh
         repo = ContextSearchConfigRepository(db)
-        backfill = AsyncMock(side_effect=lambda _ctx: order.append("backfill") or 2)
+        backfill = AsyncMock()
         monkeypatch.setattr(repo, "_queue_content_chunk_backfill", backfill)
 
         row = await repo.create_or_get(uuid4())
 
-        assert row.content_chunks_enabled is default
-        assert order == (["backfill", "commit"] if default else ["commit"])
+        assert row.content_chunks_enabled is not True
+        backfill.assert_not_awaited()
 
     async def test_reset_never_turns_the_flag_on(self, monkeypatch):
         monkeypatch.setattr(

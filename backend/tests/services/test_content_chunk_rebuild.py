@@ -233,7 +233,9 @@ async def test_a_store_without_chunk_points_is_a_no_op():
 
 
 async def test_page_usage_is_summed_over_the_batches_and_hashes_are_written():
-    """#2015 PR 2b: the page's embed usage, and each point's content_hash."""
+    """#2015 PR 2b: the page's embed usage on the log line, and each point's content_hash."""
+    import structlog
+
     from utils.content_chunks import content_hash
 
     rows = [_memory(LONG), _memory(LONG, user_id="v")]  # two users, two requests
@@ -244,9 +246,9 @@ async def test_page_usage_is_summed_over_the_batches_and_hashes_are_written():
         return [[0.0] for _ in texts]
 
     svc.embed_batch = AsyncMock(side_effect=_embed)
-    usage: dict[str, int] = {}
     flag = AsyncMock(side_effect=[True, True])
     with (
+        structlog.testing.capture_logs() as logs,
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "content_chunks_enabled", flag),
         patch.object(writer, "delete_chunk_points", AsyncMock()),
@@ -259,8 +261,8 @@ async def test_page_usage_is_summed_over_the_batches_and_hashes_are_written():
             embed_svc=svc,
             collection_name=TARGET,
             context_id=CTX,
-            usage=usage,
         )
-    assert usage == {"cached": 2, "requests": 2, "tokens": 100}
+    event = next(e for e in logs if e["event"] == "content_chunks_rebuilt")
+    assert (event["tokens"], event["cached"]) == (100, 2)
     hashes = {p[2]["content_hash"] for call in upsert.await_args_list for p in call.args[0]}
     assert hashes == {content_hash(LONG)}

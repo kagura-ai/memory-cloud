@@ -31,8 +31,8 @@ def search_config_defaults(settings: Settings) -> dict[str, Any]:
     The one place the deployment default (``DEFAULT_USE_RERANK`` /
     ``DEFAULT_RERANKER_PROVIDER`` / ``DEFAULT_RERANKER_MODEL``) becomes row
     values. Shared by :func:`new_search_config_defaults` (a new context's row:
-    ``ContextService.create_context``, ``setup_resource``,
-    :meth:`ContextSearchConfigRepository.create_or_get`, ``/system/info``),
+    ``ContextService.create_context``, ``setup_resource``, ``/system/info``),
+    :meth:`ContextSearchConfigRepository.create_or_get`,
     :meth:`ContextSearchConfigRepository.reset_to_default`, the MCP
     ``update_search_config`` fallbacks and the legacy-row
     materialisation in ``embedding_migration_service.switch_context_embedding``.
@@ -66,15 +66,15 @@ def new_search_config_defaults(settings: Settings) -> dict[str, Any]:
     """Row values for a NEW context search config (#2015 D8).
 
     :func:`search_config_defaults` plus ``content_chunks_enabled`` from
-    ``DEFAULT_CONTENT_CHUNKS_ENABLED``. Only where a config row is created —
-    ``ContextService.create_context``, ``setup_resource``,
-    :meth:`ContextSearchConfigRepository.create_or_get` — and in
+    ``DEFAULT_CONTENT_CHUNKS_ENABLED``. Only where a NEW context is created —
+    ``ContextService.create_context``, ``setup_resource`` — and in
     ``/system/info``. Never in :meth:`ContextSearchConfigRepository.reset_to_default`
     (a reset would let an editor turn chunks on, past the owner rule),
-    ``cli/apply_rerank_defaults.py`` or the migration's legacy-row
-    materialisation: those rewrite or recreate an existing context's row,
-    and turning chunks on there sends its content to the provider without
-    its owner's choice.
+    :meth:`ContextSearchConfigRepository.create_or_get` (a legacy context's
+    row, materialised by any reader), ``cli/apply_rerank_defaults.py`` or the
+    migration's legacy-row materialisation: those rewrite or recreate an
+    existing context's row, and turning chunks on there sends its content to
+    the provider without its owner's choice.
     """
     return {
         **search_config_defaults(settings),
@@ -140,24 +140,17 @@ class ContextSearchConfigRepository:
 
         # Create default config. The reranker fields are passed explicitly so
         # the lazily materialized row (a recall on a row-less legacy context)
-        # gets the same deployment default as create_context (#1572), the
-        # content chunk default included (#2015 D8) — with its backfill, since
-        # such a context can already hold memories.
+        # gets the same deployment default as create_context (#1572). Not the
+        # content chunk default (#2015 D8): this is an existing context, its
+        # memories already written, and any reader materialises the row —
+        # turning chunks on stays its owner's choice.
         logger.info("config_creating_default", context_id=str(context_id))
         config = ContextSearchConfig(
-            context_id=context_id, **new_search_config_defaults(get_settings())
+            context_id=context_id, **search_config_defaults(get_settings())
         )
         self.db.add(config)
-        backfill_queued: int | None = None
-        if config.content_chunks_enabled is True:
-            await self.db.flush()
-            backfill_queued = await self._queue_content_chunk_backfill(context_id)
         await self.db.commit()
         await self.db.refresh(config)
-        if backfill_queued is not None:
-            logger.info(
-                "content_chunks_backfill_queued", context_id=str(context_id), count=backfill_queued
-            )
 
         logger.info(
             "config_created",

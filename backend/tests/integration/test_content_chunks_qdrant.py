@@ -628,11 +628,19 @@ async def test_a_metadata_only_sync_moves_the_payload_and_keeps_the_vectors(qdra
 
     memory_id = uuid4()
     await _write(collection, memory_id, chunks=2)
+    await qdrant.set_payload(
+        collection,
+        payload={"location": {"lat": 1.0, "lon": 2.0}},
+        points=Filter(
+            must=[FieldCondition(key=CHUNK_OF_FIELD, match=MatchValue(value=str(memory_id)))]
+        ),
+    )
 
     ok = await sync_chunk_points_payload(
         memory_id,
         {"scope": "persistent", "importance": 0.9, "summary_tokens": "t"},
         collection,
+        delete_keys=["location"],
     )
 
     assert ok is True
@@ -649,6 +657,7 @@ async def test_a_metadata_only_sync_moves_the_payload_and_keeps_the_vectors(qdra
         assert point.payload["scope"] == "persistent"
         assert point.payload["importance"] == 0.9
         assert "summary_tokens" not in point.payload
+        assert "location" not in point.payload
         assert point.payload["chunk_text"] in {"t0", "t1"}
         assert point.payload["context_id"] == _CTX
         assert point.vector[qdrant_module.KAGURA_MEMORIES_VECTOR_NAME] == pytest.approx(_CHUNK_VEC)

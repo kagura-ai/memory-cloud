@@ -31,10 +31,12 @@ async def _log_unsearchable_backlog(db) -> None:
 
     #2015 D6: the failures are also split by the error code that
     ``embedding_failure_values`` puts first: ``capped`` (the embedding spend
-    cap, ``QUOTA-002``), ``configuration`` (no credential or plan feature,
-    ``CFG-*`` / ``FEAT-*``; both are retried at no cost once the workspace
-    is fixed) and ``other`` — so a capped workspace is not read as an
-    unsearchable one. Rows failed before the prefix existed count as other.
+    cap, ``QUOTA-002``), ``configuration`` (``CFG-*`` / ``FEAT-*``: no
+    credential or plan feature, and an unreachable self-hosted endpoint,
+    which the retry policy treats the same way — ``is_configuration_failure``;
+    all of these are retried without spending the budget) and ``other`` — so
+    a capped workspace is not read as an unsearchable one. Rows failed before
+    the prefix existed count as other.
     """
     from sqlalchemy import func, or_
 

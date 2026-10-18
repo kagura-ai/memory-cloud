@@ -449,3 +449,30 @@ class TestReindexContentChangedSplit:
         assert result.details["failed"] == 1
         assert result.embedding_tokens == 8
         assert result.embedding_calls_used == 2
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    async def test_no_chunk_call_counted_without_a_provider_request(
+        self, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        """A cache-only batch, or one refused before the request (spend cap)."""
+        mock_flag.return_value = True
+        mem = _make_memory()
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 2))
+
+        async def _write(db, memory, *, usage=None, **kwargs):
+            usage.update(cached=3, requests=0, tokens=0)
+            return 3
+
+        with patch("services.sleep.reindex.write_content_chunks", AsyncMock(side_effect=_write)):
+            result = await reindex_phase.execute(
+                changed_memory_ids={mem.id},
+                user_id="user-1",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        assert result.embedding_calls_used == 1  # the summary only
+        assert result.details["content_chunk_rewrites"] == 1

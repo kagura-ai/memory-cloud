@@ -752,10 +752,27 @@ async def test_sync_copies_the_payload_without_embedding():
             _db(True), memory, base_payload=base, collection_name="c"
         )
     assert ok is True
-    # The BM25 token fields are not copied (chunk points have no sparse vector).
+    # The BM25 token fields are not copied (chunk points have no sparse vector),
+    # and the optional fields the memory does not have are removed.
     sync.assert_awaited_once_with(
-        memory.id, {"summary": "s", "importance": 0.9, "scope": "persistent"}, "c"
+        memory.id,
+        {"summary": "s", "importance": 0.9, "scope": "persistent"},
+        "c",
+        delete_keys=["context", "location"],
     )
+
+
+async def test_sync_keeps_the_optional_fields_the_memory_has():
+    base = {"summary": "s", "context": {"k": 1}, "location": {"lat": 1.0, "lon": 2.0}}
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "sync_chunk_points_payload", AsyncMock(return_value=True)) as sync,
+    ):
+        await writer.sync_content_chunk_payload(
+            _db(True), _memory(LONG), base_payload=base, collection_name="c"
+        )
+    assert sync.await_args.args[1] == base
+    assert sync.await_args.kwargs["delete_keys"] is None
 
 
 @pytest.mark.parametrize(

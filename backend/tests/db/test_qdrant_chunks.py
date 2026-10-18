@@ -300,3 +300,13 @@ async def test_sync_chunk_points_payload_is_a_no_op_off_qdrant(monkeypatch):
     monkeypatch.setattr(qmod, "_active_store", lambda: object())
     assert await sync_chunk_points_payload(uuid4(), {"scope": "persistent"}, "c") is True
     client.set_payload.assert_not_awaited()
+
+
+async def test_sync_chunk_points_payload_removes_the_given_keys(mock_client):
+    from db.qdrant import sync_chunk_points_payload
+
+    mid = uuid4()
+    await sync_chunk_points_payload(mid, {"scope": "persistent"}, "c", delete_keys=["location"])
+    call = mock_client.delete_payload.await_args.kwargs
+    assert call["keys"] == ["location"]
+    assert call["points"].must[0].match == MatchValue(value=str(mid))

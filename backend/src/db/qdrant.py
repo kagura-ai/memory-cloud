@@ -1121,13 +1121,15 @@ async def sync_chunk_points_payload(
     memory_id: UUID,
     payload: dict[str, Any],
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
+    delete_keys: list[str] | None = None,
 ) -> bool:
     """Copy a memory's summary-point payload onto its content chunk points (#2015).
 
     No embedding: the Sleep reindex uses it for a memory whose metadata, not
     its content, changed (an importance re-eval, a promotion), so the chunk
-    vectors stay and only the copied fields move. Same failure contract as a
-    payload cascade: chunks that cannot be updated are deleted.
+    vectors stay and only the copied fields move; ``delete_keys`` are removed
+    from them (optional fields the memory no longer has). Same failure
+    contract as a payload cascade: chunks that cannot be updated are deleted.
 
     Returns:
         True when the chunk points (if any) carry ``payload``, False when they
@@ -1140,7 +1142,7 @@ async def sync_chunk_points_payload(
     if _active_store() is not None:
         return True
     return await _cascade_payload_to_chunks(
-        get_qdrant_client(), memory_id, payload, None, collection_name
+        get_qdrant_client(), memory_id, payload, delete_keys, collection_name
     )
 
 

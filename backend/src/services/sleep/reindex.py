@@ -204,7 +204,7 @@ class ReindexPhase:
             "reindexed": reindexed,
             "failed": failed,
             "failed_ids": failed_ids[:20],  # Cap for report size
-            # #2015: memories whose content chunks were re-embedded.
+            # #2015: memories whose content chunk points were rewritten.
             "content_chunk_rewrites": chunk_rewrites,
         }
 
@@ -228,14 +228,17 @@ class ReindexPhase:
         payload: dict,
         chunks_enabled: bool | None,
     ) -> bool:
-        """Rewrite the memory's chunk points; True when its chunks were embedded.
+        """Rewrite the memory's chunk points; True when chunk points were written.
 
-        The chunk embedding counts as one embedding call with its tokens
-        (#2015), also when the write then failed — the provider billed it.
+        A provider request for the chunks counts as one embedding call with
+        its tokens (#2015), also when the write then failed — the provider
+        billed it. A batch served from the cache alone sends no request and
+        counts none.
         """
         usage: dict[str, int] = {}
+        written = 0
         try:
-            await write_content_chunks(
+            written = await write_content_chunks(
                 self.db,
                 memory,
                 base_payload=payload,
@@ -245,9 +248,9 @@ class ReindexPhase:
                 usage=usage,
             )
         finally:
-            if "tokens" in usage:
-                self._account_embedding(result, usage["tokens"])
-        return "tokens" in usage
+            if usage.get("requests"):
+                self._account_embedding(result, usage.get("tokens", 0))
+        return bool(written)
 
     def _account_embedding(self, result: PhaseResult, tokens: int) -> None:
         """Count one embedding call and its tokens on ``result``."""
