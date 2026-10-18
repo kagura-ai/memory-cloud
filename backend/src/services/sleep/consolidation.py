@@ -40,6 +40,7 @@ from models.memory import (
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService, billed_usage
+from services.resource_indexer import unshared_point_id
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     CONSOLIDATION_JUDGE_SYSTEM,
@@ -243,7 +244,7 @@ class ConsolidationPhase(LLMSpendTracker):
                 to_promote[memory.id] = (memory, age_days)
             elif should_delete:
                 try:
-                    if not await self._archive_tombstone(user_id, memory.id):
+                    if not await self._archive_tombstone(user_id, memory):
                         continue
                     tally.deleted += 1
                     await self._record_action(
@@ -377,7 +378,7 @@ class ConsolidationPhase(LLMSpendTracker):
                     if has_graph:
                         neural = await graph_service.get_node_metrics(str(memory_id))
                     if not neural or neural["is_isolated"]:
-                        if not await self._archive_tombstone(user_id, memory_id):
+                        if not await self._archive_tombstone(user_id, mem):
                             continue
                         tally.llm_archived += 1
                         await self._record_action(
@@ -496,7 +497,7 @@ class ConsolidationPhase(LLMSpendTracker):
 
         return result
 
-    async def _archive_tombstone(self, user_id: str, memory_id: UUID) -> bool:
+    async def _archive_tombstone(self, user_id: str, memory: Memory) -> bool:
         """Tombstone one archive candidate, then drop its vector (#1520).
 
         Shared by the rule and LLM paths so the archive contract lives once.
@@ -512,7 +513,13 @@ class ConsolidationPhase(LLMSpendTracker):
         still recorded: rollback re-embeds (upsert) and the point is filtered
         at read time by the PG row, so an orphan is a logged degradation, not a
         lost restore.
+
+        #2065: the vector deleted is the row's own, by the rule ``forget``
+        follows: ``Memory.point_id`` (a resource-indexer row's is the
+        indexer's, not its id), unless another live row still names it
+        (``unshared_point_id``).
         """
+        memory_id = memory.id
         # #1523: the fetch excluded pinned rows, but the LLM pass runs between
         # fetch and stamp — a pin landing in that window must still win, so the
         # exemption rides on the UPDATE itself (0 rows → skipped, like any
@@ -528,7 +535,14 @@ class ConsolidationPhase(LLMSpendTracker):
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
             return False
         try:
-            await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
+            point_id: UUID | None = memory.point_id
+            if point_id != memory_id:
+                # Its own savepoint: a failed lookup must not abort the run's
+                # transaction from inside this best-effort step.
+                async with self.db.begin_nested():
+                    point_id = await unshared_point_id(self.db, memory_id, memory.point_id)
+            if point_id is not None:
+                await delete_memory_from_qdrant(user_id, point_id, self.collection_name)
         except Exception as e:  # noqa: BLE001 — the tombstone is the truth; log the orphan
             logger.warning(
                 "consolidation_archive_vector_delete_failed",

@@ -20,6 +20,29 @@ from services.sleep.prompts import EDGE_DISCOVERY_PROMPT_REVISION
 from services.sleep.undo import ShadowEdgeRevert
 
 
+class _Savepoint:
+    """``AsyncSession.begin_nested()`` double: an async context manager that
+    records whether its block raised (#2065: every rollback undo runs in one)."""
+
+    def __init__(self, log: list[bool]) -> None:
+        self._log = log
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._log.append(exc_type is not None)
+        return False
+
+
+def _with_savepoints(db):
+    """Give an AsyncMock session a working ``begin_nested``; ``db.savepoints``
+    lists, per savepoint, whether it was rolled back."""
+    db.savepoints = []
+    db.begin_nested = MagicMock(side_effect=lambda: _Savepoint(db.savepoints))
+    return db
+
+
 @pytest.fixture(autouse=True)
 def _point_writer_lock():
     """#1798: a restore takes the point-writer lock — one ``db.execute`` more
@@ -553,7 +576,7 @@ class TestShadowMergeRollbackEdgeMismatch:
 
         mock_db.execute.side_effect = _execute
         mock_db.rollback = AsyncMock()
-        return mock_db
+        return _with_savepoints(mock_db)
 
     @pytest.mark.asyncio
     async def test_edge_mismatch_does_not_raise(self, user_id, workspace_id):
@@ -708,7 +731,7 @@ class TestRollbackActionDispatch:
 
         db.execute.side_effect = _execute
         db.rollback = AsyncMock()
-        return db
+        return _with_savepoints(db)
 
     @staticmethod
     def _action(action_type, **kw):
@@ -899,6 +922,7 @@ class TestRollbackActionDispatch:
         cfg.scalar_one_or_none.return_value = None
         restore = MagicMock()
         restore.rowcount = 0
+        restore.one_or_none.return_value = None  # #2065: the UPDATE returns the row
         qdrant = AsyncMock()
         with patch("db.qdrant.update_memory_payload_in_qdrant", qdrant):
             data = await self._run([action], user_id, workspace_id, extra=[cfg, restore])
@@ -929,7 +953,8 @@ class TestRollbackActionDispatch:
         cfg = MagicMock()
         cfg.scalar_one_or_none.return_value = None
         restore = MagicMock()
-        restore.rowcount = 0  # WHERE ... AND details->'tool_trigger' IS NULL matched nothing
+        restore.rowcount = 0
+        restore.one_or_none.return_value = None  # #2065: the UPDATE returns the row  # WHERE ... AND details->'tool_trigger' IS NULL matched nothing
         db = self._db(report, [action], [cfg, restore])
         captured: list[str] = []
         original = db.execute.side_effect
@@ -1033,6 +1058,8 @@ class TestRollbackActionDispatch:
         ], summary
         # …and the following action still ran.
         assert summary["promotions_reversed"] == 1, summary
+        # #2065: each undo ran in its own savepoint; only the failed one rolled back.
+        assert db.savepoints == [True, False]
         assert data.get("error") == "partial_rollback"
         self._assert_partial_rollback_advice(data)
         # The exception text is in the log only.

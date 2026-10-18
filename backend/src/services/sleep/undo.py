@@ -14,7 +14,7 @@ and the error says so explicitly.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -173,6 +173,11 @@ class UndoMergeError(Exception):
         self.message = message
 
 
+#: What ``re_embed_memory_to_qdrant`` handed to the embedding sweep (#2061,
+#: #2065): nothing, the memory's content chunks, or its point.
+RequeuedFor = Literal["chunks", "point"] | None
+
+
 async def re_embed_memory_to_qdrant(
     memory: Any,
     user_id: str,
@@ -182,71 +187,75 @@ async def re_embed_memory_to_qdrant(
     collection_name: str,
     *,
     db: AsyncSession | None = None,
-) -> bool:
+) -> RequeuedFor:
     """Re-embed a restored memory back into Qdrant.
 
     Merge hard-deletes the loser's vector (orphan-vector prevention), so any
     restore path must rebuild it. Shared by run-level rollback and per-merge
-    undo. With ``db`` the memory's content chunk points (#2015) are rebuilt
-    too when its context has ``content_chunks_enabled`` (the merge deleted
-    them with the vector).
+    undo. The point is written by ``write_memory_point``: a row the resource
+    indexer wrote (#2053) gets the indexer's own point back under
+    ``Memory.point_id`` (the point the merge deleted), rebuilt from the
+    document; every other row its summary point. With ``db`` the memory's
+    content chunk points (#2015) are rebuilt too when its context has
+    ``content_chunks_enabled`` (the merge deleted them with the vector).
 
-    A failed chunk write never aborts the restore (#2061): the row is
-    re-queued ``pending`` instead, in the caller's still-uncommitted restore
-    transaction, so the embedding sweep rebuilds its chunks once the restore
-    commits. A failed re-queue is logged and the restore goes on; the memory
-    then stays summary-only until its next re-embed.
+    Neither failure aborts the restore while the row can be handed to the
+    embedding sweep, in the caller's still-uncommitted restore transaction, so
+    the sweep rebuilds what is missing once the restore commits:
 
-    A row the resource indexer wrote (#2053) gets the indexer's own point back
-    under ``Memory.point_id`` (the point the merge deleted), rebuilt from the
-    document; that needs ``db``.
+    - A failed point write (#2065: a resource whose schema is gone, an
+      embedding provider down) re-queues the row ``pending``. The sweep
+      rebuilds a resource row through the indexer too, and a resource row that
+      cannot be rebuilt ends ``failed`` there, for the admin retry. A row
+      that is ``pending`` or ``processing`` already is left to the sweep the
+      same way. Any other row (``failed``), or a re-queue that failed, raises
+      the write's error: the caller's restore must not commit.
+    - A failed chunk write (#2061) re-queues the row the same way. A failed
+      re-queue is logged and the restore goes on; the memory then stays
+      summary-only until its next re-embed.
 
     Returns:
-        True when the memory was re-queued for its chunks.
+        ``"point"`` or ``"chunks"`` when the memory was re-queued for that,
+        else None.
     """
-    from db.qdrant import add_memory_to_qdrant
-    from services.memory_service import build_memory_point
-    from services.resource_indexer import ResourceIndexer, owns_resource_point
+    from services.memory_service import write_memory_point
+    from services.resource_indexer import owns_resource_point
 
-    if owns_resource_point(memory):
-        # Not the summary path: that would embed the label ``[resource] doc
-        # vN`` into a stray point under the row id and leave the document's
-        # point deleted. Same branch as process_pending_embedding (#1870).
-        # Such a row has no content chunks.
-        if db is None:
-            raise ValueError(
-                f"Restoring resource-indexed memory {memory.id} needs a database session"
-            )
-        await ResourceIndexer(db).rebuild_point(
-            memory, collection_name=collection_name, embedding_service=embedding_svc
-        )
-        return False
-
-    vector = await embedding_svc.embed(
-        memory.summary or "",
-        user_id=user_id,
-        context_id=context_id,
-        workspace_id=workspace_id,
-    )
-    # #2053: full-point upsert — build the same point the normal write path
-    # does (BM25 sparse vector, tokenized payload, geo field for #1332), or a
-    # restored memory drops out of the sparse leg of hybrid search.
-    payload, sparse_indices, sparse_values = build_memory_point(memory)
-    await add_memory_to_qdrant(
-        user_id=user_id,
-        memory_id=memory.id,
-        vector=vector,
-        payload=payload,
-        workspace_id=workspace_id,
-        context_id=context_id,
-        sparse_indices=sparse_indices,
-        sparse_values=sparse_values,
-        collection_name=collection_name,
-    )
-    if db is None:
-        return False
+    if db is None and owns_resource_point(memory):
+        raise ValueError(f"Restoring resource-indexed memory {memory.id} needs a database session")
     from services.content_chunk_writer import requeue_embedding, write_content_chunks
 
+    try:
+        written = await write_memory_point(
+            cast(AsyncSession, db),
+            memory,
+            collection_name=collection_name,
+            embedding_service=embedding_svc,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
+    except Exception as e:
+        if db is None:
+            raise
+        logger.warning(
+            "restore_point_write_failed",
+            memory_id=str(memory.id),
+            error_class=type(e).__name__,
+        )
+        try:
+            queued = await requeue_embedding(
+                db, memory.id, reason="point_write_failed"
+            ) or await _embedding_queued(db, memory.id)
+        except Exception:
+            queued = False
+        if not queued:
+            raise
+        return "point"
+
+    if written is None or db is None:
+        return None
+    _vector, payload = written
     try:
         await write_content_chunks(
             db,
@@ -259,14 +268,23 @@ async def re_embed_memory_to_qdrant(
     except Exception:
         # Logged by the writer (content_chunks_failed, error class only).
         try:
-            return await requeue_embedding(db, memory.id, reason="chunk_write_failed")
+            if await requeue_embedding(db, memory.id, reason="chunk_write_failed"):
+                return "chunks"
         except Exception as e:
             logger.warning(
                 "embedding_requeue_failed",
                 memory_id=str(memory.id),
                 error_class=type(e).__name__,
             )
-    return False
+    return None
+
+
+async def _embedding_queued(db: AsyncSession, memory_id: Any) -> bool:
+    """Whether the embedding sweep has ``memory_id`` queued already (#2065)."""
+    status = (
+        await db.execute(select(Memory.embedding_status).where(Memory.id == memory_id))
+    ).scalar_one_or_none()
+    return status in ("pending", "processing")
 
 
 async def _resolve_embedding_info(
@@ -438,6 +456,10 @@ async def undo_merge_action(
             f"Memory {loser_id} could not be restored — it was forgotten, purged, or its "
             "context was deleted after the merge was checked.",
         )
+    # #2065: the UPDATE expired the row's computed resource columns (and its
+    # embedding clock); the point writer reads them, and an expired attribute
+    # cannot be loaded lazily on an async session (MissingGreenlet).
+    await db.refresh(loser)
 
     # Resolve workspace_id — required by add_memory_to_qdrant. Mirrors the
     # run-level rollback's Context fallback: workspace-less reports exist,
@@ -454,7 +476,7 @@ async def undo_merge_action(
             ws_id = str(ctx_ws)
     ctx_id = str(report.context_id) if report.context_id else ""
     embedding_svc = EmbeddingService(db, model=embedding_model)
-    chunks_requeued = await re_embed_memory_to_qdrant(
+    requeued_for = await re_embed_memory_to_qdrant(
         loser,
         report.user_id,
         embedding_svc,
@@ -486,7 +508,9 @@ async def undo_merge_action(
         restored_memory_id=str(loser_id),
         winner_id=str(winner_id) if winner_id else None,
         report_id=str(action.report_id),
-        chunks_requeued=chunks_requeued,
+        # #2061 / #2065: "point" when the point write failed and the row was
+        # re-queued: the undo stands and the embedding sweep rebuilds it.
+        requeued_for=requeued_for,
     )
     return {
         "restored_memory_id": str(loser_id),

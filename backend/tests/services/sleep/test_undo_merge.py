@@ -358,7 +358,7 @@ async def test_re_embed_rebuilds_content_chunks_when_given_a_session() -> None:
     svc.embed = AsyncMock(return_value=[0.1])
     db = MagicMock()
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
         patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
     ):
         await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
@@ -385,7 +385,7 @@ async def test_a_failed_chunk_write_re_queues_the_restored_memory() -> None:
     db = MagicMock()
     db.commit = AsyncMock()
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
         patch(
             "services.content_chunk_writer.write_content_chunks",
             new=AsyncMock(side_effect=ContentChunkWriteError("Content chunk write failed (x)")),
@@ -396,7 +396,7 @@ async def test_a_failed_chunk_write_re_queues_the_restored_memory() -> None:
     ):
         requeued = await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
 
-    assert requeued is True
+    assert requeued == "chunks"
     upsert.assert_awaited_once()  # the summary point is back
     assert write.await_args.kwargs["fail_open"] is False
     requeue.assert_awaited_once_with(db, memory.id, reason="chunk_write_failed")
@@ -414,7 +414,7 @@ async def test_a_failed_re_queue_does_not_abort_the_restore() -> None:
     svc.embed = AsyncMock(return_value=[0.1])
     with (
         structlog.testing.capture_logs() as logs,
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
         patch(
             "services.content_chunk_writer.write_content_chunks",
             new=AsyncMock(side_effect=RuntimeError("x")),
@@ -428,7 +428,7 @@ async def test_a_failed_re_queue_does_not_abort_the_restore() -> None:
             memory, "u", svc, "w", "c", "coll", db=MagicMock()
         )
 
-    assert requeued is False
+    assert requeued is None
     event = next(e for e in logs if e["event"] == "embedding_requeue_failed")
     assert event["error_class"] == "RuntimeError"
     assert "secret" not in repr(event)
@@ -441,7 +441,7 @@ async def test_a_written_or_skipped_chunk_write_re_queues_nothing() -> None:
     svc = MagicMock()
     svc.embed = AsyncMock(return_value=[0.1])
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
         patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock(return_value=3)),
         patch("services.content_chunk_writer.requeue_embedding", new=AsyncMock()) as requeue,
     ):
@@ -449,7 +449,7 @@ async def test_a_written_or_skipped_chunk_write_re_queues_nothing() -> None:
             await re_embed_memory_to_qdrant(
                 _restorable_memory(), "u", svc, "w", "c", "coll", db=MagicMock()
             )
-            is False
+            is None
         )
     requeue.assert_not_awaited()
 
@@ -495,7 +495,7 @@ async def test_re_embed_upsert_carries_bm25_sparse_and_canonical_payload() -> No
     svc = MagicMock()
     svc.embed = AsyncMock(return_value=[0.1])
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
         patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
     ):
         await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=MagicMock())
@@ -541,7 +541,7 @@ async def test_re_embed_rebuilds_the_indexer_point_of_a_resource_row() -> None:
     indexer = MagicMock()
     indexer.rebuild_point = AsyncMock(return_value=memory.point_id)
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
         patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
         patch("services.resource_indexer.ResourceIndexer", return_value=indexer) as indexer_cls,
     ):
@@ -549,7 +549,7 @@ async def test_re_embed_rebuilds_the_indexer_point_of_a_resource_row() -> None:
 
     indexer_cls.assert_called_once_with(db)
     indexer.rebuild_point.assert_awaited_once_with(
-        memory, collection_name="coll", embedding_service=svc
+        memory, collection_name="coll", embedding_service=svc, usage=None
     )
     upsert.assert_not_awaited()
     write.assert_not_awaited()
@@ -563,8 +563,106 @@ async def test_re_embed_of_a_resource_row_needs_a_session() -> None:
     svc = MagicMock()
     svc.embed = AsyncMock(return_value=[0.1])
     with (
-        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
         pytest.raises(ValueError, match="needs a database session"),
     ):
         await re_embed_memory_to_qdrant(_resource_loser(), "u", svc, "w", "c", "coll")
     upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource_row", [False, True])
+async def test_a_failed_point_write_re_queues_the_restored_memory(resource_row: bool) -> None:
+    """#2065: a point that cannot be written during a restore (a resource whose
+    schema is gone, a provider down) re-queues the row ``pending`` in the
+    still-uncommitted restore transaction: the embedding sweep rebuilds it —
+    through the indexer for a resource row — and the restore stands."""
+    from services.resource_indexer import ResourceRebuildError
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = _resource_loser() if resource_row else _restorable_memory()
+    svc = MagicMock()
+    svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+    indexer = MagicMock()
+    indexer.rebuild_point = AsyncMock(side_effect=ResourceRebuildError("schema gone"))
+    db = MagicMock()
+    db.commit = AsyncMock()
+    with (
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.resource_indexer.ResourceIndexer", return_value=indexer),
+        patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
+        patch(
+            "services.content_chunk_writer.requeue_embedding", new=AsyncMock(return_value=True)
+        ) as requeue,
+    ):
+        requeued = await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
+
+    assert requeued == "point"
+    requeue.assert_awaited_once_with(db, memory.id, reason="point_write_failed")
+    upsert.assert_not_awaited()
+    write.assert_not_awaited()
+    db.commit.assert_not_awaited()  # the caller commits the restore with it
+
+
+def _status_db(status: str) -> MagicMock:
+    db = MagicMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = status
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requeue", "status"),
+    [
+        (AsyncMock(return_value=False), "failed"),
+        (AsyncMock(side_effect=RuntimeError("db down")), "success"),
+    ],
+    ids=["failed_row", "requeue_failed"],
+)
+async def test_a_failed_point_write_that_cannot_be_re_queued_is_raised(requeue, status) -> None:
+    """#2065: a row the sweep would not pick up (``failed``), or a re-queue
+    that failed, must not be restored with no point: the write's own error is
+    raised so the caller's restore does not commit."""
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    svc = MagicMock()
+    svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+    with (
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.content_chunk_writer.requeue_embedding", new=requeue),
+        pytest.raises(RuntimeError, match="provider down"),
+    ):
+        await re_embed_memory_to_qdrant(
+            _restorable_memory(), "u", svc, "w", "c", "coll", db=_status_db(status)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "processing"])
+async def test_a_failed_point_write_of_a_queued_row_leaves_it_to_the_sweep(status) -> None:
+    """#2065: a row the sweep embeds anyway (``pending``, ``processing``) is
+    not re-queued, and the restore stands all the same."""
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    svc = MagicMock()
+    svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+    with (
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.content_chunk_writer.requeue_embedding", new=AsyncMock(return_value=False)),
+    ):
+        requeued = await re_embed_memory_to_qdrant(
+            _restorable_memory(), "u", svc, "w", "c", "coll", db=_status_db(status)
+        )
+    assert requeued == "point"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_point_write_without_a_session_is_raised() -> None:
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    svc = MagicMock()
+    svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+    with pytest.raises(RuntimeError, match="provider down"):
+        await re_embed_memory_to_qdrant(_restorable_memory(), "u", svc, "w", "c", "coll")

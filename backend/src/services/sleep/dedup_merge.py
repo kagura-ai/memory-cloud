@@ -51,6 +51,7 @@ from models.memory import (
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
+from services.resource_indexer import unshared_point_id
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
@@ -1469,11 +1470,20 @@ class DedupMergePhase(EmbeddingSpendTracker):
             )
         )
 
-        # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10)
+        # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10).
+        # #2065: by forget's rule — a resource point another live row still
+        # names stays with that row (``unshared_point_id``).
         try:
-            await delete_memory_from_qdrant(
-                user_id, loser.point_id, self.collection_name or "kagura_memories"
-            )
+            point_id: UUID | None = loser.point_id
+            if point_id != loser.id:
+                # Its own savepoint: a failed lookup must not abort the run's
+                # transaction from inside this best-effort step.
+                async with self.db.begin_nested():
+                    point_id = await unshared_point_id(self.db, loser.id, loser.point_id)
+            if point_id is not None:
+                await delete_memory_from_qdrant(
+                    user_id, point_id, self.collection_name or "kagura_memories"
+                )
         except Exception as e:
             logger.warning(
                 "dedup_qdrant_delete_failed",

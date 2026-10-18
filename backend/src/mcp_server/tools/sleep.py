@@ -133,13 +133,14 @@ async def _re_embed_to_qdrant(
     collection_name: str,
     *,
     db: Any = None,
-) -> bool:
+) -> str | None:
     """Re-embed a restored memory back into Qdrant.
 
     #1209: thin wrapper over the shared restore helper in
     ``services.sleep.undo`` so run-level rollback and per-merge undo cannot
-    drift in how they rebuild the vector. Returns True when the memory's
-    chunk write failed and it was re-queued for the embedding sweep (#2061).
+    drift in how they rebuild the vector. Returns ``"chunks"`` (#2061) or
+    ``"point"`` (#2065) when that write failed and the memory was re-queued
+    for the embedding sweep, else None.
     """
     from services.sleep.undo import re_embed_memory_to_qdrant
 
@@ -469,6 +470,10 @@ async def _restore_sleep_tombstone(
     if restore_rows == 0 or mem is None:
         summary["errors"].append(not_restorable)
         return
+    # #2065: the UPDATE expired the row's computed resource columns (and its
+    # embedding clock); the point writer reads them, and an expired attribute
+    # cannot be loaded lazily on an async session (MissingGreenlet).
+    await db.refresh(mem)
     requeued = await _re_embed_to_qdrant(
         mem,
         ctx.user_id,
@@ -479,8 +484,10 @@ async def _restore_sleep_tombstone(
         db=db,
     )
     summary[counter_key] += 1
-    if requeued is True:
+    if requeued == "chunks":
         summary["chunks_requeued"] += 1
+    elif requeued == "point":
+        summary["points_requeued"] += 1
 
 
 async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
@@ -537,10 +544,27 @@ async def _undo_update_importance(
             not_tool_triggered_predicate(),
         )
         .values(importance=old_importance, updated_at=utcnow())
+        # #2065: what tells a resource-indexer row apart, read by the UPDATE.
+        .returning(
+            Memory.summary_embedding_id,
+            Memory.resource_id,
+            Memory.resource_doc_id,
+            Memory.resource_version,
+        )
     )
-    if cast(CursorResult[Any], restored).rowcount == 0:
+    row = restored.one_or_none()
+    if row is None:
         logger.info("importance_rollback_kept", memory_id=str(action.memory_id))
         summary["importance_kept"] += 1
+        return
+    from services.resource_indexer import names_own_resource_point
+
+    if names_own_resource_point(
+        row.summary_embedding_id, row.resource_id, row.resource_doc_id, row.resource_version
+    ):
+        # #2065: a resource-indexer row's point is the indexer's, whose
+        # payload carries no importance; its id names no point of its own.
+        summary["importance_restored"] += 1
         return
     try:
         from services.content_chunk_writer import chunk_cascade_needed
@@ -781,6 +805,10 @@ async def handle_rollback_sleep_run(
                 # #2061: restored memories whose chunk write failed, re-queued
                 # for the embedding sweep (the restore itself went through).
                 "chunks_requeued": 0,
+                # #2065: restored memories whose point write failed (a
+                # resource whose schema is gone, a provider down), re-queued
+                # the same way: the sweep rebuilds the point.
+                "points_requeued": 0,
                 "errors": [],
             }
 
@@ -801,7 +829,14 @@ async def handle_rollback_sleep_run(
                 if handler is None:
                     continue
                 try:
-                    await handler(db, action, ctx, rollback_summary)
+                    # #2065: each undo in a SAVEPOINT of its own. A handler
+                    # that raises leaves nothing behind: without it the final
+                    # commit below saved its partial writes too — a restored
+                    # row whose point could not be rebuilt went live with no
+                    # point, under a report this handler then refuses to roll
+                    # back again. Rolled back, the tombstone stays as it was.
+                    async with db.begin_nested():
+                        await handler(db, action, ctx, rollback_summary)
                 except Exception as e:
                     # Per-action isolation: one failed undo must not abandon the
                     # rest of the run. The error lands in the summary, which is

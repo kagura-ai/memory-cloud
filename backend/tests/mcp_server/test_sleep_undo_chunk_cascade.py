@@ -33,10 +33,15 @@ async def test_importance_restore_cascades_by_the_context_flag(flag):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requeued", [True, False])
-async def test_restore_counts_memories_re_queued_for_their_chunks(requeued):
+@pytest.mark.parametrize(
+    ("requeued", "chunks", "points"), [("chunks", 1, 0), ("point", 0, 1), (None, 0, 0)]
+)
+async def test_restore_counts_memories_re_queued_for_their_chunks_or_point(
+    requeued, chunks, points
+):
     """#2061: a restored memory whose chunk write failed is re-queued and
-    counted under ``chunks_requeued``; the restore itself still counts."""
+    counted under ``chunks_requeued``; #2065: one whose point write failed
+    under ``points_requeued``. The restore itself still counts."""
     memory_id = uuid4()
     mem = MagicMock(id=memory_id)
     ctx = MagicMock(
@@ -47,7 +52,8 @@ async def test_restore_counts_memories_re_queued_for_their_chunks(requeued):
     )
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
-    summary = {"archives_restored": 0, "chunks_requeued": 0, "errors": []}
+    db.refresh = AsyncMock()
+    summary = {"archives_restored": 0, "chunks_requeued": 0, "points_requeued": 0, "errors": []}
     with (
         patch.object(sleep_tools, "hold_point_writer_lock", new=AsyncMock()),
         patch.object(
@@ -64,9 +70,12 @@ async def test_restore_counts_memories_re_queued_for_their_chunks(requeued):
             not_restorable="gone",
         )
     assert reembed.await_args.kwargs["db"] is db
+    # #2065: the row is re-read after the restore UPDATE expired it.
+    db.refresh.assert_awaited_once_with(mem)
     assert summary == {
         "archives_restored": 1,
-        "chunks_requeued": 1 if requeued else 0,
+        "chunks_requeued": chunks,
+        "points_requeued": points,
         "errors": [],
     }
 
@@ -74,12 +83,12 @@ async def test_restore_counts_memories_re_queued_for_their_chunks(requeued):
 @pytest.mark.asyncio
 async def test_re_embed_wrapper_forwards_the_requeue_outcome():
     with patch(
-        "services.sleep.undo.re_embed_memory_to_qdrant", new=AsyncMock(return_value=True)
+        "services.sleep.undo.re_embed_memory_to_qdrant", new=AsyncMock(return_value="point")
     ) as helper:
         assert (
             await sleep_tools._re_embed_to_qdrant(
                 MagicMock(), "u", MagicMock(), "w", "c", "coll", db="db"
             )
-            is True
+            == "point"
         )
     assert helper.await_args.kwargs["db"] == "db"
