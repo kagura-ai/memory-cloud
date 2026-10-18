@@ -21,6 +21,7 @@ from models.schemas import ContextSearchConfigUpdate
 from repositories.config_repository import (
     ContextSearchConfigRepository,
     new_search_config_defaults,
+    new_search_config_row,
     search_config_defaults,
 )
 from services.reranker_service import (
@@ -310,6 +311,18 @@ class TestContentChunksDefault:
         off = await TestCreateContext()._create(_settings())
         assert on.content_chunks_enabled is True
         assert off.content_chunks_enabled is False
+        # #2103: a row created on records the enable (the plan cap's rank).
+        assert on.content_chunks_enabled_at is not None
+        assert off.content_chunks_enabled_at is None
+
+    def test_the_new_row_records_the_enable_but_system_info_does_not(self):
+        """#2103: ``new_search_config_row`` adds the enable stamp; the
+        ``/system/info`` shape (``new_search_config_defaults``) stays as it was."""
+        on = new_search_config_row(_settings(default_content_chunks_enabled=True))
+        off = new_search_config_row(_settings())
+        assert on["content_chunks_enabled_at"] is not None
+        assert off["content_chunks_enabled_at"] is None
+        assert "content_chunks_enabled_at" not in new_search_config_defaults(_settings())
 
     async def test_create_or_get_never_turns_the_flag_on(self, monkeypatch):
         """A row-less legacy context already holds memories and any reader

@@ -272,5 +272,16 @@ def test_feature_enforcement_is_additive_for_older_clients(client: TestClient) -
         "connectors",
         "public_contexts",
     }
+    # #2103 adds the content chunk row (additive, like #1648's field).
+    added_since = {"feature_enforcement", "content_chunks", "max_content_chunk_contexts"}
     for tier in (free, basic, pro, promax):
-        assert set(tier) - {"feature_enforcement"} == pre_1648_keys, tier["name"]
+        assert set(tier) - added_since == pre_1648_keys, tier["name"]
+
+
+def test_content_chunks_row(client: TestClient) -> None:
+    """#2103: M and above have the feature; the cap is S 0 / M 1 / L 5 / XL 20,
+    and the mode says the gate is deployment-conditional."""
+    tiers = client.get(ENDPOINT).json()
+    assert [t["content_chunks"] for t in tiers] == [False, True, True, True]
+    assert [t["max_content_chunk_contexts"] for t in tiers] == [0, 1, 5, 20]
+    assert tiers[0]["feature_enforcement"]["content_chunks"] == "conditional"

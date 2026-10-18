@@ -1068,7 +1068,7 @@ async def handle_setup_resource(
             # 8. Create search config
             from config.settings import get_settings
             from models.config import ContextSearchConfig
-            from repositories.config_repository import new_search_config_defaults
+            from repositories.config_repository import new_search_config_row
 
             search_config = ContextSearchConfig(
                 context_id=context.id,
@@ -1076,7 +1076,7 @@ async def handle_setup_resource(
                 fetch_factor=3,
                 # #1572 / #2015: same deployment default as
                 # ContextService.create_context.
-                **new_search_config_defaults(get_settings()),
+                **new_search_config_row(get_settings()),
                 embedding_model=actual_embedding_model,
                 embedding_dimensions=actual_dimensions,
             )

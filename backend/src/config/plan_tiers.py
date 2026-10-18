@@ -69,6 +69,13 @@ class PlanTier:
             by the F6-b setup flow bypass the ``max_resource_tokens`` Pro+
             gate and are governed by this seat count instead. 0 disables
             connector creation for the plan.
+        max_content_chunk_contexts: How many contexts of a workspace may
+            have content chunk vectors active (Issue #2103; feature
+            ``content_chunks``). Read only where ``CONTENT_CHUNKS_REQUIRE_PLAN``
+            is on: turning the flag on past it is refused, and over it (after a
+            downgrade) only the earliest-enabled contexts stay active — the
+            others keep their flag and their chunk points, unused. 0 on a tier
+            without the feature.
         memory_limit: Maximum memories per workspace
         memories_per_day: Memories that may be CREATED per workspace per UTC
             day (Issue #1549, epic #1547). Enforced on every path that writes
@@ -110,6 +117,7 @@ class PlanTier:
     weekly_api_limit: int  # Legacy field, use mcp_calls_per_week instead
     max_resource_tokens: int = 0  # Issue #242: Active resource tokens limit
     max_connectors: int = 0  # Issue #850 (F6-a of #755): ai-worker connector seat cap
+    max_content_chunk_contexts: int = 0  # Issue #2103: contexts with active content chunks
     mcp_calls_per_day: int = 0  # Issue #238: MCP API quota
     mcp_calls_per_week: int = 0  # Issue #238: MCP API quota
     rest_calls_per_day: int = 0  # Issue #238: REST API quota
@@ -145,6 +153,7 @@ PLAN_FREE = PlanTier(
     owned_workspace_grant=0,  # Issue #1550: base slot only → owns 1
     max_resource_tokens=0,  # Issue #242: No resource tokens (PRO only)
     max_connectors=0,  # Issue #850: no ai-worker connectors on Free
+    max_content_chunk_contexts=0,  # Issue #2103: no content chunks on Free
     memory_limit=1000,
     memories_per_day=50,  # Issue #1549 (#1547 matrix)
     daily_api_limit=100,  # Legacy (backward compatibility)
@@ -175,6 +184,7 @@ PLAN_BASIC = PlanTier(
     max_resource_tokens=3,  # Issue #242: Max 3 active tokens
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=3,  # Issue #850 → Spec(2026-06-02): Basic 1→3
+    max_content_chunk_contexts=1,  # Issue #2103
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
     memory_limit=10000,
     memories_per_day=300,  # Issue #1549 (#1547 matrix)
@@ -192,7 +202,10 @@ PLAN_BASIC = PlanTier(
     embedding_monthly_cap_usd=60.0,  # Issue #709
     # Issue #1030: paid tiers (M/L) get platform-managed embeddings — they may
     # embed on the platform key without BYOK (bounded by the #709/#1033 cap).
-    features=frozenset({"api_keys", "reranking", "oauth", "managed_embeddings", "secret_store"}),
+    # Issue #2103: content chunk vectors (M and above, capped per tier).
+    features=frozenset(
+        {"api_keys", "reranking", "oauth", "managed_embeddings", "secret_store", "content_chunks"}
+    ),
 )
 
 PLAN_PRO = PlanTier(
@@ -205,6 +218,7 @@ PLAN_PRO = PlanTier(
     max_resource_tokens=30,  # Issue #242: Max 30 active tokens
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=10,  # Issue #850 → Spec(2026-06-02): Pro 5→10
+    max_content_chunk_contexts=5,  # Issue #2103
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
     memory_limit=100000,
     memories_per_day=2000,  # Issue #1549 (#1547 matrix)
@@ -238,6 +252,7 @@ PLAN_PRO = PlanTier(
             "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
             "managed_llm",  # Issue #1569: Analysis on the platform-managed LLM lane (no BYOK)
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
+            "content_chunks",  # Issue #2103: content chunk vectors (M and above)
         }
     ),
 )
@@ -252,6 +267,7 @@ PLAN_PROMAX = PlanTier(
     # resource tokens / connectors, so these are the real creation caps.
     max_resource_tokens=150,
     max_connectors=50,
+    max_content_chunk_contexts=20,  # Issue #2103
     allows_shared_contexts=True,
     memory_limit=100000,  # Issue #1547 matrix
     memories_per_day=10000,  # Issue #1549 (#1547 matrix)
@@ -326,6 +342,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "managed_llm": "pro",  # Issue #1569: Memory Analysis on the platform-managed LLM lane (L/XL)
     "resources": "promax",  # Issue #1551: setup_resource / new resource tokens are XL-only
     "connectors": "promax",  # Issue #1551: setup_connector is XL-only
+    "content_chunks": "basic",  # Issue #2103: content chunk vectors (M and above, capped per tier)
 }
 
 # Every feature name the registry knows (#1559): the code-default tiers'
@@ -449,6 +466,14 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
         "provisioning (#1551). Separately, services/plan_suspension.py suspends ingest "
         "and indexing on existing tokens while max_resource_tokens is 0 (back on "
         "Free); the tokens are kept (#1939).",
+    ),
+    "content_chunks": FeatureGate(
+        FeatureEnforcement.CONDITIONAL,
+        "services/content_chunk_policy.py refuses turning content_chunks_enabled on "
+        "without the feature or past max_content_chunk_contexts, and treats a stored "
+        "true as off past them (#2103), but only where CONTENT_CHUNKS_REQUIRE_PLAN is "
+        "on — it defaults to off, so a default deployment lets every tier turn chunks "
+        "on in any number of contexts.",
     ),
     "connectors": FeatureGate(
         FeatureEnforcement.ENFORCED,

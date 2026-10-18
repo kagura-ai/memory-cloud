@@ -185,6 +185,7 @@ class LLMService:
         max_tokens: int = 1024,
         disallow_env_fallback: bool = False,
         platform_only: bool = False,
+        release_db_before_call: bool = False,
     ) -> LLMResponse:
         """Call LLM with JSON mode and return cost-grade response.
 
@@ -212,6 +213,14 @@ class LLMService:
                 from the platform env / settings — the deployment pays, so
                 a workspace's stored key must never be billed by accident.
                 Mutually exclusive with ``disallow_env_fallback``.
+            release_db_before_call: #2070. When True, the session is
+                committed once the credential is resolved and before the
+                provider round trip, so its pooled connection goes back to the
+                pool for those seconds instead of idling in an open read
+                transaction. Only for a caller with nothing pending on the
+                session (the commit would make it durable) and whose loaded
+                objects must survive: a commit keeps them under
+                ``expire_on_commit=False``, where a rollback would expire them.
 
         Returns:
             LLMResponse — parsed JSON + per-class token counts +
@@ -233,6 +242,8 @@ class LLMService:
             disallow_env_fallback=disallow_env_fallback,
             platform_only=platform_only,
         )
+        if release_db_before_call:
+            await self.db.commit()
 
         # First attempt
         first_usage = Usage(total=0, input=0, output=0, cached=0)

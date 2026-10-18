@@ -229,3 +229,136 @@ async def test_the_renewal_is_fenced_on_the_current_stamp(fast_renewal):
     # The next renewal is fenced on the stamp the first one wrote.
     assert "EMBEDDING_ATTEMPTED_AT = '2026-01-02 03:04:25.678901'" in second.split("WHERE", 1)[1]
     assert sessions.session.commit.await_count == 2
+
+
+# #2070: a renewal that waits for a pooled connection waits at most
+# RENEW_CHECKOUT_TIMEOUT_SECONDS, so a starved pool cannot turn one failed
+# renewal into a reclaim.
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_gives_up_on_a_slow_checkout_and_tries_again(fast_renewal):
+    attempts = 0
+
+    async def _pool_exhausted() -> None:
+        nonlocal attempts
+        attempts += 1
+        await asyncio.Event().wait()
+
+    sessions = _Sessions([_row(True)])
+    sessions.session.connection = AsyncMock(side_effect=_pool_exhausted)
+    claim = _claim()
+    with (
+        patch.object(embedding_claim, "RENEW_CHECKOUT_TIMEOUT_SECONDS", 0.01),
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch.object(embedding_claim, "logger") as log,
+    ):
+        claim.start_renewal()
+        await _until(lambda: attempts >= 2)
+        await claim.stop_renewal()
+    assert sessions.statements == []
+    assert claim.stamp == _T0
+    first = log.warning.call_args_list[0]
+    assert first.args[0] == "embedding_claim_renew_failed"
+    assert first.kwargs["error_class"] == "TimeoutError"
+
+
+def test_two_failed_renewals_still_leave_a_third_before_the_stale_cutoff():
+    # A renewal that started at T; the next three start at T+15, T+30, T+45 and
+    # each has its connection, or gives up, within 5 s.
+    interval = embedding_claim.RENEW_INTERVAL_SECONDS
+    checkout = embedding_claim.RENEW_CHECKOUT_TIMEOUT_SECONDS
+    third_connected_by = 3 * interval + checkout
+    assert third_connected_by < embedding_claim.STALE_CLAIM_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_slow_checkout_does_not_push_the_next_renewal_back():
+    starts: list[float] = []
+
+    async def _pool_exhausted() -> None:
+        starts.append(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    sessions = _Sessions([_row(True)])
+    sessions.session.connection = AsyncMock(side_effect=_pool_exhausted)
+    claim = _claim()
+    with (
+        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.4),
+        patch.object(embedding_claim, "RENEW_CHECKOUT_TIMEOUT_SECONDS", 0.3),
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch.object(embedding_claim, "logger"),
+    ):
+        claim.start_renewal()
+        await _until(lambda: len(starts) >= 3, timeout=10.0)
+        await claim.stop_renewal()
+    # One interval apart, not interval + checkout wait (0.7).
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    assert all(gap < 0.55 for gap in gaps), gaps
+
+
+# #2070: ``embedding_claim_lost`` says why the claim went. A row is reclaimable
+# only once its stamp is STALE_CLAIM_SECONDS old, so a loss seen earlier is a
+# re-queue (an edit, a migration switch) or a delete.
+
+
+@pytest.mark.asyncio
+async def test_a_loss_the_renewal_saw_while_the_stamp_was_fresh_is_a_requeue(fast_renewal):
+    sessions = _Sessions([_row(False)])
+    claim = _claim()
+    late = _T0 + timedelta(seconds=300)
+    with (
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch("utils.datetime.utcnow", side_effect=[_T1, late]),
+    ):
+        claim.start_renewal()
+        await _until(lambda: len(sessions.statements) == 1)
+        await claim.stop_renewal()
+        # Seen by the renewal at T+20; the run noticing it much later does not
+        # make it stale.
+        assert claim.loss_reason() == "requeued"
+
+
+@pytest.mark.asyncio
+async def test_a_loss_seen_with_a_fresh_stamp_is_a_requeue():
+    claim = _claim()
+    with patch("utils.datetime.utcnow", return_value=_T0 + timedelta(seconds=59)):
+        assert claim.loss_reason() == "requeued"
+
+
+@pytest.mark.asyncio
+async def test_a_loss_seen_with_a_stale_stamp_is_a_possible_reclaim():
+    claim = _claim()
+    with patch("utils.datetime.utcnow", return_value=_T0 + timedelta(seconds=60)):
+        assert claim.loss_reason() == "stale"
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_the_loop_when_renewals_overrun_the_interval():
+    """#2070: an attempt longer than the interval leaves no wait before the
+    next one, and the loop must still see a stop that arrived during it (the
+    stop does not cancel a renewal that is writing)."""
+    writing = asyncio.Event()
+
+    async def _slow_write() -> MagicMock:
+        writing.set()
+        await asyncio.sleep(0.02)
+        return _row(True)
+
+    async def _slow_checkout() -> None:
+        await asyncio.sleep(0.01)
+
+    sessions = _Sessions(_slow_write)
+    # Every attempt, even one that only finds the stop, outlasts the interval.
+    sessions.session.connection = AsyncMock(side_effect=_slow_checkout)
+    claim = _claim()
+    with (
+        patch.object(embedding_claim, "RENEW_INTERVAL_SECONDS", 0.001),
+        patch.object(embedding_claim, "isolated_session", sessions),
+        patch("utils.datetime.utcnow", return_value=_T1),
+    ):
+        claim.start_renewal()
+        await asyncio.wait_for(writing.wait(), 2)
+        await asyncio.wait_for(claim.stop_renewal(), 1)
+    # The write that was under way when the stop came is the last one.
+    assert len(sessions.statements) == 1

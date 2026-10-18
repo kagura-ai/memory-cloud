@@ -233,7 +233,7 @@ async def test_run_rebuilds_chunks_the_flag_flip_left_out_before_switching(capsy
     # rebuild's check leaves those to the sweep.
     assert rebuild.await_args.kwargs["requeue_since"] == _STARTED
     assert switch.await_args.kwargs["requeue_since"] == _STARTED
-    assert "content_chunks_enabled was turned on after the plan" in out
+    assert "content chunks became active after the plan" in out
     assert "Rebuilding them before the switch" in out
     assert "rebuilt the content chunks of 2 memory(ies): 6 chunk points" in out
     assert "Not switched yet" not in out

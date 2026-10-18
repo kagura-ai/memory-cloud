@@ -18,6 +18,11 @@ from models.config import ContextSearchConfig
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.capacity_lock import CapacityPolicy
+from services.content_chunk_policy import (
+    ContentChunksStatus,
+    content_chunks_gated,
+    content_chunks_status,
+)
 from services.permission_service import (
     PermissionService,
     check_content_chunks_change,
@@ -41,15 +46,38 @@ async def build_search_config_response(
     """The search-config response, with the server-computed #2015 fields (D7).
 
     Shared by GET, PUT and reset. ``content_chunks_can_change`` is the PUT's
-    own owner rule, asked of the caller; ``content_chunks_backfill_pending``
-    is counted only while the flag is on. They inform the UI — the PUT checks
-    the permission and the store again.
+    own rule, asked of the caller: the owner rule, and to turn the flag on the
+    store, the plan and the cap (#2103; turning it off is always allowed).
+    ``content_chunks_backfill_pending`` is counted only while the flag is on.
+    #2103 / #2080 add whether the chunks are active, the plan's cap, the
+    workspace's count and why the toggle is disabled. They inform the UI —
+    the PUT checks all of it again.
     """
     try:
         await check_content_chunks_change(perm_service, user_id, context_id)
-        can_change = True
+        owner = True
     except AuthorizationError:
-        can_change = False
+        owner = False
+    stored = config.content_chunks_enabled is True
+    try:
+        # A savepoint: the PUT has already committed, and a failed count must
+        # not turn its response into a 500. The fallback has no counts, so
+        # where gated it reads inactive / not enable-able (the PUT re-checks).
+        async with repo.db.begin_nested():
+            chunks = await content_chunks_status(
+                repo.db, context_id, stored=stored, include_usage=True
+            )
+    except Exception as e:  # noqa: BLE001 — informational fields only
+        logger.warning(
+            "content_chunks_status_load_failed",
+            context_id=str(context_id),
+            error_class=type(e).__name__,
+        )
+        chunks = ContentChunksStatus(
+            stored=stored, supported=chunk_points_supported(), gated=content_chunks_gated()
+        )
+    can_change = owner and (stored or chunks.can_enable)
+    reason = chunks.reason or (None if owner else "permission")
     model = config.embedding_model
     provider = (
         EMBEDDING_MODEL_REGISTRY[model][1]
@@ -67,6 +95,10 @@ async def build_search_config_response(
             "content_chunks_supported": chunk_points_supported(),
             "embedding_provider": provider,
             "content_chunks_backfill_pending": pending,
+            "content_chunks_effective": chunks.effective,
+            "content_chunks_limit": chunks.limit,
+            "content_chunks_in_use": chunks.in_use or 0,
+            "content_chunks_disabled_reason": reason,
         }
     )
 
@@ -160,6 +192,11 @@ async def update_context_search_config(
             change content_chunks_enabled, 404 if context not found, 500 on error
         ValidationError: 422 when turning content_chunks_enabled on with the
             LanceDB vector store, which has no content chunk vectors (#2072)
+        FeatureNotAvailableError: 403 ``FEAT-001`` when turning it on on a plan
+            without ``content_chunks`` (only where CONTENT_CHUNKS_REQUIRE_PLAN
+            is on, #2103)
+        QuotaExceededError: 429 ``QUOTA-001`` when turning it on with the
+            workspace at the plan's ``max_content_chunk_contexts`` (likewise)
     """
     user_id = user.get("user_id")
     logger.info(

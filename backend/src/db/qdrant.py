@@ -50,7 +50,7 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
-from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates
+from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_point_id
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
@@ -1216,6 +1216,33 @@ async def delete_chunk_points(
         )
     except Exception as e:
         raise QdrantError(f"Failed to delete content chunks: {e}") from e
+
+
+async def chunk_points_content_hash(
+    memory_id: UUID | str,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> str | None:
+    """The ``content_hash`` the memory's first chunk point carries (#2103).
+
+    ``None`` when the memory has no chunk point 0 (or it carries no hash) or
+    on a non-Qdrant store. One point retrieve, payload field only.
+    """
+    if _active_store() is not None:
+        return None
+    client = get_qdrant_client()
+    try:
+        points = await client.retrieve(
+            collection_name=collection_name,
+            ids=[chunk_point_id(memory_id, 0)],
+            with_payload=["content_hash"],
+            with_vectors=False,
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to read content chunks: {e}") from e
+    if not points:
+        return None
+    value = (points[0].payload or {}).get("content_hash")
+    return value if isinstance(value, str) else None
 
 
 async def delete_chunk_points_from(

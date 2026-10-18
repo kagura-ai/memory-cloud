@@ -110,25 +110,31 @@ async def resolve_context_embedding(
     *reason about* a context's model (migration planning, #1525) rather than
     embed with it.
     """
-    model, dimensions, _ = await resolve_context_embedding_config(db, context_id)
-    return model, dimensions
+    config = await _fetch_config(db, context_id)
+    if config:
+        return config.embedding_model, config.embedding_dimensions
+    return _LEGACY_MODEL, _LEGACY_DIMS
 
 
 async def resolve_context_embedding_config(
     db: AsyncSession,
     context_id: UUID,
 ) -> tuple[str, int, bool]:
-    """:func:`resolve_context_embedding` plus ``content_chunks_enabled`` (#2015).
+    """:func:`resolve_context_embedding` plus whether the context's content chunks are active.
 
-    One SELECT. A context without a config row has no chunk points (False).
+    #2015, #2080 / #2103: the third element is the EFFECTIVE flag (stored on,
+    on a store that keeps chunk points, and allowed by the plan where the
+    deployment gates it). One SELECT, plus the plan's rank query when gated
+    and the flag is on. A context without a config row has no chunk points
+    (False).
     """
+    from services.content_chunk_policy import content_chunks_status
+
     config = await _fetch_config(db, context_id)
     if config:
-        return (
-            config.embedding_model,
-            config.embedding_dimensions,
-            getattr(config, "content_chunks_enabled", False) is True,
-        )
+        stored = getattr(config, "content_chunks_enabled", False) is True
+        active = stored and (await content_chunks_status(db, context_id, stored=True)).effective
+        return config.embedding_model, config.embedding_dimensions, active
     return _LEGACY_MODEL, _LEGACY_DIMS, False
 
 

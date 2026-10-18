@@ -484,6 +484,22 @@ async def test_a_chunk_enabled_target_re_embeds_long_merged_memories():
 
 
 @pytest.mark.asyncio
+async def test_an_inactive_chunk_target_keeps_merged_memories_embedded():
+    """#2103: a target whose chunks are inactive (plan, cap) gets no re-queue."""
+
+    def long_memory(u, c):
+        m = _source_memory(u, c)
+        m.content = "x" * 5000
+        return m
+
+    with patch(
+        "services.content_chunk_policy.content_chunks_effective", AsyncMock(return_value=False)
+    ):
+        _, rows, _, _ = await _run_merge([long_memory], target_chunks=True)
+    assert rows[0].embedding_status == "success"
+
+
+@pytest.mark.asyncio
 async def test_a_target_without_chunks_keeps_merged_memories_embedded():
     def long_memory(u, c):
         m = _source_memory(u, c)

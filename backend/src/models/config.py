@@ -159,6 +159,13 @@ class ContextSearchConfig(Base):
     content_chunks_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
     )
+    # Issue #2103: when content_chunks_enabled was last turned on (NULL while
+    # it is off). A plan's cap on contexts with chunks keeps the earliest-
+    # enabled ones active (services.content_chunk_policy), so the choice over
+    # the cap is deterministic.
+    content_chunks_enabled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

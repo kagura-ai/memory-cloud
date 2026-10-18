@@ -273,6 +273,7 @@ QUOTA_TYPES: frozenset[str] = frozenset(
         "agents",
         "resource_tokens",
         "connectors",
+        "content_chunk_contexts",  # #2103: contexts with active content chunk vectors
         "embedding_spend_daily",
         "embedding_spend_monthly",
         "api_mcp_daily",

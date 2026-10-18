@@ -327,6 +327,85 @@ async def test_mcp_turning_the_flag_off_is_allowed_without_chunk_point_support()
 
 
 # ---------------------------------------------------------------------------
+# #2103: the plan feature and the cap, on the MCP door
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_a_plan_without_content_chunks_is_feature_not_available():
+    from unittest.mock import patch
+
+    from utils.exceptions import FeatureNotAvailableError
+
+    refusal = FeatureNotAvailableError.for_feature("free", "content_chunks")
+    with patch(
+        "services.content_chunk_policy.ensure_content_chunks_plan",
+        AsyncMock(side_effect=refusal),
+    ):
+        payload, perms, repo = await _call_update(
+            {"content_chunks_enabled": True}, stored=False, owner=True
+        )
+    assert payload["error"] == "feature_not_available"
+    assert (payload["gate"], payload["feature"]) == ("plan", "content_chunks")
+    assert (payload["required_plan"], payload["required_plan_display"]) == ("basic", "M")
+    perms.check_context_owner.assert_not_awaited()
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_the_cap_is_quota_exceeded_with_the_counts():
+    from unittest.mock import patch
+
+    from services.content_chunk_policy import _raise_cap
+    from utils.exceptions import QuotaExceededError
+
+    with pytest.raises(QuotaExceededError) as exc:
+        _raise_cap("basic", 1, 1)
+    with patch(
+        "services.content_chunk_policy.ensure_content_chunk_capacity",
+        AsyncMock(side_effect=exc.value),
+    ):
+        payload, _, repo = await _call_update(
+            {"content_chunks_enabled": True}, stored=False, owner=True
+        )
+    assert payload["error"] == "quota_exceeded"
+    assert payload["quota_type"] == "content_chunk_contexts"
+    assert (payload["current"], payload["limit"], payload["required_plan"]) == (1, 1, "pro")
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_turning_off_never_asks_the_plan():
+    from unittest.mock import patch
+
+    plan, cap = AsyncMock(), AsyncMock()
+    with (
+        patch("services.content_chunk_policy.ensure_content_chunks_plan", plan),
+        patch("services.content_chunk_policy.ensure_content_chunk_capacity", cap),
+    ):
+        payload, _, _ = await _call_update(
+            {"content_chunks_enabled": False}, stored=True, owner=True
+        )
+    assert payload["status"] == "success"
+    plan.assert_not_awaited()
+    cap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active", [True, False])
+async def test_mcp_the_result_says_whether_the_flag_is_acted_on(active):
+    from unittest.mock import patch
+
+    with patch(
+        "services.content_chunk_policy.content_chunks_effective",
+        AsyncMock(return_value=active),
+    ):
+        payload, _, _ = await _call_update({"use_rerank": True}, stored=True, owner=False)
+    assert payload["config"]["content_chunks_enabled"] is True
+    assert payload["config"]["content_chunks_effective"] is active
+
+
+# ---------------------------------------------------------------------------
 # #2015 PR 2b (D4): turning the flag on queues the existing long memories.
 # ---------------------------------------------------------------------------
 
