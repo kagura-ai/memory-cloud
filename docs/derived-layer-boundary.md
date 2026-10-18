@@ -45,7 +45,8 @@ feature-development time, not discovered at export time.
 
 | Table | What it holds |
 |-------|---------------|
-| `memories` | L1 `summary`, L2 `context_summary`, L3 `content`/`details`, `tags`, `type`, `scope`, user-set `importance`/`confidence`, provenance (`source`, `source_type`, `source_uri`), timestamps |
+| `memories` | L1 `summary`, L2 `context_summary`, L3 `content`/`details`, `tags`, `type`, `scope`, user-set `importance`/`confidence`, provenance (`source`, `source_type`, `source_uri`), timestamps, `version` |
+| `memory_revisions` | A memory's write events (#2043): the overwritten values of each edit's changed fields, the version, and who wrote it |
 | `attachments` | User file metadata (filename, content type, size) |
 | `file_objects` | R2 object records for user uploads (#485) |
 | `agent_states` | User-set key/value run state (#889) |

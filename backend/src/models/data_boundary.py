@@ -29,6 +29,9 @@ from __future__ import annotations
 RAW_EXPORTABLE_TABLES: frozenset[str] = frozenset(
     {
         "memories",  # L1/L2/L3 text, tags, importance, source provenance
+        # #2043: the memory's own earlier values (overwritten fields) and who
+        # wrote each event — user-authored history, not learned structure.
+        "memory_revisions",
         "attachments",  # user file metadata (blobs in R2)
         "file_objects",  # R2 object records for user uploads (#485)
         "agent_states",  # user-set key/value run state (#889)

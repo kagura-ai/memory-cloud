@@ -32,7 +32,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -101,6 +101,40 @@ _ALL_SOURCE_TYPES: tuple[str, ...] = (
     SOURCE_TYPE_MANUAL,
     SOURCE_TYPE_CONNECTOR,
 )
+
+# #2043: the fields whose change is a new ``Memory.version``. An edit that
+# changes none of them (importance-only is a change; delivery_mode, context,
+# a supersede dismissal, access stats are not) neither bumps the version nor
+# writes a revision. Order is the order ``MemoryRevision.prior`` keys follow.
+VERSIONED_FIELDS: tuple[str, ...] = (
+    "summary",
+    "context_summary",
+    "content",
+    "details",
+    "type",
+    "importance",
+    "tags",
+)
+
+# #2043/#2044: one ``memory_revisions`` row per write event. The CHECK literals
+# are derived from these tuples byte-identically to the alembic migration
+# (pinned by tests/test_memory_revision_constants.py). New values are APPENDED,
+# never reordered.
+REVISION_KIND_CREATED = "created"
+REVISION_KIND_UPDATED = "updated"
+REVISION_KIND_FORGOTTEN = "forgotten"
+REVISION_KIND_RESTORED = "restored"
+REVISION_KINDS: tuple[str, ...] = (
+    REVISION_KIND_CREATED,
+    REVISION_KIND_UPDATED,
+    REVISION_KIND_FORGOTTEN,
+    REVISION_KIND_RESTORED,
+)
+# Who wrote the event: an API caller (MCP / REST) or a session rollback (#2044).
+# Sleep maintenance writes no revision (its own action log covers it).
+REVISION_WRITER_API = "api"
+REVISION_WRITER_ROLLBACK = "rollback"
+REVISION_WRITERS: tuple[str, ...] = (REVISION_WRITER_API, REVISION_WRITER_ROLLBACK)
 
 
 class Memory(Base):
@@ -258,6 +292,12 @@ class Memory(Base):
     # merge/re-eval all do). With ``onupdate=func.now()`` every read-path
     # access-stats flush (recall/reference/explore) silently re-stamped it.
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #2043: optimistic-concurrency version. 1 on create; +1 on an edit that
+    # changes one of ``VERSIONED_FIELDS`` (each such edit writes an
+    # ``updated`` row to ``memory_revisions``). forget, Sleep maintenance, the
+    # embedding pipeline and access stats never move it, so an agent's
+    # ``update_memory(expected_version=N)`` fails only on a real edit.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
 
     # Logical Delete (Issue #46 Phase 4)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -585,6 +625,72 @@ class Memory(Base):
         ``details.tool_trigger`` object and belongs to the deterministic
         ``load_guardrails()`` lane. The SQL twin is ``tool_triggered_predicate()``."""
         return isinstance(self.details, dict) and self.details.get("tool_trigger") is not None
+
+
+def _in_list(values: tuple[str, ...]) -> str:
+    return ", ".join(repr(v) for v in values)
+
+
+class MemoryRevision(Base):
+    """One write event on a memory: the revision log (#2043, shared with #2044).
+
+    An event log, not a snapshot table. ``kind='updated'`` rows carry in
+    ``prior`` the values the edit overwrote — the CHANGED keys of
+    ``VERSIONED_FIELDS`` only (a JSON ``null`` is "was null", an absent key is
+    "unchanged"), so an importance-only edit costs a few bytes, not a copy of
+    a 1 MB content. Version K is the live row with the ``prior`` of every
+    ``updated`` row above K applied newest first. ``created`` / ``forgotten``
+    / ``restored`` rows carry no snapshot (the live row or the tombstone holds
+    the text) and only ``created`` / ``updated`` move ``Memory.version``.
+
+    Rows go with their memory: hard deletes (tombstone purge, context delete,
+    erasure) cascade through the FK. ``forget`` keeps them — the tombstone
+    keeps the same text until it is purged, and every read API answers a
+    tombstone with the uniform not-found. Never embedded, never searchable.
+
+    ``actor_user_id`` is the caller who wrote the event (``Memory.user_id`` is
+    the creator); ``agent_id`` / ``session_id`` are the caller's verified
+    agent and session (#2044). Erasure pseudonymizes the actor and NULLs the
+    session. ``context_id`` is copied from the memory row so per-context
+    session queries never join ``memories``.
+    """
+
+    __tablename__ = "memory_revisions"
+
+    # BIGSERIAL: the keyset cursor and the reverse order of a rollback.
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    context_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # ``Memory.version`` right after this event.
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    prior: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    writer: Mapped[str] = mapped_column(String(10), nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Same width and charset as memory_access_events.session_id.
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(f"kind IN ({_in_list(REVISION_KINDS)})", name="valid_revision_kind"),
+        CheckConstraint(f"writer IN ({_in_list(REVISION_WRITERS)})", name="valid_revision_writer"),
+        Index("idx_memory_revisions_memory", "memory_id", "version", "id"),
+        Index(
+            "idx_memory_revisions_session",
+            "context_id",
+            "session_id",
+            "actor_user_id",
+            "id",
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
+    )
 
 
 def pinned_predicate() -> ColumnElement[bool]:
