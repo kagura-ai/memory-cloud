@@ -385,7 +385,14 @@ async def rebuild_content_chunks(
     try:
         await delete_chunk_points([memory.id for memory in plain], collection_name)
     except Exception as e:
-        _log_failure(plain[0], collection_name, e)
+        # One delete for the whole page: no memory of it is to blame.
+        logger.warning(
+            "content_chunks_page_delete_failed",
+            context_id=str(context_id),
+            collection=collection_name,
+            memories=len(plain),
+            error_class=type(e).__name__,
+        )
         raise
 
     # Every chunk of the page, grouped by user (embed_batch and the upsert

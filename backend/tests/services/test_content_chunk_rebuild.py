@@ -171,23 +171,33 @@ async def test_resource_rows_and_short_pages_embed_nothing():
     upsert.assert_not_awaited()
 
 
-async def test_a_failed_delete_is_logged_and_raised():
+async def test_a_failed_delete_is_logged_for_the_page_and_raised():
+    """F23: the page-wide delete failing is logged as a page event (context,
+    memory count, error class), not blamed on the page's first memory."""
     with (
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "content_chunks_enabled", AsyncMock(return_value=True)),
         patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
-        patch.object(writer, "_log_failure") as log,
+        patch.object(writer, "_log_failure") as per_memory,
+        patch.object(writer, "logger") as logger,
         pytest.raises(RuntimeError),
     ):
         await writer.rebuild_content_chunks(
             _db(),
-            [_memory(LONG)],
+            [_memory(LONG), _memory(LONG)],
             base_payloads={},
             embed_svc=_embed_svc(),
             collection_name=TARGET,
             context_id=CTX,
         )
-    log.assert_called_once()
+    per_memory.assert_not_called()
+    logger.warning.assert_called_once_with(
+        "content_chunks_page_delete_failed",
+        context_id=CTX,
+        collection=TARGET,
+        memories=2,
+        error_class="RuntimeError",
+    )
 
 
 async def test_a_failed_embedding_is_raised_not_swallowed():
