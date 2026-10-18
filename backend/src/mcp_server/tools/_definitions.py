@@ -347,7 +347,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full (summary, context_summary, content, details, provenance, links) by id, within max_chars. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate names an older near-duplicate (a suggestion; verified: true when the deployment's judge confirmed it is an update of the same fact): accept with create_edge(edge_type="supersedes"), a tool outside the core profile — describe_tools(["create_edge"]) has its schema. Oversized content arrives as a slice (content_truncated, content_next_offset) or content_omitted; oversized details / context arrive as details_json / context_json pages with *_next_offset, or <field>_omitted; continue with the *_offset parameters. Errors: memory_not_found, invalid_argument.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. version=N reads an earlier version: historical: true, current_version, unavailable_fields? (erased), no links or supersede_candidate; list_revisions, a tool outside the core profile, lists the versions — describe_tools(["list_revisions"]) has its schema. supersede_candidate names an older near-duplicate (a suggestion; verified: true when the deployment's judge confirmed it is an update of the same fact): accept with create_edge(edge_type="supersedes"), a tool outside the core profile — describe_tools(["create_edge"]) has its schema. Oversized content arrives as a slice (content_truncated, content_next_offset) or content_omitted; oversized details / context arrive as details_json / context_json pages with *_next_offset, or <field>_omitted; continue with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error (no such version; current_version).
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -371,6 +371,11 @@ Manual: guide(["reference"]).""",
                         },
                         "description": "Heavy fields to return (default all four; with an offset, only that one). Other fields always return.",
                     },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Read this earlier version instead of the current one. Omit for the current version.",
+                    },
                     "content_offset": {
                         "type": "integer",
                         "minimum": 0,
@@ -385,6 +390,44 @@ Manual: guide(["reference"]).""",
                         "type": "integer",
                         "minimum": 0,
                         "description": "As details_offset, for context (context_json).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
+                    },
+                },
+            },
+        },
+        {
+            "name": "list_revisions",
+            "readOnly": True,
+            "description": """List one memory's revision log, newest first: created, updated (with the fields the edit changed), forgotten and restored events, each with the version after it. Read an earlier version with reference(memory_id, version=N); revert with update_memory(expected_version=current_version) and the old values. Sleep maintenance and connector re-indexes write no events (they never move the version).
+Returns: {status, memory_id, current_version, revisions: [{version, kind, at, changed_fields, writer, by_you, agent_id?, session_id?}], count, has_more, next_cursor, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. by_you: you wrote it; agent_id / session_id show on your own events only. Errors: memory_not_found (also once forgotten).""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["memory_id", "context_id"],
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the memory (from recall() results). Do NOT guess or fabricate IDs.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Events per page (default 20).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
                     },
                     "max_chars": {
                         "type": "integer",

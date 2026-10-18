@@ -122,6 +122,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         # #1852: deterministic SQL reads, no embedding, no Hebbian write (like load_pinned).
         "list",
         "changes_since",
+        # #2043: one memory's revision rows by index — no embedding, no Hebbian write.
+        "list_revisions",
         # #1851: composes the deterministic lanes above — same exemption.
         "bootstrap",
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
@@ -247,6 +249,7 @@ def _build_registry() -> dict[str, Any]:
         handle_setup_connector,
         handle_setup_resource,
     )
+    from mcp_server.tools.revisions import handle_list_revisions
     from mcp_server.tools.search_config import handle_update_search_config
     from mcp_server.tools.secrets import (
         handle_secret_get,
@@ -276,6 +279,7 @@ def _build_registry() -> dict[str, Any]:
         "load_guardrails": handle_load_guardrails,
         "forget": handle_forget,
         "reference": handle_reference,
+        "list_revisions": handle_list_revisions,  # #2043
         "explore": handle_explore,
         "guide": handle_guide,  # #1850
         "describe_tools": handle_describe_tools,  # #1849

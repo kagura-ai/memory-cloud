@@ -38,6 +38,9 @@ CAPACITY_LOCK_BLOCKED_TOOLS: frozenset[str] = frozenset(
         "recall_nearby",
         "recall_series",
         "reference",
+        # #2043: a memory's edit history (the fields each edit changed);
+        # parity with reference, which reads the earlier versions' text.
+        "list_revisions",
         "explore",
         "load_pinned",
         "bootstrap",
@@ -142,6 +145,7 @@ CAPACITY_LOCK_SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "recall",
         "reference",
+        "list_revisions",  # MemoryService.list_revisions checks after access
         "explore",
         "load_pinned",
         "remember",

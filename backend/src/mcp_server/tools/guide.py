@@ -386,6 +386,21 @@ GUIDE_TOPICS: dict[str, str] = {
         "picks the heavy fields to return (default all four; with an offset, only "
         "that one). Errors to branch on: memory_not_found, invalid_argument."
     ),
+    "reference.versions": (
+        "Earlier versions: reference(memory_id, version=N) returns version N as it "
+        "stood before the next edit, rebuilt from the memory's revision log: "
+        "historical: true, version: N, current_version (the live one), updated_at = "
+        "when N was written; scope, context and provenance are today's, and the links "
+        "and supersede_candidate are left out (they describe the memory now). "
+        "unavailable_fields lists fields whose old value account erasure removed (they "
+        "read null). version = current_version reads the memory as it is. A version "
+        "outside 1..current_version is validation_error with current_version. To see "
+        "which versions exist and what each edit changed, call list_revisions — outside "
+        'the core profile, describe_tools(["list_revisions"]) has its schema. To '
+        "revert, send the old values with update_memory(expected_version="
+        "current_version). A forgotten memory has no readable versions "
+        "(memory_not_found)."
+    ),
     # ------------------------------------------------------------------ forget
     "forget.modes": (
         "Modes — supply exactly ONE (memory_id wins if both are given): memory_id "
@@ -584,7 +599,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "ids",
     ),
     "update_memory": ("update_memory.modes", "update_memory.returns", "security", "ids"),
-    "reference": ("reference.returns", "reference.paging", "ids"),
+    "reference": ("reference.returns", "reference.paging", "reference.versions", "ids"),
     "forget": ("forget.modes", "ids"),
     "explore": ("explore.usage", "ids"),
     "load_pinned": ("load_pinned.usage", "remember.delivery"),
