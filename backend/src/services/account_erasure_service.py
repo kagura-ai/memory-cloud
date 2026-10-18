@@ -37,7 +37,8 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, type_coerce, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +81,7 @@ from services.billing_contract import (
     workspaces_under_contract,
 )
 from services.email_service import EmailService, get_email_service
+from services.memory_versions import PRIOR_ERASED_KEY
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
@@ -1436,7 +1438,10 @@ class AccountErasureService:
           revision-log twin of ``_scrub_surviving_memories`` NULLing the
           surviving memories' ``details`` (an overwritten ``details`` would
           otherwise keep the structured payload the scrub removes). The
-          overwritten text stays, as the memory text itself does.
+          overwritten text stays, as the memory text itself does. The key
+          is replaced by ``{"erased": ["details"]}`` (``PRIOR_ERASED_KEY``),
+          so a rebuilt earlier version says its details are unavailable
+          instead of passing a later value off as it (#2043 PR2).
         - the subject's own events get the salted pseudonym as
           ``actor_user_id`` (the same pseudonym as the memories, so the log
           still lines up) and a NULL ``session_id`` (the
@@ -1453,7 +1458,11 @@ class AccountErasureService:
                 (MemoryRevision.actor_user_id == user_id)
                 | MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id)),
             )
-            .values(prior=MemoryRevision.prior.delete_path(["details"]))
+            .values(
+                prior=MemoryRevision.prior.delete_path(["details"]).op("||", return_type=JSONB)(
+                    type_coerce({PRIOR_ERASED_KEY: ["details"]}, JSONB)
+                )
+            )
         )
         result = cast(
             CursorResult[Any],

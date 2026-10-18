@@ -69,11 +69,14 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     assert count == 3
     strip, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
     strip_sql = str(strip.compile(dialect=postgresql.dialect()))
-    assert strip_sql.startswith("UPDATE memory_revisions SET prior=(memory_revisions.prior #-")
+    assert strip_sql.startswith("UPDATE memory_revisions SET prior=((memory_revisions.prior #-")
     # the subject's own events AND every event of a memory the subject wrote
     assert "memory_revisions.actor_user_id =" in strip_sql
     assert "memory_revisions.memory_id IN (SELECT memories.id" in strip_sql
     assert "memory_revisions.prior ? " in strip_sql  # only rows that carry details
+    # PR2: the dropped key is recorded, so a rebuilt version says "unavailable"
+    assert ") || " in strip_sql
+    assert {"erased": ["details"]} in strip.compile(dialect=postgresql.dialect()).params.values()
 
     compiled = pseudonymize.compile(dialect=postgresql.dialect())
     assert str(compiled).startswith("UPDATE memory_revisions SET actor_user_id=")

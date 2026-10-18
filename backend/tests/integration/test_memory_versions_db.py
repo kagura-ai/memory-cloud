@@ -10,7 +10,7 @@
    forget whose unlocked read is older than a concurrent edit logs the
    committed version.
 4. The erasure scrub pseudonymizes the subject's events, NULLs their session
-   and strips ``details`` from ``prior`` (#2043 §1e).
+   and strips ``details`` from ``prior``, leaving the erased marker (#2043 §1e).
 5. ``f03_2043_memory_versions`` round trip: existing rows read ``version = 1``;
    the downgrade drops the table and the column.
 
@@ -326,8 +326,8 @@ async def test_erasure_scrubs_the_revision_log(
             )
         ).all()
     assert [tuple(r) for r in rows] == [
-        (pseudonym, None, {"summary": "old"}),
-        (other, "sess-2", {"importance": 0.4}),
+        (pseudonym, None, {"summary": "old", "erased": ["details"]}),
+        (other, "sess-2", {"importance": 0.4, "erased": ["details"]}),
         (other, "sess-3", {"details": {"keep": True}}),
     ]
 
