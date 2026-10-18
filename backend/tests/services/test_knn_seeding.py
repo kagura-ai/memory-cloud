@@ -5,6 +5,7 @@ in `process_pending_embedding` to bootstrap the Neural Memory graph for
 new memories.
 """
 
+import hashlib
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -24,20 +25,26 @@ def _fresh_no_consumer_reported(monkeypatch):
 
 
 def _make_memory(workspace_id=None, context_id=None, user_id="user1"):
-    """Build a Memory mock with the fields _create_knn_seed_edges reads."""
-    memory = MagicMock()
-    memory.id = uuid4()
-    memory.user_id = user_id
-    memory.workspace_id = workspace_id or uuid4()
-    memory.context_id = context_id or uuid4()
-    # #1403: real (non-mock) starting value for the server-only supersede
-    # suggestion column the storage path assigns to.
-    memory.supersede_candidate = None
-    # #2016: the judge's pair fingerprint reads these as text.
-    memory.summary = "new summary"
-    memory.content = "new content"
-    memory.created_at = datetime(2026, 10, 2)
-    return memory
+    """Build a transient Memory with the fields _create_knn_seed_edges reads.
+
+    A real model, not a mock: #2069's detection write sets the committed
+    ``supersede_candidate`` on it after the conditional UPDATE, which needs
+    the ORM instance state.
+    """
+    from models.memory import Memory
+
+    return Memory(
+        id=uuid4(),
+        user_id=user_id,
+        workspace_id=workspace_id or uuid4(),
+        context_id=context_id or uuid4(),
+        # #1403: the server-only supersede suggestion column starts empty.
+        supersede_candidate=None,
+        # #2016: the judge's pair fingerprint reads these as text.
+        summary="new summary",
+        content="new content",
+        created_at=datetime(2026, 10, 2),
+    )
 
 
 def _make_config(
@@ -73,6 +80,8 @@ def _make_db():
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.refresh = AsyncMock()
+    # #2069: the detection write is a conditional UPDATE; one row matched.
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
     # begin_nested() returns an async context manager
     nested_cm = MagicMock()
@@ -1519,7 +1528,11 @@ class TestSupersedeVerification:
             )
 
         judge.assert_not_called()
-        db.execute.assert_not_called()
+        # The one statement is the detection write itself, not a target load.
+        from sqlalchemy.sql.dml import Update
+
+        db.execute.assert_awaited_once()
+        assert isinstance(db.execute.await_args.args[0], Update)
         assert "verification" not in memory.supersede_candidate
 
     @pytest.mark.asyncio
@@ -2008,3 +2021,233 @@ class TestSupersedeVerdictAfterAnEdit:
         assert memory.supersede_candidate == stored
         db.execute.assert_not_called()
         db.commit.assert_not_called()
+
+
+class TestSupersedeWriteRecheck:
+    """#2069: the off mode (the default) and the LLM mode's reused verdict
+    wrote the candidate from the row as the task loaded it — before the
+    embed, the upsert and the search. The re-read that #2059 added after the
+    judge call now runs right before the write on every path, and the write
+    only applies while the row still holds what that re-read saw."""
+
+    PATHS = ("off", "reuse")
+
+    @staticmethod
+    def _setup(path):
+        """Memory, db, hits, target id and judge for one detection path.
+
+        ``reuse``: LLM mode with a stored verdict for the same unmoved pair,
+        so no judge call is made — the write follows the target load only.
+        """
+        from services.supersede_verify import pair_fingerprint
+
+        memory = _make_memory()
+        db = _make_db()
+        dup_id = str(uuid4())
+        hits = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {"id": dup_id, "score": 0.93, "payload": {}, "embedding": []},
+        ]
+        judge = AsyncMock()
+        if path == "off":
+            return memory, db, hits, dup_id, judge, _make_config(enabled=False)
+        old = MagicMock()
+        old.id = dup_id
+        old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
+        row = MagicMock()
+        row.scalar_one_or_none = MagicMock(return_value=old)
+        db.execute = AsyncMock(side_effect=[row, MagicMock(rowcount=1)])
+        memory.supersede_candidate = {
+            "memory_id": dup_id,
+            "similarity": 0.925,
+            "detected_at": "2026-10-01T00:00:00Z",
+            "verification": {
+                "verdict": "supersedes",
+                "confidence": 0.9,
+                "verified": True,
+                "fingerprint": pair_fingerprint(old, memory),
+            },
+        }
+        return memory, db, hits, dup_id, judge, _make_config(enabled=False, verify_mode="llm")
+
+    @staticmethod
+    async def _seed(memory, db, hits, *, config, judge, repo=None):
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=hits)),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=repo or _make_edge_repo(),
+            ),
+            patch("services.supersede_verify.judge_pair", new=judge),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+        return [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+
+    @staticmethod
+    def _updates(db):
+        from sqlalchemy.sql.dml import Update
+
+        return [c.args[0] for c in db.execute.await_args_list if isinstance(c.args[0], Update)]
+
+    @staticmethod
+    def _sql(statement):
+        from sqlalchemy.dialects import postgresql
+
+        compiled = statement.compile(dialect=postgresql.dialect())
+        return str(compiled), compiled.params
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", PATHS)
+    async def test_a_dismissal_committed_during_the_search_wins(self, path):
+        """update_memory(dismiss_supersede_candidate=true) landed after the
+        task loaded the row: the re-read sees the tombstone and nothing is
+        written over it."""
+        memory, db, hits, dup_id, judge, config = self._setup(path)
+        tombstone = {"dismissed": {"memory_id": dup_id, "similarity": 0.93, "dismissed_at": "x"}}
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = tombstone
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        events = await self._seed(memory, db, hits, config=config, judge=judge)
+
+        judge.assert_not_called()
+        db.refresh.assert_awaited_once()
+        assert memory.supersede_candidate is tombstone
+        assert self._updates(db) == []
+        db.commit.assert_not_called()
+        assert "supersede_candidate_suppressed_by_dismissal" in events
+        assert "supersede_candidate_detected" not in events
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", PATHS)
+    async def test_an_edit_during_the_search_skips_the_write(self, path):
+        """B_v2 was committed and its own run already cleared the column: this
+        run's neighbour is about B_v1, so it must not put the pair back."""
+        memory, db, hits, _dup_id, judge, config = self._setup(path)
+
+        async def refresh(obj, attribute_names=None):
+            obj.summary = "B_v2: a different subject"
+            obj.supersede_candidate = None
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        events = await self._seed(memory, db, hits, config=config, judge=judge)
+
+        assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {
+            "summary",
+            "content",
+            "supersede_candidate",
+        }
+        assert memory.supersede_candidate is None
+        assert self._updates(db) == []
+        db.commit.assert_not_called()
+        assert "supersede_candidate_skipped_source_edited" in events
+        assert "supersede_candidate_detected" not in events
+
+    @pytest.mark.asyncio
+    async def test_an_accept_committed_during_the_search_wins(self):
+        """create_edge accepted the suggestion after the first edge check:
+        the edge is read again after the row, so the clear is not undone."""
+        from models.memory import EDGE_TYPE_SUPERSEDES
+
+        memory, db, hits, _dup_id, judge, config = self._setup("off")
+        accepted = MagicMock()
+        accepted.edge_type = EDGE_TYPE_SUPERSEDES
+        repo = _make_edge_repo()
+        repo.get_edge = AsyncMock(side_effect=[None, accepted])
+
+        await self._seed(memory, db, hits, config=config, judge=judge, repo=repo)
+
+        assert repo.get_edge.await_count == 2
+        assert memory.supersede_candidate is None
+        assert self._updates(db) == []
+        db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_write_on_an_empty_row_requires_it_still_empty(self):
+        """Compiled SQL: no candidate at the re-read means SQL NULL — or the
+        JSON null the #2022 walk may have skipped — at the write."""
+        memory, db, hits, dup_id, judge, config = self._setup("off")
+
+        events = await self._seed(memory, db, hits, config=config, judge=judge)
+
+        (update,) = self._updates(db)
+        sql, params = self._sql(update)
+        assert sql.startswith("UPDATE memories SET supersede_candidate=")
+        assert "memories.supersede_candidate IS NULL" in sql
+        assert "CAST(memories.supersede_candidate AS TEXT) =" in sql
+        assert "null" in params.values()
+        assert "updated_at" not in sql  # #1317: a system annotation
+        # The text this run embedded, no accepted edge, not deleted.
+        assert "md5(memories.summary) =" in sql
+        assert "md5(memories.content) =" in sql
+        assert "NOT (EXISTS (SELECT" in sql and "neural_memory_edges.edge_type" in sql
+        assert "memories.deleted_at IS NULL" in sql
+        assert hashlib.md5(b"new summary").hexdigest() in params.values()
+        assert "supersedes" in params.values()
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        db.commit.assert_awaited()
+        assert "supersede_candidate_detected" in events
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", PATHS)
+    async def test_the_write_requires_the_value_the_re_read_saw(self, path):
+        """Compiled SQL: a stored value matches only while it is unchanged
+        (compared as JSONB, since the column is ``json``)."""
+        memory, db, hits, dup_id, judge, config = self._setup(path)
+        seen = memory.supersede_candidate
+        if seen is None:
+            # A rejection of ANOTHER pairing never suppresses this one (#1504):
+            # the detection overwrites it — but only that exact tombstone.
+            seen = {"dismissed": {"memory_id": str(uuid4()), "similarity": 0.9}}
+            memory.supersede_candidate = seen
+
+        await self._seed(memory, db, hits, config=config, judge=judge)
+
+        (update,) = self._updates(db)
+        sql, params = self._sql(update)
+        assert "CAST(memories.supersede_candidate AS JSONB) = CAST(" in sql
+        assert "supersede_candidate IS NULL" not in sql
+        assert seen in params.values()
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        judge.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_row_changed_after_the_re_read_is_left_alone(self):
+        """The conditional UPDATE matched nothing (a tombstone, an accept's
+        clear or a newer run landed after the re-read): the object keeps what
+        it read and no detection is reported."""
+        memory, db, hits, _dup_id, judge, config = self._setup("off")
+        db.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+
+        events = await self._seed(memory, db, hits, config=config, judge=judge)
+
+        assert len(self._updates(db)) == 1
+        assert memory.supersede_candidate is None
+        assert "supersede_candidate_detected" not in events
+        assert "supersede_candidate_skipped_row_changed" in events
+
+    @pytest.mark.asyncio
+    async def test_the_written_value_is_not_flushed_again(self):
+        """The object holds the candidate as committed, not as a pending
+        change: the seed-edge commits that follow would otherwise flush it as a
+        blind overwrite after all."""
+        from sqlalchemy import inspect
+
+        memory, db, hits, dup_id, judge, config = self._setup("off")
+
+        await self._seed(memory, db, hits, config=config, judge=judge)
+
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        assert not inspect(memory).attrs.supersede_candidate.history.has_changes()

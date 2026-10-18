@@ -7117,6 +7117,131 @@ async def _clear_supersede_candidate_without_neighbour(db: AsyncSession, *, memo
     )
 
 
+async def _supersede_write_preempted(
+    db: AsyncSession,
+    *,
+    memory: Memory,
+    edge_repo: Any,
+    target_id_str: str,
+    raw_top_score: float,
+    workspace_id_str: str,
+    context_id_str: str,
+) -> bool:
+    """Re-read the row right before a detection write; True to skip it (#2069).
+
+    The detector decided on ``memory`` as the embedding task loaded it. An
+    edit (#2059: the edit's own run owns the column), a dismissal tombstone or
+    an accepted ``supersedes`` edge committed since then by ``update_memory``
+    / ``create_edge`` must win over this write. The edge is read after the
+    row: an accept that lands in between clears the column, and only the edge
+    tells that apart from "no candidate". Leaves the re-read column on
+    ``memory`` for :func:`_store_supersede_candidate`.
+    """
+    from models.memory import EDGE_TYPE_SUPERSEDES
+    from services.supersede_dismissal import is_dismissed
+
+    memory_id_str = str(memory.id)
+    if await _source_text_moved(db, memory):
+        logger.info(
+            "supersede_candidate_skipped_source_edited",
+            memory_id=memory_id_str,
+            candidate_memory_id=target_id_str,
+        )
+        return True
+    if is_dismissed(memory.supersede_candidate, target_id=target_id_str, similarity=raw_top_score):
+        logger.info(
+            "supersede_candidate_suppressed_by_dismissal",
+            memory_id=memory_id_str,
+            candidate_memory_id=target_id_str,
+            similarity=round(raw_top_score, 4),
+        )
+        return True
+    accepted = await edge_repo.get_edge(
+        memory.user_id,
+        memory.id,
+        UUID(target_id_str),
+        workspace_id=workspace_id_str,
+        context_id=context_id_str,
+    )
+    return accepted is not None and accepted.edge_type == EDGE_TYPE_SUPERSEDES
+
+
+async def _store_supersede_candidate(
+    db: AsyncSession, *, memory: Memory, candidate: dict[str, Any]
+) -> bool:
+    """Write ``candidate`` while the row is still as the re-read saw it (#2069).
+
+    Run right after :func:`_supersede_write_preempted`, whose re-read
+    ``memory`` holds. The UPDATE applies only while, at the write:
+
+    - the column still holds that value — compared whole, not by target id: a
+      tombstone for another target, or one whose pair moved past the
+      resurface delta, is overwritten on purpose (#1504), but one committed
+      after the re-read is not, nor an accept's clear or a newer run's write.
+      "No candidate" also matches the JSON ``null`` rows the #2022 walk
+      skipped (the ORM reads both as None);
+    - the text is the one this run embedded (an edit's own run owns the
+      column, #2059);
+    - no ``supersedes`` edge to the target exists (an accept that did not
+      touch the column), and the memory is not deleted.
+
+    ``updated_at`` stays: detection is a system annotation, not a user edit
+    (#1317). Commit is safe: the caller already committed the
+    embedding_status update, so nothing else is pending here.
+
+    Returns:
+        True when the row was written; ``memory`` then holds ``candidate``
+        as committed, so the seed-edge commits that follow do not flush it
+        again.
+    """
+    from sqlalchemy import Text, update
+    from sqlalchemy import cast as sql_cast
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+
+    def md5(value: str) -> str:
+        return hashlib.md5(value.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    seen = memory.supersede_candidate
+    if seen is None:
+        column_unchanged = or_(
+            Memory.supersede_candidate.is_(None),
+            sql_cast(Memory.supersede_candidate, Text) == "null",
+        )
+    else:
+        column_unchanged = sql_cast(Memory.supersede_candidate, JSONB) == sql_cast(seen, JSONB)
+    accepted = exists().where(
+        NeuralMemoryEdge.src_id == memory.id,
+        NeuralMemoryEdge.dst_id == UUID(str(candidate["memory_id"])),
+        NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+    )
+    result = await db.execute(
+        update(Memory)
+        .where(
+            Memory.id == memory.id,
+            Memory.deleted_at.is_(None),
+            column_unchanged,
+            func.md5(Memory.summary) == md5(memory.summary),
+            func.md5(Memory.content) == md5(memory.content),
+            ~accepted,
+        )
+        .values(supersede_candidate=candidate)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    if int(getattr(result, "rowcount", 0) or 0) == 0:
+        logger.info(
+            "supersede_candidate_skipped_row_changed",
+            memory_id=str(memory.id),
+            candidate_memory_id=str(candidate["memory_id"]),
+        )
+        return False
+    set_committed_value(memory, "supersede_candidate", candidate)
+    return True
+
+
 async def _detect_supersede_candidate(
     db: AsyncSession,
     *,
@@ -7153,9 +7278,12 @@ async def _detect_supersede_candidate(
     the Sleep judge first (``services.supersede_verify``) and its verdict is
     stored beside the candidate; an earlier verdict for the same, unmoved pair
     is reused instead of re-judged. A judge that is off, capped or failing
-    leaves the candidate exactly as before. #2059: when this memory's text was
-    edited during the judge's round trip, nothing is written — the edit's own
-    embedding run owns the column.
+    leaves the candidate exactly as before. #2059 / #2069: right before the
+    write the row is read again, on every path; when this memory's text was
+    edited since the task loaded it, nothing is written — the edit's own
+    embedding run owns the column — and a dismissal or an accept committed
+    meanwhile wins. The write itself only applies while the row still holds
+    what that re-read saw.
     """
     from models.memory import EDGE_TYPE_SUPERSEDES
     from services.supersede_dismissal import is_dismissed
@@ -7251,49 +7379,24 @@ async def _detect_supersede_candidate(
                         new=memory,
                         old=old,
                     )
-                    # The judge took a round trip; an edit, a dismissal or an
-                    # accept committed meanwhile by update_memory / create_edge
-                    # must win over this write (re-read, then re-check). An
-                    # edit (#2059): the verdict is about this memory's earlier
-                    # text, and the edit's own embedding run writes the column.
-                    if await _source_text_moved(db, memory):
-                        logger.info(
-                            "supersede_candidate_skipped_source_edited",
-                            memory_id=memory_id_str,
-                            candidate_memory_id=target_id_str,
-                        )
-                        return
-                    if is_dismissed(
-                        memory.supersede_candidate,
-                        target_id=target_id_str,
-                        similarity=raw_top_score,
-                    ):
-                        logger.info(
-                            "supersede_candidate_suppressed_by_dismissal",
-                            memory_id=memory_id_str,
-                            candidate_memory_id=target_id_str,
-                            similarity=round(raw_top_score, 4),
-                        )
-                        return
-                    refreshed = await edge_repo.get_edge(
-                        memory.user_id,
-                        memory.id,
-                        UUID(target_id_str),
-                        workspace_id=workspace_id_str,
-                        context_id=context_id_str,
-                    )
-                    if refreshed is not None and refreshed.edge_type == EDGE_TYPE_SUPERSEDES:
-                        return
             if verification is not None:
                 candidate["verification"] = verification
 
-        # Reassign the dedicated column (JSON, not a MutableDict — a
-        # reassignment is what flags it dirty). Do NOT touch updated_at:
-        # detection is a system annotation, not a user edit (#1317). Commit is
-        # safe: the caller already committed the embedding_status update before
-        # invoking this function, so nothing else is pending here.
-        memory.supersede_candidate = candidate
-        await db.commit()
+        # #2069: every path — not only the judge's round trip — ran on the row
+        # as this task loaded it, before the embed, the upsert and the search.
+        # An edit, a dismissal or an accept committed since must win.
+        if await _supersede_write_preempted(
+            db,
+            memory=memory,
+            edge_repo=edge_repo,
+            target_id_str=target_id_str,
+            raw_top_score=raw_top_score,
+            workspace_id_str=workspace_id_str,
+            context_id_str=context_id_str,
+        ):
+            return
+        if not await _store_supersede_candidate(db, memory=memory, candidate=candidate):
+            return
         verification = candidate.get("verification")
         logger.info(
             "supersede_candidate_detected",

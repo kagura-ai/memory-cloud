@@ -364,65 +364,100 @@ class TestWiring:
             for node in ast.walk(fn)
         ), "_update_in_place no longer applies the dismissal"
 
+    @staticmethod
+    def _column_writes(fn):
+        """The values ``fn`` stores in ``supersede_candidate``.
+
+        Both an attribute assignment and ``set_committed_value(obj,
+        "supersede_candidate", value)`` (the #2059 / #2069 conditional
+        UPDATEs mirror their write onto the object this way) count.
+        """
+        values = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Attribute) and t.attr == "supersede_candidate"
+                for t in node.targets
+            ):
+                values.append(node.value)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "set_committed_value"
+                and len(node.args) == 3
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "supersede_candidate"
+            ):
+                values.append(node.args[2])
+        return values
+
+    @staticmethod
+    def _stores_none(value):
+        return isinstance(value, ast.Constant) and value.value is None
+
+    def _functions(self):
+        return [
+            fn
+            for fn in ast.walk(self._service_ast())
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+    @staticmethod
+    def _calls(node, names):
+        return any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in names
+            for n in ast.walk(node)
+        )
+
+    def _candidate_store_helpers(self, functions):
+        """Functions that store a candidate on behalf of their caller (#2069)."""
+        return {
+            fn.name
+            for fn in functions
+            if fn.name != "_apply_supersede_dismissal"
+            and any(not self._stores_none(v) for v in self._column_writes(fn))
+            and not self._calls(fn, {"is_dismissed"})
+        }
+
     def test_the_detector_consults_the_tombstone(self):
         """Without this, the next re-embed rewrites the suggestion and the
         dismissal silently does nothing beyond the current session.
 
-        The detector is located by what it DOES — assigning
-        ``memory.supersede_candidate`` — rather than by name, so moving or
-        renaming it keeps the guarantee under test instead of quietly passing.
+        The detector is located by what it DOES — writing a candidate into
+        ``memory.supersede_candidate``, itself or through a store helper —
+        rather than by name, so moving or renaming it keeps the guarantee under
+        test instead of quietly passing.
         """
-        tree = self._service_ast()
-
-        def writes_a_candidate(fn):
-            return any(
-                isinstance(node, ast.Attribute)
-                and node.attr == "supersede_candidate"
-                and isinstance(node.ctx, ast.Store)
-                for node in ast.walk(fn)
-            )
-
-        def only_clears(fn):
-            """Every write of the column in ``fn`` stores ``None``."""
-            return all(
-                isinstance(node.value, ast.Constant) and node.value.value is None
-                for node in ast.walk(fn)
-                if isinstance(node, ast.Assign)
-                and any(
-                    isinstance(t, ast.Attribute) and t.attr == "supersede_candidate"
-                    for t in node.targets
-                )
-            )
-
-        writers = [
-            fn
-            for fn in ast.walk(tree)
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and writes_a_candidate(fn)
-        ]
-        # The dismissal itself writes the column too; the detector is the other one.
+        functions = self._functions()
+        helpers = self._candidate_store_helpers(functions)
+        # The dismissal itself writes the column too; the detector is the other
+        # one. A store helper's guarantee is its caller's.
         detectors = [
-            fn for fn in writers if fn.name != "_apply_supersede_dismissal" and not only_clears(fn)
+            fn
+            for fn in functions
+            if fn.name != "_apply_supersede_dismissal"
+            and fn.name not in helpers
+            and (
+                any(not self._stores_none(v) for v in self._column_writes(fn))
+                or self._calls(fn, helpers)
+            )
         ]
-        assert detectors, "no function assigns memory.supersede_candidate any more"
+        assert detectors, "no function writes memory.supersede_candidate any more"
         # #2059: a writer that only CLEARS the column (a re-embed that found no
         # neighbour) must still tell a tombstone apart — clearing one would
         # resurrect the rejected pair the next time it is a neighbour.
-        for fn in writers:
-            if fn in detectors or fn.name == "_apply_supersede_dismissal":
-                continue
-            assert any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "dismissed_entry"
-                for node in ast.walk(fn)
-            ), f"{fn.name} clears the supersede candidate without checking for a tombstone"
+        clearers = [
+            fn
+            for fn in functions
+            if fn.name != "_apply_supersede_dismissal"
+            and self._column_writes(fn)
+            and all(self._stores_none(v) for v in self._column_writes(fn))
+        ]
+        for fn in clearers:
+            assert self._calls(fn, {"dismissed_entry"}), (
+                f"{fn.name} clears the supersede candidate without checking for a tombstone"
+            )
         for fn in detectors:
-            assert any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "is_dismissed"
-                for node in ast.walk(fn)
-            ), (
+            assert self._calls(fn, {"is_dismissed"}), (
                 f"{fn.name} writes a supersede candidate without consulting the "
                 "dismissal tombstone — a re-embed would resurrect rejected suggestions"
             )
@@ -433,12 +468,13 @@ class TestWiring:
         Dropping ``already_dismissed`` from the ``if`` leaves ``is_dismissed``
         called and its result unused, so the previous test still passes while
         the dismissal silently becomes session-only. This asserts on the branch
-        that guards the assignment.
+        that guards the write.
         """
-        tree = self._service_ast()
+        functions = self._functions()
+        helpers = self._candidate_store_helpers(functions)
 
-        def assigns_candidate(node):
-            return any(
+        def writes_candidate(node):
+            return self._calls(node, helpers) or any(
                 isinstance(n, ast.Attribute)
                 and n.attr == "supersede_candidate"
                 and isinstance(n.ctx, ast.Store)
@@ -447,9 +483,9 @@ class TestWiring:
 
         guards = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(self._service_ast())
             if isinstance(node, ast.If)
-            and any(assigns_candidate(stmt) for stmt in node.body)
+            and any(writes_candidate(stmt) for stmt in node.body)
             and any(
                 isinstance(n, ast.Name) and n.id == "already_superseded"
                 for n in ast.walk(node.test)
@@ -463,6 +499,37 @@ class TestWiring:
                 "tombstone is computed but ignored, so a re-embed resurrects "
                 "rejected suggestions"
             )
+
+    def test_every_detection_write_re_reads_the_row_first(self):
+        """#2069: the off mode and a reused verdict wrote from the row as the
+        task loaded it; the re-read must sit right before the write on every
+        path, not on the judge branch only."""
+        functions = self._functions()
+        helpers = self._candidate_store_helpers(functions)
+        assert helpers, "the detection write is no longer a conditional store helper"
+
+        def own_expression(stmt):
+            """The part of ``stmt`` outside its nested blocks."""
+            return stmt.test if isinstance(stmt, ast.If) else stmt
+
+        stores = 0
+        for fn in functions:
+            if fn.name in helpers:
+                continue
+            blocks = [
+                getattr(node, field)
+                for node in ast.walk(fn)
+                for field in ("body", "orelse")
+                if isinstance(getattr(node, field, None), list)
+            ]
+            for block in blocks:
+                for i, stmt in enumerate(block):
+                    if isinstance(stmt, ast.stmt) and self._calls(own_expression(stmt), helpers):
+                        stores += 1
+                        assert any(
+                            self._calls(prev, {"_supersede_write_preempted"}) for prev in block[:i]
+                        ), f"{fn.name} stores a candidate without the re-read right before it"
+        assert stores, "no caller of the detection write was found"
 
     def test_update_response_carries_the_dismissed_id(self):
         tree = self._service_ast()
