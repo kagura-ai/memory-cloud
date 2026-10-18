@@ -618,3 +618,40 @@ _CONFIG_BASE = {
     "reranker_provider": "voyage",
     "reranker_model": "rerank-2",
 }
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_metadata_only_sync_moves_the_payload_and_keeps_the_vectors(qdrant, collection):
+    """#2015 D5: a Sleep promotion's scope reaches the chunk points without an
+    embedding; the chunk vectors, texts and isolation fields stay."""
+    from db.qdrant import sync_chunk_points_payload
+
+    memory_id = uuid4()
+    await _write(collection, memory_id, chunks=2)
+
+    ok = await sync_chunk_points_payload(
+        memory_id,
+        {"scope": "persistent", "importance": 0.9, "summary_tokens": "t"},
+        collection,
+    )
+
+    assert ok is True
+    points, _ = await qdrant.scroll(
+        collection,
+        scroll_filter=Filter(
+            must=[FieldCondition(key=CHUNK_OF_FIELD, match=MatchValue(value=str(memory_id)))]
+        ),
+        with_payload=True,
+        with_vectors=True,
+    )
+    assert len(points) == 2
+    for point in points:
+        assert point.payload["scope"] == "persistent"
+        assert point.payload["importance"] == 0.9
+        assert "summary_tokens" not in point.payload
+        assert point.payload["chunk_text"] in {"t0", "t1"}
+        assert point.payload["context_id"] == _CTX
+        assert point.vector[qdrant_module.KAGURA_MEMORIES_VECTOR_NAME] == pytest.approx(_CHUNK_VEC)
+    # The summary point is not this helper's business.
+    summary = (await qdrant.retrieve(collection, ids=[str(memory_id)]))[0]
+    assert summary.payload["scope"] == "context"
