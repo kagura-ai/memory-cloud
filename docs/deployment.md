@@ -1361,6 +1361,7 @@ Two settings change the layout. Both default to the historical behaviour.
 |---|---|---|
 | `QDRANT_DENSE_QUANTIZATION` | `none` (default), `int8` | Scalar quantization: a 1-byte-per-dimension copy of the dense vector is kept in RAM and used for the HNSW search. The candidates are rescored against the fp32 originals (`rescore=true`, oversampling 2.0), which keeps the ranking within Qdrant's documented <1% recall loss. |
 | `QDRANT_DENSE_ON_DISK` | `false` (default), `true` | Store the fp32 originals as memory-mapped files instead of RAM. Combine it with `int8`: searches then read the int8 copy from RAM and touch the disk only to rescore the top candidates. |
+| `QDRANT_HTTP_COMPRESSION` | `false` (default), `true` | Lets the REST client accept compressed Qdrant responses. Off by default: a compressed, chunked response can be held about 40 ms by delayed ACK and Nagle on some response sizes (#2112). Turn it on only for a Qdrant reached over a slow WAN link, where bytes matter more than that stall. |
 
 RAM estimate per collection for the dense vector alone (add the HNSW graph,
 roughly `points × 16 × 2 × 4 B` with the default `m = 16`, and the payload

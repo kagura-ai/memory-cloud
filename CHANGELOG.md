@@ -4,6 +4,31 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.113.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.113.0) — 2026-10-18
+
+Memories get versions: every edit is recorded, `update_memory` can refuse a stale edit, past versions can be read, and one agent session's writes can be listed and rolled back. Content chunks become a plan feature with a per-plan cap and a toggle in the context's search settings, and recall loses a ~40 ms Qdrant stall.
+
+### Added
+- **Memory versions and revision log** ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)): every memory has a `version` (returned by `remember`, `update_memory`, `reference`, `list` and full-verbosity `recall`). Each create, edit and forget is recorded in `memory_revisions`. `update_memory` and REST `PATCH` take an optional `expected_version`; a mismatch is refused before anything changes (MCP `version_conflict`, REST `409 RES-002` with `details.reason="version_conflict"`). Omitting it keeps last-writer-wins. Sleep, the resource indexer and embedding never bump the version.
+- **`list_revisions` and `reference(version=N)`** ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)): read a memory's change history and the memory as it stood at version N (MCP full profile; REST `GET /api/v1/memory/{id}/revisions` and `POST /reference` with `version`). Same permission as `reference`; a gap in the log is refused rather than guessed.
+- **Session provenance and `rollback_session`** ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)): every write records the writing agent (from the verified credential only) and session (OTel baggage, else the MCP session id); write tools return `session_id`. `changes_since(session_id=)` lists one session's writes. `rollback_session(context_id, session_id, dry_run=true)` (MCP) forgets what the session created, restores what it edited and un-forgets what it forgot, skipping with a cause any memory someone else changed since. A session is addressable only by its own principal, or by the context owner on a user credential. A rollback is final, is time-boxed per call and continues on the next call.
+- **Content chunks as a plan feature** ([#2103](https://github.com/kagura-ai/memory-cloud/issues/2103)): feature `content_chunks` on M and above, with `max_content_chunk_contexts` S 0 / M 1 / L 5 / XL 20, enforced only when `CONTENT_CHUNKS_REQUIRE_PLAN=true` (default `false`, so self-hosted behaves as before). Enabling past the plan answers `403 FEAT-001`, past the cap `429 QUOTA-001` (`quota_type: content_chunk_contexts`). Over the cap or after a downgrade a stored `true` is inactive everywhere; the earliest-enabled contexts stay active and chunk points are kept. Search-config responses gain `content_chunks_effective`, `content_chunks_limit`, `content_chunks_in_use` and `content_chunks_disabled_reason`.
+- **Content chunk toggle in search settings** ([#2104](https://github.com/kagura-ai/memory-cloud/issues/2104), [#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)): the context's search settings page can turn chunks on and off, with confirmations that say what is sent to the embedding provider and reranker, the backfill count, and why the switch is disabled or inactive. The D9 eval numbers are on #2015.
+
+### Changed
+- **One effective content-chunk flag** ([#2080](https://github.com/kagura-ai/memory-cloud/issues/2080)): every reader of `content_chunks_enabled` goes through one policy (store support, plan, cap); `content_chunks_enabled` in responses still reports the stored value.
+- **Sleep supersede judge releases its DB connection** ([#2070](https://github.com/kagura-ai/memory-cloud/issues/2070)): the judge call no longer holds a pooled connection; claim renewal runs every 15 s with a 5 s checkout bound; `embedding_claim_lost` carries `reason=requeued|stale`.
+- **`update_memory` locks the row** ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) for the version check, including across its Qdrant payload sync.
+
+### Fixed
+- **~40 ms Qdrant REST stall on recall** ([#2112](https://github.com/kagura-ai/memory-cloud/issues/2112)): compressed, chunked REST responses were held by delayed ACK and Nagle at some response sizes (chunk-enabled recall and the rerank candidate query). The client now asks for uncompressed responses; `QDRANT_HTTP_COMPRESSION=true` turns compression back on for a Qdrant reached over a WAN.
+
+### Notes
+- Migrations `f02_2103_chunks_enabled_at`, `f03_2043_memory_versions` and `f04_2044_session_provenance` (metadata-only column adds, the `memory_revisions` and `memory_session_rollbacks` tables, and an index built `CONCURRENTLY`; re-run the upgrade if that build is interrupted).
+- New optional environment variables: `CONTENT_CHUNKS_REQUIRE_PLAN` (default `false`) and `QDRANT_HTTP_COMPRESSION` (default `false`). Before turning `CONTENT_CHUNKS_REQUIRE_PLAN` on, run the pre-flight query in `docs/deployment.md` to list the contexts that would go inactive.
+- The MCP server now has 72 tools (`list_revisions`, `rollback_session`).
+- `memory_revisions` grows by one row per write; there is no retention cap yet. Account erasure scrubs revision details, session ids and actor ids.
+
 ## [v0.112.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.112.0) — 2026-10-18
 
 Content chunks become operable: turning them on backfills existing memories, embedding-model migrations rebuild and purge them, Sleep re-embeds them only when the text changed and repairs a failed write, and their cost is counted. This release also fixes Sleep rollback and undo, which failed on every restore in v0.111.0.
