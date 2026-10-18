@@ -658,6 +658,18 @@ def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition
     return FieldCondition(key="importance", range=Range(**range_kwargs))
 
 
+#: #2112: ask Qdrant for uncompressed REST responses. httpx advertises
+#: gzip/deflate/zstd, so Qdrant compresses and streams the body with
+#: ``Transfer-Encoding: chunked``. When the last data segment is small, the
+#: client delays its ACK and the server's Nagle holds the 5-byte chunk
+#: terminator until that ACK: a ~40 ms stall on some response sizes (the
+#: oversampled chunk query hit it). An identity response has
+#: ``Content-Length`` and no terminator. The cost is more bytes on the wire,
+#: which a co-located Qdrant does not notice. Lowercase: also valid gRPC
+#: metadata, where qdrant-client sends the same headers.
+QDRANT_REST_HEADERS: dict[str, str] = {"accept-encoding": "identity"}
+
+
 def get_qdrant_client() -> AsyncQdrantClient:
     """Get singleton Qdrant client.
 
@@ -679,10 +691,16 @@ def get_qdrant_client() -> AsyncQdrantClient:
 
             # Issue #273 Security Review: Add API key auth for production
             if settings.qdrant_api_key:
-                _qdrant_client = AsyncQdrantClient(url=QDRANT_URL, api_key=settings.qdrant_api_key)
+                _qdrant_client = AsyncQdrantClient(
+                    url=QDRANT_URL,
+                    api_key=settings.qdrant_api_key,
+                    headers=dict(QDRANT_REST_HEADERS),
+                )
                 logger.info("qdrant_client_initialized", url=QDRANT_URL, authenticated=True)
             else:
-                _qdrant_client = AsyncQdrantClient(url=QDRANT_URL)
+                _qdrant_client = AsyncQdrantClient(
+                    url=QDRANT_URL, headers=dict(QDRANT_REST_HEADERS)
+                )
                 logger.info("qdrant_client_initialized", url=QDRANT_URL, authenticated=False)
         except Exception as e:
             raise QdrantError(f"Failed to connect to Qdrant: {e}") from e

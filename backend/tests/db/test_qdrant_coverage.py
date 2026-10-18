@@ -347,6 +347,8 @@ class TestGetQdrantClient:
         client = get_qdrant_client()
         assert client is sentinel
         assert "api_key" not in captured
+        # #2112: uncompressed responses (see QDRANT_REST_HEADERS).
+        assert captured["headers"] == {"accept-encoding": "identity"}
         assert get_qdrant_client() is sentinel
 
     def test_builds_with_api_key(self, monkeypatch):
@@ -368,6 +370,7 @@ class TestGetQdrantClient:
 
         get_qdrant_client()
         assert captured["api_key"] == "secret-key"
+        assert captured["headers"] == {"accept-encoding": "identity"}
 
     def test_connection_failure_wrapped_in_qdrant_error(self, monkeypatch):
         """A constructor exception is wrapped in QdrantError."""
