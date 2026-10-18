@@ -1777,12 +1777,21 @@ async def handle_reference(
     view, error = _parse_reference_view(args)
     if error or view is None:
         return error or _error_response("invalid_argument", "Invalid reference arguments")
+    # #2043: an earlier version. ``type(x) is int`` so bool is refused.
+    version = args.get("version")
+    if version is not None and (type(version) is not int or version < 1):
+        return _error_response(
+            "invalid_argument",
+            "version must be a positive integer (a version list_revisions returned).",
+            received=version,
+        )
 
     from db.base import get_db
     from models.schemas import ReferenceRequest
     from services.memory_service import MemoryService
+    from services.memory_versions import UnknownVersionError
 
-    request = ReferenceRequest(memory_id=memory_uuid)
+    request = ReferenceRequest(memory_id=memory_uuid, version=version)
 
     start_time = time.time()
     async for db in get_db():
@@ -1807,9 +1816,26 @@ async def handle_reference(
             try:
                 result = await execute_with_timeout(
                     service.reference(
-                        request.memory_id, user_id=user_id, record_access=record_access
+                        request.memory_id,
+                        user_id=user_id,
+                        record_access=record_access,
+                        version=request.version,
                     ),
                     operation_name="reference",
+                )
+            except UnknownVersionError as e:
+                # #2043: ``version`` names no version of this memory (the
+                # memory itself was found and readable).
+                await db.rollback()
+                await _log_tool_usage(
+                    db, user_id, "reference", start_time, 422, current_context_id, workspace_id
+                )
+                return _error_response(
+                    "validation_error",
+                    e.message,
+                    received=request.version,
+                    current_version=e.current_version,
+                    help="list_revisions(memory_id) lists the versions.",
                 )
             except NotFoundException:
                 # #1316 review: record the 404 in usage telemetry, keeping
@@ -1857,6 +1883,20 @@ async def handle_reference(
                     else None
                 ),
             }
+
+            if result.historical:
+                # #2043: an earlier version. The links and the supersede
+                # suggestion describe the memory now, so they are left out
+                # (not returned empty); the live version is named.
+                for key in (*_REFERENCE_FIELD_KEYS["links"], "supersede_candidate"):
+                    reference_data.pop(key)
+                reference_data["historical"] = True
+                reference_data["current_version"] = result.current_version
+                if result.unavailable_fields:
+                    reference_data["unavailable_fields"] = result.unavailable_fields
+                view = _ReferenceView(
+                    view.fields - {"links"}, view.page_field, view.offset, view.max_chars
+                )
 
             # #1685: only the selected / paged / bounded projection is
             # serialized, never the full one. A default call whose full

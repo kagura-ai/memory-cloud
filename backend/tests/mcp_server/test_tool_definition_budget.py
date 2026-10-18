@@ -74,7 +74,10 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 #
 # #1849 added describe_tools (core 25,884) and #1852 list + changes_since: full list
 # 96,664, core list 29,976 (16 tools).
-FULL_LIST_BUDGET = 107_500  # (#1853) remember_batch joined
+# #2043 list_revisions and #2044 rollback_session joined, and each trimmed the
+# reference / changes_since text it added so the core list stays at its
+# ceiling: full list 109,336, core list 41,499.
+FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session joined
 # #1973 added create_context / update_context / delete_context: core list 39,575.
 CORE_LIST_BUDGET = 41_500  # (#1973) 21 core tools
 RECALL_BUDGET = 4_000  # (#1850) was 6,900

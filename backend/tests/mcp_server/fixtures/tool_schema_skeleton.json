@@ -328,6 +328,10 @@
             ]
           }
         },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
         "content_offset": {
           "type": "integer",
           "minimum": 0
@@ -339,6 +343,41 @@
         "context_offset": {
           "type": "integer",
           "minimum": 0
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_revisions",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "memory_id",
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string"
         },
         "max_chars": {
           "type": "integer",

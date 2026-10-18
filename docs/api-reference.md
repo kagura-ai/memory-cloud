@@ -308,21 +308,22 @@ curl -X POST http://localhost:8080/api/v1/memory/recall \
 
 ---
 
-### GET /api/v1/memory/reference/{memory_id}
+### POST /api/v1/memory/reference
 
 Retrieve complete details (Layer 3) of a specific memory by ID.
 
-**Parameters:**
+**Request body:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `memory_id` | string (UUID) | Yes | Memory ID from recall results |
+| `version` | integer ≥ 1 | No | An earlier version to read ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)); omitted, the current one |
 
 **Response:**
 
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "memory_id": "550e8400-e29b-41d4-a716-446655440000",
   "summary": "FastAPI OAuth2 implementation guide",
   "content": "Full content of the memory...",
   "context_summary": "Detailed context...",
@@ -335,22 +336,51 @@ Retrieve complete details (Layer 3) of a specific memory by ID.
   "importance": 0.9,
   "created_at": "2025-11-20T15:00:00Z",
   "updated_at": "2025-11-20T15:00:00Z",
-  "version": 1
+  "version": 1,
+  "historical": false,
+  "current_version": null,
+  "unavailable_fields": null
 }
 ```
 
 `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) is 1 when the memory is created and moves by one with each edit that changes `summary`, `context_summary`, `content`, `details`, `type`, `importance` or `tags`; `remember` and `recall` results carry it too. Pass it as `expected_version` to `PATCH` below.
 
+With `version` below the current one, the response is that earlier version, rebuilt from the memory's revision log: `historical: true`, `current_version` is the live version, `updated_at` is when that version was written (`created_at` for version 1), and `outgoing_links` / `incoming_links` / `supersede_candidate` come back empty because they describe the memory now. `unavailable_fields` names fields whose old value account erasure removed (they read `null`). A `version` above the current one is `422`; a forgotten memory is `404`, as for every read. [MCP Tools › `list_revisions`](mcp-tools.md#list_revisions-and-earlier-versions) explains what a rebuilt version contains.
+
 **Example (Python):**
 
 ```python
-memory_id = "550e8400-e29b-41d4-a716-446655440000"
-response = requests.get(
-    f"http://localhost:8080/api/v1/memory/reference/{memory_id}",
-    headers={"Authorization": "Bearer kagura_xxxxxxxxxxxx"}
+response = requests.post(
+    "http://localhost:8080/api/v1/memory/reference",
+    headers={"Authorization": "Bearer kagura_xxxxxxxxxxxx"},
+    json={"memory_id": "550e8400-e29b-41d4-a716-446655440000"},
 )
 print(response.json()["content"])
 ```
+
+---
+
+### GET /api/v1/memory/{memory_id}/revisions
+
+A memory's revision log, newest first ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)): one item per write event, with the version right after it.
+
+**Query parameters:** `limit` (1–100, default 20), `cursor` (the `next_cursor` of the previous page).
+
+```json
+{
+  "memory_id": "550e8400-e29b-41d4-a716-446655440000",
+  "current_version": 3,
+  "revisions": [
+    {"version": 3, "kind": "updated", "at": "2025-11-22T09:00:00Z", "changed_fields": ["importance"], "writer": "api", "by_you": true, "agent_id": null, "session_id": null},
+    {"version": 2, "kind": "updated", "at": "2025-11-21T10:00:00Z", "changed_fields": ["summary", "tags"], "writer": "api", "by_you": false, "agent_id": null, "session_id": null},
+    {"version": 1, "kind": "created", "at": "2025-11-20T15:00:00Z", "changed_fields": [], "writer": "api", "by_you": true, "agent_id": null, "session_id": null}
+  ],
+  "has_more": false,
+  "next_cursor": null
+}
+```
+
+`kind` is `created`, `updated`, `forgotten` or `restored`; `changed_fields` names the fields an `updated` event changed. No member identity is returned: `by_you` marks events you (or an account linked to you) wrote, and only those carry `agent_id` / `session_id`. Read a version's text with `POST /reference` and `version`. Permission is the same as `reference`; `404` for no such memory, no access, or a forgotten memory; `422` for a `limit` out of range or a malformed `cursor`.
 
 ---
 
@@ -368,7 +398,7 @@ Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, 
 }
 ```
 
-Read the memory again (`GET /reference/{memory_id}`) and decide. Two patches racing with the same `expected_version` serialize on the row: one applies, the other gets the `409`. Without `expected_version` the last writer wins. `404`: no such memory or no access; `410`: the memory was forgotten; `422`: an invalid body (a body with only `expected_version` is one).
+Read the memory again (`POST /reference`) and decide. Two patches racing with the same `expected_version` serialize on the row: one applies, the other gets the `409`. Without `expected_version` the last writer wins. `404`: no such memory or no access; `410`: the memory was forgotten; `422`: an invalid body (a body with only `expected_version` is one).
 
 Every write records its session ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)): a REST `PATCH` (and the other memory writes) takes it from the `gen_ai.conversation.id` / `session.id` baggage key of the request, the agent from the API key's agent binding only — a `gen_ai.agent.id` baggage value never becomes the writer's agent. MCP `changes_since(session_id=...)` lists one session's writes and `rollback_session` undoes them ([MCP Tools](mcp-tools.md#rollback_session)); there is no REST route for either.
 
@@ -1653,7 +1683,7 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 71 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 72 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### Authentication and sessions on /mcp
 

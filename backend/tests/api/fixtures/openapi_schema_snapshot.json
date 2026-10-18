@@ -5815,6 +5815,43 @@
         ],
         "type": "object"
       },
+      "MemoryRevisionItem": {
+        "properties": {
+          "agent_id": {},
+          "at": {},
+          "by_you": {},
+          "changed_fields": {},
+          "kind": {},
+          "session_id": {},
+          "version": {},
+          "writer": {}
+        },
+        "required": [
+          "at",
+          "by_you",
+          "changed_fields",
+          "kind",
+          "version",
+          "writer"
+        ],
+        "type": "object"
+      },
+      "MemoryRevisionsResponse": {
+        "properties": {
+          "current_version": {},
+          "has_more": {},
+          "memory_id": {},
+          "next_cursor": {},
+          "revisions": {}
+        },
+        "required": [
+          "current_version",
+          "has_more",
+          "memory_id",
+          "revisions"
+        ],
+        "type": "object"
+      },
       "MemoryStatItem": {
         "properties": {
           "access_count": {
@@ -7778,6 +7815,17 @@
           "memory_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -7792,7 +7840,9 @@
           "context": {},
           "context_summary": {},
           "created_at": {},
+          "current_version": {},
           "details": {},
+          "historical": {},
           "importance": {},
           "incoming_has_more": {},
           "incoming_links": {},
@@ -7806,6 +7856,7 @@
           "supersede_candidate": {},
           "tags": {},
           "type": {},
+          "unavailable_fields": {},
           "updated_at": {},
           "version": {}
         },
@@ -22476,6 +22527,87 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/{memory_id}/revisions": {
+      "get": {
+        "operationId": "list_memory_revisions_api_v1_memory__memory_id__revisions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9]{1,18}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRevisionsResponse"
                 }
               }
             }

@@ -75,6 +75,9 @@ from models.memory import (
 )
 from services.memory_versions import (
     _comparable,  # one "is this the same value" rule with the version bump
+    prior_erased,
+    prior_scrubbed,
+    prior_values,
     record_edit,
     record_revision,
     versioned_snapshot,
@@ -132,12 +135,6 @@ SKIP_CAUSES: tuple[str, ...] = (
     CAUSE_NOT_PERMITTED,
 )
 
-# The markers #2043's erasure leaves in a ``prior`` whose ``details`` it
-# removed: ``{"erased": ["details"]}`` (the subject wrote the edit) and
-# ``{"scrubbed": ["details"]}`` (the subject authored the memory). Only
-# ``VERSIONED_FIELDS`` keys are values; a field named by either marker has no
-# old value left.
-_PRIOR_LOST_KEYS = ("erased", "scrubbed")
 _TEXT_FIELDS = frozenset({"summary", "context_summary", "content"})
 # ``partial`` is not final: its failed items are retried by the next call.
 _FINAL_STATUSES = frozenset({SESSION_ROLLBACK_COMPLETED})
@@ -343,22 +340,20 @@ def combined_prior(updates: list[SessionEvent]) -> tuple[dict[str, Any], bool]:
     seen: set[str] = set()
     erased = False
     for event in updates:
-        prior = event.prior or {}
-        lost = {
-            name
-            for key in _PRIOR_LOST_KEYS
-            if isinstance(prior.get(key), list)
-            for name in prior[key]
-            if isinstance(name, str)
-        }
+        # #2043's erasure markers: ``erased`` (the subject wrote the edit
+        # whose overwritten value this was) and ``scrubbed`` (the subject
+        # authored the memory, whose live value is gone). Read only through
+        # the memory_versions helpers, so the marker keys are never values.
+        lost = {*prior_erased(event.prior), *prior_scrubbed(event.prior)}
+        kept = prior_values(event.prior)
         for name in VERSIONED_FIELDS:
             if name in seen:
                 continue
             if name in lost:
                 erased = True
                 seen.add(name)
-            elif name in prior:
-                values[name] = prior[name]
+            elif name in kept:
+                values[name] = kept[name]
                 seen.add(name)
     return values, erased
 

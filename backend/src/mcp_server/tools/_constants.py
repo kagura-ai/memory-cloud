@@ -23,6 +23,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "recall": _get_timeout("recall", 60.0),
     "forget": _get_timeout("forget", 15.0),
     "reference": _get_timeout("reference", 10.0),
+    "list_revisions": _get_timeout("list_revisions", 10.0),  # #2043
     "explore": _get_timeout("explore", 45.0),
     "get_context_info": _get_timeout("get_context_info", 15.0),
     "get_agent_bootstrap": _get_timeout("get_agent_bootstrap", 15.0),  # #1276 (RFC-0002 P0-3)

@@ -13,7 +13,7 @@ When the caller is a workspace owner/admin, it also exercises the v0.49 Agent Co
 (registry, context bindings, and bootstrap composition).
 Optionally exercises the XL-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace plan has the `resources` feature (XL / `promax`; since #1551 lower tiers may only keep serving resources that already exist).
 
-The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**71 tools**). The
+The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**72 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
 stays honest — every registered tool is either exercised here or listed there with a reason. This
 is a live runbook, not a pytest suite, so the run itself checks the count through `describe_tools`
@@ -54,12 +54,12 @@ Use this after deployments, tool description changes, or MCP server updates.
 
 ```
 describe_tools()
--> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 71
+-> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 72
    entries and `count` (the tools the URL leaves out, itemised in `tools`) is 0
--> Verify: len(listed) + count == 71 on any connection — the registry total this runbook is built
+-> Verify: len(listed) + count == 72 on any connection — the registry total this runbook is built
    for. A different sum means a tool was added or removed: reconcile the Coverage cross-check
    (section 8) before trusting the run
--> ABORT when count > 0 (a default connection answers count=49 with the 21 core tools in
+-> ABORT when count > 0 (a default connection answers count=51 with the 21 core tools in
    `listed`): create nothing, report step 0 as FAIL and tell the user to reconnect with the full
    tool list — `?profile=full` on the MCP endpoint URL, or `--tool-profile full` for the
    `kagura-mcp` stdio bridge — then run the smoke test again. The reply's `url` block says the same
@@ -355,7 +355,16 @@ update_memory(memory_id=..., context_id=..., importance=0.8, verbose=true)
 recall(context_id=..., query="smoke test UPDATED", k=5, verbosity="full")
 -> Verify: returns updated memory with new summary
 -> Verify: its updated_at is now a UTC timestamp (it was null in step 4) and is not earlier than
-   created_at
+   created_at; its version is 3 (two edits that changed versioned fields)
+
+list_revisions(memory_id=..., context_id=...)
+-> Verify: current_version=3; revisions newest first: kind "updated" version 3 with
+   changed_fields ["importance"], "updated" version 2 with ["summary", "importance"], "created"
+   version 1; every item by_you=true
+
+reference(memory_id=..., context_id=..., version=1)
+-> Verify: historical=true, version=1, current_version=3; summary and importance are the step 3
+   values; no outgoing_links / supersede_candidate keys
 ```
 
 ### 6. Edge CRUD tools
@@ -788,14 +797,14 @@ delete_context(context_id=...)
 ### 8. Coverage cross-check (anti-drift)
 
 Reconcile this skill against the canonical registry so the "all MCP tools" claim cannot silently
-rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**71 tools**). Every
+rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**72 tools**). Every
 registered tool must be in exactly one group below. **If the registry and these groups disagree,
 the skill is out of date — add a row (or a documented exclusion) before merging.**
 
 Two checks keep this honest:
 
 - **In the run:** step 0's `describe_tools()` — `len(listed) + count` is the live server's registry
-  size and must equal 71, the number these groups are built for. It replaces the old `grep -c` on
+  size and must equal 72, the number these groups are built for. It replaces the old `grep -c` on
   `_definitions.py`, which needed a repository checkout and said nothing about the server under test.
 - **In CI:** `backend/tests/mcp_server/test_smoke_test_runbook.py` parses the groups below and fails
   when a registered tool is in none of them, when a group's stated size or the total differs from
@@ -804,10 +813,10 @@ Two checks keep this honest:
 "Inline" below means "called by every run"; it has nothing to do with the server's `core` tool
 profile (the default `tools/list` view), which is why the run needs `?profile=full`.
 
-**Exercised inline (42 tools):** `describe_tools`, `guide`, `list_contexts`, `create_context`,
+**Exercised inline (43 tools):** `describe_tools`, `guide`, `list_contexts`, `create_context`,
 `get_context_info`, `update_context`, `update_search_config`, `remember`, `remember_batch`,
 `recall`, `recall_upcoming`, `recall_nearby`, `load_pinned`, `load_guardrails`, `feedback`,
-`set_state`, `get_state`, `reference`, `explore`, `update_memory`, `forget`, `list`,
+`set_state`, `get_state`, `reference`, `list_revisions`, `explore`, `update_memory`, `forget`, `list`,
 `changes_since`, `bootstrap`, `list_edges`, `create_edge`, `update_edge`, `delete_edge`,
 `list_tags`, `list_my_bindings`, `describe_binding`, `merge_contexts`, `get_usage`,
 `list_analyses`, `get_active_analysis`, `get_analysis`, `get_cluster`, `get_sleep_history`,
@@ -840,7 +849,7 @@ profile (the default `tools/list` view), which is why the run needs `?profile=fu
 | `secret_list` | Owner/admin metadata listing; grouped with the secret-store flow. |
 | `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
-42 + 2 + 10 + 5 + 12 = **71** — the full registry. The conditional rows are the 10 owner/admin Agent
+43 + 2 + 10 + 5 + 12 = **72** — the full registry. The conditional rows are the 10 owner/admin Agent
 Control Plane tools and 5 `resources`-gated (XL) tools; the remaining 12 are documented exclusions.
 
 ### 9. Report
@@ -852,7 +861,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 
 | # | Tool | Action | Result |
 |---|------|--------|--------|
-| 1 | describe_tools | Registry count 71, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
+| 1 | describe_tools | Registry count 72, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
 | 2 | describe_tools | Full definition by name + unknown name | PASS/FAIL |
 | 3 | guide | Index topic | PASS/FAIL |
 | 4 | guide | Tool name expands to sections + unknown topic | PASS/FAIL |
@@ -889,7 +898,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 35 | recall_series | period=month agg=sum — values sum to 40.0 | PASS/FAIL |
 | 36 | update_memory | Update memory (compact persistence, no detail) | PASS/FAIL |
 | 37 | update_memory | Update with verbose=true (persistence.detail) | PASS/FAIL |
-| 38 | recall (verify) | Verify update (new summary, updated_at set) | PASS/FAIL |
+| 38 | recall (verify) | Verify update (new summary, updated_at set, version 3); list_revisions + reference(version=1) | PASS/FAIL |
 | 39 | remember | Create 2nd memory (linked_memory_ids, linked_source_uris) | PASS/FAIL |
 | 40 | list_edges (verify) | Verify declared link (origin="declared", confidence 1.0, weight >= 1.0) | PASS/FAIL |
 | 41 | create_edge | Create test edge (weight 1.0 default; created or #1321 updated) | PASS/FAIL |
@@ -956,11 +965,11 @@ Note: the 79 numbered rows are test *steps*, not distinct tools — several tool
 guide, remember, remember_batch, recall, list, changes_since, bootstrap, update_memory, forget,
 delete_context, list_contexts, create_context, list_edges, list_tags, record_measurement,
 recall_series) are exercised in multiple rows. Distinct-tool coverage is reconciled in the
-Coverage cross-check (42 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 71).
+Coverage cross-check (43 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 72).
 "Main rows" are the rows every run executes; the name is unrelated to the server's `core` profile.
 
 Test context: smoke-test-{timestamp} (cleaned up)
-Tool list: full (describe_tools: 71 listed, 0 hidden)
+Tool list: full (describe_tools: 72 listed, 0 hidden)
 Resource token: revoked | MANUAL — token_id rtok_..., resource_id smoke_test_{timestamp} still active | not created (resource rows skipped)
 
 Documented exclusions / gated-skip (see Coverage cross-check) — not counted as FAIL:
@@ -971,7 +980,7 @@ Documented exclusions / gated-skip (see Coverage cross-check) — not counted as
 - File tools: init_file_upload, complete_file_upload, get_file_download_url, delete_file, list_files (multipart S3/R2)
 - Secret tools: secret_register_pubkey, secret_put, secret_get, secret_list, secret_revoke_grant (zero-knowledge: age keypairs + owner approval + ciphertext)
 
-Registry reconciliation: 42 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 71 tools in _definitions.py.
+Registry reconciliation: 43 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 72 tools in _definitions.py.
 ```
 
 If any step fails:

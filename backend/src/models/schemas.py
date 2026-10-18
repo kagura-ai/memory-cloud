@@ -13,6 +13,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     field_validator,
     model_validator,
@@ -701,6 +702,9 @@ class ReferenceRequest(BaseModel):
     """Request schema for reference() API."""
 
     memory_id: UUID
+    # #2043: read an earlier version, rebuilt from the revision log. Omitted
+    # (or the current version): the memory as it is.
+    version: int | None = Field(default=None, ge=1)
 
 
 class LinkedMemoryRef(TZAwareBaseModel):
@@ -742,6 +746,14 @@ class ReferenceResponse(TZAwareBaseModel):
     updated_at: datetime
     # #2043: the version read here — the expected_version of an edit based on it.
     version: int
+    # #2043: true when ``version`` is an earlier version (reference with
+    # ``version``): the versioned fields are rebuilt from the revision log,
+    # current_version is the live one, and the links / supersede_candidate
+    # (which describe the memory now) are left empty. unavailable_fields
+    # names fields whose value at that version account erasure removed.
+    historical: bool = False
+    current_version: int | None = None
+    unavailable_fields: list[str] | None = None
     client: str
     # Optional origin metadata (Issue #215). Surfaced so the detail UI can
     # show where a memory came from (vault://, file://, https://, etc.).
@@ -764,6 +776,38 @@ class ReferenceResponse(TZAwareBaseModel):
     # #1403: liveness-guarded supersede suggestion (from the server-only
     # supersede_candidate column, never the client-writable details blob).
     supersede_candidate: SupersedeCandidate | None = None
+
+
+class MemoryRevisionItem(TZAwareBaseModel):
+    """One event of a memory's revision log (#2043).
+
+    No member identity: ``by_you`` says whether the caller (or an account
+    linked to them) wrote it; ``agent_id`` / ``session_id`` show only on the
+    caller's own events.
+    """
+
+    version: int
+    kind: Literal["created", "updated", "forgotten", "restored"]
+    at: datetime
+    # The fields an ``updated`` event changed; empty for the other kinds.
+    changed_fields: list[str]
+    writer: Literal["api", "rollback"]
+    by_you: bool
+    agent_id: str | None = None
+    session_id: str | None = None
+    # The keyset position of this event (its revision id) — the next_cursor
+    # of a page cut right after it. Not serialized.
+    _cursor: str = PrivateAttr(default="")
+
+
+class MemoryRevisionsResponse(TZAwareBaseModel):
+    """A page of a memory's revision log, newest first (#2043)."""
+
+    memory_id: UUID
+    current_version: int
+    revisions: list[MemoryRevisionItem]
+    has_more: bool
+    next_cursor: str | None = None
 
 
 class ExportedSearchConfig(BaseModel):
