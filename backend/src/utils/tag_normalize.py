@@ -99,38 +99,75 @@ def normalize_tag(tag: str) -> str:
     return _drop_long_vowel(_fold_before_long_vowel(tag))
 
 
-def group_tags_by_fold(tags: Sequence[str]) -> list[list[str]]:
-    """Group a tag filter into one list per tag, however each is spelled (#2058).
+# Internal recall filter key carrying tag_filter_groups' result to the store
+# builders (``db.qdrant.tag_groups_for_all``); recall strips a caller's (#2071).
+TAG_GROUPS_FILTER_KEY = "_tag_groups"
+# The stores AND at most this many tags (db.qdrant._MAX_FILTER_TAGS), so later
+# requested tags are not grouped: that also bounds the pairwise number check.
+MAX_TAG_GROUPS = 50
+
+
+def tag_filter_groups(requested: Sequence[str], expanded: Sequence[str]) -> list[list[str]]:
+    """One group per requested tag of a widened filter (#2058, #2071).
 
     The ``tags_normalize`` read widens a filter to every stored spelling with
     the same :func:`normalize_tag` fold as a requested tag
-    (``services.tag_resolution.expand_tag_filter``) and hands the store a flat
-    list. Under ``tags_match='all'`` that list has to be read back as one group
-    per tag, any spelling of which satisfies it; requiring every spelling would
-    make the tolerant filter narrower than the exact one. Grouping by the same
-    fold the widening used recovers exactly those groups.
+    (``services.tag_resolution.expand_tag_filter``). Under ``tags_match='all'``
+    each requested tag must be present in one of its spellings; requiring every
+    spelling would make the tolerant filter narrower than the exact one.
+
+    A group holds the requested tag and the spellings the widening added with
+    its fold. Two requested tags that fold together but carry different numbers
+    (``v0.11.0`` / ``v0.1.10``, :func:`is_mechanical_variant` false) are two
+    identifiers and stay two required tags: neither joins the other's group,
+    and an added spelling joins only the one whose numbers it shares
+    (``V0.11.0`` counts for ``v0.11.0``), so no single spelling satisfies both.
+    Requested tags that are one tag written twice (``Deploy`` / ``deploy``)
+    form one group.
 
     Args:
-        tags: Tag strings, in filter order.
+        requested: The tags the caller filtered on, in filter order.
+        expanded: ``expand_tag_filter``'s widened list (requested + added).
 
     Returns:
-        One list per distinct fold, in first-seen order, each holding that
-        fold's spellings in first-seen order without duplicates. A tag with an
-        empty fold (only punctuation) is its own group, matched exactly, so
-        such tags never merge with one another.
+        One list per distinct requested tag (the first ``MAX_TAG_GROUPS``), in
+        filter order, each starting with that tag. A tag with an empty fold
+        (only punctuation) gains nothing.
 
     Example:
-        >>> group_tags_by_fold(["ログ", "デプロイ", "ろぐ"])
+        >>> tag_filter_groups(["ログ", "デプロイ"], ["ログ", "デプロイ", "ろぐ"])
         [['ログ', 'ろぐ'], ['デプロイ']]
     """
-    groups: dict[tuple[bool, str], list[str]] = {}
-    for tag in tags:
+    listed = list(dict.fromkeys(requested))[:MAX_TAG_GROUPS]
+    listed_by_fold: dict[str, list[str]] = {}
+    for tag in listed:
         folded = normalize_tag(tag)
-        key = (True, folded) if folded else (False, tag)
-        group = groups.setdefault(key, [])
-        if tag not in group:
-            group.append(tag)
-    return list(groups.values())
+        if folded:
+            listed_by_fold.setdefault(folded, []).append(tag)
+    added_by_fold: dict[str, list[str]] = {}
+    for tag in dict.fromkeys(expanded):
+        folded = normalize_tag(tag)
+        if folded in listed_by_fold and tag not in listed_by_fold[folded]:
+            added_by_fold.setdefault(folded, []).append(tag)
+
+    groups: list[list[str]] = []
+    emitted: set[frozenset[str]] = set()
+    for tag in listed:
+        folded = normalize_tag(tag)
+        if not folded:
+            group = [tag]
+        else:
+            peers = listed_by_fold[folded]
+            same = [p for p in peers if p != tag and is_mechanical_variant(tag, p)]
+            added = added_by_fold.get(folded, [])
+            if len(same) + 1 < len(peers):  # another identifier shares the fold
+                added = [s for s in added if is_mechanical_variant(tag, s)]
+            group = [tag, *same, *added]
+        key = frozenset(group)
+        if key not in emitted:
+            emitted.add(key)
+            groups.append(group)
+    return groups
 
 
 def _fold_before_long_vowel(tag: str) -> str:

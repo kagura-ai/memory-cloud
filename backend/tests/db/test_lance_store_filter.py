@@ -12,6 +12,7 @@ from db.lance_store import (
     _sql_str,
     build_lance_filter,
 )
+from utils.tag_normalize import TAG_GROUPS_FILTER_KEY
 
 WS = "11111111-1111-1111-1111-111111111111"
 CTX = "22222222-2222-2222-2222-222222222222"
@@ -103,7 +104,12 @@ def test_tags_all_with_normalize_ors_the_spellings_of_one_tag():
         WS,
         CTX,
         USER,
-        filters={"tags": ["ログ", "デプロイ", "ろぐ"], "tags_match": "all", "tags_normalize": True},
+        filters={
+            "tags": ["ログ", "デプロイ", "ろぐ"],
+            "tags_match": "all",
+            "tags_normalize": True,
+            TAG_GROUPS_FILTER_KEY: [["ログ", "ろぐ"], ["デプロイ"]],
+        },
     )
     assert (
         "((array_has(tags, 'ログ') OR array_has(tags, 'ろぐ')) AND array_has(tags, 'デプロイ'))"
@@ -112,9 +118,21 @@ def test_tags_all_with_normalize_ors_the_spellings_of_one_tag():
 
 def test_tags_all_with_normalize_and_no_variants_is_unchanged():
     plain = {"tags": ["x", "y"], "tags_match": "all"}
-    assert build_lance_filter(WS, CTX, USER, filters={**plain, "tags_normalize": True}) == (
+    grouped = {**plain, "tags_normalize": True, TAG_GROUPS_FILTER_KEY: [["x"], ["y"]]}
+    assert build_lance_filter(WS, CTX, USER, filters=grouped) == (
         build_lance_filter(WS, CTX, USER, filters=plain)
     )
+
+
+def test_tags_all_with_normalize_but_no_groups_requires_every_tag():
+    """#2071: no fold regrouping without the widening's groups."""
+    where = build_lance_filter(
+        WS,
+        CTX,
+        USER,
+        filters={"tags": ["v0.11.0", "v0.1.10"], "tags_match": "all", "tags_normalize": True},
+    )
+    assert "(array_has(tags, 'v0.11.0') AND array_has(tags, 'v0.1.10'))" in where
 
 
 def test_tags_all_without_normalize_requires_every_spelling():
@@ -134,12 +152,14 @@ def test_tags_any_with_normalize_stays_one_flat_or():
 
 
 def test_tags_all_with_normalize_caps_tags_not_spellings():
-    widened: list[str] = []
-    for stem in ("alpha", "bravo", "charlie"):
-        widened += [stem] + [f"{stem}{'-' * n}" for n in range(1, 21)]
-    widened.append("delta")
+    groups = [[stem] + [f"{stem}{'-' * n}" for n in range(1, 21)] for stem in ("a", "b", "c")]
+    groups.append(["delta"])
+    widened = [t for g in groups for t in g]
     where = build_lance_filter(
-        WS, CTX, USER, filters={"tags": widened, "tags_match": "all", "tags_normalize": True}
+        WS,
+        CTX,
+        USER,
+        filters={"tags": widened, "tags_match": "all", TAG_GROUPS_FILTER_KEY: groups},
     )
     assert "AND array_has(tags, 'delta'))" in where
 

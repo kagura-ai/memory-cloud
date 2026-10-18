@@ -9,11 +9,12 @@ forms of two tags an author meant differently must NOT collide.
 import pytest
 
 from utils.tag_normalize import (
-    group_tags_by_fold,
+    MAX_TAG_GROUPS,
     is_mechanical_variant,
     is_near_duplicate,
     is_specialisation,
     normalize_tag,
+    tag_filter_groups,
 )
 
 
@@ -570,21 +571,51 @@ class TestIsMechanicalVariant:
         assert not is_mechanical_variant("---", "---")
 
 
-class TestGroupTagsByFold:
-    """#2058: one group per tag, written any way, for tags_match='all'."""
+class TestTagFilterGroups:
+    """#2058 / #2071: one group per requested tag of a widened filter."""
 
-    def test_spellings_of_one_tag_share_a_group(self):
-        assert group_tags_by_fold(["ログ", "デプロイ", "ろぐ"]) == [["ログ", "ろぐ"], ["デプロイ"]]
+    def test_a_tag_groups_with_its_added_spellings(self):
+        assert tag_filter_groups(["ログ", "デプロイ"], ["ログ", "デプロイ", "ろぐ"]) == [
+            ["ログ", "ろぐ"],
+            ["デプロイ"],
+        ]
 
-    def test_groups_keep_first_seen_order(self):
-        assert group_tags_by_fold(["b", "A", "a", "B_"]) == [["b", "B_"], ["A", "a"]]
+    def test_groups_keep_filter_order(self):
+        assert tag_filter_groups(["b", "A"], ["b", "A", "a", "B_"]) == [["b", "B_"], ["A", "a"]]
 
-    def test_distinct_tags_stay_singletons(self):
-        assert group_tags_by_fold(["python", "fastapi"]) == [["python"], ["fastapi"]]
+    def test_requested_tags_with_one_fold_stay_apart(self):
+        """#2071: a listed tag is never another listed tag's variant."""
+        assert tag_filter_groups(["v0.11.0", "v0.1.10"], ["v0.11.0", "v0.1.10"]) == [
+            ["v0.11.0"],
+            ["v0.1.10"],
+        ]
 
-    def test_a_tag_with_no_folding_signal_is_its_own_group(self):
-        """An empty fold must not merge every punctuation-only tag into one."""
-        assert group_tags_by_fold(["---", "***", "python"]) == [["---"], ["***"], ["python"]]
+    def test_an_added_spelling_counts_only_for_the_tag_whose_numbers_it_shares(self):
+        """#2071: no single stored spelling satisfies two listed identifiers."""
+        assert tag_filter_groups(
+            ["v0.11.0", "v0.1.10"], ["v0.11.0", "v0.1.10", "V0.11.0", "v0110"]
+        ) == [["v0.11.0", "V0.11.0"], ["v0.1.10"]]
+
+    def test_a_lone_tag_still_widens_across_numbers(self):
+        """The read fold is number-blind when no other listed tag competes (#1871)."""
+        assert tag_filter_groups(["v0.11.0"], ["v0.11.0", "v0.1.10"]) == [["v0.11.0", "v0.1.10"]]
+
+    def test_groups_stop_at_the_store_cap(self):
+        tags = [f"tag{n}" for n in range(MAX_TAG_GROUPS + 10)]
+        assert tag_filter_groups(tags, tags) == [[t] for t in tags[:MAX_TAG_GROUPS]]
+
+    def test_one_tag_listed_twice_is_one_group(self):
+        assert tag_filter_groups(["Deploy", "deploy"], ["Deploy", "deploy", "DEPLOY"]) == [
+            ["Deploy", "deploy", "DEPLOY"]
+        ]
+
+    def test_a_tag_with_no_folding_signal_gains_nothing(self):
+        assert tag_filter_groups(["---", "python"], ["---", "python", "***"]) == [
+            ["---"],
+            ["python"],
+        ]
 
     def test_duplicates_are_dropped(self):
-        assert group_tags_by_fold(["Deploy", "Deploy", "deploy"]) == [["Deploy", "deploy"]]
+        assert tag_filter_groups(["Deploy", "Deploy"], ["Deploy", "deploy", "deploy"]) == [
+            ["Deploy", "deploy"]
+        ]

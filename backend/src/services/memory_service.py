@@ -99,6 +99,7 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
+from utils.tag_normalize import TAG_GROUPS_FILTER_KEY, tag_filter_groups
 
 logger = get_logger(__name__)
 
@@ -5304,6 +5305,11 @@ class MemoryService:
         # and the caller has authorized exactly this one.
         effective_filters = request.filters
         tag_filter = self._requested_tag_filter(request.filters)
+        if request.filters and TAG_GROUPS_FILTER_KEY in request.filters:
+            # #2071: internal, set only from the widening below.
+            effective_filters = {
+                k: v for k, v in request.filters.items() if k != TAG_GROUPS_FILTER_KEY
+            }
         if (
             tag_filter
             and request.filters.get("tags_normalize")
@@ -5320,12 +5326,20 @@ class MemoryService:
                 tags=tag_filter,
             )
             if added:
-                effective_filters = {**request.filters, "tags": expanded}
+                effective_filters = {**effective_filters, "tags": expanded}
                 logger.info(
                     "recall_tag_filter_expanded",
                     requested=len(tag_filter),
                     expanded=len(expanded),
                 )
+            if request.filters.get("tags_match") == "all":
+                # #2058 / #2071: 'all' ANDs one group per requested tag; the flat
+                # list cannot tell which entries were asked for. Set even when
+                # nothing was added, so listed spellings of one tag still merge.
+                effective_filters = {
+                    **effective_filters,
+                    TAG_GROUPS_FILTER_KEY: tag_filter_groups(tag_filter, expanded),
+                }
 
         # #1515: hybrid_search reports here when it had to serve the request
         # without the semantic arm. Stays empty on the happy path.

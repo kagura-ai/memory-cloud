@@ -115,8 +115,8 @@ def _sql_str(value: str) -> str:
 def _build_tag_clause(filters: dict[str, Any]) -> str:
     """Build a list-membership clause for tag filtering (Issue #67 / #79).
 
-    #2058: with tags_normalize, ``all`` ANDs one OR group per tag (the
-    spellings recall widened it to), mirroring
+    #2058: when recall widened the filter, ``all`` ANDs one OR group per
+    requested tag (the widening's own groups, #2071), mirroring
     ``db.qdrant._build_tag_filter_conditions``.
     """
     raw = filters.get("tags")
@@ -129,12 +129,13 @@ def _build_tag_clause(filters: dict[str, Any]) -> str:
     mode = filters.get("tags_match", "any")
     if mode not in ("any", "all"):
         raise ValueError(f"Invalid tags_match value: {mode!r}. Must be 'any' or 'all'.")
-    if mode == "all" and filters.get("tags_normalize"):
-        groups = []
-        for group in tag_groups_for_all(strings):
+    groups = tag_groups_for_all(filters) if mode == "all" else None
+    if groups is not None:
+        clauses = []
+        for group in groups:
             any_of = " OR ".join(f"array_has(tags, {_sql_str(t)})" for t in group)
-            groups.append(any_of if len(group) == 1 else f"({any_of})")
-        return "(" + " AND ".join(groups) + ")"
+            clauses.append(any_of if len(group) == 1 else f"({any_of})")
+        return "(" + " AND ".join(clauses) + ")"
     clauses = [f"array_has(tags, {_sql_str(t)})" for t in valid]
     joiner = " AND " if mode == "all" else " OR "
     return "(" + joiner.join(clauses) + ")"

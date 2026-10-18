@@ -170,18 +170,18 @@ class TestExpandTagFilter:
         assert f"LIMIT {VOCABULARY_LIMIT}" in sql
 
 
-class TestExpansionRegroupsPerRequestedTag:
-    """#2058: the store builders regroup the flat expansion by fold.
+class TestExpansionGroupsPerRequestedTag:
+    """#2058: recall groups the flat expansion per requested tag, by fold.
 
-    Under tags_match='all' they AND one group per tag, so every spelling the
-    widening adds must land in its own requested tag's group. A widening rule
-    that adds a spelling outside the fold would make that spelling a required
-    tag again; this pins the invariant the builders rely on.
+    Under tags_match='all' the builders AND one group per tag, so every spelling
+    the widening adds must land in its own requested tag's group. A widening
+    rule that adds a spelling outside the fold would make that spelling a
+    required tag again; this pins the invariant tag_filter_groups relies on.
     """
 
     @pytest.mark.asyncio
-    async def test_each_requested_tag_regroups_with_exactly_its_variants(self):
-        from utils.tag_normalize import group_tags_by_fold
+    async def test_each_requested_tag_groups_with_exactly_its_variants(self):
+        from utils.tag_normalize import tag_filter_groups
 
         db = _db_with_vocabulary(
             {"ログ": 4, "ろぐ": 1, "デプロイ": 3, "でぷろい": 1, "Dev_Env": 2, "dev env": 1}
@@ -191,7 +191,53 @@ class TestExpansionRegroupsPerRequestedTag:
             db, workspace_id=WS, context_id=CTX, user_id=USER, tags=requested
         )
         assert added, "the vocabulary has variants, so the filter must widen"
-        assert group_tags_by_fold(expanded) == [[t, *added.get(t, [])] for t in requested]
+        groups = tag_filter_groups(requested, expanded)
+        assert groups == [[t, *added.get(t, [])] for t in requested]
+
+    @pytest.mark.asyncio
+    async def test_two_requested_tags_with_one_fold_stay_apart(self):
+        """#2071: each is a stored spelling of the other, but the caller listed both."""
+        from utils.tag_normalize import tag_filter_groups
+
+        db = _db_with_vocabulary({"v0.11.0": 2, "v0.1.10": 2, "V0.11.0": 1})
+        requested = ["v0.11.0", "v0.1.10"]
+        expanded, _ = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=requested
+        )
+        assert expanded == ["v0.11.0", "V0.11.0", "v0.1.10"]
+        assert tag_filter_groups(requested, expanded) == [["v0.11.0", "V0.11.0"], ["v0.1.10"]]
+
+    @pytest.mark.asyncio
+    async def test_a_listed_tag_takes_no_expansion_slot(self):
+        """#2071: listed tags are not variants, so they cannot crowd real ones out."""
+        listed = ["a-b", "A_B"]
+        stored = {"A_B": 9, **{f"a{'-' * n}b": 1 for n in range(2, 25)}, "a-b": 1}
+        db = _db_with_vocabulary(stored)
+        _, added = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=listed
+        )
+        assert "A_B" not in added.get("a-b", [])
+        assert len(added["a-b"]) == MAX_EXPANSION_PER_TAG
+
+    @pytest.mark.asyncio
+    async def test_same_number_variants_take_the_slots_first(self):
+        """#2071: tag_filter_groups keeps only those when two identifiers compete."""
+        from utils.tag_normalize import tag_filter_groups
+
+        other_numbers = {
+            f"{v}{sep}{body}": 5
+            for v in ("v", "V")
+            for sep in ("", "-", "_", " ")
+            for body in ("0110", "01.10", "011.0", "0.110")
+        }
+        assert len(other_numbers) > MAX_EXPANSION_PER_TAG
+        db = _db_with_vocabulary({**other_numbers, "V0.11.0": 1})
+        requested = ["v0.11.0", "v0.1.10"]
+        expanded, added = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=requested
+        )
+        assert "V0.11.0" in added["v0.11.0"]
+        assert tag_filter_groups(requested, expanded) == [["v0.11.0", "V0.11.0"], ["v0.1.10"]]
 
 
 class TestSuggestTags:

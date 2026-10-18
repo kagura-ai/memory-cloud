@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.memory import Memory
 from services.identity_link_service import linked_user_ids, opens_contexts_as_self
 from utils.logger import get_logger
-from utils.tag_normalize import is_near_duplicate, normalize_tag
+from utils.tag_normalize import is_mechanical_variant, is_near_duplicate, normalize_tag
 
 logger = get_logger(__name__)
 
@@ -357,9 +357,10 @@ async def expand_tag_filter(
 
         ``expanded`` is flat. Under ``tags_match='all'`` the store builders
         (``db.qdrant._build_tag_filter_conditions``, ``db.lance_store.
-        _build_tag_clause``) read it back as one group per tag by regrouping
-        on the same ``normalize_tag`` fold (``group_tags_by_fold``, #2058),
-        so every variant added here must share its requested tag's fold.
+        _build_tag_clause``) AND one group per requested tag, which recall
+        derives with ``utils.tag_normalize.tag_filter_groups`` (#2058, #2071)
+        by the same ``normalize_tag`` fold, so every variant added here must
+        share its requested tag's fold.
     """
     try:
         # #1512: widening only needs the mechanical variants, so a vocabulary up
@@ -383,6 +384,7 @@ async def expand_tag_filter(
     seen: set[str] = set()
     added_by_tag: dict[str, list[str]] = {}
 
+    listed = set(tags)
     for requested in tags:
         if requested not in seen:
             expanded.append(requested)
@@ -390,9 +392,12 @@ async def expand_tag_filter(
         folded = normalize_tag(requested)
         if not folded:
             continue
-        variants = [v for v in by_normalized.get(folded, []) if v != requested][
-            :MAX_EXPANSION_PER_TAG
-        ]
+        # A listed tag is no other listed tag's variant (#2071), so it must not
+        # take one of the MAX_EXPANSION_PER_TAG slots either; same-number
+        # spellings go first, since tag_filter_groups may keep only those.
+        candidates = [v for v in by_normalized.get(folded, []) if v not in listed]
+        candidates.sort(key=lambda v: not is_mechanical_variant(requested, v))
+        variants = candidates[:MAX_EXPANSION_PER_TAG]
         gained = []
         for variant in variants:
             if variant not in seen:

@@ -56,7 +56,7 @@ from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
-from utils.tag_normalize import group_tags_by_fold
+from utils.tag_normalize import TAG_GROUPS_FILTER_KEY
 from utils.tokenizer import augment_reading_tokens, tokenize_and_reading
 
 if TYPE_CHECKING:
@@ -375,27 +375,41 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
 
 
 # Bound on the tags a filter matches on: tags under "any" / exact "all", tag
-# groups under "all" + tags_normalize (#2058).
+# groups under "all" with recall's widening (#2058).
 _MAX_FILTER_TAGS = 50
-# Bound on the spellings scanned to build those groups. expand_tag_filter adds
-# at most MAX_EXPANSION_PER_TAG (20) spellings per tag, so 50 widened tags stay
-# within it; the cap only limits the fold work on an oversized caller list.
-_MAX_FILTER_SPELLINGS = 2000
+# Bound on the spellings of one group. expand_tag_filter adds at most
+# MAX_EXPANSION_PER_TAG (20) spellings per requested tag; the cap only bounds a
+# malformed group.
+_MAX_GROUP_SPELLINGS = 50
 
 
-def tag_groups_for_all(tags: list[str]) -> list[list[str]]:
-    """The groups a tags_match='all' + tags_normalize filter ANDs (#2058).
+def tag_groups_for_all(filters: dict[str, Any]) -> list[list[str]] | None:
+    """The groups a tags_match='all' filter ANDs, when recall widened it (#2058).
 
-    Groups BEFORE capping, so the variants of the first tags cannot push a
-    later requested tag past the cap and silently drop it from the AND.
+    The groups come from the widening itself, not from re-folding the flat tag
+    list: two requested tags with one fold must stay two groups (#2071).
 
     Args:
-        tags: The filter's non-empty string tags, uncapped.
+        filters: Filter dict, possibly carrying ``TAG_GROUPS_FILTER_KEY``.
 
     Returns:
-        At most ``_MAX_FILTER_TAGS`` groups from ``group_tags_by_fold``.
+        At most ``_MAX_FILTER_TAGS`` non-empty groups of spellings that the
+        filter's ``tags`` list holds, or None when the filter carries none
+        (every listed tag is then required).
     """
-    return group_tags_by_fold(tags[:_MAX_FILTER_SPELLINGS])[:_MAX_FILTER_TAGS]
+    raw = filters.get(TAG_GROUPS_FILTER_KEY)
+    tags = filters.get("tags")
+    if not isinstance(raw, list) or not isinstance(tags, list):
+        return None
+    # A group only regroups the filter's own tags; it never matches on another.
+    allowed = {t for t in tags if isinstance(t, str) and t}
+    groups = []
+    for group in raw:
+        if isinstance(group, list):
+            spellings = [t for t in group if isinstance(t, str) and t in allowed]
+            if spellings:
+                groups.append(spellings[:_MAX_GROUP_SPELLINGS])
+    return groups[:_MAX_FILTER_TAGS] or None
 
 
 def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
@@ -404,12 +418,13 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
     Issue #67: Exact-match tag filtering only. Tags are NOT added to
     BM25 text search to avoid score inflation for tag-heavy memories.
     Issue #79: Support AND logic via tags_match="all".
-    Issue #2058: with tags_normalize, "all" requires each TAG, not each
-    spelling: the spellings recall widened one tag to are one MatchAny.
+    Issue #2058: when recall widened the filter (tags_normalize), "all"
+    requires each TAG, not each spelling: the spellings of one requested tag
+    are one MatchAny. The groups are the widening's own (#2071).
 
     Args:
         filters: Filter dict with optional tags list, tags_match mode and
-            tags_normalize flag
+            the widening's ``TAG_GROUPS_FILTER_KEY`` groups
 
     Returns:
         List of FieldConditions for tag matching (empty if no tags)
@@ -430,16 +445,16 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
 
     if tags_match == "all":
         # AND logic: memory must have ALL specified tags
-        if not filters.get("tags_normalize"):
+        groups = tag_groups_for_all(filters)
+        if groups is None:
             return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
-        # #2058: the list holds every stored spelling of each requested tag
-        # (expand_tag_filter); any one spelling satisfies that tag. A tag with
+        # #2058: any one spelling of a requested tag satisfies it. A tag with
         # one spelling keeps the exact MatchValue above.
         return [
             FieldCondition(key="tags", match=MatchValue(value=group[0]))
             if len(group) == 1
             else FieldCondition(key="tags", match=MatchAny(any=group))
-            for group in tag_groups_for_all(strings)
+            for group in groups
         ]
     else:
         # OR logic (default): memory must have ANY of the specified tags
