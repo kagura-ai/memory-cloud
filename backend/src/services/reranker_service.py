@@ -131,24 +131,44 @@ _GENERATE_UNSUPPORTED_WARNED = False
 # above it, they would make up too much of the "ranking".
 SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO = 0.2
 
+# Key RerankerService stamps (True) on a candidate the provider could not
+# score (#2062). Its hybrid_score is on another scale than the scored
+# candidates' rerank score, so the later bounded re-sorts in MemoryService
+# (reinforce, graph boost) keep it after every scored candidate.
+RERANK_UNSCORED_KEY = "_rerank_unscored"
 
-# Character budget for a document body in the qwen3 format (#2020 gate2). The
-# template's suffix (<|im_end|> + the assistant turn + the empty think block)
-# must reach the model: a server that truncates an over-long input from the
-# right cuts it off and the yes/no score is meaningless. So the body is cut
-# here, before the suffix is appended. 2000 characters keeps a whole memory
-# summary (capped at 500) and most of its context summary — the generic score
-# prompt (SelfHostedReranker raw) scores only doc[:500] — and is at most ~2000
-# tokens even for CJK text, so prefix + query + document + suffix fit a
-# 4096-token --max-model-len (or Ollama num_ctx).
+
+# Character budgets for the qwen3 format (#2020 gate2, #2062). The whole
+# prompt — prefix + instruction + query + document + suffix — must fit the
+# reranker's context. vLLM rejects a longer input (--max-model-len; the rerank
+# fails open). A server that truncates it instead loses part of the template:
+# an Ollama runner over num_ctx keeps the head and the tail, so the
+# instruction or the query can go; one that cuts from the right loses the
+# suffix (<|im_end|> + the assistant turn + the empty think block). Either way
+# the yes/no score is meaningless. So both the query and the document body are
+# cut here, before the template is put together.
+#
+# The document gets 2000 characters: a whole memory summary (capped at 500)
+# and most of its context summary — the generic score prompt
+# (SelfHostedReranker raw) scores only doc[:500]. The query gets 1000: recall
+# accepts up to 8000, far more than a relevance judgement uses. Common text,
+# CJK included, takes about one token per character or fewer, so the two
+# budgets plus the ~80-token template stay near 3100 tokens: under a
+# 4096-token --max-model-len or Ollama num_ctx, with headroom for a longer
+# RERANK_INSTRUCTION and for rare characters that take several tokens. The
+# budgets count characters, not tokens: text made mostly of multi-token
+# characters (emoji, rare CJK), an instruction of many hundred characters or
+# a context set below 4096 tokens can still be exceeded.
 QWEN3_RERANK_MAX_DOC_CHARS = 2000
+QWEN3_RERANK_MAX_QUERY_CHARS = 1000
 
 
 def _qwen3_query_part(query: str, instruction: str) -> str:
-    """System prefix + instruction + neutralised query (the template's head)."""
+    """System prefix + instruction + truncated, neutralised query (the template's head)."""
     # Stored memories and the caller's query are untrusted: neutralise the
-    # tokenizer's control tokens before they enter the template.
-    safe_query = _neutralise_qwen3_control_tokens(query)
+    # tokenizer's control tokens before they enter the template. Cut first,
+    # as for the document, so a split token ("<|im_") is no token at all.
+    safe_query = _neutralise_qwen3_control_tokens(query[:QWEN3_RERANK_MAX_QUERY_CHARS])
     return f"{QWEN3_RERANK_PREFIX}<Instruct>: {instruction}\n<Query>: {safe_query}\n"
 
 
@@ -731,9 +751,10 @@ class SelfHostedReranker(RerankerProvider):
             )
         # Scored documents by score, then the unscored ones with
         # relevance_score None in input (= hybrid) order: RerankerService keeps
-        # those at their hybrid position with their hybrid_score, instead of a
-        # 0.0 that would sink them. Whether the scores rank at all is
-        # RerankerService's shared guard.
+        # those after the scored ones, in hybrid order with their hybrid_score
+        # (stamped RERANK_UNSCORED_KEY so the later re-sorts keep them there,
+        # #2062), instead of a 0.0 that would sink them. Whether the scores
+        # rank at all is RerankerService's shared guard.
         scored = sorted(
             (
                 {"index": i, "relevance_score": o}
@@ -1431,12 +1452,17 @@ class RerankerService:
                 return candidates[:k]
 
         # Map reranked results back to candidates: scored ones in score order,
-        # then unscored ones (None) untouched in their hybrid order.
+        # then unscored ones (None) in their hybrid order with their
+        # hybrid_score. Their hybrid_score is on another scale than the
+        # scored ones' rerank score, so they are stamped RERANK_UNSCORED_KEY:
+        # the later re-sorts (reinforce, graph boost) keep them after every
+        # scored candidate instead of comparing the two scales (#2062).
         reranked = []
         unscored_idx: list[int] = []
         for result in results:
             candidate = candidates[result["index"]]
             if result["relevance_score"] is None:
+                candidate[RERANK_UNSCORED_KEY] = True
                 unscored_idx.append(result["index"])
                 continue
             candidate["rerank_score"] = result["relevance_score"]

@@ -15,6 +15,7 @@ from models.schemas import (
     UpdateMemoryRequest,
 )
 from services.memory_service import MemoryService
+from services.reranker_service import RERANK_UNSCORED_KEY
 
 
 class TestMemoryServiceInit:
@@ -1994,6 +1995,51 @@ class TestReinforceRerank:
             FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
             await svc._maybe_reinforce_rerank(sr, memories, uuid4())
         assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
+
+    @pytest.mark.asyncio
+    async def test_unscored_rerank_candidates_stay_after_scored_ones(self):
+        """#2062: a self-hosted rerank leaves a candidate it could not score
+        with its hybrid_score (``RERANK_UNSCORED_KEY``) while the scored ones
+        carry P(yes). The re-sort must not compare the two scales: the
+        unscored ones stay after every scored one, and only reorder among
+        themselves by their own adjusted score."""
+        from decimal import Decimal
+
+        from services.feedback_service import FeedbackAggregate
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
+        old = datetime(2020, 1, 1)
+        memories = {
+            key: MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+            for key in ("s1", "s2", "u1", "u2")
+        }
+        # u2 is heavily adopted + helpful: it may pass u1, never a scored one.
+        memories["u2"].reference_count = 10
+        memories["u2"].importance = 0.9
+        sr = [
+            {"id": "s1", "hybrid_score": 0.30, "rerank_score": 0.30},
+            {"id": "s2", "hybrid_score": 0.20, "rerank_score": 0.20},
+            {"id": "u1", "hybrid_score": 0.85, RERANK_UNSCORED_KEY: True},
+            {"id": "u2", "hybrid_score": 0.80, RERANK_UNSCORED_KEY: True},
+        ]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            u2 = str(memories["u2"].id)
+            FB.return_value.aggregate_for_memories = AsyncMock(
+                return_value={
+                    u2: FeedbackAggregate(memory_id=u2, helpful_count=5, not_helpful_count=0)
+                }
+            )
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        assert [r["id"] for r in sr] == ["s1", "s2", "u2", "u1"]
 
     @pytest.mark.asyncio
     async def test_require_host_arbitration_forwards_host_only(self):

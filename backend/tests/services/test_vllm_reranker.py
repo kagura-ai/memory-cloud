@@ -24,6 +24,7 @@ from services.reranker_service import (
     DEFAULT_QWEN3_RERANK_INSTRUCTION,
     DEFAULT_VLLM_RERANK_MODEL,
     QWEN3_RERANK_MAX_DOC_CHARS,
+    QWEN3_RERANK_MAX_QUERY_CHARS,
     RERANK_CALIBRATION_MIN_MARGIN,
     RerankerService,
     SelfHostedReranker,
@@ -983,6 +984,23 @@ class TestGate2Findings:
         assert doc.endswith(_QWEN3_SUFFIX)
         body = doc[len("<Document>: ") : -len(_QWEN3_SUFFIX)]
         assert body == "x" * QWEN3_RERANK_MAX_DOC_CHARS
+
+    async def test_long_query_is_cut_and_keeps_the_template(self, monkeypatch):
+        """#2062: recall allows an 8000-character query; the qwen3 query part
+        is cut so prefix + query + document + suffix fit a 4096-token context."""
+        calls = _capture_post(monkeypatch)
+        r = VLLMReranker(base_url="http://gpu:8002", model="qwen3-reranker-0.6b")
+        await r.rerank("q" * 8000, ["d"], top_n=1)
+        assert calls[0]["query"] == (
+            f"{_QWEN3_PREFIX}<Instruct>: {DEFAULT_QWEN3_RERANK_INSTRUCTION}\n"
+            f"<Query>: {'q' * QWEN3_RERANK_MAX_QUERY_CHARS}\n"
+        )
+
+    async def test_raw_format_query_is_not_cut(self, monkeypatch):
+        calls = _capture_post(monkeypatch)
+        r = VLLMReranker(base_url="http://gpu:8002", model="bge-reranker-v2-m3")
+        await r.rerank("q" * 8000, ["d"], top_n=1)
+        assert calls[0]["query"] == "q" * 8000
 
     async def test_short_document_is_not_truncated(self, monkeypatch):
         calls = _capture_post(monkeypatch)

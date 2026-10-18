@@ -85,6 +85,7 @@ from services.recall_selection import (
     plan_recall_selection,
 )
 from services.recall_timings import RecallTimings
+from services.reranker_service import RERANK_UNSCORED_KEY
 from services.search_service import SearchService
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
 from utils.datetime import to_utc_iso, utcnow
@@ -209,6 +210,18 @@ def _is_trusted_recall(request: RecallRequest) -> bool:
     here, so they cannot drift apart.
     """
     return (request.filters or {}).get("trust_tier") == "trusted"
+
+
+def _rerank_sort_key(result: dict, adjusted: float) -> tuple[bool, float]:
+    """Sort key for a bounded re-rank over (possibly) reranked results (#2062).
+
+    A candidate the reranker could not score (``RERANK_UNSCORED_KEY``, stamped
+    by RerankerService) keeps its hybrid_score, which is on another scale than the
+    scored candidates' rerank score. Sorted descending, it stays after every
+    scored candidate and only moves among the unscored ones. Without a rerank
+    nothing is stamped and the order is the adjusted score's alone.
+    """
+    return (not result.get(RERANK_UNSCORED_KEY, False), adjusted)
 
 
 def location_payload_from_details(details: dict | None) -> dict | None:
@@ -3685,9 +3698,11 @@ class MemoryService:
                 return base * r.get("_rerank_factor", 1.0) * g
 
             # Sort and stamp ONLY the top-k slice; items past the slice keep
-            # their original order (they are outside the experiment).
+            # their original order (they are outside the experiment). A
+            # candidate the reranker could not score stays after the scored
+            # ones (#2062, see _rerank_sort_key).
             order_before = [x for x in (_sid(r) for r in scoped) if x is not None]
-            scoped.sort(key=_adjusted, reverse=True)
+            scoped.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             for r in scoped:
                 sid = _sid(r)
                 if sid is not None:
@@ -3823,7 +3838,9 @@ class MemoryService:
                 r["_rerank_factor"] = factors.get(sid, 1.0) if sid is not None else 1.0
 
             order_before = [s for s in (_sid(r) for r in search_results) if s is not None]
-            search_results.sort(key=_adjusted, reverse=True)
+            # A candidate the reranker could not score stays after the
+            # scored ones (#2062, see _rerank_sort_key).
+            search_results.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             order_after = [s for s in (_sid(r) for r in search_results) if s is not None]
 
             # Telemetry is isolated in its own guard: the re-rank has ALREADY been

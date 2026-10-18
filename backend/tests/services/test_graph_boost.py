@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 
 from services.memory_service import MemoryService
+from services.reranker_service import RERANK_UNSCORED_KEY
 
 _CTX = uuid4()
 
@@ -173,6 +174,23 @@ class TestBoost:
         assert [r["id"] for r in results] == ["r2", "r1", "r0"]
         # Cumulative stamp: reinforce factor x graph factor.
         assert results[0]["_rerank_factor"] == pytest.approx(1.15 * 1.15)
+
+    @pytest.mark.asyncio
+    async def test_unscored_rerank_candidates_stay_after_scored_ones(self, monkeypatch) -> None:
+        """#2062: an unscored rerank candidate keeps its hybrid_score, which is
+        on another scale than the scored ones' rerank score — the boost must
+        not lift it above a scored candidate, only reorder the unscored tail."""
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_MAX", "0.15")
+        results, memories = _pool(0.30, 0.20, 0.85, 0.84)
+        results[2][RERANK_UNSCORED_KEY] = True
+        results[3][RERANK_UNSCORED_KEY] = True
+        # r3 is connected (factor 1.15): it passes r2, never r0 / r1.
+        svc = _service(edge_rows=[(_mid(memories, "r1"), _mid(memories, "r3"), 2.0)])
+
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=4)
+
+        assert [r["id"] for r in results] == ["r0", "r1", "r3", "r2"]
 
     @pytest.mark.asyncio
     async def test_max_boost_env_clamped(self, monkeypatch) -> None:

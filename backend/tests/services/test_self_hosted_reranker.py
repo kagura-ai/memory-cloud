@@ -31,8 +31,10 @@ from services.reranker_service import (
     DEFAULT_QWEN3_RERANK_INSTRUCTION,
     DEFAULT_SELF_HOSTED_RERANK_MODEL,
     QWEN3_RERANK_MAX_DOC_CHARS,
+    QWEN3_RERANK_MAX_QUERY_CHARS,
     QWEN3_RERANK_PREFIX,
     QWEN3_RERANK_SUFFIX,
+    RERANK_UNSCORED_KEY,
     SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO,
     RerankerService,
     RerankGenerateUnsupportedError,
@@ -217,6 +219,31 @@ class TestQwen3Scoring:
         prompt = calls[0][1]["prompt"]
         assert prompt.endswith(QWEN3_RERANK_SUFFIX)
         assert _doc_of(calls[0][1]) == "x" * QWEN3_RERANK_MAX_DOC_CHARS
+
+    async def test_long_query_is_cut_and_the_instruction_survives(self, monkeypatch):
+        """#2062: an 8000-character query is cut in the qwen3 query part, so an
+        Ollama runner truncating an over-long prompt cannot drop the
+        instruction or the query, and the whole prompt fits 4096 tokens."""
+        calls = _patch_post(monkeypatch, lambda u, j, h: _Resp(_generate({"yes": 0.9, "no": 0.1})))
+        await SelfHostedReranker("http://x").rerank(
+            "q" * 8000, ["x" * (QWEN3_RERANK_MAX_DOC_CHARS + 50)], 1
+        )
+        prompt = calls[0][1]["prompt"]
+        assert prompt == (
+            f"{QWEN3_RERANK_PREFIX}<Instruct>: {DEFAULT_QWEN3_RERANK_INSTRUCTION}\n"
+            f"<Query>: {'q' * QWEN3_RERANK_MAX_QUERY_CHARS}\n"
+            f"<Document>: {'x' * QWEN3_RERANK_MAX_DOC_CHARS}{QWEN3_RERANK_SUFFIX}"
+        )
+
+    def test_the_prompt_budget_leaves_headroom_under_4096(self):
+        """At about one token per character (common text, CJK included) the
+        bounded prompt stays well under a 4096-token context, leaving room for
+        a longer RERANK_INSTRUCTION and multi-token characters."""
+        fixed = len(QWEN3_RERANK_PREFIX) + len(QWEN3_RERANK_SUFFIX)
+        fixed += len(DEFAULT_QWEN3_RERANK_INSTRUCTION) + len(
+            "<Instruct>: \n<Query>: \n<Document>: "
+        )
+        assert QWEN3_RERANK_MAX_QUERY_CHARS + QWEN3_RERANK_MAX_DOC_CHARS + fixed <= 3500
 
     async def test_no_logprobs_in_the_reply_fails_the_call(self, monkeypatch):
         """Ollama < 0.12.11 ignores ``logprobs``: every output is unparseable."""
@@ -476,6 +503,24 @@ class TestNoSignalGuard:
         assert [c["hybrid_score"] for c in out[3:]] == pytest.approx([0.8, 0.6])
         assert all("rerank_score" not in c for c in out[3:])
         assert out[0]["rerank_score"] == pytest.approx(0.9)
+
+    async def test_unscored_candidates_are_stamped(self, monkeypatch):
+        """#2062: unscored candidates carry ``RERANK_UNSCORED_KEY`` so the later
+        reinforce / graph-boost re-sorts keep them after the scored ones."""
+        service, _ = _service_with(monkeypatch, [0.2, None, 0.9, None, 0.5])
+        out = await service.rerank("q", _cands(5), "u", k=5)
+        assert [c.get(RERANK_UNSCORED_KEY, False) for c in out] == [
+            False,
+            False,
+            False,
+            True,
+            True,
+        ]
+
+    async def test_no_signal_keeps_candidates_unstamped(self, monkeypatch):
+        service, _ = _service_with(monkeypatch, [1.0, None, 1.0])
+        out = await service.rerank("q", _cands(3), "u", k=3)
+        assert all(RERANK_UNSCORED_KEY not in c for c in out)
 
     async def test_all_scored_zero_beside_unscored_is_still_a_failure(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.0, 0.0, None, 0.0, 0.0])
