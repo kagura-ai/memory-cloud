@@ -232,6 +232,7 @@ async def plan_context_migration(
     current_model, current_dimensions, content_chunks_on = await resolve_context_embedding_config(
         db, context_id
     )
+    content_chunks_on = content_chunks_on and chunk_points_supported()  # #2072: none on LanceDB
     if source_model is None:
         source_model, source_dimensions = current_model, current_dimensions
         if source_model == target_model:

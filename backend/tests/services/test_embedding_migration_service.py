@@ -210,6 +210,18 @@ class TestPlan:
         assert "char_length(memories.content) >= 1500" in compiled
 
     @pytest.mark.asyncio
+    async def test_a_stored_flag_without_chunk_point_support_has_no_estimate(self):
+        """#2072: the LanceDB store writes no chunk points, so a stored flag
+        neither promises a chunk rebuild nor estimates its embedding spend."""
+        config = _config(SMALL, 512)
+        config.content_chunks_enabled = True
+        db = _db([_result(scalar=_context()), _result(scalar=config), _result(scalar=3)])
+        with patch.object(svc, "chunk_points_supported", return_value=False):
+            plan = await svc.plan_context_migration(db, uuid4(), QWEN)
+        assert (plan.content_chunks_on, plan.chunk_estimate) == (False, 0)
+        assert db.execute.await_count == 3
+
+    @pytest.mark.asyncio
     async def test_a_context_without_content_chunks_has_no_estimate_query(self):
         config = _config(SMALL, 512)
         config.content_chunks_enabled = False
