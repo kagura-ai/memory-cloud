@@ -27,13 +27,22 @@ async def _log_unsearchable_backlog(db) -> None:
     database by hand. It was found that way, with 467 rows already stuck.
 
     Best-effort: this is a diagnostic, and it must never be the reason the
-    sweep does not run. Two counts over the existing partial index.
+    sweep does not run. Counts over the existing partial index.
+
+    #2015 D6: the failures are also split by the error code that
+    ``embedding_failure_values`` puts first: ``capped`` (the embedding spend
+    cap, ``QUOTA-002``), ``configuration`` (no credential or plan feature,
+    ``CFG-*`` / ``FEAT-*``; both are retried at no cost once the workspace
+    is fixed) and ``other`` — so a capped workspace is not read as an
+    unsearchable one. Rows failed before the prefix existed count as other.
     """
-    from sqlalchemy import func
+    from sqlalchemy import func, or_
 
     from config.constants import MAX_EMBEDDING_RETRIES
     from models.memory import Memory
 
+    capped = Memory.embedding_error.like("QUOTA-002:%")
+    configuration = or_(Memory.embedding_error.like("CFG-%"), Memory.embedding_error.like("FEAT-%"))
     try:
         row = (
             await db.execute(
@@ -42,6 +51,8 @@ async def _log_unsearchable_backlog(db) -> None:
                     func.count()
                     .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES)
                     .label("stalled"),
+                    func.count().filter(capped).label("capped"),
+                    func.count().filter(configuration).label("configuration"),
                 ).where(
                     Memory.embedding_status == "failed",
                     Memory.deleted_at.is_(None),
@@ -58,6 +69,9 @@ async def _log_unsearchable_backlog(db) -> None:
             "embedding_unsearchable_backlog",
             unsearchable=unsearchable,
             stalled=stalled,
+            capped=row.capped,
+            configuration=row.configuration,
+            other=unsearchable - row.capped - row.configuration,
         )
 
 

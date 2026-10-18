@@ -94,6 +94,7 @@ from utils.exceptions import (
     EmbeddingSpendCapExceeded,
     ExternalServiceError,
     FeatureNotAvailableError,
+    MemoryCloudException,
     MemoryGoneError,
     NotFoundException,
     ValidationError,
@@ -8155,12 +8156,18 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     ``failed`` row only below it, so no retry is scheduled, and the counts of
     rows nothing will retry (``embedding_retry_count >= MAX_EMBEDDING_RETRIES``)
     include it. The admin retry resets the counter along with the status.
+
+    The project's own errors are stored as ``"<error_code>: <message>"``
+    (#2015 D6), so the unsearchable-backlog metric can tell a capped or
+    unconfigured workspace (``QUOTA-002``, ``CFG-*``, ``FEAT-*``) from a
+    failing provider.
     """
     from config.constants import MAX_EMBEDDING_RETRIES
 
+    error = f"{exc.error_code}: {exc}" if isinstance(exc, MemoryCloudException) else str(exc)
     values: dict[str, Any] = {
         "embedding_status": "failed",
-        "embedding_error": str(exc)[:500],
+        "embedding_error": error[:500],
         # The #979 retry backoff (embedding_retry_eligible_clause) anchors on
         # the pipeline's own clock (#1852; it was updated_at until then, which
         # made every embedded memory look edited).

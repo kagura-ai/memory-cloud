@@ -71,7 +71,9 @@ class TestSweepPendingEmbeddings:
         mock_db = MagicMock()
         mock_result = MagicMock()
         mock_result.all.return_value = []
-        mock_result.one.return_value = SimpleNamespace(unsearchable=467, stalled=467)
+        mock_result.one.return_value = SimpleNamespace(
+            unsearchable=467, stalled=467, capped=400, configuration=7
+        )
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with patch("db.base.get_db", mock_get_db_factory(mock_db)):
@@ -82,7 +84,21 @@ class TestSweepPendingEmbeddings:
             c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"
         ]
         assert warnings, "the backlog was not reported"
-        assert warnings[0].kwargs == {"unsearchable": 467, "stalled": 467}
+        # #2015 D6: split by error class, so a capped workspace reads as capped.
+        assert warnings[0].kwargs == {
+            "unsearchable": 467,
+            "stalled": 467,
+            "capped": 400,
+            "configuration": 7,
+            "other": 60,
+        }
+        backlog_sql = str(
+            mock_db.execute.await_args_list[0]
+            .args[0]
+            .compile(compile_kwargs={"literal_binds": True})
+        )
+        assert "LIKE 'QUOTA-002:%'" in backlog_sql
+        assert "LIKE 'CFG-%'" in backlog_sql and "LIKE 'FEAT-%'" in backlog_sql
 
     @pytest.mark.asyncio
     async def test_a_healthy_deployment_stays_quiet(self):

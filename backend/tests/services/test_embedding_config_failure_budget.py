@@ -148,13 +148,32 @@ class TestWhatGetsStampedOnTheRow:
     def test_the_error_is_recorded_and_bounded(self):
         """Admins need the reason; the column (String(500)) must not overrun.
 
-        The stored text is `str(exc)`, which for this hierarchy carries a
-        human prefix ("OpenAI service error: ...") — that prefix is the part an
-        operator reads first, so truncation must keep the head, not the tail.
+        The stored text is the error code and `str(exc)` (#2015 D6), which for
+        this hierarchy carries a human prefix ("OpenAI service error: ...") —
+        that head is the part an operator reads first, so truncation must keep
+        the head, not the tail.
         """
         values = embedding_failure_values(OpenAIError("e" * 900), NOW)
-        assert values["embedding_error"].startswith("OpenAI service error:")
+        assert values["embedding_error"].startswith("EXT-201: OpenAI service error:")
         assert len(values["embedding_error"]) == 500
+
+    @pytest.mark.parametrize(
+        ("factory", "prefix"),
+        [
+            (a_spend_cap_error, "QUOTA-002: "),
+            (lambda: ConfigurationError("no key"), "CFG-001: "),
+            (a_managed_embeddings_refusal, "FEAT-001: "),
+        ],
+        ids=["spend-cap", "no-credential", "plan"],
+    )
+    def test_the_project_errors_lead_with_their_code(self, factory, prefix):
+        """#2015 D6: the backlog metric splits failures by this prefix."""
+        exc = factory()
+        assert embedding_failure_values(exc, NOW)["embedding_error"] == f"{prefix}{exc}"
+
+    def test_a_foreign_error_is_stored_as_is(self):
+        values = embedding_failure_values(TimeoutError("read timeout"), NOW)
+        assert values["embedding_error"] == "read timeout"
 
 
 class TestAnUnrebuildableResourceRowIsFinalAtOnce:
