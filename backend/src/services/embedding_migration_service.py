@@ -656,15 +656,15 @@ async def rebuild_target_chunks(
     )
     rebuilt_ids: list[UUID] = []
     for i in range(0, len(ids), batch_size):
-        result = await db.execute(
-            select(Memory)
-            .where(
-                Memory.id.in_(ids[i : i + batch_size]),
-                Memory.context_id == plan.context_id,
-                Memory.deleted_at.is_(None),
-            )
-            .order_by(Memory.id)
+        stmt = select(Memory).where(
+            Memory.id.in_(ids[i : i + batch_size]),
+            Memory.context_id == plan.context_id,
+            Memory.deleted_at.is_(None),
         )
+        if requeue_since is not None:
+            # What the switch re-queues gets its chunks from the sweep anyway.
+            stmt = stmt.where(_left_by_switch(requeue_since))
+        result = await db.execute(stmt.order_by(Memory.id))
         rows = [memory for memory in result.scalars().all() if not owns_resource_point(memory)]
         # As in the re-embed: end the read transaction before the embedding calls.
         db.expunge_all()
@@ -684,14 +684,17 @@ async def rebuild_target_chunks(
     out.rebuilt = len(rebuilt_ids)
 
     if rebuilt_ids and await content_chunks_enabled(db, plan.context_id):
-        stored = await count_context_chunk_points(
-            str(plan.workspace_id), str(plan.context_id), plan.target_collection
-        )
         length = func.char_length(Memory.content)
         for i in range(0, len(rebuilt_ids), batch_size):
-            stmt = select(Memory.id, length).where(
-                Memory.id.in_(rebuilt_ids[i : i + batch_size]), Memory.deleted_at.is_(None)
+            page = rebuilt_ids[i : i + batch_size]
+            # Only this page's chunk points, not every chunk of the context.
+            stored = await count_context_chunk_points(
+                str(plan.workspace_id),
+                str(plan.context_id),
+                plan.target_collection,
+                memory_ids=page,
             )
+            stmt = select(Memory.id, length).where(Memory.id.in_(page), Memory.deleted_at.is_(None))
             if requeue_since is not None:
                 # What switch_context_embedding re-queues is left to the sweep.
                 stmt = stmt.where(_left_by_switch(requeue_since))
@@ -892,15 +895,25 @@ async def _reconcile_target_chunks(
     stale_keys = [key for key in stored if not chunks_on or _as_uuid(key) not in live_plain_ids]
     if stale_keys and chunks_on:
         # A memory written after the first read is live, but not in the set.
+        # The same rule as that read: a live plain row of this context.
         candidates = [u for key in stale_keys if (u := _as_uuid(key)) is not None]
         live_now: set[str] = set()
         for i in range(0, len(candidates), batch_size):
             result = await db.execute(
-                select(Memory.id).where(
-                    Memory.id.in_(candidates[i : i + batch_size]), Memory.deleted_at.is_(None)
+                select(Memory)
+                .options(load_only(*_POINT_ID_COLUMNS))
+                .where(
+                    Memory.id.in_(candidates[i : i + batch_size]),
+                    Memory.context_id == plan.context_id,
+                    Memory.deleted_at.is_(None),
                 )
             )
-            live_now.update(str(memory_id) for memory_id in result.scalars().all())
+            live_now.update(
+                str(memory.id)
+                for memory in result.scalars().all()
+                if not owns_resource_point(memory)
+            )
+        db.expunge_all()
         stale_keys = [key for key in stale_keys if key not in live_now]
     if stale_keys:
         for i in range(0, len(stale_keys), batch_size):

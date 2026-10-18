@@ -134,6 +134,21 @@ async def test_count_context_chunk_points_groups_by_memory(mock_client):
     assert _is_chunk_exclusion(kwargs["scroll_filter"].must_not[0])
 
 
+async def test_count_context_chunk_points_of_some_memories_filters_on_chunk_of(mock_client):
+    mock_client.scroll.side_effect = [([SimpleNamespace(payload={CHUNK_OF_FIELD: "m1"})], None)]
+    assert await count_context_chunk_points(WS, CTX_ON, "coll", memory_ids=["m1", "m2"]) == {
+        "m1": 1
+    }
+    must = mock_client.scroll.await_args.kwargs["scroll_filter"].must
+    chunk_of = [c for c in must if getattr(c, "key", None) == CHUNK_OF_FIELD]
+    assert len(chunk_of) == 1 and chunk_of[0].match.any == ["m1", "m2"]
+
+
+async def test_count_context_chunk_points_of_no_memories_asks_nothing(mock_client):
+    assert await count_context_chunk_points(WS, CTX_ON, "coll", memory_ids=[]) == {}
+    mock_client.scroll.assert_not_awaited()
+
+
 async def test_count_context_chunk_points_failure_is_a_qdrant_error(mock_client):
     mock_client.scroll.side_effect = RuntimeError("down")
     with pytest.raises(QdrantError):

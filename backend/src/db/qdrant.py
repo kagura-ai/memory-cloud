@@ -1279,13 +1279,18 @@ async def purge_context_chunk_points_everywhere(
 
 
 async def count_context_chunk_points(
-    workspace_id: str, context_id: str, collection_name: str, *, page_size: int = 1000
+    workspace_id: str,
+    context_id: str,
+    collection_name: str,
+    *,
+    memory_ids: Sequence[UUID | str] | None = None,
+    page_size: int = 1000,
 ) -> dict[str, int]:
     """A context's content chunk points (#2015) in ``collection_name``, per memory.
 
     Returns ``{chunk_of memory id: number of chunk points}``. Scrolls the
     chunk points only (``chunk_of`` set), with no payload but ``chunk_of``
-    and no vectors. The embedding migration's verify uses it to report
+    and no vectors; with ``memory_ids``, only the chunks of those memories. The embedding migration's verify uses it to report
     memories whose chunks are incomplete and to find chunks of memories that
     are no longer live. A non-Qdrant store holds none (``{}``).
 
@@ -1296,14 +1301,18 @@ async def count_context_chunk_points(
         return {}
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
+    must: list[Condition] = [
+        FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+    ]
+    if memory_ids is not None:
+        if not memory_ids:
+            return {}
+        must.append(
+            FieldCondition(key=CHUNK_OF_FIELD, match=MatchAny(any=[str(m) for m in memory_ids]))
+        )
     client = get_qdrant_client()
-    chunk_filter = Filter(
-        must=[
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
-        ],
-        must_not=[summary_points_condition()],
-    )
+    chunk_filter = Filter(must=must, must_not=[summary_points_condition()])
     counts: dict[str, int] = {}
     offset = None
     try:

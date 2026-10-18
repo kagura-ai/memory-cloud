@@ -1165,9 +1165,16 @@ class TestContentChunks:
                 db, plan, [ok.id, stuck.id], requeue_since=since, embedding_service=MagicMock()
             )
         assert result.still_missing == [stuck.id]
+        # Only the rebuilt memories' chunk points are counted.
         _no_content_chunks["counted"].assert_awaited_once_with(
-            str(plan.workspace_id), str(plan.context_id), plan.target_collection
+            str(plan.workspace_id),
+            str(plan.context_id),
+            plan.target_collection,
+            memory_ids=[ok.id, stuck.id],
         )
+        # Rows the switch re-queues are not rebuilt now: the sweep does it.
+        rows_read = str(db.execute.await_args_list[0].args[0].compile())
+        assert "updated_at IS NULL" in rows_read and "embedding_status" in rows_read
         recheck = db.execute.await_args_list[1].args[0]
         compiled = str(recheck.compile())
         assert "embedding_status" in compiled and "updated_at <" in compiled
@@ -1300,7 +1307,7 @@ class TestContentChunks:
                 _result(scalars=[live]),
                 _rows_result([(live.id, 1500)]),
                 # asked again: a row written since the first read is live
-                _result(scalars=[written_since]),
+                _result(scalars=[_memory(memory_id=written_since)]),
             ]
         )
         client = MagicMock()
@@ -1315,6 +1322,30 @@ class TestContentChunks:
         _no_content_chunks["deleted"].assert_awaited_once_with([forgotten], plan.target_collection)
         assert result.chunks_stale_removed == 1
         assert result.chunks_missing == []
+        # Asked again with the first read's rule: a live row of this context.
+        asked_again = str(db.execute.await_args_list[2].args[0].compile())
+        assert "context_id" in asked_again and "deleted_at IS NULL" in asked_again
+
+    @pytest.mark.asyncio
+    async def test_verify_deletes_the_chunks_of_a_row_that_now_owns_a_resource_point(
+        self, _no_content_chunks
+    ):
+        """Asked again, a live row is kept only as a plain row: a resource
+        row is never chunked, so chunk points under its id are stale."""
+        plan = _plan()
+        doc = _resource_memory()
+        _no_content_chunks["enabled"].return_value = True
+        _no_content_chunks["counted"].return_value = {str(doc.id): 2}
+        db = _db([_result(scalars=[]), _rows_result([]), _result(scalars=[doc])])
+        with (
+            patch.object(svc, "list_context_point_ids", AsyncMock(return_value=[])),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        ):
+            result = await svc.verify_context_migration(db, plan)
+        _no_content_chunks["deleted"].assert_awaited_once_with(
+            [str(doc.id)], plan.target_collection
+        )
+        assert result.chunks_stale_removed == 1
 
     @pytest.mark.asyncio
     async def test_verify_with_the_flag_off_removes_every_chunk_of_the_context(
