@@ -627,10 +627,6 @@ class Memory(Base):
         return isinstance(self.details, dict) and self.details.get("tool_trigger") is not None
 
 
-def _in_list(values: tuple[str, ...]) -> str:
-    return ", ".join(repr(v) for v in values)
-
-
 class MemoryRevision(Base):
     """One write event on a memory: the revision log (#2043, shared with #2044).
 
@@ -679,8 +675,14 @@ class MemoryRevision(Base):
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
-        CheckConstraint(f"kind IN ({_in_list(REVISION_KINDS)})", name="valid_revision_kind"),
-        CheckConstraint(f"writer IN ({_in_list(REVISION_WRITERS)})", name="valid_revision_writer"),
+        # Derived like valid_delivery_mode: byte-identical to the f03 literal.
+        CheckConstraint(
+            f"kind IN ({', '.join(repr(k) for k in REVISION_KINDS)})", name="valid_revision_kind"
+        ),
+        CheckConstraint(
+            f"writer IN ({', '.join(repr(w) for w in REVISION_WRITERS)})",
+            name="valid_revision_writer",
+        ),
         Index("idx_memory_revisions_memory", "memory_id", "version", "id"),
         Index(
             "idx_memory_revisions_session",

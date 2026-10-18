@@ -6,7 +6,9 @@
    for the first and compare against its result.
 2. Two concurrent edits without ``expected_version`` both apply and the
    version moves twice (no lost increment), one ``updated`` row each.
-3. ``memory_revisions`` rows go with their memory on a hard delete (FK).
+3. ``memory_revisions`` rows go with their memory on a hard delete (FK); a
+   forget whose unlocked read is older than a concurrent edit logs the
+   committed version.
 4. The erasure scrub pseudonymizes the subject's events, NULLs their session
    and strips ``details`` from ``prior`` (#2043 §1e).
 5. ``f03_2043_memory_versions`` round trip: existing rows read ``version = 1``;
@@ -26,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from models.auth import Context, Workspace
@@ -218,6 +220,31 @@ async def test_revisions_go_with_a_hard_deleted_memory(
             text("SELECT count(*) FROM memory_revisions WHERE memory_id = :m"), {"m": memory_id}
         )
         assert left.scalar_one() == 0
+
+
+async def test_forget_logs_the_version_it_deleted(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """forget reads the memory without a lock; an edit that commits before
+    forget's UPDATE moves the version, and the forgotten event carries it."""
+    memory_id = seeded["memory_id"]
+    maker = _maker(async_engine)
+    async with maker() as forgetter, maker() as editor:
+        svc = MemoryService(forgetter)
+        memory = await svc.memory_repo.get(memory_id)
+        assert memory is not None and memory.version == 3
+        await editor.execute(update(Memory).where(Memory.id == memory_id).values(version=4))
+        await editor.commit()
+
+        svc._delete_memory_point = AsyncMock()  # type: ignore[method-assign]
+        await svc._soft_delete_memory(
+            "editor", memory, str(seeded["workspace_id"]), str(seeded["context_id"])
+        )
+        await forgetter.commit()
+
+    memory, revisions = await _state(async_engine, memory_id)
+    assert memory.deleted_at is not None and memory.version == 4
+    assert [(r.kind, r.version, r.at) for r in revisions] == [("forgotten", 4, memory.deleted_at)]
 
 
 async def test_erasure_scrubs_the_revision_log(

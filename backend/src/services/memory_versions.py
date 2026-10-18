@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,6 +99,37 @@ def check_expected_version(memory: Any, expected_version: int | None) -> None:
         )
 
 
+def revision_values(
+    *,
+    memory_id: UUID,
+    context_id: UUID,
+    version: int,
+    kind: str,
+    actor_user_id: str,
+    at: datetime | None = None,
+    prior: dict[str, Any] | None = None,
+    writer: str = REVISION_WRITER_API,
+) -> dict[str, Any]:
+    """The column values of one revision row — the single mapping both the
+    per-row writer (``record_revision``) and the bulk forget INSERT use, so a
+    column added here (#2044's provenance) reaches every write path.
+
+    ``at`` is left out when None, so the column default applies.
+    """
+    values: dict[str, Any] = {
+        "memory_id": memory_id,
+        "context_id": context_id,
+        "version": version,
+        "kind": kind,
+        "prior": prior or {},
+        "writer": writer,
+        "actor_user_id": actor_user_id,
+    }
+    if at is not None:
+        values["at"] = at
+    return values
+
+
 def record_revision(
     db: AsyncSession,
     memory: Any,
@@ -130,18 +162,20 @@ def record_revision(
     """
     if memory.context_id is None:
         return
-    row = MemoryRevision(
-        memory_id=memory.id,
-        context_id=memory.context_id,
-        version=memory.version,
-        kind=kind,
-        prior=prior or {},
-        writer=writer,
-        actor_user_id=actor_user_id,
+    db.add(
+        MemoryRevision(
+            **revision_values(
+                memory_id=memory.id,
+                context_id=memory.context_id,
+                version=memory.version,
+                kind=kind,
+                actor_user_id=actor_user_id,
+                at=at,
+                prior=prior,
+                writer=writer,
+            )
+        )
     )
-    if at is not None:
-        row.at = at
-    db.add(row)
 
 
 def record_edit(

@@ -5,11 +5,12 @@ Based on Issue #1 - API specifications.
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     ValidationError,
@@ -990,6 +991,11 @@ def _reject_bool_version(v: Any) -> Any:
     return v
 
 
+# #2043: a memory version argument (>= 1). Lax like every other integer
+# argument (an MCP client's "3" is 3), but a boolean is refused.
+VersionNumber = Annotated[int, Field(ge=1), BeforeValidator(_reject_bool_version)]
+
+
 class UpdateMemoryRequest(BaseModel):
     """Request schema for update_memory() API.
 
@@ -1050,19 +1056,13 @@ class UpdateMemoryRequest(BaseModel):
     # #2043: optimistic concurrency. The edit applies only while the memory is
     # still at this version; otherwise nothing is written and the caller gets
     # version_conflict with the current version. None = last writer wins.
-    expected_version: int | None = Field(
+    expected_version: VersionNumber | None = Field(
         None,
-        ge=1,
         description=(
             "Apply the edit only if the memory is still at this version "
             "(version_conflict otherwise, nothing written). In-place mode only."
         ),
     )
-
-    @field_validator("expected_version", mode="before")
-    @classmethod
-    def _expected_version_not_bool(cls, v: Any) -> Any:
-        return _reject_bool_version(v)
 
     @model_validator(mode="after")
     def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":
@@ -1163,12 +1163,7 @@ class PatchMemoryRequest(BaseModel):
     details: dict | None = None
     # #2043: apply the patch only while the memory is at this version (409
     # version_conflict otherwise, nothing written). Omitted = last writer wins.
-    expected_version: int | None = Field(None, ge=1)
-
-    @field_validator("expected_version", mode="before")
-    @classmethod
-    def _expected_version_not_bool(cls, v: Any) -> Any:
-        return _reject_bool_version(v)
+    expected_version: VersionNumber | None = None
 
     @field_validator("tags")
     @classmethod

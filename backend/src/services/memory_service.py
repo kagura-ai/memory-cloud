@@ -40,7 +40,6 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     REVISION_KIND_CREATED,
     REVISION_KIND_FORGOTTEN,
-    REVISION_WRITER_API,
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
     Memory,
@@ -89,6 +88,7 @@ from services.memory_versions import (
     check_expected_version,
     record_edit,
     record_revision,
+    revision_values,
     versioned_snapshot,
 )
 from services.persistence import persistence_info
@@ -5949,7 +5949,10 @@ class MemoryService:
         # after the "forgotten" one (#1924).
         await self.memory_repo.update(memory.id, memory, touch=False)
         # #2043: the forgotten event, at the version it was forgotten at (a
-        # forget is not an edit: no bump).
+        # forget is not an edit: no bump). ``update`` flushed the UPDATE — which
+        # waits for, then holds, the row lock — and refreshed the row, so
+        # ``memory.version`` is the committed one even if an edit landed after
+        # forget's unlocked read.
         record_revision(
             self.db,
             memory,
@@ -6021,20 +6024,19 @@ class MemoryService:
         ).all()
         deleted = [row.id for row in rows]
         if rows:
-            # #2043: the rows' forgotten events, from the ids the UPDATE returned.
+            # #2043: the rows' forgotten events, at the versions the UPDATE
+            # returned (it holds the row locks, so they are the committed ones).
             await self.db.execute(
                 insert(MemoryRevision).values(
                     [
-                        {
-                            "memory_id": row.id,
-                            "context_id": UUID(context_id),
-                            "version": row.version,
-                            "kind": REVISION_KIND_FORGOTTEN,
-                            "prior": {},
-                            "writer": REVISION_WRITER_API,
-                            "actor_user_id": user_id,
-                            "at": deleted_at,
-                        }
+                        revision_values(
+                            memory_id=row.id,
+                            context_id=UUID(context_id),
+                            version=row.version,
+                            kind=REVISION_KIND_FORGOTTEN,
+                            actor_user_id=user_id,
+                            at=deleted_at,
+                        )
                         for row in rows
                     ]
                 )
