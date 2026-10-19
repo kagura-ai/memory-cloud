@@ -1559,6 +1559,61 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
             ),
         )
     )
+    # Issue #2144: the recall LLM selector opt-in. llm_selector_enabled is the
+    # STORED value (a client echoing an effective false back would turn it
+    # off); the server-computed fields below say whether it is acted on.
+    llm_selector_enabled: bool = Field(
+        default=False,
+        description=(
+            "Recall LLM selector opt-in: an MCP recall may send this context's "
+            "summaries and attached content to the deployment's judge model, which "
+            "keeps the results that answer the query and cuts their content to "
+            "verbatim passages"
+        ),
+    )
+    llm_selector_effective: bool = Field(
+        default=False,
+        description=(
+            "Whether recall acts on llm_selector_enabled: on, and, where the "
+            "deployment gates it by plan (LLM_SELECTOR_REQUIRE_PLAN), a plan with the "
+            "llm_selector feature on which this context is among the earliest-enabled "
+            "max_llm_selector_contexts"
+        ),
+    )
+    llm_selector_limit: int | None = Field(
+        default=None,
+        description=(
+            "The workspace plan's max_llm_selector_contexts (0 without the "
+            "llm_selector feature); null when the deployment does not gate the "
+            "selector by plan"
+        ),
+    )
+    llm_selector_in_use: int = Field(
+        default=0,
+        description=(
+            "Live contexts of the workspace with llm_selector_enabled on, this one "
+            "included when it is on"
+        ),
+    )
+    llm_selector_disabled_reason: Literal["permission", "plan", "cap"] | None = Field(
+        default=None,
+        description=(
+            "Why the toggle cannot be turned on (flag off) or why the selector is "
+            "inactive (flag on): plan (the plan lacks llm_selector), cap "
+            "(max_llm_selector_contexts reached), or permission (nothing else "
+            "blocks, but only the context owner or a workspace owner/admin may "
+            "change it); null when nothing blocks"
+        ),
+    )
+    llm_selector_can_change: bool = Field(
+        default=False,
+        description=(
+            "Whether the caller may change llm_selector_enabled: the context owner "
+            "or a workspace owner/admin, and, to turn it on where gated by plan, the "
+            "plan's feature and a free slot under its cap. Turning it off is always "
+            "allowed"
+        ),
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1622,6 +1677,18 @@ class ContextSearchConfigUpdate(BaseModel):
         "workspace owner/admin (403 for an editor); sending the stored value is "
         "a no-op. Needs the Qdrant vector store: turning it on with LanceDB is "
         "refused (422)",
+    )
+    # Issue #2144: optional (default-preserving via exclude_unset in the repo).
+    llm_selector_enabled: bool = Field(
+        default=False,
+        description="Recall LLM selector opt-in: an MCP recall may send this "
+        "context's summaries and attached content to the deployment's judge model, "
+        "which keeps the results that answer the query and cuts their content to "
+        "verbatim passages. Changing it takes the context owner or a workspace "
+        "owner/admin (403 for an editor); sending the stored value is a no-op. "
+        "Where the deployment gates it by plan (LLM_SELECTOR_REQUIRE_PLAN), turning "
+        "it on needs the llm_selector feature (403 FEAT-001) and a free slot under "
+        "max_llm_selector_contexts (429 QUOTA-001)",
     )
 
     @model_validator(mode="after")

@@ -203,3 +203,10 @@ def test_list_plan_tiers_exposes_the_content_chunk_cap(client: TestClient) -> No
     tiers = client.get("/api/v1/admin/plans/tiers").json()
     assert [t["max_content_chunk_contexts"] for t in tiers] == [0, 1, 5, 20]
     assert ["content_chunks" in t["features"] for t in tiers] == [False, True, True, True]
+
+
+def test_list_plan_tiers_exposes_the_llm_selector_cap(client: TestClient) -> None:
+    """#2144: the admin table shows the per-tier selector context cap and the feature."""
+    tiers = client.get("/api/v1/admin/plans/tiers").json()
+    assert [t["max_llm_selector_contexts"] for t in tiers] == [0, 1, 5, 20]
+    assert ["llm_selector" in t["features"] for t in tiers] == [False, True, True, True]

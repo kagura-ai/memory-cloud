@@ -167,6 +167,21 @@ class ContextSearchConfig(Base):
         TIMESTAMP(timezone=True), nullable=True
     )
 
+    # Issue #2144: the recall LLM selector opt-in. When true (and allowed by
+    # the plan where the deployment gates it, services.llm_selector_policy),
+    # an MCP recall may send the page's summaries and attached content to the
+    # deployment's judge model, which keeps the rows that answer the query and
+    # cuts their content to verbatim passages. Off by default; turning it on
+    # takes the context owner.
+    llm_selector_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    # Issue #2144: when llm_selector_enabled was last turned on (NULL while it
+    # is off) — the earliest-enabled rank under the plan's cap, as #2103.
+    llm_selector_enabled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

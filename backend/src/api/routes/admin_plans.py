@@ -37,6 +37,7 @@ from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 from services.content_chunk_policy import content_chunk_context_limit
 from services.effective_quota_service import EffectiveQuotaService
+from services.llm_selector_policy import llm_selector_context_limit
 from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
@@ -114,6 +115,8 @@ class QuotaBreakdown(BaseModel):
     memories_per_day: int = 0  # #1975: tier base for the extra_memories_per_day addon
     # #2103: tier-fixed (no addon); read only where CONTENT_CHUNKS_REQUIRE_PLAN is on.
     max_content_chunk_contexts: int = 0
+    # #2144: tier-fixed (no addon); read only where LLM_SELECTOR_REQUIRE_PLAN is on.
+    max_llm_selector_contexts: int = 0
 
 
 class AddonValues(BaseModel):
@@ -289,6 +292,8 @@ class PlanTierInfo(BaseModel):
     max_connectors: int  # Issue #1551: serve-only cap on M/L, creation cap on XL
     # Issue #2103: contexts with active content chunks (CONTENT_CHUNKS_REQUIRE_PLAN).
     max_content_chunk_contexts: int
+    # Issue #2144: contexts with the recall LLM selector (LLM_SELECTOR_REQUIRE_PLAN).
+    max_llm_selector_contexts: int
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
@@ -452,7 +457,10 @@ async def update_workspace_plan(
         ``message``, and ``content_chunks_deactivated``: the ids of the
         contexts whose content chunk vectors go inactive under the new plan
         (#2103; their flag and chunk points are kept; empty where
-        CONTENT_CHUNKS_REQUIRE_PLAN is off)
+        CONTENT_CHUNKS_REQUIRE_PLAN is off), and ``llm_selector_deactivated``:
+        the ids of the contexts whose recall LLM selector goes inactive
+        (#2144; their flag is kept; empty where LLM_SELECTOR_REQUIRE_PLAN is
+        off)
 
     Raises:
         404: Workspace not found
@@ -571,6 +579,23 @@ async def update_workspace_plan(
                 context_ids=[str(context_id) for context_id in chunks_deactivated],
             )
 
+        # Issue #2144: the same report for the recall LLM selector. The stored
+        # flag is kept; empty where LLM_SELECTOR_REQUIRE_PLAN is off.
+        from services.llm_selector_policy import contexts_losing_llm_selector
+
+        selector_deactivated = await contexts_losing_llm_selector(
+            db, workspace.id, old_plan, request.plan_name
+        )
+        if selector_deactivated:
+            logger.info(
+                "llm_selector_deactivated_by_plan",
+                workspace_id=workspace_id,
+                old_plan=old_plan,
+                new_plan=request.plan_name,
+                count=len(selector_deactivated),
+                context_ids=[str(context_id) for context_id in selector_deactivated],
+            )
+
         await db.commit()
 
         logger.info(
@@ -585,6 +610,7 @@ async def update_workspace_plan(
         return {
             "message": f"Plan changed from {old_plan} to {request.plan_name}",
             "content_chunks_deactivated": [str(context_id) for context_id in chunks_deactivated],
+            "llm_selector_deactivated": [str(context_id) for context_id in selector_deactivated],
         }
 
 
@@ -838,6 +864,7 @@ async def get_workspace_quotas(
                 max_connectors=plan_tier.max_connectors,
                 memories_per_day=plan_tier.memories_per_day,
                 max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
+                max_llm_selector_contexts=plan_tier.max_llm_selector_contexts,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -867,6 +894,8 @@ async def get_workspace_quotas(
                 memories_per_day=effective["memories_per_day"],
                 # #2103: no addon column; 0 when the tier lacks content_chunks.
                 max_content_chunk_contexts=content_chunk_context_limit(workspace.plan_name),
+                # #2144: likewise; 0 when the tier lacks llm_selector.
+                max_llm_selector_contexts=llm_selector_context_limit(workspace.plan_name),
             ),
             usage=UsageValues(
                 memories=memory_count,

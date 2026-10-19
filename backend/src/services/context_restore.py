@@ -400,6 +400,16 @@ async def restore_deleted_context(
         .values(content_chunks_enabled_at=func.clock_timestamp())
         .execution_options(synchronize_session=False)
     )
+    # #2144: the same for the recall LLM selector's rank under its cap.
+    await db.execute(
+        update(ContextSearchConfig)
+        .where(
+            ContextSearchConfig.context_id == context.id,
+            ContextSearchConfig.llm_selector_enabled.is_(True),
+        )
+        .values(llm_selector_enabled_at=func.clock_timestamp())
+        .execution_options(synchronize_session=False)
+    )
     db.add(
         AuditLog(
             user_email=actor_email or actor_id,

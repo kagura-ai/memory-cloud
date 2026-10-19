@@ -226,7 +226,16 @@ class ContextSearchConfigRepository:
                 ["content_chunks_enabled", "content_chunks_enabled_at"],
                 with_for_update=True,
             )
+        if "llm_selector_enabled" in update_dict:
+            # #2144: the same re-read for the selector flag, so a repeated
+            # enable keeps the first enable's rank under the plan's cap.
+            await self.db.refresh(
+                config,
+                ["llm_selector_enabled", "llm_selector_enabled_at"],
+                with_for_update=True,
+            )
         chunks_were_on = getattr(config, "content_chunks_enabled", False) is True
+        selector_was_on = getattr(config, "llm_selector_enabled", False) is True
         for key, value in update_dict.items():
             setattr(config, key, value)
 
@@ -242,6 +251,12 @@ class ContextSearchConfigRepository:
         # transaction as the flag.
         chunks_now_on = getattr(config, "content_chunks_enabled", False) is True
         flag_changed = chunks_were_on != chunks_now_on
+        # #2144: the selector's rank under the plan's cap, as #2103 does for
+        # chunks (clock_timestamp() for the same reason). No purge and no
+        # backfill: the flag only decides whether recall calls the selector.
+        selector_now_on = getattr(config, "llm_selector_enabled", False) is True
+        if selector_was_on != selector_now_on:
+            config.llm_selector_enabled_at = func.clock_timestamp() if selector_now_on else None
         if flag_changed:
             # #2103: the enable's rank under the plan's cap, committed with the
             # flag and its backfill (a failed enable rolls all three back).
@@ -376,7 +391,11 @@ class ContextSearchConfigRepository:
         logger.info("content_chunks_purged", context_id=str(context_id), failed=len(failed))
 
     async def reset_to_default(
-        self, context_id: UUID, *, reset_content_chunks: bool = True
+        self,
+        context_id: UUID,
+        *,
+        reset_content_chunks: bool = True,
+        reset_llm_selector: bool = True,
     ) -> ContextSearchConfig:
         """Reset configuration to default values.
 
@@ -386,6 +405,9 @@ class ContextSearchConfigRepository:
                 (#2015). The REST route passes ``False`` when the flag is
                 already off, so a reset by an editor never writes the flag —
                 changing it takes the context owner.
+            reset_llm_selector: Also turn ``llm_selector_enabled`` off
+                (#2144), on the same rule: the REST route passes ``False``
+                when it is already off.
 
         Returns:
             Reset ContextSearchConfig
@@ -399,6 +421,10 @@ class ContextSearchConfigRepository:
         # when asked, so the flag is otherwise left out of the update.
         chunk_reset: dict[str, bool] = (
             {"content_chunks_enabled": False} if reset_content_chunks else {}
+        )
+        # #2144: the selector off on the same rule.
+        selector_reset: dict[str, bool] = (
+            {"llm_selector_enabled": False} if reset_llm_selector else {}
         )
         defaults = ContextSearchConfigUpdate(
             semantic_weight=0.6,
@@ -415,6 +441,7 @@ class ContextSearchConfigRepository:
             reinforce_max_boost=0.15,
             reinforce_require_host_arbitration=False,
             **chunk_reset,
+            **selector_reset,
         )
 
         config = await self.update(context_id, defaults)

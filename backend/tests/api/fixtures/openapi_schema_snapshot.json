@@ -2533,6 +2533,12 @@
           "embedding_model": {},
           "embedding_provider": {},
           "fetch_factor": {},
+          "llm_selector_can_change": {},
+          "llm_selector_disabled_reason": {},
+          "llm_selector_effective": {},
+          "llm_selector_enabled": {},
+          "llm_selector_in_use": {},
+          "llm_selector_limit": {},
           "reinforce_enabled": {},
           "reinforce_max_boost": {},
           "reinforce_require_host_arbitration": {},
@@ -2573,6 +2579,10 @@
             "maximum": 10.0,
             "minimum": 1.0,
             "type": "integer"
+          },
+          "llm_selector_enabled": {
+            "default": false,
+            "type": "boolean"
           },
           "reinforce_enabled": {
             "default": true,
@@ -6959,6 +6969,9 @@
             },
             "type": "object"
           },
+          "llm_selector": {
+            "type": "boolean"
+          },
           "managed_embeddings": {
             "type": "boolean"
           },
@@ -6972,6 +6985,9 @@
             "type": "integer"
           },
           "max_contexts": {
+            "type": "integer"
+          },
+          "max_llm_selector_contexts": {
             "type": "integer"
           },
           "max_members": {
@@ -7032,11 +7048,13 @@
           "content_chunks",
           "display_name",
           "feature_enforcement",
+          "llm_selector",
           "managed_embeddings",
           "managed_llm",
           "max_connectors",
           "max_content_chunk_contexts",
           "max_contexts",
+          "max_llm_selector_contexts",
           "max_members",
           "max_resource_tokens",
           "mcp_calls_per_day",
@@ -7109,6 +7127,9 @@
           "max_contexts_per_workspace": {
             "type": "integer"
           },
+          "max_llm_selector_contexts": {
+            "type": "integer"
+          },
           "max_members_per_workspace": {
             "type": "integer"
           },
@@ -7171,6 +7192,7 @@
           "max_connectors",
           "max_content_chunk_contexts",
           "max_contexts_per_workspace",
+          "max_llm_selector_contexts",
           "max_members_per_workspace",
           "max_resource_tokens",
           "mcp_calls_per_day",
@@ -7554,6 +7576,10 @@
             "type": "integer"
           },
           "max_contexts": {
+            "type": "integer"
+          },
+          "max_llm_selector_contexts": {
+            "default": 0,
             "type": "integer"
           },
           "max_members": {

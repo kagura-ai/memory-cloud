@@ -881,3 +881,42 @@ async def test_a_restored_context_with_content_chunks_on_ranks_as_enabled_now(db
     )
     assert stamps[on_id] > old
     assert stamps[off_id] is None
+
+
+@pytest.mark.asyncio
+async def test_a_restored_context_with_the_llm_selector_on_ranks_as_enabled_now(db_session, seed):
+    """#2144: the #2103 re-stamp for the recall LLM selector's cap."""
+    from datetime import UTC, datetime
+
+    from models.config import ContextSearchConfig
+
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    on, off = seed.context(), seed.context()
+    db_session.add_all([on, off])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ContextSearchConfig(
+                context_id=on.id, llm_selector_enabled=True, llm_selector_enabled_at=old
+            ),
+            ContextSearchConfig(context_id=off.id, llm_selector_enabled=False),
+        ]
+    )
+    await db_session.commit()
+    on_id, off_id = on.id, off.id
+
+    for context_id in (on_id, off_id):
+        await _delete(db_session, context_id)
+        await restore_deleted_context(db_session, context_id, dry_run=False)
+
+    stamps = dict(
+        (
+            await db_session.execute(
+                select(ContextSearchConfig.context_id, ContextSearchConfig.llm_selector_enabled_at)
+                .where(ContextSearchConfig.context_id.in_([on_id, off_id]))
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    assert stamps[on_id] > old
+    assert stamps[off_id] is None
