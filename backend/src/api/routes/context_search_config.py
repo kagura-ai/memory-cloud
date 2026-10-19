@@ -86,7 +86,7 @@ async def build_search_config_response(
         )
     can_change = owner and (stored or chunks.can_enable)
     reason = chunks.reason or (None if owner else "permission")
-    selector = await _llm_selector_fields(repo, context_id, config, owner=owner)
+    selector = await _llm_selector_fields(repo, perm_service, user_id, context_id, config)
     model = config.embedding_model
     provider = (
         EMBEDDING_MODEL_REGISTRY[model][1]
@@ -115,19 +115,24 @@ async def build_search_config_response(
 
 async def _llm_selector_fields(
     repo: ContextSearchConfigRepository,
+    perm_service: PermissionService,
+    user_id: str,
     context_id: UUID,
     config: ContextSearchConfig,
-    *,
-    owner: bool,
 ) -> dict[str, object]:
     """The server-computed ``llm_selector_*`` response fields (#2144).
 
-    Read in a savepoint like the chunk fields: a failed count degrades to the
-    stored flag without counts (inactive / not enable-able where gated)
-    instead of turning a committed PUT into a 500. The selector's owner rule
-    is the chunk one (``check_llm_selector_change`` = ``check_context_owner``),
-    so the caller's answer to it is reused.
+    ``llm_selector_can_change`` asks the caller the PUT's own rule
+    (``check_llm_selector_change``). Read in a savepoint like the chunk
+    fields: a failed count degrades to the stored flag without counts
+    (inactive / not enable-able where gated) instead of turning a committed
+    PUT into a 500.
     """
+    try:
+        await check_llm_selector_change(perm_service, user_id, context_id)
+        owner = True
+    except AuthorizationError:
+        owner = False
     stored = config.llm_selector_enabled is True
     try:
         async with repo.db.begin_nested():

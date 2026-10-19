@@ -880,6 +880,8 @@ class ExportedSearchConfig(BaseModel):
     routing_mode: str = "off"
     # #2015: default keeps older exports parseable.
     content_chunks_enabled: bool = False
+    # #2144: the recall LLM selector opt-in, like the chunk one.
+    llm_selector_enabled: bool = False
 
 
 class ExportedMemory(TZAwareBaseModel):

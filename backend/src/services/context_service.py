@@ -546,6 +546,7 @@ class ContextService:
                 reinforce_require_host_arbitration=cfg.reinforce_require_host_arbitration,
                 routing_mode=cfg.routing_mode,
                 content_chunks_enabled=cfg.content_chunks_enabled,
+                llm_selector_enabled=cfg.llm_selector_enabled,
             )
             if cfg is not None
             else None

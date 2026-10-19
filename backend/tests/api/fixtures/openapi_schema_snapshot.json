@@ -3870,6 +3870,10 @@
           "fetch_factor": {
             "type": "integer"
           },
+          "llm_selector_enabled": {
+            "default": false,
+            "type": "boolean"
+          },
           "reinforce_enabled": {
             "default": true,
             "type": "boolean"

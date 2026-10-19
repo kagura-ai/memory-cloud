@@ -430,3 +430,40 @@ async def test_a_repeated_enable_at_the_cap_passes_when_the_flag_is_already_on(g
     db = _db(workspace, MagicMock(), _scalar(1), _scalar(False))
     with pytest.raises(QuotaExceededError):
         await policy.ensure_llm_selector_capacity(db, uuid4())
+
+
+async def test_an_update_of_both_flags_takes_one_locking_read(monkeypatch):
+    """A reset (or PUT) carrying both flags re-reads them in one FOR UPDATE."""
+    from models.schemas import ContextSearchConfigUpdate
+    from repositories.config_repository import ContextSearchConfigRepository
+
+    row = SimpleNamespace(
+        content_chunks_enabled=False,
+        content_chunks_enabled_at=None,
+        llm_selector_enabled=False,
+        llm_selector_enabled_at=None,
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    repo = ContextSearchConfigRepository(db)
+    monkeypatch.setattr(repo, "get_by_context", AsyncMock(return_value=row))
+    monkeypatch.setattr(repo, "_purge_chunk_points", AsyncMock())
+    both = ContextSearchConfigUpdate.model_construct(
+        _fields_set={"content_chunks_enabled", "llm_selector_enabled"},
+        content_chunks_enabled=False,
+        llm_selector_enabled=False,
+    )
+    await repo.update(uuid4(), both)
+    locking = [c for c in db.refresh.await_args_list if c.kwargs.get("with_for_update")]
+    assert len(locking) == 1
+    assert locking[0].args[1] == [
+        "content_chunks_enabled",
+        "content_chunks_enabled_at",
+        "llm_selector_enabled",
+        "llm_selector_enabled_at",
+    ]

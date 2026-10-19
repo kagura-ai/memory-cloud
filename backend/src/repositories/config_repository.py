@@ -214,26 +214,21 @@ class ContextSearchConfigRepository:
         # Update fields
         backfill_queued: int | None = None
         update_dict = update_data.model_dump(exclude_unset=True)
-        if "content_chunks_enabled" in update_dict:
-            # The flag as committed, under the row lock: the caller loaded this
-            # row before it took the cap's lock, and the identity map would
-            # keep that stale value. A second enable of the same context
-            # (a double click, a retry) then sees "already on" and keeps the
-            # first enable's stamp, purge and backfill instead of re-ranking
-            # the context and doing them again (v0.113.0 review chunks F2).
-            await self.db.refresh(
-                config,
-                ["content_chunks_enabled", "content_chunks_enabled_at"],
-                with_for_update=True,
-            )
-        if "llm_selector_enabled" in update_dict:
-            # #2144: the same re-read for the selector flag, so a repeated
-            # enable keeps the first enable's rank under the plan's cap.
-            await self.db.refresh(
-                config,
-                ["llm_selector_enabled", "llm_selector_enabled_at"],
-                with_for_update=True,
-            )
+        # The flags as committed, under the row lock: the caller loaded this
+        # row before it took the cap's lock, and the identity map would keep
+        # that stale value. A second enable of the same context (a double
+        # click, a retry) then sees "already on" and keeps the first enable's
+        # stamp, purge and backfill instead of re-ranking the context and
+        # doing them again (v0.113.0 review chunks F2; #2144 the same for the
+        # selector's rank). One locking read for whichever flags change.
+        flag_columns = [
+            column
+            for flag in ("content_chunks_enabled", "llm_selector_enabled")
+            if flag in update_dict
+            for column in (flag, f"{flag}_at")
+        ]
+        if flag_columns:
+            await self.db.refresh(config, flag_columns, with_for_update=True)
         chunks_were_on = getattr(config, "content_chunks_enabled", False) is True
         selector_was_on = getattr(config, "llm_selector_enabled", False) is True
         for key, value in update_dict.items():

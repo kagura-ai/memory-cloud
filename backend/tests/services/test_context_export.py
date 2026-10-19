@@ -78,6 +78,8 @@ def _cfg():
     # #1212: pin so the MagicMock attribute doesn't fail Pydantic validation.
     c.routing_mode = "off"
     c.content_chunks_enabled = False
+    # #2144: True so the assertion below proves the value is carried.
+    c.llm_selector_enabled = True
     return c
 
 
@@ -127,6 +129,7 @@ async def test_export_private_context_is_creator_scoped_and_serializes():
     assert out.search_config.reinforce_enabled is False
     assert out.search_config.reinforce_max_boost == 0.15
     assert out.search_config.reinforce_require_host_arbitration is False
+    assert out.search_config.llm_selector_enabled is True
 
     # Private context => the memory query MUST carry a user_id (creator) filter
     # alongside context_id + the soft-delete guard.

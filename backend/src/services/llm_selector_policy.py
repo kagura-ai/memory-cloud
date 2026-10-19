@@ -51,8 +51,6 @@ logger = get_logger(__name__)
 
 #: The plan feature (``config.plan_tiers``).
 LLM_SELECTOR_FEATURE = "llm_selector"
-#: ``details.quota_type`` of the cap refusal (``config.constants.QUOTA_TYPES``).
-LLM_SELECTOR_CONTEXTS_QUOTA = "llm_selector_contexts"
 
 #: Why a context's selector is inactive, or why the flag cannot be turned on.
 LLMSelectorReason = Literal["plan", "cap"]

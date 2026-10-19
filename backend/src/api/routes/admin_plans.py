@@ -37,7 +37,10 @@ from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 from services.content_chunk_policy import content_chunk_context_limit
 from services.effective_quota_service import EffectiveQuotaService
-from services.llm_selector_policy import llm_selector_context_limit
+from services.llm_selector_policy import (
+    contexts_losing_llm_selector,
+    llm_selector_context_limit,
+)
 from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
@@ -581,8 +584,6 @@ async def update_workspace_plan(
 
         # Issue #2144: the same report for the recall LLM selector. The stored
         # flag is kept; empty where LLM_SELECTOR_REQUIRE_PLAN is off.
-        from services.llm_selector_policy import contexts_losing_llm_selector
-
         selector_deactivated = await contexts_losing_llm_selector(
             db, workspace.id, old_plan, request.plan_name
         )
