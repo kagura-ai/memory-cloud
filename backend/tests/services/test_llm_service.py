@@ -751,3 +751,53 @@ class TestFailedCallUsage:
             with pytest.raises(LLMServiceError) as excinfo:
                 await llm_service.complete_json("u1", "p")
         assert excinfo.value.usage is None
+
+
+class TestMaxAttempts:
+    """#2144: ``max_attempts=1`` makes one provider call; the default keeps two."""
+
+    @pytest.mark.asyncio
+    async def test_single_attempt_raises_on_parse_failure_with_its_usage(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.side_effect = [
+            _make_provider_response("not json", total=30, input_tokens=20, output_tokens=10),
+            _make_provider_response('{"never": "asked"}'),
+        ]
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            with pytest.raises(LLMServiceError, match="JSON parse failed") as excinfo:
+                await llm_service.complete_json(
+                    "u1", "p", provider="openai", model="m", max_attempts=1
+                )
+        assert provider.complete_json.await_count == 1
+        usage = excinfo.value.usage
+        assert usage is not None
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (20, 10, 30)
+
+    @pytest.mark.asyncio
+    async def test_single_attempt_success_is_one_call(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.return_value = _make_provider_response('{"ok": 1}')
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            resp = await llm_service.complete_json("u1", "p", max_attempts=1)
+        assert resp.parsed == {"ok": 1}
+        assert provider.complete_json.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_default_still_retries_once(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.side_effect = [
+            _make_provider_response("not json"),
+            _make_provider_response('{"ok": 2}'),
+        ]
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            resp = await llm_service.complete_json("u1", "p")
+        assert resp.parsed == {"ok": 2}
+        assert provider.complete_json.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [0, 3, -1])
+    async def test_out_of_range_is_refused_before_any_call(self, llm_service, bad):
+        with patch.object(llm_service, "_get_provider", new=AsyncMock()) as get_provider:
+            with pytest.raises(ValueError, match="max_attempts"):
+                await llm_service.complete_json("u1", "p", max_attempts=bad)
+        get_provider.assert_not_called()

@@ -186,6 +186,7 @@ class LLMService:
         disallow_env_fallback: bool = False,
         platform_only: bool = False,
         release_db_before_call: bool = False,
+        max_attempts: int = 2,
     ) -> LLMResponse:
         """Call LLM with JSON mode and return cost-grade response.
 
@@ -221,6 +222,12 @@ class LLMService:
                 session (the commit would make it durable) and whose loaded
                 objects must survive: a commit keeps them under
                 ``expire_on_commit=False``, where a rollback would expire them.
+            max_attempts: Provider calls at most (1 or 2). The default 2 retries
+                once at a higher temperature when the answer does not parse
+                (Sleep, the supersede judge). 1 makes an unparseable answer
+                raise at once with its usage on the error — for a fail-open
+                caller under its own timeout, where a retry would only bill a
+                second call for the same fallback (#2144 recall selector).
 
         Returns:
             LLMResponse — parsed JSON + per-class token counts +
@@ -229,8 +236,11 @@ class LLMService:
         Raises:
             LLMServiceError: On API error or JSON parse failure after retry
             ConfigurationError: No resolvable API key for the provider.
-            ValueError: ``platform_only`` and ``disallow_env_fallback`` both set.
+            ValueError: ``platform_only`` and ``disallow_env_fallback`` both set,
+                or ``max_attempts`` is not 1 or 2.
         """
+        if max_attempts not in (1, 2):
+            raise ValueError("max_attempts must be 1 or 2")
         resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano")
         resolved_provider = provider or os.getenv("SLEEP_LLM_PROVIDER", "openai")
 
@@ -276,7 +286,20 @@ class LLMService:
                 model=resolved_model,
             )
 
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            if max_attempts == 1:
+                # The one attempt answered and was billed; its usage rides on
+                # the error so a ledger still records the spend.
+                raise LLMServiceError(
+                    f"LLM JSON parse failed ({resolved_provider}/{resolved_model}): {e}",
+                    usage=self._build_response(
+                        parsed={},
+                        first=first_usage,
+                        retry=None,
+                        provider=resolved_provider,
+                        model=resolved_model,
+                    ),
+                ) from e
             logger.warning(
                 "llm_json_parse_failed_retrying",
                 provider=resolved_provider,

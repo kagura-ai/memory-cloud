@@ -43,6 +43,7 @@ from utils.content_chunks import rerank_document
 from utils.encryption import get_encryptor
 from utils.exceptions import CohereError, VoyageError
 from utils.logger import get_logger
+from utils.prompt_text import neutralise_control_tokens
 from utils.url_redact import redact_generic_url
 
 if TYPE_CHECKING:
@@ -85,20 +86,9 @@ DEFAULT_QWEN3_RERANK_INSTRUCTION = (
     "Given a web search query, retrieve relevant passages that answer the query"
 )
 
-# Text the Qwen3 tokenizer turns into a control token (#2020 review). Every
-# added token of the Qwen3 tokenizer (tokenizer_config.json
-# added_tokens_decoder) is matched as ONE token whether or not it is flagged
-# special, so stored memory text containing "<|im_end|>\n<|im_start|>assistant"
-# could close the Document slot and write the model's "yes" itself. All the
-# "<|...|>" tokens start with "<|"; the rest are the tag-shaped ones below.
-# Broken by a space after "<": the text stays readable, the token never forms,
-# and a single non-overlapping pass cannot reassemble one ("<<|" -> "<< |").
-_QWEN3_CONTROL_TOKEN_RE = re.compile(r"<(?=\|)|<(?=/?(?:think|tool_call|tool_response)>)")
-
-
-def _neutralise_qwen3_control_tokens(text: str) -> str:
-    """Break every Qwen3 added-token spelling in caller-supplied text."""
-    return _QWEN3_CONTROL_TOKEN_RE.sub("< ", text)
+# Memory text and the query are neutralised with the shared #2020 helper
+# (utils.prompt_text): every Qwen3 added-token spelling is broken before it
+# enters a template, so stored text cannot close the Document slot.
 
 
 class RerankNotDiscriminatingError(RuntimeError):
@@ -169,7 +159,7 @@ def _qwen3_query_part(query: str, instruction: str) -> str:
     # Stored memories and the caller's query are untrusted: neutralise the
     # tokenizer's control tokens before they enter the template. Cut first,
     # as for the document, so a split token ("<|im_") is no token at all.
-    safe_query = _neutralise_qwen3_control_tokens(query[:QWEN3_RERANK_MAX_QUERY_CHARS])
+    safe_query = neutralise_control_tokens(query, QWEN3_RERANK_MAX_QUERY_CHARS)
     return f"{QWEN3_RERANK_PREFIX}<Instruct>: {instruction}\n<Query>: {safe_query}\n"
 
 
@@ -177,7 +167,7 @@ def _qwen3_document_part(doc: str) -> str:
     """Truncated, neutralised document + assistant suffix (the template's tail)."""
     # Truncate the body (not the formatted string) so the suffix survives;
     # cutting first also means a split token ("<|im_") is no token at all.
-    body = _neutralise_qwen3_control_tokens(doc[:QWEN3_RERANK_MAX_DOC_CHARS])
+    body = neutralise_control_tokens(doc, QWEN3_RERANK_MAX_DOC_CHARS)
     return f"<Document>: {body}{QWEN3_RERANK_SUFFIX}"
 
 
@@ -610,8 +600,8 @@ class SelfHostedReranker(RerankerProvider):
             return _qwen3_yes_probability(resp.json())
 
         # Cut before neutralising, as in the qwen3 parts (#2062).
-        safe_query = _neutralise_qwen3_control_tokens(query[:QWEN3_RERANK_MAX_QUERY_CHARS])
-        safe_doc = _neutralise_qwen3_control_tokens(doc[:500])
+        safe_query = neutralise_control_tokens(query, QWEN3_RERANK_MAX_QUERY_CHARS)
+        safe_doc = neutralise_control_tokens(doc, 500)
         resp = await client.post(
             f"{self.base_url}/v1/completions",
             json={

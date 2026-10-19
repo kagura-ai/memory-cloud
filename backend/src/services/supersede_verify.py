@@ -64,6 +64,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from db.base import isolated_session
+from services.llm_ledger import record_completion_call
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import INJECTION_RESISTANCE_DIRECTIVE, wrap_untrusted_content
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
@@ -410,34 +411,22 @@ async def _record_judge_call(
     task's own session gave its connection back before the judge call
     (#2070), so this short write is the only connection the task holds.
     """
-    from services.llm_call_log_writer import LLMCallLogWriter
-
-    try:
-        async with isolated_session(db) as session:
-            row = await LLMCallLogWriter(session).record(
-                caller=LEDGER_CALLER,
-                call_type="completion",
-                provider=response.provider,
-                model=response.model,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                context_id=context_id,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                cached_input_tokens=response.cached_input_tokens,
-                cache_write_tokens=response.cache_write_tokens,
-                paid_by=paid_by,
-                call_metadata=call_metadata,
-                fail_on_error=False,
-            )
-            if row is not None:
-                await session.commit()
-    except Exception as exc:  # noqa: BLE001 — never raises into the embedding task
-        logger.warning(
-            "supersede_verify_ledger_failed",
-            workspace_id=workspace_id,
-            error_type=type(exc).__name__,
-        )
+    # The shared #2144 helper; this module's ``isolated_session`` and
+    # ``logger`` bindings are passed so the judge's row and its failure event
+    # stay exactly as they were.
+    await record_completion_call(
+        db,
+        response,
+        caller=LEDGER_CALLER,
+        call_metadata=call_metadata,
+        paid_by=paid_by,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        context_id=context_id,
+        failure_event="supersede_verify_ledger_failed",
+        session_factory=isolated_session,
+        log=logger,
+    )
 
 
 # Workspaces whose cap was already reported today (reset when the UTC day
