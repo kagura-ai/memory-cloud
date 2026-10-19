@@ -1,19 +1,20 @@
-"""#2123: judge-verified older versions of a fact fold under the newest one.
+"""#2123: judge-verified older versions of a fact fold under the newer one.
 
 Pins the read-path half of the fix:
 
 1. A verified chain (v3→v2→v1) collapses to one row whatever the pool order
    (the cross-encoder may rank v1 first, the hybrid order v3 first): the head
-   is the newest version, at the group's best position, with the group's best
+   is the newest version, at the group's best position, with that row's
    scores; the others are listed newest first in the fold map.
-2. Joins are transitive (a skipped link still forms one group) and an
-   unverified link breaks the chain there.
-3. A cosine-only (unverified) candidate never folds.
+2. Links are followed transitively but only in the direction a verdict gave:
+   two newer memories that each supersede the same older one both stay.
+3. An unverified link breaks the chain; a cosine-only candidate never folds.
 4. ``include_superseded=true`` folds nothing.
 5. A candidate whose target is not in the pool folds nothing.
-6. Fail-open: a resolver error leaves the pool untouched.
-7. recall() folds before the re-rank, the selection plan and the page builder,
-   and hands the page builder the candidates it resolved.
+6. A version shadowing removed still links its chain, over several edges.
+7. Only memories with a ``supersedes`` verdict are resolved; none → no query.
+8. Fail-open: a resolver error leaves the pool untouched.
+9. recall() folds before the re-rank, the selection plan and the page builder.
 """
 
 from __future__ import annotations
@@ -55,6 +56,15 @@ def _mem(age_days: int, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def _judged(newer, older) -> None:
+    """Store a candidate with a ``supersedes`` verdict on ``newer``."""
+    newer.supersede_candidate = {
+        "memory_id": str(older.id),
+        "similarity": 0.8,
+        "verification": {"verdict": "supersedes", "confidence": 0.9},
+    }
+
+
 def _cand(target, *, verified: bool | None = True) -> SupersedeCandidate:
     return SupersedeCandidate(
         memory_id=target.id, summary="older", similarity=0.8, verified=verified
@@ -74,18 +84,21 @@ def _pool(*rows):
     return search_results, memories
 
 
-async def _fold(svc, search_results, memories, *, include_superseded=False):
+async def _fold(svc, search_results, memories, *, include_superseded=False, shadow_map=None):
     return await svc._apply_supersede_fold(
         search_results,
         memories,
         include_superseded=include_superseded,
         user_id="u",
         trusted_only=False,
+        shadow_map=shadow_map,
     )
 
 
 def _chain():
     v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+    _judged(v3, v2)
+    _judged(v2, v1)
     candidates = {v3.id: _cand(v2), v2.id: _cand(v1)}
     return v1, v2, v3, candidates
 
@@ -99,16 +112,15 @@ class TestFold:
         search_results, memories = _pool((v1, 0.9), (other, 0.85), (v2, 0.8), (v3, 0.7))
         svc = _service(candidates)
 
-        fold_map, resolved = await _fold(svc, search_results, memories)
+        fold_map = await _fold(svc, search_results, memories)
 
         assert [r["id"] for r in search_results] == [str(v3.id), str(other.id)]
         head = search_results[0]
         assert head["score"] == 0.9 and head["hybrid_score"] == 0.9
         assert fold_map == {v3.id: [v2.id, v1.id]}
-        assert resolved is candidates
-        # Resolved once, over the whole pool (each memory once).
-        pool_arg = svc._resolve_supersede_candidates.await_args.args[0]
-        assert set(pool_arg) == {v1.id, v2.id, v3.id, other.id}
+        # Only the memories with a supersedes verdict are resolved.
+        resolved_over = svc._resolve_supersede_candidates.await_args.args[0]
+        assert set(resolved_over) == {v2.id, v3.id}
 
     async def test_chain_ranked_newest_first_gives_the_same_page(self):
         """The reranker-off shape: the hybrid order already has v3 first."""
@@ -116,7 +128,7 @@ class TestFold:
         other = _mem(5)
         search_results, memories = _pool((v3, 0.9), (other, 0.85), (v1, 0.8), (v2, 0.7))
 
-        fold_map, _ = await _fold(_service(candidates), search_results, memories)
+        fold_map = await _fold(_service(candidates), search_results, memories)
 
         assert [r["id"] for r in search_results] == [str(v3.id), str(other.id)]
         assert search_results[0]["score"] == 0.9
@@ -153,60 +165,126 @@ class TestFold:
             }
         ]
 
-    async def test_a_skipped_link_still_forms_one_group(self):
-        """v3→v1 and v2→v1 (v2 was not v3's top-1 neighbour): one group."""
+    async def test_two_newer_memories_of_one_older_both_stay(self):
+        """v3→v1 and v2→v1, no verdict between v3 and v2 (staging vs prod
+        upgraded): both stay, the shared older one folds under the newer."""
         v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        _judged(v3, v1)
+        _judged(v2, v1)
         candidates = {v3.id: _cand(v1), v2.id: _cand(v1)}
         search_results, memories = _pool((v2, 0.9), (v1, 0.8), (v3, 0.7))
 
-        fold_map, _ = await _fold(_service(candidates), search_results, memories)
+        fold_map = await _fold(_service(candidates), search_results, memories)
 
-        assert [r["id"] for r in search_results] == [str(v3.id)]
-        assert fold_map == {v3.id: [v2.id, v1.id]}
+        assert [r["id"] for r in search_results] == [str(v2.id), str(v3.id)]
+        assert fold_map == {v3.id: [v1.id]}
 
     async def test_an_unverified_link_breaks_the_chain(self):
         v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        _judged(v3, v2)
+        _judged(v2, v1)
         candidates = {v3.id: _cand(v2), v2.id: _cand(v1, verified=None)}
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
 
-        fold_map, _ = await _fold(_service(candidates), search_results, memories)
+        fold_map = await _fold(_service(candidates), search_results, memories)
 
         assert [r["id"] for r in search_results] == [str(v1.id), str(v3.id)]
         assert fold_map == {v3.id: [v2.id]}
 
     async def test_unverified_candidates_never_fold(self):
         v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        _judged(v3, v2)
+        _judged(v2, v1)
         candidates = {v3.id: _cand(v2, verified=None), v2.id: _cand(v1, verified=None)}
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
         before = [dict(r) for r in search_results]
 
-        fold_map, resolved = await _fold(_service(candidates), search_results, memories)
+        fold_map = await _fold(_service(candidates), search_results, memories)
 
         assert fold_map == {}
         assert search_results == before
-        assert resolved is candidates  # the hints still reach the page
+
+    async def test_no_supersedes_verdict_means_no_query(self):
+        """The judge-off deployment: cosine-only candidates, nothing to fold,
+        and the fold costs no query."""
+        v1, v2 = _mem(1), _mem(0)
+        v2.supersede_candidate = {"memory_id": str(v1.id), "similarity": 0.9}
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8))
+        svc = _service({})
+
+        assert await _fold(svc, search_results, memories) == {}
+        svc._resolve_supersede_candidates.assert_not_awaited()
+        assert len(search_results) == 2
 
     async def test_include_superseded_folds_nothing(self):
         v1, v2, v3, candidates = _chain()
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        svc = _service(candidates)
 
-        fold_map, resolved = await _fold(
-            _service(candidates), search_results, memories, include_superseded=True
-        )
+        fold_map = await _fold(svc, search_results, memories, include_superseded=True)
 
         assert fold_map == {}
         assert len(search_results) == 3
-        assert resolved is candidates
+        svc._resolve_supersede_candidates.assert_not_awaited()
 
     async def test_a_target_outside_the_pool_folds_nothing(self):
-        v1, v3 = _mem(2), _mem(0)
+        v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        _judged(v3, v1)
         candidates = {v3.id: _cand(v1)}
-        search_results, memories = _pool((v3, 0.9))
+        search_results, memories = _pool((v3, 0.9), (v2, 0.5))
 
-        fold_map, _ = await _fold(_service(candidates), search_results, memories)
+        fold_map = await _fold(_service(candidates), search_results, memories)
 
         assert fold_map == {}
+        assert [r["id"] for r in search_results] == [str(v3.id), str(v2.id)]
+
+    async def test_a_shadowed_version_still_links_its_chain(self):
+        """Accepting v3's suggestion shadows v2 (edge v3→v2) and clears v3's
+        candidate; v1, linked to v2 only, stays folded under v3."""
+        v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        _judged(v2, v1)
+        candidates = {v2.id: _cand(v1)}
+        search_results, memories = _pool((v1, 0.9), (v3, 0.8))
+        memories[str(v2.id)] = v2  # hydrated, then removed by shadowing
+        svc = _service(candidates)
+
+        fold_map = await _fold(svc, search_results, memories, shadow_map={v2.id: v3.id})
+
         assert [r["id"] for r in search_results] == [str(v3.id)]
+        assert search_results[0]["score"] == 0.9
+        # v2 is a link, not a row this recall folded.
+        assert fold_map == {v3.id: [v1.id]}
+        assert set(svc._resolve_supersede_candidates.await_args.args[0]) == {v2.id}
+
+    async def test_a_chain_of_accepted_edges_still_links(self):
+        """v4→v3 and v3→v2 accepted (both shadowed), v2 verified→v1: v1 stays
+        folded under v4."""
+        v1, v2, v3, v4 = _mem(3), _mem(2), _mem(1), _mem(0)
+        _judged(v2, v1)
+        candidates = {v2.id: _cand(v1)}
+        search_results, memories = _pool((v1, 0.9), (v4, 0.8))
+        memories[str(v2.id)] = v2
+        memories[str(v3.id)] = v3
+
+        fold_map = await _fold(
+            _service(candidates),
+            search_results,
+            memories,
+            shadow_map={v2.id: v3.id, v3.id: v4.id},
+        )
+
+        assert [r["id"] for r in search_results] == [str(v4.id)]
+        assert fold_map == {v4.id: [v1.id]}
+
+    async def test_a_cycle_without_a_head_stays_unfolded(self):
+        v1, v2 = _mem(1), _mem(0)
+        _judged(v1, v2)
+        _judged(v2, v1)
+        candidates = {v1.id: _cand(v2), v2.id: _cand(v1)}
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8))
+
+        assert await _fold(_service(candidates), search_results, memories) == {}
+        assert len(search_results) == 2
 
     async def test_resolver_error_fails_open(self):
         v1, v2, v3, _ = _chain()
@@ -216,85 +294,36 @@ class TestFold:
         svc._resolve_supersede_candidates = AsyncMock(side_effect=RuntimeError("boom"))
 
         with patch("services.memory_service.logger") as log:
-            fold_map, resolved = await _fold(svc, search_results, memories)
+            fold_map = await _fold(svc, search_results, memories)
 
         assert fold_map == {}
-        assert resolved is None  # the page builder resolves the page itself
         assert search_results == before
         events = [c.args[0] for c in log.warning.call_args_list if c.args]
         assert "supersede_fold_failed" in events
 
     async def test_a_grouping_error_leaves_the_pool_untouched(self):
         v1, v2, v3, candidates = _chain()
-        v2.created_at = "not a datetime"  # sorting raises
+        v2.created_at = "not a datetime"  # ordering the members raises
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
         before = [dict(r) for r in search_results]
 
-        fold_map, resolved = await _fold(_service(candidates), search_results, memories)
-
-        assert fold_map == {}
-        assert resolved is candidates
+        assert await _fold(_service(candidates), search_results, memories) == {}
         assert search_results == before
-
-    async def test_a_shadowed_version_still_links_its_chain(self):
-        """Accepting v3's suggestion shadows v2 (edge v3→v2) and clears v3's
-        candidate; v1, linked to v2 only, stays folded under v3."""
-        v1, v2, v3 = _mem(2), _mem(1), _mem(0)
-        candidates = {v2.id: _cand(v1)}  # v3's own candidate was accepted
-        search_results, memories = _pool((v1, 0.9), (v3, 0.8))
-        memories[str(v2.id)] = v2  # hydrated, then removed by shadowing
-        svc = _service(candidates)
-
-        fold_map, _ = await svc._apply_supersede_fold(
-            search_results,
-            memories,
-            include_superseded=False,
-            user_id="u",
-            trusted_only=False,
-            shadow_map={v2.id: v3.id},
-        )
-
-        assert [r["id"] for r in search_results] == [str(v3.id)]
-        assert search_results[0]["score"] == 0.9
-        # v2 is a link, not a row this recall folded.
-        assert fold_map == {v3.id: [v1.id]}
-        resolved_over = svc._resolve_supersede_candidates.await_args.args[0]
-        assert set(resolved_over) == {v1.id, v2.id, v3.id}
-
-    async def test_a_shadowed_version_whose_superseder_is_absent_links_nothing(self):
-        v1, v2 = _mem(2), _mem(1)
-        candidates = {v2.id: _cand(v1)}
-        search_results, memories = _pool((v1, 0.9))
-        memories[str(v2.id)] = v2
-        svc = _service(candidates)
-
-        fold_map, _ = await svc._apply_supersede_fold(
-            search_results,
-            memories,
-            include_superseded=False,
-            user_id="u",
-            trusted_only=False,
-            shadow_map={v2.id: uuid4()},
-        )
-
-        assert fold_map == {}
-        assert [r["id"] for r in search_results] == [str(v1.id)]
-        assert set(svc._resolve_supersede_candidates.await_args.args[0]) == {v1.id}
 
     async def test_empty_pool_does_not_query(self):
         svc = _service({})
 
-        assert await _fold(svc, [], {}) == ({}, {})
+        assert await _fold(svc, [], {}) == {}
         svc._resolve_supersede_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 class TestPage:
-    async def test_page_carries_folded_and_reuses_the_resolved_candidates(self):
+    async def test_page_carries_folded_and_the_heads_own_hint(self):
         v1, v2, v3, candidates = _chain()
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
         svc = _service(candidates)
-        fold_map, resolved = await _fold(svc, search_results, memories)
+        fold_map = await _fold(svc, search_results, memories)
 
         responses = await svc._recall_build_responses(
             RecallRequest(query="q", k=5),
@@ -304,7 +333,6 @@ class TestPage:
             contradiction_map={},
             user_id="u",
             fold_map=fold_map,
-            supersede_candidates=resolved,
         )
 
         assert len(responses) == 1
@@ -313,16 +341,16 @@ class TestPage:
         assert head.score == 0.9
         assert head.folded.count == 2
         assert head.folded.memory_ids == [v2.id, v1.id]
-        # The head keeps its own accept affordance.
+        # The head keeps its own accept affordance (the page's own lookup).
         assert head.supersede_candidate.memory_id == v2.id
-        # One resolution for the whole recall, not a second one for the page.
-        svc._resolve_supersede_candidates.assert_awaited_once()
+        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
+        assert set(page_lookup) == {str(v3.id)}
 
     async def test_projection_renders_folded_and_omits_it_when_absent(self):
         v1, v2, v3, candidates = _chain()
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7), (_mem(9), 0.1))
-        svc = _service({v3.id: candidates[v3.id], v2.id: candidates[v2.id]})
-        fold_map, resolved = await _fold(svc, search_results, memories)
+        svc = _service(candidates)
+        fold_map = await _fold(svc, search_results, memories)
         responses = await svc._recall_build_responses(
             RecallRequest(query="q", k=5),
             search_results,
@@ -331,7 +359,6 @@ class TestPage:
             contradiction_map={},
             user_id="u",
             fold_map=fold_map,
-            supersede_candidates=resolved,
         )
 
         for verbosity in ("compact", "full"):
@@ -396,7 +423,6 @@ async def test_recall_folds_before_rerank_selection_and_page():
     assert seen["selection"] == [str(v3.id)]
     assert [r["id"] for r in build.await_args.args[1]] == [str(v3.id)]
     assert build.await_args.kwargs["fold_map"] == {v3.id: [v2.id, v1.id]}
-    assert build.await_args.kwargs["supersede_candidates"] is candidates
 
 
 def test_folded_is_an_optional_response_field():
@@ -414,3 +440,67 @@ def test_folded_is_an_optional_response_field():
     )
     assert response.folded is None
     assert response.model_dump()["folded"] is None
+
+
+@pytest.mark.asyncio
+class TestSubThresholdCandidatesAtReadTime:
+    """#2123: a candidate below 0.85 exists only on the judge's word, so it
+    surfaces only while that word confirms it (verified: true)."""
+
+    @staticmethod
+    def _pair(similarity: float, verdict: str | None, confidence: float = 0.95):
+        from services.supersede_verify import pair_fingerprint, text_fingerprint
+
+        ws, ctx = uuid4(), uuid4()
+        old = SimpleNamespace(
+            id=uuid4(),
+            summary="old",
+            content="old",
+            content_head="old",
+            workspace_id=ws,
+            context_id=ctx,
+            type="fact",
+            source_type="manual",
+        )
+        new = _mem(0, workspace_id=ws, context_id=ctx, summary="new", content="new")
+        candidate = {"memory_id": str(old.id), "similarity": similarity}
+        if verdict is not None:
+            candidate["verification"] = {
+                "verdict": verdict,
+                "confidence": confidence,
+                "fingerprint": pair_fingerprint(old, new),
+                "old_fingerprint": text_fingerprint(old.summary, old.content),
+            }
+        new.supersede_candidate = candidate
+        svc = MemoryService(MagicMock())
+        result = MagicMock()
+        result.all = MagicMock(return_value=[old])
+        svc.db.execute = AsyncMock(return_value=result)
+        return svc, new, old
+
+    async def _resolve(self, svc, new):
+        return await svc._resolve_supersede_candidates(
+            {new.id: new}, user_id="u", operation="recall"
+        )
+
+    async def test_a_verified_sub_threshold_candidate_surfaces(self):
+        svc, new, old = self._pair(0.78, "supersedes")
+        resolved = await self._resolve(svc, new)
+        assert resolved[new.id].memory_id == old.id
+        assert resolved[new.id].verified is True
+
+    async def test_a_low_confidence_verdict_below_085_is_hidden(self, monkeypatch):
+        monkeypatch.delenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", raising=False)
+        svc, new, _ = self._pair(0.78, "supersedes", confidence=0.5)
+        assert await self._resolve(svc, new) == {}
+
+    async def test_a_stale_verdict_below_085_is_hidden(self):
+        svc, new, _ = self._pair(0.78, "supersedes")
+        new.summary = "edited since the judge saw it"
+        assert await self._resolve(svc, new) == {}
+
+    async def test_an_unverified_candidate_at_085_still_surfaces(self):
+        svc, new, old = self._pair(0.9, None)
+        resolved = await self._resolve(svc, new)
+        assert resolved[new.id].memory_id == old.id
+        assert resolved[new.id].verified is None

@@ -2404,3 +2404,79 @@ class TestLlmModeDetectionThreshold:
         assert _supersede_detect_threshold(config) == 0.6
         config = _make_config(verify_mode="off", llm_threshold=0.6)
         assert _supersede_detect_threshold(config) == 0.85
+
+
+class TestLlmModeClearsStaleCandidates:
+    """#2123 review: in judge mode a suggestion stored at 0.85 or above must
+    still be cleared when the re-embed finds no neighbour near 0.85, whether
+    the new top neighbour is unjudged (skipped) or just below τ_llm."""
+
+    @staticmethod
+    def _db(old_id):
+        old = MagicMock()
+        old.id = old_id
+        old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
+        result = MagicMock(rowcount=1)
+        result.scalar_one_or_none = MagicMock(return_value=old)
+        db = _make_db()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @staticmethod
+    async def _run(stored, top_score, judge_result=None):
+        memory = TestSupersedeVerdictAfterAnEdit._orm_memory(stored)
+        neighbour = uuid4()
+        db = TestLlmModeClearsStaleCandidates._db(str(neighbour))
+        config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        log = await TestSupersedeVerdictAfterAnEdit._seed(
+            memory,
+            db,
+            TestSupersedeVerdictAfterAnEdit._hits(memory, (neighbour, top_score)),
+            config=config,
+            judge=AsyncMock(return_value=judge_result),
+        )
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        return memory, events
+
+    @pytest.mark.asyncio
+    async def test_an_unjudged_neighbour_below_085_clears_a_085_candidate(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.78)
+
+        assert "supersede_candidate_skipped_unjudged_low_similarity" in events
+        assert "supersede_candidate_cleared_no_neighbour" in events
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_an_unjudged_neighbour_hovering_at_085_keeps_it(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.86}
+
+        memory, events = await self._run(stored, 0.84)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_a_neighbour_just_below_the_llm_threshold_clears_a_085_candidate(self):
+        """[τ_llm - δ, τ_llm): neither detected nor inside the 0.85 margin."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.74)
+
+        assert "supersede_candidate_cleared_no_neighbour" in events
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_a_sub_085_candidate_keeps_its_own_margin(self):
+        stored = {
+            "memory_id": str(uuid4()),
+            "similarity": 0.78,
+            "verification": {"verdict": "supersedes", "confidence": 0.9},
+        }
+
+        memory, events = await self._run(stored, 0.74)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
