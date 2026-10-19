@@ -437,6 +437,9 @@ export interface PlanTierFeature {
   // #2103: contexts that may have content chunk vectors active (0 without
   // `content_chunks`). Optional: an API predating #2103 omits both fields.
   max_content_chunk_contexts?: number;
+  // #2144: contexts that may have the recall LLM selector active (0 without
+  // `llm_selector`). Optional: an API predating #2144 omits both fields.
+  max_llm_selector_contexts?: number;
   analysis_runs_per_day: number;
   sleep_enabled_contexts_limit: number;
   reranking: boolean;
@@ -456,6 +459,9 @@ export interface PlanTierFeature {
   // CONTENT_CHUNKS_REQUIRE_PLAN (`feature_enforcement.content_chunks` is
   // "conditional"), so no control hard-disables on this column alone.
   content_chunks?: boolean;
+  // #2144: the recall LLM selector. Enforced only where the deployment sets
+  // LLM_SELECTOR_REQUIRE_PLAN ("conditional"), like `content_chunks`.
+  llm_selector?: boolean;
   // #1648: what each feature name actually does at runtime — "enforced" (the
   // backend refuses), "conditional" (it refuses only where a deployment
   // setting turns the check on), "degrades" (the request still succeeds with

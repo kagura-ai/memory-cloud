@@ -2263,6 +2263,25 @@
       "inactiveCap": "Content chunk vectors are on for this context but inactive: the plan's limit is exceeded ({inUse} of {limit} in use) and earlier-enabled contexts come first.",
       "inactiveKept": "Search uses summaries only meanwhile. The chunk vectors are kept and are used again after an upgrade or once a slot frees up; memories added or edited in the meantime get chunks on their next edit or re-embed.",
       "backfillPending": "{count, plural, one {# memory is} other {# memories are}} waiting to be re-embedded in chunks. Reload to update."
+    },
+    "llmSelector": {
+      "title": "LLM result selection",
+      "description": "Let recall have the deployment's LLM keep only the results that answer the query, cut to the relevant passages.",
+      "toggleLabel": "Select recall results with the LLM",
+      "toggleDesc": "Off: recall returns the ranked results as they are. On: the top results are checked by the LLM, and those kept are returned as selected passages.",
+      "activeBadge": "Active",
+      "inactiveBadge": "Inactive",
+      "usage": "{inUse} of {limit} contexts on your plan use LLM result selection.",
+      "enableConfirmTitle": "Turn on LLM result selection?",
+      "enableConfirmBody": "When you save, recall in this context sends the query and the content of the top results to this deployment's LLM provider (the one that checks superseded memories).",
+      "enableConfirmPassages": "Recall results are then cut to the passages the LLM selects, instead of the full memories.",
+      "confirmEnable": "Turn on",
+      "reasonPlan": "Your plan does not include LLM result selection.",
+      "reasonCap": "Your plan's limit of contexts with LLM result selection is reached ({inUse} of {limit} in use).",
+      "reasonPermission": "Only the context owner or a workspace owner/admin can change this setting.",
+      "inactivePlan": "LLM result selection is on for this context but inactive: your plan does not include it.",
+      "inactiveCap": "LLM result selection is on for this context but inactive: the plan's limit is exceeded ({inUse} of {limit} in use) and earlier-enabled contexts come first.",
+      "inactiveNote": "Recall returns the ranked results without selection meanwhile. It applies again after an upgrade or once a slot frees up."
     }
   },
   "externalKeys": {
@@ -4541,6 +4560,11 @@
         "label": "Content chunk vectors",
         "plural": "content chunk contexts",
         "singular": "content chunk context"
+      },
+      "llm_selector": {
+        "label": "LLM result selection",
+        "plural": "LLM result selection contexts",
+        "singular": "LLM result selection context"
       }
     }
   },

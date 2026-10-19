@@ -183,6 +183,22 @@ export interface ContextSearchConfig {
   /** Workspace contexts with the flag stored on (this one included). */
   content_chunks_in_use?: number;
   content_chunks_disabled_reason?: ContentChunksDisabledReason | null;
+  // #2144: the recall LLM selector. Optional throughout — a backend predating
+  // it omits every field, and the settings card is then hidden.
+  // `llm_selector_enabled` is the STORED flag: never write
+  // `llm_selector_effective` back into it.
+  llm_selector_enabled?: boolean;
+  /** Whether recall acts on the stored flag (plan and cap, where gated). */
+  llm_selector_effective?: boolean;
+  /** The plan's cap on contexts with the selector; null where the deployment
+   * does not gate the selector by plan. */
+  llm_selector_limit?: number | null;
+  /** Workspace contexts with the flag stored on (this one included). */
+  llm_selector_in_use?: number;
+  llm_selector_disabled_reason?: LlmSelectorDisabledReason | null;
+  /** The caller may change the flag: the context owner or a workspace
+   * owner/admin, and to turn it on, the plan's feature and a free slot. */
+  llm_selector_can_change?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -190,6 +206,9 @@ export interface ContextSearchConfig {
 /** Why the content chunk toggle cannot be turned on, or the chunks are inactive. */
 export type ContentChunksDisabledReason =
   "permission" | "unsupported" | "plan" | "cap";
+
+/** Why the LLM selector toggle cannot be turned on, or the selector is inactive. */
+export type LlmSelectorDisabledReason = "permission" | "plan" | "cap";
 
 export interface ContextSearchConfigUpdate {
   semantic_weight: number;
@@ -200,6 +219,8 @@ export interface ContextSearchConfigUpdate {
   reranker_model: string;
   /** #2015: sent only when the user changed it (optional on the server). */
   content_chunks_enabled?: boolean;
+  /** #2144: sent only when the user changed it (optional on the server). */
+  llm_selector_enabled?: boolean;
 }
 
 /**

@@ -57,6 +57,7 @@ const SERVER_QUOTA_TYPES = [
   "resource_tokens",
   "connectors",
   "content_chunk_contexts",
+  "llm_selector_contexts",
   "embedding_spend_daily",
   "embedding_spend_monthly",
   "api_mcp_daily",
@@ -459,7 +460,7 @@ describe("normalizeGate — fields", () => {
 
 describe("GATE_KEYS / QUOTA_TYPE_TO_GATE_KEY", () => {
   it("lists every gate key exactly once", () => {
-    expect(GATE_KEYS).toHaveLength(24);
+    expect(GATE_KEYS).toHaveLength(25);
     expect(new Set(GATE_KEYS).size).toBe(GATE_KEYS.length);
   });
 
@@ -1459,6 +1460,7 @@ describe("GATE_SPECS key space (#1645)", () => {
     "connectors",
     "secret_store",
     "content_chunks",
+    "llm_selector",
   ];
 
   it("every plan GateKey is a server feature key", () => {
@@ -1498,6 +1500,7 @@ describe("GATE_SPECS key space (#1645)", () => {
         "embedding_spend",
         "api_calls",
         "content_chunks",
+        "llm_selector",
       ].sort(),
     );
   });

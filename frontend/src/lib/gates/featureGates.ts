@@ -250,6 +250,11 @@ export const GATE_SPECS = {
   // names the wire refusals (FEAT-001 `content_chunks`, QUOTA-001
   // `content_chunk_contexts`).
   content_chunks: {},
+  // #2144: same shape as `content_chunks` — gated by plan only where the
+  // deployment sets LLM_SELECTOR_REQUIRE_PLAN; the search-config response's
+  // `llm_selector_disabled_reason` is the pre-check, and this key names the
+  // wire refusals (FEAT-001 `llm_selector`, QUOTA-001 `llm_selector_contexts`).
+  llm_selector: {},
 } as const satisfies Record<string, GateSpec>;
 
 export type GateKey = keyof typeof GATE_SPECS;
@@ -285,6 +290,7 @@ export const QUOTA_TYPE_TO_GATE_KEY: Readonly<Record<string, GateKey>> = {
   resource_tokens: "resource_tokens",
   connectors: "connectors",
   content_chunk_contexts: "content_chunks",
+  llm_selector_contexts: "llm_selector",
   embedding_spend_daily: "embedding_spend",
   embedding_spend_monthly: "embedding_spend",
   api_mcp_daily: "api_calls",

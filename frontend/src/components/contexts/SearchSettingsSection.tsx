@@ -3,7 +3,8 @@
  *
  * Self-contained section for search/reranker settings within the Settings tab.
  * Contains hybrid search weights, reranker config, content chunk vectors
- * (#2104), embedding info with sticky save bar.
+ * (#2104), the recall LLM selector (#2148), embedding info with sticky save
+ * bar.
  * Extracted from contexts/[id]/search-settings/page.tsx (#232).
  */
 
@@ -51,6 +52,7 @@ import {
   Loader2,
   Sparkles,
   Layers,
+  ListFilter,
 } from "lucide-react";
 import {
   getContextSearchConfig,
@@ -58,6 +60,7 @@ import {
   type ContentChunksDisabledReason,
   type ContextSearchConfig,
   type ContextSearchConfigUpdate,
+  type LlmSelectorDisabledReason,
 } from "@/lib/api/contexts";
 import {
   listExternalAPIKeys,
@@ -135,6 +138,9 @@ export function SearchSettingsSection({
   // `open` so the dialog keeps its wording through the close animation.
   const [chunkDialogOpen, setChunkDialogOpen] = useState(false);
   const [chunkTarget, setChunkTarget] = useState(false);
+  // #2148: the LLM selector confirmation (asked on enable only — turning it
+  // off sends nothing anywhere and deletes nothing).
+  const [selectorDialogOpen, setSelectorDialogOpen] = useState(false);
   const { toast } = useToast();
   // Issue #1167: with BYOK off no new key can be added, so the "configure
   // reranker keys" CTA would point at a page without an Add button — skip the
@@ -242,6 +248,10 @@ export function SearchSettingsSection({
     const chunksChanged =
       editedConfig.content_chunks_enabled !== undefined &&
       editedConfig.content_chunks_enabled !== config!.content_chunks_enabled;
+    // #2148: the same for the LLM selector flag (plan/cap-checked on enable).
+    const selectorChanged =
+      editedConfig.llm_selector_enabled !== undefined &&
+      editedConfig.llm_selector_enabled !== config!.llm_selector_enabled;
 
     try {
       setSaving(true);
@@ -259,6 +269,9 @@ export function SearchSettingsSection({
         ...(chunksChanged
           ? { content_chunks_enabled: editedConfig.content_chunks_enabled }
           : {}),
+        ...(selectorChanged
+          ? { llm_selector_enabled: editedConfig.llm_selector_enabled }
+          : {}),
       };
 
       await updateContextSearchConfig(contextId, updateData);
@@ -273,22 +286,29 @@ export function SearchSettingsSection({
         description: errorMsg,
         variant: "destructive",
       });
-      // #2104: a refused chunk change (403 FEAT-001 plan / 429 QUOTA-001 cap,
-      // e.g. another context took the last slot meanwhile): re-read the
-      // server's view so the card shows the reason, and drop only the staged
-      // chunk flag — the user's other unsaved edits stay. Any other failure
-      // (network, 500, a capacity lock) keeps the confirmed choice staged.
+      // #2104 / #2148: a refused chunk or LLM selector change (403 FEAT-001
+      // plan / 429 QUOTA-001 cap, e.g. another context took the last slot
+      // meanwhile): re-read the server's view so the card shows the reason,
+      // and drop only the refused staged flag — the user's other unsaved
+      // edits stay. Any other failure (network, 500, a capacity lock) keeps
+      // the confirmed choice staged.
       const gate = err instanceof ApiError ? err.gate : undefined;
       const chunkRefusal =
-        gate?.feature === "content_chunks" ||
-        gate?.quotaType === "content_chunk_contexts";
-      if (chunksChanged && chunkRefusal) {
+        chunksChanged &&
+        (gate?.feature === "content_chunks" ||
+          gate?.quotaType === "content_chunk_contexts");
+      const selectorRefusal =
+        selectorChanged &&
+        (gate?.feature === "llm_selector" ||
+          gate?.quotaType === "llm_selector_contexts");
+      if (chunkRefusal || selectorRefusal) {
         try {
           const data = await getContextSearchConfig(contextId);
           setConfig(data);
           setEditedConfig((prev) => {
             const next = { ...prev };
-            delete next.content_chunks_enabled;
+            if (chunkRefusal) delete next.content_chunks_enabled;
+            if (selectorRefusal) delete next.llm_selector_enabled;
             return next;
           });
         } catch {
@@ -479,6 +499,76 @@ export function SearchSettingsSection({
   const confirmChunksToggle = () => {
     setEditedConfig({ ...editedConfig, content_chunks_enabled: chunkTarget });
     setChunkDialogOpen(false);
+  };
+
+  // ── #2148: the recall LLM selector ──
+  // The content chunk card's shape: every answer is the server's (GET
+  // search-config, #2144) — the plan gate applies only where the deployment
+  // sets LLM_SELECTOR_REQUIRE_PLAN, so the tier matrix is not consulted. A
+  // backend predating the fields omits `llm_selector_enabled` and the card is
+  // not rendered.
+  const selectorShown = config.llm_selector_enabled !== undefined;
+  const storedSelector = config.llm_selector_enabled === true;
+  const currentSelector = getCurrentValue("llm_selector_enabled") === true;
+  const selectorCanChange = config.llm_selector_can_change === true;
+  const selectorReason = config.llm_selector_disabled_reason ?? null;
+  const selectorInUse = config.llm_selector_in_use ?? 0;
+  // null: the deployment does not gate the selector by plan (no cap to show).
+  const selectorLimit = config.llm_selector_limit ?? null;
+  // Stored on but not acted on (plan or cap). A backend without the field is
+  // taken at the stored value.
+  const selectorInactive =
+    storedSelector && config.llm_selector_effective === false;
+  const selectorInactiveForPlan =
+    selectorInactive && (selectorReason === "plan" || selectorReason === "cap");
+  const selectorSwitchBlocked = !selectorCanChange;
+  // The reason under a disabled switch. When the inactive note already says
+  // plan/cap, the switch is blocked only by the role (turning it off is
+  // otherwise always allowed).
+  const selectorBlockedReason: LlmSelectorDisabledReason | null =
+    selectorSwitchBlocked
+      ? selectorInactiveForPlan
+        ? "permission"
+        : (selectorReason ?? "permission")
+      : null;
+  // In-use / limit where the deployment gates by plan and the plan has
+  // slots; the cap reason and the inactive cap note say it themselves.
+  const showSelectorUsage =
+    selectorLimit !== null && selectorLimit > 0 && selectorReason !== "cap";
+
+  // Literal keys on purpose (parity.test.ts orphan scan, see above).
+  const selectorReasonText = (reason: LlmSelectorDisabledReason) => {
+    switch (reason) {
+      case "plan":
+        return t("llmSelector.reasonPlan");
+      case "cap":
+        return t("llmSelector.reasonCap", {
+          inUse: selectorInUse,
+          limit: selectorLimit ?? 0,
+        });
+      case "permission":
+        return t("llmSelector.reasonPermission");
+    }
+  };
+
+  const handleSelectorToggle = (checked: boolean) => {
+    if (checked === storedSelector) {
+      // Back to the saved value: nothing to confirm, nothing to send.
+      const next = { ...editedConfig };
+      delete next.llm_selector_enabled;
+      setEditedConfig(next);
+      return;
+    }
+    if (checked) {
+      setSelectorDialogOpen(true);
+      return;
+    }
+    setEditedConfig({ ...editedConfig, llm_selector_enabled: false });
+  };
+
+  const confirmSelectorEnable = () => {
+    setEditedConfig({ ...editedConfig, llm_selector_enabled: true });
+    setSelectorDialogOpen(false);
   };
 
   const getProviderDescription = () => {
@@ -933,6 +1023,96 @@ export function SearchSettingsSection({
           </Card>
         )}
 
+        {/* Recall LLM selector (#2148) — only with a backend that reports
+            it (#2144) */}
+        {selectorShown && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <ListFilter className="h-5 w-5" />
+                {t("llmSelector.title")}
+                {storedSelector &&
+                  (selectorInactive ? (
+                    <Badge variant="outline" className="text-muted-foreground">
+                      {t("llmSelector.inactiveBadge")}
+                    </Badge>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      className="border-green-500 text-green-700 dark:text-green-400"
+                    >
+                      {t("llmSelector.activeBadge")}
+                    </Badge>
+                  ))}
+              </CardTitle>
+              <CardDescription>{t("llmSelector.description")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <Label htmlFor="llm_selector_enabled" className="text-base">
+                    {t("llmSelector.toggleLabel")}
+                  </Label>
+                  <p
+                    id="llm-selector-desc"
+                    className="text-sm text-muted-foreground"
+                  >
+                    {t("llmSelector.toggleDesc")}
+                  </p>
+                </div>
+                <Switch
+                  id="llm_selector_enabled"
+                  checked={currentSelector}
+                  onCheckedChange={handleSelectorToggle}
+                  // Not while saving: a successful save resets the staged
+                  // edits, which would drop a change confirmed meanwhile.
+                  disabled={selectorSwitchBlocked || saving}
+                  aria-describedby={
+                    selectorBlockedReason
+                      ? "llm-selector-desc llm-selector-reason"
+                      : "llm-selector-desc"
+                  }
+                />
+              </div>
+
+              {selectorBlockedReason && (
+                <p
+                  id="llm-selector-reason"
+                  className="text-sm text-muted-foreground"
+                >
+                  {selectorReasonText(selectorBlockedReason)}
+                </p>
+              )}
+
+              {selectorInactiveForPlan && (
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription className="space-y-1">
+                    <p className="text-sm">
+                      {selectorReason === "cap"
+                        ? t("llmSelector.inactiveCap", {
+                            inUse: selectorInUse,
+                            limit: selectorLimit ?? 0,
+                          })
+                        : t("llmSelector.inactivePlan")}
+                    </p>
+                    <p className="text-sm">{t("llmSelector.inactiveNote")}</p>
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {showSelectorUsage && (
+                <p className="text-sm text-muted-foreground">
+                  {t("llmSelector.usage", {
+                    inUse: selectorInUse,
+                    limit: selectorLimit,
+                  })}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Embedding Configuration (Read-only) */}
         <Card>
           <CardHeader>
@@ -1008,6 +1188,32 @@ export function SearchSettingsSection({
               {chunkTarget
                 ? t("contentChunks.confirmEnable")
                 : t("contentChunks.confirmDisable")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* #2148: confirm turning the LLM selector on before it is staged */}
+      <AlertDialog
+        open={selectorDialogOpen}
+        onOpenChange={setSelectorDialogOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("llmSelector.enableConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>{t("llmSelector.enableConfirmBody")}</p>
+                <p>{t("llmSelector.enableConfirmPassages")}</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmSelectorEnable}>
+              {t("llmSelector.confirmEnable")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
