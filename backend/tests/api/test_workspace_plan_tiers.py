@@ -272,8 +272,15 @@ def test_feature_enforcement_is_additive_for_older_clients(client: TestClient) -
         "connectors",
         "public_contexts",
     }
-    # #2103 adds the content chunk row (additive, like #1648's field).
-    added_since = {"feature_enforcement", "content_chunks", "max_content_chunk_contexts"}
+    # #2103 adds the content chunk row, #2144 the LLM selector row (additive,
+    # like #1648's field).
+    added_since = {
+        "feature_enforcement",
+        "content_chunks",
+        "max_content_chunk_contexts",
+        "llm_selector",
+        "max_llm_selector_contexts",
+    }
     for tier in (free, basic, pro, promax):
         assert set(tier) - added_since == pre_1648_keys, tier["name"]
 
@@ -285,3 +292,12 @@ def test_content_chunks_row(client: TestClient) -> None:
     assert [t["content_chunks"] for t in tiers] == [False, True, True, True]
     assert [t["max_content_chunk_contexts"] for t in tiers] == [0, 1, 5, 20]
     assert tiers[0]["feature_enforcement"]["content_chunks"] == "conditional"
+
+
+def test_llm_selector_row(client: TestClient) -> None:
+    """#2144: M and above have the feature; the provisional cap is S 0 / M 1 /
+    L 5 / XL 20, and the mode says the gate is deployment-conditional."""
+    tiers = client.get(ENDPOINT).json()
+    assert [t["llm_selector"] for t in tiers] == [False, True, True, True]
+    assert [t["max_llm_selector_contexts"] for t in tiers] == [0, 1, 5, 20]
+    assert tiers[0]["feature_enforcement"]["llm_selector"] == "conditional"

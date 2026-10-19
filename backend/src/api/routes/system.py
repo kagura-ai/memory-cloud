@@ -179,6 +179,9 @@ async def system_info():
             # plan feature with a per-plan context cap (CONTENT_CHUNKS_REQUIRE_PLAN);
             # the search-config response says why a context's toggle is disabled.
             "content_chunks_require_plan": settings.content_chunks_require_plan,
+            # Issue #2144: default-off. When true, the recall LLM selector is a
+            # plan feature with a per-plan context cap (LLM_SELECTOR_REQUIRE_PLAN).
+            "llm_selector_require_plan": settings.llm_selector_require_plan,
         },
     }
 

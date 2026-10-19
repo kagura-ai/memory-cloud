@@ -76,6 +76,14 @@ class PlanTier:
             downgrade) only the earliest-enabled contexts stay active — the
             others keep their flag and their chunk points, unused. 0 on a tier
             without the feature.
+        max_llm_selector_contexts: How many contexts of a workspace may
+            have the recall LLM selector active (Issue #2144; feature
+            ``llm_selector``). Read only where ``LLM_SELECTOR_REQUIRE_PLAN`` is
+            on, exactly like ``max_content_chunk_contexts``: turning the flag
+            on past it is refused, and over it (after a downgrade) only the
+            earliest-enabled contexts stay active — the others keep their
+            flag, unused. 0 on a tier without the feature. Provisional values,
+            to be revisited once the stage is measured.
         memory_limit: Maximum memories per workspace
         memories_per_day: Memories that may be CREATED per workspace per UTC
             day (Issue #1549, epic #1547). Enforced on every path that writes
@@ -118,6 +126,7 @@ class PlanTier:
     max_resource_tokens: int = 0  # Issue #242: Active resource tokens limit
     max_connectors: int = 0  # Issue #850 (F6-a of #755): ai-worker connector seat cap
     max_content_chunk_contexts: int = 0  # Issue #2103: contexts with active content chunks
+    max_llm_selector_contexts: int = 0  # Issue #2144: contexts with the recall LLM selector
     mcp_calls_per_day: int = 0  # Issue #238: MCP API quota
     mcp_calls_per_week: int = 0  # Issue #238: MCP API quota
     rest_calls_per_day: int = 0  # Issue #238: REST API quota
@@ -154,6 +163,7 @@ PLAN_FREE = PlanTier(
     max_resource_tokens=0,  # Issue #242: No resource tokens (PRO only)
     max_connectors=0,  # Issue #850: no ai-worker connectors on Free
     max_content_chunk_contexts=0,  # Issue #2103: no content chunks on Free
+    max_llm_selector_contexts=0,  # Issue #2144: no recall LLM selector on Free
     memory_limit=1000,
     memories_per_day=50,  # Issue #1549 (#1547 matrix)
     daily_api_limit=100,  # Legacy (backward compatibility)
@@ -185,6 +195,7 @@ PLAN_BASIC = PlanTier(
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=3,  # Issue #850 → Spec(2026-06-02): Basic 1→3
     max_content_chunk_contexts=1,  # Issue #2103
+    max_llm_selector_contexts=1,  # Issue #2144 (provisional)
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
     memory_limit=10000,
     memories_per_day=300,  # Issue #1549 (#1547 matrix)
@@ -203,8 +214,17 @@ PLAN_BASIC = PlanTier(
     # Issue #1030: paid tiers (M/L) get platform-managed embeddings — they may
     # embed on the platform key without BYOK (bounded by the #709/#1033 cap).
     # Issue #2103: content chunk vectors (M and above, capped per tier).
+    # Issue #2144: the recall LLM selector (M and above, capped per tier).
     features=frozenset(
-        {"api_keys", "reranking", "oauth", "managed_embeddings", "secret_store", "content_chunks"}
+        {
+            "api_keys",
+            "reranking",
+            "oauth",
+            "managed_embeddings",
+            "secret_store",
+            "content_chunks",
+            "llm_selector",
+        }
     ),
 )
 
@@ -219,6 +239,7 @@ PLAN_PRO = PlanTier(
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=10,  # Issue #850 → Spec(2026-06-02): Pro 5→10
     max_content_chunk_contexts=5,  # Issue #2103
+    max_llm_selector_contexts=5,  # Issue #2144 (provisional)
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
     memory_limit=100000,
     memories_per_day=2000,  # Issue #1549 (#1547 matrix)
@@ -253,6 +274,7 @@ PLAN_PRO = PlanTier(
             "managed_llm",  # Issue #1569: Analysis on the platform-managed LLM lane (no BYOK)
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
             "content_chunks",  # Issue #2103: content chunk vectors (M and above)
+            "llm_selector",  # Issue #2144: recall LLM selector (M and above)
         }
     ),
 )
@@ -268,6 +290,7 @@ PLAN_PROMAX = PlanTier(
     max_resource_tokens=150,
     max_connectors=50,
     max_content_chunk_contexts=20,  # Issue #2103
+    max_llm_selector_contexts=20,  # Issue #2144 (provisional)
     allows_shared_contexts=True,
     memory_limit=100000,  # Issue #1547 matrix
     memories_per_day=10000,  # Issue #1549 (#1547 matrix)
@@ -343,6 +366,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "resources": "promax",  # Issue #1551: setup_resource / new resource tokens are XL-only
     "connectors": "promax",  # Issue #1551: setup_connector is XL-only
     "content_chunks": "basic",  # Issue #2103: content chunk vectors (M and above, capped per tier)
+    "llm_selector": "basic",  # Issue #2144: recall LLM selector (M and above, capped per tier)
 }
 
 # Every feature name the registry knows (#1559): the code-default tiers'
@@ -475,6 +499,14 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
         "on — it defaults to off, so a default deployment lets every tier turn chunks "
         "on in any number of contexts.",
     ),
+    "llm_selector": FeatureGate(
+        FeatureEnforcement.CONDITIONAL,
+        "services/llm_selector_policy.py refuses turning llm_selector_enabled on "
+        "without the feature or past max_llm_selector_contexts, and treats a stored "
+        "true as off past them (#2144), but only where LLM_SELECTOR_REQUIRE_PLAN is "
+        "on — it defaults to off, so a default deployment lets every tier turn the "
+        "selector on in any number of contexts.",
+    ),
     "connectors": FeatureGate(
         FeatureEnforcement.ENFORCED,
         "services/connector_provisioning.py refuses setup_connector (#1551). "
@@ -573,6 +605,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
             "mcp_calls_per_day": settings.plan_free_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_free_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_free_sleep_enabled_contexts_limit,
+            "max_llm_selector_contexts": settings.plan_free_max_llm_selector_contexts,
             "memories_per_day": settings.plan_free_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_free_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_free_embedding_monthly_cap_usd,
@@ -586,6 +619,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
             "mcp_calls_per_day": settings.plan_basic_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_basic_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_basic_sleep_enabled_contexts_limit,
+            "max_llm_selector_contexts": settings.plan_basic_max_llm_selector_contexts,
             "memories_per_day": settings.plan_basic_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_basic_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_basic_embedding_monthly_cap_usd,
@@ -599,6 +633,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
             "mcp_calls_per_day": settings.plan_pro_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_pro_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_pro_sleep_enabled_contexts_limit,
+            "max_llm_selector_contexts": settings.plan_pro_max_llm_selector_contexts,
             "memories_per_day": settings.plan_pro_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_pro_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_pro_embedding_monthly_cap_usd,
@@ -612,6 +647,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
             "mcp_calls_per_day": settings.plan_promax_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_promax_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_promax_sleep_enabled_contexts_limit,
+            "max_llm_selector_contexts": settings.plan_promax_max_llm_selector_contexts,
             "memories_per_day": settings.plan_promax_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_promax_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_promax_embedding_monthly_cap_usd,

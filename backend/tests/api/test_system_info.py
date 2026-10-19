@@ -161,3 +161,11 @@ def test_system_info_exposes_the_content_chunks_plan_gate_default_off(info_with)
     assert info_with().json()["features"]["content_chunks_require_plan"] is False
     gated = info_with(content_chunks_require_plan=True).json()
     assert gated["features"]["content_chunks_require_plan"] is True
+
+
+def test_system_info_exposes_the_llm_selector_plan_gate_default_off(info_with) -> None:
+    """#2144: whether the recall LLM selector is a plan feature, by name only.
+    Default OFF: self-hosted deployments keep every plan, no cap."""
+    assert info_with().json()["features"]["llm_selector_require_plan"] is False
+    gated = info_with(llm_selector_require_plan=True).json()
+    assert gated["features"]["llm_selector_require_plan"] is True

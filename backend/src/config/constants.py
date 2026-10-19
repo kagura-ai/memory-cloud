@@ -274,6 +274,7 @@ QUOTA_TYPES: frozenset[str] = frozenset(
         "resource_tokens",
         "connectors",
         "content_chunk_contexts",  # #2103: contexts with active content chunk vectors
+        "llm_selector_contexts",  # #2144: contexts with the recall LLM selector active
         "embedding_spend_daily",
         "embedding_spend_monthly",
         "api_mcp_daily",

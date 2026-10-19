@@ -132,6 +132,10 @@ class PlanTierFeature(BaseModel):
     # the tier lacks ``content_chunks``). Enforced only where the deployment
     # sets CONTENT_CHUNKS_REQUIRE_PLAN — see ``feature_enforcement``.
     max_content_chunk_contexts: int
+    # Issue #2144: contexts that may have the recall LLM selector active (0
+    # when the tier lacks ``llm_selector``). Enforced only where the
+    # deployment sets LLM_SELECTOR_REQUIRE_PLAN — see ``feature_enforcement``.
+    max_llm_selector_contexts: int
     analysis_runs_per_day: int
     sleep_enabled_contexts_limit: int
     # Boolean capabilities
@@ -149,6 +153,7 @@ class PlanTierFeature(BaseModel):
     connectors: bool
     public_contexts: bool
     content_chunks: bool  # Issue #2103
+    llm_selector: bool  # Issue #2144
     # Issue #1648: what each feature name actually DOES at runtime —
     # ``"enforced"`` (a check refuses the request), ``"conditional"`` (a check
     # refuses only where a deployment setting turns it on), ``"degrades"`` (the
@@ -262,6 +267,7 @@ async def get_available_plans(
         "team_invitations": "Team Invitations",
         "shared_contexts": "Shared Contexts",
         "content_chunks": "Content Chunk Vectors",  # Issue #2103
+        "llm_selector": "Recall LLM Selector",  # Issue #2144
     }
 
     return [
@@ -294,6 +300,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
     has_connectors = "connectors" in tier.features
     has_public = "public_contexts" in tier.features
     has_chunks = "content_chunks" in tier.features
+    has_selector = "llm_selector" in tier.features
     return PlanTierFeature(
         name=tier.name,
         display_name=tier.display_name,
@@ -309,6 +316,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         max_resource_tokens=tier.max_resource_tokens if has_resources else 0,
         max_connectors=tier.max_connectors if has_connectors else 0,
         max_content_chunk_contexts=tier.max_content_chunk_contexts if has_chunks else 0,
+        max_llm_selector_contexts=tier.max_llm_selector_contexts if has_selector else 0,
         analysis_runs_per_day=tier.analysis_runs_per_day,
         sleep_enabled_contexts_limit=tier.sleep_enabled_contexts_limit,
         reranking="reranking" in tier.features,
@@ -321,6 +329,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         connectors=has_connectors,
         public_contexts=has_public,
         content_chunks=has_chunks,
+        llm_selector=has_selector,
         # #1648: the same tier-independent map on every row — see the field's
         # comment. A UI may hard-disable a control only for an ``enforced``
         # feature; ``conditional``, ``degrades`` and ``advertised`` rows have

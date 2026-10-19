@@ -1087,6 +1087,58 @@ class Settings(BaseSettings):
             "searched and written without chunks. Default False = every plan, no cap."
         ),
     )
+    # #2144: the recall LLM selector as a plan feature with a per-plan context
+    # cap, on the #2103 shape. Off (the default) keeps self-hosted deployments
+    # free of any plan check: every workspace may turn the selector on in any
+    # number of contexts. On, the plan must have the ``llm_selector`` feature
+    # and only the earliest-enabled ``max_llm_selector_contexts`` contexts of a
+    # workspace are active.
+    llm_selector_require_plan: bool = Field(
+        default=False,
+        description=(
+            "Gate the recall LLM selector by plan (#2144): turning llm_selector_enabled "
+            "on needs a plan with the 'llm_selector' feature and a free slot under its "
+            "max_llm_selector_contexts cap; contexts past the cap (or on a plan without "
+            "the feature) keep their flag but are recalled without the selector. "
+            "Default False = every plan, no cap."
+        ),
+    )
+    # #2144 D4: bounds of the recall LLM selector stage. Here, not in
+    # NeuralMemoryConfig: the stage runs on the recall read path, where
+    # NeuralMemoryConfig.from_env() must never run (#2016), and needs no admin
+    # row override.
+    llm_selector_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "Time limit of one recall LLM selector call (#2144); past it the recall "
+            "returns its unselected page"
+        ),
+    )
+    llm_selector_max_rows: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Rows of a recall page sent to the LLM selector (#2144); rows after them "
+            "are returned unchanged"
+        ),
+    )
+    llm_selector_max_prompt_chars: int = Field(
+        default=24000,
+        ge=1,
+        description=(
+            "Characters of summaries and content the LLM selector may send in one call "
+            "(#2144); a larger page is returned unselected"
+        ),
+    )
+    llm_selector_max_calls_per_day: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "Recall LLM selector calls per workspace per UTC day (#2144); past it "
+            "recalls return their unselected page"
+        ),
+    )
 
     @field_validator("default_reranker_model", mode="before")
     @classmethod
@@ -1706,6 +1758,28 @@ class Settings(BaseSettings):
     plan_promax_sleep_enabled_contexts_limit: int | None = Field(
         default=None,
         description="Override PROMAX plan sleep-enabled contexts cap (Issue #560; default 15)",
+    )
+    # Issue #2144: contexts with the recall LLM selector active, per tier.
+    # Read only where LLM_SELECTOR_REQUIRE_PLAN is on.
+    plan_free_max_llm_selector_contexts: int | None = Field(
+        default=None,
+        description="Override FREE plan cap on contexts with the recall LLM selector "
+        "(Issue #2144; default 0)",
+    )
+    plan_basic_max_llm_selector_contexts: int | None = Field(
+        default=None,
+        description="Override BASIC plan cap on contexts with the recall LLM selector "
+        "(Issue #2144; default 1)",
+    )
+    plan_pro_max_llm_selector_contexts: int | None = Field(
+        default=None,
+        description="Override PRO plan cap on contexts with the recall LLM selector "
+        "(Issue #2144; default 5)",
+    )
+    plan_promax_max_llm_selector_contexts: int | None = Field(
+        default=None,
+        description="Override PROMAX plan cap on contexts with the recall LLM selector "
+        "(Issue #2144; default 20)",
     )
     plan_promax_embedding_daily_cap_usd: float | None = Field(
         default=None,
