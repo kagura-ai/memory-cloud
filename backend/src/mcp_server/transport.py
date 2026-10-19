@@ -356,6 +356,33 @@ SERVER_INSTRUCTIONS_BASE = (
 # Kept as a module attribute for imports that still read the old name.
 SERVER_INSTRUCTIONS = SERVER_INSTRUCTIONS_BASE
 
+# #2125: the base text when the URL names a default context the caller can
+# read (``?context=<uuid>``). Same 240-char budget as the base: the fixed text
+# is under 200 characters and the name is flattened and cut to
+# ``DEFAULT_CONTEXT_NAME_CAP`` (the digest's own rules,
+# so a name cannot forge the digest boundary). Pinned with the base in
+# ``tests/mcp_server/test_instructions_budget.py``.
+DEFAULT_CONTEXT_NAME_CAP = 40
+_DEFAULT_CONTEXT_INSTRUCTIONS = (
+    "Kagura Memory Cloud. Default context: {name}; omit context_id. bootstrap() opens a "
+    "session; remember stores, recall searches; changes_since lists changes. "
+    "list_contexts(name_contains=) reaches another."
+)
+
+
+def default_context_instructions(name: str) -> str:
+    """The base text naming the connection's default context (#2125).
+
+    Falls back to ``SERVER_INSTRUCTIONS_BASE`` when nothing printable is left
+    of the name.
+    """
+    from services.guardrail_digest import cut_summary, flatten_summary
+
+    shown = cut_summary(flatten_summary(name), DEFAULT_CONTEXT_NAME_CAP)
+    if not shown:
+        return SERVER_INSTRUCTIONS_BASE
+    return _DEFAULT_CONTEXT_INSTRUCTIONS.format(name=shown)
+
 
 def _discover_result(
     instructions: str = SERVER_INSTRUCTIONS_BASE, *, private: bool = False
@@ -435,14 +462,12 @@ async def _read_digest(
                     logger.debug("mcp_guardrail_digest_no_last_used_context")
                     return None
             elif selection.mode == "binding":
-                from services.agent_binding_service import AgentBindingService
+                from mcp_server.tools._default_context import default_binding_context_id
 
-                binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
-                if binding is None or outcome not in ("default", "sole"):
-                    # F2: no existence oracle — nothing above debug.
-                    logger.debug("mcp_guardrail_digest_no_default_binding: outcome=%s", outcome)
+                # F2: no existence oracle — nothing above debug.
+                context_id = await default_binding_context_id(db, agent_id)
+                if context_id is None:
                     return None
-                context_id = binding.context_id
             if context_id is None:  # pragma: no cover - explicit always carries one
                 return None
             return await fetch_entries(
@@ -453,6 +478,104 @@ async def _read_digest(
                 limit=INSTRUCTIONS_CAPS.entries,
             )
     return None  # pragma: no cover - get_db always yields
+
+
+async def _read_default_context_name(
+    *,
+    user_id: str,
+    context_id: UUID,
+    key_workspace_id: "UUID | None",
+    timeout_ms: int,
+) -> str | None:
+    """The name of the ``?context=`` default if the caller can read it, else ``None``.
+
+    Read through the chokepoint the read tools use
+    (``resolve_context_for_workspace_read``), so a deny — unknown, other
+    workspace, private non-creator, whitelist miss, agent binding, seat —
+    returns ``None`` and the caller serves the base text with no signal about
+    why. Same session discipline as ``_read_digest``.
+    """
+    from sqlalchemy import text
+
+    from db.base import get_db
+    from services.capacity_lock import CapacityPolicy
+    from services.permission_service import PermissionService
+    from utils.exceptions import FeatureNotAvailableError, NotFoundException
+
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            await db.execute(
+                text("SELECT set_config('statement_timeout', :ms, true)"),
+                {"ms": str(timeout_ms)},
+            )
+            try:
+                context = await PermissionService(db).resolve_context_for_workspace_read(
+                    user_id=user_id,
+                    context_id=context_id,
+                    required_role="viewer",
+                    key_workspace_id=key_workspace_id,
+                    capacity=CapacityPolicy.ALLOWED,  # naming it reads no memory
+                )
+            except (NotFoundException, FeatureNotAvailableError):
+                logger.debug("mcp_default_context_instructions_denied")
+                return None
+            return context.name
+    return None  # pragma: no cover - get_db always yields
+
+
+async def _instructions_base(
+    *,
+    user_id: str,
+    query_string: bytes,
+    key_workspace_id: "UUID | None",
+    era: Literal["legacy", "stateless"],
+    deadline: float,
+) -> tuple[str, bool]:
+    """The base text for this connection and whether it varies by caller (#2125).
+
+    ``default_context_instructions`` when ``?context=<uuid>`` names a context
+    the caller can read, else ``SERVER_INSTRUCTIONS_BASE``. ``private`` is
+    ``True`` whenever ``?context=`` is present in any form — the answer
+    depends on the caller — and the database is opened only for a UUID. An
+    agent-bound key's default binding fills tool arguments
+    (``tools._default_context``) but does not change this text: its handshake
+    keeps the reads #1621 pins. Fails open to the base text, like the digest,
+    and shares the digest's ``deadline``: the handshake waits at most one
+    ``mcp_guardrail_digest_timeout_ms`` for both reads together.
+    """
+    from mcp_server.tools._default_context import select_default_context
+
+    selection = select_default_context(query_string)
+    if selection.mode == "none":
+        return SERVER_INSTRUCTIONS_BASE, False
+    if selection.mode == "invalid" or selection.context_id is None:
+        logger.info(
+            "mcp_context_param_invalid: len=%d parsed=False era=%s", selection.raw_length, era
+        )
+        return SERVER_INSTRUCTIONS_BASE, True
+
+    settings = get_settings()
+    try:
+        async with asyncio.timeout_at(deadline):
+            name = await _read_default_context_name(
+                user_id=user_id,
+                context_id=selection.context_id,
+                key_workspace_id=key_workspace_id,
+                timeout_ms=settings.mcp_guardrail_digest_timeout_ms,
+            )
+    except Exception as e:  # noqa: BLE001 - fail open to the base text
+        logger.warning(
+            "mcp_default_context_instructions_failed: reason=%s era=%s", type(e).__name__, era
+        )
+        return SERVER_INSTRUCTIONS_BASE, True
+    if name is None:
+        return SERVER_INSTRUCTIONS_BASE, True
+    logger.info(
+        "mcp_default_context_instructions_served: context_id=%s era=%s source=url",
+        str(selection.context_id),
+        era,
+    )
+    return default_context_instructions(name), True
 
 
 async def build_instructions(
@@ -484,6 +607,12 @@ async def build_instructions(
     is all this caller can ever get (a connector key, or the fallback switched
     off), whose bytes are static per deployment and identical for every caller.
 
+    #2125: the base text itself may name the connection's default context
+    (``_instructions_base``); ``private`` is then ``True`` as well. Without
+    ``?guardrails=``, a ``?context=<uuid>`` default is also the digest's
+    context (as if ``?guardrails=<uuid>`` were given), so the text never names
+    one context and digests another. Both reads share one budget.
+
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
     and never fail the handshake. Denies produce no signal beyond debug level;
@@ -492,14 +621,30 @@ async def build_instructions(
     """
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
+    from mcp_server.tools._default_context import select_default_context
     from services.guardrail_digest import (
+        GuardrailSelection,
         render_instructions,
         select_guardrail_context,
         tool_view_names,
     )
 
     settings = get_settings()
+    # One budget for the default-context name and the digest together.
+    deadline = asyncio.get_running_loop().time() + settings.mcp_guardrail_digest_timeout_ms / 1000
+    base, base_private = await _instructions_base(
+        user_id=user_id,
+        query_string=query_string,
+        key_workspace_id=key_workspace_id,
+        era=era,
+        deadline=deadline,
+    )
     selection = select_guardrail_context(query_string)
+    default_selection = select_default_context(query_string)
+    if selection.mode == "binding" and default_selection.mode == "url":
+        # #2125: without ?guardrails=, the digest follows the ?context= default,
+        # so the instructions never name one context and digest another.
+        selection = GuardrailSelection("explicit", default_selection.context_id)
     scope = get_agent_scope()
     user_fallback = (
         selection.mode == "binding"
@@ -508,24 +653,24 @@ async def build_instructions(
         and settings.mcp_guardrail_digest_last_used_fallback
         and not get_mcp_connector_credential()
     )
-    attempted = selection.mode != "binding" or scope is not None or user_fallback
+    attempted = selection.mode != "binding" or scope is not None or user_fallback or base_private
 
     if not settings.mcp_guardrail_digest_enabled:
-        return SERVER_INSTRUCTIONS_BASE, attempted
+        return base, attempted
     if selection.mode == "ignored":
         logger.info(
             "mcp_guardrails_param_ignored: len=%d parsed=False era=%s",
             selection.raw_length,
             era,
         )
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
     if selection.mode == "off":
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
     if selection.mode == "binding" and scope is None and not user_fallback:
-        return SERVER_INSTRUCTIONS_BASE, False
+        return base, base_private
 
     try:
-        async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
+        async with asyncio.timeout_at(deadline):
             entries = await _read_digest(
                 user_id=user_id,
                 selection=selection,
@@ -535,14 +680,12 @@ async def build_instructions(
             )
     except Exception as e:  # noqa: BLE001 - fail open to the base text
         logger.warning("mcp_guardrail_digest_failed: reason=%s era=%s", type(e).__name__, era)
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
 
     if entries is None or not entries.entries:
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
 
-    instructions = render_instructions(
-        SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query_string)
-    )
+    instructions = render_instructions(base, entries, tool_names=tool_view_names(query_string))
     logger.info(
         "mcp_guardrail_digest_served: context_id=%s entries=%d truncated=%s era=%s selection=%s",
         str(entries.context_id),
@@ -1554,7 +1697,9 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # Must use api_key_workspace_id, NOT the conflated workspace_id below —
         # the latter becomes the user's *current* workspace for OAuth2/session/
         # global-key auth and would over-confine those (non-key-scoped) callers.
+        from mcp_server.tools._default_context import select_default_context
         from mcp_server.tools._helpers import (
+            set_mcp_default_context_selection,
             set_mcp_guardrails_selection,
             set_mcp_key_workspace_scope,
             set_mcp_tool_view_query,
@@ -1572,6 +1717,10 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # #1849: the same URL picks what ``tools/list`` shows; ``describe_tools``
         # derives the view from these bytes when (and only when) it is called.
         set_mcp_tool_view_query(scope.get("query_string", b""))
+        # #2125: ``?context=<uuid>`` names the connection's default context;
+        # the tool dispatcher fills a missing ``context_id`` from it. Pure parse
+        # here, per request on both eras (sessions are not extended).
+        set_mcp_default_context_selection(select_default_context(scope.get("query_string", b"")))
 
         # RFC-0002 P0-4 (#1277): parse W3C traceparent + baggage into the
         # per-request correlation contextvar at the same auth seam (sibling of

@@ -216,10 +216,11 @@ def test_registration():
     from mcp_server.tools._profiles import CORE_TOOLS
 
     (definition,) = [t for t in get_tool_definitions() if t["name"] == "rollback_session"]
-    # #2121: session_id or since — exactly one, checked by the handler.
-    assert definition["inputSchema"]["required"] == ["context_id"]
+    # #2121: session_id or since — exactly one, checked by the handler;
+    # #2125: context_id may come from the ?context= default.
+    assert definition["inputSchema"]["required"] == []
     props = definition["inputSchema"]["properties"]
-    assert {"session_id", "since", "until", "dry_run"} <= set(props)
+    assert {"context_id", "session_id", "since", "until", "dry_run"} <= set(props)
     assert "since" in definition["description"] and "7 days" in definition["description"]
     annotations = TOOL_ANNOTATIONS["rollback_session"]
     assert annotations["destructiveHint"] is True and annotations["readOnlyHint"] is False

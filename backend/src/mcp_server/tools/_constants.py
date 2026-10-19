@@ -132,8 +132,9 @@ get_context_info(context_id) returns the context block alone (after switching co
 - Use filters: {"type": "decision"}, {"tags": ["project:x"]}
 
 ## Context Management
-All tools require context_id argument (except list_contexts and create_context).
-Use list_contexts() first to discover available context IDs.
+Most tools take a context_id argument (list_contexts and create_context do not).
+With ?context=<context_id> on the MCP URL it may be omitted: calls run in that default context.
+Otherwise use list_contexts() first to discover available context IDs.
 Use create_context() to create a new context (requires owner/admin role).
 Then pass context_id to other tools: remember(), recall(), forget(), reference(), explore(), get_context_info().
 

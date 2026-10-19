@@ -223,9 +223,8 @@ async def test_caller_errors_on_core_tools_point_at_the_manual(tool, args, error
     assert f'guide(["{tool}"])' in payload["help"]
     if error == "context_id_required":
         # The pre-dispatch check has help of its own; the pointer joins it.
-        assert payload["help"].startswith(
-            "Use list_contexts() first to discover available context IDs."
-        )
+        # #2125: it names both ways to supply one — the argument or ?context=.
+        assert payload["help"].startswith("Pass context_id, or set a default for this connection")
 
 
 @pytest.mark.asyncio

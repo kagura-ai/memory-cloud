@@ -51,7 +51,7 @@ def test_remember_batch_is_a_core_additive_write_with_a_manual():
     assert "remember_batch" in GUIDE_INDEX
     assert _VERIFY_WITH["remember_batch"] == "recall"
     tool = next(t for t in get_tool_definitions() if t["name"] == "remember_batch")
-    assert tool["inputSchema"]["required"] == ["context_id", "items"]
+    assert tool["inputSchema"]["required"] == ["items"]  # #2125: ?context= default
     assert tool["inputSchema"]["properties"]["items"]["maxItems"] == MAX_BATCH_ITEMS
 
 
