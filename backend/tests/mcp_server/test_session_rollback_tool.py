@@ -38,6 +38,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         "role": ContextRole.EDITOR,
         "result": sr.RollbackResult(dry_run=True, items=[], events=0, remaining=0),
         "unfinished_until": None,
+        "db_now": datetime.now(UTC).replace(tzinfo=None),
     }
     defaults.update(patches)
     service = AsyncMock(side_effect=defaults["result"])
@@ -59,6 +60,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         patch.object(
             sr, "unfinished_window_until", AsyncMock(return_value=defaults["unfinished_until"])
         ) as unfinished,
+        patch.object(tool, "_db_now", AsyncMock(return_value=defaults["db_now"])),
     ):
         (block,) = await tool.handle_rollback_session(
             {"context_id": str(CTX), **args}, "caller", WS
@@ -269,17 +271,12 @@ HOUR_AGO = _iso(NOW - timedelta(hours=1))
         ({"since": "yesterday"}, "validation_error", "since"),
         ({"since": HOUR_AGO, "until": "soon"}, "validation_error", "until"),
         ({"since": 5}, "validation_error", "ISO 8601"),
+        ({"since": HOUR_AGO, "until": ""}, "validation_error", "until"),
         ({"since": HOUR_AGO, "until": HOUR_AGO}, "validation_error", "later than since"),
         (
             {"since": HOUR_AGO, "until": _iso(NOW - timedelta(hours=2))},
             "validation_error",
             "later than since",
-        ),
-        ({"since": _iso(NOW + timedelta(hours=1))}, "validation_error", "earlier than now"),
-        (
-            {"since": _iso(NOW - timedelta(days=8)), "until": _iso(NOW - timedelta(hours=1))},
-            "validation_error",
-            "7 days",
         ),
         ({"since": HOUR_AGO, "dry_run": "no"}, "validation_error", "dry_run"),
     ],
@@ -309,15 +306,46 @@ async def test_window_is_the_callers_own_principal_even_for_an_owner():
 
 
 @pytest.mark.asyncio
-async def test_window_until_is_clamped_to_now_and_echoed():
-    since = NOW - timedelta(hours=1)
-    payload, db = await _call({"since": _iso(since), "until": _iso(NOW + timedelta(days=1))})
+@pytest.mark.parametrize(
+    ("args", "words"),
+    [
+        ({"since": _iso(NOW + timedelta(hours=1))}, "earlier than now"),
+        (
+            {"since": _iso(NOW - timedelta(days=8)), "until": _iso(NOW - timedelta(hours=1))},
+            "7 days",
+        ),
+    ],
+)
+async def test_window_against_now_is_checked_on_the_database_clock(args, words):
+    payload, db = await _call(args, db_now=NOW)
+    assert payload["error"] == "validation_error" and words in payload["message"]
+    db.service.assert_not_awaited()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_past_until_is_kept_and_echoed():
+    since, until = NOW - timedelta(hours=2), NOW - timedelta(hours=1)
+    payload, db = await _call({"since": _iso(since), "until": _iso(until)}, db_now=NOW)
     scope = db.service.await_args.kwargs["scope"]
-    assert scope.since == since
-    assert NOW <= scope.until <= datetime.now(UTC).replace(tzinfo=None)
+    assert (scope.since, scope.until) == (since, until)
     assert payload["since"] == _iso(since) and "session_id" not in payload
-    assert payload["until"] == to_utc_iso(scope.until)
-    db.unfinished.assert_not_awaited()  # an explicit until is never replaced
+    assert payload["until"] == to_utc_iso(until)
+    assert "dry_run=false" in payload["help"]  # act on exactly this window
+    db.unfinished.assert_not_awaited()  # an explicit past until is never replaced
+
+
+@pytest.mark.asyncio
+async def test_a_future_until_counts_as_omitted():
+    """Clamped to now, or continuing the unfinished window: a retry with the
+    same arguments lands on the same record instead of a new now."""
+    since = NOW - timedelta(hours=1)
+    future = {"since": _iso(since), "until": _iso(NOW + timedelta(days=1))}
+    _, db = await _call(future, db_now=NOW)
+    assert db.service.await_args.kwargs["scope"].until == NOW
+    earlier = NOW - timedelta(minutes=30)
+    _, db = await _call(future, db_now=NOW + timedelta(minutes=5), unfinished_until=earlier)
+    assert db.service.await_args.kwargs["scope"].until == earlier
 
 
 @pytest.mark.asyncio
@@ -328,9 +356,9 @@ async def test_an_omitted_until_continues_the_unfinished_window():
     assert db.service.await_args.kwargs["scope"].until == earlier
     principal = db.unfinished.await_args.args[2]
     assert principal == sr.SessionPrincipal("caller", None)
-    # None unfinished: the window ends now.
-    _, db = await _call({"since": _iso(since)})
-    assert db.service.await_args.kwargs["scope"].until >= NOW
+    # None unfinished: the window ends now (the database clock).
+    _, db = await _call({"since": _iso(since)}, db_now=NOW)
+    assert db.service.await_args.kwargs["scope"].until == NOW
 
 
 @pytest.mark.asyncio

@@ -2058,7 +2058,7 @@ Manual: guide(["changes_since"]).""",
                     },
                     "by_me": {
                         "type": "boolean",
-                        "description": "true: only your own writes (same user, same agent credential), any session — what rollback_session(since) undoes.",
+                        "description": "true: only your own writes (same user, same agent credential), in any session.",
                     },
                     "limit": {
                         "type": "integer",

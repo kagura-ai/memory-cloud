@@ -10,9 +10,10 @@ Exactly one mode per call: ``session_id``, or ``since`` (+ ``until``) for the
 caller's own writes in a time window — for clients that have no session id
 (the stateless MCP transport). The window is always the caller's own
 principal (verified sub + the credential's agent), never a context owner's
-override; it is at most ``MAX_ROLLBACK_WINDOW`` wide, ``until`` is clamped to
-now, and an omitted ``until`` continues the caller's unfinished rollback of a
-window from the same ``since`` before it defaults to now.
+override; it is at most ``MAX_ROLLBACK_WINDOW`` wide, and an omitted ``until``
+(or one later than now) continues the caller's unfinished rollback of a
+window from the same ``since`` before it defaults to now. "Now" is the
+database clock, which stamps ``memory_revisions.at``.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from mcp_server.tools._helpers import (
     _success_response,
     execute_with_timeout,
 )
-from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso, utcnow
+from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -68,6 +69,9 @@ _NO_WRITES_HELP = (
     "you wrote and when."
 )
 _CONTINUE_HELP = "Call again with the same since and until to continue."
+_DRY_RUN_WINDOW_HELP = (
+    "Call with the same since and until and dry_run=false to act on exactly this window."
+)
 _PARTIAL_HELP = (
     "Every item not listed in summary.errors was handled and saved. Call "
     "rollback_session again to retry the failed items (they are planned again "
@@ -82,7 +86,7 @@ class _Args:
 
     session_id: str | None
     since: datetime | None
-    # Explicit until, clamped to now; None in session mode or when omitted.
+    # Explicit until (not yet compared with now); None in session mode or when omitted.
     until: datetime | None
     dry_run: bool
 
@@ -101,30 +105,57 @@ def _window_too_wide(since: datetime, until: datetime) -> list[TextContent] | No
 
 
 def _parse_window(
-    since_arg: Any, until_arg: Any, now: datetime
+    since_arg: Any, until_arg: Any
 ) -> tuple[datetime, datetime | None] | list[TextContent]:
-    """``since`` / ``until`` → naive UTC; ``until`` clamped to ``now`` (naive UTC)."""
+    """``since`` / ``until`` → naive UTC. Comparing them with now needs the database clock."""
     if not isinstance(since_arg, str) or (until_arg is not None and not isinstance(until_arg, str)):
         return _error_response("validation_error", "since and until must be ISO 8601 strings.")
     try:
         since = to_naive_utc(parse_iso8601_to_aware(since_arg, "since"))
-        until = to_naive_utc(parse_iso8601_to_aware(until_arg, "until")) if until_arg else None
+        until = (
+            to_naive_utc(parse_iso8601_to_aware(until_arg, "until"))
+            if until_arg is not None
+            else None
+        )
     except ValueError as e:
         return _error_response("validation_error", str(e))
     if until is not None and until <= since:
         return _error_response("validation_error", "until must be later than since.")
-    if since >= now:
-        return _error_response("validation_error", "since must be earlier than now.")
-    if until is not None:
-        # Clock skew tolerance: nothing is written after now.
-        until = min(until, now)
-        too_wide = _window_too_wide(since, until)
-        if too_wide is not None:
-            return too_wide
     return since, until
 
 
-def _parse_args(args: dict[str, Any], now: datetime) -> _Args | list[TextContent]:
+async def _db_now(db: Any) -> datetime:
+    """Now on the database clock (naive UTC) — the clock that stamps ``memory_revisions.at``."""
+    from sqlalchemy import func, select
+
+    return to_naive_utc(await db.scalar(select(func.clock_timestamp())))
+
+
+async def _resolve_window(
+    db: Any, context_id: UUID, principal: Any, since: datetime, until: datetime | None
+) -> tuple[datetime, datetime] | list[TextContent]:
+    """The effective window, or the refusal.
+
+    ``since`` must be before now. An ``until`` later than now is treated like
+    an omitted one, so a retry with the same arguments continues the same
+    record instead of opening a new window at a later now: it becomes the
+    ``until`` of the caller's unfinished rollback of a window from ``since``,
+    else now.
+    """
+    from services.session_rollback import unfinished_window_until
+
+    now = await _db_now(db)
+    if since >= now:
+        return _error_response("validation_error", "since must be earlier than now.")
+    if until is None or until > now:
+        until = (await unfinished_window_until(db, context_id, principal, since)) or now
+    too_wide = _window_too_wide(since, until)
+    if too_wide is not None:
+        return too_wide
+    return since, until
+
+
+def _parse_args(args: dict[str, Any]) -> _Args | list[TextContent]:
     from api.correlation import validate_correlation_token
 
     session_id = args.get("session_id")
@@ -152,7 +183,7 @@ def _parse_args(args: dict[str, Any], now: datetime) -> _Args | list[TextContent
                 help=_SESSION_ID_HELP,
             )
     else:
-        window = _parse_window(since_arg, until_arg, now)
+        window = _parse_window(since_arg, until_arg)
         if isinstance(window, list):
             return window
         since, until = window
@@ -177,12 +208,10 @@ async def handle_rollback_session(
         context_role,
         finish,
         rollback_session,
-        unfinished_window_until,
     )
     from services.write_provenance import caller_principal
 
-    now = utcnow()
-    parsed = _parse_args(args, now)
+    parsed = _parse_args(args)
     if isinstance(parsed, list):
         return parsed
     session_id, since, until, dry_run = (
@@ -225,12 +254,11 @@ async def handle_rollback_session(
                 # #2121: always the caller's own principal — the owner
                 # override is session-mode only.
                 principal = caller_principal(user_id)
-                if until is None:
-                    until = (await unfinished_window_until(db, context_id, principal, since)) or now
-                    too_wide = _window_too_wide(since, until)
-                    if too_wide is not None:
-                        await db.rollback()
-                        return too_wide
+                window = await _resolve_window(db, context_id, principal, since, until)
+                if isinstance(window, list):
+                    await db.rollback()
+                    return window
+                since, until = window
                 mode = {"since": to_utc_iso(since), "until": to_utc_iso(until)}
                 scope = SessionScope(
                     context_id=context_id,
@@ -343,6 +371,7 @@ async def handle_rollback_session(
                 plan=plan_counts(result.items),
                 **listing,
                 **common,
+                **({"help": _DRY_RUN_WINDOW_HELP} if since is not None else {}),
             )
         if failed:
             return _error_response(
