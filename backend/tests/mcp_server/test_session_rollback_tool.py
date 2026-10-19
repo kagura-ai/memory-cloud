@@ -60,7 +60,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         patch.object(
             sr, "unfinished_window_until", AsyncMock(return_value=defaults["unfinished_until"])
         ) as unfinished,
-        patch.object(tool, "_db_now", AsyncMock(return_value=defaults["db_now"])),
+        patch.object(tool, "_window_now", AsyncMock(return_value=defaults["db_now"])),
     ):
         (block,) = await tool.handle_rollback_session(
             {"context_id": str(CTX), **args}, "caller", WS
@@ -279,6 +279,9 @@ HOUR_AGO = _iso(NOW - timedelta(hours=1))
             "later than since",
         ),
         ({"since": HOUR_AGO, "dry_run": "no"}, "validation_error", "dry_run"),
+        # Out of the datetime range once moved to UTC (gate2: no internal_error).
+        ({"since": "0001-01-01T00:00:00+05:00"}, "validation_error", "since"),
+        ({"since": HOUR_AGO, "until": "9999-12-31T23:59:59-05:00"}, "validation_error", "until"),
     ],
 )
 async def test_window_arguments_are_checked_before_the_database(args, error, words):
@@ -356,7 +359,7 @@ async def test_an_omitted_until_continues_the_unfinished_window():
     assert db.service.await_args.kwargs["scope"].until == earlier
     principal = db.unfinished.await_args.args[2]
     assert principal == sr.SessionPrincipal("caller", None)
-    # None unfinished: the window ends now (the database clock).
+    # None unfinished: the window ends now.
     _, db = await _call({"since": _iso(since)}, db_now=NOW)
     assert db.service.await_args.kwargs["scope"].until == NOW
 
@@ -399,3 +402,55 @@ async def test_no_writes_in_window_and_a_finished_window():
     )
     assert payload["error"] == "already_rolled_back" and "rollback_id" not in payload
     assert payload["since"] and "by_me=true" in payload["help"]
+
+
+@pytest.mark.asyncio
+async def test_exactly_seven_days_is_allowed():
+    since = NOW - timedelta(days=8)
+    until = since + sr.MAX_ROLLBACK_WINDOW
+    payload, db = await _call({"since": _iso(since), "until": _iso(until)}, db_now=NOW)
+    assert payload["status"] == "dry_run"
+    assert db.service.await_args.kwargs["scope"].until == until
+
+
+@pytest.mark.asyncio
+async def test_window_now_is_the_later_of_the_two_clocks():
+    """Created events are stamped by the database, edits and forgets by the
+    server: a window ending now must not cut off either."""
+    ahead = NOW + timedelta(minutes=1)
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=ahead.replace(tzinfo=UTC))
+    assert await tool._window_now(db) == ahead
+    db.scalar = AsyncMock(return_value=(NOW - timedelta(minutes=1)).replace(tzinfo=UTC))
+    assert await tool._window_now(db) >= NOW
+
+
+@pytest.mark.asyncio
+async def test_window_partial_rollback_says_continue_with_the_same_window():
+    result = sr.RollbackResult(
+        dry_run=False,
+        items=[],
+        events=2,
+        remaining=1,
+        rollback_id=9,
+        status="partial",
+        summary={"failed": 1, "errors": ["Memory x (restore) failed: internal_error"]},
+        totals={"failed": 1},
+        errors=["Memory x (restore) failed: internal_error"],
+    )
+    payload, _ = await _call({"since": HOUR_AGO, "dry_run": False}, result=result)
+    assert payload["error"] == "partial_rollback"
+    assert "same since and until" in payload["help"]
+    assert payload["since"] and payload["until"] and "session_id" not in payload
+
+
+def test_a_window_wider_than_the_cap_is_refused_by_the_scope_too():
+    since = NOW - timedelta(days=10)
+    with pytest.raises(ValueError, match="MAX_ROLLBACK_WINDOW"):
+        sr.SessionScope(
+            CTX,
+            None,
+            sr.SessionPrincipal("caller", None),
+            since=since,
+            until=since + sr.MAX_ROLLBACK_WINDOW + timedelta(microseconds=1),
+        )

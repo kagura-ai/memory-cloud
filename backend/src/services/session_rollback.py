@@ -223,6 +223,8 @@ class SessionScope:
             raise ValueError("a window needs until")
         if self.until <= self.since:
             raise ValueError("until must be later than since")
+        if self.until - self.since > MAX_ROLLBACK_WINDOW:
+            raise ValueError("a window is at most MAX_ROLLBACK_WINDOW wide")
         if self.principal is None:
             raise ValueError("a window is always the caller's own principal")
 

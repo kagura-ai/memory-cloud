@@ -590,6 +590,10 @@ def test_window_foreign_predicate_is_the_null_safe_negation():
     ):
         assert term in foreign, term
     assert " OR " in foreign and "session_id" not in foreign
+    # An agent principal counts the user's own unbound writes as foreign.
+    agent = uuid.uuid4()
+    bound = _sql(sr._foreign_predicate(_window(sr.SessionPrincipal("u1", agent))))
+    assert f"memory_revisions.agent_id IS DISTINCT FROM '{agent}'" in bound
 
 
 def test_window_record_key_and_lock_are_the_principals():

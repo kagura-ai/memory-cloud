@@ -1210,17 +1210,20 @@ async def test_window_without_writes_is_no_writes_in_window(world: World) -> Non
     with pytest.raises(sr.NoWritesInWindowError):
         await _window(w, SessionPrincipal(w.member, None), since, until, dry_run=False)
     await w.session.rollback()
-    # Rollback-written events alone are nothing to undo either.
+    # Rollback-written events alone are nothing to undo either. The rollback's
+    # events are moved an hour back, away from the API write (the World clock
+    # runs a few ms ahead of now, so "just after the rollback" could catch it).
     owner = SessionPrincipal(w.owner, None)
     await _window(w, owner, since, until, dry_run=False)
     await w.session.commit()
-    rollback_at = await w.session.scalar(
-        select(func.min(MemoryRevision.at)).where(
-            MemoryRevision.context_id == w.context_id, MemoryRevision.writer == "rollback"
-        )
+    parked = since - timedelta(hours=1)
+    await w.session.execute(
+        text("UPDATE memory_revisions SET at = :at WHERE context_id = :c AND writer = 'rollback'"),
+        {"at": parked, "c": w.context_id},
     )
+    await w.session.commit()
     with pytest.raises(sr.NoWritesInWindowError):
-        await _window(w, owner, rollback_at, rollback_at + _MS, dry_run=True)
+        await _window(w, owner, parked - _MS, parked + _MS, dry_run=True)
 
 
 async def test_changes_in_session_by_principal_respects_the_private_owner_filter(
@@ -1374,3 +1377,113 @@ def test_f05_round_trip() -> None:
             _upgrade_to("head")
         finally:
             engine.dispose()
+
+
+async def test_window_skips_a_memory_another_writer_changed_after_it(world: World) -> None:
+    """The foreign predicate on Postgres: another user, the same user's agent
+    key, and (for an agent principal) the same user's unbound credential all
+    count as someone else — the memory is skipped, never reverted over them."""
+    w, member, owner = world, world.member, world.owner
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    by_owner = await w.create(member, None, summary="edited later by the owner")
+    by_agent = await w.create(member, None, summary="edited later by my agent key")
+    agent_made = await w.create(member, None, agent=w.agent, summary="my agent's")
+    until = _mark(w)
+    await w.update(by_owner, owner, None, importance=0.2)
+    await w.update(by_agent, member, None, agent=w.agent, importance=0.3)
+    await w.update(agent_made, member, None, importance=0.4)  # unbound user edit
+    await w.session.commit()
+    before = {m: await w.row(m) for m in (by_owner, by_agent, agent_made)}
+
+    plan = await _window(w, me, since, until, dry_run=True)
+    causes = {i.memory_id: (i.action, i.cause) for i in plan.items}
+    assert causes == {
+        by_owner: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+        by_agent: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+    }
+    agent_plan = await _window(w, SessionPrincipal(member, w.agent), since, until, dry_run=True)
+    assert [(i.memory_id, i.cause) for i in agent_plan.items] == [
+        (agent_made, sr.CAUSE_MODIFIED_SINCE)
+    ]
+    await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    for memory_id, row in before.items():
+        assert await w.row(memory_id) == row
+
+
+async def test_unfinished_window_until_prefers_the_newest_partial_or_in_progress(
+    world: World,
+) -> None:
+    w = world
+    me = SessionPrincipal(w.member, None)
+    since = utcnow() - timedelta(hours=3)
+
+    def record(until: Any, status: str) -> MemorySessionRollback:
+        return MemorySessionRollback(
+            workspace_id=w.workspace_id,
+            context_id=w.context_id,
+            principal_user_id=w.member,
+            requested_by=w.member,
+            status=status,
+            window_since=since,
+            window_until=until,
+        )
+
+    first, second, done = (since + timedelta(hours=h) for h in (1, 2, 3))
+    w.session.add(record(first, "in_progress"))
+    await w.session.flush()
+    w.session.add(record(second, "partial"))
+    await w.session.flush()
+    w.session.add(record(done, "completed"))
+    await w.session.commit()
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, since) == second
+    # Another since, or the agent key, has none.
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, first) is None
+    agent = SessionPrincipal(w.member, w.agent)
+    assert await sr.unfinished_window_until(w.session, w.context_id, agent, since) is None
+
+
+async def test_the_window_key_is_unique_per_principal(world: World) -> None:
+    """The partial unique index, NULL agent included (COALESCE)."""
+    from sqlalchemy.exc import IntegrityError
+
+    w = world
+    since = utcnow() - timedelta(hours=2)
+    until = since + timedelta(hours=1)
+
+    def record(agent: Any) -> MemorySessionRollback:
+        return MemorySessionRollback(
+            workspace_id=w.workspace_id,
+            context_id=w.context_id,
+            principal_user_id=w.member,
+            agent_id=agent,
+            requested_by=w.member,
+            status="completed",
+            window_since=since,
+            window_until=until,
+        )
+
+    w.session.add_all([record(None), record(w.agent)])
+    await w.session.commit()
+    w.session.add(record(None))
+    with pytest.raises(IntegrityError):
+        await w.session.commit()
+    await w.session.rollback()
+
+
+async def test_window_then_session_reverses_nothing_twice(world: World) -> None:
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    target = await w.create(member, "S-AFTER")
+    until = _mark(w)
+    await w.session.commit()
+    window = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert [i.memory_id for i in window.items] == [target]
+    with pytest.raises(sr.AlreadyRolledBackError) as refused:
+        await _rollback(w, "S-AFTER", me, dry_run=False)
+    assert refused.value.rollback_id is None
+    await w.session.rollback()
+    assert await _rollback_events(w, target) == ["forgotten"]

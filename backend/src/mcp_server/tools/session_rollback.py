@@ -12,8 +12,11 @@ caller's own writes in a time window — for clients that have no session id
 principal (verified sub + the credential's agent), never a context owner's
 override; it is at most ``MAX_ROLLBACK_WINDOW`` wide, and an omitted ``until``
 (or one later than now) continues the caller's unfinished rollback of a
-window from the same ``since`` before it defaults to now. "Now" is the
-database clock, which stamps ``memory_revisions.at``.
+window from the same ``since`` before it defaults to now. "Now" is the later
+of the database clock and this server's clock: ``memory_revisions.at`` comes
+from both (a created event takes the database's ``now()``, an edit or a
+forget the server's ``utcnow()``), so neither clock alone may cut off a
+write that has already happened.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from mcp_server.tools._helpers import (
     _success_response,
     execute_with_timeout,
 )
-from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso
+from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,7 +110,7 @@ def _window_too_wide(since: datetime, until: datetime) -> list[TextContent] | No
 def _parse_window(
     since_arg: Any, until_arg: Any
 ) -> tuple[datetime, datetime | None] | list[TextContent]:
-    """``since`` / ``until`` → naive UTC. Comparing them with now needs the database clock."""
+    """``since`` / ``until`` → naive UTC. Comparing them with now needs the database (``_window_now``)."""
     if not isinstance(since_arg, str) or (until_arg is not None and not isinstance(until_arg, str)):
         return _error_response("validation_error", "since and until must be ISO 8601 strings.")
     try:
@@ -117,18 +120,25 @@ def _parse_window(
             if until_arg is not None
             else None
         )
-    except ValueError as e:
-        return _error_response("validation_error", str(e))
+    except (ValueError, OverflowError) as e:
+        # OverflowError: a year-1 / year-9999 value with an offset leaves the
+        # datetime range when it is moved to UTC.
+        return _error_response("validation_error", f"since / until: {e}")
     if until is not None and until <= since:
         return _error_response("validation_error", "until must be later than since.")
     return since, until
 
 
-async def _db_now(db: Any) -> datetime:
-    """Now on the database clock (naive UTC) — the clock that stamps ``memory_revisions.at``."""
+async def _window_now(db: Any) -> datetime:
+    """Now for a window (naive UTC): the later of the database and the server clock.
+
+    ``memory_revisions.at`` is stamped by both — the database's ``now()`` on a
+    created event, the server's ``utcnow()`` on an edit or a forget.
+    """
     from sqlalchemy import func, select
 
-    return to_naive_utc(await db.scalar(select(func.clock_timestamp())))
+    db_now = to_naive_utc(await db.scalar(select(func.clock_timestamp())))
+    return max(db_now, utcnow())
 
 
 async def _resolve_window(
@@ -144,10 +154,14 @@ async def _resolve_window(
     """
     from services.session_rollback import unfinished_window_until
 
-    now = await _db_now(db)
+    now = await _window_now(db)
     if since >= now:
         return _error_response("validation_error", "since must be earlier than now.")
     if until is None or until > now:
+        # Read outside the rollback's advisory lock: two concurrent first
+        # calls may each end their window at their own now. Nothing is
+        # reversed twice (row locks + undone_by); the older record is closed
+        # by a later since-only call that continues it.
         until = (await unfinished_window_until(db, context_id, principal, since)) or now
     too_wide = _window_too_wide(since, until)
     if too_wide is not None:
