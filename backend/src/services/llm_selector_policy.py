@@ -319,7 +319,10 @@ async def _count_in_use_locked(db: AsyncSession, workspace_id: UUID) -> int:
     """``_count_in_use`` under the workspace's cap lock (held to the transaction end).
 
     The one place the lock key is built: every path that may turn a
-    context's flag on counts through it.
+    context's flag on counts through it. Lock order: a path that also takes
+    the ``content_chunk_contexts:`` cap lock takes that one first (the
+    search-config update runs the chunk gate before this one), so two
+    requests never wait on each other's lock in reverse order.
     """
     await db.execute(_CAP_LOCK_SQL.bindparams(key=f"llm_selector_contexts:{workspace_id}"))
     return await _count_in_use(db, workspace_id)

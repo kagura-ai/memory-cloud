@@ -231,10 +231,18 @@ async def test_the_repository_stamps_an_enable_and_clears_it_on_disable(db_sessi
     assert stamp is not None
     config = await repo.update(ctx, flag(True))
     assert config.llm_selector_enabled_at == stamp
+    # An update of another field keeps the flag and its rank.
+    other = ContextSearchConfigUpdate.model_construct(_fields_set={"fetch_factor"}, fetch_factor=4)
+    config = await repo.update(ctx, other)
+    assert (config.llm_selector_enabled, config.llm_selector_enabled_at) == (True, stamp)
     config = await repo.update(ctx, flag(False))
     assert (config.llm_selector_enabled, config.llm_selector_enabled_at) == (False, None)
     # The content chunk flag is untouched by the selector's changes.
     assert (config.content_chunks_enabled, config.content_chunks_enabled_at) == (False, None)
+    # A reset turns an enabled selector off and clears its stamp.
+    await repo.update(ctx, flag(True))
+    config = await repo.reset_to_default(ctx)
+    assert (config.llm_selector_enabled, config.llm_selector_enabled_at) == (False, None)
 
 
 # ---------------------------------------------------------------------------

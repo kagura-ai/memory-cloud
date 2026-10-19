@@ -88,6 +88,25 @@ async def test_an_editor_cannot_change_the_flag(stored, requested):
 
 
 @pytest.mark.asyncio
+async def test_a_denied_change_writes_nothing():
+    perms, repo = _perms(owner=False), _repo(False)
+    from api.routes.context_search_config import update_context_search_config
+
+    with (
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        pytest.raises(AuthorizationError),
+    ):
+        await update_context_search_config(
+            uuid4(),
+            ContextSearchConfigUpdate(**_BASE, llm_selector_enabled=True),
+            {"user_id": "u-1"},
+            db=AsyncMock(),
+        )
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_an_editor_can_change_other_fields():
     perms, repo = await _put(ContextSearchConfigUpdate(**_BASE), stored=False, owner=False)
     perms.check_context_owner.assert_not_awaited()
