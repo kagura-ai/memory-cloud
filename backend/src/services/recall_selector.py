@@ -447,8 +447,13 @@ def _failed(
     model: str | None = None,
     error_type: str | None = None,
 ) -> SelectorResult:
-    """The unselected page with ``{applied: false, reason}``, logged once."""
-    logger.warning(
+    """The unselected page with ``{applied: false, reason}``, logged once.
+
+    ``daily_cap`` logs at INFO: once a workspace is over the cap every recall
+    lands here, and ``recall_selector_cap_reached`` already warned once that day.
+    """
+    log = logger.info if reason == "daily_cap" else logger.warning
+    log(
         "recall_selector_failed_open",
         reason=reason,
         error_type=error_type,

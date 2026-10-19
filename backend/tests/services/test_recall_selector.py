@@ -582,6 +582,14 @@ class TestRunSelector:
             c for c in log.warning.call_args_list if c.args[0] == "recall_selector_cap_reached"
         ]
         assert len(capped) == 1
+        # Every capped recall fails open at INFO, not WARNING (the cap warning is daily).
+        assert not [
+            c for c in log.warning.call_args_list if c.args[0] == "recall_selector_failed_open"
+        ]
+        failed_info = [
+            c for c in log.info.call_args_list if c.args[0] == "recall_selector_failed_open"
+        ]
+        assert len(failed_info) == 2 and failed_info[0].kwargs["reason"] == "daily_cap"
 
     @pytest.mark.asyncio
     async def test_timeout(self) -> None:

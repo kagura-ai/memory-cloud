@@ -82,8 +82,7 @@ class PlanTier:
             on, exactly like ``max_content_chunk_contexts``: turning the flag
             on past it is refused, and over it (after a downgrade) only the
             earliest-enabled contexts stay active — the others keep their
-            flag, unused. 0 on a tier without the feature. Provisional values,
-            to be revisited once the stage is measured.
+            flag, unused. 0 on a tier without the feature.
         memory_limit: Maximum memories per workspace
         memories_per_day: Memories that may be CREATED per workspace per UTC
             day (Issue #1549, epic #1547). Enforced on every path that writes
@@ -195,7 +194,7 @@ PLAN_BASIC = PlanTier(
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=3,  # Issue #850 → Spec(2026-06-02): Basic 1→3
     max_content_chunk_contexts=1,  # Issue #2103
-    max_llm_selector_contexts=1,  # Issue #2144 (provisional)
+    max_llm_selector_contexts=1,  # Issue #2144
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
     memory_limit=10000,
     memories_per_day=300,  # Issue #1549 (#1547 matrix)
@@ -239,7 +238,7 @@ PLAN_PRO = PlanTier(
     # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=10,  # Issue #850 → Spec(2026-06-02): Pro 5→10
     max_content_chunk_contexts=5,  # Issue #2103
-    max_llm_selector_contexts=5,  # Issue #2144 (provisional)
+    max_llm_selector_contexts=5,  # Issue #2144
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
     memory_limit=100000,
     memories_per_day=2000,  # Issue #1549 (#1547 matrix)
@@ -290,7 +289,7 @@ PLAN_PROMAX = PlanTier(
     max_resource_tokens=150,
     max_connectors=50,
     max_content_chunk_contexts=20,  # Issue #2103
-    max_llm_selector_contexts=20,  # Issue #2144 (provisional)
+    max_llm_selector_contexts=20,  # Issue #2144
     allows_shared_contexts=True,
     memory_limit=100000,  # Issue #1547 matrix
     memories_per_day=10000,  # Issue #1549 (#1547 matrix)

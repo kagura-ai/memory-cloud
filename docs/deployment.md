@@ -1975,7 +1975,7 @@ stage; REST `/api/v1/memory/recall`, share keys, agent bootstrap and
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `LLM_SELECTOR_REQUIRE_PLAN` | `false` | Gate the selector by plan, on the [content chunk](#content-chunk-vectors-as-a-plan-feature) shape. `false` keeps every workspace able to turn `llm_selector_enabled` on in any number of contexts, with no plan query. `true`: turning the flag on needs a plan with the `llm_selector` feature (M and above, `403` `FEAT-001`) and a free slot under the plan's `max_llm_selector_contexts` (S 0 / M 1 / L 5 / XL 20, provisional, `429` `QUOTA-001`, `quota_type: llm_selector_contexts`); turning it off is always allowed. Shown as `features.llm_selector_require_plan` in `/system/info`. |
+| `LLM_SELECTOR_REQUIRE_PLAN` | `false` | Gate the selector by plan, on the [content chunk](#content-chunk-vectors-as-a-plan-feature) shape. `false` keeps every workspace able to turn `llm_selector_enabled` on in any number of contexts, with no plan query. `true`: turning the flag on needs a plan with the `llm_selector` feature (M and above, `403` `FEAT-001`) and a free slot under the plan's `max_llm_selector_contexts` (S 0 / M 1 / L 5 / XL 20, `429` `QUOTA-001`, `quota_type: llm_selector_contexts`); turning it off is always allowed. Shown as `features.llm_selector_require_plan` in `/system/info`. |
 | `PLAN_<KEY>_MAX_LLM_SELECTOR_CONTEXTS` | tier value | Per-tier override of `max_llm_selector_contexts` (`PLAN_FREE_…`, `PLAN_BASIC_…`, `PLAN_PRO_…`, `PLAN_PROMAX_…`). Read only where `LLM_SELECTOR_REQUIRE_PLAN` is on; 0 on a tier without the `llm_selector` feature whatever the number. |
 | `LLM_SELECTOR_TIMEOUT_SECONDS` | `8.0` | Time limit of one selector call; past it the recall returns its unselected page. |
 | `LLM_SELECTOR_MAX_ROWS` | `10` | Rows of a recall page sent to the selector; rows after them are returned unchanged. |
@@ -2036,7 +2036,7 @@ adds `selector_applied` and `selector_dropped_count` when the stage applied.
 | Event | Level | When |
 | --- | --- | --- |
 | `recall_selector_applied` | INFO | the selector applied: `rows_sent`, `kept`, `dropped`, provider, model, tokens, `select_ms` |
-| `recall_selector_failed_open` | WARNING | the stage failed open: `reason`, `error_type`, provider, model, `rows`, `elapsed_ms` |
+| `recall_selector_failed_open` | WARNING (INFO for `daily_cap`) | the stage failed open: `reason`, `error_type`, provider, model, `rows`, `elapsed_ms`. Over the daily cap every recall logs it, so `daily_cap` is INFO; `recall_selector_cap_reached` carries the warning once a day |
 | `recall_selector_inactive` | INFO | the flag is stored on but the plan gate treats it as off |
 | `recall_selector_cap_reached` | WARNING | a workspace hit `LLM_SELECTOR_MAX_CALLS_PER_DAY`. Logged once per workspace per UTC day |
 | `recall_selector_ledger_failed` | WARNING | the `llm_call_log` row could not be written; the page is unaffected |
@@ -2323,7 +2323,7 @@ Feature availability (the `features` set on each tier):
 | Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
 | Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
 | Content chunk vectors (`content_chunks`; contexts: `max_content_chunk_contexts` 0 / 1 / 5 / 20), only where `CONTENT_CHUNKS_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
-| Recall LLM selector (`llm_selector`; contexts: `max_llm_selector_contexts` 0 / 1 / 5 / 20, provisional), only where `LLM_SELECTOR_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
+| Recall LLM selector (`llm_selector`; contexts: `max_llm_selector_contexts` 0 / 1 / 5 / 20), only where `LLM_SELECTOR_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
 | Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
 
 **Block-new-only rule.** The three XL-only rows gate *creation* only. A
