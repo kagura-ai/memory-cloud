@@ -557,6 +557,17 @@ bootstrap(context_id=...)
 
 bootstrap(context_id=..., include=["pinned"], since="1d")
 -> Verify: components has only `pinned`; `since` is about one day before `generated_at`
+
+bootstrap(context_id=..., format="index", max_chars=3000)
+-> Verify: status=success, format="index", no `instructions` key; components.pinned.memories rows
+   are {memory_id, summary, type, importance}; every upcoming / changes row's summary is at most
+   80 characters (summary_cut=true when cut); the reply is at most 3,000 characters unless every
+   lane says truncated=true
+
+bootstrap(context_id=..., format="full", max_chars=3000)
+-> Verify: status="error", error="validation_error", the message names format="index"
+-> Skip both format calls on a server whose bootstrap has no `format` parameter (older than
+   v0.115.0)
 ```
 
 ### 7. Merge & usage tools
