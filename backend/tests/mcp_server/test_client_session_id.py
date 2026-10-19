@@ -5,7 +5,7 @@ without OTel baggage used to write without a session. It can now name its own
 run / conversation id:
 
 - ``params._meta['ai.kagura/sessionId']`` (one tools/call), or
-- the ``X-Session-Id`` header (the whole HTTP request);
+- the ``Kagura-Session-Id`` header (the whole HTTP request);
 
 with the baggage session's token rule (≤ 128 chars of ``[A-Za-z0-9._-]``;
 invalid → dropped with a logged reason, never an error) and the precedence
@@ -249,7 +249,7 @@ async def test_the_session_a_write_records_and_echoes(  # noqa: PLR0913
 ):
     body, headers = _call(era, meta)
     if header is not None:
-        headers[b"x-session-id"] = header.encode()
+        headers[b"kagura-session-id"] = header.encode()
     if baggage is not None:
         headers[b"baggage"] = baggage.encode()
 
@@ -267,7 +267,7 @@ async def test_the_session_a_write_records_and_echoes(  # noqa: PLR0913
 async def test_the_header_reaches_the_request_correlation_on_both_eras(asgi, seen):  # noqa: F811
     for era in ("stateless", "session"):
         body, headers = _call(era)
-        headers[b"x-session-id"] = b"run-7"
+        headers[b"kagura-session-id"] = b"run-7"
         await asgi(body, headers, b"profile=core")
         assert seen["session_id"] == "run-7"
 
@@ -305,3 +305,13 @@ def test_a_dropped_client_id_names_its_source_in_the_warning(monkeypatch, value,
         ("correlation_token_dropped", reason, SESSION_SOURCE_HEADER),
         ("correlation_token_dropped", reason, SESSION_SOURCE_META),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_generic_session_header_is_not_the_client_session(asgi, seen):  # noqa: F811
+    """The header is namespaced: a gateway's own ``X-Session-Id`` is not read."""
+    for era, expected in (("stateless", None), ("session", "sess-1")):
+        body, headers = _call(era)
+        headers[b"x-session-id"] = b"gateway-sticky-1"
+        await asgi(body, headers, b"profile=core")
+        assert seen["session_id"] == expected

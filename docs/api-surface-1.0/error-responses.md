@@ -159,7 +159,7 @@ The server is dual-era (#1544). The tables above describe the **legacy** half (`
 
 **Mirrored headers.** The spec makes the mirrored headers MUSTs, and since #1740 an absent one is answered `400` `-32020` like a contradicting one. `MCP_REQUIRE_MIRRORED_HEADERS=false` restores the earlier leniency: the request is served and a warning naming the gaps is logged; a contradicting header is still rejected. `server/discover` is exempt either way — it is the probe a client sends before it knows what to mirror. An absent `_meta.clientCapabilities` (body metadata nothing here relies on) stays tolerated and logged. The `MCP-Protocol-Version` header is not an era signal (legacy session clients send it too).
 
-**Client session id (#2122).** `params._meta["ai.kagura/sessionId"]` on a `tools/call` and the `X-Session-Id` header (either era) are optional and never produce an error: a value outside 1-128 characters of `[A-Za-z0-9._-]` is dropped and logged, and the call is served without it. They are not mirrored headers.
+**Client session id (#2122).** `params._meta["ai.kagura/sessionId"]` on a `tools/call` and the `Kagura-Session-Id` header (either era) are optional and never produce an error: a value outside 1-128 characters of `[A-Za-z0-9._-]` is dropped and logged, and the call is served without it. They are not mirrored headers.
 
 Successful results carry `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]`; `server/discover` and `tools/list` additionally carry the `ttlMs` / `cacheScope` caching hints.
 

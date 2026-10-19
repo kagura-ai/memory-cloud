@@ -350,7 +350,7 @@ def _session_response_field() -> dict[str, Any]:
     carry (it lives in a transport header the model does not read); the write
     tools echo it so the model can pass it to ``changes_since(session_id=)`` /
     ``rollback_session``. The same holds for a client-supplied id (``_meta``
-    ``ai.kagura/sessionId`` or ``X-Session-Id``, #2122). Omitted when the
+    ``ai.kagura/sessionId`` or ``Kagura-Session-Id``, #2122). Omitted when the
     request has no session.
     """
     from services.write_provenance import current_provenance

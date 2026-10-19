@@ -555,7 +555,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "(created / updated / forgotten / restored, each edit separately; no "
         "superseded): your own sessions only — the session is your OTel baggage "
         "session, else the id your client sends in params._meta['ai.kagura/sessionId'] "
-        "(that call) or the X-Session-Id header (the request; _meta wins), else the MCP "
+        "(that call) or the Kagura-Session-Id header (the request; _meta wins), else the MCP "
         "session id; a write reply echoes it as session_id — and a context owner may "
         "name any. "
         "by_me=true lists only your own writes (same user, same agent credential) "

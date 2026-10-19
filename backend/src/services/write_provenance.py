@@ -12,7 +12,7 @@ writer on ``memories.agent_id`` / ``memories.session_id``.
   (#2122): the OTel baggage session (``gen_ai.conversation.id`` /
   ``session.id``) > a client-supplied id on an MCP request —
   ``params._meta['ai.kagura/sessionId']`` (one tools/call) over the
-  ``X-Session-Id`` header (the whole request) > on the stateful MCP
+  ``Kagura-Session-Id`` header (the whole request) > on the stateful MCP
   transport, the protocol session id the transport fills in. Every source
   passes the same token rule (``api.correlation``).
 

@@ -8,7 +8,7 @@ real tool handlers write and read the database:
    ``_meta['ai.kagura/sessionId']`` record that session and echo it;
    ``changes_since(session_id=)`` lists the three writes and
    ``rollback_session(session_id=, dry_run=true)`` plans them.
-2. The ``X-Session-Id`` header does the same for the whole request.
+2. The ``Kagura-Session-Id`` header does the same for the whole request.
 3. Principal binding: another member naming the same id sees nothing —
    ``changes_since`` is empty and ``rollback_session`` is ``session_not_found``.
 4. A client sending no id still writes without a session, and the #2121

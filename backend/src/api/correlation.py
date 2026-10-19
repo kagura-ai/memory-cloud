@@ -46,7 +46,7 @@ BAGGAGE_RUN_ID = "kagura.agent.run.id"
 # baggage session; ``_meta`` (one JSON-RPC message) wins over the header (the
 # whole HTTP request) when both are sent.
 CLIENT_SESSION_META_KEY = "ai.kagura/sessionId"
-CLIENT_SESSION_HEADER = "x-session-id"
+CLIENT_SESSION_HEADER = "kagura-session-id"
 
 # Where ``CorrelationContext.session_id`` came from. Precedence (normative):
 # baggage > _meta > header > the stateful transport's Mcp-Session-Id — held
@@ -213,7 +213,7 @@ def build_correlation_from_headers(
     - ``trace_id``/``span_id`` from ``traceparent`` when valid, else generated.
     - ``session_id``/``run_id`` from baggage after token validation (invalid →
       dropped).
-    - ``client_session_id``: the MCP ``X-Session-Id`` header (#2122), the
+    - ``client_session_id``: the MCP ``Kagura-Session-Id`` header (#2122), the
       session when baggage named none (validated and dropped alike).
     - ``agent_claim`` = the raw baggage ``gen_ai.agent.id`` (unresolved).
     """
@@ -250,7 +250,7 @@ def offered_session(corr: CorrelationContext, value: Any, source: str) -> str | 
 
     The single place the session precedence is applied (#2122): ``value``
     wins only when ``source`` outranks the session ``corr`` already holds —
-    baggage > ``_meta`` > ``X-Session-Id`` > ``Mcp-Session-Id`` — and passes
+    baggage > ``_meta`` > ``Kagura-Session-Id`` > ``Mcp-Session-Id`` — and passes
     the token rule (an invalid value is dropped with a warning naming
     ``source``, never a request failure). A session held without a recorded
     source (a hand-built context) ranks as baggage: it is never overridden.
@@ -271,7 +271,7 @@ def client_session_scope(meta: Any) -> Iterator[None]:
 
     For the duration of the block the request's correlation names that
     session, so the writes it makes are recorded under it and echo it. It
-    overrides the ``X-Session-Id`` header and the stateful transport's
+    overrides the ``Kagura-Session-Id`` header and the stateful transport's
     ``Mcp-Session-Id``, never the OTel baggage session. An invalid value is
     dropped with a logged reason (``validate_correlation_token``), exactly as
     a baggage one is — never a request failure. The correlation is restored on

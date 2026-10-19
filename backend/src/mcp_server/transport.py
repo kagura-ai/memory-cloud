@@ -229,7 +229,7 @@ def _default_correlation_session(mcp_session_id: str) -> None:
     MCP session, with no client change. The id is server-minted (or
     re-adopted only in the server-minted shape) and passes the correlation
     token check like any baggage value. Baggage, when present, wins, and so
-    does a client-supplied ``X-Session-Id`` header or
+    does a client-supplied ``Kagura-Session-Id`` header or
     ``_meta['ai.kagura/sessionId']`` (#2122). Side effect: agent-key
     ``memory_access_events`` rows of such traffic now carry this session id
     too. Stateless (modern) requests have no protocol session: they keep the
@@ -1734,7 +1734,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # per-request correlation contextvar at the same auth seam (sibling of
         # the #963 key-workspace scope). Advisory-only — never fails the
         # request; missing/invalid headers → server-generated trace/span.
-        # #2122: a client-supplied ``X-Session-Id`` names the request's
+        # #2122: a client-supplied ``Kagura-Session-Id`` names the request's
         # session when baggage did not (both eras; ``_meta`` overrides it per
         # tools/call, see ``client_session_scope``).
         from api.correlation import (
