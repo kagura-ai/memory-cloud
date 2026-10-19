@@ -263,7 +263,7 @@ Full setup guide — every client, the memory-sync hook, the ready-to-use `.clau
 
 Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
 
-An agent's writes can be listed and undone: `changes_since` + `rollback_session` per session (a stateless MCP client can name its own session with `_meta["ai.kagura/sessionId"]` or an `Kagura-Session-Id` header), or — for clients without a session id — over a time window of your own writes (`by_me=true`, `since` / `until`); see [Which clients get a session id](docs/mcp-clients.md#which-clients-get-a-session-id).
+An agent's writes can be listed and undone: `changes_since` + `rollback_session` per session (a stateless MCP client can name its own session with `_meta["ai.kagura/sessionId"]` or a `Kagura-Session-Id` header), or — for clients without a session id — over a time window of your own writes (`by_me=true`, `since` / `until`); see [Which clients get a session id](docs/mcp-clients.md#which-clients-get-a-session-id).
 
 A client does not have to list all 72: the default URL [above](#connect-an-mcp-client) lists the 21 core tools (`?profile=full` lists everything), and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
