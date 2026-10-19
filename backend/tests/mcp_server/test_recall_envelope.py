@@ -760,6 +760,16 @@ class TestToolDescription:
             assert key in returns, f"{key} not marked optional in recall Returns"
         assert "omitted" in returns
 
+    def test_declares_full_and_the_content_keys(self):
+        """#2124: the top ``full`` results carry content; the keys are listed."""
+        tool = self._recall_tool()
+        prop = tool["inputSchema"]["properties"]["full"]
+        assert prop["type"] == "integer"
+        assert (prop["minimum"], prop["maximum"]) == (0, 100)
+        returns = tool["description"].rsplit("Returns: {", 1)[1]
+        for key in ("content?", "content_truncated?", "content_next_offset?", "full_applied?"):
+            assert key in returns, f"{key} not in recall Returns"
+
 
 # ============================================================================
 # #1743: max_chars budget

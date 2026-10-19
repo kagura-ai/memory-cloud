@@ -270,9 +270,9 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
-Tip: query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Compact first; reference(memory_id) for one hit, verbosity='full' for tags / context_summary. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, status, results: [{memory_id, summary, summary_cut?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): reject with update_memory(dismiss_supersede_candidate=true); accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])). folded? {count, memory_ids}: judge-verified older versions, newest first.
+            "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25); returns ranked summaries, plus content for the top `full`. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
+Query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
+Returns: {confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160; content_next_offset: reference's content_offset. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); reject with update_memory(dismiss_supersede_candidate=true), accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])). folded?: judge-verified older versions.
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -295,6 +295,12 @@ Manual: guide(["recall"]).""",
                         "type": "integer",
                         "description": "Number of results (default 5, max 100).",
                     },
+                    "full": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Top results with content, 1500 chars each (default 3; 0: none). Lowered to fit max_chars.",
+                    },
                     "max_chars": {
                         "type": "integer",
                         "minimum": 10000,
@@ -303,11 +309,11 @@ Manual: guide(["recall"]).""",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Cross-encoder reranking: omit to follow the context's search config; false forces it off; true also needs the context to allow it and a usable provider.",
+                        "description": "Cross-encoder reranking: omit to follow the context's search config; false forces it off; true needs the context to allow it.",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Filter object; keys AND together: type, scope, tags (ANY; tags_match='all' for ALL; tags_normalize=true tolerates spelling drift), importance {gte|lte|gt|lt}, created_after/before, updated_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector-ingested memories), near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
+                        "description": "Filter object; keys AND together: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector-ingested memories), near, within. Details: guide(['recall.filters']).",
                     },
                     "context_id": {
                         "type": "string",
@@ -319,7 +325,7 @@ Manual: guide(["recall"]).""",
                         "items": {"type": "string", "format": "uuid"},
                         "minItems": 2,
                         "maxItems": 20,
-                        "description": "Cross-context search: 2-20 context UUIDs instead of context_id; all must share one workspace, privacy setting and embedding model.",
+                        "description": "Cross-context search: 2-20 context UUIDs instead of context_id, sharing one workspace, privacy setting and embedding model.",
                     },
                     "search_mode": {
                         "type": "string",
@@ -332,7 +338,7 @@ Manual: guide(["recall"]).""",
                     },
                     "include_superseded": {
                         "type": "boolean",
-                        "description": "true also returns superseded (superseded_by) and folded memories as rows, for audit. Default false.",
+                        "description": "true also returns superseded (superseded_by) and folded memories as rows (audit).",
                     },
                     "verbosity": {
                         "type": "string",

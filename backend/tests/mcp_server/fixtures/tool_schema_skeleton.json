@@ -244,6 +244,11 @@
         "k": {
           "type": "integer"
         },
+        "full": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
         "max_chars": {
           "type": "integer",
           "minimum": 10000,
