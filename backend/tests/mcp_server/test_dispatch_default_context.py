@@ -436,12 +436,13 @@ def real_registry(monkeypatch, gate):
 async def _both(tool: str, args: dict, target: UUID) -> tuple[dict, dict]:
     """The same call with the target as an explicit id and as the URL default."""
     set_mcp_default_context_selection(None)
-    explicit = _payload(
-        await execute_tool_call(tool, {**args, "context_id": str(target)}, "u", None)
-    )
+    explicit_result = await execute_tool_call(tool, {**args, "context_id": str(target)}, "u", None)
     set_mcp_default_context_selection(DefaultContextSelection("url", target))
-    implicit = _payload(await execute_tool_call(tool, args, "u", None))
-    return explicit, implicit
+    implicit_result = await execute_tool_call(tool, args, "u", None)
+    # Both are tool execution errors (CallToolResult.isError), not just the payload.
+    assert getattr(explicit_result, "is_error", False) is True
+    assert getattr(implicit_result, "is_error", False) is True
+    return _payload(explicit_result), _payload(implicit_result)
 
 
 def _assert_parity(explicit: dict, implicit: dict) -> None:
@@ -658,3 +659,15 @@ async def test_a_denied_binding_default_names_the_binding(monkeypatch, gate):
     assert payload["context_source"] == "binding"
     assert payload["message"] == json.loads(envelope[0].text)["message"]
     assert "binding" in payload["help"]
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_url_value_never_falls_back_to_the_binding(handlers):
+    _agent()
+    set_mcp_default_context_selection(DefaultContextSelection("invalid", raw_length=4))
+    with _bindings("default", uuid4()) as resolve:
+        result = await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    assert _payload(result)["error"] == "invalid_context_id_format"
+    resolve.assert_not_awaited()
+    assert "remember" not in handlers

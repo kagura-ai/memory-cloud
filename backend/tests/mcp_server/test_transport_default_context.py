@@ -346,23 +346,49 @@ async def test_guardrails_off_reads_no_digest_for_the_default(reader):
 
 @pytest.mark.asyncio
 async def test_the_name_and_the_digest_share_one_budget(reader, monkeypatch):
-    """A slow name read leaves the digest only what is left of the budget."""
+    """Both reads slow: separate budgets would wait 2 x 300 ms, one shared
+    budget waits about 300 ms in total."""
     import asyncio
 
+    import services.guardrail_digest as digest_mod
     from config.settings import get_settings
     from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
     from services.permission_service import PermissionService
 
-    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_timeout_ms", 200)
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_timeout_ms", 300)
 
-    async def slow(self, **_kwargs):
+    async def slow(*_args, **_kwargs):
         await asyncio.sleep(1)
 
     monkeypatch.setattr(PermissionService, "resolve_context_for_workspace_read", slow)
+    monkeypatch.setattr(digest_mod, "fetch_entries", slow)
     loop = asyncio.get_running_loop()
     started = loop.time()
 
     text, private = await _instructions(f"context={uuid4()}".encode())
 
     assert (text, private) == (SERVER_INSTRUCTIONS_BASE, True)
-    assert loop.time() - started < 0.6
+    assert loop.time() - started < 0.55
+
+
+@pytest.mark.asyncio
+async def test_an_agent_key_digest_follows_the_url_default_not_its_binding(reader, monkeypatch):
+    """With ?context= and no ?guardrails=, an agent key's digest is the URL
+    default's, like its tool calls — the binding is not consulted."""
+    from unittest.mock import AsyncMock
+
+    from auth.agent_scope import AgentScope, set_agent_scope
+    from services.agent_binding_service import AgentBindingService
+
+    ctx = uuid4()
+    reader.result = SimpleNamespace(name="proj-alpha")
+    resolve = AsyncMock(return_value=(SimpleNamespace(context_id=uuid4()), "default"))
+    monkeypatch.setattr(AgentBindingService, "resolve_default_binding", resolve)
+    set_agent_scope(AgentScope(agent_id=uuid4(), enforcement_mode="enforce", workspace_id=None))
+    try:
+        await _instructions(f"context={ctx}".encode())
+    finally:
+        set_agent_scope(None)
+
+    assert reader.digests == [ctx]
+    resolve.assert_not_awaited()

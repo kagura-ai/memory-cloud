@@ -271,6 +271,8 @@ async def _both(scenario, tool: str, args: dict, target) -> tuple[dict, dict]:
     explicit = await execute_tool_call(tool, {**args, "context_id": str(target)}, user, ws)
     set_mcp_default_context_selection(DefaultContextSelection("url", target))
     implicit = await execute_tool_call(tool, args, user, ws)
+    assert getattr(explicit, "is_error", False) is True
+    assert getattr(implicit, "is_error", False) is True
     return json.loads(explicit[0].text), json.loads(implicit[0].text)
 
 
