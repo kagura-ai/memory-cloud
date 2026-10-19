@@ -41,7 +41,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1217,10 +1217,11 @@ async def test_window_without_writes_is_no_writes_in_window(world: World) -> Non
     await _window(w, owner, since, until, dry_run=False)
     await w.session.commit()
     parked = since - timedelta(hours=1)
-    await w.session.execute(
+    moved = await w.session.execute(
         text("UPDATE memory_revisions SET at = :at WHERE context_id = :c AND writer = 'rollback'"),
         {"at": parked, "c": w.context_id},
     )
+    assert cast(Any, moved).rowcount > 0  # the rollback did write its own events
     await w.session.commit()
     with pytest.raises(sr.NoWritesInWindowError):
         await _window(w, owner, parked - _MS, parked + _MS, dry_run=True)
@@ -1380,36 +1381,50 @@ def test_f05_round_trip() -> None:
 
 
 async def test_window_skips_a_memory_another_writer_changed_after_it(world: World) -> None:
-    """The foreign predicate on Postgres: another user, the same user's agent
-    key, and (for an agent principal) the same user's unbound credential all
-    count as someone else — the memory is skipped, never reverted over them."""
+    """Other writers' edits INSIDE the window (another user, the same user's
+    agent key, and for an agent principal the same user's unbound credential)
+    are not the principal's: each memory is skipped, never reverted over them,
+    while the principal's own last write is restored.
+
+    Two guards decide it — the foreign predicate's actor / agent terms and the
+    planner's version check (an edit moves the version) — and either alone
+    skips these memories, so this pins the behavior, not one guard. The
+    predicate's terms themselves are pinned by the compile tests in
+    tests/services/test_session_rollback_planner.py."""
     w, member, owner = world, world.member, world.owner
     me = SessionPrincipal(member, None)
     since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
-    by_owner = await w.create(member, None, summary="edited later by the owner")
-    by_agent = await w.create(member, None, summary="edited later by my agent key")
+    by_owner = await w.create(member, None, summary="edited by the owner")
+    by_agent = await w.create(member, None, summary="edited by my agent key")
     agent_made = await w.create(member, None, agent=w.agent, summary="my agent's")
+    await w.update(by_owner, owner, None, importance=0.2)  # another actor
+    await w.update(by_agent, member, None, agent=w.agent, importance=0.3)  # another agent
+    await w.update(agent_made, member, None, importance=0.4)  # unbound vs the agent
     until = _mark(w)
-    await w.update(by_owner, owner, None, importance=0.2)
-    await w.update(by_agent, member, None, agent=w.agent, importance=0.3)
-    await w.update(agent_made, member, None, importance=0.4)  # unbound user edit
     await w.session.commit()
     before = {m: await w.row(m) for m in (by_owner, by_agent, agent_made)}
 
     plan = await _window(w, me, since, until, dry_run=True)
     causes = {i.memory_id: (i.action, i.cause) for i in plan.items}
     assert causes == {
-        by_owner: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
-        by_agent: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+        by_owner: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),  # actor term
+        by_agent: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),  # agent IS DISTINCT FROM NULL
+        # The unbound edit is the user's own; the agent's earlier create blocks nothing.
+        agent_made: (sr.ACTION_RESTORE, None),
     }
     agent_plan = await _window(w, SessionPrincipal(member, w.agent), since, until, dry_run=True)
-    assert [(i.memory_id, i.cause) for i in agent_plan.items] == [
-        (agent_made, sr.CAUSE_MODIFIED_SINCE)
-    ]
+    agent_causes = {i.memory_id: (i.action, i.cause) for i in agent_plan.items}
+    assert agent_causes == {
+        # The user's unbound edit after the agent's create: IS DISTINCT FROM '<agent>'.
+        agent_made: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+        # The agent's own edit is the last write there.
+        by_agent: (sr.ACTION_RESTORE, None),
+    }
     await _window(w, me, since, until, dry_run=False)
     await w.session.commit()
-    for memory_id, row in before.items():
-        assert await w.row(memory_id) == row
+    for memory_id in (by_owner, by_agent):
+        assert await w.row(memory_id) == before[memory_id]
+    assert (await w.row(agent_made))["importance"] == 0.5
 
 
 async def test_unfinished_window_until_prefers_the_newest_partial_or_in_progress(

@@ -417,12 +417,13 @@ async def test_exactly_seven_days_is_allowed():
 async def test_window_now_is_the_later_of_the_two_clocks():
     """Created events are stamped by the database, edits and forgets by the
     server: a window ending now must not cut off either."""
-    ahead = NOW + timedelta(minutes=1)
+    server = datetime(2026, 10, 19, 12, 0, 0)
     db = MagicMock()
-    db.scalar = AsyncMock(return_value=ahead.replace(tzinfo=UTC))
-    assert await tool._window_now(db) == ahead
-    db.scalar = AsyncMock(return_value=(NOW - timedelta(minutes=1)).replace(tzinfo=UTC))
-    assert await tool._window_now(db) >= NOW
+    with patch.object(tool, "utcnow", return_value=server):
+        db.scalar = AsyncMock(return_value=(server + timedelta(seconds=2)).replace(tzinfo=UTC))
+        assert await tool._window_now(db) == server + timedelta(seconds=2)  # database ahead
+        db.scalar = AsyncMock(return_value=(server - timedelta(seconds=2)).replace(tzinfo=UTC))
+        assert await tool._window_now(db) == server  # server ahead
 
 
 @pytest.mark.asyncio
