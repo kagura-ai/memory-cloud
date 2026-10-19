@@ -11,6 +11,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 | **Core tools (default)** | `…/mcp` |
 | **All tools** | `…/mcp?profile=full` |
 | **Guardrail digest** (clients without tool hooks) | `…/mcp?guardrails=<context_id>` (off: `?guardrails=off`) |
+| **Default context** (the client works in one context) | `…/mcp?context=<context_id>` — tools called without `context_id` run in it |
 | **Pinned to one workspace** (OAuth client, several workspaces) | `…/mcp/w/{workspace_id}` — takes the same query parameters |
 
 An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
@@ -346,6 +347,8 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 Restart or reconnect the client afterwards so it lists tools again. A typo in `profile`, or a `tools` list that matches nothing, makes `tools/list` fail with an error naming the valid values rather than silently falling back to the full list.
 
 `?guardrails=` lives in the same URL. `?guardrails=<context_id>` adds a digest of that context's tool guardrails to the server instructions; `?guardrails=off` switches both server-side guardrail lanes off — the instructions digest and the `get_context_info.guardrails` block — which is the setting for a client whose plugin hooks already deliver guardrails at the tool call. A value that is neither `off` nor a context id is ignored: the instructions stay at the base text and `get_context_info.guardrails` stays on. Rules and caps: [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
+
+`?context=<context_id>` lives in the same query (`…/mcp?profile=full&context=<context_id>`). It names the connection's default context: a context-scoped tool called without `context_id` runs in it, an explicit `context_id` still wins, and the server instructions name the context (with its guardrail digest unless `?guardrails=` says otherwise), so the model can skip `list_contexts` at session start. The default is checked like an explicit id — a context the credential cannot use is refused with `context_not_found` and `context_source: "url"`, and `delete_context` and the other tools that change a context itself always need the explicit id. Like `?guardrails=`, a connector configured with one shared credential sends every conversation to that context. Changing the URL of an OAuth entry needs a new sign-in (see the Claude Code note below). Rules: [MCP Tools › Default context](mcp-tools.md#default-context--context).
 
 > This changes what is **listed**, not what can be **called** — it is not an access control. See [MCP Tools Reference › Tool Profiles](mcp-tools.md#tool-profiles) for the exact rules and the core tool set.
 >

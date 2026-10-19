@@ -207,7 +207,7 @@ def test_registration():
     from mcp_server.tools._profiles import CORE_TOOLS
 
     (definition,) = [t for t in get_tool_definitions() if t["name"] == "rollback_session"]
-    assert definition["inputSchema"]["required"] == ["context_id", "session_id"]
+    assert definition["inputSchema"]["required"] == ["session_id"]  # #2125: ?context= default
     annotations = TOOL_ANNOTATIONS["rollback_session"]
     assert annotations["destructiveHint"] is True and annotations["readOnlyHint"] is False
     assert "rollback_session" in CAPACITY_LOCK_BLOCKED_TOOLS

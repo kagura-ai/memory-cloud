@@ -33,8 +33,7 @@
       "required": [
         "summary",
         "content",
-        "type",
-        "context_id"
+        "type"
       ],
       "properties": {
         "verbose": {
@@ -160,7 +159,6 @@
         }
       },
       "required": [
-        "context_id",
         "items"
       ],
       "additionalProperties": false
@@ -170,9 +168,7 @@
     "name": "update_memory",
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "verbose": {
           "type": "boolean"
@@ -304,8 +300,7 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "memory_id",
-        "context_id"
+        "memory_id"
       ],
       "properties": {
         "memory_id": {
@@ -359,8 +354,7 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "memory_id",
-        "context_id"
+        "memory_id"
       ],
       "properties": {
         "memory_id": {
@@ -393,9 +387,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -423,7 +415,6 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "context_id",
         "lat",
         "lon"
       ],
@@ -456,9 +447,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -481,9 +470,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -505,9 +492,7 @@
     "name": "forget",
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "memory_id": {
           "type": "string",
@@ -533,8 +518,7 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "memory_id",
-        "context_id"
+        "memory_id"
       ],
       "properties": {
         "memory_id": {
@@ -568,8 +552,7 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "memory_id",
-        "context_id"
+        "memory_id"
       ],
       "properties": {
         "memory_id": {
@@ -604,8 +587,7 @@
       "type": "object",
       "required": [
         "source_id",
-        "target_id",
-        "context_id"
+        "target_id"
       ],
       "properties": {
         "source_id": {
@@ -656,8 +638,7 @@
       "type": "object",
       "required": [
         "source_id",
-        "target_id",
-        "context_id"
+        "target_id"
       ],
       "properties": {
         "source_id": {
@@ -698,8 +679,7 @@
       "type": "object",
       "required": [
         "source_id",
-        "target_id",
-        "context_id"
+        "target_id"
       ],
       "properties": {
         "source_id": {
@@ -723,9 +703,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "include_details": {
           "type": "boolean"
@@ -772,9 +750,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -998,9 +974,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -1064,7 +1038,6 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "context_id",
         "session_id"
       ],
       "properties": {
@@ -1412,9 +1385,7 @@
     "name": "analyze_context",
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -1470,9 +1441,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -1493,9 +1462,7 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "properties": {
         "context_id": {
           "type": "string",
@@ -1666,7 +1633,6 @@
         }
       },
       "required": [
-        "context_id",
         "memory_id",
         "helpful"
       ],
@@ -1754,9 +1720,7 @@
           "type": "integer"
         }
       },
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "additionalProperties": false
     }
   },
@@ -1806,7 +1770,6 @@
         }
       },
       "required": [
-        "context_id",
         "since"
       ],
       "additionalProperties": false
@@ -1840,9 +1803,7 @@
           "type": "integer"
         }
       },
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "additionalProperties": false
     }
   },
@@ -1864,7 +1825,6 @@
         }
       },
       "required": [
-        "context_id",
         "key",
         "value"
       ],
@@ -1897,9 +1857,7 @@
           "maximum": 100000
         }
       },
-      "required": [
-        "context_id"
-      ],
+      "required": [],
       "additionalProperties": false
     }
   },
@@ -1936,7 +1894,6 @@
         }
       },
       "required": [
-        "context_id",
         "metric",
         "value"
       ],
@@ -1983,7 +1940,6 @@
         }
       },
       "required": [
-        "context_id",
         "metric"
       ],
       "additionalProperties": false

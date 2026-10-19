@@ -67,6 +67,19 @@ GUIDE_TOPICS: dict[str, str] = {
         "call still lists it); forget() a time memory only when the follow-up itself is "
         "obsolete."
     ),
+    "default-context": (
+        "A connection can name one context as its default: add ?context=<context_id> to "
+        "the MCP URL (also after /mcp/w/<workspace_id>). Context-scoped tools called "
+        "without context_id then run in it; an explicit context_id wins and recall's "
+        "context_ids stays explicit. Responses name the context they ran in (context_id), "
+        "so a call is never routed silently. The default is authorized exactly like an "
+        "explicit id: a context you cannot use fails context_not_found with "
+        "context_source: 'url', and a value that is not a UUID fails "
+        "invalid_context_id_format. Tools that change a context itself (delete_context, "
+        "update_context) never use it: name that context. An agent-bound key without "
+        "?context= defaults to its default (or only) binding. list_contexts(name_contains=) "
+        "reaches another context; pass its id as context_id."
+    ),
     "guardrails": (
         "A tool guardrail is a memory with details.tool_trigger = {tool: 'Bash|"
         "PowerShell' | 'Edit|Write' | 'mcp__.*__remember', match: '<regex>', action: "
@@ -624,11 +637,11 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "load_pinned": ("load_pinned.usage", "remember.delivery"),
     "recall_upcoming": ("time-memories",),
     "get_context_info": ("get_context_info.returns", "guardrails"),
-    "list_contexts": ("list_contexts.usage", "ids"),
+    "list_contexts": ("list_contexts.usage", "default-context", "ids"),
     "list_tags": ("list_tags.usage",),
     "list": ("list.filters", "ids"),
     "changes_since": ("changes_since.usage", "ids"),
-    "bootstrap": ("bootstrap.usage", "guardrails", "ids"),
+    "bootstrap": ("bootstrap.usage", "default-context", "guardrails", "ids"),
 }
 
 SHARED_TOPICS: tuple[str, ...] = ("security", "ids", "persistence", "time-memories", "guardrails")

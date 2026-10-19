@@ -29,6 +29,10 @@ command -v gh >/dev/null 2>&1 && gh issue list --state open --limit 10 --json nu
 
 **Memory Cloud** (MCP):
 
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`) — skip `list_contexts()` and the choice below: call `bootstrap(since="7d")` without `context_id`, and leave `context_id` out of the later calls too. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
+
+Otherwise:
+
 ```
 list_contexts()
 ```

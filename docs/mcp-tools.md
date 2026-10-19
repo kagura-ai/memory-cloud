@@ -111,6 +111,12 @@ The base text is the same for every caller and describes the tools only; it does
 
 > Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives context IDs; bootstrap(context_id) opens a session (context, pinned notes, recent changes). remember stores, recall searches; changes_since lists what changed, when.
 
+**With a default context** (`?context=<context_id>` on the URL, [#2125](https://github.com/kagura-ai/memory-cloud/issues/2125)) the base text names it instead, within the same 240 characters (the name is flattened to one line and cut at 40 characters with `…`):
+
+> Kagura Memory Cloud. Default context: <name>; omit context_id. bootstrap() opens a session; remember stores, recall searches; changes_since lists changes. list_contexts(name_contains=) reaches another.
+
+The name is read with the caller's own read permission, through the same resolver the read tools use. A context the caller cannot read, an unknown id, a database error or a value that is not a UUID all serve the plain base text, with no signal about why. Whenever `?context=` is present, in any form, `server/discover` is `cacheScope: "private"` (5 minutes): the text depends on the caller. Without `?guardrails=`, the default context is also the digest's context (as if `?guardrails=<context_id>` were given), so the text never names one context and digests another; an explicit `?guardrails=<context_id>` still picks the digest, and `?guardrails=off` drops the digest but not the default context. The name and the digest share one `MCP_GUARDRAIL_DIGEST_TIMEOUT_MS` budget. An agent-bound key's default binding fills tool arguments (below) but does not change this text. See [Default context](#default-context--context).
+
 **Selecting the context.** `?guardrails=` on the endpoint URL (the same place as `?profile=`), evaluated once per request after authentication, first value wins:
 
 | URL | `instructions` | `get_context_info.guardrails` |
@@ -379,6 +385,26 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `merge_contexts` | Merge memories from source context into target context; `delete_source=true` deletes the source and moves its files to the target | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
 
+### Default context — `?context=`
+
+A client that already knows its context (a plugin option, a desktop entry configured for one project) can name it once on the MCP URL: `https://<host>/mcp?context=<context_id>`, also `…/mcp/w/<workspace_id>?context=<context_id>`, with any other query parameter (`?profile=full&context=<context_id>`). Every credential type and both transport eras read it, once per request ([#2125](https://github.com/kagura-ai/memory-cloud/issues/2125)). A context-scoped tool called without `context_id` then runs as if the caller had passed it, so the session needs no `list_contexts` turn.
+
+| Where `context_id` comes from | Precedence |
+|---|---|
+| The `context_id` argument | 1 — always wins, also when it differs from the URL |
+| `recall`'s `context_ids` (cross-context search) | 2 — never mixed with the default |
+| `?context=<context_id>` on the URL | 3 |
+| An agent-bound key's default binding, or its only binding (no `?context=`) | 4 |
+| Nothing | `context_id_required` (its `help` names both ways to supply one) |
+
+- **Authorization is the explicit path.** The dispatcher writes the default into the arguments before the capacity check, the context-id check and the tool, so the same resolvers and permission checks run as for an explicit id: the default never widens access. A default naming a context you cannot use answers exactly what the explicit id answers — `context_not_found` with the uniform message, which adds `context_source` (`"url"` or `"binding"`) and a `help` that points at the URL, or `feature_not_available` for a member without a seat, which adds `context_source`. A locked context behaves as it does with an explicit id.
+- **Not a UUID.** A `?context=` value that is not a UUID does not fail the connection; a call that omits `context_id` is refused with `invalid_context_id_format` and `context_source: "url"`. A call that passes `context_id` is unaffected.
+- **Never defaulted.** These tools never receive the default: `delete_context`, `update_search_config`, `update_context` and `bind_agent_context`, whose `context_id` names the context (or binding target) being changed and stays required; `merge_contexts` (`source_context_id` / `target_context_id`); `create_context` and `list_contexts`; `describe_binding` and `get_agent_bootstrap`, whose optional `context_id` selects a binding (`get_agent_bootstrap` without one resolves the agent's binding itself); and `setup_connector` and `init_file_upload`. A bare `delete_context()` is refused with `context_id_required` whatever the URL says.
+- **Visible routing.** Most context-scoped responses carry `context_id`, `context_name`, `context_display_name`, `context_is_private` and `context_is_locked`; when a call ran in the default and its response does not name its context (`set_state`, `feedback`, the edge tools, …), the dispatcher adds `context_id`. A call routed to the wrong context shows it.
+- **Agent-bound keys.** Without `?context=`, an agent-bound key's call defaults to the agent's default binding, or to its binding when it has exactly one. No binding and several bindings without a default are both `context_id_required` and name no binding. The binding gate still applies to the default like to an explicit id.
+- **Shared connector keys.** A connector configured with one shared credential and `?context=` sends every conversation of that connector to one context; prefer it for a context whose members you control.
+- The manual is `guide(["default-context"])`. A default bound to the credential itself (user API keys, OAuth sessions) is a separate follow-up.
+
 ### `list_contexts` response shape
 
 `list_contexts()` exists to turn a context **name** into an **id**, so by default each item is just `{id, name, is_private, is_locked, last_used_at}` — no `summary`, no `embedding_model`. A workspace with dozens of contexts stays a few thousand characters instead of overflowing an MCP client's tool-result limit. For one context's full summary, usage guide and search config call `get_context_info(context_id)`.
@@ -499,6 +525,8 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 | `session_not_found` | `rollback_session` found no session of yours with that id in the context — also the answer for another principal's session | `changes_since(context_id, since, session_id=...)` with your own session |
 | `already_rolled_back` | The session's rollback in this context is complete and the session wrote nothing since (`retryable: false`) | None; `changes_since` shows what happened |
 | `unknown_tool` | No tool has that name | `tools/list` |
+
+A call that relied on the URL's [default context](#default-context--context) and was refused for it carries `context_source` (`"url"` or `"binding"`): `context_not_found` keeps the explicit-path `message` and adds `context_source` with a `help` that points at the default, `feature_not_available` adds `context_source`, and a `?context=` that is not a UUID is `invalid_context_id_format` with `context_source: "url"`.
 
 An argument the tool's `inputSchema` does not declare is refused with `invalid_argument` before the tool runs; nothing is stored with defaults in its place. The envelope adds `unknown_arguments` (the names refused), `allowed_arguments` (the names the tool's `inputSchema` declares) and `suggestions`, which maps an unknown name to the closest accepted one when there is one (`{"importanc": "importance"}`). `_meta` is accepted on every tool and ignored, and `merge_contexts` still accepts its deprecated `source_id` / `target_id`. `arguments` itself must be a JSON object (or absent): anything else is `invalid_argument` from the dispatcher and JSON-RPC `-32602` "Invalid params: 'arguments' must be an object" from both transports. `missing_fields` from `remember` lists only the fields actually missing, also as a `missing_fields` array.
 

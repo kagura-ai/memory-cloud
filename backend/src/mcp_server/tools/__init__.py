@@ -88,6 +88,30 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
     }
 )
 
+# #2125: tools whose ``context_id`` names the context ROW being administered
+# (or a binding target), never the context to work in. The connection default
+# (``?context=``) is never written into their arguments: a bare
+# ``delete_context()`` must not delete the default. ``delete_context`` and
+# ``update_search_config`` go through the pre-dispatch check, so this set is
+# what keeps them explicit; the rest are outside it already and listed so a
+# later move cannot make them default silently. Pinned by
+# ``tests/mcp_server/test_dispatch_default_context.py``.
+_DEFAULT_CONTEXT_EXEMPT = frozenset(
+    {
+        "delete_context",
+        "update_search_config",
+        "update_context",
+        "merge_contexts",
+        "bind_agent_context",
+        "describe_binding",
+        "get_agent_bootstrap",
+        "list_contexts",
+        "create_context",
+        "setup_connector",
+        "init_file_upload",
+    }
+)
+
 # Read-only info tools exempt from rate limiting
 _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
     {
@@ -179,6 +203,115 @@ def _with_manual_help(tool_name: str, result: list[TextContent]) -> list[TextCon
         return result
     payload["help"] = manual
     return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
+
+
+# ---------------------------------------------------------------------------
+# #2125: connection default context
+# ---------------------------------------------------------------------------
+
+_CONTEXT_ID_REQUIRED_HELP = (
+    "Pass context_id, or set a default for this connection with ?context=<uuid> on the "
+    "MCP URL. list_contexts() lists the contexts you can access."
+)
+_URL_CONTEXT_INVALID_MESSAGE = (
+    "Invalid context_id format in the MCP URL's ?context= parameter. "
+    "Expected a UUID (example: 'b3abeabe-7ab1-44bd-8e52-18a191bda66b'). "
+    "Use list_contexts() to discover valid context IDs."
+)
+_DEFAULT_CONTEXT_DENIED_HELP = {
+    "url": (
+        "The connection default names a context you cannot use; fix ?context= on the "
+        "MCP URL or pass context_id explicitly."
+    ),
+    "binding": (
+        "The agent's default binding names a context you cannot use; pass context_id explicitly."
+    ),
+}
+
+
+def takes_default_context(tool_name: str) -> bool:
+    """Whether a call without ``context_id`` may be filled from the connection default."""
+    return tool_name not in _TOOLS_WITHOUT_CONTEXT_ID and tool_name not in _DEFAULT_CONTEXT_EXEMPT
+
+
+def _names_a_context(args: dict[str, Any]) -> bool:
+    """An explicit ``context_id`` (or recall's ``context_ids`` list) is in the arguments."""
+    return args.get("context_id") is not None or isinstance(args.get("context_ids"), list)
+
+
+async def _apply_default_context(
+    tool_name: str, args: dict[str, Any]
+) -> tuple[dict[str, Any], str | None, ToolErrorContent | None]:
+    """Fill a missing ``context_id`` from the connection default (#2125).
+
+    Returns ``(args, context_source, refusal)``. Precedence: an explicit
+    ``context_id`` > ``context_ids`` (recall) > ``?context=`` > the agent's
+    default or sole binding (agent-bound keys) > none. The
+    default is written into the arguments and nothing else: the capacity
+    gate, the pre-dispatch check and the handler's own resolver then see
+    exactly what an explicit call would send, so authorization cannot differ.
+    A ``?context=`` that is not a UUID refuses the call here, naming the URL,
+    instead of reading as "no default".
+    """
+    if not takes_default_context(tool_name) or _names_a_context(args):
+        return args, None, None
+    from mcp_server.tools._default_context import resolve_default_context
+    from mcp_server.tools._helpers import get_mcp_default_context_selection
+
+    # ``context_id: null`` from a client that sends every optional key is "absent".
+    args = {k: v for k, v in args.items() if k != "context_id"}
+    selection = get_mcp_default_context_selection()
+    if selection is not None and selection.mode == "invalid":
+        return (
+            args,
+            "url",
+            _error_response(
+                "invalid_context_id_format",
+                _URL_CONTEXT_INVALID_MESSAGE,
+                context_source="url",
+                help="Fix ?context= on the MCP URL or pass context_id explicitly.",
+            ),
+        )
+    default = await resolve_default_context(selection)
+    if default is None:
+        return args, None, None
+    return {**args, "context_id": str(default.context_id)}, default.source, None
+
+
+def _with_default_context_source(
+    result: list[TextContent], context_source: str | None, context_id: Any = None
+) -> list[TextContent]:
+    """Mark a call that ran in the connection default (#2125).
+
+    A refusal keeps ``error`` and ``message`` byte-identical to the
+    explicit-id answer: ``context_not_found`` gains ``context_source`` and a
+    ``help`` that points at the default, ``feature_not_available`` (a member
+    without a seat) gains ``context_source``. A success that does not name its
+    context already (``set_state``, ``feedback``, the edge tools, …) gains
+    ``context_id``, so a defaulted call is never routed silently.
+    """
+    if context_source is None or len(result) != 1:
+        return result
+    try:
+        payload = json.loads(result[0].text)
+    except (ValueError, AttributeError, TypeError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    if isinstance(result, ToolErrorContent):
+        error = payload.get("error")
+        if error == "context_not_found":
+            payload["context_source"] = context_source
+            payload["help"] = _DEFAULT_CONTEXT_DENIED_HELP[context_source]
+        elif error == "feature_not_available":
+            payload["context_source"] = context_source
+        else:
+            return result
+        return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
+    if "context_id" in payload or context_id is None:
+        return result
+    payload["context_id"] = context_id
+    return [TextContent(type="text", text=_dumps(payload))]
 
 
 # Per-workspace rate limit cache {workspace_id: (allowed, used, limit, expires_at)}
@@ -500,6 +633,14 @@ async def execute_tool_call(
             # Don't block tool execution if rate limit check fails
             logger.warning(f"rate_limit_check_failed: {e}")
 
+    # #2125: fill a missing context_id from the connection default after the
+    # rate limit (an agent key's binding lookup is a query) and BEFORE the
+    # capacity gate (it reads args["context_id"] itself) and the pre-dispatch
+    # check, so both — and the handler — see what an explicit call sends.
+    args, context_source, default_refusal = await _apply_default_context(tool_name, args)
+    if default_refusal is not None:
+        return default_refusal
+
     # #1941: a Free workspace over its capacity loses search and saving until
     # it is cleaned up; listing, deleting and usage stay callable. Every tool
     # is classified in ``_capacity_gate`` (a coverage test pins the split).
@@ -515,11 +656,17 @@ async def execute_tool_call(
         has_context_ids = "context_ids" in args and isinstance(args.get("context_ids"), list)
         if "context_id" not in args and not has_context_ids:
             manual = _manual_help(tool_name)
+            # #2125: a tool that takes the connection default says how to set one;
+            # an exempt tool (delete_context, …) always needs the explicit id.
+            hint = (
+                _CONTEXT_ID_REQUIRED_HELP
+                if takes_default_context(tool_name)
+                else "Use list_contexts() first to discover available context IDs."
+            )
             return _error_response(
                 "context_id_required",
                 f"{tool_name} requires context_id argument.",
-                help="Use list_contexts() first to discover available context IDs."
-                + (f" {manual}" if manual else ""),
+                help=hint + (f" {manual}" if manual else ""),
                 example=f'{tool_name}(..., context_id="<uuid-from-list_contexts>")',
             )
         if "context_id" in args:
@@ -529,7 +676,11 @@ async def execute_tool_call(
                 return _error_response("invalid_context_id_format", str(e))
 
     try:
-        return _with_manual_help(tool_name, await handler(args, user_id, workspace_id))
+        result = await handler(args, user_id, workspace_id)
+        return _with_manual_help(
+            tool_name,
+            _with_default_context_source(result, context_source, args.get("context_id")),
+        )
     except ValidationError as e:
         # #1323: expected client-input errors — return the structured envelope
         # (no pydantic model names / errors.pydantic.dev URLs) and log at

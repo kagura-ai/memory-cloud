@@ -42,7 +42,7 @@ import pytest
 
 from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
-from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, default_context_instructions
 
 # Within one sentence: any character but a newline or a sentence-ending period
 # (the dot inside ``context.usage_guide`` does not end one).
@@ -326,6 +326,8 @@ def _static_texts() -> list[tuple[str, str]]:
         if isinstance(tool.get("title"), str):
             texts.append((f"{tool['name']}.title", tool["title"]))
     texts.append(("SERVER_INSTRUCTIONS_BASE", SERVER_INSTRUCTIONS_BASE))
+    # #2125: the variant served when ?context= names a readable context.
+    texts.append(("default_context_instructions", default_context_instructions("proj-alpha")))
     texts.append(("KAGURA_MEMORY_INSTRUCTIONS", KAGURA_MEMORY_INSTRUCTIONS))
     return texts
 

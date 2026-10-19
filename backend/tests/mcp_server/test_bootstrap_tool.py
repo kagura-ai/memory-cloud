@@ -34,7 +34,7 @@ def test_bootstrap_is_a_core_read_tool_with_a_manual():
     assert "bootstrap" not in _TOOLS_WITHOUT_CONTEXT_ID
     assert "bootstrap" in GUIDE_INDEX
     tool = next(t for t in get_tool_definitions() if t["name"] == "bootstrap")
-    assert tool["inputSchema"]["required"] == ["context_id"]
+    assert tool["inputSchema"]["required"] == []  # #2125: context_id may come from ?context=
     assert set(tool["inputSchema"]["properties"]) == {"context_id", "since", "include", "max_chars"}
     assert tool["inputSchema"]["properties"]["include"]["items"]["enum"] == list(COMPONENTS)
 

@@ -22,6 +22,7 @@ from services.capacity_lock import CapacityPolicy
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from mcp_server.tools._default_context import DefaultContextSelection
     from services.guardrail_digest import GuardrailSelection
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,27 @@ def set_mcp_tool_view_query(query_string: "bytes | None") -> None:
 def get_mcp_tool_view_query() -> "bytes | None":
     """Read the request URL's raw query; ``None`` = no request (direct handler call)."""
     return _mcp_tool_view_query.get()
+
+
+# ============================================================================
+# #2125: per-request default context (``?context=<uuid>`` on the URL)
+# ============================================================================
+# Parsed once per request at the same seam as the contextvars above; the tool
+# dispatcher reads it to fill a missing ``context_id``. ``None`` (never set —
+# a direct ``execute_tool_call`` in tests) behaves like the parameter absent.
+_mcp_default_context_selection: ContextVar["DefaultContextSelection | None"] = ContextVar(
+    "mcp_default_context_selection", default=None
+)
+
+
+def set_mcp_default_context_selection(selection: "DefaultContextSelection | None") -> None:
+    """Store the request's ``?context=`` selection (see ``tools._default_context``)."""
+    _mcp_default_context_selection.set(selection)
+
+
+def get_mcp_default_context_selection() -> "DefaultContextSelection | None":
+    """Read the request's ``?context=`` selection; ``None`` = not evaluated."""
+    return _mcp_default_context_selection.get()
 
 
 # ============================================================================
