@@ -117,7 +117,7 @@ When the user asks what is remembered, asks for prior decisions, or needs simila
    - `keyword`: exact terms, IDs, Japanese hiragana-only terms, or error strings.
    - `semantic`: concepts where wording may differ.
 4. Use filters when the user asks for a type, date, tag, source URI, or known category. If tag spelling is uncertain, search broadly first rather than inventing tag filters.
-5. For important hits, call `reference(context_id=..., memory_id=...)` to load full details.
+5. The top three results also carry their `content` (up to 1,500 characters each; `full=N` sets how many, `full=0` none) — answer from it. Call `reference(context_id=..., memory_id=...)` only for a lower-ranked hit, or for one marked `content_truncated: true` (`content_offset=<content_next_offset>` reads on).
 6. For broad context-building, call `explore(context_id=..., memory_id=..., depth=2, min_weight=0.0)` on the strongest seed memory.
 
 <!-- SYNC: keep the query technique + response-reading notes (including the get_context_info.guardrails bullet) in step with claude-skills/guide.md ("Using the memory tools well") and docs/mcp-tools.md ("Usage notes"). The MCP tool descriptions are deliberately short; this is where the depth lives. -->
