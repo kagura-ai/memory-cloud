@@ -1427,6 +1427,41 @@ async def test_window_skips_a_memory_another_writer_changed_after_it(world: Worl
     assert (await w.row(agent_made))["importance"] == 0.5
 
 
+async def test_a_foreign_write_between_the_principals_own_is_never_reverted_over(
+    world: World,
+) -> None:
+    """Only the foreign predicate's actor / agent terms guard this: another
+    writer's edit sits between two of the principal's own writes inside the
+    window, so the version matches the principal's last write and no
+    tombstone is involved. Without the terms the plan would forget each
+    memory and the other writer's edit with it."""
+    w, member, owner = world, world.member, world.owner
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    by_owner = await w.create(member, None)
+    await w.update(by_owner, owner, None, importance=0.2)  # another actor
+    await w.update(by_owner, member, None, tags=["mine"])
+    by_agent = await w.create(member, None)
+    await w.update(by_agent, member, None, agent=w.agent, importance=0.3)  # my agent key
+    await w.update(by_agent, member, None, tags=["mine"])
+    agent_made = await w.create(member, None, agent=w.agent)
+    await w.update(agent_made, member, None, importance=0.4)  # the unbound user
+    await w.update(agent_made, member, None, agent=w.agent, tags=["agent"])
+    until = _mark(w)
+    await w.session.commit()
+
+    user_plan = await _window(w, SessionPrincipal(member, None), since, until, dry_run=True)
+    assert {i.memory_id: (i.action, i.cause) for i in user_plan.items} == {
+        by_owner: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+        by_agent: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+        # The unbound user's edit sits between the agent's writes: its own
+        # (only) event is not the last one, so the version check skips it.
+        agent_made: (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE),
+    }
+    agent_plan = await _window(w, SessionPrincipal(member, w.agent), since, until, dry_run=True)
+    agent_causes = {i.memory_id: (i.action, i.cause) for i in agent_plan.items}
+    assert agent_causes[agent_made] == (sr.ACTION_SKIP, sr.CAUSE_MODIFIED_SINCE)
+
+
 async def test_unfinished_window_until_prefers_the_newest_partial_or_in_progress(
     world: World,
 ) -> None:
