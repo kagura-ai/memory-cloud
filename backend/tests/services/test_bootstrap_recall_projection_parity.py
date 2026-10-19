@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_server.tools import memory as mcp_memory
-from models.schemas import MemoryResponse, RecallResponse, SupersedeCandidate
+from models.schemas import FoldedVersions, MemoryResponse, RecallResponse, SupersedeCandidate
 from services.agent_bootstrap_service import (
     AgentBootstrapService,
     BootstrapParams,
@@ -105,6 +105,7 @@ class TestBootstrapRecallRowMatchesRecall:
             supersede_candidate=SupersedeCandidate(
                 memory_id=uuid.uuid4(), similarity=0.93, summary="older note"
             ),
+            folded=FoldedVersions(count=1, memory_ids=[uuid.uuid4()]),
         )
 
         row = await _bootstrap_row(memory)
@@ -118,6 +119,8 @@ class TestBootstrapRecallRowMatchesRecall:
         assert row == expected
         assert list(row) == list(expected)
         assert row["contradicts"] == [str(c) for c in memory.contradicts]
+        # #2123: the fold rides into the bootstrap row unchanged.
+        assert row["folded"] == {"count": 1, "memory_ids": [str(memory.folded.memory_ids[0])]}
 
     async def test_bootstrap_serves_the_full_projection(self):
         # Bootstrap rows are behaviour-establishing and read once at session
@@ -149,6 +152,11 @@ BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS = frozenset(
         "tags",
         "superseded_by",
         "contradicts",
+        # #2123, added on purpose: the ids of judge-verified older versions
+        # recall folded under this row. Ids and a count only — no other
+        # memory's text enters the bootstrap lane — and without it a folded
+        # row would silently lose the fact that older versions exist.
+        "folded",
     }
 )
 # Present on every row, whatever the memory holds.
@@ -169,6 +177,7 @@ class TestBootstrapRecallRowKeyContract:
             supersede_candidate=SupersedeCandidate(
                 memory_id=uuid.uuid4(), similarity=0.93, summary="older note", verified=True
             ),
+            folded=FoldedVersions(count=2, memory_ids=[uuid.uuid4(), uuid.uuid4()]),
         )
 
         row = await _bootstrap_row(memory)

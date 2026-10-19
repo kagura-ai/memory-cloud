@@ -90,6 +90,13 @@ def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:
         item["supersede_candidate"] = r.supersede_candidate.model_dump(
             mode="json", exclude_none=True
         )
+    # #2123: judge-verified older versions folded under this (newest) row.
+    folded = getattr(r, "folded", None)
+    if folded:
+        item["folded"] = {
+            "count": folded.count,
+            "memory_ids": [str(memory_id) for memory_id in folded.memory_ids],
+        }
 
 
 def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:

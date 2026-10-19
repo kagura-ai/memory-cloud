@@ -154,7 +154,9 @@ item shape (`trigger`, not `details`); `recall` → `results` in the `recall` to
 and `score` is rounded to 4 decimals). The one exception: a bootstrap row never carries
 `supersede_candidate`, which `recall` returns when a live suggestion exists — an agent does
 not act on a suggestion in this session-start lane, the `max_chars` fit cannot drop it, and
-it would put another memory's summary in the trusted lane; keyless `get_state` →
+it would put another memory's summary in the trusted lane. `folded` (#2123: ids and a count of
+the judge-verified older versions folded under the row, no other memory's text) is carried
+like in `recall`; keyless `get_state` →
 `{states, count, has_more, next_cursor}`), so clients reuse one parser per primitive whether they call it directly
 or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
 `until`, `selection_probabilities`, `selection_policy`) are additive metadata alongside the

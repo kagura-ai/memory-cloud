@@ -4308,6 +4308,17 @@
         ],
         "type": "object"
       },
+      "FoldedVersions": {
+        "properties": {
+          "count": {},
+          "memory_ids": {}
+        },
+        "required": [
+          "count",
+          "memory_ids"
+        ],
+        "type": "object"
+      },
       "ForceTransferOwnershipRequest": {
         "properties": {
           "reason": {
@@ -5787,6 +5798,7 @@
           "context_summary": {},
           "contradicts": {},
           "created_at": {},
+          "folded": {},
           "importance": {},
           "memory_id": {},
           "scope": {},

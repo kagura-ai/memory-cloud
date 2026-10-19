@@ -345,9 +345,14 @@ class RecallRequest(BaseModel):
     )
     # #1208: shadowed (superseded) memories are demoted out of results by
     # default; true returns them annotated with superseded_by for audit.
+    # #2123: true also turns off folding, so judge-verified older versions
+    # come back as their own rows instead of under the newest one's ``folded``.
     include_superseded: bool = Field(
         default=False,
-        description="Include memories shadowed by a supersedes edge (annotated with superseded_by)",
+        description=(
+            "Include memories shadowed by a supersedes edge (annotated with "
+            "superseded_by) and return folded older versions as their own rows"
+        ),
     )
 
 
@@ -376,6 +381,21 @@ class SupersedeCandidate(TZAwareBaseModel):
     # Both hold only while the verdict is about both memories' current texts
     # (#2059): after an edit of either, the candidate surfaces unverified.
     verified: bool | None = None
+
+
+class FoldedVersions(TZAwareBaseModel):
+    """#2123: older versions of one fact folded under the newest one in recall.
+
+    A version is folded only when the deployment's judge verified the pair
+    (``supersede_candidate.verified``) and both memories were in the same
+    recall's candidate pool; ``include_superseded=true`` turns folding off.
+    """
+
+    # The number of folded versions. Equal to len(memory_ids) today; kept
+    # separate so the id list may be capped later without a shape change.
+    count: int
+    # Folded memory ids, newest first.
+    memory_ids: list[UUID]
 
 
 class MemoryResponse(TZAwareBaseModel):
@@ -412,6 +432,9 @@ class MemoryResponse(TZAwareBaseModel):
     # #1403: liveness-guarded supersede suggestion (top-1 near-duplicate detected
     # at ingest). None unless this memory has a still-actionable candidate.
     supersede_candidate: SupersedeCandidate | None = None
+    # #2123: judge-verified older versions of this fact that recall folded
+    # under this (newest) row. None unless something was folded.
+    folded: FoldedVersions | None = None
     # #2043: the memory's version (update_memory's expected_version).
     version: int | None = None
 

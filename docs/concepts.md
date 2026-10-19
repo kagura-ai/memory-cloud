@@ -154,7 +154,10 @@ version (the truth is gone) or keep returning it (the truth is buried). Since
   `superseded_by`, `explore()` still reaches it, and deleting the edge (or
   the superseding memory) restores full visibility. Create it by storing the
   updated fact with `remember(..., supersedes=<old_memory_id>)`, or
-  explicitly with `create_edge(edge_type="supersedes")`.
+  explicitly with `create_edge(edge_type="supersedes")`. Without an edge, a
+  judge-verified `supersede_candidate` folds the older version under the newer
+  one in recall (`folded`, #2123) — the same effect, reversible, and off
+  under `include_superseded=true`.
 - **`contradicts`** — two memories disagree and neither is known to be
   current. Contradiction **never hides** either side: both surface in recall
   annotated with the opposing memory ids. Resolving a contradiction is an

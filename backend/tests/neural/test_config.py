@@ -690,8 +690,58 @@ class TestSupersedeVerifyConfig:
             ("supersede_verify_mode", "auto", "supersede_verify_mode"),
             ("supersede_verify_min_confidence", 1.5, "supersede_verify_min_confidence"),
             ("supersede_verify_max_calls_per_day", 0, "supersede_verify_max_calls_per_day"),
+            ("supersede_suggest_threshold_llm", 0.9, "supersede_suggest_threshold_llm"),
+            ("supersede_suggest_threshold_llm", 0.4, "supersede_suggest_threshold_llm"),
         ],
     )
     def test_invalid_values_rejected(self, field, value, match):
         with pytest.raises(ValueError, match=match):
             NeuralMemoryConfig(**{field: value})
+
+
+class TestSupersedeSuggestThresholdLlm:
+    """#2123: the judge-mode detection threshold — env-only, clamped."""
+
+    def test_default(self, monkeypatch):
+        monkeypatch.delenv("SUPERSEDE_SUGGEST_THRESHOLD_LLM", raising=False)
+        assert NeuralMemoryConfig().supersede_suggest_threshold_llm == 0.75
+        assert NeuralMemoryConfig.from_env().supersede_suggest_threshold_llm == 0.75
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("0.7", 0.7),
+            (" 0.8 ", 0.8),
+            ("0.85", 0.85),
+            ("0.5", 0.5),
+            ("0.95", 0.85),  # clamped to the unverified threshold
+            ("0.2", 0.5),  # clamped to the floor
+            ("", 0.75),
+            ("high", 0.75),  # unparseable → default
+            ("nan", 0.75),
+        ],
+    )
+    def test_env_parse_and_clamp(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("SUPERSEDE_SUGGEST_THRESHOLD_LLM", raw)
+        assert NeuralMemoryConfig.from_env().supersede_suggest_threshold_llm == expected
+
+    async def test_from_db_keeps_the_env_value(self, monkeypatch):
+        monkeypatch.setenv("SUPERSEDE_SUGGEST_THRESHOLD_LLM", "0.7")
+        NeuralMemoryConfig.invalidate_cache()
+        db = MagicMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=result)
+        try:
+            config = await NeuralMemoryConfig.from_db(db)
+        finally:
+            NeuralMemoryConfig.invalidate_cache()
+        assert config.supersede_suggest_threshold_llm == 0.7
+
+    def test_the_ceiling_is_the_unverified_threshold(self):
+        """The two 0.85s must move together: above the unverified threshold
+        the judge mode would detect LESS than the off mode."""
+        from neural.config import SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX
+        from services.memory_service import _SUPERSEDE_SUGGEST_THRESHOLD
+
+        assert SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX == _SUPERSEDE_SUGGEST_THRESHOLD

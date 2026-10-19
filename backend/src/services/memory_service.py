@@ -51,6 +51,7 @@ from models.schemas import (
     ExploreHint,
     ExploreRequest,
     ExploreResponse,
+    FoldedVersions,
     ForgetRequest,
     ForgetResponse,
     GuardrailItem,
@@ -224,6 +225,11 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
             error=str(exc),
             exc_info=exc,
         )
+
+
+# #2123: the keys that place a row in the recall pool. A folded group's head
+# takes them from the group's best-ranked row, whose place it takes.
+_FOLD_RANK_KEYS = ("score", "hybrid_score", "rerank_score", RERANK_UNSCORED_KEY)
 
 
 def _is_trusted_recall(request: RecallRequest) -> bool:
@@ -3584,6 +3590,213 @@ class MemoryService:
             logger.warning("supersede_shadowing_failed", error=str(e))
             return {}, {}
 
+    async def _apply_supersede_fold(
+        self,
+        search_results: list[dict],
+        memories: dict,
+        *,
+        include_superseded: bool,
+        user_id: str,
+        trusted_only: bool,
+        shadow_map: Mapping[UUID, UUID] | None = None,
+    ) -> dict[UUID, list[UUID]]:
+        """#2123: fold judge-verified older versions of a fact under the newer one.
+
+        Shadowing (#1208) removes a memory only when an explicit ``supersedes``
+        edge names it. Agents rarely write that edge, so one fact updated a few
+        times through ``remember()`` came back once per version. This is the
+        same subtraction without an edge, from the strongest signal the store
+        has short of one: a ``supersede_candidate`` the deployment's judge
+        verified (``verified is True``, which holds only while the verdict is
+        about both memories' current texts and at or above the confidence
+        floor). A cosine-only candidate never folds: similarity alone does not
+        tell an update from a sibling fact.
+
+        1. Only pool memories whose stored candidate carries a ``supersedes``
+           verdict are resolved (one batched query; none at all on a
+           deployment without the judge). The page builder resolves the
+           shipped page's hints itself, as before.
+        2. A verified candidate is a directed link newer → older. A pool row
+           reachable from another pool row along links is folded; links are
+           followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
+           only in the direction a verdict gave: two newer memories that each
+           supersede the same older one both stay (no verdict compared them),
+           and the older one folds under the newer of the two.
+        3. A version shadowing just removed (``shadow_map``, dst → src) still
+           links: through its edge and its own verified candidate. Accepting
+           v3's suggestion with ``create_edge`` shadows v2, and v1 — linked to
+           v2 only — must stay folded under v3 rather than resurface.
+        4. Each head (a row no other pool row reaches; the newest by
+           ``created_at`` when several reach a folded row) takes the best
+           position of its group in the pool and that row's ranking scores, so
+           the list stays monotonic and ``confidence`` (computed from the pool)
+           matches it. The folded rows leave ``search_results`` in place —
+           like shadowing, before the re-rank, the selection plan and the
+           top-k slice, so #1306's registered pool is the shipped one (the
+           page is as full as the pool allows; with neural off the pool is
+           ``k`` and a fold shortens the page, as shadowing does).
+
+        Runs with the reranker on or off alike; only the pool order differs.
+        ``include_superseded=True`` folds nothing (audit reads, and
+        ``forget(query=)``, must see every version). Rows in a link cycle with
+        no head outside it stay unfolded. Fail-open: an error leaves the pool
+        untouched.
+
+        Returns:
+            Head id → folded member ids, newest first.
+        """
+        if include_superseded:
+            return {}
+        try:
+            from services.supersede_verify import VERDICT_SUPERSEDES, stored_verification
+
+            def judged_supersedes(memory: Memory) -> bool:
+                verification = stored_verification(memory.supersede_candidate)
+                return verification is not None and (
+                    verification.get("verdict") == VERDICT_SUPERSEDES
+                )
+
+            pool: dict[UUID, Memory] = {}
+            for search_result in search_results:
+                memory = memories.get(search_result["id"])
+                if memory is not None:
+                    pool.setdefault(memory.id, memory)
+            # Shadowed versions (hydrated, removed by shadowing): link nodes,
+            # never rows. All of them, so a chain of accepted edges
+            # (v4→v3→v2, v2 verified→v1) still reaches v1.
+            bridges: dict[UUID, Memory] = {}
+            for memory in memories.values():
+                if shadow_map and memory.id in shadow_map and memory.id not in pool:
+                    bridges.setdefault(memory.id, memory)
+            nodes = {**pool, **bridges}
+            judged = {mid: m for mid, m in nodes.items() if judged_supersedes(m)}
+            if len(pool) < 2 or not judged:
+                return {}
+            candidates = await self._resolve_supersede_candidates(
+                judged,
+                user_id=user_id,
+                operation="recall",
+                trusted_only=trusted_only,
+            )
+            links: dict[UUID, set[UUID]] = {}
+            for dst, src in (shadow_map or {}).items():
+                if dst in bridges and src in nodes:
+                    links.setdefault(src, set()).add(dst)
+            for source_id, candidate in candidates.items():
+                if candidate.verified is True and candidate.memory_id in nodes:
+                    if candidate.memory_id != source_id:
+                        links.setdefault(source_id, set()).add(candidate.memory_id)
+            if not links:
+                return {}
+            return self._fold_linked_versions(search_results, memories, pool, links)
+        except Exception as e:
+            logger.warning("supersede_fold_failed", error=str(e))
+            return {}
+
+    @staticmethod
+    def _fold_linked_versions(
+        search_results: list[dict],
+        memories: dict,
+        pool: dict[UUID, Memory],
+        links: Mapping[UUID, set[UUID]],
+    ) -> dict[UUID, list[UUID]]:
+        """The grouping half of :meth:`_apply_supersede_fold` (#2123).
+
+        ``links`` maps a memory to the older memories a verdict or an edge
+        says it supersedes; nodes outside ``pool`` only carry links. Computes
+        everything before touching ``search_results``, which is replaced in
+        one assignment at the end, so a failure part-way leaves the pool as
+        it was.
+        """
+
+        def reachable(start: UUID) -> set[UUID]:
+            seen: set[UUID] = set()
+            stack = list(links.get(start, ()))
+            while stack:
+                node = stack.pop()
+                if node in seen:
+                    continue
+                seen.add(node)
+                stack.extend(links.get(node, ()))
+            return seen
+
+        reach = {memory_id: reachable(memory_id) - {memory_id} for memory_id in pool}
+        reached_by: dict[UUID, list[UUID]] = {}
+        for source_id, targets in reach.items():
+            for target_id in targets:
+                if target_id in pool:
+                    reached_by.setdefault(target_id, []).append(source_id)
+        heads = {memory_id for memory_id in pool if memory_id not in reached_by}
+
+        def newest_key(memory_id: UUID) -> tuple[float, str]:
+            created_at = pool[memory_id].created_at
+            return (
+                created_at.timestamp() if created_at is not None else float("-inf"),
+                str(memory_id),
+            )
+
+        head_of: dict[UUID, UUID] = {}
+        for folded_id, sources in reached_by.items():
+            owners = [source for source in sources if source in heads]
+            if owners:  # none: a cycle with no head outside it stays unfolded
+                head_of[folded_id] = max(owners, key=newest_key)
+        if not head_of:
+            return {}
+        fold_map: dict[UUID, list[UUID]] = {}
+        for folded_id, head in head_of.items():
+            fold_map.setdefault(head, []).append(folded_id)
+        for head, members in fold_map.items():
+            members.sort(key=newest_key, reverse=True)
+            head_of[head] = head
+
+        rows_of: dict[UUID, list[dict]] = {}
+        for search_result in search_results:
+            memory = memories.get(search_result["id"])
+            if memory is not None and memory.id in head_of:
+                rows_of.setdefault(head_of[memory.id], []).append(search_result)
+
+        folded_results: list[dict] = []
+        emitted: set[UUID] = set()
+        for search_result in search_results:
+            memory = memories.get(search_result["id"])
+            head = head_of.get(memory.id) if memory is not None else None
+            if head is None:
+                folded_results.append(search_result)
+                continue
+            if head in emitted:
+                continue
+            emitted.add(head)
+            rows = rows_of[head]
+            # The head takes the place — and the ranking scores — of the
+            # group's best-ranked row (this one): in a ranked pool that is
+            # the group maximum, on the same scale as its neighbours (a
+            # reranked pool can mix scored and unscored rows).
+            head_row = dict(next(r for r in rows if memories[r["id"]].id == head))
+            for key in _FOLD_RANK_KEYS:
+                if key in search_result:
+                    head_row[key] = search_result[key]
+                else:
+                    head_row.pop(key, None)
+            # The raw cosine is not a ranking key; confidence reads its
+            # maximum for absence detection, which must not drop with a fold.
+            raw = [
+                r["semantic_score_raw"]
+                for r in rows
+                if isinstance(r.get("semantic_score_raw"), (int, float))
+            ]
+            if raw:
+                head_row["semantic_score_raw"] = max(raw)
+            folded_results.append(head_row)
+
+        before = len(search_results)
+        search_results[:] = folded_results
+        logger.info(
+            "supersede_fold_applied",
+            folded=before - len(search_results),
+            groups=len(fold_map),
+        )
+        return fold_map
+
     async def _resolve_supersede_candidates(
         self,
         memories: Mapping[Any, Memory],
@@ -3722,6 +3935,13 @@ class MemoryService:
                         # never surfaced.
                         continue
                     verified = current and is_verified(cand, min_confidence=min_confidence)
+                    if not verified and float(cand["similarity"]) < _SUPERSEDE_SUGGEST_THRESHOLD:
+                        # #2123: a pair below 0.85 is stored only on the
+                        # judge's word (judge-mode threshold). Once that word
+                        # no longer confirms it — a low confidence, a raised
+                        # floor, an edit of either text — it is an unverified
+                        # suggestion below the precision 0.85 promises.
+                        continue
                     resolved[source_id] = SupersedeCandidate(
                         memory_id=target.id,
                         summary=target.summary,
@@ -4644,7 +4864,7 @@ class MemoryService:
         """#1306: stamp selection evidence and reorder the pool to match the plan.
 
         Every subtractive gate (trusted context/source, agent row binding,
-        deletion, cluster scope, supersede shadowing) has already run by this
+        deletion, cluster scope, supersede shadowing and folding) has already run by this
         point, so the pool seen here is precisely the authorized eligible pool
         used by this query.
 
@@ -4704,6 +4924,7 @@ class MemoryService:
         shadow_map: dict[UUID, UUID],
         contradiction_map: dict[UUID, list[UUID]],
         user_id: str,
+        fold_map: Mapping[UUID, list[UUID]] | None = None,
     ) -> list[MemoryResponse]:
         """Build the page that ships: supersede hints and response rows.
 
@@ -4717,6 +4938,7 @@ class MemoryService:
             shadow_map: #1208 dst → superseding src annotations.
             contradiction_map: #1208 memory → contradicting opponents.
             user_id: Caller identity for the supersede-candidate lookup.
+            fold_map: #2123 head id → folded older versions, newest first.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -4734,6 +4956,7 @@ class MemoryService:
             operation="recall",
             trusted_only=_is_trusted_recall(request),
         )
+        fold_map = fold_map or {}
 
         responses: list[MemoryResponse] = []
         for search_result in page:
@@ -4771,6 +4994,12 @@ class MemoryService:
                     contradicts=contradiction_map.get(memory.id, []),
                     # #1403: near-duplicate this memory may supersede (or None).
                     supersede_candidate=supersede_candidates.get(memory.id),
+                    # #2123: older versions folded under this row, if any.
+                    folded=(
+                        FoldedVersions(count=len(folded_ids), memory_ids=folded_ids)
+                        if (folded_ids := fold_map.get(memory.id))
+                        else None
+                    ),
                     version=memory.version,  # #2043
                 )
             )
@@ -5660,6 +5889,17 @@ class MemoryService:
             memories,
             include_superseded=request.include_superseded,
         )
+        # #2123: judge-verified older versions of a fact without an edge fold
+        # under the newer one — same altitude as shadowing, so the re-rank,
+        # the selection plan and the top-k slice see the folded pool.
+        fold_map = await self._apply_supersede_fold(
+            search_results,
+            memories,
+            include_superseded=request.include_superseded,
+            user_id=user_id,
+            trusted_only=_is_trusted_recall(request),
+            shadow_map=shadow_map,
+        )
 
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
         # config-gated per-context (default ON since #1207), single-context only. Reorders the
@@ -5708,6 +5948,7 @@ class MemoryService:
                 shadow_map=shadow_map,
                 contradiction_map=contradiction_map,
                 user_id=user_id,
+                fold_map=fold_map,
             )
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
@@ -7313,6 +7554,43 @@ class MemoryService:
 # with different score distributions.
 _SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 
+
+def _supersede_clear_floor(memory: Memory, detect_threshold: float) -> float:
+    """The threshold a stored suggestion was admitted under (#2059, #2123).
+
+    A re-embed whose nearest neighbour falls a clear margin below it clears
+    the suggestion. A candidate stored at 0.85 or above (unverified, or from
+    before the judge was on) answers to 0.85 even in judge mode; one stored
+    below 0.85 — only ever on the judge's word — to the judge-mode threshold.
+    """
+    stored = memory.supersede_candidate
+    similarity = stored.get("similarity") if isinstance(stored, dict) else None
+    if isinstance(similarity, (int, float)) and similarity >= _SUPERSEDE_SUGGEST_THRESHOLD:
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    return detect_threshold
+
+
+def _supersede_detect_threshold(config: Any) -> float:
+    """The post-embed detection threshold for this deployment (#2123).
+
+    ``_SUPERSEDE_SUGGEST_THRESHOLD`` unless the judge is on
+    (``supersede_verify_mode == "llm"``): then
+    ``supersede_suggest_threshold_llm``, never above the unverified threshold.
+    A pair the lower threshold admits is stored only with the judge's answer
+    (see :func:`_detect_supersede_candidate`), so the precision of an
+    UNVERIFIED candidate still rests on 0.85. ``remember(dedupe="check")``
+    keeps 0.85 regardless.
+    """
+    from services.supersede_verify import VERIFY_MODE_LLM
+
+    if getattr(config, "supersede_verify_mode", None) != VERIFY_MODE_LLM:
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    value = getattr(config, "supersede_suggest_threshold_llm", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    return min(float(value), _SUPERSEDE_SUGGEST_THRESHOLD)
+
+
 # #2006: (model_name, dimensions) pairs already warned about having no
 # ``knn_seed`` calibration row although the D3 bootstrap gate is crossed, so
 # the WARNING fires once per process per embedder instead of on every ingest.
@@ -7541,11 +7819,19 @@ async def _detect_supersede_candidate(
     config: Any,
     workspace_id_str: str,
     context_id_str: str,
+    clear_allowed: bool = False,
 ) -> None:
     """Store ``raw_top`` as ``memory``'s supersede suggestion (#1403, #2016).
 
+    ``clear_allowed`` (#2123): the search returned this memory's own point,
+    so a missing near-duplicate is evidence (#2059) — only then may the
+    judge-mode skip below 0.85 clear a suggestion stored at 0.85 or above.
+
     ``raw_top`` is the RAW top-1 neighbour (excluding self) at or above
-    ``_SUPERSEDE_SUGGEST_THRESHOLD`` — INDEPENDENT of the calibrated/operator
+    ``_SUPERSEDE_SUGGEST_THRESHOLD`` (#2123: or the lower
+    ``supersede_suggest_threshold_llm`` with the judge on, in which case a
+    pair below 0.85 is stored only with a ``supersedes`` / ``parallel``
+    verdict) — INDEPENDENT of the calibrated/operator
     seed-edge threshold. Coupling it to the seed neighbours would let an
     operator seed threshold (knn_seed_min_similarity) > the suggest threshold
     silently suppress a valid suggestion (e.g. a 0.87 near-duplicate filtered
@@ -7578,6 +7864,8 @@ async def _detect_supersede_candidate(
     from models.memory import EDGE_TYPE_SUPERSEDES
     from services.supersede_dismissal import is_dismissed
     from services.supersede_verify import (
+        VERDICT_PARALLEL,
+        VERDICT_SUPERSEDES,
         VERIFY_MODE_LLM,
         judge_pair,
         pair_fingerprint,
@@ -7671,6 +7959,43 @@ async def _detect_supersede_candidate(
                     )
             if verification is not None:
                 candidate["verification"] = verification
+
+        # Compared as stored (4 decimals): the read path tests the stored value.
+        if round(raw_top_score, 4) < _SUPERSEDE_SUGGEST_THRESHOLD:
+            # #2123: the pair is a candidate only because the judge mode
+            # lowered the threshold. Without the judge's answer it would be an
+            # unverified suggestion below the precision 0.85 was chosen for;
+            # a parallel verdict is kept (the pair is not re-judged, never
+            # surfaced), a supersedes verdict is the point.
+            stored = candidate.get("verification")
+            verdict = stored.get("verdict") if isinstance(stored, dict) else None
+            if verdict not in (VERDICT_SUPERSEDES, VERDICT_PARALLEL):
+                logger.info(
+                    "supersede_candidate_skipped_unjudged_low_similarity",
+                    memory_id=memory_id_str,
+                    candidate_memory_id=target_id_str,
+                    similarity=round(raw_top_score, 4),
+                    verdict=verdict,
+                )
+                # No near-duplicate at 0.85 or above any more: a suggestion
+                # stored there (an earlier text, or before the judge was on)
+                # is cleared as #2059 clears it in the off mode — a clear
+                # margin below, so a pair hovering at 0.85 is not flapped.
+                if (
+                    clear_allowed
+                    and raw_top_score < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA
+                ):
+                    stored_similarity = (
+                        memory.supersede_candidate.get("similarity")
+                        if isinstance(memory.supersede_candidate, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(stored_similarity, (int, float))
+                        and stored_similarity >= _SUPERSEDE_SUGGEST_THRESHOLD
+                    ):
+                        await _clear_supersede_candidate_without_neighbour(db, memory=memory)
+                return
 
         # #2069: every path — not only the judge's round trip — ran on the row
         # as this task loaded it, before the embed, the upsert and the search.
@@ -7896,8 +8221,10 @@ async def _create_knn_seed_edges(
 
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
         if suggest_enabled:
+            # #2123: lower while the judge is on; 0.85 otherwise.
+            detect_threshold = _supersede_detect_threshold(config)
             raw_top = max(non_self, key=lambda c: float(c["score"])) if non_self else None
-            if raw_top is not None and float(raw_top["score"]) >= _SUPERSEDE_SUGGEST_THRESHOLD:
+            if raw_top is not None and float(raw_top["score"]) >= detect_threshold:
                 await _detect_supersede_candidate(
                     db,
                     memory=memory,
@@ -7906,11 +8233,12 @@ async def _create_knn_seed_edges(
                     config=config,
                     workspace_id_str=workspace_id_str,
                     context_id_str=context_id_str,
+                    clear_allowed=len(non_self) < len(candidates),
                 )
             elif len(non_self) < len(candidates) and (
                 raw_top is None
                 or float(raw_top["score"])
-                < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA
+                < _supersede_clear_floor(memory, detect_threshold) - RESURFACE_SIMILARITY_DELTA
             ):
                 # #2059: no near-duplicate any more. Only when the search
                 # returned this memory's own point (just upserted): a result

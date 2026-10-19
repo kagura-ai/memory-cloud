@@ -1095,6 +1095,9 @@ WARNING events below.
 | `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
 | `supersede_shadowing_applied` | INFO | recall-side: a recall applied the shadowing of memories superseded by an accepted `supersedes` edge (`shadowed` of `candidates` results were hidden) |
 | `supersede_shadowing_failed` | WARNING | recall-side: the shadowing lookup failed, so the recall returned without hiding superseded memories |
+| `supersede_fold_applied` | INFO | recall-side (#2123): judge-verified older versions were folded under the newest one (`folded` rows removed, in `groups` groups) |
+| `supersede_fold_failed` | WARNING | recall-side: the fold could not be computed, so the recall returned without folding |
+| `supersede_candidate_skipped_unjudged_low_similarity` | INFO | with the judge on, a neighbour between `SUPERSEDE_SUGGEST_THRESHOLD_LLM` and 0.85 got no `supersedes` / `parallel` verdict (no provider, the daily cap, a failure, or `unclear`), so nothing was stored (#2123). Many of these during an ingest usually mean the daily cap |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
 
@@ -1108,6 +1111,17 @@ WARNING events below.
 | `supersede_verify_cap_reached` | WARNING | a workspace hit `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`. Logged once per workspace per UTC day |
 | `supersede_verify_counter_failed` | WARNING | the daily counter could not be read. The judge is skipped (fail-closed) |
 | `supersede_verify_ledger_failed` | WARNING | the `llm_call_log` row for a judge call could not be written. The verdict is still used |
+| `supersede_suggest_threshold_llm_invalid` / `supersede_suggest_threshold_llm_clamped` | WARNING | `SUPERSEDE_SUGGEST_THRESHOLD_LLM` was unparseable (the default 0.75 is used) or outside 0.5-0.85 (the nearest bound is used) |
+
+**Detection threshold with the judge on** (#2123). With `SUPERSEDE_VERIFY_MODE=llm` the
+detection considers the nearest neighbour down to `SUPERSEDE_SUGGEST_THRESHOLD_LLM`
+(default 0.75, clamped to 0.5-0.85, env-only) instead of 0.85, and stores a pair below
+0.85 only with a `supersedes` or `parallel` verdict. The default is provisional until it is
+measured on reworded updates. Each such pair is a judge call against
+`SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (default 200 per workspace), so raise the cap before a
+bulk ingest: once it is reached, later reworded updates are neither stored nor folded in
+recall, and pairs at 0.85 or above are stored unverified (they do not fold either). The
+lower threshold spends the cap faster than 0.85 did. `remember(dedupe="check")` and the judge-off mode keep 0.85.
 
 The judge's results do not depend on the log. Since #2019, each judge call that
 spent tokens is a `caller='supersede_verify'` row in `llm_call_log`, with the

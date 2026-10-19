@@ -54,6 +54,7 @@ def _make_config(
     weight=0.3,
     suggest=True,
     verify_mode="off",
+    llm_threshold=0.75,
 ):
     """Build a NeuralMemoryConfig mock."""
     config = MagicMock()
@@ -62,6 +63,8 @@ def _make_config(
     config.supersede_verify_mode = verify_mode
     config.supersede_verify_min_confidence = 0.7
     config.supersede_verify_max_calls_per_day = 200
+    # #2123: the detection threshold while verify_mode == "llm".
+    config.supersede_suggest_threshold_llm = llm_threshold
     config.knn_seed_k = k
     config.knn_seed_min_similarity = min_similarity
     config.knn_seed_weight = weight
@@ -1923,21 +1926,48 @@ class TestSupersedeVerdictAfterAnEdit:
         assert memory.supersede_candidate is None
 
     @pytest.mark.asyncio
-    async def test_a_neighbour_just_below_the_threshold_keeps_the_candidate(self):
+    @pytest.mark.parametrize("verify_mode", ["off", "llm"])
+    async def test_a_neighbour_just_below_the_threshold_keeps_the_candidate(self, verify_mode):
         """Hysteresis: a pair hovering at the threshold (0.851 / 0.849 across
-        re-embeds) must not be cleared and re-judged — a paid call — each time."""
+        re-embeds) must not be cleared and re-judged — a paid call — each time.
+        #2123: the margin is below the EFFECTIVE threshold — 0.85 with the
+        judge off, supersede_suggest_threshold_llm with it on."""
         from services.memory_service import _SUPERSEDE_SUGGEST_THRESHOLD
         from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
 
-        stored = {"memory_id": str(uuid4()), "similarity": 0.851}
+        threshold = 0.75 if verify_mode == "llm" else _SUPERSEDE_SUGGEST_THRESHOLD
+        config = _make_config(enabled=False, verify_mode=verify_mode, llm_threshold=0.75)
+        stored = {"memory_id": str(uuid4()), "similarity": threshold + 0.001}
         memory = self._orm_memory(stored)
         db = self._db_with_update()
-        hovering = _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA / 2
+        hovering = threshold - RESURFACE_SIMILARITY_DELTA / 2
 
-        await self._seed(memory, db, self._hits(memory, (uuid4(), hovering)))
+        await self._seed(memory, db, self._hits(memory, (uuid4(), hovering)), config=config)
 
         assert memory.supersede_candidate == stored
         db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_mode_clears_only_a_clear_margin_below_its_own_threshold(self):
+        """#2123: with the judge on, a neighbour at 0.80 is no reason to
+        clear (it is a candidate at τ_llm 0.75); one clearly below τ_llm is."""
+        from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
+
+        target = str(uuid4())
+        memory = self._orm_memory({"memory_id": target, "similarity": 0.8})
+        db = self._db_with_update()
+        config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+
+        log = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.75 - RESURFACE_SIMILARITY_DELTA - 0.01)),
+            config=config,
+        )
+
+        assert memory.supersede_candidate is None
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_candidate_cleared_no_neighbour" in events
 
     @pytest.mark.asyncio
     async def test_a_tombstone_is_never_cleared(self):
@@ -2251,3 +2281,226 @@ class TestSupersedeWriteRecheck:
 
         assert memory.supersede_candidate["memory_id"] == dup_id
         assert not inspect(memory).attrs.supersede_candidate.history.has_changes()
+
+
+class TestLlmModeDetectionThreshold:
+    """#2123: with the judge on, the detection looks below 0.85 (to
+    ``supersede_suggest_threshold_llm``), but a pair below 0.85 is stored only
+    with the judge's answer; with the judge off nothing changes."""
+
+    @staticmethod
+    async def _run(score, *, verify_mode="llm", verdict=None, llm_threshold=0.75):
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode=verify_mode, llm_threshold=llm_threshold)
+        dup_id = str(uuid4())
+        candidates = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {"id": dup_id, "score": score, "payload": {}, "embedding": []},
+        ]
+        old = MagicMock()
+        old.id = dup_id
+        old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
+        row = MagicMock()
+        row.scalar_one_or_none = MagicMock(return_value=old)
+        db.execute = AsyncMock(return_value=row)
+        judge = AsyncMock(return_value=verdict)
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+            patch("services.memory_service.logger") as log,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+        events = {c.args[0]: c.kwargs for c in log.info.call_args_list if c.args}
+        return memory, dup_id, judge, events
+
+    @pytest.mark.asyncio
+    async def test_a_reworded_update_judged_supersedes_is_stored_verified(self):
+        verdict = {"verdict": "supersedes", "confidence": 0.95, "verified": True}
+
+        memory, dup_id, judge, events = await self._run(0.78, verdict=verdict)
+
+        judge.assert_awaited_once()
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        assert memory.supersede_candidate["similarity"] == 0.78
+        assert memory.supersede_candidate["verification"] == verdict
+        assert events["supersede_candidate_detected"]["verdict"] == "supersedes"
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_below_085_stores_nothing(self):
+        """No provider, the daily cap or a failure: an unverified candidate
+        below 0.85 is not written (its precision was never measured)."""
+        memory, dup_id, judge, events = await self._run(0.78, verdict=None)
+
+        judge.assert_awaited_once()
+        assert memory.supersede_candidate is None
+        skipped = events["supersede_candidate_skipped_unjudged_low_similarity"]
+        assert skipped["candidate_memory_id"] == dup_id
+        assert skipped["similarity"] == 0.78
+        assert skipped["verdict"] is None
+        assert "supersede_candidate_detected" not in events
+
+    @pytest.mark.asyncio
+    async def test_an_unclear_verdict_below_085_stores_nothing(self):
+        verdict = {"verdict": "unclear", "confidence": 0.4}
+
+        memory, _, _, events = await self._run(0.8, verdict=verdict)
+
+        assert memory.supersede_candidate is None
+        assert events["supersede_candidate_skipped_unjudged_low_similarity"]["verdict"] == "unclear"
+
+    @pytest.mark.asyncio
+    async def test_a_parallel_verdict_below_085_is_stored(self):
+        """Kept so the pair is not re-judged; the resolver never surfaces it."""
+        verdict = {"verdict": "parallel", "confidence": 0.9}
+
+        memory, dup_id, _, _ = await self._run(0.78, verdict=verdict)
+
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        assert memory.supersede_candidate["verification"]["verdict"] == "parallel"
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_at_or_above_085_still_stores_unverified(self):
+        """The 0.85 contract is unchanged: there the judge only annotates."""
+        memory, dup_id, _, _ = await self._run(0.9, verdict=None)
+
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        assert "verification" not in memory.supersede_candidate
+
+    @pytest.mark.asyncio
+    async def test_below_the_llm_threshold_is_not_a_candidate(self):
+        memory, _, judge, _ = await self._run(0.7, verdict={"verdict": "supersedes"})
+
+        judge.assert_not_called()
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_off_mode_keeps_085(self):
+        memory, _, judge, _ = await self._run(
+            0.78, verify_mode="off", verdict={"verdict": "supersedes"}
+        )
+
+        judge.assert_not_called()
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_the_llm_threshold_never_exceeds_085(self):
+        """A config built outside from_env cannot make the judge mode see LESS
+        than the off mode."""
+        from services.memory_service import _supersede_detect_threshold
+
+        config = _make_config(verify_mode="llm", llm_threshold=0.95)
+        assert _supersede_detect_threshold(config) == 0.85
+        config = _make_config(verify_mode="llm", llm_threshold=0.6)
+        assert _supersede_detect_threshold(config) == 0.6
+        config = _make_config(verify_mode="off", llm_threshold=0.6)
+        assert _supersede_detect_threshold(config) == 0.85
+
+
+class TestLlmModeClearsStaleCandidates:
+    """#2123 review: in judge mode a suggestion stored at 0.85 or above must
+    still be cleared when the re-embed finds no neighbour near 0.85, whether
+    the new top neighbour is unjudged (skipped) or just below τ_llm."""
+
+    @staticmethod
+    def _db(old_id):
+        old = MagicMock()
+        old.id = old_id
+        old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
+        result = MagicMock(rowcount=1)
+        result.scalar_one_or_none = MagicMock(return_value=old)
+        db = _make_db()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @staticmethod
+    async def _run(stored, top_score, judge_result=None, *, with_self=True):
+        memory = TestSupersedeVerdictAfterAnEdit._orm_memory(stored)
+        neighbour = uuid4()
+        db = TestLlmModeClearsStaleCandidates._db(str(neighbour))
+        config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        hits = TestSupersedeVerdictAfterAnEdit._hits(memory, (neighbour, top_score))
+        if not with_self:
+            hits = hits[1:]
+        log = await TestSupersedeVerdictAfterAnEdit._seed(
+            memory,
+            db,
+            hits,
+            config=config,
+            judge=AsyncMock(return_value=judge_result),
+        )
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        return memory, events
+
+    @pytest.mark.asyncio
+    async def test_an_unjudged_neighbour_below_085_clears_a_085_candidate(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.78)
+
+        assert "supersede_candidate_skipped_unjudged_low_similarity" in events
+        assert "supersede_candidate_cleared_no_neighbour" in events
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_an_unjudged_neighbour_hovering_at_085_keeps_it(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.86}
+
+        memory, events = await self._run(stored, 0.84)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_a_neighbour_just_below_the_llm_threshold_clears_a_085_candidate(self):
+        """[τ_llm - δ, τ_llm): neither detected nor inside the 0.85 margin."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.74)
+
+        assert "supersede_candidate_cleared_no_neighbour" in events
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_a_sub_085_candidate_keeps_its_own_margin(self):
+        stored = {
+            "memory_id": str(uuid4()),
+            "similarity": 0.78,
+            "verification": {"verdict": "supersedes", "confidence": 0.9},
+        }
+
+        memory, events = await self._run(stored, 0.74)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_results_without_the_memory_itself_clear_nothing(self):
+        """#2059: a search that did not return the memory's own point is no
+        evidence that the near-duplicate is gone."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.78, with_self=False)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_the_085_gate_reads_the_stored_rounding(self):
+        """Raw 0.84996 is stored as 0.85, so without a verdict it is stored
+        unverified like any pair at 0.85 (the read path sees 0.85)."""
+        memory, events = await self._run(None, 0.84996)
+
+        assert "supersede_candidate_skipped_unjudged_low_similarity" not in events
+        assert memory.supersede_candidate["similarity"] == 0.85
+        assert "verification" not in memory.supersede_candidate
