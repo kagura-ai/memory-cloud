@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 from mcp_server.tools import memory as mcp_memory
 from mcp_server.tools._helpers import _dumps
 from models.schemas import (
+    FoldedVersions,
     MemoryResponse,
     RecallConfidence,
     RecallResponse,
@@ -114,7 +115,13 @@ class TestRelatedTags:
 class TestResultItems:
     def test_empty_annotations_are_absent(self):
         item = _envelope(RecallResponse(results=[_memory(context_summary=None)]))["results"][0]
-        for key in ("superseded_by", "contradicts", "supersede_candidate", "context_summary"):
+        for key in (
+            "superseded_by",
+            "contradicts",
+            "supersede_candidate",
+            "folded",
+            "context_summary",
+        ):
             assert key not in item
         assert list(item) == [
             "memory_id",
@@ -147,6 +154,17 @@ class TestResultItems:
         assert item["supersede_candidate"] == candidate.model_dump(mode="json", exclude_none=True)
         assert item["supersede_candidate"]["memory_id"] == str(candidate_id)
         assert "verified" not in item["supersede_candidate"]
+
+    def test_folded_versions_are_listed_newest_first(self):
+        """#2123: ``folded`` carries the count and the ids, in the order the
+        service folded them (newest first), on both verbosities."""
+        newer_old, oldest = uuid4(), uuid4()
+        memory = _memory(folded=FoldedVersions(count=2, memory_ids=[newer_old, oldest]))
+        result = RecallResponse(results=[memory])
+        expected = {"count": 2, "memory_ids": [str(newer_old), str(oldest)]}
+
+        assert _envelope(result)["results"][0]["folded"] == expected
+        assert _compact(result)["results"][0]["folded"] == expected
 
     def test_unconditional_fields_are_unchanged(self):
         memory = _memory(updated_at=None)
