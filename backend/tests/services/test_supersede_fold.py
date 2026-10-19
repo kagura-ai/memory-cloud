@@ -236,6 +236,51 @@ class TestFold:
         assert resolved is candidates
         assert search_results == before
 
+    async def test_a_shadowed_version_still_links_its_chain(self):
+        """Accepting v3's suggestion shadows v2 (edge v3→v2) and clears v3's
+        candidate; v1, linked to v2 only, stays folded under v3."""
+        v1, v2, v3 = _mem(2), _mem(1), _mem(0)
+        candidates = {v2.id: _cand(v1)}  # v3's own candidate was accepted
+        search_results, memories = _pool((v1, 0.9), (v3, 0.8))
+        memories[str(v2.id)] = v2  # hydrated, then removed by shadowing
+        svc = _service(candidates)
+
+        fold_map, _ = await svc._apply_supersede_fold(
+            search_results,
+            memories,
+            include_superseded=False,
+            user_id="u",
+            trusted_only=False,
+            shadow_map={v2.id: v3.id},
+        )
+
+        assert [r["id"] for r in search_results] == [str(v3.id)]
+        assert search_results[0]["score"] == 0.9
+        # v2 is a link, not a row this recall folded.
+        assert fold_map == {v3.id: [v1.id]}
+        resolved_over = svc._resolve_supersede_candidates.await_args.args[0]
+        assert set(resolved_over) == {v1.id, v2.id, v3.id}
+
+    async def test_a_shadowed_version_whose_superseder_is_absent_links_nothing(self):
+        v1, v2 = _mem(2), _mem(1)
+        candidates = {v2.id: _cand(v1)}
+        search_results, memories = _pool((v1, 0.9))
+        memories[str(v2.id)] = v2
+        svc = _service(candidates)
+
+        fold_map, _ = await svc._apply_supersede_fold(
+            search_results,
+            memories,
+            include_superseded=False,
+            user_id="u",
+            trusted_only=False,
+            shadow_map={v2.id: uuid4()},
+        )
+
+        assert fold_map == {}
+        assert [r["id"] for r in search_results] == [str(v1.id)]
+        assert set(svc._resolve_supersede_candidates.await_args.args[0]) == {v1.id}
+
     async def test_empty_pool_does_not_query(self):
         svc = _service({})
 

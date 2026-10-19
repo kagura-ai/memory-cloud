@@ -3598,6 +3598,7 @@ class MemoryService:
         include_superseded: bool,
         user_id: str,
         trusted_only: bool,
+        shadow_map: Mapping[UUID, UUID] | None = None,
     ) -> tuple[dict[UUID, list[UUID]], dict[UUID, SupersedeCandidate] | None]:
         """#2123: fold judge-verified older versions of a fact under the newest.
 
@@ -3617,6 +3618,10 @@ class MemoryService:
         2. A verified ``source → candidate`` pair with both memories in the
            pool joins them; joins are transitive (v3→v2→v1, or v3→v1 with v2
            linked to v1, is one group). An unverified link breaks the chain.
+           A version shadowing just removed (``shadow_map``, dst → src) still
+           links through its edge and its own candidate: accepting v3's
+           suggestion with ``create_edge`` shadows v2, and v1 — linked to v2
+           only — must stay folded under v3 rather than resurface.
         3. Each group keeps one row: the member with the newest
            ``created_at`` (id as tiebreak), at the group's best position in
            the pool, carrying the group's best scores so the list stays
@@ -3644,8 +3649,19 @@ class MemoryService:
                     pool.setdefault(memory.id, memory)
             if not pool:
                 return {}, {}
+            # Shadowed versions whose superseder is in the pool: links only,
+            # never rows (shadowing already removed them).
+            bridges: dict[UUID, Memory] = {}
+            if shadow_map and not include_superseded:
+                for memory in memories.values():
+                    if (
+                        memory.id in shadow_map
+                        and memory.id not in pool
+                        and shadow_map[memory.id] in pool
+                    ):
+                        bridges.setdefault(memory.id, memory)
             candidates = await self._resolve_supersede_candidates(
-                pool,
+                {**pool, **bridges},
                 user_id=user_id,
                 operation="recall",
                 trusted_only=trusted_only,
@@ -3656,7 +3672,13 @@ class MemoryService:
         if include_superseded:
             return {}, candidates
         try:
-            fold_map = self._fold_verified_versions(search_results, memories, pool, candidates)
+            fold_map = self._fold_verified_versions(
+                search_results,
+                memories,
+                pool,
+                candidates,
+                edges={dst: shadow_map[dst] for dst in bridges} if shadow_map else {},
+            )
         except Exception as e:
             logger.warning("supersede_fold_failed", error=str(e))
             return {}, candidates
@@ -3668,14 +3690,18 @@ class MemoryService:
         memories: dict,
         pool: dict[UUID, Memory],
         candidates: Mapping[UUID, SupersedeCandidate],
+        *,
+        edges: Mapping[UUID, UUID],
     ) -> dict[UUID, list[UUID]]:
         """The grouping half of :meth:`_apply_supersede_fold` (#2123).
 
+        ``edges`` maps a shadowed version outside the pool to its in-pool
+        superseder; such a version links its group but is never a row.
         Computes everything before touching ``search_results``, which is
         replaced in one assignment at the end, so a failure part-way leaves
         the pool as it was.
         """
-        parent: dict[UUID, UUID] = {memory_id: memory_id for memory_id in pool}
+        parent: dict[UUID, UUID] = {memory_id: memory_id for memory_id in [*pool, *edges]}
 
         def find(memory_id: UUID) -> UUID:
             while parent[memory_id] != memory_id:
@@ -3683,18 +3709,23 @@ class MemoryService:
                 memory_id = parent[memory_id]
             return memory_id
 
+        def join(a: UUID, b: UUID) -> None:
+            root_a, root_b = find(a), find(b)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+        for shadowed_id, superseder_id in edges.items():
+            join(shadowed_id, superseder_id)
         for source_id, candidate in candidates.items():
             if candidate.verified is not True:
                 continue
             target_id = candidate.memory_id
-            if source_id == target_id or source_id not in pool or target_id not in pool:
+            if source_id == target_id or source_id not in parent or target_id not in parent:
                 continue
-            root_a, root_b = find(source_id), find(target_id)
-            if root_a != root_b:
-                parent[root_a] = root_b
+            join(source_id, target_id)
 
         groups: dict[UUID, list[UUID]] = {}
-        for memory_id in pool:
+        for memory_id in pool:  # rows only: a bridge is never folded or a head
             groups.setdefault(find(memory_id), []).append(memory_id)
 
         def newest_first(memory_id: UUID) -> tuple[float, str]:
@@ -5864,6 +5895,7 @@ class MemoryService:
             include_superseded=request.include_superseded,
             user_id=user_id,
             trusted_only=_is_trusted_recall(request),
+            shadow_map=shadow_map,
         )
 
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),

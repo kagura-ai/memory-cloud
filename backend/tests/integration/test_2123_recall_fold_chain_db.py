@@ -216,6 +216,43 @@ async def test_three_versions_recall_as_the_newest_with_the_others_folded(
 
 
 @pytest.mark.asyncio
+async def test_accepting_the_newest_suggestion_keeps_the_oldest_folded(
+    db_session, judge_on, quiet_write
+):
+    """create_edge(v3 → v2) shadows v2 and clears v3's candidate; v1 is
+    linked to v2 only and must not come back as a stale row."""
+    from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+    from services.edge_service import accept_supersede_candidate_if_matching
+
+    owner, ws, ctx = await _scope(db_session)
+    v1, v2, v3 = await _write_chain(db_session, owner, ws, ctx)
+    judge = AsyncMock(side_effect=_judge_supersedes)
+    await _detect(db_session, v2, v1, judge)
+    await _detect(db_session, v3, v2, judge)
+    db_session.add(
+        NeuralMemoryEdge(
+            user_id=owner,
+            src_id=v3,
+            dst_id=v2,
+            workspace_id=ws.id,
+            context_id=ctx.id,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            weight=1.0,
+            origin=EDGE_ORIGIN_DECLARED,
+        )
+    )
+    await accept_supersede_candidate_if_matching(db_session, src_id=v3, dst_id=v2)
+    await db_session.commit()
+    assert await _stored_candidate(db_session, v3) is None
+
+    response, _ = await _recall(db_session, owner, ws, ctx, [v1, v2, v3])
+
+    assert [r.memory_id for r in response.results] == [v3]
+    assert response.results[0].folded.memory_ids == [v1]
+    assert response.results[0].supersede_candidate is None
+
+
+@pytest.mark.asyncio
 async def test_include_superseded_returns_every_version(db_session, judge_on, quiet_write):
     owner, ws, ctx = await _scope(db_session)
     v1, v2, v3 = await _write_chain(db_session, owner, ws, ctx)
