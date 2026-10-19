@@ -108,20 +108,20 @@ def _response(**overrides) -> MemoryResponse:
 class TestEffectiveFull:
     @pytest.mark.parametrize(
         ("full", "k", "expected"),
-        [(None, 5, 3), (None, 2, 2), (0, 5, 0), (1, 5, 1), (10, 5, 5), (10, 20, 10)],
+        [(None, 5, 0), (0, 5, 0), (1, 5, 1), (3, 2, 2), (10, 5, 5), (10, 20, 10)],
     )
-    def test_default_explicit_and_clamped_to_k(self, full, k, expected):
+    def test_service_default_is_none_explicit_and_clamped_to_k(self, full, k, expected):
         assert effective_full(full, k) == expected
 
-    def test_default_is_three(self):
+    def test_the_tool_default_is_three(self):
         assert RECALL_DEFAULT_FULL == 3
 
 
 @pytest.mark.asyncio
 class TestBuildResponses:
-    async def test_default_puts_content_on_the_top_three(self):
+    async def test_full_three_puts_content_on_the_top_three(self):
         mems = [_mem(i) for i in range(5)]
-        responses = await _build(mems, k=5)
+        responses = await _build(mems, k=5, full=3)
         assert [r.content for r in responses] == [m.content for m in mems[:3]] + [None, None]
         assert all(r.content_truncated is None for r in responses)
 
@@ -134,7 +134,7 @@ class TestBuildResponses:
     async def test_long_content_is_cut_with_its_continuation_offset(self):
         long = "x" * (RECALL_CONTENT_CHARS + 10)
         exact = "y" * RECALL_CONTENT_CHARS
-        responses = await _build([_mem(0, long), _mem(1, exact)], k=5)
+        responses = await _build([_mem(0, long), _mem(1, exact)], k=5, full=3)
         assert responses[0].content == long[:RECALL_CONTENT_CHARS]
         assert responses[0].content_truncated is True
         assert responses[0].content_next_offset == RECALL_CONTENT_CHARS
@@ -283,7 +283,8 @@ class TestHandler:
             patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
             patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
         ):
-            for value, expected in ((None, None), (0, 0), (7, 7)):
+            # Omitted → the tool's default (3); the service itself ships none.
+            for value, expected in ((None, 3), (0, 0), (7, 7)):
                 args = {"query": "q", "context_id": str(uuid4())}
                 if value is not None:
                     args["full"] = value
@@ -308,7 +309,7 @@ class TestRecallRequest:
         assert RecallRequest(query="q").full is None
         assert RecallRequest(query="q", full=0).full == 0
         assert RecallRequest(query="q", full=100).full == 100
-        for bad in (-1, 101):
+        for bad in (-1, 101, True, "3"):
             with pytest.raises(ValidationError):
                 RecallRequest(query="q", full=bad)
 

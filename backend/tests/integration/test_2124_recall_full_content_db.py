@@ -124,7 +124,7 @@ async def test_full_two_puts_content_on_exactly_the_top_two(db_session, quiet_wr
 
 
 @pytest.mark.asyncio
-async def test_default_is_three_and_zero_is_summaries_only(db_session, quiet_write):
+async def test_service_default_and_zero_are_summaries_only_three_is_three(db_session, quiet_write):
     owner, ws, ctx = await _scope(db_session)
     ids = [
         await _remember(db_session, owner, ws, ctx, f"stored fact number {i}", f"body {i}")
@@ -143,7 +143,11 @@ async def test_default_is_three_and_zero_is_summaries_only(db_session, quiet_wri
             current_workspace_id=ws.id,
         )
 
+    # The service (REST, internal callers) ships no content unless asked; the
+    # MCP tool sends full=3 when its caller omits it.
     default = await recall()
-    assert [r.content for r in default.results] == ["body 0", "body 1", "body 2", None]
+    assert all(r.content is None for r in default.results)
+    three = await recall(full=3)
+    assert [r.content for r in three.results] == ["body 0", "body 1", "body 2", None]
     none = await recall(full=0)
     assert all(r.content is None for r in none.results)

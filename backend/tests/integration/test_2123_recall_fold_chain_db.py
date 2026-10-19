@@ -200,7 +200,9 @@ async def test_three_versions_recall_as_the_newest_with_the_others_folded(
     # The read path: the cross-encoder ranks the oldest wording first; the
     # hybrid order has the newest first. Same page either way.
     pool = [v1, v2, other, v3] if use_rerank else [v3, other, v2, v1]
-    response, hybrid_search = await _recall(db_session, owner, ws, ctx, pool, use_rerank=use_rerank)
+    response, hybrid_search = await _recall(
+        db_session, owner, ws, ctx, pool, use_rerank=use_rerank, full=2
+    )
 
     assert hybrid_search.await_args.kwargs["use_rerank"] is use_rerank
     assert [r.memory_id for r in response.results] == [v3, other]

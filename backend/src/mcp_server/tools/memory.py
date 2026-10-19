@@ -52,6 +52,7 @@ from utils.exceptions import (
 )
 from utils.recall_projection import (
     RECALL_CONTENT_KEYS,
+    RECALL_DEFAULT_FULL,
     RECALL_MAX_FULL,
     RECALL_VERBOSITIES,
     recall_result_item,
@@ -74,6 +75,9 @@ logger = logging.getLogger(__name__)
 _DETAILS_RESULTS_BUDGET = DEFAULT_MAX_CHARS - 1_000
 
 
+_CONTEXT_SUMMARY_OMITTED_RESERVE = len('"context_summary_omitted":true,')
+
+
 def _bound_list_envelope(
     envelope: dict[str, Any], lanes: tuple[str, ...], max_chars: int
 ) -> tuple[dict[str, Any], dict[str, bool]]:
@@ -91,7 +95,7 @@ def _bound_list_envelope(
         The bounded envelope and, per lane key, whether items were cut.
     """
     shell = {**envelope, **{lane: [] for lane in lanes}}
-    budget = max_chars - json_chars(shell) - len('"context_summary_omitted":true,')
+    budget = max_chars - json_chars(shell) - _CONTEXT_SUMMARY_OMITTED_RESERVE
     bounded, cut, dropped = fit_lanes(
         [envelope[lane] for lane in lanes], budget, droppable="context_summary"
     )
@@ -1109,11 +1113,12 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
     return response_data
 
 
-# What _bound_list_envelope keeps back before it counts a reply as fitting:
-# room for ``"context_summary_omitted":true,`` and one separator per item
-# where the serialized array has one fewer. A reply within this much of
-# max_chars is still cut there, so the content fit aims below it (#2124).
-_RECALL_BOUND_RESERVE = len('"context_summary_omitted":true,') + 1
+# What _bound_recall_envelope keeps back before it counts a reply as fitting:
+# room for the omitted flag (_CONTEXT_SUMMARY_OMITTED_RESERVE, which
+# _bound_list_envelope subtracts) and one separator per item where the
+# serialized array has one fewer. A reply within this much of max_chars is
+# still cut there, so the content fit aims below it (#2124).
+_RECALL_BOUND_RESERVE = _CONTEXT_SUMMARY_OMITTED_RESERVE + 1
 
 
 def _fit_recall_content(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
@@ -1142,8 +1147,8 @@ def _fit_recall_content(envelope: dict[str, Any], max_chars: int) -> dict[str, A
         item = dict(results[index])
         for key in RECALL_CONTENT_KEYS:
             if key in item:
-                # ``,"key":value`` — never the first member (memory_id is).
-                total -= json_chars(key) + json_chars(item.pop(key)) + 2
+                # Never the first member (memory_id is), so it costs its comma.
+                total -= _member_chars(key, item.pop(key))
         results[index] = item
     return {**envelope, "results": results, "full_applied": len(with_content)}
 
@@ -1197,9 +1202,12 @@ async def handle_recall(
         )
 
     # #2124: how many of the top results carry content. ``type(x) is int`` so
-    # bool, which subclasses int, is refused; None follows the default (3).
+    # bool, which subclasses int, is refused. The tool's default (3) is applied
+    # here, not in the service, which ships no content unless asked.
     full = args.get("full")
-    if full is not None and (type(full) is not int or not 0 <= full <= RECALL_MAX_FULL):
+    if full is None:
+        full = RECALL_DEFAULT_FULL
+    elif type(full) is not int or not 0 <= full <= RECALL_MAX_FULL:
         return _error_response(
             "invalid_argument",
             f"full must be an integer between 0 and {RECALL_MAX_FULL} "

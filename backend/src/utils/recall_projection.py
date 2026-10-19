@@ -18,8 +18,10 @@ from utils.datetime import to_utc_iso
 RECALL_VERBOSITIES = ("compact", "full")
 # Characters of ``summary`` a compact item carries, the ellipsis included.
 COMPACT_SUMMARY_CHARS = 160
-# #2124: how many of the top results carry ``content`` when the caller passes
-# no ``full``, the largest ``full`` accepted (recall's own ``k`` limit), and
+# #2124: how many of the top results carry ``content`` when an MCP recall
+# passes no ``full`` (the tool applies it; the service and REST default to
+# none, so an internal caller never ships content by accident), the largest
+# ``full`` accepted (recall's own ``k`` limit), and
 # the characters of content one result carries at most. Longer content is cut
 # there and continues with reference(memory_id, content_offset=...).
 RECALL_DEFAULT_FULL = 3
@@ -60,10 +62,10 @@ def _compact_summary(summary: str) -> tuple[str, bool]:
 def effective_full(full: int | None, k: int) -> int:
     """How many of the top results carry content (#2124).
 
-    ``full`` as the caller passed it (``None`` → ``RECALL_DEFAULT_FULL``),
-    never more than ``k``.
+    ``full`` as the request carries it (``None`` → none: the MCP tool fills
+    in ``RECALL_DEFAULT_FULL`` itself), never more than ``k``.
     """
-    return min(RECALL_DEFAULT_FULL if full is None else full, k)
+    return min(full or 0, k)
 
 
 def content_slice(content: str) -> tuple[str, int | None]:

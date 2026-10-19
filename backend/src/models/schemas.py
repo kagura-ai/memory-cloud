@@ -356,15 +356,18 @@ class RecallRequest(BaseModel):
     )
     # #2124: the top ``full`` results carry their content (each cut at 1,500
     # characters), so an agent can answer without a reference() round trip.
-    # None → 3; 0 → summaries only. Never more than ``k``.
+    # None → none here (REST and internal callers); the MCP recall tool sends 3
+    # when its caller omits it. Never more than ``k``. Strict: a bool or a
+    # numeric string is refused, as the MCP handler refuses it.
     full: int | None = Field(
         default=None,
         ge=0,
         le=100,
+        strict=True,
         description=(
             "How many of the top results carry content, each cut at 1,500 "
             "characters (content_truncated / content_next_offset when cut). "
-            "Omit for 3; 0 returns summaries only."
+            "Omit or 0 for summaries only."
         ),
     )
 
