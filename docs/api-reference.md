@@ -272,6 +272,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 | `k` | integer | No | Number of results (default: 5, max: 100) |
 | `filters` | object | No | `context_id` (UUID) names the context to search — required. Also filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
 | `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
+| `full` | integer | No | How many of the top results carry `content` (default 3, `0`-`100`, never more than `k`; `0` returns summaries only). Each is cut at 1,500 characters; a cut one carries `content_truncated: true` and `content_next_offset` (the `content_offset` that continues it in `reference`). Results past the first `full` carry no `content` key. The share-key `/recall` ignores it and returns summaries only. |
 
 Errors: `422` for a missing or malformed `filters.context_id`; a context the caller may not read (unknown, other workspace, private non-creator, not a member, suspended, outside the member's context whitelist, or outside a workspace-scoped key's workspace) is the uniform `404` `Context not found` — the same check as `/memory/list`, `/memory/stats` and the MCP `recall` tool.
 
@@ -1744,6 +1745,8 @@ Search memories.
   }
 }
 ```
+
+The top `full` results (default 3; `0` for summaries only) also carry `content`, up to 1,500 characters each, with `content_truncated` / `content_next_offset` when cut — see [MCP Tools › recall](mcp-tools.md#recall).
 
 ### 3. reference
 

@@ -26,7 +26,7 @@ Use `recall` with the resolved context_id:
 recall(context_id=..., query="$ARGUMENTS", k=10)
 ```
 
-The reply is compact by default: each result carries `memory_id`, the first 160 characters of `summary` (`summary_cut: true` when it was shortened), `type`, `importance`, `score`, `created_at` and `updated_at`. Read one hit in full with `reference(memory_id)`. Decide the shape before the first call: use `verbosity="full"` when the display needs each result's `tags` or `context_summary` — a second recall for the same query is billed again and strengthens associations again.
+The reply is compact by default: each result carries `memory_id`, the first 160 characters of `summary` (`summary_cut: true` when it was shortened), `type`, `importance`, `score`, `created_at` and `updated_at`. The top three results also carry their `content` (up to 1,500 characters each; `full=N` sets how many, `full=0` none), so answer from it — no `reference()` call is needed for those. Call `reference(memory_id)` only for a lower-ranked hit, or for one marked `content_truncated: true` (pass `content_offset=<content_next_offset>` to read on). Decide the shape before the first call: use `verbosity="full"` when the display needs each result's `tags` or `context_summary` — a second recall for the same query is billed again and strengthens associations again.
 
 **Query technique** — a question often matches better as a hypothetical answer (HyDE): for "how to fix auth errors?" search `"Auth errors are caused by expired JWT tokens. Use the refresh token to re-authenticate..."` (typically 3-10% better, up to 25%). Expand with related terms ("認証エラー" → also `OAuth2`, `JWT`, `401 error`) and combine the searches when you need coverage.
 
@@ -101,9 +101,9 @@ Show results in a table: memory_id, summary, type, importance (plus a tags colum
 
 ### 5. Follow up
 
-- **Results found** — suggest using `reference` for detailed content on the most relevant match:
+- **Results found** — the top results already carry their content; answer from it. Suggest `reference` only for a lower-ranked match the user wants in full, or to read past a cut (`content_truncated: true`):
   ```
-  reference(memory_id=<id_from_results>, context_id=...)
+  reference(memory_id=<id_from_results>, context_id=..., content_offset=<content_next_offset>)
   ```
 - **Zero results** — try these adjustments:
   1. Shorten or broaden the query (remove specific terms)

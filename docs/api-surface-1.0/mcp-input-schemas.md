@@ -79,6 +79,7 @@ Hybrid search (semantic + BM25 + Neural Memory boosting) over memories; returns 
   - `context_ids` — array of string (format `uuid`), minItems 2, maxItems 20 (cross-context recall; an ALTERNATIVE to `context_id` — `context_ids` overrides `context_id` when both are given, and is sufficient on its own). The deliberate frozen pattern: singular `context_id` and plural `context_ids` are the two arms of one "exactly one of" selector, neither in `required`.
   - `search_mode` — string, enum [`hybrid`, `semantic`, `keyword`] (default hybrid) ⚠ mild lock-in: description bakes in the 60/40 weighting and BM25/Neural-Memory implementation details; enum values themselves look stable
   - `include_explore_hints` — boolean (default false)
+  - `full` — integer, minimum 0, maximum 100 (default 3 when omitted; never more than `k`): how many of the top results carry `content` (each cut at 1,500 characters; `content_truncated` / `content_next_offset` when cut). `0` restores the summary-only shape. Lowered on the response, not rejected, when `max_chars` is tight (`full_applied` on the envelope) (#2124).
 - ✅ `context_id` is not in `required` here (because `context_ids` can stand in). Since #2125 it is not in `required` on the remember-family either: the connection default (`?context=`) can supply it. recall stays the only tool with a cross-context (`context_ids`) mode, and `context_ids` is never combined with the default. The prose still says "IMPORTANT: always specify context_id" as the single-context happy-path guidance for agents.
 
 ### reference
