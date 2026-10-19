@@ -356,6 +356,33 @@ SERVER_INSTRUCTIONS_BASE = (
 # Kept as a module attribute for imports that still read the old name.
 SERVER_INSTRUCTIONS = SERVER_INSTRUCTIONS_BASE
 
+# #2125: the base text when the URL names a default context the caller can
+# read (``?context=<uuid>``). Same 240-char budget as the base: the fixed text
+# is under 200 characters and the name is flattened and cut to
+# ``DEFAULT_CONTEXT_NAME_CAP`` (the digest's own rules,
+# so a name cannot forge the digest boundary). Pinned with the base in
+# ``tests/mcp_server/test_instructions_budget.py``.
+DEFAULT_CONTEXT_NAME_CAP = 40
+_DEFAULT_CONTEXT_INSTRUCTIONS = (
+    "Kagura Memory Cloud. Default context: {name}; omit context_id. bootstrap() opens a "
+    "session; remember stores, recall searches; changes_since lists changes. "
+    "list_contexts(name_contains=) reaches another."
+)
+
+
+def default_context_instructions(name: str) -> str:
+    """The base text naming the connection's default context (#2125).
+
+    Falls back to ``SERVER_INSTRUCTIONS_BASE`` when nothing printable is left
+    of the name.
+    """
+    from services.guardrail_digest import cut_summary, flatten_summary
+
+    shown = cut_summary(flatten_summary(name), DEFAULT_CONTEXT_NAME_CAP)
+    if not shown:
+        return SERVER_INSTRUCTIONS_BASE
+    return _DEFAULT_CONTEXT_INSTRUCTIONS.format(name=shown)
+
 
 def _discover_result(
     instructions: str = SERVER_INSTRUCTIONS_BASE, *, private: bool = False
@@ -455,6 +482,101 @@ async def _read_digest(
     return None  # pragma: no cover - get_db always yields
 
 
+async def _read_default_context_name(
+    *,
+    user_id: str,
+    context_id: UUID,
+    key_workspace_id: "UUID | None",
+    timeout_ms: int,
+) -> str | None:
+    """The name of the ``?context=`` default if the caller can read it, else ``None``.
+
+    Read through the chokepoint the read tools use
+    (``resolve_context_for_workspace_read``), so a deny — unknown, other
+    workspace, private non-creator, whitelist miss, agent binding, seat —
+    returns ``None`` and the caller serves the base text with no signal about
+    why. Same session discipline as ``_read_digest``.
+    """
+    from sqlalchemy import text
+
+    from db.base import get_db
+    from services.capacity_lock import CapacityPolicy
+    from services.permission_service import PermissionService
+    from utils.exceptions import FeatureNotAvailableError, NotFoundException
+
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            await db.execute(
+                text("SELECT set_config('statement_timeout', :ms, true)"),
+                {"ms": str(timeout_ms)},
+            )
+            try:
+                context = await PermissionService(db).resolve_context_for_workspace_read(
+                    user_id=user_id,
+                    context_id=context_id,
+                    required_role="viewer",
+                    key_workspace_id=key_workspace_id,
+                    capacity=CapacityPolicy.ALLOWED,  # naming it reads no memory
+                )
+            except (NotFoundException, FeatureNotAvailableError):
+                logger.debug("mcp_default_context_instructions_denied")
+                return None
+            return context.name
+    return None  # pragma: no cover - get_db always yields
+
+
+async def _instructions_base(
+    *,
+    user_id: str,
+    query_string: bytes,
+    key_workspace_id: "UUID | None",
+    era: Literal["legacy", "stateless"],
+) -> tuple[str, bool]:
+    """The base text for this connection and whether it varies by caller (#2125).
+
+    ``default_context_instructions`` when ``?context=<uuid>`` names a context
+    the caller can read, else ``SERVER_INSTRUCTIONS_BASE``. ``private`` is
+    ``True`` whenever ``?context=`` is present in any form — the answer
+    depends on the caller — and the database is opened only for a UUID. An
+    agent-bound key's default binding fills tool arguments
+    (``tools._default_context``) but does not change this text: its handshake
+    keeps the reads #1621 pins. Fails open to the base text, like the digest.
+    """
+    from mcp_server.tools._default_context import select_default_context
+
+    selection = select_default_context(query_string)
+    if selection.mode == "none":
+        return SERVER_INSTRUCTIONS_BASE, False
+    if selection.mode == "invalid" or selection.context_id is None:
+        logger.info(
+            "mcp_context_param_invalid: len=%d parsed=False era=%s", selection.raw_length, era
+        )
+        return SERVER_INSTRUCTIONS_BASE, True
+
+    settings = get_settings()
+    try:
+        async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
+            name = await _read_default_context_name(
+                user_id=user_id,
+                context_id=selection.context_id,
+                key_workspace_id=key_workspace_id,
+                timeout_ms=settings.mcp_guardrail_digest_timeout_ms,
+            )
+    except Exception as e:  # noqa: BLE001 - fail open to the base text
+        logger.warning(
+            "mcp_default_context_instructions_failed: reason=%s era=%s", type(e).__name__, era
+        )
+        return SERVER_INSTRUCTIONS_BASE, True
+    if name is None:
+        return SERVER_INSTRUCTIONS_BASE, True
+    logger.info(
+        "mcp_default_context_instructions_served: context_id=%s era=%s source=url",
+        str(selection.context_id),
+        era,
+    )
+    return default_context_instructions(name), True
+
+
 async def build_instructions(
     *,
     user_id: str,
@@ -484,6 +606,9 @@ async def build_instructions(
     is all this caller can ever get (a connector key, or the fallback switched
     off), whose bytes are static per deployment and identical for every caller.
 
+    #2125: the base text itself may name the connection's default context
+    (``_instructions_base``); ``private`` is then ``True`` as well.
+
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
     and never fail the handshake. Denies produce no signal beyond debug level;
@@ -498,6 +623,9 @@ async def build_instructions(
         tool_view_names,
     )
 
+    base, base_private = await _instructions_base(
+        user_id=user_id, query_string=query_string, key_workspace_id=key_workspace_id, era=era
+    )
     settings = get_settings()
     selection = select_guardrail_context(query_string)
     scope = get_agent_scope()
@@ -508,21 +636,21 @@ async def build_instructions(
         and settings.mcp_guardrail_digest_last_used_fallback
         and not get_mcp_connector_credential()
     )
-    attempted = selection.mode != "binding" or scope is not None or user_fallback
+    attempted = selection.mode != "binding" or scope is not None or user_fallback or base_private
 
     if not settings.mcp_guardrail_digest_enabled:
-        return SERVER_INSTRUCTIONS_BASE, attempted
+        return base, attempted
     if selection.mode == "ignored":
         logger.info(
             "mcp_guardrails_param_ignored: len=%d parsed=False era=%s",
             selection.raw_length,
             era,
         )
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
     if selection.mode == "off":
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
     if selection.mode == "binding" and scope is None and not user_fallback:
-        return SERVER_INSTRUCTIONS_BASE, False
+        return base, base_private
 
     try:
         async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
@@ -535,14 +663,12 @@ async def build_instructions(
             )
     except Exception as e:  # noqa: BLE001 - fail open to the base text
         logger.warning("mcp_guardrail_digest_failed: reason=%s era=%s", type(e).__name__, era)
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
 
     if entries is None or not entries.entries:
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base, True
 
-    instructions = render_instructions(
-        SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query_string)
-    )
+    instructions = render_instructions(base, entries, tool_names=tool_view_names(query_string))
     logger.info(
         "mcp_guardrail_digest_served: context_id=%s entries=%d truncated=%s era=%s selection=%s",
         str(entries.context_id),
