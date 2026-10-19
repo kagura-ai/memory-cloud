@@ -52,7 +52,6 @@ from utils.exceptions import (
 )
 from utils.recall_projection import (
     RECALL_CONTENT_KEYS,
-    RECALL_DEFAULT_FULL,
     RECALL_MAX_FULL,
     RECALL_VERBOSITIES,
     recall_result_item,
@@ -1209,7 +1208,11 @@ async def handle_recall(
     # explicit one is the caller's deliberate request, every row eligible.
     content_trusted_only = full is None
     if full is None:
-        full = RECALL_DEFAULT_FULL
+        # #2140: the deployment default (MCP_RECALL_DEFAULT_FULL, 3 unless
+        # set); still a default, so the trusted-only rule above holds.
+        from config.settings import get_settings
+
+        full = get_settings().mcp_recall_default_full
     elif type(full) is not int or not 0 <= full <= RECALL_MAX_FULL:
         return _error_response(
             "invalid_argument",

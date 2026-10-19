@@ -819,6 +819,18 @@ class Settings(BaseSettings):
         description="recall result shape when the caller omits verbosity",
     )
 
+    # #2140: how many of the top results carry content when an MCP recall
+    # omits ``full`` (#2124's tool default, 3). Still a *default*: only trusted
+    # rows get content, as with the built-in one. An explicit ``full`` wins.
+    # An out-of-range value refuses to boot, like a bad verbosity. REST is
+    # unaffected (its default stays 0).
+    mcp_recall_default_full: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description="recall top results carrying content when the caller omits full",
+    )
+
     # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
     # whose ``Origin`` header is present and not allow-listed with 403 (the
     # spec's DNS-rebinding defence). The allow-list is ``CORS_ORIGINS``, the
