@@ -19,6 +19,14 @@
    principal (cross-principal → ``session_not_found``).
 8. The erasure scrub of ``memories.session_id`` and the rollback rows.
 9. ``f04_2044_session_provenance`` round trip.
+10. #2121 window mode: only the principal's in-window API writes (another
+    user, another agent, the same user unbound vs agent-bound, before / after
+    the window are untouched); two clients on one credential are both
+    covered; continuation under the same record (``until`` omitted too); a
+    wider window and session-then-window never reverse an event twice (also
+    concurrently); ``no_writes_in_window``; the MCP handler never applies the
+    owner override; ``changes_in_session`` without a session (``by_me``);
+    erasure of a window row; ``f05_2121_rollback_window`` round trip.
 
 The vector store, the embedding service and the permission check are stubbed.
 Every seeded row goes with its workspace. Not executed in the local unit run —
@@ -769,6 +777,17 @@ async def test_erasure_scrubs_session_tokens(world: World) -> None:
                 requested_by=w.member,
                 status="completed",
             ),
+            # #2121: a window-mode row of the subject.
+            MemorySessionRollback(
+                workspace_id=w.workspace_id,
+                context_id=w.context_id,
+                session_id=None,
+                principal_user_id=w.member,
+                requested_by=w.member,
+                status="completed",
+                window_since=w.clock[0],
+                window_until=w.clock[-1],
+            ),
         ]
     )
     await w.session.commit()
@@ -780,7 +799,7 @@ async def test_erasure_scrubs_session_tokens(world: World) -> None:
         pseudonym = service._pseudonym(w.member)
     await w.session.commit()
 
-    assert counts == {"memory_sessions_scrubbed": 1, "session_rollbacks_pseudonymized": 3}
+    assert counts == {"memory_sessions_scrubbed": 1, "session_rollbacks_pseudonymized": 5}
     assert (await w.row(mine))["session_id"] is None
     # The owner's later session on the member's memory is not the member's.
     assert (await w.row(edited_later))["session_id"] == "O-SESSION"
@@ -790,6 +809,7 @@ async def test_erasure_scrubs_session_tokens(world: World) -> None:
                 MemorySessionRollback.session_id,
                 MemorySessionRollback.principal_user_id,
                 MemorySessionRollback.requested_by,
+                MemorySessionRollback.window_since.is_not(None),
             )
             .where(MemorySessionRollback.context_id == w.context_id)
             .order_by(MemorySessionRollback.id)
@@ -798,8 +818,10 @@ async def test_erasure_scrubs_session_tokens(world: World) -> None:
     # The owner-scope row the subject requested may name the subject's own
     # session: its token goes too.
     assert [tuple(r) for r in rows] == [
-        (None, pseudonym, pseudonym),
-        (None, None, pseudonym),
+        (None, pseudonym, pseudonym, False),
+        (None, None, pseudonym, False),
+        # The window bounds are not personal data and stay.
+        (None, pseudonym, pseudonym, True),
     ]
 
 
@@ -884,3 +906,471 @@ def test_f04_round_trip() -> None:
                     conn.execute(text("DELETE FROM memories WHERE user_id = :u"), {"u": user})
             finally:
                 engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# #2121: the window mode
+# ---------------------------------------------------------------------------
+
+_MS = timedelta(milliseconds=1)
+
+
+def _mark(world: World) -> Any:
+    """A window bound between the last write and the next (ticks are 5 ms apart)."""
+    return world.clock[-1] + _MS
+
+
+async def _window(
+    world: World,
+    principal: SessionPrincipal,
+    since: Any,
+    until: Any,
+    *,
+    dry_run: bool,
+    session: AsyncSession | None = None,
+) -> sr.RollbackResult:
+    return await sr.rollback_session(
+        session or world.session,
+        scope=sr.SessionScope(world.context_id, None, principal, since=since, until=until),
+        workspace_id=world.workspace_id,
+        requested_by=principal.actor_user_id,
+        dry_run=dry_run,
+        classify=_errors,
+        new_correlation_id=_cid,
+    )
+
+
+async def _rollback_events(world: World, memory_id: uuid.UUID) -> list[str]:
+    return list(
+        (
+            await world.session.execute(
+                select(MemoryRevision.kind)
+                .where(MemoryRevision.memory_id == memory_id, MemoryRevision.writer == "rollback")
+                .order_by(MemoryRevision.id)
+            )
+        ).scalars()
+    )
+
+
+async def test_window_rolls_back_only_the_principals_in_window_writes(world: World) -> None:
+    w, member, owner = world, world.member, world.owner
+    me = SessionPrincipal(member, None)
+    before = await w.create(member, None, summary="mine, before")
+    shared = await w.create(owner, None, summary="owner's", tags=["o"])
+    doomed = await w.create(member, None, summary="mine, forgotten in the window")
+    since = _mark(w)
+    created = await w.create(member, None)  # in the window, no session
+    await w.update(shared, member, "stateful-1", tags=["m"])  # a session id too
+    await w.update(before, member, None, summary="mine, edited in the window")
+    owners = await w.create(owner, None)  # another user
+    agents = await w.create(member, None, agent=w.agent)  # same user, agent key
+    await w.forget(doomed, member, None)
+    later_edit = await w.create(member, None)
+    until = _mark(w)
+    after = await w.create(member, None)  # after the window
+    await w.update(later_edit, member, None, importance=0.1)  # own write after until
+    await w.session.commit()
+    untouched = {m: await w.row(m) for m in (owners, agents, after)}
+
+    plan = await _window(w, me, since, until, dry_run=True)
+    by_memory = {item.memory_id: item for item in plan.items}
+    assert set(by_memory) == {created, shared, before, doomed, later_edit}
+    assert by_memory[created].action == sr.ACTION_FORGET
+    assert by_memory[shared].action == sr.ACTION_RESTORE
+    assert by_memory[before].values == {"summary": "mine, before"}
+    assert by_memory[doomed].action == sr.ACTION_UNFORGET
+    # The principal's own write after until changed the memory since.
+    assert (by_memory[later_edit].action, by_memory[later_edit].cause) == (
+        sr.ACTION_SKIP,
+        sr.CAUSE_MODIFIED_SINCE,
+    )
+    assert (plan.events, plan.remaining) == (5, 0)
+    records = select(func.count()).where(MemorySessionRollback.context_id == w.context_id)
+    assert await w.session.scalar(records) == 0  # a dry run writes nothing
+
+    result = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert (result.status, result.remaining, result.errors) == ("completed", 0, [])
+    assert (await w.row(created))["deleted_at"] is not None
+    assert (await w.row(shared))["tags"] == ["o"]
+    assert (await w.row(before))["summary"] == "mine, before"
+    assert (await w.row(doomed))["deleted_at"] is None
+    assert (await w.row(later_edit))["deleted_at"] is None
+    for memory_id, row in untouched.items():
+        assert await w.row(memory_id) == row
+    record = await w.session.get(MemorySessionRollback, result.rollback_id)
+    assert record is not None
+    assert (record.session_id, record.principal_user_id, record.agent_id) == (None, member, None)
+    assert (record.window_since, record.window_until) == (since, until)
+
+
+async def test_window_never_selects_another_agent_or_the_unbound_user(world: World) -> None:
+    w, owner = world, world.owner
+    other_agent = uuid.uuid4()
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    unbound = await w.create(owner, None)
+    bound = await w.create(owner, None, agent=w.agent)
+    unbound_2 = await w.create(owner, "S-1")
+    until = _mark(w)
+    await w.session.commit()
+
+    user_plan = await _window(w, SessionPrincipal(owner, None), since, until, dry_run=True)
+    agent_plan = await _window(w, SessionPrincipal(owner, w.agent), since, until, dry_run=True)
+    assert {i.memory_id for i in user_plan.items} == {unbound, unbound_2}
+    assert {i.memory_id for i in agent_plan.items} == {bound}
+    with pytest.raises(sr.NoWritesInWindowError):
+        await _window(w, SessionPrincipal(owner, other_agent), since, until, dry_run=True)
+    with pytest.raises(sr.NoWritesInWindowError):
+        await _window(w, SessionPrincipal(w.member, None), since, until, dry_run=True)
+
+
+async def test_two_clients_one_credential_are_both_in_the_window(world: World) -> None:
+    """A user credential running two clients: one window covers both (documented)."""
+    w, member = world, world.member
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    stateless = await w.create(member, None)
+    stateful = await w.create(member, "mcp-session-b")
+    stateless_2 = await w.create(member, None)
+    until = _mark(w)
+    await w.session.commit()
+    me = SessionPrincipal(member, None)
+    plan = await _window(w, me, since, until, dry_run=True)
+    assert {i.memory_id for i in plan.items} == {stateless, stateful, stateless_2}
+    page = await changes_in_session(
+        w.session,
+        context_id=w.context_id,
+        session_id=None,
+        principal=me,
+        owner_user_id=None,
+        since=since,
+        until=until,
+    )
+    assert [c.memory_id for c in page.changes] == [stateless, stateful, stateless_2]
+    result = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert result.summary["forgotten"] == 3
+
+
+async def test_window_continues_under_the_same_record(world: World) -> None:
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    created = [await w.create(member, None) for _ in range(5)]
+    until = _mark(w)
+    await w.session.commit()
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, since) is None
+    with patch.object(sr, "MAX_ROLLBACK_EVENTS_PER_CALL", 2):
+        first = await _window(w, me, since, until, dry_run=False)
+        await w.session.commit()
+        assert (first.status, first.events, first.remaining) == ("in_progress", 2, 3)
+        # until omitted on the follow-up: the unfinished record's until.
+        reused = await sr.unfinished_window_until(w.session, w.context_id, me, since)
+        assert reused == until
+        # Another principal (the agent key) has no unfinished window here.
+        agent = SessionPrincipal(member, w.agent)
+        assert await sr.unfinished_window_until(w.session, w.context_id, agent, since) is None
+        second = await _window(w, me, since, reused, dry_run=False)
+        await w.session.commit()
+        third = await _window(w, me, since, until, dry_run=False)
+        await w.session.commit()
+    assert (third.status, third.remaining) == ("completed", 0)
+    assert first.rollback_id == second.rollback_id == third.rollback_id
+    assert third.totals["forgotten"] == 5 and third.totals["calls"] == 3
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, since) is None
+    for dry_run in (True, False):
+        with pytest.raises(sr.AlreadyRolledBackError) as refused:
+            await _window(w, me, since, until, dry_run=dry_run)
+        assert refused.value.rollback_id == first.rollback_id
+        await w.session.rollback()
+    for memory_id in created:
+        assert (await w.row(memory_id))["deleted_at"] is not None
+    # A write that was in flight lands inside the window afterwards: it
+    # reopens the same record.
+    late = await w.create(member, None)
+    await w.session.execute(
+        text("UPDATE memory_revisions SET at = :at WHERE memory_id = :m"),
+        {"at": until - _MS, "m": late},
+    )
+    await w.session.commit()
+    again = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert (again.rollback_id, again.status) == (first.rollback_id, "completed")
+    assert [i.memory_id for i in again.items] == [late]
+
+
+async def test_a_wider_window_reverses_nothing_twice(world: World) -> None:
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    first = await w.create(member, None)
+    narrow_until = _mark(w)
+    second = await w.create(member, None)
+    wide_until = _mark(w)
+    await w.session.commit()
+
+    narrow = await _window(w, me, since, narrow_until, dry_run=False)
+    await w.session.commit()
+    assert [i.memory_id for i in narrow.items] == [first]
+    wide = await _window(w, me, since, wide_until, dry_run=False)
+    await w.session.commit()
+    assert [i.memory_id for i in wide.items] == [second]
+    assert wide.rollback_id != narrow.rollback_id
+    assert await _rollback_events(w, first) == ["forgotten"]
+    assert await _rollback_events(w, second) == ["forgotten"]
+    # Each window answers with its own record from now on.
+    for until, record in ((narrow_until, narrow), (wide_until, wide)):
+        with pytest.raises(sr.AlreadyRolledBackError) as refused:
+            await _window(w, me, since, until, dry_run=False)
+        assert refused.value.rollback_id == record.rollback_id
+        await w.session.rollback()
+    # A third window whose events another window handled: refused, no record.
+    with pytest.raises(sr.AlreadyRolledBackError) as refused:
+        await _window(w, me, since + _MS, wide_until, dry_run=True)
+    assert refused.value.rollback_id is None
+
+
+async def test_session_then_window_reverses_nothing_twice(world: World) -> None:
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    target = await w.create(w.owner, None, summary="original")
+    await w.update(target, member, "S-STATEFUL", summary="by the session")
+    outside = await w.create(member, None)  # same principal, no session
+    until = _mark(w)
+    await w.session.commit()
+
+    session = await _rollback(w, "S-STATEFUL", me, dry_run=False)
+    await w.session.commit()
+    assert session.summary["updated_restored"] == 1
+    window = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert [i.memory_id for i in window.items] == [outside]
+    assert await _rollback_events(w, target) == ["updated"]
+    assert (await w.row(target))["summary"] == "original"
+
+
+async def test_concurrent_session_and_window_rollbacks_reverse_once(
+    world: World, async_engine: AsyncEngine
+) -> None:
+    """Different advisory locks; the memory row lock and the ``undone_by``
+    re-read under it keep the window from reversing what the session's
+    rollback (committed while the window waited) already reversed."""
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    target = await w.create(w.owner, None, tags=["orig"])
+    await w.update(target, member, "S-RACE", tags=["session"])
+    until = _mark(w)
+    await w.session.commit()
+    window_pid = await w.session.scalar(text("SELECT pg_backend_pid()"))
+    maker = _maker(async_engine)
+
+    async with maker() as other:
+        session = await sr.rollback_session(
+            other,
+            scope=sr.SessionScope(w.context_id, "S-RACE", me),
+            workspace_id=w.workspace_id,
+            requested_by=member,
+            dry_run=False,
+            classify=_errors,
+            new_correlation_id=_cid,
+        )
+        assert session.summary["updated_restored"] == 1
+        task = asyncio.create_task(_window(w, me, since, until, dry_run=False))
+        waiting = False
+        for _ in range(200):  # until the window waits on the row lock
+            async with maker() as probe:
+                waiting = bool(
+                    await probe.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = :p AND NOT granted)"
+                        ),
+                        {"p": window_pid},
+                    )
+                )
+            if waiting or task.done():
+                break
+            await asyncio.sleep(0.05)
+        assert waiting, "the window rollback never waited on the row lock"
+        await other.commit()
+    with pytest.raises(sr.AlreadyRolledBackError) as refused:
+        await task
+    assert refused.value.rollback_id is None
+    await w.session.rollback()
+    assert await _rollback_events(w, target) == ["updated"]
+    assert (await w.row(target))["tags"] == ["orig"]
+
+
+async def test_window_without_writes_is_no_writes_in_window(world: World) -> None:
+    w = world
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    await w.create(w.owner, None)  # another principal wrote in the window
+    until = _mark(w)
+    await w.session.commit()
+    with pytest.raises(sr.NoWritesInWindowError):
+        await _window(w, SessionPrincipal(w.member, None), since, until, dry_run=False)
+    await w.session.rollback()
+    # Rollback-written events alone are nothing to undo either.
+    owner = SessionPrincipal(w.owner, None)
+    await _window(w, owner, since, until, dry_run=False)
+    await w.session.commit()
+    rollback_at = await w.session.scalar(
+        select(func.min(MemoryRevision.at)).where(
+            MemoryRevision.context_id == w.context_id, MemoryRevision.writer == "rollback"
+        )
+    )
+    with pytest.raises(sr.NoWritesInWindowError):
+        await _window(w, owner, rollback_at, rollback_at + _MS, dry_run=True)
+
+
+async def test_changes_in_session_by_principal_respects_the_private_owner_filter(
+    world: World,
+) -> None:
+    w, member, owner = world, world.member, world.owner
+    since = (w.clock[-1] if w.clock else utcnow()) - timedelta(seconds=1)
+    mine = await w.create(member, None)
+    theirs = await w.create(owner, None)
+    await w.update(theirs, member, "S-X", summary="member edit of the owner's memory")
+    await w.create(member, None, agent=w.agent)
+    await w.create(owner, None)
+    await w.session.commit()
+    me = SessionPrincipal(member, None)
+
+    async def page(**kw: Any) -> list[tuple[uuid.UUID, str]]:
+        result = await changes_in_session(
+            w.session,
+            context_id=w.context_id,
+            principal=me,
+            since=since,
+            until=None,
+            **{"session_id": None, "owner_user_id": None, **kw},
+        )
+        return [(c.memory_id, c.kind) for c in result.changes]
+
+    assert await page() == [(mine, "created"), (theirs, "updated")]
+    # A private context lists only the memories the caller owns.
+    assert await page(owner_user_id=member) == [(mine, "created")]
+    # session_id narrows the principal's events to that session.
+    assert await page(session_id="S-X") == [(theirs, "updated")]
+    with pytest.raises(ValueError, match="principal"):
+        await changes_in_session(
+            w.session,
+            context_id=w.context_id,
+            session_id=None,
+            principal=None,
+            owner_user_id=None,
+            since=since,
+            until=None,
+        )
+
+
+async def test_mcp_handler_window_is_the_callers_own_even_for_an_owner(world: World) -> None:
+    from mcp_server.tools import session_rollback as tool
+    from utils.datetime import to_utc_iso
+
+    w = world
+    since = utcnow() - timedelta(seconds=5)
+    member_write = await w.create(w.member, None)
+    owner_write = await w.create(w.owner, None)
+    await w.session.commit()
+    await asyncio.sleep(0.2)  # the World clock runs a little ahead of now
+
+    async def fake_get_db() -> AsyncIterator[AsyncSession]:
+        yield w.session
+
+    async def call(user_id: str, **args: Any) -> dict[str, Any]:
+        with (
+            patch("db.base.get_db", fake_get_db),
+            patch.object(tool, "_check_viewer_permission", AsyncMock(return_value=None)),
+            patch.object(
+                tool,
+                "_resolve_context",
+                AsyncMock(return_value=MagicMock(id=w.context_id, workspace_id=w.workspace_id)),
+            ),
+            patch.object(tool, "_context_response_fields", lambda _c: {}),
+            patch.object(tool, "_log_tool_usage", AsyncMock()),
+            patch(
+                "services.session_rollback.context_role",
+                AsyncMock(return_value=ContextRole.OWNER),
+            ),
+        ):
+            out = await tool.handle_rollback_session(
+                {"context_id": str(w.context_id), **args}, user_id, w.workspace_id
+            )
+        return json.loads(out[0].text)
+
+    plan = await call(w.owner, since=to_utc_iso(since))
+    assert plan["status"] == "dry_run"
+    assert [i["memory_id"] for i in plan["items"]] == [str(owner_write)]
+    assert plan["since"] == to_utc_iso(since) and "session_id" not in plan
+    done = await call(w.owner, since=to_utc_iso(since), until=plan["until"], dry_run=False)
+    assert done["status"] == "rolled_back" and done["rollback_status"] == "completed"
+    assert (await w.row(member_write))["deleted_at"] is None
+    assert (await w.row(owner_write))["deleted_at"] is not None
+    again = await call(w.owner, since=to_utc_iso(since), until=plan["until"], dry_run=False)
+    assert again["error"] == "already_rolled_back"
+    assert again["rollback_id"] == done["rollback_id"]
+    empty = await call(
+        w.owner,
+        since=to_utc_iso(since - timedelta(days=1)),
+        until=to_utc_iso(since - timedelta(hours=1)),
+    )
+    assert empty["error"] == "no_writes_in_window"
+
+
+def test_f05_round_trip() -> None:
+    from tests.integration.test_alembic_migrations import (
+        _downgrade_to,
+        _reset_alembic_state,
+        _sync_engine,
+        _upgrade_to,
+    )
+
+    f05, prior = "f05_2121_rollback_window", "f04_2044_session_provenance"
+    _reset_alembic_state()
+    engine = _sync_engine()
+
+    def columns(conn: Any) -> set[str]:
+        return {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'memory_session_rollbacks'"
+                )
+            )
+        }
+
+    def index_valid(conn: Any, name: str) -> Any:
+        return conn.execute(
+            text(
+                "SELECT i.indisvalid FROM pg_class c JOIN pg_index i "
+                "ON c.oid = i.indexrelid WHERE c.relname = :n"
+            ),
+            {"n": name},
+        ).scalar()
+
+    try:
+        _upgrade_to(prior)
+        with engine.connect() as conn:
+            assert "window_since" not in columns(conn)
+        _upgrade_to(f05)
+        with engine.connect() as conn:
+            assert {"window_since", "window_until"} <= columns(conn)
+            assert index_valid(conn, "idx_memory_revisions_actor_at") is True
+            assert index_valid(conn, "uq_memory_session_rollbacks_window") is True
+            definition = conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = :n"),
+                {"n": "uq_memory_session_rollbacks_window"},
+            ).scalar_one()
+            assert "UNIQUE" in definition and "WHERE (window_since IS NOT NULL)" in definition
+        _downgrade_to(prior)
+        with engine.connect() as conn:
+            assert not ({"window_since", "window_until"} & columns(conn))
+            assert index_valid(conn, "idx_memory_revisions_actor_at") is None
+            assert index_valid(conn, "uq_memory_session_rollbacks_window") is None
+    finally:
+        try:
+            _upgrade_to("head")
+        finally:
+            engine.dispose()

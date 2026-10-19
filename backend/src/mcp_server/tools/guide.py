@@ -533,7 +533,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "(created / updated / forgotten / restored, each edit separately; no "
         "superseded): your own sessions only — the session is your OTel baggage "
         "session, else the MCP session id — and a context owner may name any. "
-        "The tool that undoes such a session is outside the core profile: "
+        "by_me=true lists only your own writes (same user, same agent credential) "
+        "in any session or none, the same events as session_id, also for an owner: "
+        "clients without a session id (stateless MCP) preview with it what "
+        "rollback_session(since, until) undoes — take since / until from its at values. "
+        "The tool that undoes such writes is outside the core profile: "
         'describe_tools(["rollback_session"]) has its schema. next_cursor '
         "is a keyset token over (at, kind, id): pass it back unchanged, and a page is "
         "never shifted by rows written after you read it. Pair it with "

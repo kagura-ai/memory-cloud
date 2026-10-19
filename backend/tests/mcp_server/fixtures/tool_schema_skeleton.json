@@ -1064,8 +1064,7 @@
     "inputSchema": {
       "type": "object",
       "required": [
-        "context_id",
-        "session_id"
+        "context_id"
       ],
       "properties": {
         "context_id": {
@@ -1075,6 +1074,12 @@
         "session_id": {
           "type": "string",
           "maxLength": 128
+        },
+        "since": {
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
         },
         "dry_run": {
           "type": "boolean"
@@ -1792,6 +1797,9 @@
         "session_id": {
           "type": "string",
           "maxLength": 128
+        },
+        "by_me": {
+          "type": "boolean"
         },
         "limit": {
           "type": "integer",

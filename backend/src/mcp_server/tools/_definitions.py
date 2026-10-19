@@ -1244,11 +1244,11 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
         },
         {
             "name": "rollback_session",
-            "description": """Undo what one session wrote in a context. DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the session's first edit put back (a new version); forgotten → restored and re-embedded. A memory someone else changed since, Sleep merged, someone else forgot, or a resource row is skipped with a cause, never half-reverted. Your own sessions only (same user, same agent credential); a context owner may name any. Editor role required. At most 500 events (100 restores of forgotten memories) per call: status 'in_progress' with remaining > 0 means call again; failed items are retried by the next call. Once complete, a further call is refused (already_rolled_back) until the session writes again.
-Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, updated_restored, skipped, failed, chunks_requeued, points_requeued, skipped_items, errors}, totals?, context_id, ...}. Errors: session_not_found (also for another principal's session), already_rolled_back, partial_rollback (summary lists what was reversed; call again to retry the failed items).""",
+            "description": """Undo writes in a context: one session's (session_id), or your own in a time window (since, until?; ≤ 7 days — for clients without a session id). DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the first edit put back (a new version); forgotten → restored and re-embedded. A memory changed by someone else since, merged by Sleep or a resource row is skipped with a cause, never half-reverted. Your own writes only (same user, same agent credential); a context owner may name any session. Editor role. ≤ 500 events (100 restores) per call: 'in_progress' with remaining > 0 → call again (same since and until); failed items are retried. Once complete, further calls are refused (already_rolled_back) until new writes land.
+Returns: {status: dry_run|rolled_back|in_progress, session_id | since+until, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, skipped, failed, skipped_items, errors, ...}, totals?, context_{id, ...}}. Errors: session_not_found, no_writes_in_window, already_rolled_back, partial_rollback (call again to retry the failed items).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id", "session_id"],
+                "required": ["context_id"],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1258,7 +1258,15 @@ Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining
                     "session_id": {
                         "type": "string",
                         "maxLength": 128,
-                        "description": "The session whose writes to undo — the session_id remember / update_memory / forget returned (your OTel baggage session, else the MCP session id).",
+                        "description": "The session whose writes to undo — the session_id remember / update_memory / forget returned.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Instead of session_id: undo your own writes since then (ISO 8601, naive = UTC).",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "Window end, exclusive (default now or your unfinished window's end).",
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -2016,8 +2024,8 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (a forgotten memory's events omit summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes.
-Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, truncated?, context_{id, name, display_name, is_private, is_locked}}.
+            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (a forgotten memory's events omit summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes; by_me: only yours.
+Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, by_me?, truncated?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2041,12 +2049,16 @@ Manual: guide(["changes_since"]).""",
                             "type": "string",
                             "enum": ["created", "updated", "superseded", "forgotten", "restored"],
                         },
-                        "description": "Kinds to include (default all). restored needs session_id; superseded excludes it.",
+                        "description": "Kinds to include (default all). restored needs session_id or by_me; superseded excludes them.",
                     },
                     "session_id": {
                         "type": "string",
                         "maxLength": 128,
                         "description": "Only this session's writes (a session_id a write returned).",
+                    },
+                    "by_me": {
+                        "type": "boolean",
+                        "description": "true: only your own writes (same user, same agent credential), any session — what rollback_session(since) undoes.",
                     },
                     "limit": {
                         "type": "integer",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,7 @@ from auth.agent_scope import AgentScope, set_agent_scope
 from auth.workspace_roles import ContextRole
 from mcp_server.tools import session_rollback as tool
 from services import session_rollback as sr
+from utils.datetime import to_utc_iso
 
 CTX = uuid.UUID("00000000-0000-4000-8000-000000000044")
 WS = uuid.uuid4()
@@ -35,6 +37,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
     defaults: dict[str, Any] = {
         "role": ContextRole.EDITOR,
         "result": sr.RollbackResult(dry_run=True, items=[], events=0, remaining=0),
+        "unfinished_until": None,
     }
     defaults.update(patches)
     service = AsyncMock(side_effect=defaults["result"])
@@ -53,12 +56,16 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         patch.object(sr, "context_role", AsyncMock(return_value=defaults["role"])),
         patch.object(sr, "rollback_session", service),
         patch.object(sr, "finish", AsyncMock()) as finish,
+        patch.object(
+            sr, "unfinished_window_until", AsyncMock(return_value=defaults["unfinished_until"])
+        ) as unfinished,
     ):
         (block,) = await tool.handle_rollback_session(
             {"context_id": str(CTX), **args}, "caller", WS
         )
         db.finish = finish
         db.service = service
+        db.unfinished = unfinished
     return json.loads(block.text), db
 
 
@@ -207,7 +214,11 @@ def test_registration():
     from mcp_server.tools._profiles import CORE_TOOLS
 
     (definition,) = [t for t in get_tool_definitions() if t["name"] == "rollback_session"]
-    assert definition["inputSchema"]["required"] == ["context_id", "session_id"]
+    # #2121: session_id or since — exactly one, checked by the handler.
+    assert definition["inputSchema"]["required"] == ["context_id"]
+    props = definition["inputSchema"]["properties"]
+    assert {"session_id", "since", "until", "dry_run"} <= set(props)
+    assert "since" in definition["description"] and "7 days" in definition["description"]
     annotations = TOOL_ANNOTATIONS["rollback_session"]
     assert annotations["destructiveHint"] is True and annotations["readOnlyHint"] is False
     assert "rollback_session" in CAPACITY_LOCK_BLOCKED_TOOLS
@@ -234,3 +245,129 @@ def test_write_tools_echo_the_recorded_session():
     returns = {t["name"]: t["description"] for t in get_tool_definitions()}
     for name in ("remember", "remember_batch", "update_memory", "forget"):
         assert "session_id?" in returns[name], name
+
+
+# ------------------------------------------------------------- #2121 window
+
+
+def _iso(dt: datetime) -> str:
+    return dt.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+
+
+NOW = datetime.now(UTC).replace(tzinfo=None)
+HOUR_AGO = _iso(NOW - timedelta(hours=1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "error", "words"),
+    [
+        ({}, "missing_fields", "since"),
+        ({"session_id": "s", "since": HOUR_AGO}, "validation_error", "not both"),
+        ({"session_id": "s", "until": HOUR_AGO}, "validation_error", "until needs since"),
+        ({"until": HOUR_AGO}, "validation_error", "until needs since"),
+        ({"since": "yesterday"}, "validation_error", "since"),
+        ({"since": HOUR_AGO, "until": "soon"}, "validation_error", "until"),
+        ({"since": 5}, "validation_error", "ISO 8601"),
+        ({"since": HOUR_AGO, "until": HOUR_AGO}, "validation_error", "later than since"),
+        (
+            {"since": HOUR_AGO, "until": _iso(NOW - timedelta(hours=2))},
+            "validation_error",
+            "later than since",
+        ),
+        ({"since": _iso(NOW + timedelta(hours=1))}, "validation_error", "earlier than now"),
+        (
+            {"since": _iso(NOW - timedelta(days=8)), "until": _iso(NOW - timedelta(hours=1))},
+            "validation_error",
+            "7 days",
+        ),
+        ({"since": HOUR_AGO, "dry_run": "no"}, "validation_error", "dry_run"),
+    ],
+)
+async def test_window_arguments_are_checked_before_the_database(args, error, words):
+    (block,) = await tool.handle_rollback_session({"context_id": str(CTX), **args}, "u", None)
+    payload = json.loads(block.text)
+    assert payload["status"] == "error" and payload["error"] == error
+    assert words in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_window_is_the_callers_own_principal_even_for_an_owner():
+    for role in (ContextRole.OWNER, ContextRole.EDITOR):
+        _, db = await _call({"since": HOUR_AGO}, role=role)
+        scope = db.service.await_args.kwargs["scope"]
+        assert scope.window and scope.session_id is None
+        assert scope.principal == sr.SessionPrincipal("caller", None), role
+
+    agent = uuid.uuid4()
+    set_agent_scope(AgentScope(agent_id=agent, enforcement_mode="enforce"))
+    try:
+        _, db = await _call({"since": HOUR_AGO}, role=ContextRole.OWNER)
+    finally:
+        set_agent_scope(None)
+    assert db.service.await_args.kwargs["scope"].principal == sr.SessionPrincipal("caller", agent)
+
+
+@pytest.mark.asyncio
+async def test_window_until_is_clamped_to_now_and_echoed():
+    since = NOW - timedelta(hours=1)
+    payload, db = await _call({"since": _iso(since), "until": _iso(NOW + timedelta(days=1))})
+    scope = db.service.await_args.kwargs["scope"]
+    assert scope.since == since
+    assert NOW <= scope.until <= datetime.now(UTC).replace(tzinfo=None)
+    assert payload["since"] == _iso(since) and "session_id" not in payload
+    assert payload["until"] == to_utc_iso(scope.until)
+    db.unfinished.assert_not_awaited()  # an explicit until is never replaced
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_until_continues_the_unfinished_window():
+    since = NOW - timedelta(hours=3)
+    earlier = NOW - timedelta(hours=2)
+    _, db = await _call({"since": _iso(since)}, unfinished_until=earlier)
+    assert db.service.await_args.kwargs["scope"].until == earlier
+    principal = db.unfinished.await_args.args[2]
+    assert principal == sr.SessionPrincipal("caller", None)
+    # None unfinished: the window ends now.
+    _, db = await _call({"since": _iso(since)})
+    assert db.service.await_args.kwargs["scope"].until >= NOW
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_until_on_an_old_since_is_capped():
+    payload, db = await _call({"since": _iso(NOW - timedelta(days=8))})
+    assert payload["error"] == "validation_error" and "7 days" in payload["message"]
+    db.service.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_window_in_progress_says_call_again_with_the_same_window():
+    result = sr.RollbackResult(
+        dry_run=False,
+        items=[],
+        events=500,
+        remaining=20,
+        rollback_id=9,
+        status="in_progress",
+        summary={"forgotten": 500, "errors": []},
+        totals={"forgotten": 500, "calls": 1},
+    )
+    payload, _ = await _call({"since": HOUR_AGO, "dry_run": False}, result=result)
+    assert payload["status"] == "in_progress"
+    assert "same since and until" in payload["help"]
+    assert {"since", "until"} <= set(payload) and "session_id" not in payload
+
+
+@pytest.mark.asyncio
+async def test_no_writes_in_window_and_a_finished_window():
+    payload, db = await _call({"since": HOUR_AGO}, result=sr.NoWritesInWindowError())
+    assert payload["error"] == "no_writes_in_window" and payload["retryable"] is False
+    assert payload["since"] and payload["until"]
+    assert "by_me=true" in payload["help"] and "agent key" in payload["help"]
+    db.commit.assert_not_awaited()
+
+    payload, _ = await _call(
+        {"since": HOUR_AGO, "dry_run": False}, result=sr.AlreadyRolledBackError(None, "completed")
+    )
+    assert payload["error"] == "already_rolled_back" and "rollback_id" not in payload
+    assert payload["since"] and "by_me=true" in payload["help"]
