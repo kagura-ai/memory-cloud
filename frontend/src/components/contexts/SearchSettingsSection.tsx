@@ -70,6 +70,7 @@ import { apiClient, ApiError } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { QUOTA_TYPE_TO_GATE_KEY } from "@/lib/gates/featureGates";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { cn } from "@/styles/design-tokens";
 
@@ -288,19 +289,20 @@ export function SearchSettingsSection({
       });
       // #2104 / #2148: a refused chunk or LLM selector change (403 FEAT-001
       // plan / 429 QUOTA-001 cap, e.g. another context took the last slot
-      // meanwhile): re-read the server's view so the card shows the reason,
-      // and drop only the refused staged flag — the user's other unsaved
-      // edits stay. Any other failure (network, 500, a capacity lock) keeps
-      // the confirmed choice staged.
+      // meanwhile; 403 AUTH-101 when the caller lost the owner/admin role):
+      // re-read the server's view so the card shows the reason, and drop
+      // only the refused staged flag — the user's other unsaved edits stay.
+      // Any other failure (network, 500, a capacity lock) keeps the
+      // confirmed choice staged.
       const gate = err instanceof ApiError ? err.gate : undefined;
+      const refusedKey =
+        gate?.feature ??
+        (gate?.quotaType ? QUOTA_TYPE_TO_GATE_KEY[gate.quotaType] : undefined);
+      const roleRefusal = gate?.state === "role";
       const chunkRefusal =
-        chunksChanged &&
-        (gate?.feature === "content_chunks" ||
-          gate?.quotaType === "content_chunk_contexts");
+        chunksChanged && (roleRefusal || refusedKey === "content_chunks");
       const selectorRefusal =
-        selectorChanged &&
-        (gate?.feature === "llm_selector" ||
-          gate?.quotaType === "llm_selector_contexts");
+        selectorChanged && (roleRefusal || refusedKey === "llm_selector");
       if (chunkRefusal || selectorRefusal) {
         try {
           const data = await getContextSearchConfig(contextId);
@@ -521,12 +523,11 @@ export function SearchSettingsSection({
     storedSelector && config.llm_selector_effective === false;
   const selectorInactiveForPlan =
     selectorInactive && (selectorReason === "plan" || selectorReason === "cap");
-  const selectorSwitchBlocked = !selectorCanChange;
   // The reason under a disabled switch. When the inactive note already says
   // plan/cap, the switch is blocked only by the role (turning it off is
   // otherwise always allowed).
   const selectorBlockedReason: LlmSelectorDisabledReason | null =
-    selectorSwitchBlocked
+    !selectorCanChange
       ? selectorInactiveForPlan
         ? "permission"
         : (selectorReason ?? "permission")
@@ -542,10 +543,14 @@ export function SearchSettingsSection({
       case "plan":
         return t("llmSelector.reasonPlan");
       case "cap":
-        return t("llmSelector.reasonCap", {
-          inUse: selectorInUse,
-          limit: selectorLimit ?? 0,
-        });
+        // No limit when the server could not count (it then reports the
+        // stored flag without counts): say the cap without made-up numbers.
+        return selectorLimit === null
+          ? t("llmSelector.reasonCapNoCount")
+          : t("llmSelector.reasonCap", {
+              inUse: selectorInUse,
+              limit: selectorLimit,
+            });
       case "permission":
         return t("llmSelector.reasonPermission");
     }
@@ -1066,7 +1071,7 @@ export function SearchSettingsSection({
                   onCheckedChange={handleSelectorToggle}
                   // Not while saving: a successful save resets the staged
                   // edits, which would drop a change confirmed meanwhile.
-                  disabled={selectorSwitchBlocked || saving}
+                  disabled={!selectorCanChange || saving}
                   aria-describedby={
                     selectorBlockedReason
                       ? "llm-selector-desc llm-selector-reason"
@@ -1089,12 +1094,14 @@ export function SearchSettingsSection({
                   <Info className="h-4 w-4" />
                   <AlertDescription className="space-y-1">
                     <p className="text-sm">
-                      {selectorReason === "cap"
-                        ? t("llmSelector.inactiveCap", {
-                            inUse: selectorInUse,
-                            limit: selectorLimit ?? 0,
-                          })
-                        : t("llmSelector.inactivePlan")}
+                      {selectorReason !== "cap"
+                        ? t("llmSelector.inactivePlan")
+                        : selectorLimit === null
+                          ? t("llmSelector.inactiveCapNoCount")
+                          : t("llmSelector.inactiveCap", {
+                              inUse: selectorInUse,
+                              limit: selectorLimit,
+                            })}
                     </p>
                     <p className="text-sm">{t("llmSelector.inactiveNote")}</p>
                   </AlertDescription>

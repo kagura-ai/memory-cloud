@@ -2278,9 +2278,11 @@
       "confirmEnable": "Turn on",
       "reasonPlan": "Your plan does not include LLM result selection.",
       "reasonCap": "Your plan's limit of contexts with LLM result selection is reached ({inUse} of {limit} in use).",
+      "reasonCapNoCount": "Your plan's limit of contexts with LLM result selection is reached.",
       "reasonPermission": "Only the context owner or a workspace owner/admin can change this setting.",
       "inactivePlan": "LLM result selection is on for this context but inactive: your plan does not include it.",
       "inactiveCap": "LLM result selection is on for this context but inactive: the plan's limit is exceeded ({inUse} of {limit} in use) and earlier-enabled contexts come first.",
+      "inactiveCapNoCount": "LLM result selection is on for this context but inactive: the plan's limit is exceeded and earlier-enabled contexts come first.",
       "inactiveNote": "Recall returns the ranked results without selection meanwhile. It applies again after an upgrade or once a slot frees up."
     }
   },

@@ -298,6 +298,50 @@ describe("LLM selector card — enabling", () => {
   });
 });
 
+describe("LLM selector card — role lost meanwhile", () => {
+  it("a role refusal re-reads the config and drops the staged selector change", async () => {
+    await renderWith(SELECTOR_OFF);
+    mockUpdateConfig.mockRejectedValueOnce(refusal({ state: "role" }));
+    mockGetConfig.mockResolvedValue({
+      ...SELECTOR_OFF,
+      llm_selector_can_change: false,
+      llm_selector_disabled_reason: "permission",
+    });
+    fireEvent.click(selectorSwitch());
+    fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
+    fireEvent.click(await screen.findByText("saveChanges"));
+    await waitFor(() =>
+      expect(screen.getByText("llmSelector.reasonPermission")).toBeTruthy(),
+    );
+    expect(selectorSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(selectorSwitch().hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+  });
+});
+
+describe("LLM selector card — cap without counts", () => {
+  it("says the cap without numbers when the server reports no limit", async () => {
+    await renderWith({
+      ...SELECTOR_OFF,
+      llm_selector_limit: null,
+      llm_selector_can_change: false,
+      llm_selector_disabled_reason: "cap",
+    });
+    expect(screen.getByText("llmSelector.reasonCapNoCount")).toBeTruthy();
+    expect(screen.queryByText(/llmSelector\.reasonCap\(/)).toBeNull();
+  });
+
+  it("the inactive note too", async () => {
+    await renderWith({
+      ...SELECTOR_ON,
+      llm_selector_effective: false,
+      llm_selector_limit: null,
+      llm_selector_disabled_reason: "cap",
+    });
+    expect(screen.getByText("llmSelector.inactiveCapNoCount")).toBeTruthy();
+  });
+});
+
 describe("LLM selector card — disabling", () => {
   it("stages the change without a dialog and sends false", async () => {
     await renderWith(SELECTOR_ON);
