@@ -61,6 +61,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
             sr, "unfinished_window_until", AsyncMock(return_value=defaults["unfinished_until"])
         ) as unfinished,
         patch.object(tool, "_window_now", AsyncMock(return_value=defaults["db_now"])),
+        patch.object(sr, "lock_window_principal", AsyncMock()) as window_lock,
     ):
         (block,) = await tool.handle_rollback_session(
             {"context_id": str(CTX), **args}, "caller", WS
@@ -68,6 +69,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         db.finish = finish
         db.service = service
         db.unfinished = unfinished
+        db.window_lock = window_lock
     return json.loads(block.text), db
 
 
@@ -356,8 +358,13 @@ async def test_a_future_until_counts_as_omitted():
 async def test_an_omitted_until_continues_the_unfinished_window():
     since = NOW - timedelta(hours=3)
     earlier = NOW - timedelta(hours=2)
-    _, db = await _call({"since": _iso(since)}, unfinished_until=earlier)
+    payload, db = await _call({"since": _iso(since)}, unfinished_until=earlier)
     assert db.service.await_args.kwargs["scope"].until == earlier
+    assert payload["until_from"] == "unfinished_rollback"  # an earlier call's until
+    db.window_lock.assert_not_awaited()  # a dry run takes no lock
+    _, db = await _call({"since": _iso(since), "dry_run": False}, unfinished_until=earlier)
+    # Resolved under the principal's window lock: concurrent first calls share a record.
+    db.window_lock.assert_awaited_once()
     principal = db.unfinished.await_args.args[2]
     assert principal == sr.SessionPrincipal("caller", None)
     # None unfinished: the window ends now.

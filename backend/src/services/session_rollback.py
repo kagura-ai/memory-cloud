@@ -804,13 +804,32 @@ def _empty_summary() -> dict[str, Any]:
     return {**dict.fromkeys(_COUNT_KEYS, 0), "skipped_items": [], "errors": []}
 
 
+def _window_lock_key(context_id: UUID, principal: SessionPrincipal) -> str:
+    agent = principal.agent_id or "-"
+    return f"session_rollback:{context_id}:principal:{principal.actor_user_id}:{agent}"
+
+
 def _lock_key(scope: SessionScope) -> str:
     if scope.window:
         assert scope.principal is not None
-        principal = scope.principal
-        agent = principal.agent_id or "-"
-        return f"session_rollback:{scope.context_id}:principal:{principal.actor_user_id}:{agent}"
+        return _window_lock_key(scope.context_id, scope.principal)
     return f"session_rollback:{scope.context_id}:{scope.session_id}"
+
+
+async def lock_window_principal(
+    db: AsyncSession, context_id: UUID, principal: SessionPrincipal
+) -> None:
+    """Take the window-mode lock of one principal before resolving an omitted ``until``.
+
+    The same transaction lock ``rollback_session`` takes for a window (it
+    stacks), so two concurrent first calls resolve their window one after the
+    other: the second sees the first's record and continues it instead of
+    opening a second record at its own now.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": _window_lock_key(context_id, principal)},
+    )
 
 
 async def _lock_scope(db: AsyncSession, scope: SessionScope) -> None:
@@ -1173,12 +1192,17 @@ async def rollback_session(
     deadline = time.monotonic() + time_budget if time_budget is not None else None
     if not dry_run:
         await _lock_scope(db, scope)
-    if not await _scope_exists(db, scope):
-        raise NoWritesInWindowError if scope.window else SessionNotFoundError
+    exists = await _scope_exists(db, scope)
     record_stmt = select(MemorySessionRollback).where(*_target_predicates(scope))
     if not dry_run:
         record_stmt = record_stmt.with_for_update()
     record = (await db.execute(record_stmt)).scalar_one_or_none()
+    if not exists and not (scope.window and record is not None):
+        raise NoWritesInWindowError if scope.window else SessionNotFoundError
+    # A window record whose events are all gone (purged memories cascade
+    # their revisions away) is closed by the empty batch below instead of
+    # answering no_writes_in_window forever: an omitted until would keep
+    # continuing it and never reach the caller's newer writes.
 
     batch = await _read_batch(db, scope, requested_by, workspace_id, lock=not dry_run)
     if not batch.items:
@@ -1501,6 +1525,7 @@ __all__ = [
     "combined_prior",
     "context_role",
     "finish",
+    "lock_window_principal",
     "plan_counts",
     "plan_memory",
     "rollback_session",

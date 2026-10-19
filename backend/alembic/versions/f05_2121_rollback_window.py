@@ -95,9 +95,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the scan index, the unique key and the two columns."""
+    """Drop the scan index, the window rollback rows, the unique key and the two columns.
+
+    Window rows go: without their window they would read as erased session
+    rows (``session_id`` NULL) and could never be matched again. The events
+    they handled keep ``undone_by``, so nothing is reversed twice after a
+    re-upgrade.
+    """
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}"))
+    op.execute(sa.text("DELETE FROM memory_session_rollbacks WHERE window_since IS NOT NULL"))
     op.drop_index(_UNIQUE_NAME, table_name="memory_session_rollbacks", if_exists=True)
     op.drop_column("memory_session_rollbacks", "window_until")
     op.drop_column("memory_session_rollbacks", "window_since")

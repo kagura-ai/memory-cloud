@@ -193,6 +193,11 @@ async def _by_me_call(args: dict, role: object) -> tuple[dict, object]:
         patch.object(listing, "_context_response_fields", lambda _c: {}),
         patch.object(listing, "_log_tool_usage", AsyncMock()),
         patch.object(listing, "changes_in_session", lane),
+        patch.object(
+            listing,
+            "changes_since",
+            AsyncMock(return_value=ChangePage(changes=[], next_cursor=None)),
+        ),
         patch("services.session_rollback.context_role", AsyncMock(return_value=role)),
     ):
         (block,) = await listing.handle_changes_since(
@@ -220,6 +225,15 @@ async def test_by_me_is_the_callers_own_principal_even_for_an_owner():
     # Without by_me the owner override of #2044 is unchanged.
     _, lane = await _by_me_call({"session_id": "s1"}, ContextRole.OWNER)
     assert lane.await_args.kwargs["principal"] is None
+
+
+@pytest.mark.asyncio
+async def test_by_me_null_is_omitted():
+    from auth.workspace_roles import ContextRole
+
+    payload, lane = await _by_me_call({"by_me": None}, ContextRole.EDITOR)
+    assert payload["status"] == "success" and "by_me" not in payload
+    lane.assert_not_awaited()  # the plain change log, not the revision lane
 
 
 @pytest.mark.asyncio

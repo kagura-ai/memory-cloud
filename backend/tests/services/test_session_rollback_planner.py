@@ -622,6 +622,7 @@ def test_window_record_key_and_lock_are_the_principals():
 @pytest.mark.asyncio
 async def test_a_window_without_writes_raises_no_writes_in_window():
     db = _db()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))  # no record
     with patch.object(sr, "_scope_exists", AsyncMock(return_value=False)):
         with pytest.raises(sr.NoWritesInWindowError):
             await sr.rollback_session(

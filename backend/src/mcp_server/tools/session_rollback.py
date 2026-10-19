@@ -143,7 +143,7 @@ async def _window_now(db: Any) -> datetime:
 
 async def _resolve_window(
     db: Any, context_id: UUID, principal: Any, since: datetime, until: datetime | None
-) -> tuple[datetime, datetime] | list[TextContent]:
+) -> tuple[datetime, datetime, bool] | list[TextContent]:
     """The effective window, or the refusal.
 
     ``since`` must be before now. An ``until`` later than now is treated like
@@ -157,16 +157,15 @@ async def _resolve_window(
     now = await _window_now(db)
     if since >= now:
         return _error_response("validation_error", "since must be earlier than now.")
+    continued = False
     if until is None or until > now:
-        # Read outside the rollback's advisory lock: two concurrent first
-        # calls may each end their window at their own now. Nothing is
-        # reversed twice (row locks + undone_by); the older record is closed
-        # by a later since-only call that continues it.
-        until = (await unfinished_window_until(db, context_id, principal, since)) or now
+        unfinished = await unfinished_window_until(db, context_id, principal, since)
+        continued = unfinished is not None
+        until = unfinished or now
     too_wide = _window_too_wide(since, until)
     if too_wide is not None:
         return too_wide
-    return since, until
+    return since, until, continued
 
 
 def _parse_args(args: dict[str, Any]) -> _Args | list[TextContent]:
@@ -221,6 +220,7 @@ async def handle_rollback_session(
         addressable_principal,
         context_role,
         finish,
+        lock_window_principal,
         rollback_session,
     )
     from services.write_provenance import caller_principal
@@ -268,12 +268,20 @@ async def handle_rollback_session(
                 # #2121: always the caller's own principal — the owner
                 # override is session-mode only.
                 principal = caller_principal(user_id)
+                if not dry_run:
+                    # Resolve an omitted until under the principal's window
+                    # lock, so concurrent first calls share one record.
+                    await lock_window_principal(db, context_id, principal)
                 window = await _resolve_window(db, context_id, principal, since, until)
                 if isinstance(window, list):
                     await db.rollback()
                     return window
-                since, until = window
+                since, until, continued = window
                 mode = {"since": to_utc_iso(since), "until": to_utc_iso(until)}
+                if continued:
+                    # The echoed until is an earlier call's: say so, and how
+                    # to reach writes made after it.
+                    mode["until_from"] = "unfinished_rollback"
                 scope = SessionScope(
                     context_id=context_id,
                     session_id=None,

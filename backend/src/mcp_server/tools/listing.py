@@ -246,7 +246,9 @@ async def handle_changes_since(
                 "validation_error",
                 "session_id must be 1-128 characters of A-Z, a-z, 0-9, '.', '_' or '-'.",
             )
-    by_me = args.get("by_me", False)
+    by_me = args.get("by_me")
+    if by_me is None:  # omitted or null, like the other optional arguments
+        by_me = False
     if not isinstance(by_me, bool):
         return _error_response("validation_error", "by_me must be a boolean.")
     kinds_or_error = _parse_kinds(args.get("kinds"), session=session_id is not None or by_me)

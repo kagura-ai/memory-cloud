@@ -1331,6 +1331,8 @@ def test_f05_round_trip() -> None:
     )
 
     f05, prior = "f05_2121_rollback_window", "f04_2044_session_provenance"
+    marker = f"f05-migration-{uuid.uuid4().hex[:8]}"
+    ws_id, ctx_id = uuid.uuid4(), uuid.uuid4()
     _reset_alembic_state()
     engine = _sync_engine()
 
@@ -1368,16 +1370,44 @@ def test_f05_round_trip() -> None:
                 {"n": "uq_memory_session_rollbacks_window"},
             ).scalar_one()
             assert "UNIQUE" in definition and "WHERE (window_since IS NOT NULL)" in definition
+        with engine.begin() as conn:
+            # Through the model tables, so their Python-side defaults apply.
+            conn.execute(
+                Workspace.__table__.insert().values(id=ws_id, name=marker, owner_user_id=marker)
+            )
+            conn.execute(
+                Context.__table__.insert().values(
+                    id=ctx_id, workspace_id=ws_id, name="f05", created_by=marker
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO memory_session_rollbacks (workspace_id, context_id, "
+                    "principal_user_id, requested_by, status, window_since, window_until) "
+                    "VALUES (:w, :c, :u, :u, 'completed', now() - interval '2 hours', "
+                    "now() - interval '1 hour')"
+                ),
+                {"w": ws_id, "c": ctx_id, "u": marker},
+            )
         _downgrade_to(prior)
         with engine.connect() as conn:
             assert not ({"window_since", "window_until"} & columns(conn))
+            left = conn.execute(
+                text("SELECT count(*) FROM memory_session_rollbacks WHERE requested_by = :u"),
+                {"u": marker},
+            ).scalar_one()
+            assert left == 0  # window rows do not survive as erased-looking session rows
             assert index_valid(conn, "idx_memory_revisions_actor_at") is None
             assert index_valid(conn, "uq_memory_session_rollbacks_window") is None
     finally:
         try:
             _upgrade_to("head")
         finally:
-            engine.dispose()
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM workspaces WHERE id = :w"), {"w": ws_id})
+            finally:
+                engine.dispose()
 
 
 async def test_window_skips_a_memory_another_writer_changed_after_it(world: World) -> None:
@@ -1537,3 +1567,39 @@ async def test_window_then_session_reverses_nothing_twice(world: World) -> None:
     assert refused.value.rollback_id is None
     await w.session.rollback()
     assert await _rollback_events(w, target) == ["forgotten"]
+
+
+async def test_a_window_record_whose_writes_are_gone_is_closed(world: World) -> None:
+    """Its memories purged (the revisions cascade away), an unfinished window
+    is closed by the next call instead of pinning since-only calls to its
+    old until with no_writes_in_window forever."""
+    w = world
+    me = SessionPrincipal(w.member, None)
+    since = utcnow() - timedelta(hours=2)
+    until = since + timedelta(hours=1)
+    w.session.add(
+        MemorySessionRollback(
+            workspace_id=w.workspace_id,
+            context_id=w.context_id,
+            principal_user_id=w.member,
+            requested_by=w.member,
+            status="in_progress",
+            summary={"forgotten": 3, "calls": 1},
+            window_since=since,
+            window_until=until,
+        )
+    )
+    await w.session.commit()
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, since) == until
+    plan = await _window(w, me, since, until, dry_run=True)
+    assert (plan.items, plan.rollback_id is not None) == ([], True)
+    closed = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert (closed.status, closed.remaining, closed.events) == ("completed", 0, 0)
+    assert closed.totals["calls"] == 2
+    assert await sr.unfinished_window_until(w.session, w.context_id, me, since) is None
+    with pytest.raises(sr.AlreadyRolledBackError):
+        await _window(w, me, since, until, dry_run=True)
+    # A window that never had a record still answers no_writes_in_window.
+    with pytest.raises(sr.NoWritesInWindowError):
+        await _window(w, me, since - timedelta(hours=1), since, dry_run=True)
