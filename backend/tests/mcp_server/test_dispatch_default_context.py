@@ -487,3 +487,129 @@ async def test_parity_read_of_a_context_the_resolver_denies(real_registry):
     first, second = resolver.await_args_list
     assert first.kwargs == second.kwargs
     assert first.kwargs["context_id"] == target
+
+
+# ------------------------------------------------------- agent default binding
+
+
+def _agent() -> AgentScope:
+    scope = AgentScope(agent_id=uuid4(), enforcement_mode="enforce", workspace_id=uuid4())
+    set_agent_scope(scope)
+    return scope
+
+
+def _bindings(outcome: str, context_id: UUID | None = None):
+    """Stub ``resolve_default_binding`` with one outcome."""
+    binding = SimpleNamespace(context_id=context_id) if context_id is not None else None
+    return patch(
+        "services.agent_binding_service.AgentBindingService.resolve_default_binding",
+        new=AsyncMock(return_value=(binding, outcome)),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["default", "sole"])
+async def test_an_agent_key_without_a_url_default_uses_its_binding(handlers, outcome):
+    scope = _agent()
+    bound = uuid4()
+    set_mcp_default_context_selection(DefaultContextSelection("none"))
+    with _get_db(_db()), _bindings(outcome, bound) as resolve:
+        await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    assert handlers["remember"]["context_id"] == str(bound)
+    assert resolve.await_args.args == (scope.agent_id,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["none", "ambiguous"])
+async def test_no_or_ambiguous_bindings_are_context_id_required_naming_nothing(handlers, outcome):
+    _agent()
+    with _get_db(_db()), _bindings(outcome):
+        result = await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    payload = _payload(result)
+    assert payload["error"] == "context_id_required"
+    assert "remember" not in handlers
+    # No binding is enumerated or hinted at — the envelope is the no-default one.
+    assert set(payload) == {"status", "error", "message", "help", "example"}
+
+
+@pytest.mark.asyncio
+async def test_the_url_beats_the_binding(handlers):
+    _agent()
+    set_mcp_default_context_selection(URL)
+    with _bindings("default", uuid4()) as resolve:
+        await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    assert handlers["remember"]["context_id"] == str(DEFAULT)
+    resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_id_beats_the_binding_without_a_lookup(handlers):
+    _agent()
+    explicit = str(uuid4())
+    with _bindings("default", uuid4()) as resolve:
+        await execute_tool_call("remember", _remember_args(context_id=explicit), "u", None)
+
+    assert handlers["remember"]["context_id"] == explicit
+    resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_user_credential_never_looks_up_a_binding(handlers):
+    with _bindings("default", uuid4()) as resolve:
+        result = await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    assert _payload(result)["error"] == "context_id_required"
+    resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_binding_lookup_failure_is_no_default(handlers):
+    _agent()
+    failing = AsyncMock(side_effect=RuntimeError("db down"))
+    with (
+        _get_db(_db()),
+        patch(
+            "services.agent_binding_service.AgentBindingService.resolve_default_binding",
+            new=failing,
+        ),
+    ):
+        result = await execute_tool_call("remember", _remember_args(), "user-1", None)
+
+    assert _payload(result)["error"] == "context_id_required"
+    assert "remember" not in handlers
+
+
+@pytest.mark.asyncio
+async def test_an_exempt_tool_never_looks_up_a_binding(handlers):
+    _agent()
+    with _bindings("default", uuid4()) as resolve:
+        result = await execute_tool_call("delete_context", {}, "user-1", None)
+
+    assert _payload(result)["error"] == "context_id_required"
+    resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_denied_binding_default_names_the_binding(monkeypatch, gate):
+    _agent()
+    bound = uuid4()
+    envelope = tools_mod._error_response(
+        "context_not_found",
+        "Context not found or you don't have access to it.",
+        context_id=str(bound),
+        help="Use list_contexts() to see contexts you have access to.",
+    )
+
+    async def deny(_args, _user_id, _workspace_id):
+        return envelope
+
+    monkeypatch.setattr(tools_mod, "_TOOL_REGISTRY", {"get_context_info": deny})
+    with _get_db(_db()), _bindings("default", bound):
+        payload = _payload(await execute_tool_call("get_context_info", {}, "user-1", None))
+
+    assert payload["context_source"] == "binding"
+    assert payload["message"] == json.loads(envelope[0].text)["message"]
+    assert "binding" in payload["help"]

@@ -245,7 +245,8 @@ async def _apply_default_context(
     """Fill a missing ``context_id`` from the connection default (#2125).
 
     Returns ``(args, context_source, refusal)``. Precedence: an explicit
-    ``context_id`` > ``context_ids`` (recall) > ``?context=`` > none. The
+    ``context_id`` > ``context_ids`` (recall) > ``?context=`` > the agent's
+    default or sole binding (agent-bound keys) > none. The
     default is written into the arguments and nothing else: the capacity
     gate, the pre-dispatch check and the handler's own resolver then see
     exactly what an explicit call would send, so authorization cannot differ.

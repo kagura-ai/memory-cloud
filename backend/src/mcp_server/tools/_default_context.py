@@ -4,6 +4,8 @@ A client that already knows its context (a plugin option, a desktop entry
 configured for one project) used to spend the first turn of every session on
 ``list_contexts``. The URL can now name the context once; a context-scoped
 tool called without ``context_id`` then runs as if the caller had passed it.
+An agent-bound key whose URL names no context falls back to the agent's
+default (or sole) binding.
 
 The default only fills an argument the caller could have sent. The
 dispatcher (``execute_tool_call``) writes it into ``args["context_id"]``
@@ -19,10 +21,14 @@ never logs the raw value.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 DefaultContextMode = Literal["none", "url", "invalid"]
 
@@ -81,10 +87,42 @@ async def resolve_default_context(
 ) -> DefaultContext | None:
     """The connection default for this request, or ``None``.
 
-    ``url`` → its UUID (no I/O). Anything else → no default, and the call
-    fails ``context_id_required`` as before. The caller handles ``invalid``
-    before asking.
+    ``url`` → its UUID (no I/O). No ``?context=`` and an agent-bound key →
+    the agent's default binding, or its sole binding (one query). Anything
+    else → no default, and the call fails ``context_id_required`` as before.
+    The caller handles ``invalid`` before asking.
+
+    An agent with no binding and one with several but no default are
+    indistinguishable here (no existence oracle, RFC-0002 F2), and a database
+    error is "no default" (fail closed — never a guessed context).
     """
     if selection is not None and selection.mode == "url" and selection.context_id is not None:
         return DefaultContext(selection.context_id, "url")
-    return None
+    if selection is not None and selection.mode != "none":
+        return None
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    if scope is None:
+        return None
+    try:
+        context_id = await _agent_default_binding(scope.agent_id)
+    except Exception as e:  # noqa: BLE001 - fail closed to "no default"
+        logger.warning("mcp_default_context_binding_failed: reason=%s", type(e).__name__)
+        return None
+    return DefaultContext(context_id, "binding") if context_id is not None else None
+
+
+async def _agent_default_binding(agent_id: UUID) -> UUID | None:
+    """The context of the agent's default (or sole) binding, else ``None``."""
+    from db.base import get_db
+    from services.agent_binding_service import AgentBindingService
+
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
+            if binding is None or outcome not in ("default", "sole"):
+                logger.debug("mcp_default_context_no_binding: outcome=%s", outcome)
+                return None
+            return binding.context_id
+    return None  # pragma: no cover - get_db always yields
