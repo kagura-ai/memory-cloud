@@ -46,19 +46,23 @@ def json_chars(obj: Any) -> int:
     return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str))
 
 
-def parse_max_chars(raw: Any, *, default: int = DEFAULT_MAX_CHARS) -> int:
+def parse_max_chars(
+    raw: Any, *, default: int = DEFAULT_MAX_CHARS, minimum: int = MIN_MAX_CHARS
+) -> int:
     """Validate an optional ``max_chars`` argument (#1685 convention).
 
     ``type(x) is int`` rather than ``isinstance``: ``bool`` subclasses ``int``.
+    ``minimum`` is the shared floor for every tool but ``bootstrap``, whose
+    index format accepts a smaller budget (#2126).
 
     Raises:
-        BudgetArgumentError: not an integer in [MIN_MAX_CHARS, MAX_CHARS_LIMIT].
+        BudgetArgumentError: not an integer in [minimum, MAX_CHARS_LIMIT].
     """
     if raw is None:
         return default
-    if type(raw) is not int or not (MIN_MAX_CHARS <= raw <= MAX_CHARS_LIMIT):
+    if type(raw) is not int or not (minimum <= raw <= MAX_CHARS_LIMIT):
         raise BudgetArgumentError(
-            f"max_chars must be an integer between {MIN_MAX_CHARS} and "
+            f"max_chars must be an integer between {minimum} and "
             f"{MAX_CHARS_LIMIT} (characters, not tokens).",
             raw,
         )

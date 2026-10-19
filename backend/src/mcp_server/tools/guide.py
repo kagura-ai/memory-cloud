@@ -588,7 +588,7 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     # ----------------------------------------------------------- bootstrap
     "bootstrap.usage": (
-        "bootstrap(context_id, since?, include?, max_chars?) is the interactive "
+        "bootstrap(context_id, since?, include?, max_chars?, format?) is the interactive "
         "session's one-call start. "
         "It returns the context block, the context's guardrails (guardrails.items), the "
         "pinned memories (trusted, cap 20), upcoming Time Memories (from now, k 20) and "
@@ -601,6 +601,17 @@ GUIDE_TOPICS: dict[str, str] = {
         "max_chars, context_summary leaves the pinned items first, "
         "then pinned → upcoming → changes keep the prefix that fits (truncated: true); "
         "a cut changes page's next_cursor continues from the last change kept. "
+        "format is full or index; omitted, it is index when max_chars is under 10,000 "
+        "(the floor is 2,000) and full otherwise; format='full' under 10,000 is refused. "
+        "format='index' answers with format: 'index' and pointer rows: pinned keeps "
+        "{memory_id, summary, type, importance} with the full summary; guardrails.items, "
+        "upcoming.results ({memory_id, summary, summary_cut?, from, until}) and "
+        "changes.changes carry a summary head of at most 80 characters (summary_cut: true "
+        "when cut; reference(memory_id) reads the rest); instructions is left out "
+        "(get_context_info has it). Only in index mode the budget also cuts "
+        "guardrails.items, right after pinned (guardrails.truncated: true); when the "
+        "context block alone exceeds max_chars every lane comes back empty with "
+        "truncated: true. "
         "It replaces the three probabilistic session-start recalls: recall by topic "
         "afterwards only when the change list does not answer the question. Render "
         "the standing-guardrails section from pinned + guardrails.items (dedupe by "

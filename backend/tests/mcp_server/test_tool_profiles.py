@@ -36,6 +36,7 @@ from mcp_server.tools._profiles import (
 # #1743 (paging / max_chars parameters on the bounded tools) took it to 34,203.
 # #1850 moved the manual into ``guide`` and trimmed every core description: 25,590.
 # #1973 added create_context / update_context / delete_context: 41,088 (from 36,617).
+# #2126 (bootstrap's format parameter) took it to 40,528.
 CORE_CHAR_BUDGET = 43_100  # (#1973) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]

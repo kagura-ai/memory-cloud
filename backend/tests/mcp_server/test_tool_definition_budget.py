@@ -81,6 +81,9 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # reference, changes_since, list, remember_batch, bootstrap, explore) into their guide
 # topics and wrote the context envelope as context_{...}: full list 106,284,
 # core list 38,447 — about 3,050 of headroom under an unchanged ceiling.
+# #2126 added bootstrap's format parameter and one line on the index rows
+# (bootstrap 1,987, +449): full list 106,699, core list 38,946 — 2,554 of
+# headroom under an unchanged ceiling.
 FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session joined
 # #1973 added create_context / update_context / delete_context: core list 39,575.
 CORE_LIST_BUDGET = 41_500  # (#1973) 21 core tools

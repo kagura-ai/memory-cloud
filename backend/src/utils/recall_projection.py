@@ -18,6 +18,8 @@ from utils.datetime import to_utc_iso
 RECALL_VERBOSITIES = ("compact", "full")
 # Characters of ``summary`` a compact item carries, the ellipsis included.
 COMPACT_SUMMARY_CHARS = 160
+# #2126: the same cut for a bootstrap index row (guardrails, upcoming, changes).
+INDEX_SUMMARY_CHARS = 80
 # #2124: how many of the top results carry ``content`` when an MCP recall
 # passes no ``full`` (the tool applies it, overridable by MCP_RECALL_DEFAULT_FULL
 # since #2140; the service and REST default to none, so an internal caller
@@ -33,29 +35,32 @@ RECALL_CONTENT_KEYS = ("content", "content_truncated", "content_next_offset")
 _ELLIPSIS = "…"
 
 
-def _compact_summary(summary: str) -> tuple[str, bool]:
-    """The head of ``summary`` a compact item carries, and whether text was cut.
+def compact_summary(summary: str, limit: int = COMPACT_SUMMARY_CHARS) -> tuple[str, bool]:
+    """The head of ``summary`` a compact row carries, and whether text was cut.
 
-    A summary within ``COMPACT_SUMMARY_CHARS`` is returned as stored. A longer
-    one is flattened first (every run of whitespace, newlines included, becomes
-    one space), then cut at the last space that leaves room for the ellipsis.
+    A summary within ``limit`` is returned as stored. A longer one is
+    flattened first (every run of whitespace, newlines included, becomes one
+    space), then cut at the last space that leaves room for the ellipsis.
     When that space falls in the first half — a URL, path or UUID would
     otherwise collapse the head to a few words — the cut is made mid-token.
 
     Args:
         summary: The stored summary.
+        limit: Characters the head may take, the ellipsis included
+            (``COMPACT_SUMMARY_CHARS`` for recall, ``INDEX_SUMMARY_CHARS`` for
+            a bootstrap index row).
 
     Returns:
         The head and ``True`` when characters (not just whitespace) were dropped.
     """
-    if len(summary) <= COMPACT_SUMMARY_CHARS:
+    if len(summary) <= limit:
         return summary, False
     flat = " ".join(summary.split())
-    if len(flat) <= COMPACT_SUMMARY_CHARS:
+    if len(flat) <= limit:
         return flat, False
-    head = flat[: COMPACT_SUMMARY_CHARS - 1]
+    head = flat[: limit - 1]
     boundary = head.rfind(" ")
-    if boundary >= COMPACT_SUMMARY_CHARS // 2:
+    if boundary >= limit // 2:
         head = head[:boundary]
     return head.rstrip() + _ELLIPSIS, True
 
@@ -107,7 +112,7 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
     rare annotations it must act on. tags, context_summary and scope stay in
     ``verbosity="full"``.
     """
-    summary, cut = _compact_summary(r.summary)
+    summary, cut = compact_summary(r.summary)
     item: dict[str, Any] = {"memory_id": str(r.memory_id), "summary": summary}
     if cut:
         item["summary_cut"] = True

@@ -2090,7 +2090,8 @@ Manual: guide(["changes_since"]).""",
             "name": "bootstrap",
             "readOnly": True,
             "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time — fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
-Returns: {status, degraded, context, instructions, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+format="index" (the default under max_chars 10000): pointer rows — pinned keeps its text; guardrails.items, upcoming.results and changes.changes carry {memory_id, summary (at most 80 chars), summary_cut?, …}; no instructions.
+Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2111,7 +2112,12 @@ Manual: guide(["bootstrap"]).""",
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Response budget in characters, not tokens (default 20000).",
+                        "description": 'Response budget in characters, not tokens (default 20000; 2000-9999 selects format="index").',
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["full", "index"],
+                        "description": "full (default at max_chars 10000 and above) or index: one short row per memory, full text for pinned only.",
                     },
                 },
                 "required": [],

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
-from models.memory import Memory
+from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from services.memory_listing import changes_since, decode_change_cursor
 from services.session_bootstrap_service import (
     COMPONENTS,
@@ -306,3 +306,292 @@ async def test_changes_component_withholds_the_summary_of_a_forgotten_memory(db_
     assert "stored by mistake" not in str(env)
     recent = next(c for c in changes if c["memory_id"] == str(rows["recent"].id))
     assert recent["summary"] == "yesterday's decision"  # live rows keep theirs
+
+
+# ------------------------------------------------------- format="index" (#2126)
+
+
+def _key_paths(node, prefix=""):
+    """Every key path in ``node`` in order; list members collapse to ``[]``."""
+    if isinstance(node, dict):
+        out = []
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else key
+            out.append(path)
+            out.extend(_key_paths(value, path))
+        return out
+    if isinstance(node, list):
+        seen: list[str] = []
+        for item in node:
+            for path in _key_paths(item, f"{prefix}[]"):
+                if path not in seen:
+                    seen.append(path)
+        return seen
+    return []
+
+
+def _guardrails_provider(n: int = 3):
+    async def provider():
+        return {
+            "guardrails": {
+                "provenance": "notes context editors stored",
+                "items": [
+                    {
+                        "memory_id": str(uuid4()),
+                        "summary": f"guardrail {i} " + "never do the risky thing " * 8,
+                        "importance": 0.9,
+                        "authored_by_caller": False,
+                        "source_type": "manual",
+                    }
+                    for i in range(n)
+                ],
+                "total_available": n,
+                "truncated": False,
+                "tool_triggered_version": 4,
+            }
+        }
+
+    return provider
+
+
+# The v0.114.0 key paths of a default call (no format, max_chars 20,000) on the
+# ``seeded`` fixture with a guardrails block: an old plugin's reply must not change.
+_V0114_DEFAULT_PATHS = [
+    "status",
+    "degraded",
+    "context",
+    "instructions",
+    "guardrails",
+    "guardrails.provenance",
+    "guardrails.items",
+    "guardrails.items[].memory_id",
+    "guardrails.items[].summary",
+    "guardrails.items[].importance",
+    "guardrails.items[].authored_by_caller",
+    "guardrails.items[].source_type",
+    "guardrails.total_available",
+    "guardrails.truncated",
+    "guardrails.tool_triggered_version",
+    "components",
+    "components.pinned",
+    "components.pinned.status",
+    "components.pinned.memories",
+    "components.pinned.memories[].memory_id",
+    "components.pinned.memories[].summary",
+    "components.pinned.memories[].context_summary",
+    "components.pinned.memories[].type",
+    "components.pinned.memories[].importance",
+    "components.pinned.memories[].delivery_mode",
+    "components.pinned.total_available",
+    "components.pinned.truncated",
+    "components.pinned.cap",
+    "components.upcoming",
+    "components.upcoming.status",
+    "components.upcoming.results",
+    "components.upcoming.results[].memory_id",
+    "components.upcoming.results[].summary",
+    "components.upcoming.results[].type",
+    "components.upcoming.results[].trigger",
+    "components.upcoming.results[].trigger.year",
+    "components.upcoming.results[].trigger.month",
+    "components.upcoming.results[].trigger.from",
+    "components.upcoming.results[].trigger.until",
+    "components.upcoming.from",
+    "components.changes",
+    "components.changes.status",
+    "components.changes.changes",
+    "components.changes.changes[].memory_id",
+    "components.changes.changes[].kind",
+    "components.changes.changes[].at",
+    "components.changes.changes[].summary",
+    "components.changes.has_more",
+    "components.changes.next_cursor",
+    "since",
+    "generated_at",
+]
+
+
+@pytest.mark.asyncio
+async def test_default_call_keeps_the_v0114_shape(db_session, seeded):
+    """C8: an old plugin (no format, default budget) sees no change."""
+    owner, ws, ctx, _ = seeded
+    env = await _build(db_session, owner, ws, ctx, guardrails_provider=_guardrails_provider())
+    paths = [p for p in _key_paths(env) if not p.startswith("context.")]
+    assert paths == _V0114_DEFAULT_PATHS
+    assert "format" not in env
+    explicit = await _build(
+        db_session, owner, ws, ctx, guardrails_provider=_guardrails_provider(), format="full"
+    )
+    assert [p for p in _key_paths(explicit) if not p.startswith("context.")] == paths
+
+
+@pytest.mark.asyncio
+async def test_index_envelope_rows_per_lane(db_session, seeded):
+    owner, ws, ctx, rows = seeded
+    now = utcnow()
+    successor = await _row(db_session, owner, ws.id, ctx.id, summary="the newer fact")
+    long_summary = "a decision about " + "the shape of the index rows " * 6
+    replaced = await _row(
+        db_session,
+        owner,
+        ws.id,
+        ctx.id,
+        summary=long_summary,
+        created_at=now - timedelta(days=2),
+    )
+    db_session.add(
+        NeuralMemoryEdge(
+            user_id=owner,
+            src_id=successor.id,
+            dst_id=replaced.id,
+            workspace_id=ws.id,
+            context_id=ctx.id,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            weight=1.0,
+            confidence=1.0,
+            origin="declared",
+            created_at=now - timedelta(days=1),
+        )
+    )
+    gone = await _row(
+        db_session,
+        owner,
+        ws.id,
+        ctx.id,
+        summary="stored by mistake",
+        created_at=now - timedelta(days=2),
+        deleted_at=now - timedelta(days=1, hours=23),
+    )
+    await db_session.commit()
+    await db_session.refresh(ctx)
+    env = await _build(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=_guardrails_provider(),
+        format="index",
+        max_chars=20_000,
+    )
+    assert list(env)[:4] == ["status", "format", "degraded", "context"]
+    assert env["format"] == "index"
+    assert "instructions" not in env and "context_summary_omitted" not in env
+
+    pinned = env["components"]["pinned"]["memories"]
+    assert pinned == [
+        {
+            "memory_id": str(rows["pinned"].id),
+            "summary": "standing rule",
+            "type": "note",
+            "importance": 0.5,
+        }
+    ]
+    assert list(pinned[0]) == ["memory_id", "summary", "type", "importance"]
+
+    guard = env["guardrails"]
+    assert list(guard) == [
+        "provenance",
+        "items",
+        "total_available",
+        "truncated",
+        "tool_triggered_version",
+    ]
+    for item in guard["items"]:
+        assert list(item) == ["memory_id", "summary", "summary_cut", "importance"]
+        assert len(item["summary"]) <= 80
+
+    (due,) = env["components"]["upcoming"]["results"]
+    trigger = rows["due"].details["trigger"]
+    assert due == {
+        "memory_id": str(rows["due"].id),
+        "summary": "renew the certificate",
+        "from": trigger["from"],
+        "until": trigger["until"],
+    }
+    assert list(due) == ["memory_id", "summary", "from", "until"]
+
+    changes = env["components"]["changes"]["changes"]
+    cut = [c for c in changes if c["memory_id"] == str(replaced.id)]
+    assert cut and all(len(c["summary"]) <= 80 and c["summary_cut"] is True for c in cut)
+    sup = next(c for c in cut if c["kind"] == "superseded")
+    assert list(sup) == ["memory_id", "kind", "at", "summary", "summary_cut", "superseded_by"]
+    assert sup["superseded_by"] == str(successor.id)
+    forgotten = [c for c in changes if c["memory_id"] == str(gone.id)]
+    assert forgotten and all(set(c) == {"memory_id", "kind", "at"} for c in forgotten)
+    short = next(c for c in changes if c["memory_id"] == str(rows["recent"].id))
+    assert short["summary"] == "yesterday's decision" and "summary_cut" not in short
+
+
+@pytest.mark.asyncio
+async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
+    owner, ws, ctx, _ = seeded
+    for i in range(30):
+        await _row(db_session, owner, ws.id, ctx.id, summary=f"busy change {i} " + "y" * 200)
+    await db_session.commit()
+    full_index = await _build(
+        db_session, owner, ws, ctx, guardrails_provider=_guardrails_provider(6), format="index"
+    )
+    env = await _build(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=_guardrails_provider(6),
+        format="index",
+        max_chars=3_000,
+    )
+    assert json_chars(env) <= 3_000
+    comps = env["components"]
+    assert comps["pinned"]["memories"]  # the first lane keeps its rows
+    changes = comps["changes"]
+    assert changes["truncated"] is True and changes["has_more"] is True
+    assert len(changes["changes"]) < len(full_index["components"]["changes"]["changes"])
+    # A later lane keeps rows only when every earlier lane kept all of its rows.
+    lanes = [
+        (comps["pinned"], "memories", full_index["components"]["pinned"]),
+        (env["guardrails"], "items", full_index["guardrails"]),
+        (comps["upcoming"], "results", full_index["components"]["upcoming"]),
+        (changes, "changes", full_index["components"]["changes"]),
+    ]
+    earlier_cut = False
+    for block, key, whole in lanes:
+        if earlier_cut:
+            assert block[key] == []
+        if len(block[key]) < len(whole[key]):
+            assert block["truncated"] is True
+            earlier_cut = True
+
+
+@pytest.mark.asyncio
+async def test_index_pinned_alone_over_budget_keeps_a_prefix(db_session, seeded):
+    owner, ws, ctx, _ = seeded
+    for i in range(12):
+        await _row(
+            db_session,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=f"pinned rule {i} " + "z" * 400,
+            delivery_mode="always",
+        )
+    await db_session.commit()
+    env = await _build(db_session, owner, ws, ctx, format="index", max_chars=3_000)
+    pinned = env["components"]["pinned"]
+    assert 0 < len(pinned["memories"]) < pinned["total_available"]
+    assert pinned["truncated"] is True
+    # Pinned text is never demoted to an 80-character head.
+    assert all(len(m["summary"]) > 80 for m in pinned["memories"] if "pinned rule" in m["summary"])
+    assert json_chars(env) <= 3_000
+
+
+@pytest.mark.asyncio
+async def test_index_passes_absent_and_null_guardrails_through(db_session, seeded):
+    owner, ws, ctx, _ = seeded
+    env = await _build(db_session, owner, ws, ctx, format="index")
+    assert "guardrails" not in env
+
+    async def failed():
+        return {"guardrails": None}
+
+    env = await _build(db_session, owner, ws, ctx, format="index", guardrails_provider=failed)
+    assert env["guardrails"] is None

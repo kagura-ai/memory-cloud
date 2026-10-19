@@ -1813,6 +1813,13 @@
         },
         "max_chars": {
           "type": "integer"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "full",
+            "index"
+          ]
         }
       },
       "required": [],
