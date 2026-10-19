@@ -18,6 +18,15 @@ from utils.datetime import to_utc_iso
 RECALL_VERBOSITIES = ("compact", "full")
 # Characters of ``summary`` a compact item carries, the ellipsis included.
 COMPACT_SUMMARY_CHARS = 160
+# #2124: how many of the top results carry ``content`` when the caller passes
+# no ``full``, the largest ``full`` accepted (recall's own ``k`` limit), and
+# the characters of content one result carries at most. Longer content is cut
+# there and continues with reference(memory_id, content_offset=...).
+RECALL_DEFAULT_FULL = 3
+RECALL_MAX_FULL = 100
+RECALL_CONTENT_CHARS = 1_500
+# The item keys that carry content, in item order (#2124).
+RECALL_CONTENT_KEYS = ("content", "content_truncated", "content_next_offset")
 _ELLIPSIS = "…"
 
 
@@ -48,6 +57,43 @@ def _compact_summary(summary: str) -> tuple[str, bool]:
     return head.rstrip() + _ELLIPSIS, True
 
 
+def effective_full(full: int | None, k: int) -> int:
+    """How many of the top results carry content (#2124).
+
+    ``full`` as the caller passed it (``None`` → ``RECALL_DEFAULT_FULL``),
+    never more than ``k``.
+    """
+    return min(RECALL_DEFAULT_FULL if full is None else full, k)
+
+
+def content_slice(content: str) -> tuple[str, int | None]:
+    """The head of ``content`` a recall result carries, and where the rest starts.
+
+    Returns:
+        The first ``RECALL_CONTENT_CHARS`` characters and, when that cut text,
+        the offset to pass as reference()'s ``content_offset`` (``None`` when
+        the whole content fits).
+    """
+    if len(content) <= RECALL_CONTENT_CHARS:
+        return content, None
+    return content[:RECALL_CONTENT_CHARS], RECALL_CONTENT_CHARS
+
+
+def _add_content(item: dict[str, Any], r: Any) -> None:
+    """Copy a top result's content onto ``item`` when the service attached it.
+
+    #2124: absent on the other results, and ``content_truncated`` /
+    ``content_next_offset`` only when the content was cut (absent, never null).
+    """
+    content = getattr(r, "content", None)
+    if not content:
+        return
+    item["content"] = content
+    if r.content_next_offset is not None:
+        item["content_truncated"] = True
+        item["content_next_offset"] = r.content_next_offset
+
+
 def _compact_recall_item(r: Any) -> dict[str, Any]:
     """The ``verbosity="compact"`` projection of one recall result (#2002).
 
@@ -61,6 +107,7 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
     item: dict[str, Any] = {"memory_id": str(r.memory_id), "summary": summary}
     if cut:
         item["summary_cut"] = True
+    _add_content(item, r)
     item.update(
         {
             "type": r.type,
@@ -121,6 +168,7 @@ def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
     if verbosity == "compact":
         return _compact_recall_item(r)
     item: dict[str, Any] = {"memory_id": str(r.memory_id), "summary": r.summary}
+    _add_content(item, r)
     # Truthiness, like the annotations below: a stored "" (remember() has no
     # min_length) says as little as None, so it is absent too.
     if r.context_summary:

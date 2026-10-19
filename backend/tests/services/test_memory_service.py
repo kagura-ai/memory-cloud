@@ -80,6 +80,7 @@ class TestRecall:
         mock_memory = MagicMock()
         mock_memory.id = memory_id
         mock_memory.summary = "Test result"
+        mock_memory.content = "Test content"  # #2124: top results carry it
         mock_memory.context_summary = None
         mock_memory.type = "code"
         mock_memory.importance = 0.8
@@ -1591,6 +1592,7 @@ class TestExploreHints:
         m = MagicMock()
         m.id = memory_id or str(uuid4())
         m.summary = summary
+        m.content = "Test content"  # #2124
         m.context_summary = None
         m.type = "note"
         m.importance = 0.7

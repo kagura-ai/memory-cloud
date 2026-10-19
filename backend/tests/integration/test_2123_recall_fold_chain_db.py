@@ -213,6 +213,9 @@ async def test_three_versions_recall_as_the_newest_with_the_others_folded(
     assert head.supersede_candidate.memory_id == v2
     assert head.supersede_candidate.verified is True
     assert response.results[1].folded is None
+    # #2124: content rides on the head (the newest version's), not a folded one.
+    assert head.content == VERSIONS[2]
+    assert response.results[1].content == "Falcon's QA lead is Mina"
 
 
 @pytest.mark.asyncio

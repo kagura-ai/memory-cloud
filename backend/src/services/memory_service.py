@@ -121,6 +121,7 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
+from utils.recall_projection import content_slice, effective_full
 from utils.tag_normalize import TAG_GROUPS_FILTER_KEY, tag_filter_groups
 
 logger = get_logger(__name__)
@@ -4957,6 +4958,9 @@ class MemoryService:
             trusted_only=_is_trusted_recall(request),
         )
         fold_map = fold_map or {}
+        # #2124: the first ``full`` shipped rows carry their content (a folded
+        # group's content is its head's — the head is the row that ships).
+        full = effective_full(request.full, request.k)
 
         responses: list[MemoryResponse] = []
         for search_result in page:
@@ -4964,6 +4968,11 @@ class MemoryService:
 
             if not memory:
                 continue
+
+            content: str | None = None
+            content_next_offset: int | None = None
+            if len(responses) < full and memory.content:
+                content, content_next_offset = content_slice(memory.content)
 
             # Issue #1047: snapshot updated_at as read. #1317 removed the
             # column's onupdate and #1985 moved the access-stats write to a
@@ -5001,6 +5010,9 @@ class MemoryService:
                         else None
                     ),
                     version=memory.version,  # #2043
+                    content=content,
+                    content_truncated=True if content_next_offset is not None else None,
+                    content_next_offset=content_next_offset,
                 )
             )
         return responses
@@ -6824,6 +6836,7 @@ class MemoryService:
                 # make forget(query=...) silently skip them.
                 include_superseded=True,
                 search_mode="hybrid",
+                full=0,  # #2124: only the ids are used
             )
 
             # Issue #82: Pass project ID to recall

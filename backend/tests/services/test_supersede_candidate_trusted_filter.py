@@ -37,6 +37,7 @@ def _source(target_id: uuid.UUID) -> SimpleNamespace:
         id=uuid.uuid4(),
         summary="the newer fact",
         context_summary=None,
+        content="body",  # #2124
         type="note",
         importance=0.5,
         scope="working",

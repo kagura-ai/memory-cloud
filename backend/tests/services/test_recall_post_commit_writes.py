@@ -28,6 +28,7 @@ def _memory(**overrides) -> SimpleNamespace:
         "id": uuid4(),
         "summary": "s",
         "context_summary": None,
+        "content": "c",  # #2124
         "type": "note",
         "importance": 0.5,
         "scope": "working",
@@ -125,6 +126,7 @@ class TestRecallOrder:
         row = MagicMock(
             id=memory_id,
             summary="s",
+            content="c",  # #2124
             context_summary=None,
             type="note",
             importance=0.5,

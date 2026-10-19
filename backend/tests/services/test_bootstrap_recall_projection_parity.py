@@ -194,3 +194,16 @@ class TestBootstrapRecallRowKeyContract:
         row = await _bootstrap_row(_memory())
 
         assert BOOTSTRAP_RECALL_ROW_REQUIRED_KEYS <= set(row) <= BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS
+
+
+@pytest.mark.asyncio
+async def test_recall_content_never_enters_a_bootstrap_row():
+    """#2124: recall's content on the top results is recall-only — the allowed
+    key set above does not grow, even if a result arrives carrying content."""
+    memory = _memory(content="the whole body", content_truncated=True, content_next_offset=1500)
+
+    row = await _bootstrap_row(memory)
+
+    assert "content" in _recall_tool_row(memory, "full")
+    assert set(row) <= BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS
+    assert not {"content", "content_truncated", "content_next_offset"} & set(row)

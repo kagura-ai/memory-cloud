@@ -354,6 +354,19 @@ class RecallRequest(BaseModel):
             "superseded_by) and return folded older versions as their own rows"
         ),
     )
+    # #2124: the top ``full`` results carry their content (each cut at 1,500
+    # characters), so an agent can answer without a reference() round trip.
+    # None → 3; 0 → summaries only. Never more than ``k``.
+    full: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "How many of the top results carry content, each cut at 1,500 "
+            "characters (content_truncated / content_next_offset when cut). "
+            "Omit for 3; 0 returns summaries only."
+        ),
+    )
 
 
 class SupersedeCandidate(TZAwareBaseModel):
@@ -437,6 +450,13 @@ class MemoryResponse(TZAwareBaseModel):
     folded: FoldedVersions | None = None
     # #2043: the memory's version (update_memory's expected_version).
     version: int | None = None
+    # #2124: recall only, on the top ``full`` results — the memory's content,
+    # cut at 1,500 characters. When cut, content_truncated is True and
+    # content_next_offset is reference()'s content_offset for the rest.
+    # None on every other result and on every other surface.
+    content: str | None = None
+    content_truncated: bool | None = None
+    content_next_offset: int | None = None
 
     class Config:
         from_attributes = True

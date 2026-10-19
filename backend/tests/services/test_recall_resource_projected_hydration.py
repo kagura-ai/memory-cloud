@@ -34,6 +34,7 @@ def _fake_resource_memory(mem_id, point_id):
     m.id = mem_id
     m.summary_embedding_id = point_id  # the Qdrant point id (uuid5), != m.id
     m.summary = "[innoxia_dictionary] drug-214814 v2"
+    m.content = "body"  # #2124
     m.context_summary = "ソラナックス 一般名 アルプラゾラム ..."
     m.type = "resource_data"
     m.importance = 0.6

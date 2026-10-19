@@ -29,7 +29,7 @@ from services.capacity_lock import CapacityPolicy
 from services.recall_selection import RecallSelectionConfig
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
-from utils.recall_projection import recall_result_item
+from utils.recall_projection import RECALL_CONTENT_KEYS, recall_result_item
 from utils.response_budget import (
     DEFAULT_MAX_CHARS,
     BudgetArgumentError,
@@ -660,6 +660,9 @@ class AgentBootstrapService:
             query=params.query,
             k=params.recall_k if params.recall_k is not None else 5,
             filters={"trust_tier": "trusted"},
+            # #2124: summaries only — recall's content on the top results is a
+            # recall-tool feature; this lane carries no Layer-3 text.
+            full=0,
         )
         result = await MemoryService(self.db).recall(
             request,
@@ -748,6 +751,10 @@ def _bootstrap_recall_row(r: Any) -> dict[str, Any]:
     """
     item = recall_result_item(r, BOOTSTRAP_RECALL_VERBOSITY)
     item.pop("supersede_candidate", None)
+    # #2124: the request asks for no content (full=0); dropping the keys here
+    # too keeps Layer-3 text out of this lane whatever the service returns.
+    for key in RECALL_CONTENT_KEYS:
+        item.pop(key, None)
     return item
 
 

@@ -272,6 +272,11 @@ async def share_recall(
     # refused in its redacted form — no counts, no cleanup page.
     await ensure_context_not_capacity_locked(memory_service.db, bound_context_id, outsider=True)
 
+    # #2124: a share key reads summaries only, as before recall could carry
+    # content — this surface has no reference(), and widening a share key's
+    # read to Layer-3 text is a separate decision.
+    request = request.model_copy(update={"full": 0})
+
     try:
         result = await memory_service.recall(
             request,

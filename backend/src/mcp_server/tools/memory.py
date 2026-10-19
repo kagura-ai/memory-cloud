@@ -50,7 +50,12 @@ from utils.exceptions import (
     QuotaExceededError,
     VersionConflictError,
 )
-from utils.recall_projection import RECALL_VERBOSITIES, recall_result_item
+from utils.recall_projection import (
+    RECALL_CONTENT_KEYS,
+    RECALL_MAX_FULL,
+    RECALL_VERBOSITIES,
+    recall_result_item,
+)
 from utils.response_budget import (
     DEFAULT_MAX_CHARS,
     BudgetArgumentError,
@@ -1104,6 +1109,37 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
     return response_data
 
 
+def _fit_recall_content(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Lower the number of results that carry content until the reply fits (#2124).
+
+    Content is the first thing to go over ``max_chars``: from the lowest-ranked
+    result that carries it upwards, a result loses its content keys (it keeps
+    its whole summary) until the reply fits or no content is left. When any was
+    removed, ``full_applied`` is the number of results still carrying content;
+    it is absent otherwise. Whatever still does not fit is then cut by
+    :func:`_bound_recall_envelope` as before.
+    """
+    total = json_chars(envelope)
+    if total <= max_chars:
+        return envelope
+    results = envelope["results"]
+    with_content = [i for i, item in enumerate(results) if "content" in item]
+    if not with_content:
+        return envelope
+    # Room for the flag itself (its value is at most a three-digit count).
+    target = max_chars - json_chars({"full_applied": RECALL_MAX_FULL}) + 1
+    results = list(results)
+    while with_content and total > target:
+        index = with_content.pop()
+        item = dict(results[index])
+        for key in RECALL_CONTENT_KEYS:
+            if key in item:
+                # ``,"key":value`` — never the first member (memory_id is).
+                total -= json_chars(key) + json_chars(item.pop(key)) + 2
+        results[index] = item
+    return {**envelope, "results": results, "full_applied": len(with_content)}
+
+
 def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
     """Hold a recall reply to ``max_chars`` characters (#1743).
 
@@ -1152,9 +1188,21 @@ async def handle_recall(
             "validation_error", "verbosity must be 'compact' or 'full'", received=verbosity
         )
 
+    # #2124: how many of the top results carry content. ``type(x) is int`` so
+    # bool, which subclasses int, is refused; None follows the default (3).
+    full = args.get("full")
+    if full is not None and (type(full) is not int or not 0 <= full <= RECALL_MAX_FULL):
+        return _error_response(
+            "invalid_argument",
+            f"full must be an integer between 0 and {RECALL_MAX_FULL} "
+            "(how many of the top results carry content; 0 for summaries only).",
+            received=full,
+        )
+
     request = RecallRequest(
         query=args["query"],
         k=args.get("k", 5),
+        full=full,
         # #1572: None when omitted → SearchService follows the context's config.
         use_rerank=args.get("use_rerank"),
         filters=args.get("filters"),
@@ -1281,7 +1329,10 @@ async def handle_recall(
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
             response_data = _bound_recall_envelope(
-                _recall_envelope(result, current_context, verbosity), max_chars
+                _fit_recall_content(
+                    _recall_envelope(result, current_context, verbosity), max_chars
+                ),
+                max_chars,
             )
 
             await _log_tool_usage(

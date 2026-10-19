@@ -39,6 +39,7 @@ def _mem(age_days: int, **overrides) -> SimpleNamespace:
         "id": uuid4(),
         "summary": "the fact",
         "context_summary": None,
+        "content": "the fact in full",  # #2124
         "type": "fact",
         "importance": 0.5,
         "scope": "working",
