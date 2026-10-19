@@ -72,6 +72,7 @@ from models.schemas import (
     RelatedTagItem,
     RememberRequest,
     RememberResponse,
+    SelectorReport,
     SupersedeCandidate,
     UpdateMemoryRequest,
     UpdateMemoryResponse,
@@ -391,14 +392,19 @@ class _PreparedRemember:
 
 
 def _recall_audit_metadata(
-    responses: list[MemoryResponse], binding_row_filtered: int
+    responses: list[MemoryResponse],
+    binding_row_filtered: int,
+    selector: SelectorReport | None = None,
 ) -> dict[str, Any] | None:
-    """``event_metadata`` of the recall success audit row (#1299, #2124).
+    """``event_metadata`` of the recall success audit row (#1299, #2124, #2144).
 
     #1299: the enforce-mode row-filter count. #2124: the ids of the results
     that shipped their content — a Layer-3 read that reference() audits on its
     own row, so a recall that carries content says which memories it read
     (identifiers only, capped like every id list in the audit metadata).
+    #2144: when the LLM selector applied, ``selector_applied`` and
+    ``selector_dropped_count`` (counts only; the content ids above are the
+    selected page's).
     """
     from services.agent_binding_service import ROW_FILTER_KIND
     from services.memory_access_event_writer import MAX_METADATA_MEMORY_IDS
@@ -411,6 +417,9 @@ def _recall_audit_metadata(
     if content_ids:
         metadata["content_memory_ids"] = content_ids[:MAX_METADATA_MEMORY_IDS]
         metadata["content_count"] = len(content_ids)
+    if selector is not None and selector.applied:
+        metadata["selector_applied"] = True
+        metadata["selector_dropped_count"] = selector.dropped or 0
     return metadata or None
 
 
@@ -5059,6 +5068,73 @@ class MemoryService:
             )
         return responses
 
+    async def _recall_apply_llm_selector(
+        self,
+        request: RecallRequest,
+        responses: list[MemoryResponse],
+        *,
+        llm_selector: bool,
+        search_config: Any,
+        cross_context: bool,
+        selection_config: RecallSelectionConfig | None,
+        degradation: dict[str, Any],
+        user_id: str,
+        context_id: UUID,
+        effective_workspace_id: UUID,
+        timings: RecallTimings,
+    ) -> tuple[list[MemoryResponse], SelectorReport | None]:
+        """Run the #2144 LLM selector over the built page when it applies.
+
+        Checked cheapest first; any miss returns the page unchanged and no
+        report (the envelope then has no ``selector`` key):
+
+        1. the caller opted in (``llm_selector`` — only the MCP recall tool);
+        2. a single-context recall whose prefetched search config has
+           ``llm_selector_enabled`` stored on;
+        3. at least one row carries content (``full`` >= 1) — selecting among
+           summaries alone saves nothing;
+        4. not ``include_superseded`` (audit mode shows the raw page), not the
+           #1306 evaluation seam, not a degraded (keyword-only) search;
+        5. the plan gate says the flag is effective — otherwise
+           ``{applied: false, reason: "inactive"}``.
+
+        The stage itself (:func:`services.recall_selector.run_selector`) never
+        raises; its failures come back as ``{applied: false, reason}`` with the
+        page unchanged. It is timed as the ``select`` stage.
+
+        Returns:
+            The page to ship and the report (None when the stage did not apply).
+        """
+        if not llm_selector or cross_context:
+            return responses, None
+        if getattr(search_config, "llm_selector_enabled", False) is not True:
+            return responses, None
+        if effective_full(request.full, request.k) < 1 or not any(r.content for r in responses):
+            return responses, None
+        if request.include_superseded or selection_config is not None:
+            return responses, None
+        if degradation.get("degraded"):
+            return responses, None
+
+        from config.settings import get_settings
+        from services.llm_selector_policy import llm_selector_effective
+        from services.recall_selector import run_selector
+
+        with timings.stage("select"):
+            if not await llm_selector_effective(self.db, context_id, stored=True):
+                logger.info("recall_selector_inactive", context_id=str(context_id))
+                return responses, SelectorReport(applied=False, reason="inactive")
+            result = await run_selector(
+                self.db,
+                query=request.query,
+                responses=responses,
+                user_id=user_id,
+                workspace_id=str(effective_workspace_id),
+                context_id=str(context_id),
+                settings=get_settings(),
+            )
+        return result.responses, result.report
+
     async def _recall_trusted_context_ids(self, context_ids: set[UUID]) -> set[UUID]:
         """The ids among ``context_ids`` whose context is trusted (#2124).
 
@@ -5438,6 +5514,7 @@ class MemoryService:
         degradation: dict[str, Any] | None = None,
         timings: RecallTimings | None = None,
         context_count: int = 1,
+        selector: SelectorReport | None = None,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -5460,6 +5537,7 @@ class MemoryService:
                 last, after the audit row. ``None`` (direct callers) logs no
                 line, like :meth:`_empty_recall_response`.
             context_count: Contexts the recall spanned, for the log line.
+            selector: #2144 the LLM selector's report, or None.
 
         Returns:
             The completed RecallResponse.
@@ -5477,6 +5555,7 @@ class MemoryService:
                 selection_evidence=selection_evidence,
                 cross_context=cross_context,
                 degradation=degradation,
+                selector=selector,
             )
         # #1989: one line per recall, after everything the caller waits for.
         if timings is not None:
@@ -5505,6 +5584,7 @@ class MemoryService:
         selection_evidence: dict[str, Any] | None,
         cross_context: bool,
         degradation: dict[str, Any] | None,
+        selector: SelectorReport | None = None,
     ) -> RecallResponse:
         """The body of :meth:`_recall_finalize`, timed as one stage there.
 
@@ -5565,11 +5645,12 @@ class MemoryService:
             context_id=current_context_id,
             result_count=len(responses),
             query=request.query,
-            extra_metadata=_recall_audit_metadata(responses, binding_row_filtered),
+            extra_metadata=_recall_audit_metadata(responses, binding_row_filtered, selector),
         )
 
         return RecallResponse(
             results=responses,
+            selector=selector,
             related_tags=related_tags,
             explore_hints=explore_hints,
             # #1515: None (and therefore omitted) unless the search degraded.
@@ -5696,6 +5777,7 @@ class MemoryService:
         *,
         capacity_gate: bool = True,
         content_trusted_only: bool = False,
+        llm_selector: bool = False,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -5733,6 +5815,10 @@ class MemoryService:
                 CWE-639 / OWASP A01).
             content_trusted_only: #2124 only trusted rows may carry content
                 (the MCP tool's defaulted ``full``).
+            llm_selector: #2144 the caller allows the LLM selector stage. Only
+                the MCP recall tool passes True; the stage then runs when the
+                context's flag is effective (see
+                :meth:`_recall_apply_llm_selector`).
 
         Returns:
             RecallResponse with search results
@@ -6016,6 +6102,24 @@ class MemoryService:
                 content_trusted_only=content_trusted_only,
             )
 
+        # #2144: the opt-in LLM selector over the page that would ship — after
+        # fold, rerank, the selection plan and the #2124 content rule, before
+        # the commit, so access stats and the audit row describe the selected
+        # page. None (no ``selector`` key) unless the stage ran or was refused.
+        responses, selector_report = await self._recall_apply_llm_selector(
+            request,
+            responses,
+            llm_selector=llm_selector,
+            search_config=search_config,
+            cross_context=bool(context_ids),
+            selection_config=selection_config,
+            degradation=degradation,
+            user_id=user_id,
+            context_id=current_context_id,
+            effective_workspace_id=effective_workspace_id,
+            timings=timings,
+        )
+
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must
         # not feed the graph — a degraded hybrid recall IS keyword-only, so it has
@@ -6061,6 +6165,7 @@ class MemoryService:
             degradation=degradation,
             timings=timings,
             context_count=context_count,
+            selector=selector_report,
         )
 
     async def load_pinned(

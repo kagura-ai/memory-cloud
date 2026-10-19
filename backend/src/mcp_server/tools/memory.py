@@ -1082,8 +1082,17 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
         "status": "success",
         "results": results_data,
         "count": len(results_data),
-        **_context_response_fields(context),
     }
+    # #2144: what the LLM selector did — absent (never null) unless the stage
+    # ran or was refused on a context with the flag on. Right after count:
+    # count is the selected page's and the dropped ids are listed here. The
+    # type check keeps a loose stand-in result (a bare mock) from inventing one.
+    from models.schemas import SelectorReport
+
+    selector = getattr(result, "selector", None)
+    if isinstance(selector, SelectorReport):
+        response_data["selector"] = selector.model_dump(mode="json", exclude_none=True)
+    response_data |= _context_response_fields(context)
     # #1599: tag + count only. ``RelatedTagItem.sample_summary`` (still served
     # over REST) repeats, in full, a summary that is already in ``results`` —
     # up to 10 times per response on this surface. #1851: absent when there
@@ -1344,6 +1353,10 @@ async def handle_recall(
                     context_workspace_id=current_context.workspace_id,
                     context_ids=cross_context_ids,
                     content_trusted_only=content_trusted_only,
+                    # #2144: this tool is the only caller that allows the
+                    # LLM selector; it runs where the context's flag is
+                    # effective.
+                    llm_selector=True,
                 ),
                 operation_name="recall",
             )

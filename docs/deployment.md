@@ -1969,9 +1969,9 @@ selector: an MCP recall may send the page's summaries and attached content to
 the deployment's judge model (the `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` lane
 that `SUPERSEDE_VERIFY_MODE=llm` uses), which keeps the results that answer the
 query and cuts their content to verbatim passages. Changing the flag takes the
-context owner or a workspace owner/admin. **This release ships the flag, its
-plan gate and these settings only: nothing reads the flag at recall time yet**;
-the stage itself follows in a separate change.
+context owner or a workspace owner/admin. Only the MCP `recall` tool runs the
+stage; REST `/api/v1/memory/recall`, share keys, agent bootstrap and
+`forget(query=...)` never do.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -1994,6 +1994,50 @@ an upgrade makes them active again. The search-config response reports
 reports `search_config.llm_selector_enabled` and `llm_selector_effective`.
 Migration `f06_2144_llm_selector` adds both columns (`BOOLEAN NOT NULL DEFAULT
 false`, metadata-only, and a nullable timestamp); no row is turned on.
+
+**At recall time.** The stage runs after the page is built (fold, rerank and the
+`full` content rule have run) on a single-context MCP recall whose flag is
+effective, with at least one result carrying content, not under
+`include_superseded=true` and not on a degraded search. The model receives the
+query, each sent row's summary and its attached content split into numbered
+segments — no memory ids, scores, tags or sources; every string passes the
+control-token neutraliser and sits between the untrusted-content markers — and
+answers with row and segment indices only. The server validates each answer
+item on its own, drops the rows marked irrelevant (their ids are listed in
+`selector.dropped_memory_ids`, at most 20) and rebuilds a kept row's content by
+slicing the stored text at the chosen segments, joined with `" … "`, with
+`spans: [{start, end}]` in stored-content offsets. Nothing the model writes is
+copied into a result. With a defaulted `full`, only trusted, non-connector rows
+carry content, so only those are sent with content. One provider attempt is
+made (no retry) at temperature 0, on the judge's credential lane, paid by the
+context's workspace (#708).
+
+Every failure returns the unselected page with `selector: {applied: false,
+reason}`: `timeout`, `provider_error` (the call or the judge config read
+failed), `invalid_answer` (no usable `rows`), `daily_cap`, `too_large` (over
+`LLM_SELECTOR_MAX_PROMPT_CHARS`), `no_provider` (`SLEEP_LLM_PROVIDER` empty),
+`counter_unavailable` (the Redis day counter could not be read: no call is
+made), or `inactive` (the flag is stored on but the plan gate does not cover the
+context). A recall timed with the stage logs `select_ms` on `recall_completed`.
+Each billed call writes one `llm_call_log` row with `caller='recall'`,
+`call_type='completion'` and `call_metadata.stage='llm_selector'` (outcome
+`applied`, `invalid_answer` or `failed`, plus `rows_sent`, `kept`, `dropped` and
+the prompt revision); cost reports can filter on that pair. The recall audit row
+adds `selector_applied` and `selector_dropped_count` when the stage applied.
+
+| Event | Level | When |
+| --- | --- | --- |
+| `recall_selector_applied` | INFO | the selector applied: `rows_sent`, `kept`, `dropped`, provider, model, tokens, `select_ms` |
+| `recall_selector_failed_open` | WARNING | the stage failed open: `reason`, `error_type`, provider, model, `rows`, `elapsed_ms` |
+| `recall_selector_inactive` | INFO | the flag is stored on but the plan gate treats it as off |
+| `recall_selector_cap_reached` | WARNING | a workspace hit `LLM_SELECTOR_MAX_CALLS_PER_DAY`. Logged once per workspace per UTC day |
+| `recall_selector_ledger_failed` | WARNING | the `llm_call_log` row could not be written; the page is unaffected |
+
+The stage is measured before any default changes: enable it per context with
+`update_search_config(context_id, llm_selector_enabled=true)` on a deployment
+with `SLEEP_LLM_PROVIDER` set and compare the same queries with the flag off and
+on (tokens from the `llm_call_log` rows above, `select_ms` from
+`recall_completed`, misses from `dropped_memory_ids`).
 
 ## MCP recall defaults — Issues #2002, #2140
 
@@ -2762,13 +2806,14 @@ Every recall that completes logs one `recall_completed` line (also when the page
 | `qdrant_ms`, `fulltext_ms` | The dense and the BM25 search. When a recall is `degraded` (#1515), the failed arm carries its time-to-failure: `embed_ms` for `embedding_unavailable`, `qdrant_ms` for `vector_search_unavailable`; the rest of the recall ran keyword-only. |
 | `rerank_ms` | The cross-encoder rerank; absent when there was nothing to score or no active provider (never `0` for a skipped one). A rerank that failed open (`rerank_failed_open`) keeps its time-to-failure here. |
 | `hydrate_ms` | The Postgres row fetch. |
+| `select_ms` | The recall LLM selector (#2144), including its plan-gate check; absent when the stage did not run. |
 | `finalize_ms` | Response build, explore hints, related tags, confidence and the `memory_access_events` row. |
 | `commit_ms` | The read transaction's commit, before the post-commit writes. |
 | `post_commit_ms` | The access-statistics and Hebbian writes that run after the read commits (#1985) and still delay the response. |
 | `other_ms` | `duration_ms` minus the stages above: preparation and config lookups, the `llm_call_log` write after a cold embed, the plan-tier check before a rerank, and the binding, supersede, reinforce and selection passes between hydrate and the response build. |
 | `candidates`, `results`, `k`, `context_count`, `degraded` | Size context: candidate pool, returned page, requested page, contexts searched; `degraded: true` when the semantic arm was unavailable (#1515). |
 
-The stages run one after another, so `embed_ms + qdrant_ms + fulltext_ms + rerank_ms + hydrate_ms + finalize_ms + commit_ms + post_commit_ms + other_ms` equals `duration_ms` up to rounding. `memory_access_events.latency_ms` and `usage_stats` keep the total only; the breakdown lives in the log. A p50 / p95 per stage from the live color's JSON log (`LOG_COLORIZE=false`, the production default; the colored console renderer is not JSON):
+The stages run one after another, so `embed_ms + qdrant_ms + fulltext_ms + rerank_ms + hydrate_ms + select_ms + finalize_ms + commit_ms + post_commit_ms + other_ms` equals `duration_ms` up to rounding. `memory_access_events.latency_ms` and `usage_stats` keep the total only; the breakdown lives in the log. A p50 / p95 per stage from the live color's JSON log (`LOG_COLORIZE=false`, the production default; the colored console renderer is not JSON):
 
 ```bash
 docker logs kagura-api-blue --since 1h 2>&1 | grep recall_completed | jq -s '
@@ -2776,7 +2821,7 @@ docker logs kagura-api-blue --since 1h 2>&1 | grep recall_completed | jq -s '
   def stage(f): {p50: (map(f // empty) | pct(0.5)), p95: (map(f // empty) | pct(0.95))};
   {duration: stage(.duration_ms), embed: stage(.embed_ms), qdrant: stage(.qdrant_ms),
    fulltext: stage(.fulltext_ms), rerank: stage(.rerank_ms), hydrate: stage(.hydrate_ms),
-   finalize: stage(.finalize_ms), commit: stage(.commit_ms), post_commit: stage(.post_commit_ms),
+   select: stage(.select_ms), finalize: stage(.finalize_ms), commit: stage(.commit_ms), post_commit: stage(.post_commit_ms),
    other: stage(.other_ms)}'
 ```
 

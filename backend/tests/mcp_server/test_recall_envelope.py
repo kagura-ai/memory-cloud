@@ -928,3 +928,78 @@ class TestVerifiedCandidate:
         ][0]
         assert "detected_at" not in item["supersede_candidate"]
         assert "verified" not in item["supersede_candidate"]
+
+
+class TestSelectorAndSpans:
+    """#2144: ``selector`` after ``count`` and ``spans`` on a selected row; both absent
+    (never null) otherwise, and the content fit strips ``spans`` with content."""
+
+    @staticmethod
+    def _selected(**overrides: Any) -> MemoryResponse:
+        from models.schemas import SpanRef
+
+        fields: dict[str, Any] = {
+            "content": "first passage … second passage",
+            "spans": [SpanRef(start=0, end=13), SpanRef(start=40, end=54)],
+        }
+        fields.update(overrides)
+        return _memory(**fields)
+
+    def _result(self, **report: Any) -> RecallResponse:
+        from models.schemas import SelectorReport
+
+        report = report or {
+            "applied": True,
+            "model": "small-model",
+            "kept": 1,
+            "dropped": 1,
+            "dropped_memory_ids": [UUID("00000000-0000-4000-8000-0000000000aa")],
+        }
+        return RecallResponse(results=[self._selected()], selector=SelectorReport(**report))
+
+    @pytest.mark.parametrize("verbosity", ["compact", "full"])
+    def test_spans_follow_content_in_both_verbosities(self, verbosity: str) -> None:
+        item = _envelope(self._result(), verbosity)["results"][0]
+        assert item["spans"] == [{"start": 0, "end": 13}, {"start": 40, "end": 54}]
+        keys = list(item)
+        assert keys.index("spans") == keys.index("content") + 1
+        assert "content_truncated" not in item
+
+    def test_selector_comes_right_after_count(self) -> None:
+        envelope = _envelope(self._result())
+        keys = list(envelope)
+        assert keys.index("selector") == keys.index("count") + 1
+        assert envelope["selector"] == {
+            "applied": True,
+            "model": "small-model",
+            "kept": 1,
+            "dropped": 1,
+            "dropped_memory_ids": ["00000000-0000-4000-8000-0000000000aa"],
+        }
+
+    def test_a_refused_stage_reports_only_the_reason(self) -> None:
+        envelope = _envelope(self._result(applied=False, reason="timeout"))
+        assert envelope["selector"] == {"applied": False, "reason": "timeout"}
+
+    def test_absent_when_the_stage_did_not_apply(self) -> None:
+        envelope = _envelope(RecallResponse(results=[_memory(content="body")]))
+        assert "selector" not in envelope
+        assert "spans" not in envelope["results"][0]
+        assert "null" not in _dumps(envelope["results"][0])
+
+    def test_the_content_fit_strips_spans_with_the_content(self) -> None:
+        result = RecallResponse(
+            results=[
+                self._selected(),
+                self._selected(content="x" * 12_000),
+            ]
+        )
+        fitted = mcp_memory._fit_recall_content(_envelope(result), 10_000)
+        assert fitted["full_applied"] == 1
+        assert "spans" in fitted["results"][0]
+        assert "content" not in fitted["results"][1] and "spans" not in fitted["results"][1]
+
+    async def test_the_handler_passes_the_selector_through(self) -> None:
+        payload = await _handler_payload({}, self._result())
+        assert payload["selector"]["applied"] is True
+        assert payload["results"][0]["spans"][0] == {"start": 0, "end": 13}

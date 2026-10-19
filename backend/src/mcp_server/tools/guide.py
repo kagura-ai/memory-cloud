@@ -251,7 +251,7 @@ GUIDE_TOPICS: dict[str, str] = {
     "recall.returns": (
         "Returns (verbosity='compact', the default): {confidence, status, results: "
         "[{memory_id, summary, summary_cut?, content?, content_truncated?, "
-        "content_next_offset?, type, importance, score, created_at, "
+        "content_next_offset?, spans?, type, importance, score, created_at, "
         "updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], "
         "then the "
         "same envelope keys as below; summary_cut: true means summary is the first "
@@ -261,10 +261,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "verbosity (MCP_RECALL_DEFAULT_VERBOSITY); an explicit value wins. "
         "Returns (verbosity='full'): {confidence: {level, top_score, prominence, "
         "relative_margin, result_count, rationale}, status, results: [{memory_id, "
-        "summary, content?, content_truncated?, content_next_offset?, "
+        "summary, content?, content_truncated?, content_next_offset?, spans?, "
         "context_summary?, type, "
         "importance, scope, score, tags?, created_at, updated_at, superseded_by?, "
-        "contradicts?, supersede_candidate?, folded?}], count, full_applied?, related_tags?: "
+        "contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, "
+        "related_tags?: "
         "[{tag, count}], "
         "context_id, context_name, context_display_name, context_is_private, "
         "context_is_locked, explore_hints?: [{memory_id, "
@@ -275,6 +276,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "include_superseded=true); contradicts when no memory opposes it; "
         "supersede_candidate unless a live suggestion exists; content outside the top "
         "full results (and content_truncated / content_next_offset unless it was cut); "
+        "spans / selector unless the LLM selector acted (see recall.selector); "
         "full_applied unless max_chars took content off a result; folded unless older "
         "versions were folded under the row; explore_hints unless "
         "requested; tag_suggestions unless a tag filter returned nothing and similar "
@@ -287,6 +289,29 @@ GUIDE_TOPICS: dict[str, str] = {
         "workspace, one privacy setting and one embedding model across the list "
         "(else workspace_mismatch / context_privacy_mismatch / "
         "embedding_model_mismatch)."
+    ),
+    "recall.selector": (
+        "Selected passages: where a context has llm_selector_enabled on (off by "
+        "default; plan-gated on some deployments; set with update_search_config, "
+        'outside the core profile: describe_tools(["update_search_config"])), a '
+        "small model — the deployment's judge model — reads the query and the page "
+        "and keeps only the results that answer it, cutting their content to the "
+        "passages that do. The context's memory text is sent to that model. It runs "
+        "only on a single-context recall with at least one result carrying content "
+        "(full >= 1), and not with include_superseded=true or on a degraded search; "
+        "then selector is absent. A selected result's content is verbatim stored "
+        "text: its passages joined with ' … ', and spans: [{start, end}] gives each "
+        "passage's character offsets in the stored content (end exclusive) — "
+        "reference(memory_id, content_offset=start) reads around one. "
+        "content_truncated / content_next_offset stay only when the last passage "
+        "reaches the 1,500-character cut. A result kept whole carries its content as "
+        "usual. Dropped results leave results (count follows) and their ids are in "
+        "selector.dropped_memory_ids (at most 20); reference() still reads them. "
+        "selector: {applied: true, model, kept, dropped, dropped_memory_ids} or "
+        "{applied: false, reason} with the unselected page; reason is timeout | "
+        "provider_error | invalid_answer | daily_cap | too_large | no_provider | "
+        "counter_unavailable | inactive (the flag is on but the plan or its cap does "
+        "not cover this context)."
     ),
     "remember.tags_normalize": (
         "remember(tags_normalize=true) / remember_batch(tags_normalize=true) store each "
@@ -663,6 +688,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "recall.filters",
         "recall.reading-results",
         "recall.returns",
+        "recall.selector",
         "ids",
     ),
     "update_memory": ("update_memory.modes", "update_memory.returns", "security", "ids"),

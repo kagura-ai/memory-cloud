@@ -30,8 +30,8 @@ INDEX_SUMMARY_CHARS = 80
 RECALL_DEFAULT_FULL = 3
 RECALL_MAX_FULL = 100
 RECALL_CONTENT_CHARS = 1_500
-# The item keys that carry content, in item order (#2124).
-RECALL_CONTENT_KEYS = ("content", "content_truncated", "content_next_offset")
+# The item keys that carry content, in item order (#2124; #2144 spans).
+RECALL_CONTENT_KEYS = ("content", "content_truncated", "content_next_offset", "spans")
 _ELLIPSIS = "…"
 
 
@@ -93,6 +93,8 @@ def _add_content(item: dict[str, Any], r: Any) -> None:
 
     #2124: absent on the other results, and ``content_truncated`` /
     ``content_next_offset`` only when the content was cut (absent, never null).
+    #2144: ``spans`` (``[{start, end}]`` in stored-content offsets) only when
+    the LLM selector cut the content to verbatim passages.
     """
     content = getattr(r, "content", None)
     if not content:
@@ -101,6 +103,9 @@ def _add_content(item: dict[str, Any], r: Any) -> None:
     if r.content_next_offset is not None:
         item["content_truncated"] = True
         item["content_next_offset"] = r.content_next_offset
+    spans = getattr(r, "spans", None)
+    if isinstance(spans, list) and spans:
+        item["spans"] = [{"start": span.start, "end": span.end} for span in spans]
 
 
 def _compact_recall_item(r: Any) -> dict[str, Any]:

@@ -272,7 +272,7 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25); returns ranked summaries, plus content for the top `full`. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
 Query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); reject with update_memory(dismiss_supersede_candidate=true), accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])). folded? {count, memory_ids}: judge-verified older versions.
+Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); reject with update_memory(dismiss_supersede_candidate=true), accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])). folded? {count, memory_ids}: judge-verified older versions.
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -289,7 +289,7 @@ Manual: guide(["recall"]).""",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Natural-language query: a question, keywords, or a description of what you need (max 8000 chars).",
+                        "description": "A question, keywords or a description of what you need (max 8000 chars).",
                     },
                     "k": {
                         "type": "integer",

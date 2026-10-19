@@ -82,6 +82,7 @@ def test_field_order_is_stable_for_log_readers() -> None:
         "qdrant",
         "embed",
         "post_commit",
+        "select",
     ):
         with t.stage(name):
             clock.advance(0.001)
@@ -93,6 +94,7 @@ def test_field_order_is_stable_for_log_readers() -> None:
         "fulltext_ms",
         "rerank_ms",
         "hydrate_ms",
+        "select_ms",
         "finalize_ms",
         "commit_ms",
         "post_commit_ms",
