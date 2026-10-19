@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -334,9 +335,9 @@ async def test_a_dry_run_locks_nothing_and_writes_nothing():
     )
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     with (
-        patch.object(sr, "_session_exists", AsyncMock(return_value=True)),
+        patch.object(sr, "_scope_exists", AsyncMock(return_value=True)),
         patch.object(sr, "_read_batch", AsyncMock(return_value=batch)) as read,
-        patch.object(sr, "_lock_session", AsyncMock()) as lock,
+        patch.object(sr, "_lock_scope", AsyncMock()) as lock,
     ):
         result = await sr.rollback_session(
             db,
@@ -357,7 +358,7 @@ async def test_a_dry_run_locks_nothing_and_writes_nothing():
 @pytest.mark.asyncio
 async def test_an_unknown_session_is_not_found_before_anything_else():
     db = _db()
-    with patch.object(sr, "_session_exists", AsyncMock(return_value=False)):
+    with patch.object(sr, "_scope_exists", AsyncMock(return_value=False)):
         with pytest.raises(sr.SessionNotFoundError):
             await sr.rollback_session(
                 db,
@@ -377,8 +378,8 @@ def _empty_batch() -> Any:
 async def _run(db: MagicMock, record: Any, batch: Any, *, dry_run: bool = False) -> Any:
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: record))
     with (
-        patch.object(sr, "_session_exists", AsyncMock(return_value=True)),
-        patch.object(sr, "_lock_session", AsyncMock()),
+        patch.object(sr, "_scope_exists", AsyncMock(return_value=True)),
+        patch.object(sr, "_lock_scope", AsyncMock()),
         patch.object(sr, "_read_batch", AsyncMock(return_value=batch)),
     ):
         return await sr.rollback_session(
@@ -513,6 +514,125 @@ def test_principal_predicates_compile_index_friendly():
     owner = sql(sr.SessionScope(ctx, "s", None))
     assert "actor_user_id" not in owner and "agent_id" not in owner
     assert "memory_revisions.session_id = 's'" in owner
+
+
+# --------------------------------------------------------------- #2121 window
+
+
+T0 = datetime(2026, 10, 19, 10, 0, 0)
+T1 = T0 + timedelta(hours=1)
+
+
+def _window(principal: Any = None, **kw: Any) -> sr.SessionScope:
+    return sr.SessionScope(
+        uuid.uuid4(),
+        None,
+        principal if principal is not None else sr.SessionPrincipal("u1", None),
+        since=kw.pop("since", T0),
+        until=kw.pop("until", T1),
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"session_id": "s", "since": T0, "until": T1},  # both modes
+        {"session_id": None},  # neither
+        {"session_id": "s", "until": T1},  # until without since
+        {"session_id": None, "since": T0},  # since without until
+        {"session_id": None, "since": T1, "until": T0},  # until before since
+        {"session_id": None, "since": T0, "until": T0},  # empty window
+    ],
+)
+def test_scope_takes_exactly_one_well_formed_mode(kwargs):
+    with pytest.raises(ValueError):
+        sr.SessionScope(
+            context_id=uuid.uuid4(), principal=sr.SessionPrincipal("u1", None), **kwargs
+        )
+
+
+def test_a_window_is_never_the_owner_scope():
+    with pytest.raises(ValueError, match="own principal"):
+        sr.SessionScope(uuid.uuid4(), None, None, since=T0, until=T1)
+    assert _window().window is True
+    assert sr.SessionScope(uuid.uuid4(), "s", None).window is False
+
+
+def _sql(clause: Any) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    return str(clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
+def test_window_predicates_compile_index_friendly():
+    from sqlalchemy import and_
+
+    user = _sql(and_(*sr._api_event_predicates(_window())))
+    assert "memory_revisions.actor_user_id = 'u1'" in user
+    assert "memory_revisions.agent_id IS NULL" in user
+    assert "memory_revisions.at >= '2026-10-19 10:00:00'" in user
+    assert "memory_revisions.at < '2026-10-19 11:00:00'" in user
+    assert "memory_revisions.writer = 'api'" in user
+    assert "session_id" not in user  # any session or none
+    agent = uuid.uuid4()
+    bound = _sql(and_(*sr._api_event_predicates(_window(sr.SessionPrincipal("u1", agent)))))
+    assert f"memory_revisions.agent_id = '{agent}'" in bound
+
+
+def test_window_foreign_predicate_is_the_null_safe_negation():
+    foreign = _sql(sr._foreign_predicate(_window()))
+    for term in (
+        "memory_revisions.actor_user_id != 'u1'",
+        "memory_revisions.agent_id IS DISTINCT FROM NULL",
+        "memory_revisions.writer != 'api'",
+        "memory_revisions.at < '2026-10-19 10:00:00'",
+        "memory_revisions.at >= '2026-10-19 11:00:00'",
+    ):
+        assert term in foreign, term
+    assert " OR " in foreign and "session_id" not in foreign
+
+
+def test_window_record_key_and_lock_are_the_principals():
+    from sqlalchemy import and_
+
+    agent = uuid.uuid4()
+    scope = _window(sr.SessionPrincipal("u1", agent))
+    target = _sql(and_(*sr._target_predicates(scope)))
+    assert "memory_session_rollbacks.session_id IS NULL" in target
+    assert "memory_session_rollbacks.principal_user_id = 'u1'" in target
+    assert f"memory_session_rollbacks.agent_id = '{agent}'" in target
+    assert "memory_session_rollbacks.window_since = '2026-10-19 10:00:00'" in target
+    assert "memory_session_rollbacks.window_until = '2026-10-19 11:00:00'" in target
+    assert sr._lock_key(scope) == f"session_rollback:{scope.context_id}:principal:u1:{agent}"
+    assert sr._lock_key(_window()).endswith(":principal:u1:-")
+    # Overlapping windows of one principal share the lock; a session does not.
+    assert (
+        sr._lock_key(_window(until=T1 + timedelta(hours=1))).split(":", 2)[2]
+        == (sr._lock_key(_window()).split(":", 2)[2])
+    )
+    session = sr.SessionScope(scope.context_id, "s", sr.SessionPrincipal("u1", agent))
+    assert sr._lock_key(session) == f"session_rollback:{scope.context_id}:s"
+    assert "window_since" not in _sql(and_(*sr._target_predicates(session)))
+
+
+@pytest.mark.asyncio
+async def test_a_window_without_writes_raises_no_writes_in_window():
+    db = _db()
+    with patch.object(sr, "_scope_exists", AsyncMock(return_value=False)):
+        with pytest.raises(sr.NoWritesInWindowError):
+            await sr.rollback_session(
+                db,
+                scope=_window(),
+                workspace_id=uuid.uuid4(),
+                requested_by="u1",
+                dry_run=True,
+                classify=lambda e: "x",
+                new_correlation_id=lambda: "c",
+            )
+
+
+def test_the_window_cap_is_seven_days():
+    assert timedelta(days=7) == sr.MAX_ROLLBACK_WINDOW
 
 
 def test_unforgets_beyond_the_per_call_cap_wait_for_the_next_call():

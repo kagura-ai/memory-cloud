@@ -2,8 +2,12 @@
 
 A session's writes are its ``memory_revisions`` events (``writer='api'``)
 under one session id, written by one principal — the caller sub and the
-verified agent of the credential (``SessionPrincipal``). The rollback groups
-those events per memory and lets the memory's own history decide:
+verified agent of the credential (``SessionPrincipal``). The window mode
+(#2121) addresses the caller's own API writes in ``[since, until)`` instead,
+for clients that have no session id (the stateless MCP transport): the same
+principal, never a context owner's override, and at most
+``MAX_ROLLBACK_WINDOW`` wide. The rollback groups those events per memory and
+lets the memory's own history decide:
 
 =================  ===========================================================
 session did        rollback
@@ -25,7 +29,8 @@ resource indexer owns it (``resource_row``), the caller may not write it
 (``not_permitted``), an earlier value was erased (``prior_erased``), or there
 is nothing left to undo (``already_forgotten`` / ``already_restored``).
 
-Execution holds a per-(context, session id) advisory lock, locks the batch's
+Execution holds a per-(context, session id) advisory lock — per (context,
+principal) in the window mode — locks the batch's
 memory rows in id order, and runs each item (each forget chunk) in a SAVEPOINT
 of its own: a failed item leaves nothing behind and the rest still runs. Every
 event a call handles — reversed or skipped — gets the rollback row's id in
@@ -35,6 +40,11 @@ call) is continued by the next call, and nothing is ever reversed twice. A
 failed item's events stay unhandled: the next call retries it (``partial``).
 A rollback whose events are all handled is ``completed``; the next call is
 refused (``AlreadyRolledBackError``) unless the session wrote again since.
+A window's record is keyed by the window itself: the same ``(since, until)``
+continues one record, a different window is a record of its own that only
+handles events no rollback has handled yet — overlapping windows, or a
+session and a window of the same principal, never reverse an event twice
+(the batch's rows are locked and ``undone_by`` is re-read under the lock).
 Vector deletes, re-embeds of restored text and the access audit run after
 the commit (``finish``).
 
@@ -48,6 +58,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -108,6 +119,9 @@ MAX_UNFORGETS_PER_CALL = 100
 FORGET_CHUNK = 100
 #: Plan items a response lists; the counts always cover every item.
 MAX_LISTED_ITEMS = 100
+#: The widest window the window mode (#2121) rolls back in one record; a
+#: longer stretch is split into several windows by the caller.
+MAX_ROLLBACK_WINDOW = timedelta(days=7)
 
 ACTION_FORGET = "forget"
 ACTION_RESTORE = "restore"
@@ -157,6 +171,14 @@ class SessionNotFoundError(Exception):
     """
 
 
+class NoWritesInWindowError(Exception):
+    """The caller's principal has no API write in the window in the context (#2121).
+
+    Says nothing about other principals: the window predicate cannot reach
+    their rows.
+    """
+
+
 class AlreadyRolledBackError(Exception):
     """The session's rollback is ``completed`` and it wrote nothing since."""
 
@@ -173,16 +195,41 @@ class AlreadyRolledBackError(Exception):
 
 @dataclass(frozen=True)
 class SessionScope:
-    """The events a rollback addresses.
+    """The events a rollback addresses: one session, or one window (#2121).
 
-    ``principal`` is the session's principal; None is a context owner's
-    rollback, which covers every principal's events under ``session_id`` in
-    the context.
+    Session mode (``session_id``): ``principal`` is the session's principal;
+    None is a context owner's rollback, which covers every principal's
+    events under ``session_id`` in the context.
+
+    Window mode (``since`` / ``until``, naive UTC, ``[since, until)``): the
+    principal's own events in the window, any session or none. The
+    principal is required — there is no owner override in this mode.
     """
 
     context_id: UUID
-    session_id: str
+    session_id: str | None
     principal: SessionPrincipal | None
+    since: datetime | None = None
+    until: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if (self.session_id is None) == (self.since is None):
+            raise ValueError("SessionScope takes exactly one of session_id or since")
+        if self.since is None:
+            if self.until is not None:
+                raise ValueError("until needs since")
+            return
+        if self.until is None:
+            raise ValueError("a window needs until")
+        if self.until <= self.since:
+            raise ValueError("until must be later than since")
+        if self.principal is None:
+            raise ValueError("a window is always the caller's own principal")
+
+    @property
+    def window(self) -> bool:
+        """True for the window mode (#2121)."""
+        return self.since is not None
 
 
 async def context_role(db: AsyncSession, user_id: str, context_id: UUID) -> ContextRole | None:
@@ -215,12 +262,24 @@ def addressable_principal(user_id: str, role: ContextRole | None) -> SessionPrin
     return caller_principal(user_id)
 
 
-def _session_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
-    """Every event of the session in the context, any writer."""
-    preds: list[ColumnElement[bool]] = [
-        MemoryRevision.context_id == scope.context_id,
-        MemoryRevision.session_id == scope.session_id,
-    ]
+def _scope_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
+    """Every event of the scope in the context, any writer.
+
+    Window mode: the principal's events with ``since <= at < until``
+    (``idx_memory_revisions_actor_at``).
+    """
+    preds: list[ColumnElement[bool]] = [MemoryRevision.context_id == scope.context_id]
+    if scope.window:
+        assert scope.principal is not None  # SessionScope.__post_init__
+        preds += [
+            principal_predicate(
+                MemoryRevision.actor_user_id, MemoryRevision.agent_id, scope.principal
+            ),
+            MemoryRevision.at >= scope.since,
+            MemoryRevision.at < scope.until,
+        ]
+        return preds
+    preds.append(MemoryRevision.session_id == scope.session_id)
     if scope.principal is not None:
         preds.append(
             principal_predicate(
@@ -236,11 +295,27 @@ def _api_event_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
     The rollback's own events (``writer='rollback'``) are never reversed by a
     rollback; they count as another writer's events instead.
     """
-    return [*_session_predicates(scope), MemoryRevision.writer == REVISION_WRITER_API]
+    return [*_scope_predicates(scope), MemoryRevision.writer == REVISION_WRITER_API]
 
 
 def _foreign_predicate(scope: SessionScope) -> ColumnElement[bool]:
-    """An event that is NOT one of the session's API writes (NULL-safe)."""
+    """An event that is NOT one of the scope's API writes (NULL-safe).
+
+    Window mode: the negation of the window predicate — another actor or
+    agent, another writer, or outside the window. The principal's own write
+    after ``until`` on a memory therefore skips it (``modified_since``); one
+    before ``since`` is older than the window's first event there and blocks
+    nothing. ``actor_user_id`` and ``at`` are NOT NULL.
+    """
+    if scope.window:
+        assert scope.principal is not None
+        return or_(
+            MemoryRevision.actor_user_id != scope.principal.actor_user_id,
+            MemoryRevision.agent_id.is_distinct_from(scope.principal.agent_id),
+            MemoryRevision.writer != REVISION_WRITER_API,
+            MemoryRevision.at < scope.since,
+            MemoryRevision.at >= scope.until,
+        )
     parts: list[ColumnElement[bool]] = [
         MemoryRevision.session_id.is_distinct_from(scope.session_id),
         MemoryRevision.writer != REVISION_WRITER_API,
@@ -251,12 +326,11 @@ def _foreign_predicate(scope: SessionScope) -> ColumnElement[bool]:
     return or_(*parts)
 
 
-def _target_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
-    """The ``memory_session_rollbacks`` row of this scope (the unique key)."""
-    principal = scope.principal
+def _record_principal_predicates(
+    context_id: UUID, principal: SessionPrincipal | None
+) -> list[ColumnElement[bool]]:
     return [
-        MemorySessionRollback.context_id == scope.context_id,
-        MemorySessionRollback.session_id == scope.session_id,
+        MemorySessionRollback.context_id == context_id,
         MemorySessionRollback.principal_user_id.is_(None)
         if principal is None
         else MemorySessionRollback.principal_user_id == principal.actor_user_id,
@@ -264,6 +338,43 @@ def _target_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
         if principal is None or principal.agent_id is None
         else MemorySessionRollback.agent_id == principal.agent_id,
     ]
+
+
+def _target_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
+    """The ``memory_session_rollbacks`` row of this scope (its unique key)."""
+    preds = _record_principal_predicates(scope.context_id, scope.principal)
+    if scope.window:
+        return [
+            *preds,
+            MemorySessionRollback.session_id.is_(None),
+            MemorySessionRollback.window_since == scope.since,
+            MemorySessionRollback.window_until == scope.until,
+        ]
+    return [*preds, MemorySessionRollback.session_id == scope.session_id]
+
+
+async def unfinished_window_until(
+    db: AsyncSession, context_id: UUID, principal: SessionPrincipal, since: datetime
+) -> datetime | None:
+    """The ``until`` of the principal's unfinished rollback of a window from ``since``.
+
+    A follow-up call that omits ``until`` continues that record instead of
+    opening a new window ending now (#2121); None when there is none (the
+    caller then ends the window now). The newest such record wins.
+    """
+    return await db.scalar(
+        select(MemorySessionRollback.window_until)
+        .where(
+            *_record_principal_predicates(context_id, principal),
+            MemorySessionRollback.session_id.is_(None),
+            MemorySessionRollback.window_since == since,
+            MemorySessionRollback.status.in_(
+                (SESSION_ROLLBACK_IN_PROGRESS, SESSION_ROLLBACK_PARTIAL)
+            ),
+        )
+        .order_by(MemorySessionRollback.id.desc())
+        .limit(1)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +562,14 @@ class _Batch:
     remaining: int
 
 
-async def _session_exists(db: AsyncSession, scope: SessionScope) -> bool:
-    return bool(await db.scalar(select(exists().where(*_session_predicates(scope)))))
+async def _scope_exists(db: AsyncSession, scope: SessionScope) -> bool:
+    """Whether the scope has an event to address.
+
+    A session exists with any of its events; a window only with an API write
+    of the principal — rollback-written events alone are nothing to undo.
+    """
+    preds = _api_event_predicates(scope) if scope.window else _scope_predicates(scope)
+    return bool(await db.scalar(select(exists().where(*preds))))
 
 
 async def _unhandled_count(db: AsyncSession, scope: SessionScope) -> int:
@@ -685,11 +802,28 @@ def _empty_summary() -> dict[str, Any]:
     return {**dict.fromkeys(_COUNT_KEYS, 0), "skipped_items": [], "errors": []}
 
 
-async def _lock_session(db: AsyncSession, scope: SessionScope) -> None:
-    """Serialize every rollback of one session id in one context (whatever principal)."""
+def _lock_key(scope: SessionScope) -> str:
+    if scope.window:
+        assert scope.principal is not None
+        principal = scope.principal
+        agent = principal.agent_id or "-"
+        return f"session_rollback:{scope.context_id}:principal:{principal.actor_user_id}:{agent}"
+    return f"session_rollback:{scope.context_id}:{scope.session_id}"
+
+
+async def _lock_scope(db: AsyncSession, scope: SessionScope) -> None:
+    """Serialize the rollbacks of one scope in one context.
+
+    Session mode: every rollback of one session id (whatever principal).
+    Window mode: every window of one principal, so overlapping windows run
+    one after the other. A session-mode and a window-mode rollback of the
+    same principal take different locks; they meet on the memory row locks
+    and the ``undone_by IS NULL`` re-read, which keeps an event from being
+    reversed twice.
+    """
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"session_rollback:{scope.context_id}:{scope.session_id}"},
+        {"key": _lock_key(scope)},
     )
 
 
@@ -1020,22 +1154,25 @@ async def rollback_session(
     """Plan (``dry_run``) or execute the next batch of one session's rollback.
 
     The caller has authorized the context (editor) and built ``scope`` with
-    ``addressable_principal``. Nothing is committed here: the caller commits,
+    ``addressable_principal`` (session mode) or ``caller_principal`` (window
+    mode). Nothing is committed here: the caller commits,
     then runs ``finish(result)``. With ``time_budget`` (seconds, from the
     start of this call) no further item is started once it is spent; the rest
     is left for the next call (``remaining``).
 
     Raises:
-        SessionNotFoundError: no event of the scope exists in the context.
+        SessionNotFoundError: no event of the session exists in the context.
+        NoWritesInWindowError: the principal has no API write in the window.
         AlreadyRolledBackError: the scope's rollback is ``completed`` and the
             session wrote nothing since, or every one of its events was
-            handled by another rollback (a context owner's).
+            handled by another rollback (a context owner's, a session-mode
+            one of a window's events, another window's).
     """
     deadline = time.monotonic() + time_budget if time_budget is not None else None
     if not dry_run:
-        await _lock_session(db, scope)
-    if not await _session_exists(db, scope):
-        raise SessionNotFoundError
+        await _lock_scope(db, scope)
+    if not await _scope_exists(db, scope):
+        raise NoWritesInWindowError if scope.window else SessionNotFoundError
     record_stmt = select(MemorySessionRollback).where(*_target_predicates(scope))
     if not dry_run:
         record_stmt = record_stmt.with_for_update()
@@ -1048,7 +1185,8 @@ async def rollback_session(
         if record is None:
             if await _handled_exists(db, scope):
                 # Every event was handled by another rollback of the same
-                # events (a context owner's, or the principal's own).
+                # events (a context owner's, the principal's own session-mode
+                # one, or another window's).
                 raise AlreadyRolledBackError(None, SESSION_ROLLBACK_COMPLETED)
             # Only rollback-written events under this session: nothing to
             # undo, and no record, so a later write in the session stays
@@ -1074,6 +1212,8 @@ async def rollback_session(
             session_id=scope.session_id,
             principal_user_id=principal.actor_user_id if principal is not None else None,
             agent_id=principal.agent_id if principal is not None else None,
+            window_since=scope.since,
+            window_until=scope.until,
             requested_by=requested_by,
             status=SESSION_ROLLBACK_IN_PROGRESS,
             summary={},
@@ -1082,8 +1222,10 @@ async def rollback_session(
         await db.flush()
     elif record.status in _FINAL_STATUSES:
         # The session wrote again after its rollback finished (the MCP
-        # session id lasts a whole connection): those writes are new, never
-        # handled, and are rolled back under the same record.
+        # session id lasts a whole connection), or a write that was in flight
+        # when a window's rollback finished landed inside the window: those
+        # events are new, never handled, and are rolled back under the same
+        # record.
         record.status = SESSION_ROLLBACK_IN_PROGRESS
         record.completed_at = None
 
@@ -1119,6 +1261,7 @@ async def rollback_session(
         rollback_id=record.id,
         context_id=str(scope.context_id),
         owner_scope=scope.principal is None,
+        window=scope.window,
         status=record.status,
         events=batch.events,
         remaining=remaining,
@@ -1339,11 +1482,13 @@ def _log_reembed_task(task: asyncio.Task[None]) -> None:
 
 __all__ = [
     "MAX_ROLLBACK_EVENTS_PER_CALL",
+    "MAX_ROLLBACK_WINDOW",
     "MAX_UNFORGETS_PER_CALL",
     "PAYLOAD_SYNC_GROUP",
     "SKIP_CAUSES",
     "AlreadyRolledBackError",
     "MemoryState",
+    "NoWritesInWindowError",
     "PayloadSync",
     "PlanItem",
     "RollbackResult",
@@ -1357,4 +1502,5 @@ __all__ = [
     "plan_counts",
     "plan_memory",
     "rollback_session",
+    "unfinished_window_until",
 ]
