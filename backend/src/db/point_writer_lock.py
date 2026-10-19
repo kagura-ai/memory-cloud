@@ -11,8 +11,9 @@ point first and commit the row that owns it afterwards:
 For as long as such a transaction is open, its points look orphaned to every
 other session. Each of those writers therefore holds this advisory lock
 *shared* until its transaction ends, and the sweep takes it *exclusively*
-before the look that precedes a delete. Writers never block each other; the
-sweep never sees one of them half-way.
+before the look that precedes a delete. The embedding-model switch also takes
+it exclusively while changing routing, so a restore either finishes under
+the old route first or resolves the new route after the switch.
 
 A new writer that upserts before it commits must call
 :func:`hold_point_writer_lock` first.
@@ -43,6 +44,11 @@ async def hold_point_writer_lock(db: AsyncSession) -> None:
     each other, only the sweep's delete pass (seconds, once a day).
     """
     await db.execute(_SHARED_SQL)
+
+
+async def hold_point_writer_lock_exclusive(db: AsyncSession) -> None:
+    """Wait for point writers and keep them out until this transaction ends."""
+    await db.execute(_EXCLUSIVE_SQL)
 
 
 async def wait_for_point_writers(db: AsyncSession, *, timeout_seconds: float) -> bool:

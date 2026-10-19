@@ -766,6 +766,22 @@ async def handle_rollback_sleep_run(
                     "No recorded actions to rollback. This report may pre-date action recording.",
                 )
 
+            has_tombstone_restores = any(
+                (
+                    action.action_type == "merge"
+                    and action.target_id
+                    and (action.details or {}).get("mode") != "shadow"
+                )
+                or (
+                    action.action_type == "archive"
+                    and action.memory_id
+                    and (action.details or {}).get("mode") == "tombstone"
+                )
+                for action in actions
+            )
+            if has_tombstone_restores:
+                await hold_point_writer_lock(db)
+
             # Get context embedding info for re-embedding
             collection_name = "kagura_memories"
             embedding_model = None

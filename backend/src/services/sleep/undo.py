@@ -468,6 +468,9 @@ async def undo_merge_action(
             "maintenance — undo-merge refuses to override a different deletion.",
         )
 
+    # Resolve the collection under the shared lock so a concurrent embedding
+    # switch cannot commit a new route while this restore keeps the old one.
+    await hold_point_writer_lock(db)
     embedding_model, collection_name = await _resolve_embedding_info(db, report.context_id)
 
     # #1520: the same restore UPDATE as run-level rollback — it matches only a
@@ -476,7 +479,6 @@ async def undo_merge_action(
     # of planting a live row + vector where no retention sweep can reach it.
     # #1798: the vector is rebuilt before this UPDATE commits; until then the
     # row still reads as a tombstone to the orphan sweep.
-    await hold_point_writer_lock(db)
     restored = await db.execute(
         restore_sleep_tombstone_stmt(loser_id, report.user_id, deleted_by=DELETED_BY_SLEEP_MERGE)
     )

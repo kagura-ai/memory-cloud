@@ -64,6 +64,7 @@ from sqlalchemy.orm import load_only
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.embedding_policy import is_embedding_model_allowed
 from config.settings import get_settings
+from db.point_writer_lock import hold_point_writer_lock_exclusive
 from db.qdrant import (
     add_memory_to_qdrant,
     chunk_points_supported,
@@ -1006,6 +1007,7 @@ async def switch_context_embedding(
     if requeue_since is not None:
         requeue_since = to_naive_utc(requeue_since)
 
+    await hold_point_writer_lock_exclusive(db)
     previous_model, previous_dimensions = await resolve_context_embedding(db, context_id)
 
     result = await db.execute(
@@ -1046,6 +1048,10 @@ async def switch_context_embedding(
 
     stale_removed = 0
     if requeue_since is not None:
+        # The route commit releases its transaction-scoped lock. Reacquire it
+        # while pruning so a restore cannot upsert a live point just before it
+        # is mistaken for a stale tombstone.
+        await hold_point_writer_lock_exclusive(db)
         # Routing now points at ``model``; forgets from here on delete from
         # its collection themselves. Forgets between the last verify and the
         # commit above only hit the previous collection — drop those points

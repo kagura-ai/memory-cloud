@@ -24,6 +24,12 @@ SMALL = "text-embedding-3-small"
 
 
 @pytest.fixture(autouse=True)
+def _point_writer_lock():
+    with patch.object(svc, "hold_point_writer_lock_exclusive", new=AsyncMock()):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _no_content_chunks():
     """#2015: the context has content_chunks_enabled off and the target holds
     no chunk points, unless a test says otherwise (TestContentChunks). The
