@@ -7520,6 +7520,28 @@ class MemoryService:
 # with different score distributions.
 _SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 
+
+def _supersede_detect_threshold(config: Any) -> float:
+    """The post-embed detection threshold for this deployment (#2123).
+
+    ``_SUPERSEDE_SUGGEST_THRESHOLD`` unless the judge is on
+    (``supersede_verify_mode == "llm"``): then
+    ``supersede_suggest_threshold_llm``, never above the unverified threshold.
+    A pair the lower threshold admits is stored only with the judge's answer
+    (see :func:`_detect_supersede_candidate`), so the precision of an
+    UNVERIFIED candidate still rests on 0.85. ``remember(dedupe="check")``
+    keeps 0.85 regardless.
+    """
+    from services.supersede_verify import VERIFY_MODE_LLM
+
+    if getattr(config, "supersede_verify_mode", None) != VERIFY_MODE_LLM:
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    value = getattr(config, "supersede_suggest_threshold_llm", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    return min(float(value), _SUPERSEDE_SUGGEST_THRESHOLD)
+
+
 # #2006: (model_name, dimensions) pairs already warned about having no
 # ``knn_seed`` calibration row although the D3 bootstrap gate is crossed, so
 # the WARNING fires once per process per embedder instead of on every ingest.
@@ -7752,7 +7774,10 @@ async def _detect_supersede_candidate(
     """Store ``raw_top`` as ``memory``'s supersede suggestion (#1403, #2016).
 
     ``raw_top`` is the RAW top-1 neighbour (excluding self) at or above
-    ``_SUPERSEDE_SUGGEST_THRESHOLD`` — INDEPENDENT of the calibrated/operator
+    ``_SUPERSEDE_SUGGEST_THRESHOLD`` (#2123: or the lower
+    ``supersede_suggest_threshold_llm`` with the judge on, in which case a
+    pair below 0.85 is stored only with a ``supersedes`` / ``parallel``
+    verdict) — INDEPENDENT of the calibrated/operator
     seed-edge threshold. Coupling it to the seed neighbours would let an
     operator seed threshold (knn_seed_min_similarity) > the suggest threshold
     silently suppress a valid suggestion (e.g. a 0.87 near-duplicate filtered
@@ -7785,6 +7810,8 @@ async def _detect_supersede_candidate(
     from models.memory import EDGE_TYPE_SUPERSEDES
     from services.supersede_dismissal import is_dismissed
     from services.supersede_verify import (
+        VERDICT_PARALLEL,
+        VERDICT_SUPERSEDES,
         VERIFY_MODE_LLM,
         judge_pair,
         pair_fingerprint,
@@ -7878,6 +7905,24 @@ async def _detect_supersede_candidate(
                     )
             if verification is not None:
                 candidate["verification"] = verification
+
+        if raw_top_score < _SUPERSEDE_SUGGEST_THRESHOLD:
+            # #2123: the pair is a candidate only because the judge mode
+            # lowered the threshold. Without the judge's answer it would be an
+            # unverified suggestion below the precision 0.85 was chosen for;
+            # a parallel verdict is kept (the pair is not re-judged, never
+            # surfaced), a supersedes verdict is the point.
+            stored = candidate.get("verification")
+            verdict = stored.get("verdict") if isinstance(stored, dict) else None
+            if verdict not in (VERDICT_SUPERSEDES, VERDICT_PARALLEL):
+                logger.info(
+                    "supersede_candidate_skipped_unjudged_low_similarity",
+                    memory_id=memory_id_str,
+                    candidate_memory_id=target_id_str,
+                    similarity=round(raw_top_score, 4),
+                    verdict=verdict,
+                )
+                return
 
         # #2069: every path — not only the judge's round trip — ran on the row
         # as this task loaded it, before the embed, the upsert and the search.
@@ -8103,8 +8148,10 @@ async def _create_knn_seed_edges(
 
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
         if suggest_enabled:
+            # #2123: lower while the judge is on; 0.85 otherwise.
+            detect_threshold = _supersede_detect_threshold(config)
             raw_top = max(non_self, key=lambda c: float(c["score"])) if non_self else None
-            if raw_top is not None and float(raw_top["score"]) >= _SUPERSEDE_SUGGEST_THRESHOLD:
+            if raw_top is not None and float(raw_top["score"]) >= detect_threshold:
                 await _detect_supersede_candidate(
                     db,
                     memory=memory,
@@ -8116,8 +8163,7 @@ async def _create_knn_seed_edges(
                 )
             elif len(non_self) < len(candidates) and (
                 raw_top is None
-                or float(raw_top["score"])
-                < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA
+                or float(raw_top["score"]) < detect_threshold - RESURFACE_SIMILARITY_DELTA
             ):
                 # #2059: no near-duplicate any more. Only when the search
                 # returned this memory's own point (just upserted): a result

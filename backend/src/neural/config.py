@@ -37,6 +37,50 @@ def _log_sleep_llm_from_managed_lane_once(provider: str, model: str) -> None:
 # Cache TTL in seconds (5 minutes)
 _CONFIG_CACHE_TTL = 300
 
+# #2123: the supersede-detection threshold used while the judge is on
+# (SUPERSEDE_VERIFY_MODE=llm). Reworded updates of one fact embed below the
+# 0.85 unverified threshold, so with a judge to confirm them the detection
+# looks further down; a pair below 0.85 is stored only with a verdict. The
+# ceiling is the unverified threshold (memory_service._SUPERSEDE_SUGGEST_THRESHOLD):
+# above it the knob would make the judge mode see LESS than the off mode.
+# 0.75 is provisional until a reworded-update eval sets it.
+SUPERSEDE_SUGGEST_THRESHOLD_LLM_DEFAULT = 0.75
+SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN = 0.5
+SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX = 0.85
+
+
+def supersede_suggest_threshold_llm_from_env() -> float:
+    """``SUPERSEDE_SUGGEST_THRESHOLD_LLM``, clamped to its range (#2123).
+
+    Unset, unparseable or NaN → the default; outside
+    [``SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN``, ``SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX``]
+    → the nearest bound. Both log a warning: a typo must not stop the
+    service, nor silently run another threshold.
+    """
+    import math
+    import os
+
+    raw = os.getenv("SUPERSEDE_SUGGEST_THRESHOLD_LLM")
+    if raw is None or not raw.strip():
+        return SUPERSEDE_SUGGEST_THRESHOLD_LLM_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if math.isnan(value):
+        logger.warning(
+            "supersede_suggest_threshold_llm_invalid",
+            value=raw,
+            used=SUPERSEDE_SUGGEST_THRESHOLD_LLM_DEFAULT,
+        )
+        return SUPERSEDE_SUGGEST_THRESHOLD_LLM_DEFAULT
+    clamped = min(
+        max(value, SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN), SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX
+    )
+    if clamped != value:
+        logger.warning("supersede_suggest_threshold_llm_clamped", value=value, used=clamped)
+    return clamped
+
 
 @dataclass
 class NeuralMemoryConfig:
@@ -239,6 +283,11 @@ class NeuralMemoryConfig:
     supersede_verify_mode: str = "off"
     supersede_verify_min_confidence: float = 0.7
     supersede_verify_max_calls_per_day: int = 200
+    # #2123: the detection threshold while supersede_verify_mode == "llm"
+    # (top-1 neighbour only). A pair below the unverified 0.85 is stored only
+    # when the judge answered (supersedes or parallel). Env-only, clamped to
+    # [0.5, 0.85]; see supersede_suggest_threshold_llm_from_env.
+    supersede_suggest_threshold_llm: float = SUPERSEDE_SUGGEST_THRESHOLD_LLM_DEFAULT
     # Cosine threshold override. None (default) → use `embedding_calibrations`
     # percentile path; non-None → raw operator override (D6). Prior to #406,
     # this was hardcoded 0.4, which is over-permissive for text-embedding-3-
@@ -535,6 +584,16 @@ class NeuralMemoryConfig:
                 "supersede_verify_max_calls_per_day must be positive, "
                 f"got {self.supersede_verify_max_calls_per_day}"
             )
+        if not (
+            SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN
+            <= self.supersede_suggest_threshold_llm
+            <= SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX
+        ):
+            raise ValueError(
+                "supersede_suggest_threshold_llm must be in "
+                f"[{SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN}, {SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX}], "
+                f"got {self.supersede_suggest_threshold_llm}"
+            )
         if not self.sleep_max_memories_per_run > 0:
             raise ValueError(
                 f"sleep_max_memories_per_run must be positive, "
@@ -682,6 +741,7 @@ class NeuralMemoryConfig:
             supersede_verify_mode=os.getenv("SUPERSEDE_VERIFY_MODE", "off").strip().lower(),
             supersede_verify_min_confidence=get_float("SUPERSEDE_VERIFY_MIN_CONFIDENCE", 0.7),
             supersede_verify_max_calls_per_day=get_int("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", 200),
+            supersede_suggest_threshold_llm=supersede_suggest_threshold_llm_from_env(),
             knn_seed_k=get_int("KNN_SEED_K", 5),
             knn_seed_min_similarity=get_float_or_none("KNN_SEED_MIN_SIMILARITY"),
             knn_seed_min_percentile=get_float("KNN_SEED_MIN_PERCENTILE", 90.0),
@@ -925,6 +985,8 @@ class NeuralMemoryConfig:
             supersede_verify_mode=base_config.supersede_verify_mode,  # env-only (#2016)
             supersede_verify_min_confidence=base_config.supersede_verify_min_confidence,
             supersede_verify_max_calls_per_day=base_config.supersede_verify_max_calls_per_day,
+            # env-only (#2123)
+            supersede_suggest_threshold_llm=base_config.supersede_suggest_threshold_llm,
             knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),
             # A DB row for knn_seed_min_similarity is an operator override that
             # wins over calibration (D6). Post-#406 migration deletes rows with
