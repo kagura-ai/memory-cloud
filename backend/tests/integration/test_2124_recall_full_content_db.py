@@ -151,3 +151,41 @@ async def test_service_default_and_zero_are_summaries_only_three_is_three(db_ses
     assert [r.content for r in three.results] == ["body 0", "body 1", "body 2", None]
     none = await recall(full=0)
     assert all(r.content is None for r in none.results)
+
+
+@pytest.mark.asyncio
+async def test_defaulted_full_inlines_only_trusted_rows(db_session, quiet_write):
+    """The MCP tool's defaulted full (content_trusted_only) passes over a
+    connector-ingested row — its slot goes to the next trusted row; an
+    explicit full gives it content like any other row."""
+    from sqlalchemy import update
+
+    from models.memory import SOURCE_TYPE_CONNECTOR, Memory
+
+    owner, ws, ctx = await _scope(db_session)
+    ids = [
+        await _remember(db_session, owner, ws, ctx, f"stored fact number {i}", f"body {i}")
+        for i in range(5)
+    ]
+    await db_session.execute(
+        update(Memory).where(Memory.id == ids[0]).values(source_type=SOURCE_TYPE_CONNECTOR)
+    )
+    await db_session.commit()
+
+    async def recall(**kw):
+        svc = MemoryService(db_session)
+        svc.search_service.hybrid_search = AsyncMock(
+            return_value=[{"id": str(m), "score": 0.9 - 0.1 * i} for i, m in enumerate(ids)]
+        )
+        return await svc.recall(
+            RecallRequest(query="fact", k=5, full=3),
+            user_id=owner,
+            current_context_id=ctx.id,
+            current_workspace_id=ws.id,
+            **kw,
+        )
+
+    defaulted = await recall(content_trusted_only=True)
+    assert [r.content for r in defaulted.results] == [None, "body 1", "body 2", "body 3", None]
+    explicit = await recall()
+    assert [r.content for r in explicit.results] == ["body 0", "body 1", "body 2", None, None]

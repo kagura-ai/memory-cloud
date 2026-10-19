@@ -1205,6 +1205,9 @@ async def handle_recall(
     # bool, which subclasses int, is refused. The tool's default (3) is applied
     # here, not in the service, which ships no content unless asked.
     full = args.get("full")
+    # #2124: a defaulted full inlines content on trusted rows only; an
+    # explicit one is the caller's deliberate request, every row eligible.
+    content_trusted_only = full is None
     if full is None:
         full = RECALL_DEFAULT_FULL
     elif type(full) is not int or not 0 <= full <= RECALL_MAX_FULL:
@@ -1338,6 +1341,7 @@ async def handle_recall(
                     # #708 Option A: source workspace pays for shared-context reads.
                     context_workspace_id=current_context.workspace_id,
                     context_ids=cross_context_ids,
+                    content_trusted_only=content_trusted_only,
                 ),
                 operation_name="recall",
             )

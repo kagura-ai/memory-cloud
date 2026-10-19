@@ -38,10 +38,15 @@ from utils.recall_projection import (
 from utils.response_budget import json_chars
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
+TRUSTED_CTX = uuid4()
+EXTERNAL_CTX = uuid4()
 
 
-def _mem(i: int, content: str | None = None) -> SimpleNamespace:
+def _mem(
+    i: int, content: str | None = None, *, source_type=None, context_id=TRUSTED_CTX
+) -> SimpleNamespace:
     return SimpleNamespace(
+        context_id=context_id,
         id=uuid4(),
         summary=f"fact {i}",
         context_summary=None,
@@ -55,7 +60,7 @@ def _mem(i: int, content: str | None = None) -> SimpleNamespace:
         tags=[],
         context=None,
         source_uri=None,
-        source_type=None,
+        source_type=source_type,
         version=1,
         supersede_candidate=None,
     )
@@ -69,9 +74,10 @@ def _pool(mems):
     return search_results, {str(m.id): m for m in mems}
 
 
-async def _build(mems, *, fold_map=None, **request_kwargs):
+async def _build(mems, *, fold_map=None, content_trusted_only=False, **request_kwargs):
     svc = MemoryService(MagicMock())
     svc._resolve_supersede_candidates = AsyncMock(return_value={})
+    svc._recall_trusted_context_ids = AsyncMock(return_value={TRUSTED_CTX})
     search_results, memories = _pool(mems)
     return await svc._recall_build_responses(
         RecallRequest(query="q", **request_kwargs),
@@ -81,6 +87,7 @@ async def _build(mems, *, fold_map=None, **request_kwargs):
         contradiction_map={},
         user_id="u",
         fold_map=fold_map,
+        content_trusted_only=content_trusted_only,
     )
 
 
@@ -427,3 +434,80 @@ class TestRecallAuditMetadata:
         assert len(metadata["content_memory_ids"]) == MAX_METADATA_MEMORY_IDS
         assert metadata["content_count"] == MAX_METADATA_MEMORY_IDS + 5
         assert metadata["binding_row_filtered_count"] == 3
+
+
+# ------------------------------------------------- trusted-only default (owner)
+
+
+@pytest.mark.asyncio
+class TestTrustedOnlyWhenDefaulted:
+    """A defaulted full (the MCP tool's 3) inlines content on trusted rows only;
+    an untrusted row keeps summary-only and leaves its slot to the next trusted
+    row. An explicit full is a deliberate request: every row is eligible."""
+
+    async def test_defaulted_full_skips_a_connector_row_in_position_one(self):
+        mems = [_mem(0, source_type="connector")] + [_mem(i) for i in range(1, 6)]
+        responses = await _build(mems, k=6, full=3, content_trusted_only=True)
+        assert [r.content is not None for r in responses] == [
+            False,
+            True,
+            True,
+            True,
+            False,
+            False,
+        ]
+
+    async def test_defaulted_full_skips_a_row_in_an_external_context(self):
+        mems = [_mem(0), _mem(1, context_id=EXTERNAL_CTX), _mem(2), _mem(3)]
+        responses = await _build(mems, k=4, full=2, content_trusted_only=True)
+        assert [r.content is not None for r in responses] == [True, False, True, False]
+
+    async def test_explicit_full_gives_the_connector_row_content(self):
+        mems = [_mem(0, source_type="connector")] + [_mem(i) for i in range(1, 5)]
+        responses = await _build(mems, k=5, full=3)
+        assert [r.content is not None for r in responses] == [True, True, True, False, False]
+
+    async def test_a_trusted_filter_needs_no_context_lookup(self):
+        svc = MemoryService(MagicMock())
+        svc._resolve_supersede_candidates = AsyncMock(return_value={})
+        svc._recall_trusted_context_ids = AsyncMock(return_value=set())
+        search_results, memories = _pool([_mem(0), _mem(1)])
+        responses = await svc._recall_build_responses(
+            RecallRequest(query="q", k=2, full=3, filters={"trust_tier": "trusted"}),
+            search_results,
+            memories,
+            shadow_map={},
+            contradiction_map={},
+            user_id="u",
+            content_trusted_only=True,
+        )
+        svc._recall_trusted_context_ids.assert_not_awaited()
+        assert all(r.content is not None for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_the_handler_marks_only_a_defaulted_full_as_trusted_only():
+    captured = []
+
+    async def recall(request, **kwargs):
+        captured.append((request.full, kwargs.get("content_trusted_only")))
+        return _result_with_content()
+
+    service = MagicMock()
+    service.recall = recall
+    with (
+        patch("db.base.get_db", new=_get_db_yielding(AsyncMock())),
+        patch(
+            "mcp_server.tools.memory._resolve_context_for_read",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch("mcp_server.tools.memory._context_response_fields", return_value={}),
+        patch("mcp_server.tools.memory._touch_context_last_used", new=AsyncMock()),
+        patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
+        patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
+    ):
+        await mcp_memory.handle_recall({"query": "q", "context_id": str(uuid4())}, "u", None)
+        await mcp_memory.handle_recall(
+            {"query": "q", "context_id": str(uuid4()), "full": 3}, "u", None
+        )
+    assert captured == [(3, True), (3, False)]
