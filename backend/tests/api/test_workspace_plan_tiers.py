@@ -295,7 +295,7 @@ def test_content_chunks_row(client: TestClient) -> None:
 
 
 def test_llm_selector_row(client: TestClient) -> None:
-    """#2144: M and above have the feature; the provisional cap is S 0 / M 1 /
+    """#2144: M and above have the feature; the cap is S 0 / M 1 /
     L 5 / XL 20, and the mode says the gate is deployment-conditional."""
     tiers = client.get(ENDPOINT).json()
     assert [t["llm_selector"] for t in tiers] == [False, True, True, True]
