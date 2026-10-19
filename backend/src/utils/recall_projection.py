@@ -19,8 +19,9 @@ RECALL_VERBOSITIES = ("compact", "full")
 # Characters of ``summary`` a compact item carries, the ellipsis included.
 COMPACT_SUMMARY_CHARS = 160
 # #2124: how many of the top results carry ``content`` when an MCP recall
-# passes no ``full`` (the tool applies it; the service and REST default to
-# none, so an internal caller never ships content by accident), the largest
+# passes no ``full`` (the tool applies it, overridable by MCP_RECALL_DEFAULT_FULL
+# since #2140; the service and REST default to none, so an internal caller
+# never ships content by accident), the largest
 # ``full`` accepted (recall's own ``k`` limit), and
 # the characters of content one result carries at most. Longer content is cut
 # there and continues with reference(memory_id, content_offset=...).
@@ -63,7 +64,8 @@ def effective_full(full: int | None, k: int) -> int:
     """How many of the top results carry content (#2124).
 
     ``full`` as the request carries it (``None`` → none: the MCP tool fills
-    in ``RECALL_DEFAULT_FULL`` itself), never more than ``k``.
+    in ``settings.mcp_recall_default_full`` itself, whose default is
+    ``RECALL_DEFAULT_FULL``), never more than ``k``.
     """
     return min(full or 0, k)
 

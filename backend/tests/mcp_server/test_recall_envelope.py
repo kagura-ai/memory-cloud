@@ -18,8 +18,11 @@ rather than a copy of it, so the size budget measures what clients receive.
 import inspect
 import json
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
+
+import pytest
 
 from mcp_server.tools import memory as mcp_memory
 from mcp_server.tools._helpers import _dumps
@@ -704,7 +707,7 @@ class TestHandlerVerbosity:
         from types import SimpleNamespace
         from unittest.mock import patch
 
-        settings = SimpleNamespace(mcp_recall_default_verbosity="full")
+        settings = SimpleNamespace(mcp_recall_default_verbosity="full", mcp_recall_default_full=3)
         with patch("config.settings.get_settings", return_value=settings):
             omitted = await _handler_payload({}, _handler_result())
             explicit = await _handler_payload({"verbosity": "compact"}, _handler_result())
@@ -724,6 +727,96 @@ class TestHandlerVerbosity:
             payload = json.loads(result[0].text)
             assert payload["error"] == "validation_error", bad
             assert "verbosity must be 'compact' or 'full'" in payload["message"]
+
+
+# ============================================================================
+# #2140: MCP_RECALL_DEFAULT_FULL through the handler
+# ============================================================================
+
+
+async def _recall_request(args: dict, default_full: int = 3) -> tuple[Any, bool | None]:
+    """Run the handler; return (RecallRequest, content_trusted_only) it passed on."""
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    service = MagicMock()
+    service.recall = AsyncMock(return_value=_handler_result())
+    with ExitStack() as stack:
+        settings = SimpleNamespace(
+            mcp_recall_default_verbosity="compact", mcp_recall_default_full=default_full
+        )
+        stack.enter_context(patch("config.settings.get_settings", return_value=settings))
+        stack.enter_context(patch("db.base.get_db", new=_get_db_yielding(AsyncMock())))
+        stack.enter_context(
+            patch(
+                "mcp_server.tools.memory._resolve_context_for_read",
+                new=AsyncMock(return_value=MagicMock()),
+            )
+        )
+        stack.enter_context(
+            patch("mcp_server.tools.memory._context_response_fields", return_value={})
+        )
+        stack.enter_context(
+            patch("mcp_server.tools.memory._touch_context_last_used", new=AsyncMock())
+        )
+        stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
+        stack.enter_context(
+            patch("services.memory_service.MemoryService", new=MagicMock(return_value=service))
+        )
+        await mcp_memory.handle_recall(
+            {"query": "q", "context_id": str(uuid4()), **args}, "u", None
+        )
+    service.recall.assert_awaited_once()
+    call = service.recall.await_args
+    request = next(a for a in (*call.args, *call.kwargs.values()) if hasattr(a, "full"))
+    return request, call.kwargs.get("content_trusted_only")
+
+
+class TestHandlerDefaultFull:
+    async def test_built_in_default_is_three_trusted_only(self):
+        request, trusted_only = await _recall_request({})
+        assert request.full == 3
+        assert trusted_only is True
+
+    async def test_omitted_full_takes_the_env_value(self):
+        request, trusted_only = await _recall_request({}, default_full=7)
+        assert request.full == 7
+        # An env-supplied default is still a default: trusted rows only.
+        assert trusted_only is True
+
+    async def test_explicit_full_wins_over_the_env_value(self):
+        request, trusted_only = await _recall_request({"full": 1}, default_full=7)
+        assert request.full == 1
+        assert trusted_only is False
+
+    async def test_env_zero_means_no_content(self):
+        request, trusted_only = await _recall_request({}, default_full=0)
+        assert request.full == 0
+        assert trusted_only is True
+
+    def test_the_setting_defaults_to_the_tool_default(self):
+        from config.settings import Settings
+        from utils.recall_projection import RECALL_DEFAULT_FULL
+
+        assert Settings.model_fields["mcp_recall_default_full"].default == RECALL_DEFAULT_FULL
+
+    @pytest.mark.parametrize("bad", ["-1", "101"])
+    def test_out_of_range_env_refuses_to_boot(self, bad, monkeypatch):
+        from pydantic import ValidationError
+
+        from config.settings import Settings
+
+        monkeypatch.setenv("MCP_RECALL_DEFAULT_FULL", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["0", "100"])
+    def test_bounds_are_accepted(self, value, monkeypatch):
+        from config.settings import Settings
+
+        monkeypatch.setenv("MCP_RECALL_DEFAULT_FULL", value)
+        assert Settings().mcp_recall_default_full == int(value)
 
 
 # ============================================================================
