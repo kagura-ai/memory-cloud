@@ -4,6 +4,33 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.114.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.114.0) — 2026-10-19
+
+Fewer round trips for agents: the MCP URL can name a default context, `recall` returns the content of its top results and folds older versions of a fact under the newest, and clients without an MCP session can roll back their own writes by time window or name their session themselves.
+
+### Added
+- **Default context on the MCP URL** ([#2125](https://github.com/kagura-ai/memory-cloud/issues/2125)): `?context=<context_id>` names the connection's default context, and context-scoped tools called without `context_id` run in it (an explicit `context_id`, and recall's `context_ids`, win). The default is authorized exactly like an explicit id and never widens access; a default the caller cannot use is refused with the same error plus `context_source`. An agent-bound key without `?context=` defaults to its default or sole binding. `delete_context`, `update_context`, `update_search_config`, `merge_contexts` and the binding tools never take it. The server instructions name the default; `guide(["default-context"])` explains it. A credential-bound default (user API keys, OAuth) is #2129.
+- **`rollback_session` by time window** ([#2121](https://github.com/kagura-ai/memory-cloud/issues/2121)): `rollback_session(context_id, since, until?, dry_run=true)` undoes the caller's own writes in a window of at most 7 days — the same planner, caps and continuation as the session mode — for stateless MCP clients that have no session id. The window selects only the caller's principal (user and the credential's agent); `changes_since(by_me=true)` previews it. New error `no_writes_in_window`.
+- **Client session id on stateless requests** ([#2122](https://github.com/kagura-ai/memory-cloud/issues/2122)): a client can name its own session with `params._meta["ai.kagura/sessionId"]` on a `tools/call`, or the `Kagura-Session-Id` request header; same validation as the baggage id, bound to the caller's principal, precedence OTel baggage > `_meta` > header > `Mcp-Session-Id`. Write replies echo `session_id`, so `changes_since(session_id=)` and `rollback_session(session_id=)` work for those clients.
+- **`recall` returns content for the top results** ([#2124](https://github.com/kagura-ai/memory-cloud/issues/2124)): `recall(full=N)` adds `content` (up to 1,500 characters; `content_truncated` / `content_next_offset` when cut) to the first N results, so an agent no longer needs a `reference()` round trip for them. On MCP the default is 3 and, when `full` is omitted, only trusted-tier non-connector rows receive content; an explicit `full` includes every row; `full=0` restores the summary-only shape. REST and internal callers default to 0. Under `max_chars`, content leaves the lowest-ranked rows first (`full_applied` reports how many kept it) before any row is cut. `bootstrap`, share-key recall and `forget(query=)` never include content.
+- **`SUPERSEDE_SUGGEST_THRESHOLD_LLM`** ([#2123](https://github.com/kagura-ai/memory-cloud/issues/2123)): optional, default 0.75 (clamped 0.5–0.85). With `SUPERSEDE_VERIFY_MODE=llm` the supersede detection looks down to it, and a pair below 0.85 is stored as a candidate only with a judge verdict, so reworded updates of a fact reach the judge.
+
+### Changed
+- **Core tool descriptions trimmed** ([#2117](https://github.com/kagura-ai/memory-cloud/issues/2117)): the `tools/list` core profile is back under its 41,500-character budget with headroom; the detail moved to the `guide` topics. Behaviour and schemas are unchanged.
+- **`context_id` optional in the schemas** ([#2125](https://github.com/kagura-ai/memory-cloud/issues/2125)): 30 context-scoped tools no longer list `context_id` under `required` because the URL default may supply it; a call that nothing supplies is still refused with `context_id_required`.
+- **`recall` tool definition** ([#2124](https://github.com/kagura-ai/memory-cloud/issues/2124)): lists `full` and the content keys; the filter, rerank and confidence detail moved to `guide(["recall"])`.
+
+### Fixed
+- **Recall returned older versions of a fact next to the current one** ([#2123](https://github.com/kagura-ai/memory-cloud/issues/2123)): judge-verified older versions now fold under the newest (`folded: {count, memory_ids}` on that row), following the verdicts' direction, with the group's best score; `include_superseded=true` folds nothing. Folding only happens within one query's result pool.
+
+### Notes
+- Migration `f05_2121_rollback_window`: two nullable columns and a partial unique index on `memory_session_rollbacks`, and `idx_memory_revisions_actor_at` built `CONCURRENTLY` in an autocommit block (writes continue; re-run the upgrade if the build is interrupted; it cannot run offline with `alembic upgrade --sql`).
+- New optional environment variable `SUPERSEDE_SUGGEST_THRESHOLD_LLM` (above). It sends more pairs to the judge: raise `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (default 200 per workspace) before a bulk ingest.
+- Proxies in front of `/mcp` must pass the `Kagura-Session-Id` request header through; never set it statically (one value would put every conversation in one session).
+- With `?guardrails=off&context=<id>` (the URL the Claude Code plugin recommends) the handshake performs one bounded DB read for the context name and `server/discover` becomes `cacheScope: private`.
+- MCP `recall` now ships content for its top 3 results by default; clients that want the previous shape pass `full=0`. A deployment-level default is #2140.
+- The MCP server still has 72 tools.
+
 ## [v0.113.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.113.0) — 2026-10-18
 
 Memories get versions: every edit is recorded, `update_memory` can refuse a stale edit, past versions can be read, and one agent session's writes can be listed and rolled back. Content chunks become a plan feature with a per-plan cap and a toggle in the context's search settings, and recall loses a ~40 ms Qdrant stall.
