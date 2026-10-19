@@ -139,7 +139,8 @@ async def test_a_call_without_context_id_runs_in_the_url_default(handlers):
 
     result = await execute_tool_call("remember", _remember_args(), "user-1", None)
 
-    assert _payload(result) == {"status": "success"}
+    # A response that does not name its context gets the default's id.
+    assert _payload(result) == {"status": "success", "context_id": str(DEFAULT)}
     assert handlers["remember"]["context_id"] == str(DEFAULT)
 
 
@@ -280,7 +281,7 @@ async def test_an_invalid_url_value_does_not_affect_an_explicit_call(handlers):
 
     result = await execute_tool_call("remember", _remember_args(context_id=explicit), "u", None)
 
-    assert _payload(result) == {"status": "success"}
+    assert _payload(result) == {"status": "success"}  # explicit: nothing added
     assert handlers["remember"]["context_id"] == explicit
 
 
@@ -337,12 +338,56 @@ async def test_a_context_not_found_under_the_default_names_its_source(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_a_success_under_the_default_is_unchanged(handlers):
+async def test_a_success_under_the_default_names_its_context(handlers):
+    set_mcp_default_context_selection(URL)
+
+    result = await execute_tool_call("set_state", {"key": "k", "value": 1}, "user-1", None)
+
+    assert _payload(result) == {"status": "success", "context_id": str(DEFAULT)}
+    assert not getattr(result, "is_error", False)
+
+
+@pytest.mark.asyncio
+async def test_a_success_that_names_its_context_is_left_alone(monkeypatch, gate):
+    own = json.dumps({"status": "success", "context_id": str(DEFAULT), "context_name": "a"})
+
+    async def ok(_args, _user_id, _workspace_id):
+        return [tools_mod.TextContent(type="text", text=own)]
+
+    monkeypatch.setattr(tools_mod, "_TOOL_REGISTRY", {"get_context_info": ok})
     set_mcp_default_context_selection(URL)
 
     result = await execute_tool_call("get_context_info", {}, "user-1", None)
 
+    assert result[0].text == own
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_success_is_unchanged(handlers):
+    result = await execute_tool_call(
+        "set_state", {"key": "k", "value": 1, "context_id": str(DEFAULT)}, "u", None
+    )
+
     assert _payload(result) == {"status": "success"}
+
+
+@pytest.mark.asyncio
+async def test_a_seat_refusal_under_the_default_names_its_source(monkeypatch, gate):
+    envelope = tools_mod._error_response(
+        "feature_not_available", "Feature 'members' is not available.", help="Ask the owner."
+    )
+
+    async def deny(_args, _user_id, _workspace_id):
+        return envelope
+
+    monkeypatch.setattr(tools_mod, "_TOOL_REGISTRY", {"recall": deny})
+    set_mcp_default_context_selection(URL)
+
+    payload = _payload(await execute_tool_call("recall", {"query": "q"}, "user-1", None))
+
+    assert payload["context_source"] == "url"
+    assert payload["help"] == "Ask the owner."
+    assert payload["message"] == json.loads(envelope[0].text)["message"]
 
 
 # ------------------------------------------------------------------- schemas

@@ -279,24 +279,39 @@ async def _apply_default_context(
 
 
 def _with_default_context_source(
-    result: list[TextContent], context_source: str | None
+    result: list[TextContent], context_source: str | None, context_id: Any = None
 ) -> list[TextContent]:
-    """Name the default as the source of a ``context_not_found`` refusal (#2125).
+    """Mark a call that ran in the connection default (#2125).
 
-    ``error`` and ``message`` stay byte-identical to the explicit-id answer;
-    only ``context_source`` is added and ``help`` points at the default.
+    A refusal keeps ``error`` and ``message`` byte-identical to the
+    explicit-id answer: ``context_not_found`` gains ``context_source`` and a
+    ``help`` that points at the default, ``feature_not_available`` (a member
+    without a seat) gains ``context_source``. A success that does not name its
+    context already (``set_state``, ``feedback``, the edge tools, …) gains
+    ``context_id``, so a defaulted call is never routed silently.
     """
-    if context_source is None or not isinstance(result, ToolErrorContent) or len(result) != 1:
+    if context_source is None or len(result) != 1:
         return result
     try:
         payload = json.loads(result[0].text)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return result
-    if not isinstance(payload, dict) or payload.get("error") != "context_not_found":
+    if not isinstance(payload, dict):
         return result
-    payload["context_source"] = context_source
-    payload["help"] = _DEFAULT_CONTEXT_DENIED_HELP[context_source]
-    return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
+    if isinstance(result, ToolErrorContent):
+        error = payload.get("error")
+        if error == "context_not_found":
+            payload["context_source"] = context_source
+            payload["help"] = _DEFAULT_CONTEXT_DENIED_HELP[context_source]
+        elif error == "feature_not_available":
+            payload["context_source"] = context_source
+        else:
+            return result
+        return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
+    if "context_id" in payload or context_id is None:
+        return result
+    payload["context_id"] = context_id
+    return [TextContent(type="text", text=_dumps(payload))]
 
 
 # Per-workspace rate limit cache {workspace_id: (allowed, used, limit, expires_at)}
@@ -601,13 +616,6 @@ async def execute_tool_call(
     # handler constructs its pydantic request model.
     args = coerce_mcp_arguments(tool_name, args)
 
-    # #2125: fill a missing context_id from the connection default BEFORE the
-    # capacity gate (it reads args["context_id"] itself) and the pre-dispatch
-    # check, so both — and the handler — see what an explicit call sends.
-    args, context_source, default_refusal = await _apply_default_context(tool_name, args)
-    if default_refusal is not None:
-        return default_refusal
-
     # Rate limit check (exempt read-only info tools)
     if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
         try:
@@ -624,6 +632,14 @@ async def execute_tool_call(
         except Exception as e:
             # Don't block tool execution if rate limit check fails
             logger.warning(f"rate_limit_check_failed: {e}")
+
+    # #2125: fill a missing context_id from the connection default after the
+    # rate limit (an agent key's binding lookup is a query) and BEFORE the
+    # capacity gate (it reads args["context_id"] itself) and the pre-dispatch
+    # check, so both — and the handler — see what an explicit call sends.
+    args, context_source, default_refusal = await _apply_default_context(tool_name, args)
+    if default_refusal is not None:
+        return default_refusal
 
     # #1941: a Free workspace over its capacity loses search and saving until
     # it is cleaned up; listing, deleting and usage stay callable. Every tool
@@ -661,7 +677,10 @@ async def execute_tool_call(
 
     try:
         result = await handler(args, user_id, workspace_id)
-        return _with_manual_help(tool_name, _with_default_context_source(result, context_source))
+        return _with_manual_help(
+            tool_name,
+            _with_default_context_source(result, context_source, args.get("context_id")),
+        )
     except ValidationError as e:
         # #1323: expected client-input errors — return the structured envelope
         # (no pydantic model names / errors.pydantic.dev URLs) and log at

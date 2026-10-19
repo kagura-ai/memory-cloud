@@ -462,14 +462,12 @@ async def _read_digest(
                     logger.debug("mcp_guardrail_digest_no_last_used_context")
                     return None
             elif selection.mode == "binding":
-                from services.agent_binding_service import AgentBindingService
+                from mcp_server.tools._default_context import default_binding_context_id
 
-                binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
-                if binding is None or outcome not in ("default", "sole"):
-                    # F2: no existence oracle — nothing above debug.
-                    logger.debug("mcp_guardrail_digest_no_default_binding: outcome=%s", outcome)
+                # F2: no existence oracle — nothing above debug.
+                context_id = await default_binding_context_id(db, agent_id)
+                if context_id is None:
                     return None
-                context_id = binding.context_id
             if context_id is None:  # pragma: no cover - explicit always carries one
                 return None
             return await fetch_entries(
@@ -531,6 +529,7 @@ async def _instructions_base(
     query_string: bytes,
     key_workspace_id: "UUID | None",
     era: Literal["legacy", "stateless"],
+    deadline: float,
 ) -> tuple[str, bool]:
     """The base text for this connection and whether it varies by caller (#2125).
 
@@ -540,7 +539,9 @@ async def _instructions_base(
     depends on the caller — and the database is opened only for a UUID. An
     agent-bound key's default binding fills tool arguments
     (``tools._default_context``) but does not change this text: its handshake
-    keeps the reads #1621 pins. Fails open to the base text, like the digest.
+    keeps the reads #1621 pins. Fails open to the base text, like the digest,
+    and shares the digest's ``deadline``: the handshake waits at most one
+    ``mcp_guardrail_digest_timeout_ms`` for both reads together.
     """
     from mcp_server.tools._default_context import select_default_context
 
@@ -555,7 +556,7 @@ async def _instructions_base(
 
     settings = get_settings()
     try:
-        async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
+        async with asyncio.timeout_at(deadline):
             name = await _read_default_context_name(
                 user_id=user_id,
                 context_id=selection.context_id,
@@ -607,7 +608,10 @@ async def build_instructions(
     off), whose bytes are static per deployment and identical for every caller.
 
     #2125: the base text itself may name the connection's default context
-    (``_instructions_base``); ``private`` is then ``True`` as well.
+    (``_instructions_base``); ``private`` is then ``True`` as well. Without
+    ``?guardrails=``, a ``?context=<uuid>`` default is also the digest's
+    context (as if ``?guardrails=<uuid>`` were given), so the text never names
+    one context and digests another. Both reads share one budget.
 
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
@@ -617,17 +621,30 @@ async def build_instructions(
     """
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
+    from mcp_server.tools._default_context import select_default_context
     from services.guardrail_digest import (
+        GuardrailSelection,
         render_instructions,
         select_guardrail_context,
         tool_view_names,
     )
 
-    base, base_private = await _instructions_base(
-        user_id=user_id, query_string=query_string, key_workspace_id=key_workspace_id, era=era
-    )
     settings = get_settings()
+    # One budget for the default-context name and the digest together.
+    deadline = asyncio.get_running_loop().time() + settings.mcp_guardrail_digest_timeout_ms / 1000
+    base, base_private = await _instructions_base(
+        user_id=user_id,
+        query_string=query_string,
+        key_workspace_id=key_workspace_id,
+        era=era,
+        deadline=deadline,
+    )
     selection = select_guardrail_context(query_string)
+    default_selection = select_default_context(query_string)
+    if selection.mode == "binding" and default_selection.mode == "url":
+        # #2125: without ?guardrails=, the digest follows the ?context= default,
+        # so the instructions never name one context and digest another.
+        selection = GuardrailSelection("explicit", default_selection.context_id)
     scope = get_agent_scope()
     user_fallback = (
         selection.mode == "binding"
@@ -653,7 +670,7 @@ async def build_instructions(
         return base, base_private
 
     try:
-        async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
+        async with asyncio.timeout_at(deadline):
             entries = await _read_digest(
                 user_id=user_id,
                 selection=selection,

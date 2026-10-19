@@ -24,9 +24,12 @@ from __future__ import annotations
 import contextlib
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qsl
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -116,13 +119,24 @@ async def resolve_default_context(
 async def _agent_default_binding(agent_id: UUID) -> UUID | None:
     """The context of the agent's default (or sole) binding, else ``None``."""
     from db.base import get_db
-    from services.agent_binding_service import AgentBindingService
 
     async with contextlib.aclosing(get_db()) as sessions:
         async for db in sessions:
-            binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
-            if binding is None or outcome not in ("default", "sole"):
-                logger.debug("mcp_default_context_no_binding: outcome=%s", outcome)
-                return None
-            return binding.context_id
+            return await default_binding_context_id(db, agent_id)
     return None  # pragma: no cover - get_db always yields
+
+
+async def default_binding_context_id(db: AsyncSession, agent_id: UUID) -> UUID | None:
+    """The one rule for "an agent's default context" (#1276, F2).
+
+    The ``is_default`` binding, else the agent's only binding; no binding and
+    several without a default both answer ``None`` and are indistinguishable
+    to the caller. Shared by the tool default and the guardrail digest.
+    """
+    from services.agent_binding_service import AgentBindingService
+
+    binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
+    if binding is None or outcome not in ("default", "sole"):
+        logger.debug("mcp_default_binding_none: outcome=%s", outcome)
+        return None
+    return binding.context_id

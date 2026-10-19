@@ -71,14 +71,14 @@ GUIDE_TOPICS: dict[str, str] = {
         "A connection can name one context as its default: add ?context=<context_id> to "
         "the MCP URL (also after /mcp/w/<workspace_id>). Context-scoped tools called "
         "without context_id then run in it; an explicit context_id wins and recall's "
-        "context_ids stays explicit. Every response carries context_id and context_name, "
+        "context_ids stays explicit. Responses name the context they ran in (context_id), "
         "so a call is never routed silently. The default is authorized exactly like an "
         "explicit id: a context you cannot use fails context_not_found with "
         "context_source: 'url', and a value that is not a UUID fails "
         "invalid_context_id_format. Tools that change a context itself (delete_context, "
-        "update_context) never use it: name that context. An agent-bound key without ?context= defaults "
-        "to its default (or only) binding. list_contexts(name_contains=) reaches another "
-        "context; pass its id as context_id."
+        "update_context) never use it: name that context. An agent-bound key without "
+        "?context= defaults to its default (or only) binding. list_contexts(name_contains=) "
+        "reaches another context; pass its id as context_id."
     ),
     "guardrails": (
         "A tool guardrail is a memory with details.tool_trigger = {tool: 'Bash|"

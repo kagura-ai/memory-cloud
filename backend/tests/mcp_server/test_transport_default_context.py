@@ -129,10 +129,15 @@ def reader(monkeypatch):
     from unittest.mock import AsyncMock
 
     import db.base as db_base
+    import services.guardrail_digest as digest_mod
     from config.settings import get_settings
     from services.permission_service import PermissionService
 
-    state = SimpleNamespace(db_calls=0, calls=[], result=None, raise_with=None)
+    state = SimpleNamespace(db_calls=0, calls=[], result=None, raise_with=None, digests=[])
+
+    async def fake_fetch_entries(_db, **kwargs):
+        state.digests.append(kwargs["context_id"])
+        return None  # an empty set: the base text stays as it is
 
     async def fake_get_db():
         state.db_calls += 1
@@ -146,6 +151,7 @@ def reader(monkeypatch):
 
     monkeypatch.setattr(db_base, "get_db", fake_get_db)
     monkeypatch.setattr(PermissionService, "resolve_context_for_workspace_read", fake_resolve)
+    monkeypatch.setattr(digest_mod, "fetch_entries", fake_fetch_entries)
     # Keep the guardrail digest out of the way: no user-credential fallback.
     monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_last_used_fallback", False)
     return state
@@ -306,3 +312,57 @@ async def test_legacy_initialize_carries_the_default_context_text(reader):
     await handle_streamable_http_post(scope, _receive_for(body), send, session, {})
 
     assert "Default context: proj-alpha;" in send.body["result"]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_without_guardrails_the_digest_follows_the_default(reader):
+    """The text never names one context and digests another."""
+    ctx = uuid4()
+    reader.result = SimpleNamespace(name="proj-alpha")
+
+    await _instructions(f"context={ctx}".encode())
+
+    assert reader.digests == [ctx]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_guardrails_value_still_picks_the_digest(reader):
+    ctx, other = uuid4(), uuid4()
+    reader.result = SimpleNamespace(name="proj-alpha")
+
+    await _instructions(f"context={ctx}&guardrails={other}".encode())
+
+    assert reader.digests == [other]
+
+
+@pytest.mark.asyncio
+async def test_guardrails_off_reads_no_digest_for_the_default(reader):
+    reader.result = SimpleNamespace(name="proj-alpha")
+
+    await _instructions(f"context={uuid4()}&guardrails=off".encode())
+
+    assert reader.digests == []
+
+
+@pytest.mark.asyncio
+async def test_the_name_and_the_digest_share_one_budget(reader, monkeypatch):
+    """A slow name read leaves the digest only what is left of the budget."""
+    import asyncio
+
+    from config.settings import get_settings
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+    from services.permission_service import PermissionService
+
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_timeout_ms", 200)
+
+    async def slow(self, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(PermissionService, "resolve_context_for_workspace_read", slow)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    text, private = await _instructions(f"context={uuid4()}".encode())
+
+    assert (text, private) == (SERVER_INSTRUCTIONS_BASE, True)
+    assert loop.time() - started < 0.6
