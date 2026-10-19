@@ -285,3 +285,23 @@ def test_no_tool_takes_a_client_session_argument():
         assert "sessionId" not in props
         if tool["name"] in {"remember", "remember_batch", "update_memory", "forget"}:
             assert "session_id" not in props
+
+
+@pytest.mark.parametrize(("value", "reason"), [("bad id!", "charset"), (LONG, "length_or_type")])
+def test_a_dropped_client_id_names_its_source_in_the_warning(monkeypatch, value, reason):
+    import api.correlation as correlation
+
+    warned: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        correlation.logger, "warning", lambda event, **kw: warned.append((event, kw))
+    )
+    build_correlation_from_headers(
+        traceparent=None, baggage=None, surface="mcp", client_session_id=value
+    )
+    set_correlation(_corr())
+    with client_session_scope({CLIENT_SESSION_META_KEY: value}):
+        pass
+    assert [(e, kw["reason"], kw["source"]) for e, kw in warned] == [
+        ("correlation_token_dropped", reason, SESSION_SOURCE_HEADER),
+        ("correlation_token_dropped", reason, SESSION_SOURCE_META),
+    ]

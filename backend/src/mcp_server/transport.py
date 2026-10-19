@@ -235,17 +235,14 @@ def _default_correlation_session(mcp_session_id: str) -> None:
     too. Stateless (modern) requests have no protocol session: they keep the
     client's id, or None.
     """
-    from api.correlation import (
-        SESSION_SOURCE_TRANSPORT,
-        get_correlation,
-        validate_correlation_token,
-    )
+    from api.correlation import SESSION_SOURCE_TRANSPORT, get_correlation, offered_session
 
     corr = get_correlation()
-    if corr is not None and corr.session_id is None:
-        corr.session_id = validate_correlation_token(mcp_session_id)
-        if corr.session_id is not None:
-            corr.session_source = SESSION_SOURCE_TRANSPORT
+    if corr is None:
+        return
+    session_id = offered_session(corr, mcp_session_id, SESSION_SOURCE_TRANSPORT)
+    if session_id is not None:
+        corr.session_id, corr.session_source = session_id, SESSION_SOURCE_TRANSPORT
 
 
 def _normalize_mcp_path(path: str) -> str:

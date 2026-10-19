@@ -49,11 +49,18 @@ CLIENT_SESSION_META_KEY = "ai.kagura/sessionId"
 CLIENT_SESSION_HEADER = "x-session-id"
 
 # Where ``CorrelationContext.session_id`` came from. Precedence (normative):
-# baggage > _meta > header > the stateful transport's Mcp-Session-Id.
+# baggage > _meta > header > the stateful transport's Mcp-Session-Id — held
+# once, in ``_SESSION_RANK`` (``offered_session``).
 SESSION_SOURCE_BAGGAGE = "baggage"
 SESSION_SOURCE_META = "meta"
 SESSION_SOURCE_HEADER = "header"
 SESSION_SOURCE_TRANSPORT = "transport"
+_SESSION_RANK = {
+    SESSION_SOURCE_BAGGAGE: 3,
+    SESSION_SOURCE_META: 2,
+    SESSION_SOURCE_HEADER: 1,
+    SESSION_SOURCE_TRANSPORT: 0,
+}
 
 # policy_decision stamped on rows whose agent_id came from a *verified claim*
 # (explicit arg or baggage) on an agent-UNBOUND credential (attribution
@@ -105,12 +112,15 @@ def get_correlation() -> CorrelationContext | None:
 # ---------------------------------------------------------------------------
 
 
-def validate_correlation_token(value: Any) -> str | None:
+def validate_correlation_token(value: Any, *, source: str | None = None) -> str | None:
     """Validate an opaque ``session_id`` / ``run_id`` token; None if invalid.
 
     Charset ``[A-Za-z0-9._-]``, length ≤128 (design F4). Invalid = dropped
-    (advisory data, never a request failure).
+    (advisory data, never a request failure). ``source`` (a
+    ``SESSION_SOURCE_*`` value) names where a dropped session id came from in
+    the warning (#2122).
     """
+    where = {"source": source} if source is not None else {}
     if value is None:
         # Absent baggage key (bag.get(...) -> None) is the overwhelmingly common
         # case, not an anomaly — drop silently. Only a *present* malformed value
@@ -125,10 +135,11 @@ def validate_correlation_token(value: Any) -> str | None:
             reason="length_or_type",
             length=len(value) if isinstance(value, str) else None,
             value_type=type(value).__name__,
+            **where,
         )
         return None
     if not _CORRELATION_TOKEN_RE.match(value):
-        logger.warning("correlation_token_dropped", reason="charset", length=len(value))
+        logger.warning("correlation_token_dropped", reason="charset", length=len(value), **where)
         return None
     return value
 
@@ -216,25 +227,42 @@ def build_correlation_from_headers(
     session_id = validate_correlation_token(
         bag.get(BAGGAGE_SESSION_ID) or bag.get(BAGGAGE_SESSION_ID_ALIAS)
     )
-    session_source = SESSION_SOURCE_BAGGAGE if session_id is not None else None
-    if client_session_id is not None:
-        if session_id is not None:
-            logger.info("client_session_id_ignored", source="header", reason="baggage_wins")
-        else:
-            session_id = validate_correlation_token(client_session_id)
-            session_source = SESSION_SOURCE_HEADER if session_id is not None else None
     run_id = validate_correlation_token(bag.get(BAGGAGE_RUN_ID))
     agent_claim = bag.get(BAGGAGE_AGENT_ID) or None
 
-    return CorrelationContext(
+    ctx = CorrelationContext(
         trace_id=trace_id,
         span_id=span_id,
         session_id=session_id,
         run_id=run_id,
         agent_claim=agent_claim,
         surface=surface,
-        session_source=session_source,
+        session_source=SESSION_SOURCE_BAGGAGE if session_id is not None else None,
     )
+    header_session = offered_session(ctx, client_session_id, SESSION_SOURCE_HEADER)
+    if header_session is not None:
+        ctx.session_id, ctx.session_source = header_session, SESSION_SOURCE_HEADER
+    return ctx
+
+
+def offered_session(corr: CorrelationContext, value: Any, source: str) -> str | None:
+    """``value`` as the request's session from ``source``, or None to keep the current one.
+
+    The single place the session precedence is applied (#2122): ``value``
+    wins only when ``source`` outranks the session ``corr`` already holds —
+    baggage > ``_meta`` > ``X-Session-Id`` > ``Mcp-Session-Id`` — and passes
+    the token rule (an invalid value is dropped with a warning naming
+    ``source``, never a request failure). A session held without a recorded
+    source (a hand-built context) ranks as baggage: it is never overridden.
+    """
+    if value is None:
+        return None
+    if corr.session_id is not None:
+        held = corr.session_source or SESSION_SOURCE_BAGGAGE
+        if _SESSION_RANK.get(held, _SESSION_RANK[SESSION_SOURCE_BAGGAGE]) >= _SESSION_RANK[source]:
+            logger.debug("session_id_outranked", source=source, held=held)
+            return None
+    return validate_correlation_token(value, source=source)
 
 
 @contextmanager
@@ -255,23 +283,12 @@ def client_session_scope(meta: Any) -> Iterator[None]:
     """
     corr = get_correlation()
     raw = meta.get(CLIENT_SESSION_META_KEY) if isinstance(meta, dict) else None
-    if corr is None or raw is None:
+    session_id = offered_session(corr, raw, SESSION_SOURCE_META) if corr is not None else None
+    if corr is None or session_id is None:
         yield
         return
-    # A session set without a recorded source (a hand-built context) is
-    # treated as baggage: it is never overridden.
-    if corr.session_source == SESSION_SOURCE_BAGGAGE or (
-        corr.session_id is not None and corr.session_source is None
-    ):
-        logger.info("client_session_id_ignored", source="meta", reason="baggage_wins")
-        yield
-        return
-    session_id = validate_correlation_token(raw)
-    if session_id is None:
-        yield
-        return
-    if corr.session_source == SESSION_SOURCE_HEADER and corr.session_id != session_id:
-        logger.info("client_session_id_overridden", source="meta", over="header")
+    # A copy, not an in-place edit: the request-wide correlation is put back
+    # on exit (the transport sets every request-wide field before dispatch).
     token = _correlation.set(
         replace(corr, session_id=session_id, session_source=SESSION_SOURCE_META)
     )
