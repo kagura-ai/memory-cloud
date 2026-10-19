@@ -4,14 +4,6 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
-## Unreleased
-
-### Added
-- **Default context on the MCP URL** ([#2125](https://github.com/kagura-ai/memory-cloud/issues/2125)): `?context=<context_id>` (on `/mcp` and `/mcp/w/{workspace_id}`, both transport eras, every credential) names the connection's default context. A context-scoped tool called without `context_id` runs in it, so a client that knows its context no longer spends the first turn on `list_contexts`. An explicit `context_id` wins, `recall`'s `context_ids` stays explicit, and an agent-bound key without `?context=` defaults to its default (or only) binding. The default is written into the arguments before the capacity check and the tool, so it is authorized exactly like an explicit id; a context the caller cannot use answers the same `context_not_found` plus `context_source`. `delete_context`, `update_search_config`, `update_context`, `merge_contexts` and the binding tools never use it. The server instructions name the default (still at most 240 characters) and `server/discover` is `cacheScope: "private"` whenever `?context=` is present. Manual: `guide(["default-context"])`.
-
-### Changed
-- `context_id` is no longer in `required` on the 30 context-scoped tool schemas; the server still answers `context_id_required` when nothing supplies one, and its `help` now names `?context=`.
-
 ## [v0.113.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.113.0) — 2026-10-18
 
 Memories get versions: every edit is recorded, `update_memory` can refuse a stale edit, past versions can be read, and one agent session's writes can be listed and rolled back. Content chunks become a plan feature with a per-plan cap and a toggle in the context's search settings, and recall loses a ~40 ms Qdrant stall.
