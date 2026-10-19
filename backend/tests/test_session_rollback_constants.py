@@ -64,6 +64,39 @@ def test_one_rollback_row_per_target() -> None:
     assert fk.column.table.name == "contexts" and fk.ondelete == "CASCADE"
 
 
+def test_one_rollback_row_per_window() -> None:
+    """#2121: the window-mode record key, partial on rows that have a window."""
+    (index,) = [
+        i
+        for i in MemorySessionRollback.__table__.indexes
+        if i.name == "uq_memory_session_rollbacks_window"
+    ]
+    assert index.unique is True
+    rendered = [str(e) for e in index.expressions]
+    assert rendered[0] == "memory_session_rollbacks.context_id"
+    assert rendered[1] == "COALESCE(principal_user_id, '')"
+    assert rendered[2].startswith("COALESCE(agent_id, '00000000-0000-0000-0000-000000000000'")
+    assert rendered[3:] == [
+        "memory_session_rollbacks.window_since",
+        "memory_session_rollbacks.window_until",
+    ]
+    assert str(index.dialect_options["postgresql"]["where"]) == "window_since IS NOT NULL"
+    for column in (
+        MemorySessionRollback.__table__.c.window_since,
+        MemorySessionRollback.__table__.c.window_until,
+    ):
+        assert column.nullable is True and column.server_default is None
+
+
+def test_principal_window_index_on_revisions() -> None:
+    """#2121: one principal's events in a window, NULL agent included (full index)."""
+    (index,) = [
+        i for i in MemoryRevision.__table__.indexes if i.name == "idx_memory_revisions_actor_at"
+    ]
+    assert [c.name for c in index.columns] == ["context_id", "actor_user_id", "agent_id", "at"]
+    assert index.dialect_options["postgresql"]["where"] is None
+
+
 def test_classified_operational() -> None:
     from models.data_boundary import OPERATIONAL_TABLES
 
