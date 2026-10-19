@@ -736,6 +736,17 @@ class MemoryRevision(Base):
             "id",
             postgresql_where=text("session_id IS NOT NULL"),
         ),
+        # #2121: one principal's writes in a time window (rollback_session's
+        # window mode, changes_since(by_me=true)). Full, not partial: window
+        # events may carry a session id too. A btree indexes NULLs, so a user
+        # credential's ``agent_id IS NULL`` is an index condition.
+        Index(
+            "idx_memory_revisions_actor_at",
+            "context_id",
+            "actor_user_id",
+            "agent_id",
+            "at",
+        ),
     )
 
 
@@ -760,8 +771,17 @@ class MemorySessionRollback(Base):
     every principal's events under that session id in the context. ``summary``
     holds the running counts over all calls.
 
+    #2121 window mode: a rollback of the caller's own writes in
+    ``[window_since, window_until)``. Its row has ``session_id`` NULL, the
+    principal set (never the owner scope) and both window columns set; its
+    target is ``(context_id, principal_user_id, agent_id, window_since,
+    window_until)``. "Exactly one of session_id / the window" and "the window
+    has a principal" are enforced by the service (``SessionScope``), not by a
+    CHECK: an erased session row also has a NULL ``session_id``.
+
     Erasure pseudonymizes ``principal_user_id`` / ``requested_by`` and NULLs
-    the subject's ``session_id``; the row goes with its context.
+    the subject's ``session_id``; the row goes with its context. The window
+    bounds are not personal data and stay.
     """
 
     __tablename__ = "memory_session_rollbacks"
@@ -786,6 +806,9 @@ class MemorySessionRollback(Base):
         DateTime, nullable=False, server_default=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #2121: the window of a window-mode rollback (naive UTC), else NULL.
+    window_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         # Derived from the ordered tuple: byte-identical to the f04 literal.
@@ -800,6 +823,18 @@ class MemorySessionRollback(Base):
             text("COALESCE(principal_user_id, '')"),
             text(f"COALESCE(agent_id, {_NIL_UUID_SQL})"),
             unique=True,
+        ),
+        # #2121: one row per (principal, window). Window rows have a NULL
+        # session_id, which the target index above treats as distinct.
+        Index(
+            "uq_memory_session_rollbacks_window",
+            "context_id",
+            text("COALESCE(principal_user_id, '')"),
+            text(f"COALESCE(agent_id, {_NIL_UUID_SQL})"),
+            "window_since",
+            "window_until",
+            unique=True,
+            postgresql_where=text("window_since IS NOT NULL"),
         ),
     )
 

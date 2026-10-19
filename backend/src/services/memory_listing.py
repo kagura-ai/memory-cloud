@@ -5,8 +5,8 @@ live memory of one context that matches exact filters, ordered and paged;
 ``changes_since`` returns the context's memory-level change log — created,
 updated, superseded, forgotten — in time order with a keyset cursor; every
 event of a forgotten memory is listed without its summary (#1876). With a
-session (#2044) it reads that session's own write events from
-``memory_revisions`` instead (``changes_in_session``). Plain SQL: no
+session (#2044), or for the caller's own writes (``by_me``, #2121), it reads
+those write events from ``memory_revisions`` instead (``changes_in_session``). Plain SQL: no
 embedding, no Hebbian write, so both are cheap enough for a session start.
 
 Scoping is the REST list's: the caller must read the context; in a private
@@ -489,7 +489,7 @@ async def changes_in_session(
     db: AsyncSession,
     *,
     context_id: UUID,
-    session_id: str,
+    session_id: str | None,
     principal: SessionPrincipal | None,
     owner_user_id: str | None,
     since: datetime,
@@ -508,6 +508,11 @@ async def changes_in_session(
     selects nothing, exactly like an id never used. ``principal=None`` is the
     context owner's view: every principal's events under that id.
 
+    ``session_id=None`` (#2121, ``changes_since(by_me=true)``): every event of
+    ``principal`` in the window, any session or none — what
+    ``rollback_session(since, until)`` addresses. A principal is required
+    then (``idx_memory_revisions_actor_at``).
+
     ``summary`` is the memory's live one, omitted when the memory is
     forgotten (the #1876 rule). The private-context owner filter and the
     agent-binding predicate apply as in ``changes_since``; the cursor is its
@@ -518,9 +523,10 @@ async def changes_in_session(
             raise ValueError(f"kinds must be a subset of {', '.join(SESSION_KINDS)}")
     if until is not None and until <= since:
         raise ValueError("until must be later than since")
+    if session_id is None and principal is None:
+        raise ValueError("changes_in_session needs a session_id or a principal")
     where: list[Any] = [
         MemoryRevision.context_id == context_id,
-        MemoryRevision.session_id == session_id,
         MemoryRevision.kind.in_(kinds),
         MemoryRevision.at >= since,
         # The revision's context is copied from the row; never list a row
@@ -529,6 +535,8 @@ async def changes_in_session(
     ]
     if until is not None:
         where.append(MemoryRevision.at < until)
+    if session_id is not None:
+        where.append(MemoryRevision.session_id == session_id)
     if principal is not None:
         where.append(
             principal_predicate(MemoryRevision.actor_user_id, MemoryRevision.agent_id, principal)

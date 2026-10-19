@@ -182,12 +182,12 @@ async def handle_list(
 
 
 def _parse_kinds(kinds_arg: Any, *, session: bool) -> tuple[str, ...] | list[TextContent]:
-    """``kinds`` for the change log (``KINDS``) or a session's lane (#2044).
+    """``kinds`` for the change log (``KINDS``) or the revision lane (#2044, #2121).
 
-    A session lane lists the session's own write events, so ``superseded`` (an
-    edge, not a recorded write) is dropped from it and ``restored`` (a
-    rollback_session un-forget) is added; asking for ``superseded`` alone
-    there, or for ``restored`` without a session, is refused.
+    The revision lane (``session_id`` or ``by_me``) lists recorded write
+    events, so ``superseded`` (an edge, not a recorded write) is dropped from
+    it and ``restored`` (a rollback_session un-forget) is added; asking for
+    ``superseded`` alone there, or for ``restored`` outside it, is refused.
     """
     allowed = SESSION_KINDS if session else KINDS
     if kinds_arg is None:
@@ -203,7 +203,7 @@ def _parse_kinds(kinds_arg: Any, *, session: bool) -> tuple[str, ...] | list[Tex
     known = set(KINDS) | set(SESSION_KINDS)
     picked = tuple(dict.fromkeys(k for k in kinds_arg if k in allowed))
     if any(k not in known for k in kinds_arg) or not picked:
-        hint = " (with session_id: superseded is not session-attributed)" if session else ""
+        hint = " (with session_id or by_me: superseded is not a recorded write)" if session else ""
         return _error_response(
             "validation_error",
             f"kinds must be a non-empty subset of {', '.join(allowed)}{hint}.",
@@ -212,7 +212,7 @@ def _parse_kinds(kinds_arg: Any, *, session: bool) -> tuple[str, ...] | list[Tex
         return _error_response(
             "validation_error",
             f"kinds must be a non-empty subset of {', '.join(KINDS)} "
-            "(restored is listed only with session_id).",
+            "(restored is listed only with session_id or by_me).",
         )
     return picked
 
@@ -246,7 +246,12 @@ async def handle_changes_since(
                 "validation_error",
                 "session_id must be 1-128 characters of A-Z, a-z, 0-9, '.', '_' or '-'.",
             )
-    kinds_or_error = _parse_kinds(args.get("kinds"), session=session_id is not None)
+    by_me = args.get("by_me")
+    if by_me is None:  # omitted or null, like the other optional arguments
+        by_me = False
+    if not isinstance(by_me, bool):
+        return _error_response("validation_error", "by_me must be a boolean.")
+    kinds_or_error = _parse_kinds(args.get("kinds"), session=session_id is not None or by_me)
     if not isinstance(kinds_or_error, tuple):
         return kinds_or_error
     kinds = kinds_or_error
@@ -271,14 +276,19 @@ async def handle_changes_since(
                 db, user_id, context_id, operation="changes_since"
             )
             owner = user_id if context.is_private else None
-            if session_id is not None:
+            if session_id is not None or by_me:
                 from services.session_rollback import addressable_principal, context_role
+                from services.write_provenance import caller_principal
 
                 # #2044: the caller's own session (same sub, same agent
                 # credential); a context owner may name any. Another
                 # principal's session id lists nothing, like an unused one.
-                principal = addressable_principal(
-                    user_id, await context_role(db, user_id, context_id)
+                # #2121: by_me is always the caller's own principal, also for
+                # an owner (with session_id it narrows that session to them).
+                principal = (
+                    caller_principal(user_id)
+                    if by_me
+                    else addressable_principal(user_id, await context_role(db, user_id, context_id))
                 )
                 lane = changes_in_session(
                     db,
@@ -316,6 +326,7 @@ async def handle_changes_since(
                 "since": to_utc_iso(since_naive),
                 "until": to_utc_iso(until_naive),
                 **({"session_id": session_id} if session_id is not None else {}),
+                **({"by_me": True} if by_me else {}),
                 **_context_response_fields(context),
             }
             envelope, kept = _bound(envelope, "changes", max_chars)

@@ -145,6 +145,106 @@ def test_changes_since_schema_offers_the_session_filter():
     assert "restored" in props["kinds"]["items"]["enum"]
 
 
+# ------------------------------------------------- #2121: by_me
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "needle"),
+    [
+        ({"by_me": "true"}, "by_me"),
+        ({"by_me": 1}, "by_me"),
+        # superseded is an edge, not a recorded write.
+        ({"by_me": True, "kinds": ["superseded"]}, "superseded"),
+    ],
+)
+async def test_changes_since_by_me_arguments_are_checked_first(args, needle):
+    payload = await _err(handle_changes_since, {"context_id": CTX, "since": _SINCE, **args})
+    assert payload["status"] == "error" and payload["error"] == "validation_error"
+    assert needle in payload["message"]
+
+
+def test_changes_since_schema_offers_by_me():
+    from mcp_server.tools._definitions import get_tool_definitions
+
+    (tool,) = [t for t in get_tool_definitions() if t["name"] == "changes_since"]
+    assert tool["inputSchema"]["properties"]["by_me"]["type"] == "boolean"
+    assert "by_me" in tool["description"]
+
+
+async def _by_me_call(args: dict, role: object) -> tuple[dict, object]:
+    import uuid
+    from collections.abc import AsyncIterator
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp_server.tools import listing
+    from services.memory_listing import ChangePage
+
+    db = MagicMock()
+
+    async def get_db() -> AsyncIterator[object]:
+        yield db
+
+    lane = AsyncMock(return_value=ChangePage(changes=[], next_cursor=None))
+    context = MagicMock(id=uuid.UUID(CTX), is_private=False)
+    with (
+        patch("db.base.get_db", get_db),
+        patch.object(listing, "_resolve_context_for_read", AsyncMock(return_value=context)),
+        patch.object(listing, "_context_response_fields", lambda _c: {}),
+        patch.object(listing, "_log_tool_usage", AsyncMock()),
+        patch.object(listing, "changes_in_session", lane),
+        patch.object(
+            listing,
+            "changes_since",
+            AsyncMock(return_value=ChangePage(changes=[], next_cursor=None)),
+        ),
+        patch("services.session_rollback.context_role", AsyncMock(return_value=role)),
+    ):
+        (block,) = await listing.handle_changes_since(
+            {"context_id": CTX, "since": _SINCE, **args}, "caller", None
+        )
+    return json.loads(block.text), lane
+
+
+@pytest.mark.asyncio
+async def test_by_me_is_the_callers_own_principal_even_for_an_owner():
+    from auth.workspace_roles import ContextRole
+    from services.write_provenance import SessionPrincipal
+
+    payload, lane = await _by_me_call({"by_me": True}, ContextRole.OWNER)
+    kwargs = lane.await_args.kwargs
+    assert kwargs["principal"] == SessionPrincipal("caller", None)
+    assert kwargs["session_id"] is None
+    assert "restored" in kwargs["kinds"] and "superseded" not in kwargs["kinds"]
+    assert payload["by_me"] is True and "session_id" not in payload
+
+    # With session_id, by_me narrows an owner's view of the session to them.
+    payload, lane = await _by_me_call({"by_me": True, "session_id": "s1"}, ContextRole.OWNER)
+    assert lane.await_args.kwargs["principal"] == SessionPrincipal("caller", None)
+    assert lane.await_args.kwargs["session_id"] == "s1"
+    # Without by_me the owner override of #2044 is unchanged.
+    _, lane = await _by_me_call({"session_id": "s1"}, ContextRole.OWNER)
+    assert lane.await_args.kwargs["principal"] is None
+
+
+@pytest.mark.asyncio
+async def test_by_me_null_is_omitted():
+    from auth.workspace_roles import ContextRole
+
+    payload, lane = await _by_me_call({"by_me": None}, ContextRole.EDITOR)
+    assert payload["status"] == "success" and "by_me" not in payload
+    lane.assert_not_awaited()  # the plain change log, not the revision lane
+
+
+@pytest.mark.asyncio
+async def test_by_me_allows_restored():
+    from auth.workspace_roles import ContextRole
+
+    payload, lane = await _by_me_call({"by_me": True, "kinds": ["restored"]}, ContextRole.EDITOR)
+    assert payload["status"] == "success"
+    assert lane.await_args.kwargs["kinds"] == ("restored",)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["list", "changes_since"])
 async def test_the_dispatcher_points_a_missing_context_at_the_manual(name):

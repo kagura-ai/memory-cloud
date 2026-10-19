@@ -642,6 +642,15 @@ rollback_session(context_id=..., session_id="smoke-unused-session")
 
 rollback_session(context_id=..., session_id="not a session id!")
 -> Verify: returns `validation_error` (session_id charset)
+
+rollback_session(context_id=..., since="2020-01-01T00:00:00Z", until="2020-01-02T00:00:00Z")
+-> Verify: returns `no_writes_in_window` with the echoed `since` / `until` (#2121; nothing is written)
+
+rollback_session(context_id=..., session_id="smoke-unused-session", since="2020-01-01T00:00:00Z")
+-> Verify: returns `validation_error` (session_id or since, not both)
+
+changes_since(context_id=..., since=<the smoke run's start time>, by_me=true)
+-> Verify: lists the smoke run's own writes in this context (`by_me: true` in the reply), none by another member
 ```
 
 ### 7.8. Resource tools (`resources` plan feature only)
@@ -933,7 +942,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 70 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
 | 71 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
 | 72 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
-| 73 | rollback_session | Unused session (session_not_found) + malformed id (validation_error) | PASS/FAIL |
+| 73 | rollback_session | Unused session (session_not_found) + malformed id (validation_error) + empty window (no_writes_in_window) + both modes (validation_error) + changes_since(by_me) | PASS/FAIL |
 | 74 | update_memory | Unpin pinned memory (delivery_mode="on_recall") | PASS/FAIL |
 | 75 | forget | Delete guardrail memory | PASS/FAIL |
 | 76 | forget | Delete pinned memory | PASS/FAIL |
