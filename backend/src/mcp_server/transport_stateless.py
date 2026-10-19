@@ -249,14 +249,19 @@ async def _call_tool(
     tool_name = params["name"]
     logger.debug(f"MCP calling tool (stateless): {_shown(tool_name)!r}")
 
+    from api.correlation import client_session_scope
+
     try:
         # ``_meta`` is protocol metadata: only ``arguments`` reaches the tool.
-        result = await execute_tool_call(
-            tool_name=tool_name,
-            arguments=params.get("arguments") or {},
-            user_id=user_id,
-            workspace_id=workspace_id,
-        )
+        # #2122: its ``ai.kagura/sessionId`` names the call's session instead
+        # (the request correlation, never a tool argument).
+        with client_session_scope(params.get("_meta")):
+            result = await execute_tool_call(
+                tool_name=tool_name,
+                arguments=params.get("arguments") or {},
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
     except Exception as e:
         # #1684: message and ``data`` come from the shared error vocabulary
         # (stable code, help, correlation_id, retry advice); it logs the

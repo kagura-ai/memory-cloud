@@ -23,8 +23,10 @@ Rule-2 same-member predicate before reaching ``agent_id``. See
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
 
@@ -37,6 +39,21 @@ BAGGAGE_AGENT_ID = "gen_ai.agent.id"
 BAGGAGE_SESSION_ID = "gen_ai.conversation.id"
 BAGGAGE_SESSION_ID_ALIAS = "session.id"
 BAGGAGE_RUN_ID = "kagura.agent.run.id"
+
+# A client-supplied session id on MCP requests (#2122), for clients that know
+# their own run / conversation id but send no OTel baggage — the stateless
+# 2026-07-28 revision has no ``Mcp-Session-Id``. Same token rule as the
+# baggage session; ``_meta`` (one JSON-RPC message) wins over the header (the
+# whole HTTP request) when both are sent.
+CLIENT_SESSION_META_KEY = "ai.kagura/sessionId"
+CLIENT_SESSION_HEADER = "x-session-id"
+
+# Where ``CorrelationContext.session_id`` came from. Precedence (normative):
+# baggage > _meta > header > the stateful transport's Mcp-Session-Id.
+SESSION_SOURCE_BAGGAGE = "baggage"
+SESSION_SOURCE_META = "meta"
+SESSION_SOURCE_HEADER = "header"
+SESSION_SOURCE_TRANSPORT = "transport"
 
 # policy_decision stamped on rows whose agent_id came from a *verified claim*
 # (explicit arg or baggage) on an agent-UNBOUND credential (attribution
@@ -68,6 +85,8 @@ class CorrelationContext:
     # 'mcp' | 'rest' — the request surface, set at the transport/middleware
     # seam so service-layer audit emission (#1278) is surface-invariant.
     surface: str = "rest"
+    # One of the ``SESSION_SOURCE_*`` values when ``session_id`` is set (#2122).
+    session_source: str | None = None
 
 
 _correlation: ContextVar[CorrelationContext | None] = ContextVar("correlation", default=None)
@@ -176,12 +195,15 @@ def build_correlation_from_headers(
     traceparent: str | None,
     baggage: str | None,
     surface: str = "rest",
+    client_session_id: str | None = None,
 ) -> CorrelationContext:
     """Assemble the per-request CorrelationContext from raw headers.
 
     - ``trace_id``/``span_id`` from ``traceparent`` when valid, else generated.
     - ``session_id``/``run_id`` from baggage after token validation (invalid →
       dropped).
+    - ``client_session_id``: the MCP ``X-Session-Id`` header (#2122), the
+      session when baggage named none (validated and dropped alike).
     - ``agent_claim`` = the raw baggage ``gen_ai.agent.id`` (unresolved).
     """
     tp = parse_traceparent(traceparent)
@@ -194,6 +216,13 @@ def build_correlation_from_headers(
     session_id = validate_correlation_token(
         bag.get(BAGGAGE_SESSION_ID) or bag.get(BAGGAGE_SESSION_ID_ALIAS)
     )
+    session_source = SESSION_SOURCE_BAGGAGE if session_id is not None else None
+    if client_session_id is not None:
+        if session_id is not None:
+            logger.info("client_session_id_ignored", source="header", reason="baggage_wins")
+        else:
+            session_id = validate_correlation_token(client_session_id)
+            session_source = SESSION_SOURCE_HEADER if session_id is not None else None
     run_id = validate_correlation_token(bag.get(BAGGAGE_RUN_ID))
     agent_claim = bag.get(BAGGAGE_AGENT_ID) or None
 
@@ -204,7 +233,52 @@ def build_correlation_from_headers(
         run_id=run_id,
         agent_claim=agent_claim,
         surface=surface,
+        session_source=session_source,
     )
+
+
+@contextmanager
+def client_session_scope(meta: Any) -> Iterator[None]:
+    """Apply ``params._meta['ai.kagura/sessionId']`` to one JSON-RPC message (#2122).
+
+    For the duration of the block the request's correlation names that
+    session, so the writes it makes are recorded under it and echo it. It
+    overrides the ``X-Session-Id`` header and the stateful transport's
+    ``Mcp-Session-Id``, never the OTel baggage session. An invalid value is
+    dropped with a logged reason (``validate_correlation_token``), exactly as
+    a baggage one is — never a request failure. The correlation is restored on
+    exit, so the elements of a JSON-RPC batch each keep their own.
+
+    Like baggage, the id is an attribute of the caller's principal (caller
+    sub + the credential's agent), never an identity: naming another
+    principal's id selects nothing of theirs (``write_provenance``).
+    """
+    corr = get_correlation()
+    raw = meta.get(CLIENT_SESSION_META_KEY) if isinstance(meta, dict) else None
+    if corr is None or raw is None:
+        yield
+        return
+    # A session set without a recorded source (a hand-built context) is
+    # treated as baggage: it is never overridden.
+    if corr.session_source == SESSION_SOURCE_BAGGAGE or (
+        corr.session_id is not None and corr.session_source is None
+    ):
+        logger.info("client_session_id_ignored", source="meta", reason="baggage_wins")
+        yield
+        return
+    session_id = validate_correlation_token(raw)
+    if session_id is None:
+        yield
+        return
+    if corr.session_source == SESSION_SOURCE_HEADER and corr.session_id != session_id:
+        logger.info("client_session_id_overridden", source="meta", over="header")
+    token = _correlation.set(
+        replace(corr, session_id=session_id, session_source=SESSION_SOURCE_META)
+    )
+    try:
+        yield
+    finally:
+        _correlation.reset(token)
 
 
 # ---------------------------------------------------------------------------
