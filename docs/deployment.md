@@ -2011,8 +2011,9 @@ copied into a result. With a defaulted `full`, only trusted, non-connector rows
 carry content, so only those are sent with content. One provider attempt is
 made (no retry) at temperature 0, on the judge's credential lane, paid by the
 context's workspace (#708); the recall's own connection is released before the
-round trip. Rows the selector drops also leave the candidate pool that Hebbian
-learning and `confidence` read, and an emptied page gets no `tag_suggestions`.
+round trip. Rows the selector drops do not feed Hebbian learning, and an
+emptied page gets no `tag_suggestions`; `confidence` still describes the search
+before selection.
 A kept row whose stored content goes past the 1,500-character head keeps
 `content_truncated` / `content_next_offset`.
 

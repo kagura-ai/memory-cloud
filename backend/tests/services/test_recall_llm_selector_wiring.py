@@ -160,6 +160,7 @@ class TestGate:
         kwargs = run.await_args.kwargs
         assert (kwargs["workspace_id"], kwargs["context_id"]) == (str(ws), str(ctx))
         assert kwargs["query"] == "q"
+        assert kwargs["release_db_before_call"] is True
 
 
 @pytest.mark.asyncio
@@ -232,11 +233,11 @@ async def test_real_recall_ships_the_selected_page(monkeypatch: pytest.MonkeyPat
     assert audit["extra_metadata"]["selector_applied"] is True
     assert audit["extra_metadata"]["selector_dropped_count"] == 2
     assert audit["extra_metadata"]["content_memory_ids"] == [str(page[0].memory_id)]
-    # The dropped rows leave the pool Hebbian learning and confidence read;
-    # the candidate beyond the page (never judged) stays.
+    # The dropped rows leave the pool Hebbian learning reads; the candidate
+    # beyond the page (never judged) stays. confidence keeps the whole pool.
     hebbian_pool = service._recall_run_hebbian_learning.await_args.args[1]
     assert [sr["id"] for sr in hebbian_pool] == ["m0", "m3"]
-    assert result.confidence is not None and result.confidence.result_count == 2
+    assert result.confidence is not None and result.confidence.result_count == 4
     completed = [c for c in log.info.call_args_list if c.args[0] == "recall_completed"]
     assert "select_ms" in completed[0].kwargs and completed[0].kwargs["results"] == 1
 
@@ -412,3 +413,34 @@ async def test_a_page_emptied_by_the_selector_gets_no_tag_suggestions() -> None:
         )
     assert emptied.tag_suggestions is None
     assert plain.tag_suggestions == {"auth": ["oauth (3)"]}
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_stage_error_never_fails_the_recall() -> None:
+    page = [_row()]
+    svc = MemoryService(MagicMock())
+    with (
+        patch(
+            "services.recall_selector.run_selector",
+            new=AsyncMock(side_effect=RuntimeError("bug")),
+        ),
+        patch(
+            "services.llm_selector_policy.llm_selector_effective",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        responses, report = await svc._recall_apply_llm_selector(
+            RecallRequest(query="q", full=3),
+            page,
+            llm_selector=True,
+            search_config=SimpleNamespace(llm_selector_enabled=True),
+            cross_context=False,
+            selection_config=None,
+            degradation={},
+            user_id="u",
+            context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            timings=RecallTimings(),
+        )
+    assert responses is page
+    assert report == SelectorReport(applied=False, reason="provider_error")

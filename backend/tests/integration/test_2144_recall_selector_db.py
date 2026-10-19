@@ -106,7 +106,9 @@ def _answer(parsed: dict) -> LLMResponse:
     )
 
 
-async def _recall(db, owner, ws, ctx, ids, complete_json, *, llm_selector=True):
+async def _recall(
+    db, owner, ws, ctx, ids, complete_json, *, llm_selector=True, content_trusted_only=False
+):
     svc = MemoryService(db)
     svc.search_service.hybrid_search = AsyncMock(
         return_value=[{"id": str(m), "score": 0.9 - 0.1 * i} for i, m in enumerate(ids)]
@@ -127,6 +129,7 @@ async def _recall(db, owner, ws, ctx, ids, complete_json, *, llm_selector=True):
             current_context_id=ctx.id,
             current_workspace_id=ws.id,
             llm_selector=llm_selector,
+            content_trusted_only=content_trusted_only,
         )
 
 
@@ -233,3 +236,76 @@ async def test_plan_gate_reports_inactive(db_session, quiet_write, monkeypatch):
     }
     complete_json.assert_not_called()
     assert response.results[0].content == BODY
+
+
+@pytest.mark.asyncio
+async def test_defaulted_full_never_sends_connector_content(db_session, quiet_write):
+    """C2 / #2124: with the MCP tool's defaulted full, a connector-ingested row
+    carries no content, so the model sees it summary-only — its stored text
+    never enters the prompt."""
+    from sqlalchemy import update
+
+    from models.memory import SOURCE_TYPE_CONNECTOR
+
+    owner, ws, ctx = await _scope(db_session)
+    secret = "CONNECTOR-BODY-7d1e must never reach the selector prompt at all."
+    ids = [
+        await _remember(db_session, owner, ws, ctx, "External ticket text", secret),
+        await _remember(db_session, owner, ws, ctx, "Deploy pipeline facts", BODY),
+    ]
+    await db_session.execute(
+        update(Memory).where(Memory.id == ids[0]).values(source_type=SOURCE_TYPE_CONNECTOR)
+    )
+    await db_session.commit()
+    complete_json = AsyncMock(return_value=_answer({"rows": [{"i": 1, "relevant": True}]}))
+
+    response = await _recall(
+        db_session, owner, ws, ctx, ids, complete_json, content_trusted_only=True
+    )
+
+    prompt = complete_json.await_args.kwargs["prompt"]
+    assert "CONNECTOR-BODY-7d1e" not in prompt
+    assert "Row 0 (summary only)" in prompt
+    assert "[0] The deploy pipeline" in prompt
+    assert response.results[0].content is None
+
+
+@pytest.mark.asyncio
+async def test_the_real_judge_config_read_and_release_commit(db_session, quiet_write, monkeypatch):
+    """Nothing patched between recall and the provider call: the judge config is
+    read from the database / env in a savepoint on the recall's session, the
+    session is committed before the round trip, and the page still ships."""
+    from neural.config import NeuralMemoryConfig
+
+    monkeypatch.setenv("SLEEP_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SLEEP_LLM_MODEL", "small-model")
+    NeuralMemoryConfig._db_cache.clear()
+    owner, ws, ctx = await _scope(db_session)
+    ids = [
+        await _remember(db_session, owner, ws, ctx, "Deploy pipeline facts", BODY),
+        await _remember(db_session, owner, ws, ctx, "Office lunch menu", "Pasta on Fridays."),
+    ]
+    complete_json = AsyncMock(return_value=_answer({"rows": [{"i": 1, "relevant": False}]}))
+    svc = MemoryService(db_session)
+    svc.search_service.hybrid_search = AsyncMock(
+        return_value=[{"id": str(m), "score": 0.9 - 0.1 * i} for i, m in enumerate(ids)]
+    )
+    try:
+        with (
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+            patch("services.llm_service.LLMService.complete_json", new=complete_json),
+        ):
+            response = await svc.recall(
+                RecallRequest(query="deploy", k=5, full=3),
+                user_id=owner,
+                current_context_id=ctx.id,
+                current_workspace_id=ws.id,
+                llm_selector=True,
+            )
+    finally:
+        NeuralMemoryConfig._db_cache.clear()
+
+    assert complete_json.await_args.kwargs["provider"] == "openai"
+    assert complete_json.await_args.kwargs["model"] == "small-model"
+    assert response.selector is not None and response.selector.applied is True
+    assert [r.memory_id for r in response.results] == [ids[0]]

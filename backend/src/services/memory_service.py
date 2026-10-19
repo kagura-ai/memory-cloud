@@ -5145,19 +5145,27 @@ class MemoryService:
             if not await llm_selector_effective(self.db, context_id, stored=True):
                 logger.info("recall_selector_inactive", context_id=str(context_id))
                 return responses, SelectorReport(applied=False, reason="inactive")
-            result = await run_selector(
-                self.db,
-                query=request.query,
-                responses=responses,
-                user_id=user_id,
-                workspace_id=str(effective_workspace_id),
-                context_id=str(context_id),
-                settings=get_settings(),
-                # The page is read-only (#1985) and recall commits right after
-                # this stage: commit before the round trip so the connection
-                # is not held idle in transaction for the call (#2070 rule).
-                release_db_before_call=True,
-            )
+            try:
+                result = await run_selector(
+                    self.db,
+                    query=request.query,
+                    responses=responses,
+                    user_id=user_id,
+                    workspace_id=str(effective_workspace_id),
+                    context_id=str(context_id),
+                    settings=get_settings(),
+                    # The page is read-only (#1985) and recall commits right
+                    # after this stage: commit before the round trip so the
+                    # connection is not held idle in transaction (#2070 rule).
+                    release_db_before_call=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — the stage must never fail a recall
+                logger.warning(
+                    "recall_selector_failed_open",
+                    reason="provider_error",
+                    error_type=type(exc).__name__,
+                )
+                return responses, SelectorReport(applied=False, reason="provider_error")
         return result.responses, result.report
 
     async def _recall_trusted_context_ids(self, context_ids: set[UUID]) -> set[UUID]:
@@ -6151,11 +6159,12 @@ class MemoryService:
             effective_workspace_id=effective_workspace_id,
             timings=timings,
         )
+        # Rows the selector judged irrelevant do not feed the Hebbian pass.
+        # confidence keeps reading the whole pool: it is the search's signal,
+        # and selector.dropped reports what the model removed.
+        hebbian_pool = search_results
         if selector_report is not None and selector_report.applied and selector_report.dropped:
-            # Rows the selector judged irrelevant leave the pool too, so the
-            # Hebbian pass does not co-activate them and confidence is not
-            # read off rows the page no longer shows.
-            search_results = _without_dropped_rows(search_results, memories, built_page, responses)
+            hebbian_pool = _without_dropped_rows(search_results, memories, built_page, responses)
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must
@@ -6181,7 +6190,7 @@ class MemoryService:
             with timings.stage("post_commit"):
                 await self._recall_run_hebbian_learning(
                     request,
-                    search_results,
+                    hebbian_pool,
                     memories,
                     user_id=user_id,
                     current_context_id=current_context_id,

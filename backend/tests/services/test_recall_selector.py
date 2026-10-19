@@ -660,6 +660,68 @@ class TestRunSelector:
         assert result.report.applied is True
         assert order == ["commit", "call"]
 
+    @pytest.mark.asyncio
+    async def test_a_failed_release_commit_fails_open_before_any_call(self) -> None:
+        page = [_response("a", SENTENCES)]
+        db = MagicMock()
+        db.commit = AsyncMock(side_effect=ConnectionError("db gone"))
+        llm = _llm({"rows": []})
+        with (
+            patch.object(rs, "_load_judge_config", new=AsyncMock(return_value=_config())),
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch.object(rs, "isolated_session", _session_cm()),
+            patch.object(rs, "record_completion_call", new=AsyncMock()),
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+        ):
+            result = await rs.run_selector(
+                db,
+                query="q",
+                responses=page,
+                user_id="u",
+                workspace_id="w",
+                context_id="c",
+                settings=_settings(),
+                release_db_before_call=True,
+            )
+        assert result.report.reason == "provider_error" and result.responses is page
+        llm.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_llm_error_without_usage_is_a_provider_error_with_no_row(self) -> None:
+        from services.llm_service import LLMServiceError
+
+        page = [_response("a", SENTENCES)]
+        result, _, ledger = await _run(page, llm=_llm(error=LLMServiceError("API down")))
+        assert result.report.reason == "provider_error"
+        ledger.assert_not_called()
+
+    def test_the_fuzz_reaches_the_selected_path(self) -> None:
+        """Guard against a vacuous fuzz: a fixed valid answer over random text
+        yields spans, so the property checks above have something to check."""
+        rng = random.Random(7)
+        hits = 0
+        for _ in range(50):
+            text = " ".join(
+                f"Sentence {rng.randint(0, 999)} is long enough to stand on its own here."
+                for _ in range(rng.randint(2, 30))
+            )
+            r = _response("s", text)
+            rows = rs.rows_for([r], 10)
+            n = len(rows[0].segments)
+            chosen = [rng.randrange(n)]
+            decisions = rs.parse_selection(
+                {"rows": [{"i": 0, "relevant": True, "segments": chosen}]}, [n]
+            )
+            assert decisions is not None
+            page, _ = rs.apply_selection([r], rows, decisions)
+            if page[0].spans:
+                hits += 1
+                stored = r.content or ""
+                assert page[0].content == rs.SEPARATOR.join(
+                    stored[s.start : s.end] for s in page[0].spans
+                )
+        assert hits == 50
+
     def test_the_answer_budget_scales_with_rows_and_is_capped(self) -> None:
         assert rs.answer_token_budget(1) < rs.answer_token_budget(10)
         assert rs.answer_token_budget(10) >= 1024
