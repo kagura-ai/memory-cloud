@@ -64,7 +64,8 @@ def effective_full(full: int | None, k: int) -> int:
     """How many of the top results carry content (#2124).
 
     ``full`` as the request carries it (``None`` → none: the MCP tool fills
-    in ``RECALL_DEFAULT_FULL`` itself), never more than ``k``.
+    in ``settings.mcp_recall_default_full`` itself, whose default is
+    ``RECALL_DEFAULT_FULL``), never more than ``k``.
     """
     return min(full or 0, k)
 

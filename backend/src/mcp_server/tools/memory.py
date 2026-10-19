@@ -1190,11 +1190,12 @@ async def handle_recall(
         return arg_error
     # #2002: an omitted (or null) verbosity follows the deployment default,
     # "compact" unless MCP_RECALL_DEFAULT_VERBOSITY says otherwise.
+    from config.settings import get_settings
+
+    settings = get_settings()
     verbosity = args.get("verbosity")
     if verbosity is None:
-        from config.settings import get_settings
-
-        verbosity = get_settings().mcp_recall_default_verbosity
+        verbosity = settings.mcp_recall_default_verbosity
     if verbosity not in RECALL_VERBOSITIES:
         return _error_response(
             "validation_error", "verbosity must be 'compact' or 'full'", received=verbosity
@@ -1210,9 +1211,7 @@ async def handle_recall(
     if full is None:
         # #2140: the deployment default (MCP_RECALL_DEFAULT_FULL, 3 unless
         # set); still a default, so the trusted-only rule above holds.
-        from config.settings import get_settings
-
-        full = get_settings().mcp_recall_default_full
+        full = settings.mcp_recall_default_full
     elif type(full) is not int or not 0 <= full <= RECALL_MAX_FULL:
         return _error_response(
             "invalid_argument",

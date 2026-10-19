@@ -18,6 +18,7 @@ rather than a copy of it, so the size budget measures what clients receive.
 import inspect
 import json
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
@@ -733,7 +734,7 @@ class TestHandlerVerbosity:
 # ============================================================================
 
 
-async def _recall_request(args: dict, default_full: int | None = None):
+async def _recall_request(args: dict, default_full: int = 3) -> tuple[Any, bool | None]:
     """Run the handler; return (RecallRequest, content_trusted_only) it passed on."""
     from contextlib import ExitStack
     from types import SimpleNamespace
@@ -742,11 +743,10 @@ async def _recall_request(args: dict, default_full: int | None = None):
     service = MagicMock()
     service.recall = AsyncMock(return_value=_handler_result())
     with ExitStack() as stack:
-        if default_full is not None:
-            settings = SimpleNamespace(
-                mcp_recall_default_verbosity="compact", mcp_recall_default_full=default_full
-            )
-            stack.enter_context(patch("config.settings.get_settings", return_value=settings))
+        settings = SimpleNamespace(
+            mcp_recall_default_verbosity="compact", mcp_recall_default_full=default_full
+        )
+        stack.enter_context(patch("config.settings.get_settings", return_value=settings))
         stack.enter_context(patch("db.base.get_db", new=_get_db_yielding(AsyncMock())))
         stack.enter_context(
             patch(

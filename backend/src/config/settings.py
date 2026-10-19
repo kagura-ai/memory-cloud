@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.constants import RerankPromptFormat
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+from utils.recall_projection import RECALL_DEFAULT_FULL, RECALL_MAX_FULL
 
 if TYPE_CHECKING:
     from config.llm_pricing_overrides import PricingOverride
@@ -823,11 +824,12 @@ class Settings(BaseSettings):
     # omits ``full`` (#2124's tool default, 3). Still a *default*: only trusted
     # rows get content, as with the built-in one. An explicit ``full`` wins.
     # An out-of-range value refuses to boot, like a bad verbosity. REST is
-    # unaffected (its default stays 0).
+    # unaffected (its default stays 0). A high value costs content building on
+    # every argument-less recall, much of it dropped again by max_chars.
     mcp_recall_default_full: int = Field(
-        default=3,
+        default=RECALL_DEFAULT_FULL,
         ge=0,
-        le=100,
+        le=RECALL_MAX_FULL,
         description="recall top results carrying content when the caller omits full",
     )
 
