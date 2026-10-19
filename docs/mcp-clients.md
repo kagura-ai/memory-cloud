@@ -322,6 +322,20 @@ PY
 
 The recipe is extracted from this page and exercised by `backend/tests/api/test_guardrail_export_snippet.py`.
 
+## Which clients get a session id
+
+Every memory write records the session it was made in, and `changes_since(session_id=...)` / `rollback_session(session_id=...)` address one session's writes ([MCP Tools › rollback_session](mcp-tools.md#rollback_session)). Where the session id comes from depends on the client:
+
+| Client | Session id on its writes |
+|---|---|
+| Sends OTel baggage `gen_ai.conversation.id` or `session.id` (SDKs, REST callers, custom agents) | That value, on every transport |
+| Legacy stateful Streamable HTTP (opens with `initialize`) | The protocol session id (`Mcp-Session-Id`) — one per connection |
+| Stateless 2026-07-28 revision without baggage | None ([#2122](https://github.com/kagura-ai/memory-cloud/issues/2122) will let such a client send its own) |
+
+Which revision a client negotiates is the client's choice; a quick check is the reply of `remember`, `update_memory` or `forget`: when it carries no `session_id`, your writes have none. Those clients use the time window instead — `rollback_session(context_id, since, until?)` undoes **your own** writes in `[since, until)` (at most 7 days), and `changes_since(context_id, since, until?, by_me=true)` lists them first. Take `since` / `until` from the `at` values `changes_since` returns rather than from your own clock, and always look at the dry run (`dry_run=true` is the default) before `dry_run=false`.
+
+"Your own" is the credential, not the client: two clients signed in as the same user (OAuth, a browser session, a member API key without an agent) share it, so a window covers both clients' writes in that context. An agent-bound API key ([Agent Control Plane](mcp-tools.md#agent-control-plane-10-preview)) is its own principal: its writes are never in your user credential's window, and the other way round — give each long-running agent its own key to keep its runs apart. A context owner's override (naming another member's session) exists for the session mode only.
+
 ## List fewer tools
 
 By default `tools/list` returns the 21 core tools (≈ 40k characters of JSON); the whole registry is 72 tools (≈ 102k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
