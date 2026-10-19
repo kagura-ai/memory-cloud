@@ -38,7 +38,9 @@ def _perms(*, owner: bool) -> MagicMock:
 
 def _repo(stored: bool) -> MagicMock:
     repo = MagicMock()
-    repo.get_by_context = AsyncMock(return_value=SimpleNamespace(content_chunks_enabled=stored))
+    repo.get_by_context = AsyncMock(
+        return_value=SimpleNamespace(content_chunks_enabled=stored, llm_selector_enabled=False)
+    )
     repo.update = AsyncMock(side_effect=lambda _ctx, data: data)
     repo.reset_to_default = AsyncMock(return_value=SimpleNamespace())
     return repo
@@ -152,14 +154,20 @@ async def test_an_editor_cannot_reset_while_the_flag_is_on():
 async def test_an_editor_reset_with_the_flag_off_leaves_the_flag_alone():
     perms, repo = await _reset(stored=False, owner=False)
     perms.check_context_owner.assert_not_awaited()
-    assert repo.reset_to_default.await_args.kwargs == {"reset_content_chunks": False}
+    assert repo.reset_to_default.await_args.kwargs == {
+        "reset_content_chunks": False,
+        "reset_llm_selector": False,
+    }
 
 
 @pytest.mark.asyncio
 async def test_an_owner_reset_turns_the_flag_off():
     perms, repo = await _reset(stored=True, owner=True)
     perms.check_context_owner.assert_awaited_once()
-    assert repo.reset_to_default.await_args.kwargs == {"reset_content_chunks": True}
+    assert repo.reset_to_default.await_args.kwargs == {
+        "reset_content_chunks": True,
+        "reset_llm_selector": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -265,6 +273,7 @@ def _row(*, enabled: bool, model: str = "qwen3-embedding:4b"):
         reinforce_require_host_arbitration=False,
         routing_mode="off",
         content_chunks_enabled=enabled,
+        llm_selector_enabled=False,  # #2144: every ORM row carries it
         created_at=now,
         updated_at=now,
     )
@@ -335,7 +344,9 @@ async def test_put_and_reset_return_the_same_fields():
     for owner in (True, False):
         perms = _perms(owner=owner)
         repo = MagicMock()
-        repo.get_by_context = AsyncMock(return_value=SimpleNamespace(content_chunks_enabled=False))
+        repo.get_by_context = AsyncMock(
+            return_value=SimpleNamespace(content_chunks_enabled=False, llm_selector_enabled=False)
+        )
         repo.update = AsyncMock(return_value=_row(enabled=False))
         repo.reset_to_default = AsyncMock(return_value=_row(enabled=False))
         with (

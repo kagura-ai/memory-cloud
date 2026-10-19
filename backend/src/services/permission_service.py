@@ -1300,3 +1300,86 @@ async def gate_content_chunks_change(
     if turning_on:
         await ensure_content_chunk_capacity(perm_service.db, context_id)
     return update
+
+
+LLM_SELECTOR_OWNER_ONLY_MESSAGE = (
+    "Only the context owner or a workspace owner/admin can change llm_selector_enabled"
+)
+
+
+async def check_llm_selector_change(
+    perm_service: PermissionService, user_id: str, context_id: UUID
+) -> None:
+    """Require the context owner to change ``llm_selector_enabled`` (#2144).
+
+    Turning the flag on sends the context's memory text to an LLM provider at
+    recall time (and, under BYOK, the workspace pays for it), so a change of
+    the stored value (either way) takes ``check_context_owner``, the
+    ``content_chunks_enabled`` rule (#2015).
+
+    Raises:
+        AuthorizationError: 403 (``AUTH-101``) for anyone below context owner.
+    """
+    try:
+        # The write check before this one carries the capacity decision.
+        await perm_service.check_context_owner(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
+    except AuthorizationError as exc:
+        raise AuthorizationError(
+            LLM_SELECTOR_OWNER_ONLY_MESSAGE, reason="llm_selector_owner_only"
+        ) from exc
+
+
+async def gate_llm_selector_change(
+    perm_service: PermissionService,
+    user_id: str,
+    context_id: UUID,
+    update: ContextSearchConfigUpdate,
+    *,
+    current_enabled: bool,
+) -> ContextSearchConfigUpdate:
+    """Apply the #2144 owner rule and plan gate to a search-config update.
+
+    The twin of :func:`gate_content_chunks_change` without the store check
+    (the selector stores nothing). A request whose ``llm_selector_enabled``
+    differs from the stored value needs the context owner; one that omits it,
+    or sends the stored value, is not a change and the field is dropped from
+    the update. Where the deployment gates the selector by plan
+    (``LLM_SELECTOR_REQUIRE_PLAN``), turning it on also needs the plan's
+    feature and a free slot under its cap. Turning it off stays allowed.
+    Order when turning on: plan (403 ``FEAT-001``), owner (403 ``AUTH-101``),
+    cap (429 ``QUOTA-001``). The cap check takes the workspace's advisory
+    lock, held until the caller's transaction ends: the update must commit on
+    the same session with nothing committing in between.
+
+    Returns:
+        The update to apply (``update`` itself, or a copy without the flag).
+
+    Raises:
+        AuthorizationError: 403 when the flag changes and the caller is not
+            the context owner or a workspace owner/admin.
+        FeatureNotAvailableError: 403 (``FEAT-001``) when the change turns the
+            flag on and the plan lacks ``llm_selector`` (gated only).
+        QuotaExceededError: 429 (``QUOTA-001``) when the change turns the flag
+            on and the workspace is at ``max_llm_selector_contexts`` (gated
+            only).
+    """
+    if "llm_selector_enabled" not in update.model_fields_set:
+        return update
+    if update.llm_selector_enabled == current_enabled:
+        return ContextSearchConfigUpdate(
+            **update.model_dump(exclude_unset=True, exclude={"llm_selector_enabled"})
+        )
+    from services.llm_selector_policy import (
+        ensure_llm_selector_capacity,
+        ensure_llm_selector_plan,
+    )
+
+    turning_on = update.llm_selector_enabled is True
+    # Before the owner check: the answer does not depend on the caller.
+    if turning_on:
+        await ensure_llm_selector_plan(perm_service.db, context_id)
+    await check_llm_selector_change(perm_service, user_id, context_id)
+    # After it: an editor's 403 never takes the cap's lock.
+    if turning_on:
+        await ensure_llm_selector_capacity(perm_service.db, context_id)
+    return update

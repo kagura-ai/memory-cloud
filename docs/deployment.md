@@ -1961,6 +1961,40 @@ WHERE coalesce(plan_name, 'free') NOT IN ('basic', 'pro', 'promax')
    OR rn > CASE plan_name WHEN 'basic' THEN 1 WHEN 'pro' THEN 5 ELSE 20 END;
 ```
 
+### Recall LLM selector: opt-in, plan gate and bounds (#2144)
+
+`llm_selector_enabled` (per context, off by default; `update_search_config` or
+`PUT /api/v1/contexts/{id}/search-config`) opts a context in to the recall LLM
+selector: an MCP recall may send the page's summaries and attached content to
+the deployment's judge model (the `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` lane
+that `SUPERSEDE_VERIFY_MODE=llm` uses), which keeps the results that answer the
+query and cuts their content to verbatim passages. Changing the flag takes the
+context owner or a workspace owner/admin. **This release ships the flag, its
+plan gate and these settings only: nothing reads the flag at recall time yet**;
+the stage itself follows in a separate change.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `LLM_SELECTOR_REQUIRE_PLAN` | `false` | Gate the selector by plan, on the [content chunk](#content-chunk-vectors-as-a-plan-feature) shape. `false` keeps every workspace able to turn `llm_selector_enabled` on in any number of contexts, with no plan query. `true`: turning the flag on needs a plan with the `llm_selector` feature (M and above, `403` `FEAT-001`) and a free slot under the plan's `max_llm_selector_contexts` (S 0 / M 1 / L 5 / XL 20, provisional, `429` `QUOTA-001`, `quota_type: llm_selector_contexts`); turning it off is always allowed. Shown as `features.llm_selector_require_plan` in `/system/info`. |
+| `PLAN_<KEY>_MAX_LLM_SELECTOR_CONTEXTS` | tier value | Per-tier override of `max_llm_selector_contexts` (`PLAN_FREE_…`, `PLAN_BASIC_…`, `PLAN_PRO_…`, `PLAN_PROMAX_…`). Read only where `LLM_SELECTOR_REQUIRE_PLAN` is on; 0 on a tier without the `llm_selector` feature whatever the number. |
+| `LLM_SELECTOR_TIMEOUT_SECONDS` | `8.0` | Time limit of one selector call; past it the recall returns its unselected page. |
+| `LLM_SELECTOR_MAX_ROWS` | `10` | Rows of a recall page sent to the selector; rows after them are returned unchanged. |
+| `LLM_SELECTOR_MAX_PROMPT_CHARS` | `24000` | Characters of summaries and content one call may send; a larger page is returned unselected. |
+| `LLM_SELECTOR_MAX_CALLS_PER_DAY` | `2000` | Selector calls per workspace per UTC day, a counter separate from `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (recalls must not starve the judge); past it recalls return their unselected page. |
+
+With the gate on, a context whose workspace plan lacks the feature, or that
+ranks past the cap, keeps its stored flag but is treated as off. The contexts
+that stay active are the earliest-enabled ones
+(`context_search_configs.llm_selector_enabled_at`, then the context id). The
+admin plan change lists the contexts that go inactive
+(`llm_selector_deactivated`, also logged as `llm_selector_deactivated_by_plan`);
+an upgrade makes them active again. The search-config response reports
+`llm_selector_effective`, `llm_selector_limit`, `llm_selector_in_use`,
+`llm_selector_disabled_reason` and `llm_selector_can_change`; `get_context_info`
+reports `search_config.llm_selector_enabled` and `llm_selector_effective`.
+Migration `f06_2144_llm_selector` adds both columns (`BOOLEAN NOT NULL DEFAULT
+false`, metadata-only, and a nullable timestamp); no row is turned on.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score
@@ -2226,6 +2260,7 @@ Feature availability (the `features` set on each tier):
 | Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
 | Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
 | Content chunk vectors (`content_chunks`; contexts: `max_content_chunk_contexts` 0 / 1 / 5 / 20), only where `CONTENT_CHUNKS_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
+| Recall LLM selector (`llm_selector`; contexts: `max_llm_selector_contexts` 0 / 1 / 5 / 20, provisional), only where `LLM_SELECTOR_REQUIRE_PLAN` is on | – | ✓ | ✓ | ✓ |
 | Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
 
 **Block-new-only rule.** The three XL-only rows gate *creation* only. A
@@ -2292,6 +2327,7 @@ PLAN_PRO_MAX_CONTEXTS=50
 PLAN_PROMAX_MAX_CONTEXTS=2000
 PLAN_PRO_OWNED_WORKSPACE_GRANT=4      # L owners may own 1 + 4 = 5 workspaces
 PLAN_PROMAX_OWNED_WORKSPACE_GRANT=49  # XL owners may own 50
+PLAN_PRO_MAX_LLM_SELECTOR_CONTEXTS=10 # with LLM_SELECTOR_REQUIRE_PLAN=true (#2144)
 ```
 
 ### Migration `e95_1951_memories_ws_not_null` (#1951)
@@ -2404,6 +2440,7 @@ Current modes:
 | `resources` | `enforced` | `setup_resource` / new resource tokens are refused. |
 | `connectors` | `enforced` | `setup_connector` is refused. |
 | `content_chunks` | `conditional` | Turning `content_chunks_enabled` on is refused, and contexts past `max_content_chunk_contexts` are searched and written without chunks, **only** where `CONTENT_CHUNKS_REQUIRE_PLAN` is on; it defaults to off. |
+| `llm_selector` | `conditional` | Turning `llm_selector_enabled` on is refused, and contexts past `max_llm_selector_contexts` are treated as off, **only** where `LLM_SELECTOR_REQUIRE_PLAN` is on; it defaults to off. |
 
 The modes are a property of the **code**, not of a tier, so a
 `PLAN_<KEY>_FEATURES` override does not change them — it only moves which tiers

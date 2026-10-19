@@ -41,9 +41,11 @@ async def handle_update_search_config(
                 search_config_defaults,
             )
             from services.content_chunk_policy import content_chunks_effective
+            from services.llm_selector_policy import llm_selector_effective
             from services.permission_service import (
                 PermissionService,
                 gate_content_chunks_change,
+                gate_llm_selector_change,
             )
             from services.reranker_service import default_reranker_model_for
             from utils.exceptions import (
@@ -128,6 +130,9 @@ async def handle_update_search_config(
             # exclude_unset), and changing it is gated below.
             if "content_chunks_enabled" in args:
                 update_fields["content_chunks_enabled"] = args["content_chunks_enabled"]
+            # Issue #2144: the recall LLM selector opt-in, on the same terms.
+            if "llm_selector_enabled" in args:
+                update_fields["llm_selector_enabled"] = args["llm_selector_enabled"]
 
             # Validate via Pydantic (same as REST API)
             try:
@@ -173,6 +178,34 @@ async def handle_update_search_config(
                 await db.rollback()
                 return _tool_exception_response("update_search_config", gate_err)
 
+            # #2144: the same owner rule and plan gate for the recall LLM
+            # selector, after the chunk gate (a fixed order for the two
+            # per-workspace cap locks), like the REST twin.
+            try:
+                update_data = await gate_llm_selector_change(
+                    perm_service,
+                    user_id,
+                    ctx_uuid,
+                    update_data,
+                    current_enabled=config.llm_selector_enabled is True,
+                )
+            except AuthorizationError as perm_err:
+                await db.rollback()
+                return _error_response(
+                    "permission_denied",
+                    str(perm_err),
+                    required_role="owner",
+                    help=(
+                        "Ask the context owner or a workspace owner/admin to change "
+                        "llm_selector_enabled. Other search settings need only "
+                        "editor access."
+                    ),
+                )
+            except (FeatureNotAvailableError, QuotaExceededError) as gate_err:
+                # The plan lacks llm_selector, or the workspace is at its cap.
+                await db.rollback()
+                return _tool_exception_response("update_search_config", gate_err)
+
             # Apply via repository (same as REST API)
             config = await repo.update(ctx_uuid, update_data)
 
@@ -214,6 +247,14 @@ async def handle_update_search_config(
                                     db,
                                     ctx_uuid,
                                     stored=config.content_chunks_enabled is True,
+                                ),
+                                "llm_selector_enabled": config.llm_selector_enabled,
+                                # #2144: whether recall acts on the stored flag
+                                # (the plan, where the deployment gates it).
+                                "llm_selector_effective": await llm_selector_effective(
+                                    db,
+                                    ctx_uuid,
+                                    stored=config.llm_selector_enabled is True,
                                 ),
                             },
                         }

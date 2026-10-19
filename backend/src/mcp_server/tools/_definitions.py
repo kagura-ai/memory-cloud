@@ -1096,11 +1096,11 @@ Returns: {status, message, merged, source_id, target_id, delete_source}. source_
         # =================================================================
         {
             "name": "update_search_config",
-            "description": """Tune a context's search: hybrid weights, reranker, reinforce re-rank and query routing. Context owner or editor only (changing content_chunks_enabled: context owner or workspace owner/admin). semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
+            "description": """Tune a context's search: hybrid weights, reranker, reinforce re-rank and query routing. Context owner or editor only (changing content_chunks_enabled or llm_selector_enabled: context owner or workspace owner/admin). semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
 
 Example (keyless local reranking): use_rerank=true, reranker_provider='self_hosted' — reranker_model may be omitted.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, content_chunks_enabled, content_chunks_effective}}.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, content_chunks_enabled, content_chunks_effective, llm_selector_enabled, llm_selector_effective}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1155,6 +1155,10 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "content_chunks_enabled": {
                         "type": "boolean",
                         "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Turning it on also queues existing long memories for chunking (in the background); turning it off deletes the chunks. When on, memory content (not only summaries) is sent to the embedding and rerank providers. Changing it takes the context owner or a workspace owner/admin; sending the stored value is a no-op. Needs the Qdrant vector store: refused on LanceDB. Where the deployment gates it by plan, turning it on also needs a plan with content chunks (feature_not_available) and a free slot under the plan's context cap (quota_exceeded); content_chunks_effective in the result says whether it is acted on.",
+                    },
+                    "llm_selector_enabled": {
+                        "type": "boolean",
+                        "description": "A small model (the deployment's judge model) keeps only the results that answer the query and cuts their content to the verbatim passages that do; off by default. Memory text of this context is then sent to that model at recall time. Context owner or workspace owner/admin; where gated by plan, needs the llm_selector feature and a free slot (llm_selector_effective says whether it is acted on).",
                     },
                 },
             },

@@ -218,6 +218,7 @@ def _mcp_config(enabled: bool):
         reinforce_max_boost=0.15,
         reinforce_require_host_arbitration=False,
         routing_mode="off",
+        llm_selector_enabled=False,  # #2144: every ORM row carries it
     )
 
 

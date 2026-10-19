@@ -139,6 +139,16 @@ async def handle_get_context_info(
                     )
                 )
                 search_config = config_result.scalar_one_or_none()
+                # #2144: the recall LLM selector, stored and acted on (one
+                # fail-closed read; none with the flag off or the gate off).
+                from services.llm_selector_policy import llm_selector_effective
+
+                selector_stored = (
+                    search_config is not None and search_config.llm_selector_enabled is True
+                )
+                selector_effective = await llm_selector_effective(
+                    db, current_context.id, stored=selector_stored
+                )
 
                 context_data = {
                     "id": str(current_context.id),
@@ -169,6 +179,8 @@ async def handle_get_context_info(
                         or "voyage",
                         "reranker_model": (search_config.reranker_model if search_config else None)
                         or "rerank-2",
+                        "llm_selector_enabled": selector_stored,
+                        "llm_selector_effective": selector_effective,
                     },
                 }
 

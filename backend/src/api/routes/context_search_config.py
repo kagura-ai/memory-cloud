@@ -23,10 +23,17 @@ from services.content_chunk_policy import (
     content_chunks_gated,
     content_chunks_status,
 )
+from services.llm_selector_policy import (
+    LLMSelectorStatus,
+    llm_selector_gated,
+    llm_selector_status,
+)
 from services.permission_service import (
     PermissionService,
     check_content_chunks_change,
+    check_llm_selector_change,
     gate_content_chunks_change,
+    gate_llm_selector_change,
 )
 from utils.exceptions import AuthorizationError, MemoryCloudException
 from utils.logger import get_logger
@@ -51,7 +58,8 @@ async def build_search_config_response(
     ``content_chunks_backfill_pending`` is counted only while the flag is on.
     #2103 / #2080 add whether the chunks are active, the plan's cap, the
     workspace's count and why the toggle is disabled. They inform the UI —
-    the PUT checks all of it again.
+    the PUT checks all of it again. #2144 adds the same fields for the recall
+    LLM selector (``llm_selector_*``), on the same owner rule.
     """
     try:
         await check_content_chunks_change(perm_service, user_id, context_id)
@@ -78,6 +86,7 @@ async def build_search_config_response(
         )
     can_change = owner and (stored or chunks.can_enable)
     reason = chunks.reason or (None if owner else "permission")
+    selector = await _llm_selector_fields(repo, context_id, config, owner=owner)
     model = config.embedding_model
     provider = (
         EMBEDDING_MODEL_REGISTRY[model][1]
@@ -99,8 +108,46 @@ async def build_search_config_response(
             "content_chunks_limit": chunks.limit,
             "content_chunks_in_use": chunks.in_use or 0,
             "content_chunks_disabled_reason": reason,
+            **selector,
         }
     )
+
+
+async def _llm_selector_fields(
+    repo: ContextSearchConfigRepository,
+    context_id: UUID,
+    config: ContextSearchConfig,
+    *,
+    owner: bool,
+) -> dict[str, object]:
+    """The server-computed ``llm_selector_*`` response fields (#2144).
+
+    Read in a savepoint like the chunk fields: a failed count degrades to the
+    stored flag without counts (inactive / not enable-able where gated)
+    instead of turning a committed PUT into a 500. The selector's owner rule
+    is the chunk one (``check_llm_selector_change`` = ``check_context_owner``),
+    so the caller's answer to it is reused.
+    """
+    stored = config.llm_selector_enabled is True
+    try:
+        async with repo.db.begin_nested():
+            status = await llm_selector_status(
+                repo.db, context_id, stored=stored, include_usage=True
+            )
+    except Exception as e:  # noqa: BLE001 — informational fields only
+        logger.warning(
+            "llm_selector_status_load_failed",
+            context_id=str(context_id),
+            error_class=type(e).__name__,
+        )
+        status = LLMSelectorStatus(stored=stored, gated=llm_selector_gated())
+    return {
+        "llm_selector_effective": status.effective,
+        "llm_selector_limit": status.limit,
+        "llm_selector_in_use": status.in_use or 0,
+        "llm_selector_disabled_reason": status.reason or (None if owner else "permission"),
+        "llm_selector_can_change": owner and (stored or status.can_enable),
+    }
 
 
 @router.get("/{context_id}/search-config", response_model=ContextSearchConfigResponse)
@@ -173,10 +220,11 @@ async def update_context_search_config(
     Validates that weights sum to 1.0 and model matches provider.
 
     Context owners and editors may change every field except
-    ``content_chunks_enabled``: changing that one (on or off) takes the context
-    owner or a workspace owner/admin, since turning it on sends memory content
-    to the embedding and rerank providers (#2015). Sending the stored value is
-    not a change and is allowed.
+    ``content_chunks_enabled`` and ``llm_selector_enabled``: changing either
+    (on or off) takes the context owner or a workspace owner/admin, since
+    turning it on sends memory content to the embedding and rerank providers
+    (#2015) or to the deployment's judge model at recall time (#2144). Sending
+    the stored value is not a change and is allowed.
 
     Args:
         context_id: Context UUID
@@ -196,7 +244,10 @@ async def update_context_search_config(
             without ``content_chunks`` (only where CONTENT_CHUNKS_REQUIRE_PLAN
             is on, #2103)
         QuotaExceededError: 429 ``QUOTA-001`` when turning it on with the
-            workspace at the plan's ``max_content_chunk_contexts`` (likewise)
+            workspace at the plan's ``max_content_chunk_contexts`` (likewise).
+            The same 403 / 429 for ``llm_selector_enabled`` against
+            ``llm_selector`` / ``max_llm_selector_contexts``, only where
+            LLM_SELECTOR_REQUIRE_PLAN is on (#2144)
     """
     user_id = user.get("user_id")
     logger.info(
@@ -229,6 +280,15 @@ async def update_context_search_config(
             context_id,
             update_data,
             current_enabled=current_enabled,
+        )
+        # #2144: the same rule for the recall LLM selector, after the chunk
+        # gate (a fixed order for the two per-workspace cap locks).
+        update_data = await gate_llm_selector_change(
+            perm_service,
+            user_id,
+            context_id,
+            update_data,
+            current_enabled=current is not None and current.llm_selector_enabled is True,
         )
         config = await repo.update(context_id, update_data)
 
@@ -284,6 +344,7 @@ async def reset_context_search_config(
       #1572; unset: false / 'voyage' / 'rerank-2')
     - content_chunks_enabled: false — while it is on, that is a change and takes
       the context owner or a workspace owner/admin (#2015)
+    - llm_selector_enabled: false — on the same rule (#2144)
 
     Args:
         context_id: Context UUID
@@ -294,8 +355,9 @@ async def reset_context_search_config(
         Reset ContextSearchConfigResponse
 
     Raises:
-        HTTPException: 403 if content_chunks_enabled is on and the caller is
-            not the context owner, 404 if context not found, 500 on error
+        HTTPException: 403 if content_chunks_enabled or llm_selector_enabled
+            is on and the caller is not the context owner, 404 if context not
+            found, 500 on error
     """
     user_id = user.get("user_id")
     logger.info("reset_search_config_requested", user_id=user_id, context_id=str(context_id))
@@ -313,7 +375,15 @@ async def reset_context_search_config(
         chunks_on = current is not None and current.content_chunks_enabled is True
         if chunks_on:
             await check_content_chunks_change(perm_service, user_id, context_id)
-        config = await repo.reset_to_default(context_id, reset_content_chunks=chunks_on)
+        # #2144: the selector on the same rule.
+        selector_on = current is not None and current.llm_selector_enabled is True
+        if selector_on:
+            await check_llm_selector_change(perm_service, user_id, context_id)
+        config = await repo.reset_to_default(
+            context_id,
+            reset_content_chunks=chunks_on,
+            reset_llm_selector=selector_on,
+        )
 
         logger.info("reset_search_config_success", user_id=user_id, context_id=str(context_id))
 
