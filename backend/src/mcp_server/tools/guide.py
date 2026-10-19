@@ -349,7 +349,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', "
         "re_embedded, scope, version, persistence?: {scope, committed, promotes_via, "
         "consolidation_archive_min_age_days, detail}, supersede_candidate_dismissed?, "
-        "lint?: [{code, hint, subject?}], context_id, context_name, "
+        "lint?: [{code, hint, subject?}], session_id?, context_id, context_name, "
         "context_display_name, context_is_private, context_is_locked}. re_embedded is "
         "true only when summary, context_summary or content changed. Keys marked ? "
         "are omitted, never null: persistence and lint as in remember() (lint "
@@ -368,8 +368,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "importance, weight, created_at}], outgoing_has_more, incoming_links: [...], "
         "incoming_has_more, supersede_candidate}}. updated_at is a staleness cue. "
         "supersede_candidate is null, or {memory_id, summary, similarity, "
-        "detected_at} of an OLDER near-duplicate this memory likely supersedes — a "
-        "suggestion only. Accept it with create_edge(source_id=<this memory_id>, "
+        "detected_at, verified?} of an OLDER near-duplicate this memory likely supersedes — a "
+        "suggestion only (verified: true when the deployment's judge confirmed it is an "
+        "update of the same fact). Accept it with create_edge(source_id=<this memory_id>, "
         'target_id=<supersede_candidate.memory_id>, edge_type="supersedes") — outside '
         'the core profile, describe_tools(["create_edge"]) has its schema; reject '
         "a deliberate pair with update_memory(dismiss_supersede_candidate=true)."

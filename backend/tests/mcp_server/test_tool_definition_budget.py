@@ -77,6 +77,10 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # #2043 list_revisions and #2044 rollback_session joined, and each trimmed the
 # reference / changes_since text it added so the core list stays at its
 # ceiling: full list 109,336, core list 41,499.
+# #2117 moved detail out of the longest core descriptions (update_memory,
+# reference, changes_since, list, remember_batch, bootstrap) into their guide
+# topics and wrote the context envelope as context_{...}: full list 106,299,
+# core list 38,462 — about 3,000 of headroom under an unchanged ceiling.
 FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session joined
 # #1973 added create_context / update_context / delete_context: core list 39,575.
 CORE_LIST_BUDGET = 41_500  # (#1973) 21 core tools

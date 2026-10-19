@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. summary_truncated + summary_original_length: the summary was cut to 500 chars. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (limit, actual: the memory is over 1,000,000 chars — split it), validation_error.
+Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars — split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -76,7 +76,7 @@ Manual: guide(["remember"]).""",
                     "dedupe": {
                         "type": "string",
                         "enum": ["suggest", "check", "off"],
-                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest for this memory (permanent). Manual: guide(['remember']).",
+                        "description": "suggest (default): write, flag a near-duplicate later. check: a near-duplicate comes back as duplicate_candidate and nothing is written. off: never suggest for this memory (permanent).",
                     },
                     "summary": {
                         "type": "string",
@@ -119,16 +119,16 @@ Manual: guide(["remember"]).""",
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Target context UUID from list_contexts() (e.g. '550e8400-e29b-41d4-a716-446655440000'). Do NOT guess or fabricate IDs.",
+                        "description": "Target context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "source_uri": {
                         "type": "string",
-                        "description": "Origin URI, max 2048 chars (e.g. 'file:///path/note.md', 'vault://my-vault/note').",
+                        "description": "Origin URI, max 2048 chars.",
                     },
                     "source_type": {
                         "type": "string",
                         "enum": ["file", "url", "vault", "api", "manual"],
-                        "description": "Origin: 'file' local file, 'url' web page, 'vault' Obsidian vault, 'api' API-ingested, 'manual' user-entered.",
+                        "description": "Origin of the memory.",
                     },
                     "linked_memory_ids": {
                         "type": "array",
@@ -150,8 +150,8 @@ Manual: guide(["remember"]).""",
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments except context_id, dedupe, tags_normalize and verbose (the batch's apply) and is validated and limited like a single remember; an unknown item key is that item's invalid_argument error. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item, or a dedupe='check' candidate, rolls the batch back and nothing is written.
-Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, session_id?, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
+            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments and is validated like a single remember. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
                 "type": "object",
@@ -166,7 +166,7 @@ Manual: guide(["remember_batch"]).""",
                         "minItems": 1,
                         "maxItems": 50,
                         "items": {"type": "object"},
-                        "description": "One object per memory with remember's arguments (summary, content, type required; tags, importance, context_summary, details, supersedes, ... optional). No context_id, dedupe, tags_normalize or verbose per item; undeclared keys are refused.",
+                        "description": "One object per memory with remember's arguments (summary, content, type required). No context_id, dedupe, tags_normalize or verbose per item; undeclared keys are refused.",
                     },
                     "atomic": {
                         "type": "boolean",
@@ -191,9 +191,9 @@ Manual: guide(["remember_batch"]).""",
         },
         {
             "name": "update_memory",
-            "description": """Update an existing memory in place (memory_id) or upsert by external_id (details.resource_id: found → replaced under a NEW memory_id, not found → created; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
-SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
-Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, session_id?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Errors: memory_not_found, validation_error, version_conflict (current_version; nothing written).
+            "description": """Update a memory in place (memory_id) or upsert by external_id (not found → created; found → replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
+SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale.
+Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",
@@ -219,7 +219,7 @@ Manual: guide(["update_memory"]).""",
                     },
                     "dismiss_supersede_candidate": {
                         "type": "boolean",
-                        "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed. To accept instead: create_edge(edge_type='supersedes'), a tool outside the core profile — describe_tools([\"create_edge\"]) has its schema.",
+                        "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed.",
                     },
                     "summary": {
                         "type": "string",
@@ -272,7 +272,7 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
 Tip: query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Compact first; reference(memory_id) for one hit, verbosity='full' for tags / context_summary. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, status, results: [{memory_id, summary, summary_cut?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): reject with update_memory(dismiss_supersede_candidate=true); accept with create_edge(edge_type='supersedes'), a tool outside the core profile — describe_tools([\"create_edge\"]) has its schema.
+Returns: {confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, status, results: [{memory_id, summary, summary_cut?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): reject with update_memory(dismiss_supersede_candidate=true); accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])).
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -312,7 +312,7 @@ Manual: guide(["recall"]).""",
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Context UUID from list_contexts() (e.g. '550e8400-e29b-41d4-a716-446655440000'). Do NOT guess or fabricate IDs. Provide context_id OR context_ids.",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs. Provide context_id OR context_ids.",
                     },
                     "context_ids": {
                         "type": "array",
@@ -346,8 +346,8 @@ Manual: guide(["recall"]).""",
         {
             "name": "reference",
             "readOnly": True,
-            "description": """Read one memory in full (summary, context_summary, content, details, provenance, links) by id, within max_chars. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. version=N reads an earlier version (historical: true, current_version, unavailable_fields? if erased; no links or supersede_candidate); list_revisions lists the versions (outside the core profile: describe_tools(["list_revisions"])). supersede_candidate names an older near-duplicate (a suggestion; verified: true when the deployment's judge confirmed it is an update of the same fact): accept with create_edge(edge_type="supersedes"), a tool outside the core profile — describe_tools(["create_edge"]) has its schema. Oversized content arrives as a slice (content_truncated, content_next_offset) or content_omitted; oversized details / context arrive as details_json / context_json pages with *_next_offset, or <field>_omitted; continue with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error (no such version; current_version).
+            "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])). Oversized fields page via the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -442,7 +442,7 @@ Returns: {status, memory_id, current_version, revisions: [{version, kind, at, ch
             "name": "recall_upcoming",
             "readOnly": True,
             "description": """List Time Memories (type='time') whose scheduled window overlaps a range, soonest first — a deterministic time query, not search (topics: recall()). Create one with remember(type='time', details={'trigger': {'year': 2026, 'month': 7}}).
-Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, context_name, context_display_name, context_is_private, context_is_locked}; with include_details=true items carry details instead of trigger (details_omitted + details_total_chars past 20000 chars).
+Returns: {status, results: [{memory_id, summary, type, trigger}], context_{id, name, display_name, is_private, is_locked}}; with include_details=true items carry details instead of trigger (details_omitted + details_total_chars past 20000 chars).
 Manual: guide(["time-memories"]).""",
             "inputSchema": {
                 "type": "object",
@@ -514,7 +514,7 @@ Returns: {status, results: [{memory_id, summary, type, location, distance_m}], c
             "name": "load_pinned",
             "readOnly": True,
             "description": """Load a context's pinned memories (delivery_mode='always'): the complete, unranked set on every call — the deterministic counterpart to recall(). Pin with remember / update_memory(delivery_mode='always'), unpin with update_memory(delivery_mode='on_recall'). Items are summaries; reference(memory_id) for full content.
-Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_id, context_name, context_display_name, context_is_private, context_is_locked}; truncated=true when more exist than cap or max_chars allow.
+Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_{id, name, display_name, is_private, is_locked}}; truncated=true when more exist than cap or max_chars allow.
 Manual: guide(["load_pinned"]).""",
             "inputSchema": {
                 "type": "object",
@@ -812,7 +812,7 @@ Returns: {status, message}.""",
         {
             "name": "get_context_info",
             "readOnly": True,
-            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. bootstrap(context_id) returns this block plus the pinned set and recent changes in one call at session start; call this alone after switching contexts or to re-read the block. list_contexts() only maps names to ids.
+            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. At session start bootstrap(context_id) returns this block and more.
 Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?}, instructions, guardrails?}.
 Manual: guide(["get_context_info"]).""",
             "inputSchema": {
@@ -838,7 +838,7 @@ Manual: guide(["get_context_info"]).""",
         {
             "name": "list_contexts",
             "readOnly": True,
-            "description": """List the contexts you can access as a slim name→id directory, most recently used first. Every other tool needs a context_id: call this first. Narrow with name_contains; include_summary=true to choose between a few; get_context_info(context_id) for one context's details.
+            "description": """List the contexts you can access as a slim name→id directory, most recently used first. Every other tool needs a context_id: call this first. Narrow with name_contains; get_context_info(context_id) for one context's details.
 Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, has_more, next_cursor, hint?}; pass next_cursor as cursor for the next page.
 Manual: guide(["list_contexts"]).""",
             "inputSchema": {
@@ -921,7 +921,7 @@ Manual: guide(["list_tags"]).""",
             "name": "create_context",
             "description": """Create a context — a separate namespace for memories (per project or topic) — in the current workspace. Workspace owner or admin only: owners can create private and shared contexts, admins shared only.
 
-Returns: {status, message, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Pass context_id to the other tools.""",
+Returns: {status, message, context_{id, name, display_name, is_private, is_locked}}. Pass context_id to the other tools.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["name"],
@@ -975,7 +975,7 @@ Returns: {status, message, context_id, context_name, context_display_name, conte
             "name": "update_context",
             "description": """Update a context's settings. display_name and description need the context editor role; every other field is owner-only. Read the current values with get_context_info().
 
-Returns: {status, message, updated_fields, context_id, context_name, context_display_name, context_is_private, context_is_locked}.""",
+Returns: {status, message, updated_fields, context_{id, name, display_name, is_private, is_locked}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1966,8 +1966,8 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, url
         {
             "name": "list",
             "readOnly": True,
-            "description": """List a context's live memories that match exact filters — every match, no ranking, stable pages. Use it for "which memories of type task are still open?"; recall() is for meaning. Filters take recall's vocabulary (type, scope, tags + tags_match/tags_normalize, importance, created_/updated_ after/before, source_type, source_uri_prefix, trust_tier) plus details.<key> equality, e.g. {"type": "task", "details.status": "open"}.
-Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
+            "description": """List a context's live memories that match exact filters — every match, no ranking, stable pages, e.g. {"type": "task", "details.status": "open"}. recall() is for meaning.
+Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["list"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2016,9 +2016,8 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory omit summary: memory_id / kind / at only, plus superseded_by on a superseded event. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
-With session_id: only that session's own writes (every edit, restored too) — your sessions, or any for a context owner.
-Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
+            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (no summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes.
+Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, truncated?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2070,8 +2069,8 @@ Manual: guide(["changes_since"]).""",
         {
             "name": "bootstrap",
             "readOnly": True,
-            "description": """Start an interactive session on one context in ONE call. Composes the context block, the pinned memories, upcoming Time Memories and what changed since a time, plus the context's guardrails — each bounded like its standalone tool, fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
-Returns: {status, degraded, context, instructions, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. A failed component is {status: 'error', error}; a cut changes page's next_cursor continues from the last change kept.
+            "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time — fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
+Returns: {status, degraded, context, instructions, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
             "inputSchema": {
                 "type": "object",
