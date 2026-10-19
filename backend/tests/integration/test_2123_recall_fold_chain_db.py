@@ -77,7 +77,7 @@ def quiet_write():
 
 async def _scope(db) -> tuple[str, Workspace, Context]:
     owner = f"fold_{uuid4().hex[:8]}"
-    db.add(User(email=f"{owner}@test.example", user_id=owner, role="user"))
+    db.add(User(email=f"{owner}@test.example", user_id=owner, name=owner, role="user"))
     await db.flush()
     ws = Workspace(
         id=uuid4(),
