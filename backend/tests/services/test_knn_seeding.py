@@ -2424,15 +2424,18 @@ class TestLlmModeClearsStaleCandidates:
         return db
 
     @staticmethod
-    async def _run(stored, top_score, judge_result=None):
+    async def _run(stored, top_score, judge_result=None, *, with_self=True):
         memory = TestSupersedeVerdictAfterAnEdit._orm_memory(stored)
         neighbour = uuid4()
         db = TestLlmModeClearsStaleCandidates._db(str(neighbour))
         config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        hits = TestSupersedeVerdictAfterAnEdit._hits(memory, (neighbour, top_score))
+        if not with_self:
+            hits = hits[1:]
         log = await TestSupersedeVerdictAfterAnEdit._seed(
             memory,
             db,
-            TestSupersedeVerdictAfterAnEdit._hits(memory, (neighbour, top_score)),
+            hits,
             config=config,
             judge=AsyncMock(return_value=judge_result),
         )
@@ -2480,3 +2483,24 @@ class TestLlmModeClearsStaleCandidates:
 
         assert "supersede_candidate_cleared_no_neighbour" not in events
         assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_results_without_the_memory_itself_clear_nothing(self):
+        """#2059: a search that did not return the memory's own point is no
+        evidence that the near-duplicate is gone."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+
+        memory, events = await self._run(stored, 0.78, with_self=False)
+
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_the_085_gate_reads_the_stored_rounding(self):
+        """Raw 0.84996 is stored as 0.85, so without a verdict it is stored
+        unverified like any pair at 0.85 (the read path sees 0.85)."""
+        memory, events = await self._run(None, 0.84996)
+
+        assert "supersede_candidate_skipped_unjudged_low_similarity" not in events
+        assert memory.supersede_candidate["similarity"] == 0.85
+        assert "verification" not in memory.supersede_candidate

@@ -228,7 +228,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "folded under this (newest) row: each pair was confirmed by the deployment's "
         "judge (supersede_candidate verified: true) and both versions were in this "
         "search's candidates. Ids are newest first; reference(memory_id) reads one. "
-        "Nothing folds on a deployment without the judge.\n"
+        "Nothing folds without a judge verdict.\n"
         "• explore_hints (include_explore_hints=true) — up to 3 seed memories for a "
         "follow-up explore(), reason top_result | high_centrality | "
         "unexplored_neighbor. include_superseded=true also returns memories shadowed "

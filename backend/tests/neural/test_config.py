@@ -737,3 +737,11 @@ class TestSupersedeSuggestThresholdLlm:
         finally:
             NeuralMemoryConfig.invalidate_cache()
         assert config.supersede_suggest_threshold_llm == 0.7
+
+    def test_the_ceiling_is_the_unverified_threshold(self):
+        """The two 0.85s must move together: above the unverified threshold
+        the judge mode would detect LESS than the off mode."""
+        from neural.config import SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX
+        from services.memory_service import _SUPERSEDE_SUGGEST_THRESHOLD
+
+        assert SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX == _SUPERSEDE_SUGGEST_THRESHOLD

@@ -3726,7 +3726,7 @@ class MemoryService:
             for target_id in targets:
                 if target_id in pool:
                     reached_by.setdefault(target_id, []).append(source_id)
-        heads = [memory_id for memory_id in pool if memory_id not in reached_by]
+        heads = {memory_id for memory_id in pool if memory_id not in reached_by}
 
         def newest_key(memory_id: UUID) -> tuple[float, str]:
             created_at = pool[memory_id].created_at
@@ -7819,8 +7819,13 @@ async def _detect_supersede_candidate(
     config: Any,
     workspace_id_str: str,
     context_id_str: str,
+    clear_allowed: bool = False,
 ) -> None:
     """Store ``raw_top`` as ``memory``'s supersede suggestion (#1403, #2016).
+
+    ``clear_allowed`` (#2123): the search returned this memory's own point,
+    so a missing near-duplicate is evidence (#2059) — only then may the
+    judge-mode skip below 0.85 clear a suggestion stored at 0.85 or above.
 
     ``raw_top`` is the RAW top-1 neighbour (excluding self) at or above
     ``_SUPERSEDE_SUGGEST_THRESHOLD`` (#2123: or the lower
@@ -7955,7 +7960,8 @@ async def _detect_supersede_candidate(
             if verification is not None:
                 candidate["verification"] = verification
 
-        if raw_top_score < _SUPERSEDE_SUGGEST_THRESHOLD:
+        # Compared as stored (4 decimals): the read path tests the stored value.
+        if round(raw_top_score, 4) < _SUPERSEDE_SUGGEST_THRESHOLD:
             # #2123: the pair is a candidate only because the judge mode
             # lowered the threshold. Without the judge's answer it would be an
             # unverified suggestion below the precision 0.85 was chosen for;
@@ -7975,7 +7981,10 @@ async def _detect_supersede_candidate(
                 # stored there (an earlier text, or before the judge was on)
                 # is cleared as #2059 clears it in the off mode — a clear
                 # margin below, so a pair hovering at 0.85 is not flapped.
-                if raw_top_score < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA:
+                if (
+                    clear_allowed
+                    and raw_top_score < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA
+                ):
                     stored_similarity = (
                         memory.supersede_candidate.get("similarity")
                         if isinstance(memory.supersede_candidate, dict)
@@ -8224,6 +8233,7 @@ async def _create_knn_seed_edges(
                     config=config,
                     workspace_id_str=workspace_id_str,
                     context_id_str=context_id_str,
+                    clear_allowed=len(non_self) < len(candidates),
                 )
             elif len(non_self) < len(candidates) and (
                 raw_top is None
