@@ -63,3 +63,28 @@ def select_default_context(query_string: bytes | str | None) -> DefaultContextSe
         return DefaultContextSelection("url", UUID(value.strip()))
     except ValueError:
         return DefaultContextSelection("invalid", raw_length=len(value))
+
+
+ContextSource = Literal["url", "binding"]
+
+
+@dataclass(frozen=True)
+class DefaultContext:
+    """The context a call without ``context_id`` runs in, and where it came from."""
+
+    context_id: UUID
+    source: ContextSource
+
+
+async def resolve_default_context(
+    selection: DefaultContextSelection | None,
+) -> DefaultContext | None:
+    """The connection default for this request, or ``None``.
+
+    ``url`` → its UUID (no I/O). Anything else → no default, and the call
+    fails ``context_id_required`` as before. The caller handles ``invalid``
+    before asking.
+    """
+    if selection is not None and selection.mode == "url" and selection.context_id is not None:
+        return DefaultContext(selection.context_id, "url")
+    return None

@@ -349,4 +349,4 @@ class TestListTagsSchema:
         assert prop["items"] == {"type": "string", "maxLength": 200}
 
     def test_with_tags_is_optional(self):
-        assert self._schema()["required"] == ["context_id"]
+        assert self._schema()["required"] == []  # #2125: context_id may come from ?context=

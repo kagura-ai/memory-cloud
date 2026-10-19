@@ -233,7 +233,7 @@ def test_definition_is_read_only_and_sits_after_load_pinned():
     assert names.index("load_guardrails") == names.index("load_pinned") + 1
     tool = _tool("load_guardrails")
     assert tool["readOnly"] is True
-    assert tool["inputSchema"]["required"] == ["context_id"]
+    assert tool["inputSchema"]["required"] == []  # #2125: context_id may come from ?context=
     assert set(tool["inputSchema"]["properties"]) == {"context_id", "cap", "max_chars"}
     assert tool["inputSchema"]["additionalProperties"] is False
 

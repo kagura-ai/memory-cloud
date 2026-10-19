@@ -63,7 +63,7 @@ Returns: {status, memory_id, scope, version, persistence?: {scope, committed, pr
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["summary", "content", "type", "context_id"],
+                "required": ["summary", "content", "type"],
                 "properties": {
                     "verbose": {
                         "type": "boolean",
@@ -186,7 +186,7 @@ Manual: guide(["remember_batch"]).""",
                         "description": "true keeps persistence.detail on each item (default false).",
                     },
                 },
-                "required": ["context_id", "items"],
+                "required": ["items"],
             },
         },
         {
@@ -197,7 +197,7 @@ Returns: {status, memory_id, operation, re_embedded, scope, version, persistence
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "verbose": {
                         "type": "boolean",
@@ -351,7 +351,7 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["memory_id", "context_id"],
+                "required": ["memory_id"],
                 "properties": {
                     "memory_id": {
                         "type": "string",
@@ -407,7 +407,7 @@ Manual: guide(["reference"]).""",
 Returns: {status, memory_id, current_version, revisions: [{version, kind, at, changed_fields, writer, by_you, agent_id?, session_id?}], count, has_more, next_cursor, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. by_you: you wrote it; agent_id / session_id show on your own events only. Errors: memory_not_found (also once forgotten).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["memory_id", "context_id"],
+                "required": ["memory_id"],
                 "properties": {
                     "memory_id": {
                         "type": "string",
@@ -446,7 +446,7 @@ Returns: {status, results: [{memory_id, summary, type, trigger}], context_{id, n
 Manual: guide(["time-memories"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -480,7 +480,7 @@ Manual: guide(["time-memories"]).""",
 Returns: {status, results: [{memory_id, summary, type, location, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. location is the memory's details.location. With include_details=true each item carries the full details object instead (later items get details_omitted + details_total_chars past 20000 characters); reference(memory_id) reads one memory in full.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id", "lat", "lon"],
+                "required": ["lat", "lon"],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -518,7 +518,7 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
 Manual: guide(["load_pinned"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -546,7 +546,7 @@ Manual: guide(["load_pinned"]).""",
 Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists. Over max_chars: context_summary goes first (context_summary_omitted), then pinned, then tool_triggered items (*_truncated).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -574,7 +574,7 @@ Returns: {status, deleted_count, memory_ids, session_id?, context_id, context_na
 Manual: guide(["forget"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "memory_id": {
                         "type": "string",
@@ -605,7 +605,7 @@ Returns: {status, exploration: {seed_memory: {memory_id, summary, type}, related
 Manual: guide(["explore"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["memory_id", "context_id"],
+                "required": ["memory_id"],
                 "properties": {
                     "memory_id": {
                         "type": "string",
@@ -645,7 +645,7 @@ Manual: guide(["explore"]).""",
 Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count, outgoing_has_more, incoming_has_more}. Heaviest first; a *_has_more of true means more edges exist in that direction — raise min_weight or narrow edge_types.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["memory_id", "context_id"],
+                "required": ["memory_id"],
                 "properties": {
                     "memory_id": {
                         "type": "string",
@@ -687,7 +687,7 @@ If the (source, target) pair already exists (it is unique per user):
 Returns: {status, operation: 'created'|'updated'|'unchanged', edge: {source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}, previous?}.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["source_id", "target_id", "context_id"],
+                "required": ["source_id", "target_id"],
                 "properties": {
                     "source_id": {
                         "type": "string",
@@ -744,7 +744,7 @@ Returns: {status, operation: 'created'|'updated'|'unchanged', edge: {source_id, 
 Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}}.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["source_id", "target_id", "context_id"],
+                "required": ["source_id", "target_id"],
                 "properties": {
                     "source_id": {
                         "type": "string",
@@ -789,7 +789,7 @@ Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, or
 Returns: {status, message}.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["source_id", "target_id", "context_id"],
+                "required": ["source_id", "target_id"],
                 "properties": {
                     "source_id": {
                         "type": "string",
@@ -817,7 +817,7 @@ Returns: {status, context: {id, name, display_name, summary, usage_guide, is_pri
 Manual: guide(["get_context_info"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "include_details": {
                         "type": "boolean",
@@ -838,7 +838,7 @@ Manual: guide(["get_context_info"]).""",
         {
             "name": "list_contexts",
             "readOnly": True,
-            "description": """List the contexts you can access as a slim name→id directory, most recently used first. Every other tool needs a context_id: call this first. Narrow with name_contains; get_context_info(context_id) for one context's details.
+            "description": """List the contexts you can access as a slim name→id directory, most recently used first. Other tools need context_id unless the URL sets ?context=. Narrow with name_contains; get_context_info(context_id) for one context's details.
 Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, has_more, next_cursor, hint?}; pass next_cursor as cursor for the next page.
 Manual: guide(["list_contexts"]).""",
             "inputSchema": {
@@ -883,7 +883,7 @@ Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], 
 Manual: guide(["list_tags"]).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1175,7 +1175,7 @@ Returns: {status, plan, memories: {used, limit, percentage}, contexts: {used, li
 Returns: {status, reports: [{report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, llm_call_failures}], count}. llm_call_failures is the magnitude behind a 'degraded' / 'failed' run status.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1248,7 +1248,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
 Returns: {status: dry_run|rolled_back|in_progress, session_id, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, updated_restored, skipped, failed, chunks_requeued, points_requeued, skipped_items, errors}, totals?, context_id, ...}. Errors: session_not_found (also for another principal's session), already_rolled_back, partial_rollback (summary lists what was reversed; call again to retry the failed items).""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id", "session_id"],
+                "required": ["session_id"],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1628,7 +1628,7 @@ Returns (dry_run=true): {status, dry_run, memory_count, cluster_count_estimate, 
 Returns (dry_run=false): {status, run_id, started_at} — here status is the run's own status, not 'success'.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1697,7 +1697,7 @@ Returns: {status, run_id, workspace_id, context_id, triggered_by, started_at, fi
 Returns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, error_truncated?, cancellation_reason}], next_cursor}. error is a 300-character preview (error_truncated: true when cut; get_analysis has it whole). A page stops at 20,000 characters. The cost_* keys are absent when the deployment disables cost display.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1723,7 +1723,7 @@ Returns: {status, items: [{run_id, workspace_id, context_id, status, triggered_b
 Returns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. The cost_* keys are absent when the deployment disables cost display.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["context_id"],
+                "required": [],
                 "properties": {
                     "context_id": {
                         "type": "string",
@@ -1921,7 +1921,7 @@ Returns: {status, feedback_id, memory_id, helpful}.""",
                         "description": "Free-text note, e.g. why the result was wrong (max 2000 chars).",
                     },
                 },
-                "required": ["context_id", "memory_id", "helpful"],
+                "required": ["memory_id", "helpful"],
             },
         },
         {
@@ -2010,7 +2010,7 @@ Manual: guide(["list"]).""",
                         "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
-                "required": ["context_id"],
+                "required": [],
             },
         },
         {
@@ -2063,7 +2063,7 @@ Manual: guide(["changes_since"]).""",
                         "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
-                "required": ["context_id", "since"],
+                "required": ["since"],
             },
         },
         {
@@ -2094,7 +2094,7 @@ Manual: guide(["bootstrap"]).""",
                         "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
-                "required": ["context_id"],
+                "required": [],
             },
         },
         {
@@ -2122,7 +2122,7 @@ Returns: {status, key}.""",
                         "description": "TTL in seconds, clamped to 2592000 (30 days). Omit for no expiry.",
                     },
                 },
-                "required": ["context_id", "key", "value"],
+                "required": ["key", "value"],
             },
         },
         {
@@ -2160,7 +2160,7 @@ Returns (without key): {status, states: {key: value, ...}, count, has_more, next
                         "description": "List mode: response budget in characters, not tokens (default 20000).",
                     },
                 },
-                "required": ["context_id"],
+                "required": [],
             },
         },
         {
@@ -2197,7 +2197,7 @@ Returns: {status, measurement_id, metric, measured_at, value, unit}.""",
                         "description": "JSON metadata (device, source, notes).",
                     },
                 },
-                "required": ["context_id", "metric", "value"],
+                "required": ["metric", "value"],
             },
         },
         {
@@ -2237,7 +2237,7 @@ Returns: {status, metric, period, agg, series: [{bucket, value, count}], count}.
                         "description": "ISO 8601 window end, exclusive (default: now). Naive = UTC.",
                     },
                 },
-                "required": ["context_id", "metric"],
+                "required": ["metric"],
             },
         },
         # Issue #1274 (RFC-0002 P0-1): Agent Registry — owner/admin-gated CRUD

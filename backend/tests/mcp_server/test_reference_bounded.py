@@ -673,7 +673,7 @@ def test_definition_advertises_the_same_bounds_as_the_handler():
     assert props["fields"]["items"]["enum"] == ["content", "details", "context", "links"]
     for field in ("content", "details", "context"):
         assert props[f"{field}_offset"]["minimum"] == 0
-    assert tool["inputSchema"]["required"] == ["memory_id", "context_id"]
+    assert tool["inputSchema"]["required"] == ["memory_id"]  # #2125: ?context= default
 
 
 # ------------------------------------------------------------- invariants
