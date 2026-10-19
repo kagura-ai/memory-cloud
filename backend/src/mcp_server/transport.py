@@ -1554,7 +1554,9 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # Must use api_key_workspace_id, NOT the conflated workspace_id below —
         # the latter becomes the user's *current* workspace for OAuth2/session/
         # global-key auth and would over-confine those (non-key-scoped) callers.
+        from mcp_server.tools._default_context import select_default_context
         from mcp_server.tools._helpers import (
+            set_mcp_default_context_selection,
             set_mcp_guardrails_selection,
             set_mcp_key_workspace_scope,
             set_mcp_tool_view_query,
@@ -1572,6 +1574,10 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # #1849: the same URL picks what ``tools/list`` shows; ``describe_tools``
         # derives the view from these bytes when (and only when) it is called.
         set_mcp_tool_view_query(scope.get("query_string", b""))
+        # #2125: ``?context=<uuid>`` names the connection's default context;
+        # the tool dispatcher fills a missing ``context_id`` from it. Pure parse
+        # here, per request on both eras (sessions are not extended).
+        set_mcp_default_context_selection(select_default_context(scope.get("query_string", b"")))
 
         # RFC-0002 P0-4 (#1277): parse W3C traceparent + baggage into the
         # per-request correlation contextvar at the same auth seam (sibling of
