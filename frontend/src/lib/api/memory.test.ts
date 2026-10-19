@@ -94,6 +94,7 @@ describe("recallMemories", () => {
       filters: { context_id: "ctx-1" },
     });
     expect(mockPost).toHaveBeenCalledWith(RECALL, {
+      full: 0,
       query: "how does recall search work",
       k: 3,
       filters: { context_id: "ctx-1" },
@@ -102,9 +103,21 @@ describe("recallMemories", () => {
     expect(res.results[0].score).toBe(0.91);
   });
 
-  it("omits absent optional fields (query only)", async () => {
+  it("sends full: 0 and omits the other absent fields (query only)", async () => {
     mockPost.mockResolvedValue({ results: [], related_tags: [] });
     await recallMemories({ query: "anything" });
-    expect(mockPost).toHaveBeenCalledWith(RECALL, { query: "anything" });
+    expect(mockPost).toHaveBeenCalledWith(RECALL, {
+      full: 0,
+      query: "anything",
+    });
+  });
+
+  it("lets the caller ask for content on the top results", async () => {
+    mockPost.mockResolvedValue({ results: [], related_tags: [] });
+    await recallMemories({ query: "anything", full: 2 });
+    expect(mockPost).toHaveBeenCalledWith(RECALL, {
+      full: 2,
+      query: "anything",
+    });
   });
 });

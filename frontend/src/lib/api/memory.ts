@@ -109,12 +109,17 @@ export async function rememberMemory(
  *
  * Hits `POST /api/v1/memory/recall`. Honors the design constraint that recall
  * does NOT auto-trigger explore — this is precision search only. Pass
- * `filters.context_id` to scope to a single context.
+ * `filters.context_id` to scope to a single context. Sends `full: 0` (no
+ * per-result content) unless the caller passes `full`: the UI renders
+ * summaries only.
  */
 export async function recallMemories(
   params: RecallParams,
 ): Promise<RecallResponse> {
-  return apiClient.post<RecallResponse>("/api/v1/memory/recall", params);
+  return apiClient.post<RecallResponse>("/api/v1/memory/recall", {
+    full: 0,
+    ...params,
+  });
 }
 
 /**

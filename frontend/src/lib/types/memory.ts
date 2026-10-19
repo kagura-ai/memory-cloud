@@ -127,6 +127,9 @@ export interface RecallParams {
   k?: number;
   use_rerank?: boolean;
   search_mode?: "hybrid" | "semantic" | "keyword";
+  // How many top results carry `content` (backend default 3). The web UI
+  // shows summaries only, so recallMemories sends 0 unless told otherwise.
+  full?: number;
   filters?: {
     context_id?: string;
     scope?: MemoryScope;
