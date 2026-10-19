@@ -390,6 +390,30 @@ class _PreparedRemember:
     embedding_scheduled: bool = False
 
 
+def _recall_audit_metadata(
+    responses: list[MemoryResponse], binding_row_filtered: int
+) -> dict[str, Any] | None:
+    """``event_metadata`` of the recall success audit row (#1299, #2124).
+
+    #1299: the enforce-mode row-filter count. #2124: the ids of the results
+    that shipped their content — a Layer-3 read that reference() audits on its
+    own row, so a recall that carries content says which memories it read
+    (identifiers only, capped like every id list in the audit metadata).
+    """
+    from services.agent_binding_service import ROW_FILTER_KIND
+    from services.memory_access_event_writer import MAX_METADATA_MEMORY_IDS
+
+    metadata: dict[str, Any] = {}
+    if binding_row_filtered:
+        metadata["filter_kind"] = ROW_FILTER_KIND
+        metadata["binding_row_filtered_count"] = binding_row_filtered
+    content_ids = [str(r.memory_id) for r in responses if r.content is not None]
+    if content_ids:
+        metadata["content_memory_ids"] = content_ids[:MAX_METADATA_MEMORY_IDS]
+        metadata["content_count"] = len(content_ids)
+    return metadata or None
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -5498,7 +5522,6 @@ class MemoryService:
         # #1299: enforce-mode row filtering is not a request deny — the count
         # rides this success row so the subtraction stays observable without
         # corrupting the deny metrics.
-        from services.agent_binding_service import ROW_FILTER_KIND
         from services.memory_access_event_writer import emit_memory_access_event
 
         await emit_memory_access_event(
@@ -5509,14 +5532,7 @@ class MemoryService:
             context_id=current_context_id,
             result_count=len(responses),
             query=request.query,
-            extra_metadata=(
-                {
-                    "filter_kind": ROW_FILTER_KIND,
-                    "binding_row_filtered_count": binding_row_filtered,
-                }
-                if binding_row_filtered
-                else None
-            ),
+            extra_metadata=_recall_audit_metadata(responses, binding_row_filtered),
         )
 
         return RecallResponse(

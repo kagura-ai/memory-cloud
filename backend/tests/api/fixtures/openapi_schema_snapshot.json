@@ -5794,6 +5794,9 @@
       "MemoryResponse": {
         "properties": {
           "client": {},
+          "content": {},
+          "content_next_offset": {},
+          "content_truncated": {},
           "context": {},
           "context_summary": {},
           "contradicts": {},
@@ -7677,6 +7680,18 @@
               {
                 "additionalProperties": true,
                 "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "full": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "integer"
               },
               {
                 "type": "null"

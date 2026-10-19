@@ -388,3 +388,41 @@ def test_forget_by_query_asks_for_no_content():
 
     source = inspect.getsource(MemoryService.forget)
     assert "full=0" in source
+
+
+def test_a_reply_inside_the_bound_reserve_loses_content_not_rows():
+    """The bound step cuts a reply within ~32 characters of max_chars, so the
+    content fit must aim below that reserve (review finding on #2124)."""
+    env = _envelope(5, 1_500)
+    size = json_chars(env)
+    budget = size + 10  # fits max_chars, but not the bound step's reserve
+    fitted = mcp_memory._fit_recall_content(env, budget)
+    assert fitted["full_applied"] == 2
+    bounded = mcp_memory._bound_recall_envelope(fitted, budget)
+    assert "truncated" not in bounded
+    assert bounded["count"] == 5
+    assert json_chars(bounded) <= budget
+
+
+class TestRecallAuditMetadata:
+    def test_lists_the_results_that_shipped_content(self):
+        from services.memory_service import _recall_audit_metadata
+
+        with_content = [_response(content="a"), _response(content="b")]
+        responses = [*with_content, _response()]
+        metadata = _recall_audit_metadata(responses, 0)
+        assert metadata == {
+            "content_memory_ids": [str(r.memory_id) for r in with_content],
+            "content_count": 2,
+        }
+
+    def test_none_without_content_or_filtering_and_capped_ids(self):
+        from services.memory_access_event_writer import MAX_METADATA_MEMORY_IDS
+        from services.memory_service import _recall_audit_metadata
+
+        assert _recall_audit_metadata([_response()], 0) is None
+        many = [_response(content="x") for _ in range(MAX_METADATA_MEMORY_IDS + 5)]
+        metadata = _recall_audit_metadata(many, 3)
+        assert len(metadata["content_memory_ids"]) == MAX_METADATA_MEMORY_IDS
+        assert metadata["content_count"] == MAX_METADATA_MEMORY_IDS + 5
+        assert metadata["binding_row_filtered_count"] == 3

@@ -1109,6 +1109,13 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
     return response_data
 
 
+# What _bound_list_envelope keeps back before it counts a reply as fitting:
+# room for ``"context_summary_omitted":true,`` and one separator per item
+# where the serialized array has one fewer. A reply within this much of
+# max_chars is still cut there, so the content fit aims below it (#2124).
+_RECALL_BOUND_RESERVE = len('"context_summary_omitted":true,') + 1
+
+
 def _fit_recall_content(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
     """Lower the number of results that carry content until the reply fits (#2124).
 
@@ -1119,15 +1126,16 @@ def _fit_recall_content(envelope: dict[str, Any], max_chars: int) -> dict[str, A
     it is absent otherwise. Whatever still does not fit is then cut by
     :func:`_bound_recall_envelope` as before.
     """
+    limit = max_chars - _RECALL_BOUND_RESERVE
     total = json_chars(envelope)
-    if total <= max_chars:
+    if total <= limit:
         return envelope
     results = envelope["results"]
     with_content = [i for i, item in enumerate(results) if "content" in item]
     if not with_content:
         return envelope
     # Room for the flag itself (its value is at most a three-digit count).
-    target = max_chars - json_chars({"full_applied": RECALL_MAX_FULL}) + 1
+    target = limit - json_chars({"full_applied": RECALL_MAX_FULL}) + 1
     results = list(results)
     while with_content and total > target:
         index = with_content.pop()
