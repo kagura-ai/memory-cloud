@@ -101,7 +101,11 @@ Show results in a table: memory_id, summary, type, importance (plus a tags colum
 
 ### 5. Follow up
 
-- **Results found** — the top results already carry their content; answer from it. Suggest `reference` only for a lower-ranked match the user wants in full, or to read past a cut (`content_truncated: true`):
+- **Results found** — the top results already carry their content; answer from it. Suggest `reference` only for a lower-ranked match the user wants in full:
+  ```
+  reference(memory_id=<id_from_results>, context_id=...)
+  ```
+  or to read past a cut (`content_truncated: true`):
   ```
   reference(memory_id=<id_from_results>, context_id=..., content_offset=<content_next_offset>)
   ```
