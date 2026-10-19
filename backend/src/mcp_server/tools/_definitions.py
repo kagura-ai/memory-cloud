@@ -128,7 +128,7 @@ Manual: guide(["remember"]).""",
                     "source_type": {
                         "type": "string",
                         "enum": ["file", "url", "vault", "api", "manual"],
-                        "description": "Origin of the memory.",
+                        "description": "Origin: file, url, vault (Obsidian), api (API-ingested), manual (user-entered).",
                     },
                     "linked_memory_ids": {
                         "type": "array",
@@ -150,7 +150,7 @@ Manual: guide(["remember"]).""",
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments and is validated like a single remember. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
+            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments and is validated like a single remember; an unknown item key fails only that item (invalid_argument). atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
 Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
@@ -192,7 +192,7 @@ Manual: guide(["remember_batch"]).""",
         {
             "name": "update_memory",
             "description": """Update a memory in place (memory_id) or upsert by external_id (not found → created; found → replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
-SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale.
+SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
 Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
@@ -347,7 +347,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])). Oversized fields page via the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])). Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -513,7 +513,7 @@ Returns: {status, results: [{memory_id, summary, type, location, distance_m}], c
         {
             "name": "load_pinned",
             "readOnly": True,
-            "description": """Load a context's pinned memories (delivery_mode='always'): the complete, unranked set on every call — the deterministic counterpart to recall(). Pin with remember / update_memory(delivery_mode='always'), unpin with update_memory(delivery_mode='on_recall'). Items are summaries; reference(memory_id) for full content.
+            "description": """Load a context's pinned memories (delivery_mode='always'): the complete, unranked set on every call — the deterministic counterpart to recall(). Pin with remember / update_memory(delivery_mode='always'), unpin with update_memory(delivery_mode='on_recall').
 Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_{id, name, display_name, is_private, is_locked}}; truncated=true when more exist than cap or max_chars allow.
 Manual: guide(["load_pinned"]).""",
             "inputSchema": {
@@ -614,11 +614,11 @@ Manual: guide(["explore"]).""",
                     },
                     "depth": {
                         "type": "integer",
-                        "description": "Max hops (default 2, max 5): 1 = direct connections; 3+ reaches further but is slower and less relevant.",
+                        "description": "Max hops (default 2, max 5); 1 = direct connections.",
                     },
                     "min_weight": {
                         "type": "number",
-                        "description": "Minimum edge weight, 0.0-1.0 (default 0.05). 0.0 = all connections, 0.1 = stronger only, 0.3+ may return nothing.",
+                        "description": "Minimum edge weight, 0.0-1.0 (default 0.05); 0.0 = all connections.",
                         "default": 0.05,
                     },
                     "relation_types": {
@@ -963,7 +963,7 @@ Returns: {status, message, context_{id, name, display_name, is_private, is_locke
                     },
                     "embedding_model": {
                         "type": "string",
-                        "description": "Embedding model, e.g. 'text-embedding-3-small' (OpenAI) or 'qwen3-embedding:8b' (self-hosted). Default: the deployment's EMBEDDING_MODEL. Immutable after creation.",
+                        "description": "Embedding model. Default: the deployment's EMBEDDING_MODEL. Immutable after creation.",
                     },
                 },
             },
@@ -2016,7 +2016,7 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (no summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes.
+            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (a forgotten memory's events omit summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes.
 Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, truncated?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
