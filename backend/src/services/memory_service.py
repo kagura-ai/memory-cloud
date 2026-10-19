@@ -423,6 +423,25 @@ def _recall_audit_metadata(
     return metadata or None
 
 
+def _without_dropped_rows(
+    search_results: list[dict],
+    memories: Mapping[str, Any],
+    page: list[MemoryResponse],
+    kept: list[MemoryResponse],
+) -> list[dict]:
+    """The candidate pool minus the page rows the #2144 selector dropped.
+
+    Dropped = on the page before selection, not after. Candidates beyond the
+    page stay: the selector never judged them.
+    """
+    dropped = {r.memory_id for r in page} - {r.memory_id for r in kept}
+    return [
+        sr
+        for sr in search_results
+        if (memory := memories.get(sr["id"])) is None or memory.id not in dropped
+    ]
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -5096,7 +5115,9 @@ class MemoryService:
         4. not ``include_superseded`` (audit mode shows the raw page), not the
            #1306 evaluation seam, not a degraded (keyword-only) search;
         5. the plan gate says the flag is effective — otherwise
-           ``{applied: false, reason: "inactive"}``.
+           ``{applied: false, reason: "inactive"}`` (also when the plan lookup
+           itself failed: ``llm_selector_effective`` fails closed and logs
+           ``llm_selector_status_load_failed``).
 
         The stage itself (:func:`services.recall_selector.run_selector`) never
         raises; its failures come back as ``{applied: false, reason}`` with the
@@ -5132,6 +5153,10 @@ class MemoryService:
                 workspace_id=str(effective_workspace_id),
                 context_id=str(context_id),
                 settings=get_settings(),
+                # The page is read-only (#1985) and recall commits right after
+                # this stage: commit before the round trip so the connection
+                # is not held idle in transaction for the call (#2070 rule).
+                release_db_before_call=True,
             )
         return result.responses, result.report
 
@@ -5661,13 +5686,19 @@ class MemoryService:
             ),
             selection_evidence=selection_evidence,
             # #1503: only on an empty tag-filtered recall — see the helper.
-            tag_suggestions=await self._tag_suggestions_for_empty_result(
-                request,
-                responses,
-                user_id=user_id,
-                workspace_id=effective_workspace_id,
-                context_id=current_context_id,
-                cross_context=cross_context,
+            # #2144: not when the selector emptied the page — the filter did
+            # match; the rows were judged irrelevant.
+            tag_suggestions=(
+                None
+                if selector is not None and selector.applied and selector.dropped
+                else await self._tag_suggestions_for_empty_result(
+                    request,
+                    responses,
+                    user_id=user_id,
+                    workspace_id=effective_workspace_id,
+                    context_id=current_context_id,
+                    cross_context=cross_context,
+                )
             ),
         )
 
@@ -6106,6 +6137,7 @@ class MemoryService:
         # fold, rerank, the selection plan and the #2124 content rule, before
         # the commit, so access stats and the audit row describe the selected
         # page. None (no ``selector`` key) unless the stage ran or was refused.
+        built_page = responses
         responses, selector_report = await self._recall_apply_llm_selector(
             request,
             responses,
@@ -6119,6 +6151,11 @@ class MemoryService:
             effective_workspace_id=effective_workspace_id,
             timings=timings,
         )
+        if selector_report is not None and selector_report.applied and selector_report.dropped:
+            # Rows the selector judged irrelevant leave the pool too, so the
+            # Hebbian pass does not co-activate them and confidence is not
+            # read off rows the page no longer shows.
+            search_results = _without_dropped_rows(search_results, memories, built_page, responses)
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must

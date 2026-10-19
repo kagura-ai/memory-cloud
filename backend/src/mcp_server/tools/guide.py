@@ -303,15 +303,15 @@ GUIDE_TOPICS: dict[str, str] = {
         "text: its passages joined with ' … ', and spans: [{start, end}] gives each "
         "passage's character offsets in the stored content (end exclusive) — "
         "reference(memory_id, content_offset=start) reads around one. "
-        "content_truncated / content_next_offset stay only when the last passage "
-        "reaches the 1,500-character cut. A result kept whole carries its content as "
+        "content_truncated / content_next_offset stay when the stored content goes "
+        "past the 1,500-character head the model read. A result kept whole carries its content as "
         "usual. Dropped results leave results (count follows) and their ids are in "
         "selector.dropped_memory_ids (at most 20); reference() still reads them. "
         "selector: {applied: true, model, kept, dropped, dropped_memory_ids} or "
         "{applied: false, reason} with the unselected page; reason is timeout | "
         "provider_error | invalid_answer | daily_cap | too_large | no_provider | "
         "counter_unavailable | inactive (the flag is on but the plan or its cap does "
-        "not cover this context)."
+        "not cover this context, or that lookup failed)."
     ),
     "remember.tags_normalize": (
         "remember(tags_normalize=true) / remember_batch(tags_normalize=true) store each "

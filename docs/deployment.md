@@ -2010,19 +2010,26 @@ slicing the stored text at the chosen segments, joined with `" … "`, with
 copied into a result. With a defaulted `full`, only trusted, non-connector rows
 carry content, so only those are sent with content. One provider attempt is
 made (no retry) at temperature 0, on the judge's credential lane, paid by the
-context's workspace (#708).
+context's workspace (#708); the recall's own connection is released before the
+round trip. Rows the selector drops also leave the candidate pool that Hebbian
+learning and `confidence` read, and an emptied page gets no `tag_suggestions`.
+A kept row whose stored content goes past the 1,500-character head keeps
+`content_truncated` / `content_next_offset`.
 
 Every failure returns the unselected page with `selector: {applied: false,
 reason}`: `timeout`, `provider_error` (the call or the judge config read
-failed), `invalid_answer` (no usable `rows`), `daily_cap`, `too_large` (over
+failed), `invalid_answer` (not JSON, or no usable `rows`), `daily_cap`, `too_large` (over
 `LLM_SELECTOR_MAX_PROMPT_CHARS`), `no_provider` (`SLEEP_LLM_PROVIDER` empty),
 `counter_unavailable` (the Redis day counter could not be read: no call is
 made), or `inactive` (the flag is stored on but the plan gate does not cover the
-context). A recall timed with the stage logs `select_ms` on `recall_completed`.
-Each billed call writes one `llm_call_log` row with `caller='recall'`,
+context, or the plan lookup failed — `llm_selector_status_load_failed` says
+which). A recall timed with the stage logs `select_ms` on `recall_completed`.
+Each provider call writes one `llm_call_log` row with `caller='recall'`,
 `call_type='completion'` and `call_metadata.stage='llm_selector'` (outcome
-`applied`, `invalid_answer` or `failed`, plus `rows_sent`, `kept`, `dropped` and
-the prompt revision); cost reports can filter on that pair. The recall audit row
+`applied`, `invalid_answer`, `failed` or `timeout`, plus `rows_sent`, `kept`,
+`dropped` and the prompt revision); a timed-out call may still be billed but
+its usage never came back, so its row carries zero tokens. Cost reports can
+filter on that pair. The recall audit row
 adds `selector_applied` and `selector_dropped_count` when the stage applied.
 
 | Event | Level | When |

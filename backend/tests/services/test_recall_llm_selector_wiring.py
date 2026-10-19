@@ -52,7 +52,6 @@ def _selected(page: list[MemoryResponse]) -> SelectorResult:
             dropped=len(page) - 1,
             dropped_memory_ids=[r.memory_id for r in page[1:]],
         ),
-        dropped_count=len(page) - 1,
     )
 
 
@@ -177,19 +176,23 @@ async def test_real_recall_ships_the_selected_page(monkeypatch: pytest.MonkeyPat
         request=request,
         effective_workspace_id=ws,
         is_shared_context_read=False,
-        neural_enabled=False,
+        neural_enabled=True,
         search_config=SimpleNamespace(llm_selector_enabled=True),
         search_context_id=str(ctx),
     )
     page = [_row(), _row(), _row()]
+    # Three page rows plus one candidate beyond the page (k=5 > 3 rows here is
+    # irrelevant: the page builder is stubbed).
+    beyond = uuid4()
+    memories = {f"m{i}": SimpleNamespace(id=r.memory_id) for i, r in enumerate(page)}
+    memories["m3"] = SimpleNamespace(id=beyond)
+    pool = [{"id": f"m{i}", "score": 0.9 - 0.1 * i} for i in range(4)]
     service._recall_check_agent_bindings = AsyncMock()
     service._recall_prepare = AsyncMock(return_value=plan)
     service._recall_resolve_cluster_filter = AsyncMock(return_value=None)
     service.search_service = MagicMock()
-    service.search_service.hybrid_search = AsyncMock(
-        return_value=[{"id": "m1", "score": 0.9}, {"id": "m2", "score": 0.5}]
-    )
-    service._recall_hydrate_memories = AsyncMock(return_value={"m1": object(), "m2": object()})
+    service.search_service.hybrid_search = AsyncMock(return_value=pool)
+    service._recall_hydrate_memories = AsyncMock(return_value=memories)
     service._recall_filter_rows_by_binding = AsyncMock(side_effect=lambda _r, m, **_k: (m, 0))
     service._apply_supersede_shadowing = AsyncMock(return_value=({}, {}))
     service._apply_supersede_fold = AsyncMock(return_value={})
@@ -197,6 +200,7 @@ async def test_real_recall_ships_the_selected_page(monkeypatch: pytest.MonkeyPat
     service._maybe_graph_boost = AsyncMock()
     service._recall_build_responses = AsyncMock(return_value=page)
     service._recall_record_access = AsyncMock()
+    service._recall_run_hebbian_learning = AsyncMock()
     service._tag_suggestions_for_empty_result = AsyncMock(return_value=None)
     emit = AsyncMock()
     run = AsyncMock(side_effect=lambda *_a, **kw: _selected(kw["responses"]))
@@ -228,6 +232,11 @@ async def test_real_recall_ships_the_selected_page(monkeypatch: pytest.MonkeyPat
     assert audit["extra_metadata"]["selector_applied"] is True
     assert audit["extra_metadata"]["selector_dropped_count"] == 2
     assert audit["extra_metadata"]["content_memory_ids"] == [str(page[0].memory_id)]
+    # The dropped rows leave the pool Hebbian learning and confidence read;
+    # the candidate beyond the page (never judged) stays.
+    hebbian_pool = service._recall_run_hebbian_learning.await_args.args[1]
+    assert [sr["id"] for sr in hebbian_pool] == ["m0", "m3"]
+    assert result.confidence is not None and result.confidence.result_count == 2
     completed = [c for c in log.info.call_args_list if c.args[0] == "recall_completed"]
     assert "select_ms" in completed[0].kwargs and completed[0].kwargs["results"] == 1
 
@@ -364,3 +373,42 @@ def test_audit_metadata_counts_only_when_applied() -> None:
     refused = _recall_audit_metadata(rows, 0, SelectorReport(applied=False, reason="timeout"))
     assert refused is not None and "selector_applied" not in refused
     assert "selector_applied" not in (_recall_audit_metadata(rows, 0) or {})
+
+
+@pytest.mark.asyncio
+async def test_a_page_emptied_by_the_selector_gets_no_tag_suggestions() -> None:
+    svc = MemoryService(MagicMock())
+    svc._tag_suggestions_for_empty_result = AsyncMock(return_value={"auth": ["oauth (3)"]})
+    request = RecallRequest(query="q", full=3, filters={"tags": ["auth"]})
+    with patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()):
+        emptied = await svc._recall_finalize_response(
+            request,
+            [],
+            [],
+            user_id="u",
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            neural_enabled=False,
+            binding_row_filtered=0,
+            selection_evidence=None,
+            cross_context=False,
+            degradation=None,
+            selector=SelectorReport(
+                applied=True, model="m", kept=0, dropped=2, dropped_memory_ids=[]
+            ),
+        )
+        plain = await svc._recall_finalize_response(
+            request,
+            [],
+            [],
+            user_id="u",
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            neural_enabled=False,
+            binding_row_filtered=0,
+            selection_evidence=None,
+            cross_context=False,
+            degradation=None,
+        )
+    assert emptied.tag_suggestions is None
+    assert plain.tag_suggestions == {"auth": ["oauth (3)"]}

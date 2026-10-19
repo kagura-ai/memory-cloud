@@ -28,11 +28,13 @@ content the stage is not called (``too_large``); one provider attempt
 (``complete_json(max_attempts=1)``) under ``LLM_SELECTOR_TIMEOUT_SECONDS``; a
 Redis day counter per paying workspace (``LLM_SELECTOR_MAX_CALLS_PER_DAY``),
 counted before the call and fail-closed. Every failure returns the page
-unchanged with ``selector: {applied: false, reason}`` (:data:`REASONS`).
+unchanged with ``selector: {applied: false, reason}`` (``SelectorReason``).
 
-Accounting: one ``llm_call_log`` row per billed call (``caller='recall'``,
-``call_type='completion'``, ``call_metadata.stage='llm_selector'``), paid by
-the effective (#708) workspace.
+Accounting: one ``llm_call_log`` row per provider call (``caller='recall'``,
+``call_type='completion'``, ``call_metadata.stage='llm_selector'``, outcome
+``applied`` / ``invalid_answer`` / ``failed`` / ``timeout`` — a timed-out call
+is recorded with zero tokens, its usage never came back), paid by the
+effective (#708) workspace.
 """
 
 from __future__ import annotations
@@ -41,7 +43,8 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, get_args
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, TypeGuard
 from uuid import UUID
 
 from db.base import isolated_session
@@ -76,8 +79,10 @@ MIN_SEGMENT_CHARS = 40
 # Characters of a summary / of the query placed in the prompt.
 SUMMARY_PROMPT_CHARS = 500
 QUERY_PROMPT_CHARS = 2000
-# Answer budget: the answer is row and segment indices only.
-MAX_ANSWER_TOKENS = 512
+# Answer budget (see answer_token_budget): indices only, scaled by rows.
+MIN_ANSWER_TOKENS = 256
+ANSWER_TOKENS_PER_ROW = 128
+MAX_ANSWER_TOKENS_CAP = 4096
 # selector.dropped_memory_ids holds at most this many ids (page order).
 MAX_DROPPED_IDS = 20
 # The ledger caller (already allowed by the llm_call_log CHECK) and stage.
@@ -87,7 +92,14 @@ LEDGER_STAGE = "llm_selector"
 # the key without one (the judge's margin).
 _COUNTER_TTL_SECONDS = 2 * 24 * 3600
 
-REASONS: tuple[str, ...] = get_args(SelectorReason)
+# The #919 markers with any run of whitespace between their words, any case.
+_MARKER_RE = re.compile(
+    "|".join(
+        r"\s+".join(re.escape(word) for word in marker.split())
+        for marker in (UNTRUSTED_CONTENT_OPEN, UNTRUSTED_CONTENT_CLOSE)
+    ),
+    re.IGNORECASE,
+)
 
 # A sentence ends at . ! ? followed by whitespace (or the end), at a CJK
 # terminator, or at a newline; the cut goes right after it.
@@ -164,10 +176,10 @@ def _prompt_text(text: str, max_chars: int | None = None) -> str:
     line so a row can never forge a ``Row n`` / ``[n]`` line of its own.
     Display only: nothing here is ever sliced into a result.
     """
-    safe = neutralise_control_tokens(text, max_chars)
-    for marker in (UNTRUSTED_CONTENT_OPEN, UNTRUSTED_CONTENT_CLOSE):
-        safe = re.sub(re.escape(marker), "[redacted-marker]", safe, flags=re.IGNORECASE)
-    return " ".join(safe.split())
+    # Flatten FIRST: a marker spelled with extra spaces or a tab would pass a
+    # literal match and then be rebuilt exactly by the flattening.
+    safe = " ".join(neutralise_control_tokens(text, max_chars).split())
+    return _MARKER_RE.sub("[redacted-marker]", safe)
 
 
 @dataclass(frozen=True)
@@ -178,11 +190,6 @@ class SelectorRow:
     summary: str
     content: str | None
     segments: tuple[tuple[int, int], ...]
-
-    @property
-    def prompt_chars(self) -> int:
-        """Characters of memory text this row adds to the prompt."""
-        return min(len(self.summary), SUMMARY_PROMPT_CHARS) + len(self.content or "")
 
 
 def rows_for(responses: list[MemoryResponse], max_rows: int) -> list[SelectorRow]:
@@ -238,7 +245,8 @@ class RowDecision:
     segments: tuple[int, ...] = ()
 
 
-def _is_int(value: Any) -> bool:
+def _is_int(value: Any) -> TypeGuard[int]:
+    """An ``int`` that is not a ``bool``."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 
@@ -247,7 +255,7 @@ def _parse_item(item: Any, segments_per_row: list[int]) -> tuple[int, RowDecisio
     if not isinstance(item, dict):
         return None
     i = item.get("i")
-    if isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(segments_per_row):
+    if not _is_int(i) or not 0 <= i < len(segments_per_row):
         return None
     relevant = item.get("relevant")
     if not isinstance(relevant, bool):
@@ -327,9 +335,9 @@ def apply_selection(
 
     ``relevant: false`` drops the row. ``relevant: true`` with chosen segments
     on a content row replaces its content with the joined verbatim spans and
-    sets ``spans``; ``content_truncated`` / ``content_next_offset`` go, except
-    when the last span ends where the attached head was cut (the stored text
-    goes on there). Any other row — no decision, no segments chosen, summary
+    sets ``spans``; ``content_truncated`` / ``content_next_offset`` stay as
+    they were (the stored text past a cut head was never read by the
+    selector). Any other row — no decision, no segments chosen, summary
     only, or not sent — is returned unchanged.
     """
     by_index = {row.i: row for row in rows}
@@ -351,16 +359,14 @@ def apply_selection(
         if not spans:
             page.append(response)
             continue
-        reaches_cut = (
-            response.content_next_offset is not None and not row.content[spans[-1][1] :].strip()
-        )
+        # content_truncated / content_next_offset are kept as they were: when
+        # the attached head was cut, the stored text goes on past what the
+        # selector read, and the agent needs that cue to read further.
         page.append(
             response.model_copy(
                 update={
                     "content": SEPARATOR.join(row.content[s:e] for s, e in spans),
                     "spans": [SpanRef(start=s, end=e) for s, e in spans],
-                    "content_truncated": True if reaches_cut else None,
-                    "content_next_offset": response.content_next_offset if reaches_cut else None,
                 }
             )
         )
@@ -378,7 +384,6 @@ class SelectorResult:
 
     responses: list[MemoryResponse]
     report: SelectorReport
-    dropped_count: int = 0
 
 
 def counter_key(workspace_id: str) -> str:
@@ -467,6 +472,7 @@ async def run_selector(
     workspace_id: str,
     context_id: str,
     settings: Settings,
+    release_db_before_call: bool = False,
 ) -> SelectorResult:
     """Run the selector over a built recall page; never raises.
 
@@ -481,16 +487,23 @@ async def run_selector(
             day counter and the ledger's payer.
         context_id: The recalled context (credential scope, ledger).
         settings: ``LLM_SELECTOR_*`` bounds.
+        release_db_before_call: Commit ``db`` once the checks have run and
+            before the provider round trip, so the recall's pooled
+            connection is not held idle in its read transaction for up to
+            ``LLM_SELECTOR_TIMEOUT_SECONDS`` (the #2070 rule). Only for a
+            caller with nothing pending on ``db`` whose loaded objects survive
+            a commit (``expire_on_commit=False``) — recall, which commits its
+            read-only transaction right after this stage anyway.
 
     Returns:
         The page to ship and the report. On every failure the page is
         ``responses`` unchanged.
     """
-    from services.llm_service import LLMService
+    from services.llm_service import LLMService, LLMServiceError
 
     started = time.monotonic()
-    rows = rows_for(responses, settings.llm_selector_max_rows)
-    n_rows = len(rows)
+    sent = responses[: settings.llm_selector_max_rows]
+    n_rows = len(sent)
 
     try:
         config = await _load_judge_config(db)
@@ -506,7 +519,10 @@ async def run_selector(
     model = config.sleep_llm_model
     if not provider:
         return _failed(responses, "no_provider", started=started, rows=n_rows)
-    if sum(row.prompt_chars for row in rows) > settings.llm_selector_max_prompt_chars:
+    prompt_chars = sum(
+        min(len(r.summary or ""), SUMMARY_PROMPT_CHARS) + len(r.content or "") for r in sent
+    )
+    if prompt_chars > settings.llm_selector_max_prompt_chars:
         return _failed(
             responses, "too_large", started=started, rows=n_rows, provider=provider, model=model
         )
@@ -527,6 +543,22 @@ async def run_selector(
             responses, "daily_cap", started=started, rows=n_rows, provider=provider, model=model
         )
 
+    if release_db_before_call:
+        try:
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 — fail open
+            return _failed(
+                responses,
+                "provider_error",
+                started=started,
+                rows=n_rows,
+                provider=provider,
+                model=model,
+                error_type=type(exc).__name__,
+            )
+
+    # Segmented only now: the checks above need lengths alone.
+    rows = rows_for(responses, settings.llm_selector_max_rows)
     prompt = build_prompt(query, rows)
     ledger = {
         "user_id": user_id,
@@ -549,7 +581,7 @@ async def run_selector(
                     model=model,
                     provider=provider,
                     temperature=0.0,
-                    max_tokens=MAX_ANSWER_TOKENS,
+                    max_tokens=answer_token_budget(n_rows),
                     platform_only=judge_platform_only(config),
                     # The credential is read on this short session; committing
                     # it before the round trip gives its connection back.
@@ -559,22 +591,38 @@ async def run_selector(
                 timeout=settings.llm_selector_timeout_seconds,
             )
     except TimeoutError:
+        if llm is not None:
+            # The request may still be billed; its usage never came back, so
+            # the row records the call with zero tokens (cost unknown).
+            await record_completion_call(
+                db,
+                _no_usage(provider, model),
+                call_metadata=_ledger_metadata("timeout", rows_sent=n_rows),
+                paid_by=llm.resolve_paid_by(),
+                **ledger,
+            )
         return _failed(
             responses, "timeout", started=started, rows=n_rows, provider=provider, model=model
         )
     except Exception as exc:  # noqa: BLE001 — fail open, the page ships unselected
         spent = getattr(exc, "usage", None)
+        # With max_attempts=1 a call raises with usage only when its one
+        # attempt answered and the answer was not JSON: an invalid answer,
+        # not a provider failure.
+        unparseable = isinstance(exc, LLMServiceError) and spent is not None
         if spent is not None and llm is not None:
             await record_completion_call(
                 db,
                 spent,
-                call_metadata=_ledger_metadata("failed", rows_sent=n_rows),
+                call_metadata=_ledger_metadata(
+                    "invalid_answer" if unparseable else "failed", rows_sent=n_rows
+                ),
                 paid_by=llm.resolve_paid_by(),
                 **ledger,
             )
         return _failed(
             responses,
-            "provider_error",
+            "invalid_answer" if unparseable else "provider_error",
             started=started,
             rows=n_rows,
             provider=provider,
@@ -630,7 +678,28 @@ async def run_selector(
             dropped=len(dropped),
             dropped_memory_ids=dropped[:MAX_DROPPED_IDS],
         ),
-        dropped_count=len(dropped),
+    )
+
+
+def answer_token_budget(n_rows: int) -> int:
+    """``max_tokens`` for an answer about ``n_rows`` rows.
+
+    The answer is indices only, but a row may list up to :data:`MAX_SEGMENTS`
+    of them and a reasoning model spends part of the budget before answering;
+    a cut answer would not parse and the page would ship unselected.
+    """
+    return min(MAX_ANSWER_TOKENS_CAP, MIN_ANSWER_TOKENS + ANSWER_TOKENS_PER_ROW * n_rows)
+
+
+def _no_usage(provider: str, model: str) -> SimpleNamespace:
+    """A usage record for a call whose usage never came back (timeout)."""
+    return SimpleNamespace(
+        provider=provider,
+        model=model,
+        input_tokens=0,
+        output_tokens=0,
+        cached_input_tokens=0,
+        cache_write_tokens=0,
     )
 
 
