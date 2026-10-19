@@ -414,6 +414,48 @@ class FoldedVersions(TZAwareBaseModel):
     memory_ids: list[UUID]
 
 
+# #2144: the recall LLM selector's reasons for returning the unselected page.
+SelectorReason = Literal[
+    "timeout",
+    "provider_error",
+    "invalid_answer",
+    "daily_cap",
+    "too_large",
+    "no_provider",
+    "counter_unavailable",
+    "inactive",
+]
+
+
+class SpanRef(BaseModel):
+    """#2144: one verbatim passage of a recall row's stored content.
+
+    ``start`` / ``end`` are character offsets into the memory's stored
+    content (end exclusive) — ``reference(memory_id, content_offset=start)``
+    reads from there.
+    """
+
+    start: int
+    end: int
+
+
+class SelectorReport(BaseModel):
+    """#2144: what the recall LLM selector did to this page.
+
+    ``applied: true`` carries ``model``, ``kept`` / ``dropped`` (results left
+    and removed) and ``dropped_memory_ids`` (at most 20, page order);
+    ``applied: false`` carries only ``reason`` and the page is the unselected
+    one. Serialized without the unset keys.
+    """
+
+    applied: bool
+    model: str | None = None
+    kept: int | None = None
+    dropped: int | None = None
+    dropped_memory_ids: list[UUID] | None = None
+    reason: SelectorReason | None = None
+
+
 class MemoryResponse(TZAwareBaseModel):
     """Response schema for single memory."""
 
@@ -460,6 +502,10 @@ class MemoryResponse(TZAwareBaseModel):
     content: str | None = None
     content_truncated: bool | None = None
     content_next_offset: int | None = None
+    # #2144: set only when the recall LLM selector cut this row's content to
+    # verbatim passages: ``content`` is those passages joined with " … " and
+    # spans are their offsets in the stored content. MCP recall only.
+    spans: list[SpanRef] | None = None
 
     class Config:
         from_attributes = True
@@ -742,6 +788,9 @@ class RecallResponse(BaseModel):
     # outside their returned top-k.  Bootstrap copies only the documented,
     # identity-only evaluation metadata when that mode was explicitly requested.
     selection_evidence: dict[str, Any] | None = Field(default=None, exclude=True)
+    # #2144: the recall LLM selector's report — None (absent) unless the MCP
+    # recall ran, or was refused, the stage on a context with the flag on.
+    selector: SelectorReport | None = None
 
 
 class ReferenceRequest(BaseModel):

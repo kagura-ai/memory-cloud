@@ -5822,6 +5822,7 @@
           "score": {},
           "source_type": {},
           "source_uri": {},
+          "spans": {},
           "summary": {},
           "supersede_candidate": {},
           "superseded_by": {},
@@ -7832,6 +7833,16 @@
             },
             "type": "array"
           },
+          "selector": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SelectorReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "tag_suggestions": {
             "anyOf": [
               {
@@ -9125,6 +9136,81 @@
         ],
         "type": "object"
       },
+      "SelectorReport": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "dropped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dropped_memory_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kept": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "timeout",
+                  "provider_error",
+                  "invalid_answer",
+                  "daily_cap",
+                  "too_large",
+                  "no_provider",
+                  "counter_unavailable",
+                  "inactive"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "applied"
+        ],
+        "type": "object"
+      },
       "ServiceStatus": {
         "properties": {
           "details": {
@@ -9522,6 +9608,21 @@
         },
         "required": [
           "report_ids"
+        ],
+        "type": "object"
+      },
+      "SpanRef": {
+        "properties": {
+          "end": {
+            "type": "integer"
+          },
+          "start": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "end",
+          "start"
         ],
         "type": "object"
       },
