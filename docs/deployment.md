@@ -1120,7 +1120,8 @@ detection considers the nearest neighbour down to `SUPERSEDE_SUGGEST_THRESHOLD_L
 measured on reworded updates. Each such pair is a judge call against
 `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (default 200 per workspace), so raise the cap before a
 bulk ingest: once it is reached, later reworded updates are neither stored nor folded in
-recall. `remember(dedupe="check")` and the judge-off mode keep 0.85.
+recall, and pairs at 0.85 or above are stored unverified (they do not fold either). The
+lower threshold spends the cap faster than 0.85 did. `remember(dedupe="check")` and the judge-off mode keep 0.85.
 
 The judge's results do not depend on the log. Since #2019, each judge call that
 spent tokens is a `caller='supersede_verify'` row in `llm_call_log`, with the
