@@ -8,11 +8,16 @@ writer on ``memories.agent_id`` / ``memories.session_id``.
 - ``agent_id`` comes only from the verified credential (``AgentScope``, set
   by the auth adapters for an agent-bound key). A baggage claim never lands
   here — it is attribution-only (``api/correlation.py``).
-- ``session_id`` comes from the request's correlation context: the OTel
-  baggage session (``gen_ai.conversation.id`` / ``session.id``), else, on the
-  stateful MCP transport, the protocol session id the transport fills in.
+- ``session_id`` comes from the request's correlation context. Precedence
+  (#2122): the OTel baggage session (``gen_ai.conversation.id`` /
+  ``session.id``) > a client-supplied id on an MCP request —
+  ``params._meta['ai.kagura/sessionId']`` (one tools/call) over the
+  ``Kagura-Session-Id`` header (the whole request) > on the stateful MCP
+  transport, the protocol session id the transport fills in. Every source
+  passes the same token rule (``api.correlation``).
 
-A session is an attribute, not an identity: it is only ever addressed
+A session is an attribute, not an identity — whichever source named it, a
+client can pick any id: it is only ever addressed
 together with its principal — the caller sub and the credential's agent
 (``SessionPrincipal``) — so naming another principal's session id selects
 nothing (``principal_predicate``).

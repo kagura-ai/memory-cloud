@@ -330,8 +330,21 @@ Every memory write records the session it was made in, and `changes_since(sessio
 | Client | Session id on its writes |
 |---|---|
 | Sends OTel baggage `gen_ai.conversation.id` or `session.id` (SDKs, REST callers, custom agents) | That value, on every transport |
+| Sends its own id on the MCP request ([#2122](https://github.com/kagura-ai/memory-cloud/issues/2122)): `params._meta["ai.kagura/sessionId"]` on a `tools/call`, or the `Kagura-Session-Id` HTTP header | That value, on either MCP revision |
 | Legacy stateful Streamable HTTP (opens with `initialize`) | The protocol session id (`Mcp-Session-Id`) — one per connection |
-| Stateless 2026-07-28 revision without baggage | None ([#2122](https://github.com/kagura-ai/memory-cloud/issues/2122) will let such a client send its own) |
+| Stateless 2026-07-28 revision with none of the above | None — use the time window below |
+
+When several are present, the first in this order wins: OTel baggage, then `_meta["ai.kagura/sessionId"]`, then `Kagura-Session-Id`, then `Mcp-Session-Id`. The header name is namespaced (`Kagura-Session-Id`, matched case-insensitively) so that a session header a proxy or gateway sets for its own purposes is never taken for it. The header applies to every message of the HTTP request; the `_meta` key to its own `tools/call` only, so when both are sent and differ, `_meta` wins for that call. A client-supplied id follows the baggage rule — 1 to 128 characters of `A-Z a-z 0-9 . _ -` — and an invalid one is ignored (logged on the server, never an error), leaving the call with the next source in the order. It is not a tool argument: no tool schema has a `session_id` input for writes.
+
+```json
+{"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+ "params": {"name": "remember",
+            "arguments": {"context_id": "…", "summary": "…", "content": "…", "type": "note"},
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                      "ai.kagura/sessionId": "run-2026-10-19-a1b2"}}}
+```
+
+Like a baggage session, the id is an attribute of your principal (your user and your credential's agent), not an identity: naming a session id another principal used selects none of their writes — `changes_since(session_id=...)` lists nothing and `rollback_session(session_id=...)` answers `session_not_found` — and writing under it never touches theirs. Pick an id that is unique per run (a UUID, or a run id with a date) anyway: a context owner's session-mode rollback addresses every principal's writes under the id it names. A static client configuration (a fixed header in an MCP client's settings file) cannot carry a per-conversation value — such clients use the time window. Do not put a fixed `Kagura-Session-Id` in one: on the stateful transport the header outranks the per-connection `Mcp-Session-Id`, so every conversation of that client would share one session.
 
 Which revision a client negotiates is the client's choice; a quick check is the reply of `remember`, `update_memory` or `forget`: when it carries no `session_id`, your writes have none. Those clients use the time window instead — `rollback_session(context_id, since, until?)` undoes **your own** writes in `[since, until)` (at most 7 days), and `changes_since(context_id, since, until?, by_me=true)` lists them first. Take the window from the `at` values `changes_since` returns rather than from your own clock — `since` is the first `at` to undo, `until` is exclusive (a time just after the last one, or omit it for now) — and always look at the dry run (`dry_run=true` is the default) before `dry_run=false`, passing the `until` the dry run echoed so the rollback acts on exactly that window.
 

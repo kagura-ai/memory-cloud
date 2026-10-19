@@ -228,16 +228,21 @@ def _default_correlation_session(mcp_session_id: str) -> None:
     ``gen_ai.conversation.id`` / ``session.id`` baggage still gets one per
     MCP session, with no client change. The id is server-minted (or
     re-adopted only in the server-minted shape) and passes the correlation
-    token check like any baggage value. Baggage, when present, wins. Side
-    effect: agent-key ``memory_access_events`` rows of such traffic now carry
-    this session id too. Stateless (modern) requests have no session and keep
-    None.
+    token check like any baggage value. Baggage, when present, wins, and so
+    does a client-supplied ``Kagura-Session-Id`` header or
+    ``_meta['ai.kagura/sessionId']`` (#2122). Side effect: agent-key
+    ``memory_access_events`` rows of such traffic now carry this session id
+    too. Stateless (modern) requests have no protocol session: they keep the
+    client's id, or None.
     """
-    from api.correlation import get_correlation, validate_correlation_token
+    from api.correlation import SESSION_SOURCE_TRANSPORT, get_correlation, offered_session
 
     corr = get_correlation()
-    if corr is not None and corr.session_id is None:
-        corr.session_id = validate_correlation_token(mcp_session_id)
+    if corr is None:
+        return
+    session_id = offered_session(corr, mcp_session_id, SESSION_SOURCE_TRANSPORT)
+    if session_id is not None:
+        corr.session_id, corr.session_source = session_id, SESSION_SOURCE_TRANSPORT
 
 
 def _normalize_mcp_path(path: str) -> str:
@@ -1524,15 +1529,18 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
             logger.debug(f"MCP calling tool: {tool_name}")
 
             # Call the tool through extracted helper function
+            from api.correlation import client_session_scope
             from mcp_server.tools import execute_tool_call
 
-            # Issue #245: context_id is now in arguments, not session
-            result = await execute_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                user_id=session.user_id,
-                workspace_id=session.workspace_id,  # Issue #204: Pass workspace_id for workspace info
-            )
+            # Issue #245: context_id is now in arguments, not session.
+            # #2122: ``_meta['ai.kagura/sessionId']`` names this call's session.
+            with client_session_scope(params.get("_meta")):
+                result = await execute_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    user_id=session.user_id,
+                    workspace_id=session.workspace_id,  # Issue #204: workspace info
+                )
 
             await _send_jsonrpc_result(send, session, request_id, _tool_call_result(result))
             return
@@ -1726,7 +1734,14 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # per-request correlation contextvar at the same auth seam (sibling of
         # the #963 key-workspace scope). Advisory-only — never fails the
         # request; missing/invalid headers → server-generated trace/span.
-        from api.correlation import build_correlation_from_headers, set_correlation
+        # #2122: a client-supplied ``Kagura-Session-Id`` names the request's
+        # session when baggage did not (both eras; ``_meta`` overrides it per
+        # tools/call, see ``client_session_scope``).
+        from api.correlation import (
+            CLIENT_SESSION_HEADER,
+            build_correlation_from_headers,
+            set_correlation,
+        )
 
         def _hdr(name: bytes) -> str | None:
             raw = headers.get(name)
@@ -1738,6 +1753,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                     traceparent=_hdr(b"traceparent"),
                     baggage=_hdr(b"baggage"),
                     surface="mcp",
+                    client_session_id=_hdr(CLIENT_SESSION_HEADER.encode("ascii")),
                 )
             )
         except Exception:  # pragma: no cover - defensive; correlation is advisory
