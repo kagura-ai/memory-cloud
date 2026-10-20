@@ -375,6 +375,22 @@ def is_mechanical_variant(a: str, b: str) -> bool:
     return _raw_digit_runs(a) == _raw_digit_runs(b)
 
 
+def mechanical_variant_key(tag: str) -> tuple[str, tuple[str, ...]] | None:
+    """A hashable key two tags share exactly when :func:`is_mechanical_variant` holds.
+
+    Lets a caller bucket many tags in one pass instead of comparing every pair.
+
+    Args:
+        tag: A tag, as written.
+
+    Returns:
+        ``(fold, digit runs)``, or ``None`` for an empty fold (such a tag is
+        nobody's variant, not even its own).
+    """
+    folded = normalize_tag(tag)
+    return (folded, tuple(_raw_digit_runs(tag))) if folded else None
+
+
 def is_near_duplicate(requested: str, candidate: str) -> bool:
     """Whether ``candidate`` is worth SUGGESTING for a ``requested`` tag.
 

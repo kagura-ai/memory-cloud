@@ -90,6 +90,18 @@ def test_every_tag_stays_required_past_recalls_group_cap():
     assert len(_sql(_all(*tags))) == 60
 
 
+def test_many_colliding_tags_compile_without_pairwise_work():
+    # 4,096 distinct splits of one digit string share the fold "pr" + digits.
+    digits = "1234567890123"
+    tags = []
+    for mask in range(1 << 12):
+        parts = [digits[0]]
+        for i, ch in enumerate(digits[1:]):
+            parts.append(("-" if mask >> i & 1 else "") + ch)
+        tags.append("pr-" + "".join(parts))
+    assert len(compile_memory_filters(_all(*tags))) == len(tags)
+
+
 def test_any_mode_is_unchanged():
     preds = _sql({"tags": ["pr-123", "pr-1-23"], "tags_normalize": True})
     assert len(preds) == 1 and " OR " in preds[0]

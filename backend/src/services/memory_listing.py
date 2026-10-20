@@ -42,7 +42,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
-from utils.tag_normalize import is_mechanical_variant
+from utils.tag_normalize import mechanical_variant_key
 
 ORDER_COLUMNS = {
     "updated_at": func.coalesce(Memory.updated_at, Memory.created_at),
@@ -146,18 +146,16 @@ def _all_tag_groups_predicates(
     Returns:
         One ``EXISTS`` predicate per requirement, to be ANDed.
     """
-    by_needle: dict[str, list[list[str]]] = {}
+    # One pass, no pairwise comparison: the filter's tag count is unbounded.
+    by_needle: dict[str, dict[object, list[str]]] = {}
     for t in dict.fromkeys(tags):
-        clusters = by_needle.setdefault(_normalized_needle(t), [])
-        for cluster in clusters:
-            if is_mechanical_variant(cluster[0], t):
-                cluster.append(t)
-                break
-        else:
-            clusters.append([t])
+        variant = mechanical_variant_key(t)
+        clusters = by_needle.setdefault(_normalized_needle(t), {})
+        clusters.setdefault(variant if variant is not None else ("", t), []).append(t)
     digits = func.btrim(func.regexp_replace(tag, _DIGIT_RUN_SQL, ",", "g"), ",")
     out: list[ColumnElement[bool]] = []
-    for needle, clusters in by_needle.items():
+    for needle, by_variant in by_needle.items():
+        clusters = list(by_variant.values())
         if len(clusters) == 1:
             out.append(select(literal(1)).where(folded == needle).exists())
             continue

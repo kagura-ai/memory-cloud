@@ -13,6 +13,7 @@ from utils.tag_normalize import (
     is_mechanical_variant,
     is_near_duplicate,
     is_specialisation,
+    mechanical_variant_key,
     normalize_tag,
     tag_filter_groups,
 )
@@ -569,6 +570,28 @@ class TestIsMechanicalVariant:
     def test_a_tag_with_no_folding_signal_is_a_variant_of_nothing(self):
         assert not is_mechanical_variant("---", "...")
         assert not is_mechanical_variant("---", "---")
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("Dev_Environment", "dev-environment"),
+            ("ｖ０．９４．０", "v0.94.0"),
+            ("v0.11.0", "v0.1.10"),
+            ("pr-123", "pr-1-23"),
+            ("1-23-4", "12-3-4"),
+            ("sprint-07", "sprint-7"),
+            ("python", "javascript"),
+        ],
+    )
+    def test_variant_key_agrees_with_the_predicate(self, a, b):
+        """#2086: the key the list lane buckets by is the predicate, hashed."""
+        assert mechanical_variant_key(a) is not None
+        assert (mechanical_variant_key(a) == mechanical_variant_key(b)) == is_mechanical_variant(
+            a, b
+        )
+
+    def test_a_tag_with_no_folding_signal_has_no_variant_key(self):
+        assert mechanical_variant_key("---") is None
 
 
 class TestTagFilterGroups:
