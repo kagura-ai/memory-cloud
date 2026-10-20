@@ -1651,12 +1651,14 @@ async def _handle_forget_many(
     not yours, already gone — one word, so the row is no existence oracle) /
     ``error``. One usage row and one context touch for the whole call.
 
-    ``execute_with_timeout`` bounds each id, not the call: 50 ids that each
-    time out would hold the tool for 50 × the operation timeout. In practice
-    the first timeout leaves the session unusable, ``db.rollback()`` (or the
-    ``_forgotten_by`` read) fails, ``session_ok`` flips and every remaining id
-    is ``not_attempted`` — so the bound is one or two timeouts. Keep that
-    bail-out if the rollback path ever changes.
+    ``execute_with_timeout`` bounds each id, not the call. A timeout that
+    cancels a database statement usually leaves the session unusable:
+    ``db.rollback()`` (or the ``_forgotten_by`` read) fails, ``session_ok``
+    flips and every remaining id is ``not_attempted``, so the call ends after
+    one or two timeouts — keep that bail-out if the rollback path changes.
+    A stall outside the database (the vector-store point delete inside
+    ``MemoryService.forget``) leaves the session usable, so the worst case
+    stays ``len(memory_ids)`` × the ``forget`` timeout.
     """
     from types import SimpleNamespace
 
