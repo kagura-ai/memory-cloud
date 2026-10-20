@@ -223,7 +223,7 @@ async def handle_rollback_session(
         lock_window_principal,
         rollback_session,
     )
-    from services.write_provenance import caller_principal
+    from services.write_provenance import caller_principal_linked
 
     parsed = _parse_args(args)
     if isinstance(parsed, list):
@@ -262,12 +262,13 @@ async def handle_rollback_session(
                 scope = SessionScope(
                     context_id=context_id,
                     session_id=session_id,
-                    principal=addressable_principal(user_id, role),
+                    principal=await addressable_principal(db, user_id, role),
                 )
             else:
                 # #2121: always the caller's own principal — the owner
-                # override is session-mode only.
-                principal = caller_principal(user_id)
+                # override is session-mode only. #2114: an account linked
+                # to the caller's counts as the caller's own.
+                principal = await caller_principal_linked(db, user_id)
                 if not dry_run:
                     # Resolve an omitted until under the principal's window
                     # lock, so concurrent first calls share one record.

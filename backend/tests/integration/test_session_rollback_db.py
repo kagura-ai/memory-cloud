@@ -427,14 +427,15 @@ async def test_session_is_addressed_only_with_its_principal(world: World) -> Non
 async def test_addressable_principal_owner_override_is_user_credential_only(
     world: World,
 ) -> None:
-    assert sr.addressable_principal(world.owner, ContextRole.OWNER) is None
-    assert sr.addressable_principal(world.member, ContextRole.EDITOR) == SessionPrincipal(
-        world.member, None
+    db = world.session
+    assert await sr.addressable_principal(db, world.owner, ContextRole.OWNER) is None
+    assert await sr.addressable_principal(db, world.member, ContextRole.EDITOR) == (
+        SessionPrincipal(world.member, None)
     )
     set_agent_scope(AgentScope(agent_id=world.agent, enforcement_mode="enforce"))
     try:
-        assert sr.addressable_principal(world.owner, ContextRole.OWNER) == SessionPrincipal(
-            world.owner, world.agent
+        assert await sr.addressable_principal(db, world.owner, ContextRole.OWNER) == (
+            SessionPrincipal(world.owner, world.agent)
         )
     finally:
         set_agent_scope(None)
