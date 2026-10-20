@@ -157,6 +157,7 @@ class TestArchiveRollbackRealDB:
             edge_repo=MagicMock(),
         )
         action = MagicMock()
+        action.action_type = "archive"
         action.memory_id = row.id
         action.details = {"mode": "tombstone"}
         summary = {"archives_restored": 0, "errors": []}
@@ -169,6 +170,7 @@ class TestArchiveRollbackRealDB:
 
         # A row that is no longer there (older hard-delete, or purged) is an error, not a restore.
         gone = MagicMock()
+        gone.action_type = "archive"
         gone.memory_id = uuid4()
         gone.details = {"mode": "tombstone"}
         with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock):
@@ -194,6 +196,7 @@ class TestArchiveRollbackRealDB:
         await db_session.flush()
         ctx.memory_cache[forgotten.id] = forgotten
         stale = MagicMock()
+        stale.action_type = "archive"
         stale.memory_id = forgotten.id
         stale.details = {"mode": "tombstone"}
         with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock) as reembed:

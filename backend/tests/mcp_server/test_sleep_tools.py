@@ -12,6 +12,10 @@ from uuid import uuid4
 import pytest
 
 from mcp_server.tools.sleep import (
+    _archive_restore,
+    _merge_restore,
+    _restores_tombstone,
+    _shadow_merge,
     handle_get_sleep_history,
     handle_get_sleep_report,
     handle_rollback_sleep_run,
@@ -49,6 +53,46 @@ def _point_writer_lock():
     than the mocked sessions in this module script."""
     with patch("mcp_server.tools.sleep.hold_point_writer_lock", new=AsyncMock()) as lock:
         yield lock
+
+
+def _sleep_action(action_type, memory_id=None, target_id=None, details=None):
+    action = MagicMock()
+    action.action_type = action_type
+    action.memory_id = memory_id
+    action.target_id = target_id
+    action.details = details
+    return action
+
+
+@pytest.mark.parametrize(
+    ("action", "shadow", "merge", "archive"),
+    [
+        (_sleep_action("merge", uuid4(), uuid4(), {}), False, True, False),
+        (_sleep_action("merge", uuid4(), uuid4(), None), False, True, False),
+        (_sleep_action("merge", uuid4(), None, {}), False, False, False),
+        (_sleep_action("merge", uuid4(), uuid4(), {"mode": "shadow"}), True, False, False),
+        (_sleep_action("archive", uuid4(), None, {"mode": "tombstone"}), False, False, True),
+        (_sleep_action("archive", None, None, {"mode": "tombstone"}), False, False, False),
+        (_sleep_action("archive", uuid4(), None, {}), False, False, False),  # legacy
+        (_sleep_action("create_edge", uuid4(), uuid4(), {}), False, False, False),
+    ],
+    ids=[
+        "merge",
+        "merge-no-details",
+        "merge-no-target",
+        "shadow-merge",
+        "archive-tombstone",
+        "archive-no-memory",
+        "archive-legacy",
+        "create-edge",
+    ],
+)
+def test_tombstone_restore_predicates(action, shadow, merge, archive):
+    """#2157: one definition for the rollback's lock, undo and prefetch."""
+    assert _shadow_merge(action) is shadow
+    assert _merge_restore(action) is merge
+    assert _archive_restore(action) is archive
+    assert _restores_tombstone(action) is (merge or archive)
 
 
 class TestGetSleepHistory:
@@ -879,11 +923,10 @@ class TestRollbackActionDispatch:
         actions = [self._action("archive", id=1, memory_id=gone.id, details={})]
         cfg = MagicMock()
         cfg.scalar_one_or_none.return_value = None
-        prefetch = MagicMock()
-        prefetch.scalars.return_value.all.return_value = []
         update_result = MagicMock()
         update_result.rowcount = 0
-        data = await self._run(actions, user_id, workspace_id, extra=[cfg, prefetch, update_result])
+        # No lock and no prefetch: a legacy archive restores no tombstone.
+        data = await self._run(actions, user_id, workspace_id, extra=[cfg, update_result])
 
         summary = data["rollback_summary"]
         assert summary["archives_restored"] == 0
@@ -1194,12 +1237,14 @@ class TestRollbackActionDispatch:
         report.context_id = uuid4()
         report.workspace_id = uuid4()
 
-        action = self._action("archive", id=1)
+        # A tombstone archive: a legacy one (no mode) has no row to prefetch.
+        action = self._action("archive", id=1, details={"mode": "tombstone"})
         config_result = MagicMock()
         config_result.scalar_one_or_none.return_value = None
+        lock_result = MagicMock()  # the point-writer lock: a tombstone restore
         prefetch_result = MagicMock()
         prefetch_result.scalars.return_value.all.return_value = []
-        db = self._db(report, [action], [config_result, prefetch_result])
+        db = self._db(report, [action], [lock_result, config_result, prefetch_result])
 
         original = db.execute.side_effect
 

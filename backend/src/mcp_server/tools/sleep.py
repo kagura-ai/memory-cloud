@@ -490,7 +490,7 @@ async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str
     """Restore a merge loser (row + vector), or revert a shadow merge's edge."""
     if not action.target_id:
         return
-    if (action.details or {}).get("mode") == "shadow":
+    if _shadow_merge(action):
         await _undo_shadow_merge(db, action, ctx, summary)
         return
     await _restore_sleep_tombstone(
@@ -624,7 +624,7 @@ async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
     """
     if not action.memory_id:
         return
-    if (action.details or {}).get("mode") != "tombstone":
+    if not _archive_restore(action):
         summary["errors"].append(
             f"archived memory {action.memory_id} not restorable — recorded before "
             "tombstone archives (hard-deleted at archive time)"
@@ -655,6 +655,36 @@ _UNDO_HANDLERS = {
     "promote": _undo_promote,
     "archive": _undo_archive,
 }
+
+
+# The one definition of "this undo restores a tombstone" (#2157):
+# handle_rollback_sleep_run takes the point-writer lock and
+# _prefetch_rollback_memories loads the rows by _restores_tombstone /
+# _merge_restore / _archive_restore, and the undoers branch on the same
+# helpers (_undo_merge on _shadow_merge — its action is a merge with a
+# target_id by then — and _undo_archive on _archive_restore).
+def _shadow_merge(action: Any) -> bool:
+    """A shadow merge (#1208): the loser was never deleted, only linked."""
+    return (action.details or {}).get("mode") == "shadow"
+
+
+def _merge_restore(action: Any) -> bool:
+    """A merge whose loser row + vector the rollback restores (not a shadow merge)."""
+    return action.action_type == "merge" and bool(action.target_id) and not _shadow_merge(action)
+
+
+def _archive_restore(action: Any) -> bool:
+    """A tombstone archive the rollback un-deletes (#1520); older archives hard-deleted."""
+    return (
+        action.action_type == "archive"
+        and bool(action.memory_id)
+        and (action.details or {}).get("mode") == "tombstone"
+    )
+
+
+def _restores_tombstone(action: Any) -> bool:
+    """Whether undoing ``action`` writes a point before its row commits (point-writer lock)."""
+    return _merge_restore(action) or _archive_restore(action)
 
 
 async def _resolve_rollback_workspace_id(db: Any, report: Any) -> str:
@@ -691,9 +721,10 @@ async def _prefetch_rollback_memories(db: Any, actions: list[Any], user_id: str)
 
     re_embed_ids: set[UUID] = set()
     for a in actions:
-        if a.action_type == "merge" and a.target_id and (a.details or {}).get("mode") != "shadow":
+        if _merge_restore(a):
             re_embed_ids.add(a.target_id)
-        elif a.action_type == "archive" and a.memory_id:
+        elif _archive_restore(a):
+            # A legacy (hard-deleted) archive has no row to re-embed.
             re_embed_ids.add(a.memory_id)
     if not re_embed_ids:
         return {}
@@ -766,20 +797,7 @@ async def handle_rollback_sleep_run(
                     "No recorded actions to rollback. This report may pre-date action recording.",
                 )
 
-            has_tombstone_restores = any(
-                (
-                    action.action_type == "merge"
-                    and action.target_id
-                    and (action.details or {}).get("mode") != "shadow"
-                )
-                or (
-                    action.action_type == "archive"
-                    and action.memory_id
-                    and (action.details or {}).get("mode") == "tombstone"
-                )
-                for action in actions
-            )
-            if has_tombstone_restores:
+            if any(_restores_tombstone(action) for action in actions):
                 await hold_point_writer_lock(db)
 
             # Get context embedding info for re-embedding

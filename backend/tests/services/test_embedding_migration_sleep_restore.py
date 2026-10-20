@@ -167,6 +167,7 @@ async def test_switch_requeues_rows_restored_after_verify(db_session):
     with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock):
         for memory_id in (archive.id, failed_archive.id):
             action = MagicMock()
+            action.action_type = "archive"
             action.memory_id = memory_id
             action.details = {"mode": "tombstone"}
             await _undo_archive(db_session, action, rollback_ctx, summary)
