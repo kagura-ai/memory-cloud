@@ -24,6 +24,7 @@ from models.auth import (
     OAuth2Token,
     WorkspaceMember,
 )
+from services.credential_default_context import default_context_names
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthorizationError, ValidationError
 from utils.logger import get_logger
@@ -216,9 +217,13 @@ class MemberCredentialsService:
         # owner/admin viewing another member's keys sees a name only for a
         # context they can read themselves; self view matches GET
         # /config/api-keys. One read per distinct (context, key workspace).
-        from services.credential_default_context import default_context_names
-
-        names = await default_context_names(self.db, user_id=requester_id, keys=api_keys)
+        # A failed lookup costs the names only, never the key list itself
+        # (the user must still be able to see, hide and revoke their keys).
+        try:
+            names = await default_context_names(self.db, user_id=requester_id, keys=api_keys)
+        except Exception as e:
+            logger.error("member_key_default_names_failed", error=str(e), user_id=user_id)
+            names = {}
 
         return {
             "api_keys": [

@@ -165,6 +165,9 @@ export function APIKeysTabPanel() {
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createKeyError, setCreateKeyError] = useState<string | null>(null);
+  // #2188: the dialog stays open while the create runs; a second click
+  // must not mint a second key.
+  const [creatingKey, setCreatingKey] = useState(false);
   // Issue #626: public-context binding picker state. Both fields reset on
   // dialog open/close so the operator never carries a stale selection into
   // a fresh create flow.
@@ -432,8 +435,9 @@ export function APIKeysTabPanel() {
   };
 
   const handleCreateAPIKey = async () => {
-    if (!currentWorkspaceId || !userId) return;
+    if (!currentWorkspaceId || !userId || creatingKey) return;
 
+    setCreatingKey(true);
     try {
       setCreateKeyError(null);
 
@@ -480,6 +484,8 @@ export function APIKeysTabPanel() {
           ? err.message
           : t("errorCreateKey"),
       );
+    } finally {
+      setCreatingKey(false);
     }
   };
 
@@ -932,7 +938,11 @@ export function APIKeysTabPanel() {
       {/* Create API Key Dialog */}
       <AlertDialog
         open={showCreateKeyDialog}
-        onOpenChange={setShowCreateKeyDialog}
+        // #2188: closing by Escape / outside click clears the form and any
+        // error too, so a reopened dialog starts fresh.
+        onOpenChange={(open) =>
+          open ? setShowCreateKeyDialog(true) : resetCreateDialog()
+        }
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1084,6 +1094,7 @@ export function APIKeysTabPanel() {
                 (e.g. 404 for an unreadable default) shows above; success
                 closes it via resetCreateDialog. */}
             <AlertDialogAction
+              disabled={creatingKey}
               onClick={(e) => {
                 e.preventDefault();
                 void handleCreateAPIKey();

@@ -635,6 +635,46 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
       );
     });
 
+    it("mints one key when Create is clicked twice", async () => {
+      let resolve: (k: MemberAPIKey) => void = () => {};
+      mockCreateAPIKey.mockReturnValue(
+        new Promise<MemberAPIKey>((r) => {
+          resolve = r;
+        }),
+      );
+      await openCreateDialog();
+      fireEvent.click(screen.getByText("createKey"));
+      fireEvent.click(screen.getByText("createKey"));
+      resolve(makeKey({ name: "ci" }));
+
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ description: "createSuccess" }),
+        ),
+      );
+      expect(mockCreateAPIKey).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts fresh after closing on an error", async () => {
+      mockCreateAPIKey.mockRejectedValue(new Error("Context not found"));
+      await openCreateDialog();
+      fireEvent.click(screen.getByText("createKey"));
+      expect(await screen.findByText("Context not found")).toBeInTheDocument();
+
+      fireEvent.keyDown(screen.getByText("createApiKeyTitle"), {
+        key: "Escape",
+      });
+      await waitFor(() =>
+        expect(screen.queryByText("createApiKeyTitle")).not.toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByText("createApiKey"));
+      await screen.findByText("createApiKeyTitle");
+      expect(screen.queryByText("Context not found")).not.toBeInTheDocument();
+      expect(
+        (screen.getByLabelText("keyName") as HTMLInputElement).value,
+      ).toBe("");
+    });
+
     it("hides the default picker while binding to a public context", async () => {
       await openCreateDialog();
       expect(screen.getByLabelText("defaultContextLabel")).toBeInTheDocument();

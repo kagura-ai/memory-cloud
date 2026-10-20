@@ -776,8 +776,7 @@ async def create_api_key(
     if data.default_context_id is not None:
         if bound_context_uuid is not None:
             raise ValidationError(
-                "A public-bound or agent-bound key cannot have a default context; "
-                "an agent key uses its agent's default binding",
+                "A public-bound key cannot have a default context",
                 field="default_context_id",
             )
         context = await readable_context(

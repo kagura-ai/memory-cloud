@@ -267,3 +267,19 @@ class TestDefaultContextOnMemberKeys:
         (key,) = out["api_keys"]
         assert key["default_context_id"] == str(self.CONTEXT_ID)
         assert key["default_context_name"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_name_lookup_keeps_the_key_list(self):
+        keys = [self._key(1, default_context_id=self.CONTEXT_ID)]
+        service = self._service(keys)
+        with patch(
+            "services.member_credentials_service.default_context_names",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ):
+            out = await service.get_or_create_credentials(
+                self.WORKSPACE_ID, "member-1", requester_id="member-1"
+            )
+
+        (key,) = out["api_keys"]
+        assert key["default_context_id"] == str(self.CONTEXT_ID)
+        assert key["default_context_name"] is None
