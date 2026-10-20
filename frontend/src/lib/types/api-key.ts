@@ -15,6 +15,11 @@ export interface APIKey {
   revoked_at: string | null; // ISO timestamp or null
   expires_at: string | null; // ISO timestamp or null
   status: APIKeyStatus;
+  // #2129: the key's MCP default context — a context-scoped tool called
+  // without context_id runs in it (?context= on the URL wins). The name is
+  // null when none is set OR the owner can no longer read the context.
+  default_context_id: string | null;
+  default_context_name: string | null;
 }
 
 export interface APIKeyCreateRequest {
@@ -22,6 +27,14 @@ export interface APIKeyCreateRequest {
   // Days until expiry (1-3650). 0 = never expires (explicit opt-in);
   // null/omitted = server default (365 days) — see #1537.
   expires_days: number | null;
+  // #2129: optional MCP default context (404 "Context not found" when the
+  // user cannot read it — no key is created).
+  default_context_id?: string | null;
+}
+
+/** #2129: body of PATCH /api/v1/config/api-keys/{key_id}; null clears. */
+export interface APIKeyUpdateRequest {
+  default_context_id: string | null;
 }
 
 export interface APIKeyCreateResponse extends APIKey {

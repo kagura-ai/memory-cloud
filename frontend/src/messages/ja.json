@@ -1771,6 +1771,26 @@
       "oauthAppsHelp": "自作の OAuth2 クライアント用 — Claude、ChatGPT、Cursor、Claude Code は自動登録されるため、ここでの作成は不要です"
     }
   },
+  "connectedApps": {
+    "title": "接続済みアプリ",
+    "description": "OAuth で認可したアプリです。アプリごとにデフォルトコンテキストを設定すると、context_id なしで呼んだ MCP ツールがそこで動作します。",
+    "emptyTitle": "接続済みアプリはありません",
+    "emptyDescription": "上の MCP URL で Claude、ChatGPT、Cursor などのクライアントを接続してサインインすると、ここに表示されます。",
+    "loadError": "接続済みアプリを読み込めませんでした",
+    "scopes": "スコープ",
+    "lastAuthorized": "最終認可",
+    "defaultContext": "デフォルトコンテキスト",
+    "defaultContextFor": "{name} のデフォルトコンテキスト",
+    "saved": "デフォルトコンテキストを保存しました",
+    "cleared": "デフォルトコンテキストを解除しました"
+  },
+  "defaultContext": {
+    "none": "デフォルトコンテキストなし",
+    "noDefault": "デフォルトなし",
+    "save": "保存",
+    "clear": "解除",
+    "unavailable": "利用できないコンテキスト — 解除または変更してください"
+  },
   "mcpConnection": {
     "title": "MCP 接続",
     "description": "すべてのクライアントが接続する MCP エンドポイント",
@@ -1889,7 +1909,14 @@
     "publicBindBadge": "公開バインド",
     "publicBindBadgeTitle": "このキーは1つの is_public=true コンテキストに紐付けられています（キー単位のレート制限+監査）。",
     "publicBindRevoke": "この公開バインドキーを revoke",
-    "publicBindRevokeDesc": "このキーを永久に失効させます。使用中のクライアントは紐付けられた公開コンテキストへのアクセスを即座に失います。コンテキスト自体は公開のままで、このキーの属性付きアクセスのみが解除されます。"
+    "publicBindRevokeDesc": "このキーを永久に失効させます。使用中のクライアントは紐付けられた公開コンテキストへのアクセスを即座に失います。コンテキスト自体は公開のままで、このキーの属性付きアクセスのみが解除されます。",
+    "colDefaultContext": "デフォルトコンテキスト",
+    "defaultContextFor": "{name} のデフォルトコンテキスト",
+    "defaultContextLabel": "デフォルトコンテキスト(任意)",
+    "defaultContextHelp": "このキーで context_id を指定せずに呼んだ MCP ツールは、このコンテキストで動作します。MCP URL の ?context= が優先されます。",
+    "defaultContextSaved": "デフォルトコンテキストを保存しました",
+    "defaultContextCleared": "デフォルトコンテキストを解除しました",
+    "defaultContextCreateFailed": "API キーは作成されましたが、デフォルトコンテキストを設定できませんでした: {error}"
   },
   "customApps": {
     "title": "アプリ認証",

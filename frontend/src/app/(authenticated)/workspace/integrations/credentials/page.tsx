@@ -13,6 +13,7 @@ import {
 import { useTabParam } from "@/hooks/useTabParam";
 import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";
 import { McpConnectionCard } from "@/components/credentials/McpConnectionCard";
+import { ConnectedAppsSection } from "@/components/credentials/ConnectedAppsSection";
 import { OAuthAppsTabPanel } from "@/components/credentials/OAuthAppsTabPanel";
 
 // "oauth-apps" is kept as the URL value for existing links even though the
@@ -58,6 +59,11 @@ export default function CredentialsPage() {
           <OAuthAppsTabPanel />
         </CategoryTabsContent>
       </CategoryTabs>
+
+      {/* #2129: the OAuth apps the user authorized, with each app's MCP
+          default context. Per user, not a credential kind, so it sits
+          below the tabs rather than in one. */}
+      <ConnectedAppsSection />
     </PageContainer>
   );
 }

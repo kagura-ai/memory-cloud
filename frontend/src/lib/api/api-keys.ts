@@ -11,6 +11,7 @@ import type {
   APIKeyCreateRequest,
   APIKeyCreateResponse,
   APIKeyStats,
+  APIKeyUpdateRequest,
 } from '../types/api-key';
 
 /**
@@ -62,6 +63,20 @@ export async function deleteSystemAPIKey(keyId: string): Promise<void> {
  */
 export async function regenerateAPIKey(keyId: string): Promise<APIKeyCreateResponse> {
   return apiClient.post<APIKeyCreateResponse>(`/api/v1/config/api-keys/${keyId}/regenerate`, {});
+}
+
+/**
+ * Set or clear an API key's MCP default context (#2129).
+ *
+ * `null` clears it. 404 when the key or the context is not found/readable,
+ * 400 for a revoked key, 422 for a public-bound, agent-bound or connector key.
+ */
+export async function updateAPIKeyDefaultContext(
+  keyId: string,
+  defaultContextId: string | null
+): Promise<APIKey> {
+  const body: APIKeyUpdateRequest = { default_context_id: defaultContextId };
+  return apiClient.patch<APIKey>(`/api/v1/config/api-keys/${keyId}`, body);
 }
 
 /**

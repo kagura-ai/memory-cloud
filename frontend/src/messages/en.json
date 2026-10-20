@@ -1771,6 +1771,26 @@
       "oauthAppsHelp": "For an OAuth2 client you build yourself — Claude, ChatGPT, Cursor and Claude Code register themselves and need no app here"
     }
   },
+  "connectedApps": {
+    "title": "Connected apps",
+    "description": "Apps you have authorized with OAuth. Set a default context per app: its MCP tools called without a context_id run there.",
+    "emptyTitle": "No connected apps",
+    "emptyDescription": "Connect Claude, ChatGPT, Cursor or another client with the MCP URL above and sign in — the app then appears here.",
+    "loadError": "Failed to load connected apps",
+    "scopes": "Scopes",
+    "lastAuthorized": "Last authorized",
+    "defaultContext": "Default context",
+    "defaultContextFor": "Default context for {name}",
+    "saved": "Default context saved",
+    "cleared": "Default context cleared"
+  },
+  "defaultContext": {
+    "none": "No default context",
+    "noDefault": "No default",
+    "save": "Save",
+    "clear": "Clear",
+    "unavailable": "Unavailable context — clear or change it"
+  },
   "mcpConnection": {
     "title": "MCP Connection",
     "description": "The MCP endpoint every client connects to",
@@ -1889,7 +1909,14 @@
     "publicBindBadge": "Public-bound",
     "publicBindBadgeTitle": "This key is attributed to one is_public=true context (per-key rate limit + audit).",
     "publicBindRevoke": "Revoke this public-bound key",
-    "publicBindRevokeDesc": "This will permanently revoke the key. Anyone using it will immediately lose access to the bound public context. The context itself stays public — only this key's attributed access is removed."
+    "publicBindRevokeDesc": "This will permanently revoke the key. Anyone using it will immediately lose access to the bound public context. The context itself stays public — only this key's attributed access is removed.",
+    "colDefaultContext": "Default context",
+    "defaultContextFor": "Default context for {name}",
+    "defaultContextLabel": "Default context (optional)",
+    "defaultContextHelp": "MCP tools called with this key and without a context_id run in this context. A ?context= on the MCP URL takes precedence.",
+    "defaultContextSaved": "Default context saved",
+    "defaultContextCleared": "Default context cleared",
+    "defaultContextCreateFailed": "The API key was created, but its default context could not be set: {error}"
   },
   "customApps": {
     "title": "App Authentication",
