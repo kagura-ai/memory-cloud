@@ -704,6 +704,92 @@ async def test_a_spent_time_budget_defers_the_rest_to_the_next_call():
     assert sorted(marked) == [0, 9]  # the skip and the one item that ran
 
 
+# ------------------------------------------- #2157: point-writer lock once
+
+
+@pytest.mark.asyncio
+async def test_run_takes_the_point_writer_lock_once_before_the_first_item_when_an_item_unforgets():
+    """#2157: the lock is taken in the outer transaction before the first
+    SAVEPOINT, so a failed item's ROLLBACK TO SAVEPOINT cannot release it and
+    the next item does not take it again."""
+    db = _db()
+    executor = _executor(db, {})
+    order: list[str] = []
+    items = [
+        PlanItem(uuid.uuid4(), "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(i,))
+        for i in range(2)
+    ]
+
+    async def restore(unit: list[PlanItem]) -> None:
+        order.append("restore")
+        if unit[0] is items[0]:
+            raise ConnectionError("vector store down")
+
+    executor._restore = restore  # type: ignore[method-assign]
+    lock = AsyncMock(side_effect=lambda _db: order.append("lock"))
+    with patch("db.point_writer_lock.hold_point_writer_lock", lock):
+        await executor.run(items)
+    assert order == ["lock", "restore", "restore"]
+    lock.assert_awaited_once_with(db)
+    assert db.begin_nested.call_count == 2
+    assert executor.summary["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_resolves_the_forget_collection_after_the_point_writer_lock():
+    """#2157: with an un-forget in the batch, the forgets' collection is read
+    under the lock too, so a switch cannot commit a new route in between."""
+    db = _db()
+    executor = _executor(db, {})
+    order: list[str] = []
+
+    async def collection() -> str:
+        order.append("collection")
+        return "collection"
+
+    async def work(unit: list[PlanItem]) -> None:
+        order.append(unit[0].action)
+
+    executor._collection = collection  # type: ignore[method-assign]
+    executor._forget_chunk = work  # type: ignore[method-assign]
+    executor._restore = work  # type: ignore[method-assign]
+    items = [
+        PlanItem(uuid.uuid4(), "created", ACTION_FORGET, event_ids=(1,)),
+        PlanItem(uuid.uuid4(), "forgotten", ACTION_UNFORGET, unforget=True, event_ids=(2,)),
+    ]
+    lock = AsyncMock(side_effect=lambda _db: order.append("lock"))
+    with patch("db.point_writer_lock.hold_point_writer_lock", lock):
+        await executor.run(items)
+    assert order == ["lock", "collection", ACTION_FORGET, ACTION_UNFORGET]
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_take_the_point_writer_lock_without_an_unforget():
+    db = _db()
+    executor = _executor(db, {})
+    restored: list[PlanItem] = []
+    forgotten: list[PlanItem] = []
+
+    async def restore(unit: list[PlanItem]) -> None:
+        restored.extend(unit)
+
+    async def forget_chunk(unit: list[PlanItem]) -> None:
+        forgotten.extend(unit)
+
+    executor._restore = restore  # type: ignore[method-assign]
+    executor._forget_chunk = forget_chunk  # type: ignore[method-assign]
+    executor._collection = AsyncMock(return_value="collection")  # type: ignore[method-assign]
+    items = [
+        PlanItem(uuid.uuid4(), "updated", ACTION_RESTORE, values={"summary": "x"}, event_ids=(1,)),
+        PlanItem(uuid.uuid4(), "created", ACTION_FORGET, event_ids=(2,)),
+    ]
+    lock = AsyncMock()
+    with patch("db.point_writer_lock.hold_point_writer_lock", lock):
+        await executor.run(items)
+    lock.assert_not_awaited()
+    assert restored == items[:1] and forgotten == items[1:]
+
+
 @pytest.mark.asyncio
 async def test_deferred_items_remain_and_keep_the_rollback_in_progress():
     record = MagicMock(id=3, status="in_progress", summary={})

@@ -30,14 +30,17 @@ resource indexer owns it (``resource_row``), the caller may not write it
 is nothing left to undo (``already_forgotten`` / ``already_restored``).
 
 Execution holds a per-(context, session id) advisory lock — per (context,
-principal) in the window mode — locks the batch's
-memory rows in id order, and runs each item (each forget chunk) in a SAVEPOINT
-of its own: a failed item leaves nothing behind and the rest still runs. Every
-event a call handles — reversed or skipped — gets the rollback row's id in
-``undone_by``, so a call that stops at ``MAX_ROLLBACK_EVENTS_PER_CALL`` (or at
-``MAX_UNFORGETS_PER_CALL`` un-forgets, each of which re-embeds inside the
-call) is continued by the next call, and nothing is ever reversed twice. A
-failed item's events stay unhandled: the next call retries it (``partial``).
+principal) in the window mode — locks the batch's memory rows in id order,
+takes the point-writer lock shared when an item un-forgets (held until the
+commit, outside the item SAVEPOINTs, so the routes resolved once per call
+stay the served ones, #2157), and runs each item (each forget chunk) in a
+SAVEPOINT of its own: a failed item leaves nothing behind and the rest still
+runs. Every event a call handles — reversed or skipped — gets the rollback
+row's id in ``undone_by``, so a call that stops at
+``MAX_ROLLBACK_EVENTS_PER_CALL`` (or at ``MAX_UNFORGETS_PER_CALL`` un-forgets,
+each of which re-embeds inside the call) is continued by the next call, and
+nothing is ever reversed twice. A failed item's events stay unhandled: the
+next call retries it (``partial``).
 A rollback whose events are all handled is ``completed``; the next call is
 refused (``AlreadyRolledBackError``) unless the session wrote again since.
 A window's record is keyed by the window itself: the same ``(since, until)``
@@ -923,6 +926,18 @@ class _Executor:
         await _mark_handled(
             self.db, [i for item in skipped for i in item.event_ids], self.rollback_id
         )
+        if any(item.unforget for item in restores):
+            # #1798: an un-forget rebuilds the point before the UPDATE that
+            # un-tombstones the row commits, so the orphan sweep must stay
+            # out. #2157: taken here, in the outer transaction, not inside an
+            # item's SAVEPOINT — a failed item's ROLLBACK TO SAVEPOINT releases
+            # the locks taken inside it, and the routes this run resolves once
+            # (the forget collection below, _embedding_target) are only valid
+            # while the lock keeps a concurrent embedding-model switch from
+            # committing a new route. Held until the caller commits.
+            from db.point_writer_lock import hold_point_writer_lock
+
+            await hold_point_writer_lock(self.db)
         if forgets:
             self.collection = await self._collection()
         units: list[tuple[list[PlanItem], Callable[[list[PlanItem]], Any]]] = [
@@ -988,6 +1003,12 @@ class _Executor:
         return await resolve_collection_name(self.db, self.scope.context_id)
 
     async def _embedding_target(self) -> tuple[Any, str]:
+        """The un-forgets' embedding service and collection, resolved once per call.
+
+        Resolved after ``run()`` took the point-writer lock and valid until the
+        commit — never call it before the lock (#2157): without it a switch
+        could commit a new route while this run keeps writing to the old one.
+        """
         if self._embedding is None:
             from services.embedding_service import EmbeddingService
             from services.sleep.undo import _resolve_embedding_info
@@ -1019,14 +1040,13 @@ class _Executor:
 
     async def _restore(self, items: list[PlanItem]) -> None:
         """Un-forget and/or put back the pre-session values of one memory."""
-        from db.point_writer_lock import hold_point_writer_lock
         from services.sleep.merge_retention import restore_forget_tombstone_stmt
 
         (item,) = items
         memory = self.memories[item.memory_id]
         if item.unforget:
-            # #1798: the point is rebuilt before this UPDATE commits.
-            await hold_point_writer_lock(self.db)
+            # The point is rebuilt before this UPDATE commits: run() holds the
+            # point-writer lock for the whole call (#1798, #2157).
             result = await self.db.execute(
                 restore_forget_tombstone_stmt(
                     memory.id,
