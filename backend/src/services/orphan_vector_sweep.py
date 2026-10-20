@@ -28,8 +28,14 @@ This sweep removes those points. A point is an orphan when:
   Sleep reindex and undo wrote one there anyway, holding only the label
   ``[resource] doc vN``.
 
-Apart from that one case, a point whose memory row is live is never an orphan,
-whatever else is true.
+* it is a content chunk point of such a row (#2101). Chunks are never written
+  for a row that owns the indexer's point, but ones written while it did not
+  (a row the indexer later matched by its natural key and re-pointed, say)
+  stay behind holding text the row no longer has, and a recall hit on one
+  would return the memory with that stale text.
+
+Apart from those two cases, a point whose memory row is live is never an
+orphan, whatever else is true.
 A resource point whose row cannot be decided (no natural key in the payload,
 no context) is kept. Its payload's ``memory_id`` is still not used as a key:
 before #1829 ``ResourceIndexer._apply_upsert`` wrote a fresh ``uuid4()`` there
@@ -85,13 +91,28 @@ REASON_RESOURCE_TOMBSTONED = "resource_tombstoned"
 REASON_RESOURCE_NO_ROW = "resource_no_row"
 # A summary point under the id of a live resource-indexer row (#2065).
 REASON_RESOURCE_LABEL = "resource_label"
+# A content chunk point of a live resource-indexer row (#2101).
+REASON_RESOURCE_CHUNK = "resource_chunk"
+# Every reason. Each one is also the name of its CollectionSweep counter.
+REASONS = (
+    REASON_NO_ROW,
+    REASON_TOMBSTONED,
+    REASON_CONTEXT_DELETED,
+    REASON_RESOURCE_TOMBSTONED,
+    REASON_RESOURCE_NO_ROW,
+    REASON_RESOURCE_LABEL,
+    REASON_RESOURCE_CHUNK,
+)
 
 _DELETE_BATCH = 1000
 
 
 @dataclass
 class CollectionSweep:
-    """One collection's share of a sweep."""
+    """One collection's share of a sweep.
+
+    One counter per reason, named after it (``REASONS``).
+    """
 
     collection: str
     scanned: int = 0
@@ -103,6 +124,8 @@ class CollectionSweep:
     resource_no_row: int = 0
     # Stray label points of live resource-indexer rows (#2065).
     resource_label: int = 0
+    # Stray content chunk points of live resource-indexer rows (#2101).
+    resource_chunk: int = 0
     deleted: int = 0
     # Why the collection could not be read (dropped mid-run, say); its counts
     # are then partial and nothing is deleted from it.
@@ -110,14 +133,11 @@ class CollectionSweep:
 
     @property
     def orphans(self) -> int:
-        return (
-            self.no_row
-            + self.tombstoned
-            + self.context_deleted
-            + self.resource_tombstoned
-            + self.resource_no_row
-            + self.resource_label
-        )
+        return sum(self.count(reason) for reason in REASONS)
+
+    def count(self, reason: str) -> int:
+        """The orphans found for ``reason`` (one of ``REASONS``)."""
+        return int(getattr(self, reason))
 
 
 @dataclass
@@ -147,6 +167,12 @@ class SweepResult:
         return sum(c.deleted for c in self.collections)
 
     @property
+    def by_reason(self) -> dict[str, int]:
+        """Orphans per reason, across collections; reasons with none left out."""
+        counts = {reason: sum(c.count(reason) for c in self.collections) for reason in REASONS}
+        return {reason: count for reason, count in counts.items() if count}
+
+    @property
     def remaining(self) -> int:
         """Points left in the swept collections after this pass."""
         return self.scanned - self.deleted
@@ -167,9 +193,11 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
     Anything that cannot be decided — an id that is not a UUID, a resource
     point with no ``context_id`` — is left out, i.e. kept. A content chunk
     point (#2015) is judged by the row it is a chunk of, like that memory's
-    own point.
+    own point, with one difference: a chunk of a live row that owns the
+    indexer's point is an orphan (#2101), since such a row has no chunks.
     """
     memory_ids: dict[UUID, list[str]] = {}
+    chunk_points: set[str] = set()
     resource_contexts: dict[str, UUID] = {}
     for ref in refs:
         if ref.is_resource:
@@ -180,6 +208,8 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
         memory_id = _as_uuid(ref.chunk_of or ref.point_id)
         if memory_id is not None:
             memory_ids.setdefault(memory_id, []).append(ref.point_id)
+            if ref.chunk_of:
+                chunk_points.add(ref.point_id)
 
     orphans: dict[str, str] = {}
 
@@ -214,10 +244,13 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
                 for point_id in point_ids:
                     orphans[point_id] = reason
             elif memory_id in resource_rows:
-                # #2065: only the summary point under the row's own id; a
-                # chunk point is not judged here.
+                # The row owns the indexer's point: a summary point under its
+                # own id (#2065) and any content chunk point (#2101) are
+                # strays.
                 for point_id in point_ids:
-                    if _as_uuid(point_id) == memory_id:
+                    if point_id in chunk_points:
+                        orphans[point_id] = REASON_RESOURCE_CHUNK
+                    elif _as_uuid(point_id) == memory_id:
                         orphans[point_id] = REASON_RESOURCE_LABEL
 
     if resource_contexts:
@@ -399,18 +432,7 @@ async def sweep_orphan_points(
                     if reason is None:
                         continue
                     found.append(ref)
-                    if reason == REASON_NO_ROW:
-                        stats.no_row += 1
-                    elif reason == REASON_TOMBSTONED:
-                        stats.tombstoned += 1
-                    elif reason == REASON_RESOURCE_TOMBSTONED:
-                        stats.resource_tombstoned += 1
-                    elif reason == REASON_RESOURCE_NO_ROW:
-                        stats.resource_no_row += 1
-                    elif reason == REASON_RESOURCE_LABEL:
-                        stats.resource_label += 1
-                    else:
-                        stats.context_deleted += 1
+                    setattr(stats, reason, stats.count(reason) + 1)
         except QdrantError as e:
             # One collection dropped mid-run (an embedding migration purge)
             # must not cost the others their sweep.
@@ -418,8 +440,8 @@ async def sweep_orphan_points(
             found = []
             # A partial count would be asked about, weighed against the ratio
             # guard and never deleted.
-            stats.no_row = stats.tombstoned = stats.context_deleted = 0
-            stats.resource_tombstoned = stats.resource_no_row = stats.resource_label = 0
+            for reason in REASONS:
+                setattr(stats, reason, 0)
             logger.warning("orphan_vector_sweep_collection_skipped", collection=name, error=str(e))
         candidates[name] = found
 
@@ -446,6 +468,7 @@ async def sweep_orphan_points(
         logger.error(
             "orphan_vector_sweep_refused",
             orphans=result.orphans,
+            by_reason=result.by_reason,
             scanned=readable,
             max_orphan_ratio=max_orphan_ratio,
         )
@@ -493,6 +516,7 @@ async def sweep_orphan_points(
         "orphan_vector_sweep_completed",
         scanned=result.scanned,
         orphans=result.orphans,
+        by_reason=result.by_reason,
         deleted=result.deleted,
         collections=[c.collection for c in result.collections if c.deleted],
     )

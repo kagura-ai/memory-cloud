@@ -75,9 +75,22 @@ class TestSweepOrphanVectorsCommand:
         assert _run([], sweep) == 0
 
         lines = capsys.readouterr().out.splitlines()
-        assert lines[0].split()[-1] == "label"
-        assert lines[1].split()[-1] == "4"
+        assert lines[0].split()[-2] == "label"
+        assert lines[1].split()[-2] == "4"
         assert "would delete 7" in "\n".join(lines)
+
+    def test_the_plan_lists_stray_chunk_points(self, capsys):
+        """#2101: chunk points of live indexer rows get a column of their own."""
+        plan = _result(dry_run=True)
+        plan.collections[0].resource_chunk = 5
+        sweep = AsyncMock(return_value=plan)
+
+        assert _run([], sweep) == 0
+
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].split()[-1] == "chunk"
+        assert lines[1].split()[-1] == "5"
+        assert "would delete 8" in "\n".join(lines)
 
     def test_apply_plans_then_deletes_and_reports_what_is_left(self, capsys):
         sweep = AsyncMock(side_effect=[_result(dry_run=True), _result(dry_run=False, deleted=3)])

@@ -495,8 +495,8 @@ class TestStrayLabelPoints:
     @pytest.mark.asyncio
     async def test_rows_that_own_their_id_point_keep_it(self, db_session):
         """A row that only carries resource fields (``remember(external_id=...)``),
-        or names a resource point it does not own, keeps the point under its id;
-        so does the chunk of an indexer row, which this rule does not judge."""
+        or names a resource point it does not own, keeps the point under its id
+        and its chunk points."""
         context = await _live_context(db_session)
         api_row = _memory(
             workspace_id=context.workspace_id,
@@ -504,14 +504,14 @@ class TestStrayLabelPoints:
             details={"resource_id": "res_1"},
         )
         mismatched = _resource_memory(context, uuid4(), doc_id="doc_2")
-        indexer = self._indexer_row(context)
-        db_session.add_all([api_row, mismatched, indexer])
+        db_session.add_all([api_row, mismatched])
         await db_session.flush()
         store = _FakeStore(
             [
                 _ref(api_row.id),
+                _ref(uuid4(), chunk_of=api_row.id),
                 _ref(mismatched.id),
-                _ref(uuid4(), chunk_of=indexer.id),
+                _ref(uuid4(), chunk_of=mismatched.id),
             ]
         )
 
@@ -533,6 +533,113 @@ class TestStrayLabelPoints:
 
         assert result.orphans == 0
         assert store.deleted == []
+
+
+class TestStrayChunkPoints:
+    """#2101: before v0.111.0 the Sleep reindex also wrote content chunk points
+    for indexer rows, holding the raw document text. An indexer row never has
+    chunks of its own, so they are swept while the row is live."""
+
+    @pytest.mark.asyncio
+    async def test_chunk_points_of_a_live_indexer_row_are_swept(self, db_session):
+        context = await _live_context(db_session)
+        row = TestStrayLabelPoints._indexer_row(context)
+        db_session.add(row)
+        await db_session.flush()
+        resource_point = _ref(
+            row.summary_embedding_id,
+            context_id=context.id,
+            is_resource=True,
+            resource_key=("res_1", "doc_1", 1),
+            written_at=OLD_ENOUGH,
+        )
+        chunk_a, chunk_b = uuid4(), uuid4()
+        store = _FakeStore(
+            [
+                resource_point,
+                _ref(chunk_a, context_id=context.id, chunk_of=row.id),
+                _ref(chunk_b, context_id=context.id, chunk_of=row.id),
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert sorted(store.deleted) == sorted([str(chunk_a), str(chunk_b)])
+        assert result.collections[0].resource_chunk == 2
+        assert result.collections[0].resource_label == 0
+        assert result.orphans == 2
+        assert result.by_reason == {sweep_module.REASON_RESOURCE_CHUNK: 2}
+
+    @pytest.mark.asyncio
+    async def test_label_and_chunk_points_are_counted_apart(self, db_session):
+        context = await _live_context(db_session)
+        row = TestStrayLabelPoints._indexer_row(context)
+        db_session.add(row)
+        await db_session.flush()
+        chunk = uuid4()
+        store = _FakeStore([_ref(row.id), _ref(chunk, chunk_of=row.id)])
+
+        result = await _sweep(db_session, store, dry_run=True)
+
+        assert result.collections[0].resource_label == 1
+        assert result.collections[0].resource_chunk == 1
+        assert result.by_reason == {
+            sweep_module.REASON_RESOURCE_LABEL: 1,
+            sweep_module.REASON_RESOURCE_CHUNK: 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chunk_points_of_a_normal_live_row_are_kept(self, db_session):
+        live = _memory()
+        db_session.add(live)
+        await db_session.flush()
+        store = _FakeStore([_ref(live.id), _ref(uuid4(), chunk_of=live.id)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_chunk_points_of_a_tombstoned_indexer_row_follow_the_grace_period(
+        self, db_session
+    ):
+        """A tombstone keeps the existing rule: kept while fresh, ``tombstoned``
+        once past the grace period — not ``resource_chunk``."""
+        from services.resource_indexer import resource_point_id
+
+        context = await _live_context(db_session)
+        fresh = TestStrayLabelPoints._indexer_row(
+            context, deleted_at=utcnow() - timedelta(minutes=5)
+        )
+        old = _resource_memory(
+            context,
+            resource_point_id("res_1", "doc_2", 1),
+            doc_id="doc_2",
+            deleted_at=utcnow() - timedelta(hours=2),
+        )
+        db_session.add_all([fresh, old])
+        await db_session.flush()
+        fresh_chunk, old_chunk = uuid4(), uuid4()
+        store = _FakeStore([_ref(fresh_chunk, chunk_of=fresh.id), _ref(old_chunk, chunk_of=old.id)])
+
+        result = await _sweep(db_session, store, dry_run=False, grace=timedelta(hours=1))
+
+        assert store.deleted == [str(old_chunk)]
+        assert result.collections[0].tombstoned == 1
+        assert result.collections[0].resource_chunk == 0
+
+
+def test_every_reason_has_a_counter():
+    """A reason is counted in the CollectionSweep field of the same name."""
+    from dataclasses import fields
+
+    from services.orphan_vector_sweep import REASONS, CollectionSweep
+
+    counters = {f.name for f in fields(CollectionSweep) if f.type in ("int", int)}
+    assert set(REASONS) <= counters
+    stats = CollectionSweep(collection=COLLECTION, **dict.fromkeys(REASONS, 1))
+    assert stats.orphans == len(REASONS)
 
 
 class TestSafetyRails:

@@ -408,6 +408,7 @@ async def sweep_orphan_vectors_task() -> None:
                     "orphan_vector_sweep_task_completed",
                     scanned=result.scanned,
                     orphans=result.orphans,
+                    by_reason=result.by_reason,
                     deleted=result.deleted,
                     refused=result.refused,
                     live_embedded_memories=result.live_embedded_memories,

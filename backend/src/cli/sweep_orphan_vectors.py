@@ -11,10 +11,12 @@ QDRANT_URL, KAGURA_VECTOR_BACKEND), e.g. inside the API container::
     python -m src.cli.sweep_orphan_vectors                 # plan (default, read-only)
     python -m src.cli.sweep_orphan_vectors --apply --yes   # delete the orphans
 
-A point whose memory row is live is never deleted, with one exception: a
-summary point under the id of a row the resource indexer wrote, whose point is
-the indexer's (``label``; the Sleep reindex and undo wrote such label points
-before v0.111.0). ``--apply`` scans again and
+A point whose memory row is live is never deleted, with two exceptions, both
+about a row the resource indexer wrote, whose point is the indexer's: a summary
+point under the row's id (``label``; the Sleep reindex and undo wrote such
+label points before v0.111.0), and a content chunk point of the row
+(``chunk``; chunks written before the indexer took the row over, holding text
+it no longer has). ``--apply`` scans again and
 looks every orphan up a second time before deleting it, so it can delete
 fewer points than the plan listed; a second run then reports 0 orphans.
 
@@ -44,14 +46,14 @@ from services.orphan_vector_sweep import (  # noqa: E402
 def _print_plan(result: SweepResult) -> None:
     print(
         f"{'collection':<44} {'points':>8} {'no row':>8} {'soft-deleted':>13} {'context gone':>13} "
-        f"{'doc gone':>9} {'label':>6}"
+        f"{'doc gone':>9} {'label':>6} {'chunk':>6}"
     )
     for stats in result.collections:
         print(
             f"{stats.collection:<44} {stats.scanned:>8} {stats.no_row:>8} "
             f"{stats.tombstoned:>13} {stats.context_deleted:>13} "
             f"{stats.resource_tombstoned + stats.resource_no_row:>9} "
-            f"{stats.resource_label:>6}"
+            f"{stats.resource_label:>6} {stats.resource_chunk:>6}"
         )
         if stats.error:
             print(f"  not read, skipped: {stats.error}")
