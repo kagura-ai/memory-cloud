@@ -129,3 +129,32 @@ def test_reference_passes_version_and_maps_an_unknown_one_to_422() -> None:
     assert response.status_code == 422
     assert response.json()["details"]["current_version"] == 3
     assert service.reference.await_args.kwargs == {"user_id": "u1", "version": 9}
+
+
+def test_reference_a_historical_type_the_filter_denies_is_the_live_denials_404() -> None:
+    """#2116: the REST route mirrors the MCP tool — the real service under a
+    per-memory type filter that denies version 1's type answers the same 404
+    body a denied live row does."""
+    from unittest.mock import patch
+
+    from tests.services.test_memory_revisions_read import _type_changed_service, _type_filter
+
+    def call(*, live_allowed: bool) -> tuple[int, Any]:
+        memory, service, perm = _type_changed_service(live_allowed=live_allowed)
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                new=_type_filter({"note"}),
+            ),
+            patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+            _client(service) as client,
+        ):
+            response = client.post(
+                "/api/v1/memory/reference", json={"memory_id": str(memory.id), "version": 1}
+            )
+        return response.status_code, response.text.replace(str(memory.id), "<id>")
+
+    historical_denied = call(live_allowed=True)
+    assert historical_denied[0] == 404
+    assert historical_denied == call(live_allowed=False)

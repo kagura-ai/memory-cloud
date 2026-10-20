@@ -2929,6 +2929,26 @@ class MemoryService:
 
         # UnknownVersionError (a ValidationError) propagates: 422 / validation_error.
         historical = await load_version(self.db, memory, version)
+        # #2116: the live-row gate above judged the binding's per-memory type
+        # filter (#1299) on today's ``type``. When version N had another type,
+        # the filter is judged on that one too, with the live-row denial's
+        # uniform not-found. ``source_type`` is not versioned, so the live
+        # value is the historical one. Same type: the live verdict stands.
+        historical_type = historical.values["type"]
+        if historical_type != memory.type:
+            from services.agent_binding_service import ACCESS_READ, agent_binding_permits
+
+            if not await agent_binding_permits(
+                self.db,
+                memory.context_id,
+                ACCESS_READ,
+                operation="reference",
+                user_id=user_id,
+                requested_memory_id=memory.id,
+                memory_type=historical_type,
+                memory_source_type=memory.source_type,
+            ):
+                raise NotFoundException("Memory", str(memory.id))
         await self._audit_reference_read(memory, user_id, version=version)
 
         values = historical.values

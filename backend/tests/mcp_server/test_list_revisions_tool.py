@@ -289,6 +289,33 @@ class TestReferenceVersion:
 
 
 @pytest.mark.asyncio
+async def test_a_historical_type_the_filter_denies_is_the_live_denials_not_found() -> None:
+    """#2116: the real service under a per-memory type filter (#1299) that
+    allows today's type but not version 1's answers exactly what a denied
+    live row answers — no new error shape, no hint that the version exists."""
+    from tests.services.test_memory_revisions_read import _type_changed_service, _type_filter
+
+    async def call(*, live_allowed: bool) -> dict[str, Any]:
+        memory, service, perm = _type_changed_service(live_allowed=live_allowed)
+        args = {"context_id": _CTX, "memory_id": str(memory.id), "version": 1}
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                new=_type_filter({"note"}),
+            ),
+            patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+        ):
+            payload = await _reference(args, service)
+        payload["message"] = payload["message"].replace(str(memory.id), "<id>")
+        return payload
+
+    historical_denied = await call(live_allowed=True)
+    assert historical_denied["error"] == "memory_not_found"
+    assert historical_denied == await call(live_allowed=False)
+
+
+@pytest.mark.asyncio
 async def test_another_validation_error_is_not_reported_as_a_bad_version() -> None:
     service = MagicMock(reference=AsyncMock(side_effect=ValidationError("something else")))
     with pytest.raises(ValidationError):
