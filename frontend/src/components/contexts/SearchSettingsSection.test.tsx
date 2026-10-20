@@ -357,7 +357,9 @@ describe("SearchSettingsSection reranking off on this deployment (#1580)", () =>
       target: { value: "5" },
     });
 
-    expect(await screen.findByText("unsavedChangesBar")).toBeInTheDocument();
+    expect(
+      await screen.findByText("unsavedFields(fields=unsavedFieldFetchFactor)"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("providerUnavailableCannotSave"),
     ).not.toBeInTheDocument();
@@ -611,4 +613,69 @@ describe("SearchSettingsSection reranker — the whole gate truth table (#1645)"
       ).toBe(refused && role === "owner" && i === "on, plan_page on");
     },
   );
+});
+
+describe("SearchSettingsSection save bar (#2159)", () => {
+  function bar() {
+    return screen.queryByTestId("search-settings-save-bar");
+  }
+
+  it("names the unsaved fields, badges their cards, and sits in the flow", async () => {
+    // BYOK off: key presence unknown, so the reranker controls are usable.
+    mockFeatures = { byok: false };
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    fireEvent.change(await screen.findByLabelText("semanticWeightLabel"), {
+      target: { value: "0.8" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "enableReranking" }));
+
+    expect(
+      await screen.findByText(
+        "unsavedFields(fields=unsavedFieldSemanticWeight, unsavedFieldReranker)",
+      ),
+    ).toBeInTheDocument();
+    // One badge per dirty card, next to its title.
+    const badges = screen.getAllByText("unsavedBadge");
+    expect(badges).toHaveLength(2);
+    expect(
+      screen.getByText("hybridSearchWeights").contains(badges[0]),
+    ).toBe(true);
+    expect(screen.getByText("rerankerConfig").contains(badges[1])).toBe(true);
+
+    // Sticky inside the section, not a viewport-fixed overlay.
+    const el = bar()!;
+    expect(el.className).toContain("sticky");
+    expect(el.className).toContain("bottom-0");
+    expect(el.className).not.toMatch(/\bfixed\b/);
+    expect(el.className).not.toContain("bottom-14");
+    // After the last card, so it is also last in the focus order.
+    expect(
+      screen
+        .getByText("embeddingConfig")
+        .compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("clears when a field is typed back to its saved value", async () => {
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    const input = await screen.findByLabelText("fetchFactorLabel");
+    fireEvent.change(input, { target: { value: "5" } });
+    expect(bar()).not.toBeNull();
+    expect(screen.getByText("unsavedBadge")).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "3" } });
+    expect(bar()).toBeNull();
+    expect(screen.queryByText("unsavedBadge")).toBeNull();
+  });
+
+  it("discard re-reads the config and drops the staged edits", async () => {
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    fireEvent.change(await screen.findByLabelText("fetchFactorLabel"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
+    await waitFor(() => expect(bar()).toBeNull());
+    expect(
+      (screen.getByLabelText("fetchFactorLabel") as HTMLInputElement).value,
+    ).toBe("3");
+  });
 });

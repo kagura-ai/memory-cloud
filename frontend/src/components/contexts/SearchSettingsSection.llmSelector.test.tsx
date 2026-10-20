@@ -132,6 +132,20 @@ const SELECTOR_ON = {
   llm_selector_in_use: 1,
 };
 
+/** The six fields the PUT schema requires, at their stored values. */
+const STORED_FIELDS = {
+  semantic_weight: 0.6,
+  bm25_weight: 0.4,
+  fetch_factor: 3,
+  use_rerank: false,
+  reranker_provider: "voyage",
+  reranker_model: "rerank-2",
+};
+
+function saveBar() {
+  return screen.queryByTestId("search-settings-save-bar");
+}
+
 function selectorSwitch() {
   return screen.getByRole("switch", { name: "llmSelector.toggleLabel" });
 }
@@ -189,30 +203,52 @@ describe("LLM selector card — presence", () => {
 });
 
 describe("LLM selector card — enabling", () => {
-  it("asks first, saying what is sent where and that results are cut", async () => {
+  it("asks first, saying what is sent where and that results are cut, and saves on confirm", async () => {
     await renderWith(SELECTOR_OFF);
+    mockGetConfig.mockResolvedValue(SELECTOR_ON);
     fireEvent.click(selectorSwitch());
 
     expect(screen.getByText("llmSelector.enableConfirmTitle")).toBeTruthy();
     expect(screen.getByText("llmSelector.enableConfirmBody")).toBeTruthy();
     expect(screen.getByText("llmSelector.enableConfirmPassages")).toBeTruthy();
-    // Nothing is staged until confirmed.
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    // Nothing is sent until confirmed.
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    await waitFor(() =>
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy(),
-    );
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("true");
-
-    fireEvent.click(screen.getByText("saveChanges"));
-    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
-    expect(mockUpdateConfig.mock.calls[0][1]).toMatchObject({
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    // #2159: one PUT, the stored required fields plus the flag; no bar.
+    expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
       llm_selector_enabled: true,
     });
+    await waitFor(() =>
+      expect(screen.getByText("llmSelector.activeBadge")).toBeTruthy(),
+    );
+    expect(selectorSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(saveBar()).toBeNull();
   });
 
-  it("cancelling stages nothing", async () => {
+  it("keeps a staged numeric edit out of the toggle save, and staged", async () => {
+    await renderWith(SELECTOR_OFF);
+    fireEvent.change(screen.getByLabelText("semanticWeightLabel"), {
+      target: { value: "0.8" },
+    });
+    mockGetConfig.mockResolvedValue(SELECTOR_ON);
+    fireEvent.click(selectorSwitch());
+    fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
+      llm_selector_enabled: true,
+    });
+    expect(
+      screen.getByText("unsavedFields(fields=unsavedFieldSemanticWeight)"),
+    ).toBeTruthy();
+  });
+
+  it("cancelling sends nothing", async () => {
     await renderWith(SELECTOR_OFF);
     fireEvent.click(selectorSwitch());
     fireEvent.click(screen.getByText("cancel"));
@@ -220,7 +256,8 @@ describe("LLM selector card — enabling", () => {
       expect(screen.queryByText("llmSelector.enableConfirmTitle")).toBeNull(),
     );
     expect(selectorSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
+    expect(saveBar()).toBeNull();
   });
 
   it("does not send the flag when only another setting changed", async () => {
@@ -236,19 +273,21 @@ describe("LLM selector card — enabling", () => {
   });
 
   it.each([
-    ["plan", { state: "plan", feature: "llm_selector" }],
-    ["cap", { state: "quota", quotaType: "llm_selector_contexts" }],
+    ["plan", { state: "plan", feature: "llm_selector" }, "plan"],
+    ["cap", { state: "quota", quotaType: "llm_selector_contexts" }, "cap"],
+    ["role", { state: "role" }, "permission"],
   ])(
-    "a %s refusal re-reads the config and drops only the selector change",
-    async (_label, gate) => {
+    "a %s refusal toasts, re-reads the config and reverts the switch",
+    async (_label, gate, reason) => {
       await renderWith(SELECTOR_OFF);
       mockUpdateConfig.mockRejectedValueOnce(refusal(gate));
+      mockGetConfig.mockResolvedValue({
+        ...SELECTOR_OFF,
+        llm_selector_can_change: false,
+        llm_selector_disabled_reason: reason,
+      });
       fireEvent.click(selectorSwitch());
       fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-      fireEvent.change(screen.getByLabelText("fetchFactorLabel"), {
-        target: { value: "5" },
-      });
-      fireEvent.click(await screen.findByText("saveChanges"));
       await waitFor(() =>
         expect(mockToast).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -257,65 +296,31 @@ describe("LLM selector card — enabling", () => {
           }),
         ),
       );
-      await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
       await waitFor(() =>
-        expect(selectorSwitch().getAttribute("aria-checked")).toBe("false"),
+        expect(selectorSwitch().hasAttribute("disabled")).toBe(true),
       );
-      // The other unsaved edit is still staged.
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
+      expect(selectorSwitch().getAttribute("aria-checked")).toBe("false");
+      expect(saveBar()).toBeNull();
     },
   );
 
-  it("a content chunk refusal leaves the staged selector change alone", async () => {
-    await renderWith({
-      ...SELECTOR_OFF,
-      content_chunks_enabled: false,
-      content_chunks_can_change: true,
-      content_chunks_supported: true,
-    });
-    mockUpdateConfig.mockRejectedValueOnce(
-      refusal({ state: "plan", feature: "content_chunks" }),
-    );
-    fireEvent.click(selectorSwitch());
-    fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
-    await waitFor(() => expect(mockToast).toHaveBeenCalled());
-    // No chunk change was staged, so nothing is dropped or re-read.
-    expect(mockGetConfig).toHaveBeenCalledTimes(1);
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("true");
-  });
-
-  it("any other failure keeps the confirmed selector change staged", async () => {
+  it("any other failure toasts and reverts the switch", async () => {
     await renderWith(SELECTOR_OFF);
     mockUpdateConfig.mockRejectedValueOnce(new Error("network down"));
     fireEvent.click(selectorSwitch());
     fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
-    await waitFor(() => expect(mockToast).toHaveBeenCalled());
-    expect(mockGetConfig).toHaveBeenCalledTimes(1);
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
-  });
-});
-
-describe("LLM selector card — role lost meanwhile", () => {
-  it("a role refusal re-reads the config and drops the staged selector change", async () => {
-    await renderWith(SELECTOR_OFF);
-    mockUpdateConfig.mockRejectedValueOnce(refusal({ state: "role" }));
-    mockGetConfig.mockResolvedValue({
-      ...SELECTOR_OFF,
-      llm_selector_can_change: false,
-      llm_selector_disabled_reason: "permission",
-    });
-    fireEvent.click(selectorSwitch());
-    fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
     await waitFor(() =>
-      expect(screen.getByText("llmSelector.reasonPermission")).toBeTruthy(),
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "destructive",
+          description: "network down",
+        }),
+      ),
     );
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(selectorSwitch().hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    await waitFor(() =>
+      expect(selectorSwitch().getAttribute("aria-checked")).toBe("false"),
+    );
+    expect(saveBar()).toBeNull();
   });
 });
 
@@ -343,28 +348,20 @@ describe("LLM selector card — cap without counts", () => {
 });
 
 describe("LLM selector card — disabling", () => {
-  it("stages the change without a dialog and sends false", async () => {
+  it("saves at once without a dialog and sends false", async () => {
     await renderWith(SELECTOR_ON);
+    mockGetConfig.mockResolvedValue(SELECTOR_OFF);
     fireEvent.click(selectorSwitch());
     expect(screen.queryByText("llmSelector.enableConfirmTitle")).toBeNull();
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(await screen.findByText("saveChanges"));
     await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
-    expect(mockUpdateConfig.mock.calls[0][1]).toMatchObject({
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
       llm_selector_enabled: false,
     });
-  });
-
-  it("flipping back to the stored value is not a change", async () => {
-    await renderWith(SELECTOR_ON);
-    fireEvent.click(selectorSwitch());
     await waitFor(() =>
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy(),
+      expect(selectorSwitch().getAttribute("aria-checked")).toBe("false"),
     );
-    fireEvent.click(selectorSwitch());
-    expect(screen.queryByText("llmSelector.enableConfirmTitle")).toBeNull();
-    expect(selectorSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    expect(saveBar()).toBeNull();
   });
 });
 

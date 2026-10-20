@@ -3,15 +3,16 @@
  *
  * Self-contained section for search/reranker settings within the Settings tab.
  * Contains hybrid search weights, reranker config, content chunk vectors
- * (#2104), the recall LLM selector (#2148), embedding info with sticky save
- * bar.
+ * (#2104), the recall LLM selector (#2148), embedding info, and an in-flow
+ * sticky save bar for the numeric fields. The two switches save on their own
+ * (#2159).
  * Extracted from contexts/[id]/search-settings/page.tsx (#232).
  */
 
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,11 +67,10 @@ import {
   listExternalAPIKeys,
   type ExternalAPIKey,
 } from "@/lib/api/external-keys";
-import { apiClient, ApiError } from "@/lib/api/base";
+import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
-import { QUOTA_TYPE_TO_GATE_KEY } from "@/lib/gates/featureGates";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { cn } from "@/styles/design-tokens";
 
@@ -104,6 +104,23 @@ const SELF_HOSTED_MODELS = [
   },
 ];
 
+/**
+ * The fields the save bar stages (#2159). The content chunk and LLM selector
+ * switches are not among them: they save as soon as they are confirmed. These
+ * six are also the fields the PUT body requires.
+ */
+const STAGED_FIELDS = [
+  "semantic_weight",
+  "bm25_weight",
+  "fetch_factor",
+  "use_rerank",
+  "reranker_provider",
+  "reranker_model",
+] as const;
+type StagedField = (typeof STAGED_FIELDS)[number];
+type StagedEdits = Partial<Pick<ContextSearchConfigUpdate, StagedField>>;
+type ToggleField = "content_chunks_enabled" | "llm_selector_enabled";
+
 const DEFAULT_RERANKER_MODELS: Record<string, string> = {
   voyage: "rerank-2",
   cohere: "rerank-multilingual-v3.0",
@@ -119,11 +136,10 @@ export function SearchSettingsSection({
 }: SearchSettingsSectionProps) {
   const t = useTranslations("searchSettings");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
 
   const [config, setConfig] = useState<ContextSearchConfig | null>(null);
-  const [editedConfig, setEditedConfig] = useState<
-    Partial<ContextSearchConfigUpdate>
-  >({});
+  const [editedConfig, setEditedConfig] = useState<StagedEdits>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +158,12 @@ export function SearchSettingsSection({
   // #2148: the LLM selector confirmation (asked on enable only — turning it
   // off sends nothing anywhere and deletes nothing).
   const [selectorDialogOpen, setSelectorDialogOpen] = useState(false);
+  // #2159: a switch change being saved — the switch shows the target while the
+  // PUT is in flight and falls back to the stored value if it fails.
+  const [pendingToggle, setPendingToggle] = useState<{
+    field: ToggleField;
+    value: boolean;
+  } | null>(null);
   const { toast } = useToast();
   // Issue #1167: with BYOK off no new key can be added, so the "configure
   // reranker keys" CTA would point at a page without an Add button — skip the
@@ -163,7 +185,15 @@ export function SearchSettingsSection({
   // unsaid until both the matrix and /system/info have answered.
   const rerank = useFeatureGate("reranking");
   const rerankingDisabledByDeployment = rerank.state === "deployment";
-  const isDirty = Object.keys(editedConfig).length > 0;
+  // #2159: only a value that differs from the stored one is unsaved, so
+  // typing a field back to its saved value clears the bar.
+  const dirtyFields: StagedField[] = config
+    ? STAGED_FIELDS.filter(
+        (key) =>
+          editedConfig[key] !== undefined && editedConfig[key] !== config[key],
+      )
+    : [];
+  const isDirty = dirtyFields.length > 0;
 
   const providerLabel = (provider: string) =>
     provider === "voyage"
@@ -242,42 +272,26 @@ export function SearchSettingsSection({
   }, [byokEnabled, rerankingDisabledByDeployment, loadExternalKeys]);
 
   const handleSave = useCallback(async () => {
-    if (!contextId || Object.keys(editedConfig).length === 0) return;
-
-    // #2104: the content chunk flag goes out only when the user changed it —
-    // the server treats it as optional, and turning it on is plan/cap-checked.
-    const chunksChanged =
-      editedConfig.content_chunks_enabled !== undefined &&
-      editedConfig.content_chunks_enabled !== config!.content_chunks_enabled;
-    // #2148: the same for the LLM selector flag (plan/cap-checked on enable).
-    const selectorChanged =
-      editedConfig.llm_selector_enabled !== undefined &&
-      editedConfig.llm_selector_enabled !== config!.llm_selector_enabled;
+    if (!contextId || !config || !isDirty) return;
 
     try {
       setSaving(true);
       setError(null);
 
+      // The six staged fields only: the content chunk and LLM selector flags
+      // are optional on the server and saved by their own switches (#2159).
       const updateData: ContextSearchConfigUpdate = {
-        semantic_weight:
-          editedConfig.semantic_weight ?? config!.semantic_weight,
-        bm25_weight: editedConfig.bm25_weight ?? config!.bm25_weight,
-        fetch_factor: editedConfig.fetch_factor ?? config!.fetch_factor,
-        use_rerank: editedConfig.use_rerank ?? config!.use_rerank,
+        semantic_weight: editedConfig.semantic_weight ?? config.semantic_weight,
+        bm25_weight: editedConfig.bm25_weight ?? config.bm25_weight,
+        fetch_factor: editedConfig.fetch_factor ?? config.fetch_factor,
+        use_rerank: editedConfig.use_rerank ?? config.use_rerank,
         reranker_provider:
-          editedConfig.reranker_provider ?? config!.reranker_provider,
-        reranker_model: editedConfig.reranker_model ?? config!.reranker_model,
-        ...(chunksChanged
-          ? { content_chunks_enabled: editedConfig.content_chunks_enabled }
-          : {}),
-        ...(selectorChanged
-          ? { llm_selector_enabled: editedConfig.llm_selector_enabled }
-          : {}),
+          editedConfig.reranker_provider ?? config.reranker_provider,
+        reranker_model: editedConfig.reranker_model ?? config.reranker_model,
       };
 
       await updateContextSearchConfig(contextId, updateData);
       toast({ title: tCommon("success"), description: t("configSaved") });
-      // Also re-reads content_chunks_backfill_pending for the progress note.
       await refreshConfig();
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : t("errorSave");
@@ -287,40 +301,55 @@ export function SearchSettingsSection({
         description: errorMsg,
         variant: "destructive",
       });
-      // #2104 / #2148: a refused chunk or LLM selector change (403 FEAT-001
-      // plan / 429 QUOTA-001 cap, e.g. another context took the last slot
-      // meanwhile; 403 AUTH-101 when the caller lost the owner/admin role):
-      // re-read the server's view so the card shows the reason, and drop
-      // only the refused staged flag — the user's other unsaved edits stay.
-      // Any other failure (network, 500, a capacity lock) keeps the
-      // confirmed choice staged.
-      const gate = err instanceof ApiError ? err.gate : undefined;
-      const refusedKey =
-        gate?.feature ??
-        (gate?.quotaType ? QUOTA_TYPE_TO_GATE_KEY[gate.quotaType] : undefined);
-      const roleRefusal = gate?.state === "role";
-      const chunkRefusal =
-        chunksChanged && (roleRefusal || refusedKey === "content_chunks");
-      const selectorRefusal =
-        selectorChanged && (roleRefusal || refusedKey === "llm_selector");
-      if (chunkRefusal || selectorRefusal) {
-        try {
-          const data = await getContextSearchConfig(contextId);
-          setConfig(data);
-          setEditedConfig((prev) => {
-            const next = { ...prev };
-            if (chunkRefusal) delete next.content_chunks_enabled;
-            if (selectorRefusal) delete next.llm_selector_enabled;
-            return next;
-          });
-        } catch {
-          // Silent: the toast above already reported the failure.
-        }
-      }
     } finally {
       setSaving(false);
     }
-  }, [contextId, editedConfig, config, t, tCommon, toast, refreshConfig]);
+  }, [contextId, config, isDirty, editedConfig, t, tCommon, toast, refreshConfig]);
+
+  /**
+   * #2159: a confirmed switch change is saved at once, on its own.
+   *
+   * The PUT schema requires the six staged fields, so the body carries them
+   * at their STORED values from `config` — never the staged edits, which
+   * would otherwise be saved by a click that did not ask for it — plus the
+   * one changed flag. Sending a stored value is a no-op on the server. The
+   * staged edits stay staged; the config is re-read so the card shows the
+   * saved flag and its `*_effective`.
+   */
+  const saveToggle = async (field: ToggleField, value: boolean) => {
+    if (!contextId || !config) return;
+    setPendingToggle({ field, value });
+    try {
+      const body: ContextSearchConfigUpdate = {
+        semantic_weight: config.semantic_weight,
+        bm25_weight: config.bm25_weight,
+        fetch_factor: config.fetch_factor,
+        use_rerank: config.use_rerank,
+        reranker_provider: config.reranker_provider,
+        reranker_model: config.reranker_model,
+        [field]: value,
+      };
+      await updateContextSearchConfig(contextId, body);
+      toast({ title: tCommon("success"), description: t("configSaved") });
+    } catch (err: unknown) {
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : t("errorSave"),
+        variant: "destructive",
+      });
+    }
+    // Re-read either way: after a save for the effective state and the
+    // backfill queue, after a refusal (403 FEAT-001 plan / 429 QUOTA-001 cap
+    // / 403 AUTH-101 role) for the reason the card shows. The staged edits
+    // are kept.
+    try {
+      setConfig(await getContextSearchConfig(contextId));
+    } catch {
+      // Silent: the stored flag still shows; a failed save was toasted above.
+    } finally {
+      setPendingToggle(null);
+    }
+  };
 
   const handleWeightChange = (semantic: number) => {
     if (isNaN(semantic)) return;
@@ -348,12 +377,11 @@ export function SearchSettingsSection({
     });
   };
 
-  const getCurrentValue = <K extends keyof ContextSearchConfig>(
+  const getCurrentValue = <K extends StagedField>(
     key: K,
   ): ContextSearchConfig[K] => {
     return (
-      (editedConfig[key as keyof ContextSearchConfigUpdate] as
-        ContextSearchConfig[K] | undefined) ??
+      (editedConfig[key] as ContextSearchConfig[K] | undefined) ??
       (config?.[key] as ContextSearchConfig[K])
     );
   };
@@ -440,7 +468,10 @@ export function SearchSettingsSection({
     config.content_chunks_enabled !== undefined &&
     config.content_chunks_can_change !== undefined;
   const storedChunks = config.content_chunks_enabled === true;
-  const currentChunks = getCurrentValue("content_chunks_enabled") === true;
+  const currentChunks =
+    pendingToggle?.field === "content_chunks_enabled"
+      ? pendingToggle.value
+      : storedChunks;
   const chunksCanChange = config.content_chunks_can_change === true;
   const chunksReason = config.content_chunks_disabled_reason ?? null;
   const chunksInUse = config.content_chunks_in_use ?? 0;
@@ -491,20 +522,14 @@ export function SearchSettingsSection({
   };
 
   const handleChunksToggle = (checked: boolean) => {
-    if (checked === storedChunks) {
-      // Back to the saved value: nothing to confirm, nothing to send.
-      const next = { ...editedConfig };
-      delete next.content_chunks_enabled;
-      setEditedConfig(next);
-      return;
-    }
+    if (checked === storedChunks) return;
     setChunkTarget(checked);
     setChunkDialogOpen(true);
   };
 
   const confirmChunksToggle = () => {
-    setEditedConfig({ ...editedConfig, content_chunks_enabled: chunkTarget });
     setChunkDialogOpen(false);
+    void saveToggle("content_chunks_enabled", chunkTarget);
   };
 
   // ── #2148: the recall LLM selector ──
@@ -515,7 +540,10 @@ export function SearchSettingsSection({
   // not rendered.
   const selectorShown = config.llm_selector_enabled !== undefined;
   const storedSelector = config.llm_selector_enabled === true;
-  const currentSelector = getCurrentValue("llm_selector_enabled") === true;
+  const currentSelector =
+    pendingToggle?.field === "llm_selector_enabled"
+      ? pendingToggle.value
+      : storedSelector;
   const selectorCanChange = config.llm_selector_can_change === true;
   const selectorReason = config.llm_selector_disabled_reason ?? null;
   const selectorInUse = config.llm_selector_in_use ?? 0;
@@ -561,24 +589,45 @@ export function SearchSettingsSection({
   };
 
   const handleSelectorToggle = (checked: boolean) => {
-    if (checked === storedSelector) {
-      // Back to the saved value: nothing to confirm, nothing to send.
-      const next = { ...editedConfig };
-      delete next.llm_selector_enabled;
-      setEditedConfig(next);
-      return;
-    }
+    if (checked === storedSelector) return;
     if (checked) {
       setSelectorDialogOpen(true);
       return;
     }
-    setEditedConfig({ ...editedConfig, llm_selector_enabled: false });
+    // Turning it off sends nothing anywhere and deletes nothing: no dialog.
+    void saveToggle("llm_selector_enabled", false);
   };
 
   const confirmSelectorEnable = () => {
-    setEditedConfig({ ...editedConfig, llm_selector_enabled: true });
     setSelectorDialogOpen(false);
+    void saveToggle("llm_selector_enabled", true);
   };
+
+  // ── #2159: what the save bar and the card badges say is unsaved ──
+  const weightsDirty =
+    dirtyFields.includes("semantic_weight") ||
+    dirtyFields.includes("bm25_weight");
+  const fetchFactorDirty = dirtyFields.includes("fetch_factor");
+  const rerankerDirty =
+    dirtyFields.includes("use_rerank") ||
+    dirtyFields.includes("reranker_provider") ||
+    dirtyFields.includes("reranker_model");
+  const dirtyNames = [
+    ...(weightsDirty ? [t("unsavedFieldSemanticWeight")] : []),
+    ...(fetchFactorDirty ? [t("unsavedFieldFetchFactor")] : []),
+    ...(rerankerDirty ? [t("unsavedFieldReranker")] : []),
+  ];
+  const unsavedBadge = (
+    <Badge
+      variant="outline"
+      className="border-amber-500 text-amber-700 dark:text-amber-400"
+    >
+      {t("unsavedBadge")}
+    </Badge>
+  );
+  // A toggle save and a staged-fields save must not race: the toggle body
+  // carries the stored values, which would undo a save landing first.
+  const toggleSaving = pendingToggle !== null;
 
   const getProviderDescription = () => {
     if (selfHostedAvailable && hasVoyageKey && hasCohereKey)
@@ -617,7 +666,9 @@ export function SearchSettingsSection({
 
   return (
     <>
-      <div className="space-y-6">
+      {/* #2159: bottom padding while the bar shows, so at the end of the
+          section the bar sits below the last card instead of on it. */}
+      <div className={cn("space-y-6", isDirty && "pb-4")}>
         {error && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
@@ -631,6 +682,7 @@ export function SearchSettingsSection({
             <CardTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
               {t("hybridSearchWeights")}
+              {(weightsDirty || fetchFactorDirty) && unsavedBadge}
             </CardTitle>
             <CardDescription>{t("hybridSearchWeightsDesc")}</CardDescription>
           </CardHeader>
@@ -736,6 +788,7 @@ export function SearchSettingsSection({
               <CardTitle className="flex items-center gap-2">
                 <Sparkles className="h-5 w-5" />
                 {t("rerankerConfig")}
+                {rerankerDirty && unsavedBadge}
               </CardTitle>
               <CardDescription>
                 {searchDefaults
@@ -980,9 +1033,9 @@ export function SearchSettingsSection({
                   id="content_chunks_enabled"
                   checked={currentChunks}
                   onCheckedChange={handleChunksToggle}
-                  // Not while saving: a successful save resets the staged
-                  // edits, which would drop a change confirmed meanwhile.
-                  disabled={chunksSwitchBlocked || saving}
+                  // Not while a save is in flight (#2159: the toggle body
+                  // carries the stored values of the staged fields).
+                  disabled={chunksSwitchBlocked || saving || toggleSaving}
                   aria-describedby={
                     chunksBlockedReason
                       ? "content-chunks-desc content-chunks-reason"
@@ -1073,9 +1126,8 @@ export function SearchSettingsSection({
                   id="llm_selector_enabled"
                   checked={currentSelector}
                   onCheckedChange={handleSelectorToggle}
-                  // Not while saving: a successful save resets the staged
-                  // edits, which would drop a change confirmed meanwhile.
-                  disabled={!selectorCanChange || saving}
+                  // Not while a save is in flight (#2159, see above).
+                  disabled={!selectorCanChange || saving || toggleSaving}
                   aria-describedby={
                     selectorBlockedReason
                       ? "llm-selector-desc llm-selector-reason"
@@ -1158,9 +1210,55 @@ export function SearchSettingsSection({
             </div>
           </CardContent>
         </Card>
+
+        {/* Save bar for the staged fields (#2159): in the flow after the
+            last card (so it is also last in the focus order), sticking to
+            the bottom of the viewport while the section is scrolled — not a
+            fixed overlay. Only rendered when something is unsaved. */}
+        {isDirty && (
+          <div
+            data-testid="search-settings-save-bar"
+            className="sticky bottom-0 z-10 rounded-lg border bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+              <p className="text-sm text-muted-foreground" role="status">
+                {cannotSave
+                  ? t("providerUnavailableCannotSave")
+                  : t("unsavedFields", {
+                      fields: new Intl.ListFormat(locale, {
+                        style: "short",
+                        type: "unit",
+                      }).format(dirtyNames),
+                    })}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={refreshConfig}
+                  disabled={saving}
+                >
+                  {t("discardChanges")}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={saving || toggleSaving || !!cannotSave}
+                >
+                  {saving ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4 mr-2" />
+                  )}
+                  {saving ? t("saving") : t("saveChanges")}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* #2104: confirm a content chunk change before it is staged */}
+      {/* #2104: confirm a content chunk change; confirming saves it (#2159) */}
       <AlertDialog open={chunkDialogOpen} onOpenChange={setChunkDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1204,7 +1302,8 @@ export function SearchSettingsSection({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* #2148: confirm turning the LLM selector on before it is staged */}
+      {/* #2148: confirm turning the LLM selector on; confirming saves it
+          (#2159) */}
       <AlertDialog
         open={selectorDialogOpen}
         onOpenChange={setSelectorDialogOpen}
@@ -1230,35 +1329,6 @@ export function SearchSettingsSection({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky Save Bar — only rendered when dirty */}
-      {isDirty && (
-        <div className="fixed bottom-14 left-0 right-0 z-[49] border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
-            <p className="text-sm text-muted-foreground">
-              {cannotSave
-                ? t("providerUnavailableCannotSave")
-                : t("unsavedChangesBar")}
-            </p>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={refreshConfig}>
-                {t("discardChanges")}
-              </Button>
-              <Button
-                size="sm"
-                onClick={handleSave}
-                disabled={saving || !!cannotSave}
-              >
-                {saving ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4 mr-2" />
-                )}
-                {saving ? t("saving") : t("saveChanges")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }

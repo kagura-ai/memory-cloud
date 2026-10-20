@@ -135,6 +135,20 @@ const CHUNKS_ON = {
   content_chunks_in_use: 1,
 };
 
+/** The six fields the PUT schema requires, at their stored values. */
+const STORED_FIELDS = {
+  semantic_weight: 0.6,
+  bm25_weight: 0.4,
+  fetch_factor: 3,
+  use_rerank: false,
+  reranker_provider: "voyage",
+  reranker_model: "rerank-2",
+};
+
+function saveBar() {
+  return screen.queryByTestId("search-settings-save-bar");
+}
+
 function chunkSwitch() {
   return screen.getByRole("switch", { name: "contentChunks.toggleLabel" });
 }
@@ -190,8 +204,9 @@ describe("content chunk card — presence", () => {
 });
 
 describe("content chunk card — enabling", () => {
-  it("asks first, naming the embedding provider, and stages the change", async () => {
+  it("asks first, naming the embedding provider, and saves on confirm", async () => {
     await renderWith(CHUNKS_OFF);
+    mockGetConfig.mockResolvedValue(CHUNKS_ON);
     fireEvent.click(chunkSwitch());
 
     expect(screen.getByText("contentChunks.enableConfirmTitle")).toBeTruthy();
@@ -203,20 +218,44 @@ describe("content chunk card — enabling", () => {
     ).toBeTruthy();
     // Reranking is off on this context: no reranker sentence.
     expect(screen.queryByText("contentChunks.enableConfirmRerank")).toBeNull();
-    // Nothing is staged until confirmed.
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    // Nothing is sent until confirmed.
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-    await waitFor(() =>
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy(),
-    );
-    expect(chunkSwitch().getAttribute("aria-checked")).toBe("true");
-
-    fireEvent.click(screen.getByText("saveChanges"));
-    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
-    expect(mockUpdateConfig.mock.calls[0][1]).toMatchObject({
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    // #2159: one PUT, the stored required fields plus the flag; no bar.
+    expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
       content_chunks_enabled: true,
     });
+    await waitFor(() =>
+      expect(screen.getByText("contentChunks.activeBadge")).toBeTruthy(),
+    );
+    expect(chunkSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(saveBar()).toBeNull();
+  });
+
+  it("keeps a staged numeric edit out of the toggle save, and staged", async () => {
+    await renderWith(CHUNKS_OFF);
+    fireEvent.change(screen.getByLabelText("fetchFactorLabel"), {
+      target: { value: "5" },
+    });
+    mockGetConfig.mockResolvedValue(CHUNKS_ON);
+    fireEvent.click(chunkSwitch());
+    fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
+      content_chunks_enabled: true,
+    });
+    expect(
+      screen.getByText("unsavedFields(fields=unsavedFieldFetchFactor)"),
+    ).toBeTruthy();
+    expect(
+      (screen.getByLabelText("fetchFactorLabel") as HTMLInputElement).value,
+    ).toBe("5");
   });
 
   it("adds the reranker sentence when reranking is on", async () => {
@@ -249,7 +288,8 @@ describe("content chunk card — enabling", () => {
       expect(screen.queryByText("contentChunks.enableConfirmTitle")).toBeNull(),
     );
     expect(chunkSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
+    expect(saveBar()).toBeNull()
   });
 
   it("does not send the flag when only another setting changed", async () => {
@@ -268,16 +308,17 @@ describe("content chunk card — enabling", () => {
     ["plan", { state: "plan", feature: "content_chunks" }],
     ["cap", { state: "quota", quotaType: "content_chunk_contexts" }],
   ])(
-    "a %s refusal re-reads the config and drops only the chunk change",
+    "a %s refusal toasts, re-reads the config and reverts the switch",
     async (_label, gate) => {
       await renderWith(CHUNKS_OFF);
       mockUpdateConfig.mockRejectedValueOnce(refusal(gate));
+      mockGetConfig.mockResolvedValue({
+        ...CHUNKS_OFF,
+        content_chunks_can_change: false,
+        content_chunks_disabled_reason: "plan",
+      });
       fireEvent.click(chunkSwitch());
       fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-      fireEvent.change(screen.getByLabelText("fetchFactorLabel"), {
-        target: { value: "5" },
-      });
-      fireEvent.click(await screen.findByText("saveChanges"));
       await waitFor(() =>
         expect(mockToast).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -286,25 +327,32 @@ describe("content chunk card — enabling", () => {
           }),
         ),
       );
-      await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
       await waitFor(() =>
-        expect(chunkSwitch().getAttribute("aria-checked")).toBe("false"),
+        expect(screen.getByText("contentChunks.reasonPlan")).toBeTruthy(),
       );
-      // The other unsaved edit is still staged.
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
+      expect(chunkSwitch().getAttribute("aria-checked")).toBe("false");
+      expect(saveBar()).toBeNull();
     },
   );
 
-  it("any other failure keeps the confirmed chunk change staged", async () => {
+  it("any other failure toasts and reverts the switch", async () => {
     await renderWith(CHUNKS_OFF);
     mockUpdateConfig.mockRejectedValueOnce(new Error("network down"));
     fireEvent.click(chunkSwitch());
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
-    await waitFor(() => expect(mockToast).toHaveBeenCalled());
-    expect(mockGetConfig).toHaveBeenCalledTimes(1);
-    expect(chunkSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByText("unsavedChangesBar")).toBeTruthy();
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "destructive",
+          description: "network down",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(chunkSwitch().getAttribute("aria-checked")).toBe("false"),
+    );
+    expect(chunkSwitch().hasAttribute("disabled")).toBe(false);
+    expect(saveBar()).toBeNull();
   });
 
   it("disables the switch on a store without chunks, even where the backend predates the reason", async () => {
@@ -321,30 +369,23 @@ describe("content chunk card — enabling", () => {
 });
 
 describe("content chunk card — disabling", () => {
-  it("asks first, saying the chunk vectors are removed on save", async () => {
+  it("asks first, saying the chunk vectors are removed, and saves on confirm", async () => {
     await renderWith(CHUNKS_ON);
+    mockGetConfig.mockResolvedValue(CHUNKS_OFF);
     fireEvent.click(chunkSwitch());
     expect(screen.getByText("contentChunks.disableConfirmTitle")).toBeTruthy();
     expect(screen.getByText("contentChunks.disableConfirmBody")).toBeTruthy();
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("contentChunks.confirmDisable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
     await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
-    expect(mockUpdateConfig.mock.calls[0][1]).toMatchObject({
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
       content_chunks_enabled: false,
     });
-  });
-
-  it("flipping back to the stored value needs no dialog and is not a change", async () => {
-    await renderWith(CHUNKS_ON);
-    fireEvent.click(chunkSwitch());
-    fireEvent.click(screen.getByText("contentChunks.confirmDisable"));
     await waitFor(() =>
-      expect(screen.getByText("unsavedChangesBar")).toBeTruthy(),
+      expect(chunkSwitch().getAttribute("aria-checked")).toBe("false"),
     );
-    fireEvent.click(chunkSwitch());
-    expect(screen.queryByText("contentChunks.enableConfirmTitle")).toBeNull();
-    expect(chunkSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByText("unsavedChangesBar")).toBeNull();
+    expect(saveBar()).toBeNull();
   });
 });
 
@@ -432,7 +473,7 @@ describe("content chunk card — backfill progress", () => {
     expect(screen.queryByText(/contentChunks\.backfillPending/)).toBeNull();
   });
 
-  it("re-reads the queue after saving", async () => {
+  it("re-reads the queue after the switch saves", async () => {
     await renderWith(CHUNKS_OFF);
     mockGetConfig.mockResolvedValue({
       ...CHUNKS_ON,
@@ -440,7 +481,6 @@ describe("content chunk card — backfill progress", () => {
     });
     fireEvent.click(chunkSwitch());
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-    fireEvent.click(await screen.findByText("saveChanges"));
     await waitFor(() =>
       expect(
         screen.getByText("contentChunks.backfillPending(count=7)"),
