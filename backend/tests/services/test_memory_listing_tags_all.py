@@ -43,25 +43,44 @@ def test_colliding_tags_with_other_numbers_stay_two_guarded_groups():
 def test_one_tag_written_twice_is_one_group_without_a_number_guard():
     preds = _sql(_all("Deploy", "deploy", "todo"))
     assert len(preds) == 2
-    assert "IN ('deploy')" in preds[0] and "IN ('todo')" in preds[1]
+    assert "= 'deploy'" in preds[0] and "= 'todo'" in preds[1]
     assert not any("[^0-9]+" in p for p in preds)
 
 
-def test_listed_tags_recall_treats_as_one_form_one_group():
-    # recall's grouping (normalize_tag) also folds plurals: either spelling counts.
+def test_plural_spellings_stay_two_requirements_in_this_lane():
+    # This lane does not fold plurals, so recall's log / logs group is not borrowed.
     preds = _sql(_all("log", "logs"))
-    assert len(preds) == 1 and "IN ('log', 'logs')" in preds[0]
+    assert len(preds) == 2 and "= 'log'" in preds[0] and "= 'logs'" in preds[1]
+
+
+def test_full_width_digits_are_compared_after_nfkc():
+    # Both fold to pr1２３ here; recall's numbers are [1, 23] and [123].
+    preds = _sql(_all("pr-1-２３", "pr-1２３"))
+    assert len(preds) == 2
+    assert "normalize(t, NFKC)" in preds[0]
+    assert "= '1,23'" in preds[0] and "= '123'" in preds[1]
+
+
+def test_separator_only_tags_match_exactly():
+    preds = _sql(_all("-", "--"))
+    assert len(preds) == 2
+    assert "t = '-'" in preds[0] and "t = '--'" in preds[1]
+
+
+def test_needle_counting_is_linear():
+    tags = [f"tag-{i}" for i in range(20000)]
+    assert len(compile_memory_filters(_all(*tags))) == 20000
 
 
 def test_tags_that_do_not_collide_get_no_number_guard():
     # The lane's fold keeps ".", so these two never fold together here.
     preds = _sql(_all("v0.11.0", "v0.1.10"))
     assert len(preds) == 2
-    assert "IN ('v0.11.0')" in preds[0] and "IN ('v0.1.10')" in preds[1]
+    assert "= 'v0.11.0'" in preds[0] and "= 'v0.1.10'" in preds[1]
     assert not any("[^0-9]+" in p for p in preds)
 
 
-def test_every_tag_stays_required_past_the_group_cap():
+def test_every_tag_stays_required_past_recalls_group_cap():
     tags = [f"tag-{i}" for i in range(60)]
     assert len(_sql(_all(*tags))) == 60
 
@@ -86,6 +105,7 @@ def test_any_mode_is_unchanged():
         (_all("PR-123", "pr-1-23"), {"both"}),
         (_all("Deploy", "deploy"), {"deploy"}),
         (_all("pr_123", "pr-123"), {"both", "one", "upper", "other"}),
+        (_all("pr-1-２３", "pr-1２３"), {"wide_both"}),
     ],
 )
 async def test_list_all_groups_match_recall(db_session, filters, expected):
@@ -97,6 +117,10 @@ async def test_list_all_groups_match_recall(db_session, filters, expected):
         "upper": await _row(db_session, owner, ws, ctx, summary="upper", tags=["PR_123"]),
         "other": await _row(db_session, owner, ws, ctx, summary="other", tags=["pr-1-23"]),
         "deploy": await _row(db_session, owner, ws, ctx, summary="deploy", tags=["DEPLOY"]),
+        "wide_one": await _row(db_session, owner, ws, ctx, summary="wide_one", tags=["pr-1-２３"]),
+        "wide_both": await _row(
+            db_session, owner, ws, ctx, summary="wide_both", tags=["PR-1-２３", "pr-1２３"]
+        ),
     }
     await db_session.commit()
     page = await list_memories(db_session, context_id=ctx, owner_user_id=None, filters=filters)
