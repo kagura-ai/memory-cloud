@@ -97,6 +97,8 @@ def _mock_manager(monkeypatch):
     new_key.created_at = __import__("datetime").datetime(2026, 1, 1)
     new_key.expires_at = __import__("datetime").datetime(2026, 1, 31)  # #1165: owner-set expiry
     new_key.bound_context_id = None  # owner-provisioned keys never bind a context
+    new_key.default_context_id = None  # #2188: nor carry a default on mint
+    new_key.agent_id = None
     mgr = MagicMock()
     mgr.create_key = AsyncMock(return_value=("kagura_PLAINTEXT", new_key))
     monkeypatch.setattr(mc, "APIKeyManager", lambda db: mgr)
@@ -206,6 +208,19 @@ class TestOwnerProvisionedMint:
             json={"name": "k", "expires_days": 30, "bound_context_id": str(uuid.uuid4())},
         )
         assert r.status_code == 400
+
+    def test_default_context_id_400_before_mint(self, client, owner_gate, monkeypatch):
+        """#2188: the default is the key owner's preference — refused here."""
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role="member")
+        mgr, _ = _mock_manager(monkeypatch)
+        r = client.post(
+            MINT_URL,
+            json={"name": "k", "expires_days": 30, "default_context_id": str(uuid.uuid4())},
+        )
+        assert r.status_code == 400
+        assert "default_context_id" in r.json()["message"]
+        mgr.create_key.assert_not_awaited()
 
     def test_scoped_key_foreign_workspace_404(self, client, owner_gate, monkeypatch):
         _override(_api_key_owner(workspace_id=uuid.uuid4()))
@@ -427,8 +442,9 @@ class TestAgentBoundMint:
     def test_agent_id_plumbed_and_audited(self, client, owner_gate, monkeypatch):
         fake_db = _override(_api_key_owner())
         _mock_member_service(monkeypatch, target_role="member")
-        mgr, _ = _mock_manager(monkeypatch)
+        mgr, new_key = _mock_manager(monkeypatch)
         agent_id = uuid.uuid4()
+        new_key.agent_id = agent_id
 
         r = client.post(
             MINT_URL,
@@ -437,6 +453,11 @@ class TestAgentBoundMint:
 
         assert r.status_code == 201, r.text
         assert mgr.create_key.await_args.kwargs["agent_id"] == agent_id
+        # #2188: the response marks the key agent-bound (no default context).
+        body = r.json()
+        assert body["agent_id"] == str(agent_id)
+        assert body["default_context_id"] is None
+        assert body["default_context_name"] is None
         from models.auth import AuditLog
 
         audit_rows = [

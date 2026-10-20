@@ -212,8 +212,21 @@ class MemberCredentialsService:
         # Determine visibility (Zero-knowledge!)
         is_owner = requester_id == user_id
 
+        # #2188: the default context's name, read as the REQUESTER — an
+        # owner/admin viewing another member's keys sees a name only for a
+        # context they can read themselves; self view matches GET
+        # /config/api-keys. One read per distinct (context, key workspace).
+        from services.credential_default_context import default_context_names
+
+        names = await default_context_names(self.db, user_id=requester_id, keys=api_keys)
+
         return {
-            "api_keys": [self._serialize_api_key(k, show_secret=is_owner) for k in api_keys],
+            "api_keys": [
+                self._serialize_api_key(
+                    k, show_secret=is_owner, default_context_name=names.get(k.id)
+                )
+                for k in api_keys
+            ],
         }
 
     async def check_can_manage(
@@ -679,7 +692,12 @@ class MemberCredentialsService:
 
         return {"invitations_deleted": result.rowcount}
 
-    def _serialize_api_key(self, api_key: APIKey, show_secret: bool) -> dict[str, Any]:
+    def _serialize_api_key(
+        self,
+        api_key: APIKey,
+        show_secret: bool,
+        default_context_name: str | None = None,
+    ) -> dict[str, Any]:
         """Serialize API key with zero-knowledge enforcement.
 
         Migration 035: Decrypt plaintext_encrypted if visible + owner.
@@ -687,6 +705,8 @@ class MemberCredentialsService:
         Args:
             api_key: APIKey instance
             show_secret: Whether to include plaintext key (owner only)
+            default_context_name: The readable name of the key's default
+                context (#2188), ``None`` when unset or unreadable.
 
         Returns:
             Serialized API key dict
@@ -726,4 +746,10 @@ class MemberCredentialsService:
             "bound_context_id": (
                 str(api_key.bound_context_id) if api_key.bound_context_id else None
             ),
+            # #2188: the MCP default context and the agent-bound marker.
+            "default_context_id": (
+                str(api_key.default_context_id) if api_key.default_context_id else None
+            ),
+            "default_context_name": default_context_name,
+            "agent_id": str(api_key.agent_id) if api_key.agent_id else None,
         }

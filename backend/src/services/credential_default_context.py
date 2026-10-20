@@ -15,6 +15,7 @@ makes the defaulted calls fail ``context_not_found``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -23,6 +24,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
+    APIKey,
     Context,
     OAuth2Client,
     OAuth2Token,
@@ -94,6 +96,30 @@ async def readable_context_name(
         db, user_id=user_id, context_id=context_id, key_workspace_id=key_workspace_id
     )
     return context.name if context is not None else None
+
+
+async def default_context_names(
+    db: AsyncSession, *, user_id: str, keys: Sequence[APIKey]
+) -> dict[int, str | None]:
+    """``{key.id: name}`` for the keys with a default context (#2129).
+
+    Each name is read through the read resolver as ``user_id`` in the key's
+    own workspace scope, so a default that user can no longer read shows no
+    name. One read per distinct ``(context, key workspace)`` pair. Shared by
+    ``GET /config/api-keys`` and the member credentials list (#2188).
+    """
+    seen: dict[tuple[UUID, UUID | None], str | None] = {}
+    names: dict[int, str | None] = {}
+    for key in keys:
+        if key.default_context_id is None:
+            continue
+        pair = (key.default_context_id, key.workspace_id)
+        if pair not in seen:
+            seen[pair] = await readable_context_name(
+                db, user_id=user_id, context_id=pair[0], key_workspace_id=pair[1]
+            )
+        names[key.id] = seen[pair]
+    return names
 
 
 @dataclass(frozen=True)

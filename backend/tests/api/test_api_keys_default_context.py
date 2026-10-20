@@ -283,7 +283,7 @@ async def test_list_names_each_default_once_per_context_and_scope():
         return "alpha" if context_id == CONTEXT_ID else None  # ``other`` is unreadable
 
     reader = AsyncMock(side_effect=name_of)
-    with patch("api.routes.api_keys.readable_context_name", new=reader):
+    with patch("services.credential_default_context.readable_context_name", new=reader):
         response = await list_api_keys(user=USER, manager=manager)
 
     assert [r.default_context_name for r in response] == ["alpha", "alpha", None, None]
@@ -300,7 +300,8 @@ async def test_regenerate_keeps_the_default_context():
     manager = _manager(new)
     with (
         patch(
-            "api.routes.api_keys.readable_context_name", new=AsyncMock(return_value="proj-alpha")
+            "services.credential_default_context.readable_context_name",
+            new=AsyncMock(return_value="proj-alpha"),
         ),
         patch("api.routes.api_keys.schedule_security_notification"),
     ):
@@ -373,3 +374,138 @@ async def test_member_regenerate_keeps_the_default_context():
         )
 
     assert mgr.create_key.await_args.kwargs["default_context_id"] == CONTEXT_ID
+
+
+# ------------------------------------------------- member self-mint (#2188)
+
+SESSION = {"user_id": "member-1", "sub": "member-1", "email": "m@example.com", "role": "user"}
+
+
+def _member_mint_manager(**key_over):
+    new_key = _key(
+        id=9,
+        public_id="akey_" + "9" * 22,
+        user_id="member-1",
+        workspace_id=WORKSPACE_ID,
+        visibility_expires_at=utcnow(),
+        **key_over,
+    )
+    mgr = MagicMock()
+    mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
+    return mgr
+
+
+async def _member_mint(body: dict, mgr, readable_result):
+    from api.routes import member_credentials as mc
+    from models.schemas import CreateAPIKeyRequest
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    reader = AsyncMock(return_value=readable_result)
+    with (
+        patch("api.routes.member_credentials.readable_context", new=reader),
+        patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
+        patch("api.routes.member_credentials.schedule_security_notification"),
+    ):
+        response = await mc.create_api_key(
+            WORKSPACE_ID,
+            "member-1",
+            CreateAPIKeyRequest(**body),
+            REQUEST,
+            BackgroundTasks(),
+            SESSION,
+            db,
+        )
+    return response, reader
+
+
+@pytest.mark.asyncio
+async def test_member_self_mint_sets_a_readable_default_in_one_call():
+    from models.schemas import MemberAPIKeyResponse
+
+    mgr = _member_mint_manager(default_context_id=CONTEXT_ID)
+    response, reader = await _member_mint(
+        {"name": "laptop", "default_context_id": str(CONTEXT_ID)},
+        mgr,
+        SimpleNamespace(id=CONTEXT_ID, name="proj-alpha"),
+    )
+
+    assert mgr.create_key.await_args.kwargs["default_context_id"] == CONTEXT_ID
+    kwargs = reader.await_args.kwargs
+    assert kwargs["user_id"] == "member-1"
+    assert kwargs["context_id"] == CONTEXT_ID
+    assert kwargs["key_workspace_id"] == WORKSPACE_ID  # the key's own scope
+    body = MemberAPIKeyResponse(**response)
+    assert body.default_context_id == str(CONTEXT_ID)
+    assert body.default_context_name == "proj-alpha"
+    assert body.agent_id is None
+
+
+@pytest.mark.asyncio
+async def test_member_self_mint_without_a_default_reads_nothing():
+    mgr = _member_mint_manager()
+    response, reader = await _member_mint({"name": "laptop"}, mgr, None)
+
+    reader.assert_not_awaited()
+    assert mgr.create_key.await_args.kwargs["default_context_id"] is None
+    assert response["default_context_id"] is None
+    assert response["default_context_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_member_self_mint_with_an_unreadable_default_is_404_and_mints_nothing():
+    mgr = _member_mint_manager()
+    with pytest.raises(MemoryCloudException) as exc:
+        await _member_mint({"name": "laptop", "default_context_id": str(CONTEXT_ID)}, mgr, None)
+
+    assert exc.value.status_code == 404
+    assert exc.value.message == "Context not found"
+    mgr.create_key.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_member_self_mint_refuses_a_default_on_a_public_bound_key():
+    """422 (the PATCH rule) and nothing is minted."""
+    from api.routes import member_credentials as mc
+    from models.schemas import CreateAPIKeyRequest
+
+    mgr = _member_mint_manager()
+    ctx = SimpleNamespace(
+        id=uuid.uuid4(), workspace_id=WORKSPACE_ID, is_public=True, created_by="member-1"
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=ctx)),
+            MagicMock(
+                scalar_one_or_none=MagicMock(return_value=SimpleNamespace(plan_name="promax"))
+            ),
+        ]
+    )
+    reader = AsyncMock()
+    with (
+        patch("api.routes.member_credentials.readable_context", new=reader),
+        patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
+        patch("config.plan_tiers.has_feature", return_value=True),
+        patch(
+            "config.plan_tiers.get_plan_tier",
+            return_value=SimpleNamespace(bound_public_calls_per_minute=60),
+        ),
+        pytest.raises(MemoryCloudException) as exc,
+    ):
+        await mc.create_api_key(
+            WORKSPACE_ID,
+            "member-1",
+            CreateAPIKeyRequest(
+                name="pub", bound_context_id=str(ctx.id), default_context_id=CONTEXT_ID
+            ),
+            REQUEST,
+            BackgroundTasks(),
+            SESSION,
+            db,
+        )
+
+    assert exc.value.status_code == 422
+    reader.assert_not_awaited()
+    mgr.create_key.assert_not_awaited()

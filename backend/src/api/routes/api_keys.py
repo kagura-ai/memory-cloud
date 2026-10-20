@@ -22,7 +22,7 @@ from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import APIKey
-from services.credential_default_context import readable_context, readable_context_name
+from services.credential_default_context import default_context_names, readable_context
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
@@ -190,7 +190,7 @@ def _format_key_response(key: APIKey, default_context_name: str | None = None) -
     Args:
         key: APIKey ORM object
         default_context_name: The readable name of ``key.default_context_id``
-            (``_default_context_names``), ``None`` when unset or unreadable.
+            (``default_context_names``), ``None`` when unset or unreadable.
 
     Returns:
         Formatted APIKeyResponse model
@@ -210,29 +210,6 @@ def _format_key_response(key: APIKey, default_context_name: str | None = None) -
         default_context_id=key.default_context_id,
         default_context_name=default_context_name,
     )
-
-
-async def _default_context_names(
-    db: AsyncSession, user_id: str, keys: list[APIKey]
-) -> dict[int, str | None]:
-    """``{key.id: name}`` for the keys with a default context (#2129).
-
-    Each name is read through the read resolver in the key's own workspace
-    scope, so a default the owner can no longer read shows no name. One read
-    per distinct ``(context, key workspace)`` pair.
-    """
-    seen: dict[tuple[UUID, UUID | None], str | None] = {}
-    names: dict[int, str | None] = {}
-    for key in keys:
-        if key.default_context_id is None:
-            continue
-        pair = (key.default_context_id, key.workspace_id)
-        if pair not in seen:
-            seen[pair] = await readable_context_name(
-                db, user_id=user_id, context_id=pair[0], key_workspace_id=pair[1]
-            )
-        names[key.id] = seen[pair]
-    return names
 
 
 # ============================================================================
@@ -257,7 +234,7 @@ async def list_api_keys(
         keys = await manager.list_keys(
             user_id=user_id,
         )
-        names = await _default_context_names(manager.db, user_id, keys)
+        names = await default_context_names(manager.db, user_id=user_id, keys=keys)
         return [_format_key_response(key, names.get(key.id)) for key in keys]
     except Exception as e:
         logger.error(f"Failed to list API keys: {e}")
@@ -608,7 +585,7 @@ async def regenerate_api_key(
             user_id=user_id,
         )
 
-        names = await _default_context_names(db, user_id, [new_key])
+        names = await default_context_names(db, user_id=user_id, keys=[new_key])
         response_data = _format_key_response(new_key, names.get(new_key.id))
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=new_api_key)
 

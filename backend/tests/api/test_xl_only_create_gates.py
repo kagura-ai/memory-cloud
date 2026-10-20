@@ -514,6 +514,8 @@ class TestBoundPublicKeyCreate:
         new_key.created_at = datetime(2026, 1, 1, tzinfo=UTC)
         new_key.expires_at = None
         new_key.bound_context_id = ctx.id
+        new_key.default_context_id = None  # #2188
+        new_key.agent_id = None
         new_key.visibility_expires_at = None
         new_key.last_used_at = None
         mgr = MagicMock()

@@ -2175,6 +2175,14 @@ class MemberAPIKeyResponse(BaseModel):
     # expires (session self-mint).
     expires_at: str | None = None
     bound_context_id: str | None = None  # Issue #626: public attribution
+    # #2188: the key's MCP default context (#2129), as on ``APIKeyResponse``.
+    # The name is read as the VIEWER: null when unset or when the viewer
+    # cannot read that context.
+    default_context_id: str | None = None
+    default_context_name: str | None = None
+    # #2188: set when the key is bound to an agent (it then cannot carry a
+    # default context — the agent's default binding applies).
+    agent_id: str | None = None
 
 
 class MemberOAuthAppResponse(BaseModel):
@@ -2231,6 +2239,11 @@ class CreateAPIKeyRequest(BaseModel):
     # gates in APIKeyManager.create_key). Mutually exclusive with
     # bound_context_id.
     agent_id: UUID | None = None
+    # #2188: the key's MCP default context (#2129). Session self-mint only:
+    # it must be readable by the caller in the key's workspace scope (404
+    # otherwise) and cannot go with ``bound_context_id`` (422). The
+    # owner-provisioned path rejects it (400).
+    default_context_id: UUID | None = None
 
 
 class RegenerateAPIKeyResponse(BaseModel):

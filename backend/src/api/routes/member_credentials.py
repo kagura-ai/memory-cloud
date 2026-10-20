@@ -35,6 +35,7 @@ from models.schemas import (
     RegenerateAPIKeyResponse,
     RegenerateOAuthSecretResponse,
 )
+from services.credential_default_context import readable_context
 from services.member_credentials_service import MemberCredentialsService
 from services.security_notification_service import (
     SecurityEvent,
@@ -46,6 +47,7 @@ from utils.exceptions import (
     BadRequestError,
     FeatureNotAvailableError,
     NotFoundException,
+    ValidationError,
 )
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId
@@ -86,12 +88,15 @@ def _minted_key_response(
     is_visible: bool,
     visibility_expires_at: str | None,
     last_used_at: str | None,
+    default_context_name: str | None = None,
 ) -> dict:
     """Build the one-time ``MemberAPIKeyResponse`` dict for a freshly minted key.
 
     Shared by the owner-provisioned mint (force-hidden: not visible) and the
     session self-mint (visible for its auto-hide window) — the two differ only
     in ``is_visible`` / ``visibility_expires_at`` / ``last_used_at``.
+    ``default_context_name`` is the name read when the default was checked
+    (#2188); ``None`` when no default was set.
     """
     return {
         "id": new_key.public_id,
@@ -105,6 +110,12 @@ def _minted_key_response(
         "revoked_at": None,
         "expires_at": to_utc_iso(new_key.expires_at),  # #1165: owner-set expiry
         "bound_context_id": (str(new_key.bound_context_id) if new_key.bound_context_id else None),
+        # #2188: the MCP default context and the agent-bound marker.
+        "default_context_id": (
+            str(new_key.default_context_id) if new_key.default_context_id else None
+        ),
+        "default_context_name": default_context_name,
+        "agent_id": str(new_key.agent_id) if new_key.agent_id else None,
     }
 
 
@@ -227,6 +238,12 @@ async def _owner_provisioned_mint(
         raise BadRequestError(
             message="bound_context_id is not allowed for owner-provisioned keys "
             "(public-bound keys are self-only)."
+        )
+    # #2188: the default is the key owner's preference; the target member sets
+    # it later through PATCH /config/api-keys/{key_id}.
+    if data.default_context_id is not None:
+        raise BadRequestError(
+            message="default_context_id is not allowed for owner-provisioned keys"
         )
 
     manager = APIKeyManager(db)
@@ -591,6 +608,12 @@ async def create_api_key(
     audit / revoke surface on ``/api/v1/public/{ctx}/*``. The binding is
     immutable — to change it, revoke this key and create a new one.
 
+    Issue #2188: session self-mint takes an optional ``default_context_id``
+    (the MCP default context), checked before the key is minted: 422 with a
+    ``bound_context_id``, 404 ``Context not found`` when the caller cannot
+    read it in the key's workspace scope. Owner-provisioned mints reject it
+    (400).
+
     Issue #1752: the key owner is emailed a security notice after the commit
     (naming the owner key's user on the owner-provisioned path).
 
@@ -598,7 +621,8 @@ async def create_api_key(
         workspace_id: Workspace ID (from URL — used as permission scope; also
             assigned to ``api_keys.workspace_id`` unless a bound context is set)
         user_id: Target user ID
-        data: API key creation data (name, auto_hide_minutes, bound_context_id)
+        data: API key creation data (name, auto_hide_minutes, bound_context_id,
+            default_context_id)
         user: Current user (from auth)
         db: Database session
 
@@ -744,6 +768,28 @@ async def create_api_key(
         # Mutual exclusion with workspace scope (#169).
         key_scope_workspace_id = None
 
+    # #2188: an MCP default context, checked before anything is minted. The
+    # same rules as PATCH /config/api-keys/{key_id}: not on a public-bound key
+    # (422), and readable by the key's owner in the key's workspace scope —
+    # otherwise the uniform 404.
+    default_context_name: str | None = None
+    if data.default_context_id is not None:
+        if bound_context_uuid is not None:
+            raise ValidationError(
+                "A public-bound or agent-bound key cannot have a default context; "
+                "an agent key uses its agent's default binding",
+                field="default_context_id",
+            )
+        context = await readable_context(
+            db,
+            user_id=user_id,
+            context_id=data.default_context_id,
+            key_workspace_id=key_scope_workspace_id,
+        )
+        if context is None:
+            raise NotFoundException("Context")
+        default_context_name = context.name
+
     manager = APIKeyManager(db)
 
     try:
@@ -753,6 +799,7 @@ async def create_api_key(
             workspace_id=key_scope_workspace_id,
             bound_context_id=bound_context_uuid,
             auto_hide_minutes=data.auto_hide_minutes,
+            default_context_id=data.default_context_id,
         )
 
         # Issue #626: audit log entry for public-bound key creation. Other
@@ -802,6 +849,7 @@ async def create_api_key(
             is_visible=True,
             visibility_expires_at=to_utc_iso(new_key.visibility_expires_at),
             last_used_at=to_utc_iso(new_key.last_used_at),
+            default_context_name=default_context_name,
         )
 
     except ValueError as e:

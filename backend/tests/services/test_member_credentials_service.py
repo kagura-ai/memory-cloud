@@ -15,7 +15,7 @@ contract:
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -145,6 +145,8 @@ class TestSerializeApiKeyLastUsed:
             expires_at=None,
             last_used_at=last_used_at,
             bound_context_id=None,
+            agent_id=None,
+            default_context_id=None,
         )
 
     def test_serialize_includes_last_used_at_when_present(self, service):
@@ -163,3 +165,105 @@ class TestSerializeApiKeyLastUsed:
         # on the schema or it is dropped before reaching the client.
         model = MemberAPIKeyResponse(**out)
         assert model.last_used_at == to_utc_iso(used)
+
+
+class TestDefaultContextOnMemberKeys:
+    """#2188 — the member list carries each key's MCP default context (id +
+    name read as the requester) and the agent-bound marker, so the UI needs no
+    second fetch of GET /config/api-keys."""
+
+    CONTEXT_ID = uuid4()
+    AGENT_ID = uuid4()
+    WORKSPACE_ID = uuid4()
+
+    def _key(self, key_id: int, **over):
+        base = {
+            "id": key_id,
+            "public_id": "akey_" + str(key_id) * 22,
+            "name": f"key-{key_id}",
+            "key_prefix": "kagura_abc123",
+            "plaintext_encrypted": None,
+            "hidden_at": datetime(2020, 1, 1, 0, 0, 0),
+            "visibility_expires_at": None,
+            "created_at": datetime(2026, 1, 1, 12, 0, 0),
+            "revoked_at": None,
+            "expires_at": None,
+            "last_used_at": None,
+            "bound_context_id": None,
+            "agent_id": None,
+            "default_context_id": None,
+            "workspace_id": self.WORKSPACE_ID,
+        }
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def _service(self, keys):
+        db = MagicMock()
+        db.execute = AsyncMock(
+            return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=lambda: keys)))
+        )
+        service = MemberCredentialsService(db)
+        service._check_can_view = AsyncMock()
+        return service
+
+    def test_serialize_emits_default_context_and_agent(self):
+        service = MemberCredentialsService(MagicMock())
+        key = self._key(1, default_context_id=self.CONTEXT_ID, agent_id=None)
+        out = service._serialize_api_key(key, show_secret=False, default_context_name="alpha")
+        assert out["default_context_id"] == str(self.CONTEXT_ID)
+        assert out["default_context_name"] == "alpha"
+        assert out["agent_id"] is None
+        model = MemberAPIKeyResponse(**out)
+        assert model.default_context_id == str(self.CONTEXT_ID)
+        assert model.default_context_name == "alpha"
+        assert model.agent_id is None
+
+    def test_serialize_emits_agent_id_and_null_defaults(self):
+        service = MemberCredentialsService(MagicMock())
+        out = service._serialize_api_key(self._key(2, agent_id=self.AGENT_ID), show_secret=False)
+        assert out["agent_id"] == str(self.AGENT_ID)
+        assert out["default_context_id"] is None
+        assert out["default_context_name"] is None
+        assert MemberAPIKeyResponse(**out).agent_id == str(self.AGENT_ID)
+
+    @pytest.mark.asyncio
+    async def test_names_are_read_once_per_context_as_the_requester(self):
+        keys = [
+            self._key(1, default_context_id=self.CONTEXT_ID),
+            self._key(2, default_context_id=self.CONTEXT_ID),
+            self._key(3),
+        ]
+        service = self._service(keys)
+        reader = AsyncMock(return_value="alpha")
+        with patch("services.credential_default_context.readable_context_name", new=reader):
+            out = await service.get_or_create_credentials(
+                self.WORKSPACE_ID, "member-1", requester_id="admin-1"
+            )
+
+        assert [k["default_context_name"] for k in out["api_keys"]] == ["alpha", "alpha", None]
+        assert [k["default_context_id"] for k in out["api_keys"]] == [
+            str(self.CONTEXT_ID),
+            str(self.CONTEXT_ID),
+            None,
+        ]
+        assert reader.await_count == 1
+        kwargs = reader.await_args.kwargs
+        assert kwargs["user_id"] == "admin-1"  # the viewer, not the key owner
+        assert kwargs["context_id"] == self.CONTEXT_ID
+        assert kwargs["key_workspace_id"] == self.WORKSPACE_ID
+
+    @pytest.mark.asyncio
+    async def test_unreadable_default_keeps_its_id_without_a_name(self):
+        keys = [self._key(1, default_context_id=self.CONTEXT_ID)]
+        service = self._service(keys)
+        with patch(
+            "services.credential_default_context.readable_context_name",
+            new=AsyncMock(return_value=None),
+        ):
+            out = await service.get_or_create_credentials(
+                self.WORKSPACE_ID, "member-1", requester_id="member-1"
+            )
+
+        (key,) = out["api_keys"]
+        assert key["default_context_id"] == str(self.CONTEXT_ID)
+        assert key["default_context_name"] is None
