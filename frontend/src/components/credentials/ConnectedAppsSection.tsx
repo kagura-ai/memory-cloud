@@ -46,6 +46,9 @@ export function ConnectedAppsSection() {
   const { toast } = useToast();
 
   const [grants, setGrants] = useState<OAuthGrant[] | null>(null);
+  // The load failure: the server's message, or "" for none usable (shown
+  // as the translated fallback). Kept raw so loadGrants does not depend on
+  // the translator and re-fetch on every render.
   const [error, setError] = useState<string | null>(null);
   const [contexts, setContexts] = useState<DefaultContextOption[]>([]);
 
@@ -64,15 +67,11 @@ export function ConnectedAppsSection() {
       if (isMountedRef.current) setGrants(data);
     } catch (err: unknown) {
       if (isMountedRef.current) {
-        setError(
-          err instanceof Error && err.message.trim()
-            ? err.message
-            : t("loadError"),
-        );
+        setError(err instanceof Error ? err.message.trim() : "");
         setGrants([]);
       }
     }
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     void loadGrants();
@@ -134,7 +133,7 @@ export function ConnectedAppsSection() {
 
   return (
     <Section title={t("title")} description={t("description")}>
-      <ErrorBanner error={error} />
+      <ErrorBanner error={error === null ? null : error || t("loadError")} />
       {grants === null ? (
         <TableLoadingState rows={2} />
       ) : grants.length === 0 ? (
