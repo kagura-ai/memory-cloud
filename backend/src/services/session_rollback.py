@@ -1228,13 +1228,16 @@ async def _target_record(
     """The scope's rollback record, or None.
 
     Linked subs (#2114) may each hold a record of the same scope from before
-    they were linked: the caller's own sub's comes first, then the oldest.
-    The others' handled events stay handled (``undone_by``).
+    they were linked. An unfinished one comes first — the record
+    ``unfinished_window_until`` continued, which this call then closes —
+    then the caller's own sub's, then the oldest. The others' handled events
+    stay handled (``undone_by``).
     """
     stmt = select(MemorySessionRollback).where(*_target_predicates(scope))
     if scope.principal is not None and len(scope.principal.actor_user_ids) > 1:
         stmt = stmt.order_by(
-            (MemorySessionRollback.principal_user_id != scope.principal.actor_user_id),
+            MemorySessionRollback.status.in_(sorted(_FINAL_STATUSES)),
+            MemorySessionRollback.principal_user_id != scope.principal.actor_user_id,
             MemorySessionRollback.id,
         )
     stmt = stmt.limit(1)

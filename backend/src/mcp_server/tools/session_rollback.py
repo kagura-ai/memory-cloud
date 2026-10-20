@@ -57,8 +57,8 @@ _SESSION_ID_HELP = (
     "OTel baggage of the request, else the MCP session id (Mcp-Session-Id)."
 )
 _NOT_FOUND_HELP = (
-    "Only your own sessions are visible (the same user and the same agent "
-    "credential that wrote them); a context owner may name any session in the "
+    "Only your own sessions are visible (the same user, or an account linked to "
+    "it, and the same agent credential that wrote them); a context owner may name any session in the "
     "context. changes_since(context_id, since, session_id) lists what a session wrote."
 )
 _MODE_HELP = (
@@ -66,7 +66,8 @@ _MODE_HELP = (
     "your own writes in a time window."
 )
 _NO_WRITES_HELP = (
-    "Only your own writes count: the same user and the same credential — an agent "
+    "Only your own writes count: the same user (or an account linked to it) and the "
+    "same credential — an agent "
     "key's writes are not your user credential's, and two clients on one user "
     "credential share them. changes_since(context_id, since, by_me=true) lists what "
     "you wrote and when."

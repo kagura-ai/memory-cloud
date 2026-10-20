@@ -1254,7 +1254,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
         },
         {
             "name": "rollback_session",
-            "description": """Undo writes in a context: one session's (session_id), or your own in a time window (since, until?; ≤ 7 days — for clients without a session id). DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the first edit put back (a new version); forgotten → restored and re-embedded. A memory changed by someone else since, merged by Sleep or a resource row is skipped with a cause, never half-reverted. Your own writes only (same user, same agent credential); a context owner may name any session. Editor role. ≤ 500 events (100 restores) per call: 'in_progress' with remaining > 0 → call again (same since and until); failed items are retried. Once complete, further calls are refused (already_rolled_back) until new writes land.
+            "description": """Undo writes in a context: one session's (session_id), or your own in a time window (since, until?; ≤ 7 days — for clients without a session id). DESTRUCTIVE — dry_run=true (the default) only lists the plan. Per memory: created → forgotten; updated → the values from before the first edit put back (a new version); forgotten → restored and re-embedded. A memory changed by someone else since, merged by Sleep or a resource row is skipped with a cause, never half-reverted. Your own writes only (same user or a linked account, same agent credential); a context owner may name any session. Editor role. ≤ 500 events (100 restores) per call: 'in_progress' with remaining > 0 → call again (same since and until); failed items are retried. Once complete, further calls are refused (already_rolled_back) until new writes land.
 Returns: {status: dry_run|rolled_back|in_progress, session_id | since+until, events, remaining, rollback_id?, plan? {forget, restore, unforget, skip}, items? [{memory_id, kind, action, cause?, fields?}], rollback_status?, summary? {forgotten, restored, skipped, failed, skipped_items, errors, ...}, totals?, context_{id, ...}}. Errors: session_not_found, no_writes_in_window, already_rolled_back, partial_rollback (call again to retry the failed items).""",
             "inputSchema": {
                 "type": "object",
@@ -2070,7 +2070,7 @@ Manual: guide(["changes_since"]).""",
                     },
                     "by_me": {
                         "type": "boolean",
-                        "description": "true: only your own writes (same user, same agent credential), in any session.",
+                        "description": "true: only your own writes (same user or a linked account, same agent credential), in any session.",
                     },
                     "limit": {
                         "type": "integer",

@@ -30,7 +30,7 @@ The agent side never widens.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -116,11 +116,7 @@ async def caller_principal_linked(db: AsyncSession, user_id: str) -> SessionPrin
     """
     from services.identity_link_service import linked_user_ids
 
-    own = caller_principal(user_id)
-    ids = await linked_user_ids(db, user_id)
-    return SessionPrincipal(
-        actor_user_id=user_id, agent_id=own.agent_id, actor_user_ids=ids | {user_id}
-    )
+    return replace(caller_principal(user_id), actor_user_ids=await linked_user_ids(db, user_id))
 
 
 def actor_predicate(actor_column: Any, principal: SessionPrincipal) -> ColumnElement[bool]:
