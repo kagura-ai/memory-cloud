@@ -1854,21 +1854,23 @@ async def _consent_default_context_choices(
 
 
 async def _save_consent_default_context(
-    user_id: str | None, client_id: str | None, raw: str | None
+    user_id: str | None, client_id: str | None, raw: object
 ) -> None:
     """Store the default context chosen on the consent page (#2129).
 
     ``raw`` is the ``default_context`` form field. Empty clears an existing
     setting (and writes nothing when there is none); a UUID the user can read
     (viewer, no key scope) is stored; anything else — absent field, not a
-    UUID, unreadable — is ignored at debug level. Never interrupts the
-    authorization: a failure here is logged and the flow continues.
+    UUID, unreadable — is ignored at debug level. A non-string value (a
+    multipart file part named ``default_context``) counts as an absent field.
+    Never interrupts the authorization: a failure here is logged and the flow
+    continues.
     """
     if (
         not isinstance(user_id, str)
         or not user_id
         or not client_id
-        or raw is None
+        or not isinstance(raw, str)
         or raw.strip() == CONSENT_KEEP_DEFAULT
     ):
         return

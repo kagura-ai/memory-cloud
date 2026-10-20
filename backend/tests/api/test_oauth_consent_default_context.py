@@ -151,6 +151,43 @@ def _post(
     return response.status_code, save
 
 
+def test_a_file_part_named_default_context_never_interrupts_the_approve():
+    """A multipart *file* part named ``default_context`` reaches the helper as
+    an ``UploadFile``: the approve completes and nothing is stored."""
+    from starlette.datastructures import UploadFile
+
+    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_client = MagicMock(client_name="App", scope="memory:read")
+    fake_client.check_redirect_uri = MagicMock(return_value=True)
+    redirect = SimpleNamespace(location="https://app.example/cb?code=abc&state=s")
+    save = AsyncMock(wraps=oauth_routes._save_consent_default_context)
+    setter = AsyncMock()
+    with (
+        patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+        patch("api.routes.oauth.get_sync_session") as mock_sess,
+        patch("api.routes.oauth._consent_is_new", return_value=False),
+        patch("api.routes.oauth._run_oauth_sync", return_value=redirect),
+        patch("api.routes.oauth._save_consent_default_context", new=save),
+        patch("services.credential_default_context.set_grant_default_context", new=setter),
+    ):
+        db = MagicMock()
+        db.query.return_value.filter_by.return_value.first.return_value = fake_client
+        mock_sess.return_value = db
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/api/v1/oauth/authorize",
+                params={"client_id": "test", "redirect_uri": "https://app.example/cb"},
+                data={"confirm": "yes"},
+                files={"default_context": ("ctx.txt", str(CTX_A).encode(), "text/plain")},
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == redirect.location
+    assert isinstance(save.await_args.args[2], UploadFile)
+    setter.assert_not_awaited()
+
+
 def test_approve_stores_the_picked_context_once_the_code_is_issued():
     status, save = _post({"confirm": "yes", "default_context": str(CTX_A)})
 
@@ -244,8 +281,10 @@ async def test_an_empty_value_clears():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [None, "my-project", "keep"])
+@pytest.mark.parametrize("raw", [None, "my-project", "keep", object()])
 async def test_an_absent_malformed_or_keep_value_is_ignored(raw):
+    """A non-string value (an ``UploadFile`` from a multipart part) counts as
+    an absent field."""
     with _save_env(SimpleNamespace(name="alpha")) as env:
         await oauth_routes._save_consent_default_context("user-1", "client-1", raw)
 
