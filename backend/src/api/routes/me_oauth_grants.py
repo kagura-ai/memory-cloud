@@ -79,7 +79,6 @@ async def _response(
             db,
             user_id=get_user_id(user),
             context_id=grant.default_context_id,
-            key_workspace_id=user.get("api_key_workspace_id"),
         )
     return OAuthGrantResponse(
         client_id=grant.client_id,
@@ -119,8 +118,7 @@ async def set_oauth_grant_default_context(
 ) -> OAuthGrantResponse:
     """Set (or, with ``null``, clear) the MCP default context of one grant.
 
-    The context must be readable by the caller now (viewer; a
-    workspace-scoped key is confined to its workspace); otherwise 404
+    The context must be readable by the caller now (viewer); otherwise 404
     ``Context not found``.
 
     Raises:
@@ -135,7 +133,6 @@ async def set_oauth_grant_default_context(
             db,
             user_id=user_id,
             context_id=data.default_context_id,
-            key_workspace_id=user.get("api_key_workspace_id"),
         )
         if context is None:
             raise NotFoundException("Context")
