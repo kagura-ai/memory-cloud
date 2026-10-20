@@ -12,7 +12,6 @@ import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from db.point_writer_lock import hold_point_writer_lock_exclusive
 from db.qdrant import get_collection_name
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.config import ContextSearchConfig
@@ -138,10 +137,11 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
         )
         await seed.commit()
 
-    async def acquire_exclusive(db: AsyncSession, *, timeout_seconds: float) -> bool:
+    real_wait = migration.wait_for_point_writers  # bound before it is patched
+
+    async def attempting_wait(db: AsyncSession, *, timeout_seconds: float) -> bool:
         switch_lock_attempted.set()
-        await hold_point_writer_lock_exclusive(db)
-        return True
+        return await real_wait(db, timeout_seconds=timeout_seconds)
 
     async def run_switch() -> object:
         async with maker() as db:
@@ -220,12 +220,8 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
                 )
                 await asyncio.wait_for(route_resolved.wait(), TIMEOUT)
                 with (
-                    patch.object(
-                        migration,
-                        "wait_for_point_writers",
-                        new=acquire_exclusive,
-                        create=True,
-                    ),
+                    patch.object(migration, "wait_for_point_writers", new=attempting_wait),
+                    patch.object(migration, "POINT_WRITER_WAIT_SECONDS", 6.0),
                     patch.object(migration, "delete_points_from_qdrant", new=AsyncMock()),
                     patch.object(migration, "delete_chunk_points", new=AsyncMock()),
                 ):
@@ -277,12 +273,8 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
                 )
                 await asyncio.wait_for(route_resolved.wait(), TIMEOUT)
                 with (
-                    patch.object(
-                        migration,
-                        "wait_for_point_writers",
-                        new=acquire_exclusive,
-                        create=True,
-                    ),
+                    patch.object(migration, "wait_for_point_writers", new=attempting_wait),
+                    patch.object(migration, "POINT_WRITER_WAIT_SECONDS", 6.0),
                     patch.object(migration, "delete_points_from_qdrant", new=AsyncMock()),
                     patch.object(migration, "delete_chunk_points", new=AsyncMock()),
                 ):
@@ -426,17 +418,16 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
         )
         await seed.commit()
 
+    real_wait = migration.wait_for_point_writers  # bound before it is patched
+
     async def switch_lock(db: AsyncSession, *, timeout_seconds: float) -> bool:
         nonlocal exclusive_calls
         exclusive_calls += 1
-        if exclusive_calls == 1:
-            await hold_point_writer_lock_exclusive(db)
-            return True
-        route_committed.set()
-        await allow_prune_lock.wait()
-        prune_lock_attempted.set()
-        await hold_point_writer_lock_exclusive(db)
-        return True
+        if exclusive_calls > 1:
+            route_committed.set()
+            await allow_prune_lock.wait()
+            prune_lock_attempted.set()
+        return await real_wait(db, timeout_seconds=timeout_seconds)
 
     async def fake_reembed(
         memory: Memory,
@@ -473,6 +464,7 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
 
         with (
             patch.object(migration, "wait_for_point_writers", new=switch_lock),
+            patch.object(migration, "POINT_WRITER_WAIT_SECONDS", 6.0),
             patch.object(migration, "delete_points_from_qdrant", new=delete_points),
             patch.object(migration, "delete_chunk_points", new=AsyncMock()),
         ):
@@ -498,6 +490,9 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
         assert restored_collections == [get_collection_name(NEW_MODEL, NEW_DIMENSIONS)]
         assert deleted_points == []
         assert result.stale_removed == 0
+        # The real wait acquired the lock after the restore committed; a
+        # timeout would defer pruning and pass the two checks above vacuously.
+        assert result.prune_pending is False
         async with maker() as check:
             config = (
                 await check.execute(

@@ -49,11 +49,6 @@ async def hold_point_writer_lock(db: AsyncSession) -> None:
     await db.execute(_SHARED_SQL)
 
 
-async def hold_point_writer_lock_exclusive(db: AsyncSession) -> None:
-    """Wait for point writers and keep them out until this transaction ends."""
-    await db.execute(_EXCLUSIVE_SQL)
-
-
 async def wait_for_point_writers(db: AsyncSession, *, timeout_seconds: float) -> bool:
     """Take the lock exclusively, waiting up to ``timeout_seconds`` for writers.
 
