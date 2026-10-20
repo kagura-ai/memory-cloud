@@ -289,7 +289,7 @@ async def test_a_failed_chunk_rebuild_skips_the_switch_and_the_run_goes_on(capsy
     )
     assert code == 1
     switch.assert_not_awaited()
-    db.rollback.assert_awaited_once()
+    assert db.rollback.await_count == 2  # verify's read transaction, then the failure
     out = capsys.readouterr().out
     assert "chunk rebuild failed, NOT switched (RuntimeError); retry" in out
     assert "chunk text" not in out
@@ -516,7 +516,38 @@ async def test_the_read_transaction_ends_before_the_switch_prompt(argv, capsys):
             db=db,
         )
     assert code == 0
-    assert events == ["rollback", "prompt", "switch"]
+    assert events == ["rollback", "rollback", "prompt", "switch"]
+
+
+@pytest.mark.asyncio
+async def test_the_read_transaction_ends_before_the_rebuild_prompt(capsys):
+    events: list[str] = []
+    db = _db()
+    db.rollback.side_effect = lambda: events.append("rollback")
+
+    def _input(prompt: str) -> str:
+        events.append("prompt")
+        return "y"
+
+    async def _rebuild(*args, **kwargs) -> ChunkRebuildResult:
+        events.append("rebuild")
+        return ChunkRebuildResult(rebuilt=1, chunks_written=3)
+
+    async def _switch(*args, **kwargs) -> SwitchResult:
+        events.append("switch")
+        return _SWITCHED
+
+    with patch("builtins.input", _input):
+        code = await _run(
+            ["--verify", "--switch"],
+            reembed=_reembed([]),
+            verify=_chunks_missing(uuid4()),
+            rebuild=AsyncMock(side_effect=_rebuild),
+            switch=AsyncMock(side_effect=_switch),
+            db=db,
+        )
+    assert code == 0
+    assert events == ["rollback", "prompt", "rebuild", "rollback", "switch"]
 
 
 def test_requeue_since_with_an_offset_is_parsed_as_naive_utc():

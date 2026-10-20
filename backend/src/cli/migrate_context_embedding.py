@@ -289,6 +289,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
     if args.verify or args.run:
         switching = bool(args.switch or args.run)
         verified = await verify_context_migration(db, plan)
+        # End verify's read transaction: the prompts below may wait for
+        # minutes, and an idle-in-transaction session holds its locks.
+        await db.rollback()
         _print_verify(verified)
         # One line for both steps. Verify alone would leave out a row the
         # re-embed skipped whose point another live row keeps in the target.
@@ -361,10 +364,11 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                     "routing only if you pass --requeue-since"
                 )
             requeue_since = args.requeue_since
-        # End the plan / verify read transaction, as the rollback path does:
-        # the prompt below may wait for minutes, and the switch stamps
-        # embedding_switched_at with now() (= its transaction's start), which
-        # must not be verify's first read.
+        # End any read transaction still open (plan, or --switch without
+        # --verify), as the rollback path does: the prompt below may wait, and
+        # the switch stamps embedding_switched_at with now(), its transaction's
+        # start, which should be the switch's own (an earlier one only
+        # re-queues more on a later --rollback-to).
         await db.rollback()
         if not switch_confirmed and not _confirm(
             f"Switch {context_id} to {plan.target_model}?", args.yes
