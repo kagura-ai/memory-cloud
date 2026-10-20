@@ -1023,3 +1023,29 @@ async def test_timed_out_selector_call_counts_as_a_call_with_unknown_cost(db_ses
     assert selector.source == "llm_selector"
     assert selector.calls == 2
     assert selector.cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_zero_token_judge_row_without_timeout_stays_priced(db_session):
+    """Only a timed-out call is "cost unknown": a judge row from a provider that
+    reports no usage keeps its stored $0, as before #2154."""
+    workspace_id = uuid4()
+    db_session.add(
+        _make_ledger_row(
+            user_id="user-no-usage",
+            workspace_id=workspace_id,
+            occurred_at=datetime(2026, 4, 5),
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd="0",
+        )
+    )
+    await db_session.flush()
+    rows = await CostAggregationService(db_session).aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    assert rows[0].calls == 1 and rows[0].cost_usd == pytest.approx(0.0)

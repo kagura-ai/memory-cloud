@@ -25,18 +25,18 @@ def test_clauses_for_each_alias_come_from_the_same_params():
         "sr.source = :source",
         "sr.paid_by = :paid_by",
     ]
-    assert _filter_clauses(params, alias="l", source_column="caller") == [
-        "l.workspace_id = :workspace_id",
-        "l.user_id = :user_id",
-        "l.caller = :source",
-        "l.paid_by = :paid_by",
+    assert _filter_clauses(params, alias="lr", source_column="source") == [
+        "lr.workspace_id = :workspace_id",
+        "lr.user_id = :user_id",
+        "lr.source = :source",
+        "lr.paid_by = :paid_by",
     ]
 
 
 def test_unset_filters_add_neither_params_nor_clauses():
     params = _filter_params(workspace_id=None, user_id=None, source=None, paid_by="platform")
     assert params == {"paid_by": "platform"}
-    assert _filter_clauses(params, alias="l", source_column="caller") == ["l.paid_by = :paid_by"]
+    assert _filter_clauses(params, alias="lr", source_column="source") == ["lr.paid_by = :paid_by"]
 
 
 def test_ledger_sources_include_the_recall_selector_stage():
@@ -53,3 +53,12 @@ def test_ledger_source_case_matches_the_selector_by_caller_and_stage():
         "WHEN l.caller = 'recall' AND l.call_metadata ->> 'stage' = 'llm_selector' "
         "THEN 'llm_selector' END"
     )
+
+
+def test_selector_source_matches_what_the_selector_writes():
+    """The match table mirrors the selector's ledger constants: a rename there
+    must not drop selector spend from the dashboards silently."""
+    from services.cost_aggregation_service import _LEDGER_SOURCE_MATCH
+    from services.recall_selector import LEDGER_CALLER, LEDGER_STAGE
+
+    assert _LEDGER_SOURCE_MATCH["llm_selector"] == (LEDGER_CALLER, LEDGER_STAGE)

@@ -37,9 +37,10 @@ on the next read but leaves ledger rows at what they cost when written. The
 snapshot follows the same row rule as the Sleep LLM leg (``subscription``
 rows are skipped, so such a model is a pricing miss); a row flagged
 ``call_metadata.pricing_miss`` makes its bucket "cost unknown" like an
-unpriced Sleep usage row, and so does a row with no tokens at all (a timed-out
-selector call: the request may have been billed but its usage never came back,
-so its stored ``cost_usd = 0`` is not a price). The other ledger rows (recall
+unpriced Sleep usage row, and so does a timed-out call
+(``call_metadata.outcome='timeout'``, written by the selector with zero tokens:
+the request may have been billed but its usage never came back, so its stored
+``cost_usd = 0`` is not a price). The other ledger rows (recall
 embeddings, reranks) are not part of this view yet.
 
 v1 limitation: pricing-tier lookup uses ``context_min_tokens=0`` because
@@ -80,7 +81,10 @@ VALID_PERIODS: tuple[str, ...] = ("day", "week", "month")
 # writes its embedding rows under the same caller; only the selector's
 # completion rows carry the stage). Interpolated into the SQL as literals —
 # hardcoded constants, never user input; each caller must be a member of
-# ``LLM_CALL_LOG_CALLERS``.
+# ``LLM_CALL_LOG_CALLERS``. The selector pair mirrors
+# ``services.recall_selector.LEDGER_CALLER`` / ``LEDGER_STAGE`` (pinned by
+# ``tests/services/test_cost_aggregation_filters.py``; not imported, to keep the
+# recall stage's dependencies out of this module).
 _LEDGER_SOURCE_MATCH: dict[str, tuple[str, str | None]] = {
     "supersede_verify": ("supersede_verify", None),
     "llm_selector": ("recall", "llm_selector"),
@@ -392,12 +396,18 @@ class CostAggregationService:
         ledger_callers = ", ".join(
             f"'{c}'" for c in sorted({caller for caller, _ in _LEDGER_SOURCE_MATCH.values()})
         )
+        # A source filter names one family: the other family's legs cannot
+        # match, so they are cut in the SQL instead of scanned and discarded.
+        sleep_leg_off = ["FALSE"] if source in LEDGER_COST_SOURCES else []
+        ledger_leg_off = ["FALSE"] if source in SLEEP_REPORT_SOURCES else []
+        base_where = " AND ".join([base_where, *sleep_leg_off])
         ledger_where = " AND ".join(
             [
                 "l.occurred_at >= :start",
                 "l.occurred_at < :end",
                 f"l.caller IN ({ledger_callers})",
                 "l.call_type = 'completion'",
+                *ledger_leg_off,
             ]
         )
         ledger_source_where = " AND ".join(
@@ -497,9 +507,10 @@ class CostAggregationService:
         -- #2019 / #2154: event-shaped completion calls from llm_call_log,
         -- each named by its LEDGER_COST_SOURCES entry (NULL: not shown here,
         -- e.g. a recall completion without the selector stage). Cost is the
-        -- row's write-time snapshot; a pricing_miss row, or a row with no
-        -- tokens (usage never came back: a timed-out call), makes the bucket
-        -- NULL (sticky, same BOOL_AND rule as the Sleep leg).
+        -- row's write-time snapshot; a pricing_miss row, or a timed-out call
+        -- (zero tokens: usage never came back), makes the bucket NULL
+        -- (sticky, same BOOL_AND rule as the Sleep leg). The caller IN-list
+        -- above keeps the CASE off the rows of other callers.
         ledger_rows AS (
             SELECT
                 l.occurred_at,
@@ -515,9 +526,7 @@ class CostAggregationService:
                 l.cost_usd,
                 (
                     COALESCE(l.call_metadata ->> 'pricing_miss', 'false') <> 'true'
-                    AND COALESCE(l.input_tokens, 0) + COALESCE(l.output_tokens, 0)
-                      + COALESCE(l.cached_input_tokens, 0)
-                      + COALESCE(l.cache_write_tokens, 0) > 0
+                    AND COALESCE(l.call_metadata ->> 'outcome', '') <> 'timeout'
                 ) AS priced
             FROM llm_call_log l
             WHERE {ledger_where}

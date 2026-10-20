@@ -163,9 +163,10 @@ export interface SourceTotal {
 
 /**
  * Sum ``cost_breakdown_by_source`` across all rows (#2019), so an operator
- * sees what Sleep, Memory Analysis and the supersede judge each cost over the
- * selected range. Same sticky-NULL rule as ``buildChartData``. Sorted in
- * ``COST_SOURCES`` order, unknown sources last.
+ * sees what Sleep, Memory Analysis, the supersede judge and the recall LLM
+ * selector (#2154) each cost over the selected range. Same sticky-NULL rule
+ * as ``buildChartData``. Sorted in ``COST_SOURCES`` order, unknown sources
+ * last.
  *
  * Exported for unit testing.
  */

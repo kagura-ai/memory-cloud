@@ -2032,7 +2032,8 @@ Each provider call writes one `llm_call_log` row with `caller='recall'`,
 its usage never came back, so its row carries zero tokens. The admin and
 workspace cost dashboards show these rows as their own *By Source* row
 (`llm_selector`, also a `source` filter value of the cost aggregation API); a
-timed-out call counts as a call with unknown cost (`—`), not as `$0.00`. The
+timed-out call counts as a call with unknown cost (`—`), not as `$0.00` (see
+[Where cost is recorded](#where-cost-is-recorded-sleep_reports-vs-llm_call_log)). The
 recall audit row
 adds `selector_applied` and `selector_dropped_count` when the stage applied.
 
@@ -2605,9 +2606,12 @@ Analysis usage is priced from `llm_pricing` each time the dashboard is read, so
 a price change also changes past Sleep figures, while a supersede-check or
 selector row keeps the cost it was given when written. Both skip
 `pricing_model = 'subscription'` rows, so a model billed by subscription shows
-as cost unknown (`—`) in either. A ledger row with no tokens at all (a
-timed-out selector call, whose usage never came back) is counted as a call
-with unknown cost, so its bucket shows `—` rather than `$0.00`.
+as cost unknown (`—`) in either (selector rows written before #2154 kept
+subscription pricing and keep the cost they were given). A timed-out selector
+call (`call_metadata.outcome='timeout'`, zero tokens because its usage never
+came back) is counted as a call with unknown cost. Unknown cost is sticky like
+a pricing miss: the user's period total, the model row and the selector's *By
+Source* total over the selected range show `—` rather than a partial sum.
 Recall embeddings are in `llm_call_log` but are not shown in the dashboards
 yet. Because the ledger is a table, you can still answer questions such as
 "how did the supersede verdicts split last week, and what did they cost?"
