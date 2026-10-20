@@ -29,6 +29,8 @@ API keys come in three scoping shapes:
 
 Public-bound keys are immutable: to change which context a key attributes to, revoke the key and create a new one. They cannot also be workspace-scoped (DB CHECK constraint).
 
+A workspace-scoped key you mint for yourself (session only) takes an optional `default_context_id` ([#2188](https://github.com/kagura-ai/memory-cloud/issues/2188)), the key's MCP default context with the same rules as the [config route](#patch-apiv1configapi-keyskey_id): a context you cannot read within the key's workspace is `404` `Context not found` and no key is created, and a public-bound key cannot carry one (`422`). An owner-provisioned key for another member cannot carry one either (`400`). The member key list and create responses carry `default_context_id`, `default_context_name` (`null` when none is set or when you, the viewer, cannot read the context) and `agent_id` (`null` unless the key is agent-bound). A default is changed later with `PATCH /api/v1/config/api-keys/{key_id}`.
+
 ### 2. OAuth2 Access Token
 
 ```bash
