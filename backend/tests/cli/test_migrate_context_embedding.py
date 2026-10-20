@@ -26,6 +26,7 @@ if str(_BACKEND_SRC) not in sys.path:
 from cli import migrate_context_embedding as cli  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
     ChunkRebuildResult,
+    EmbeddingSwitchBusyError,
     MigrationPlan,
     ReembedResult,
     RollbackBoundary,
@@ -358,35 +359,92 @@ async def test_switch_reports_when_stale_pruning_was_deferred(capsys):
     assert "sweep_orphan_vectors --apply --yes --grace-hours 0" in out
 
 
+# ------------------------------------------- a refused switch prints its retry (#2156)
+
+_WRITERS_BUSY = "Point writers are still active; the context route was not changed."
+_ROWS_BUSY = (
+    "Another transaction holds memories this switch must re-queue; "
+    "the context route was not changed."
+)
+
+
+def _busy(message: str = _WRITERS_BUSY) -> AsyncMock:
+    return AsyncMock(side_effect=EmbeddingSwitchBusyError(message))
+
+
 @pytest.mark.asyncio
-async def test_switch_writer_timeout_returns_nonzero_and_suggests_retry(capsys):
-    context_id = uuid4()
-    args = cli._parse(["--to", _MODEL, "--context", str(context_id), "--switch", "--yes"])
+async def test_busy_run_prints_a_retry_that_carries_requeue_since(capsys):
+    """After --run the retry must repeat the re-embed start: a bare --switch
+    would re-queue nothing, and --run would re-embed the whole context."""
+    code = await _run(
+        ["--run", "--yes"], reembed=_reembed([]), verify=_chunks_complete(), switch=_busy()
+    )
+    assert code == 1
+    assert (
+        "  NOT switched: Point writers are still active; the context route was not changed. "
+        "Retry with --verify --switch --requeue-since 2026-10-01T00:00:00 once the current "
+        "write finishes (no full re-embed).\n"
+    ) in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_busy_bare_switch_prints_a_plain_retry(capsys):
+    code = await _run(["--switch", "--yes"], reembed=_reembed([]), switch=_busy(_ROWS_BUSY))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert (
+        f"  NOT switched: {_ROWS_BUSY} Retry --switch once the current write finishes.\n"
+    ) in out
+    assert "--requeue-since 2" not in out
+    assert "switched: text-embedding-3-small" not in out
+
+
+@pytest.mark.asyncio
+async def test_busy_switch_with_explicit_requeue_since_repeats_it(capsys):
+    switch = _busy()
+    code = await _run(
+        ["--switch", "--yes", "--requeue-since", "2026-10-02T03:04:05"],
+        reembed=_reembed([]),
+        switch=switch,
+    )
+    assert code == 1
+    assert switch.await_args.kwargs["requeue_since"] == datetime(2026, 10, 2, 3, 4, 5)
+    assert (
+        f"  NOT switched: {_WRITERS_BUSY} Retry with --verify --switch --requeue-since "
+        "2026-10-02T03:04:05 once the current write finishes (no full re-embed).\n"
+    ) in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_a_busy_context_does_not_stop_an_all_run(capsys):
+    """--all: the refused context exits 1, the next one is still switched."""
+    first, second = uuid4(), uuid4()
+    args = cli._parse(["--to", _MODEL, "--all", "--switch", "--yes"])
 
     async def db_sessions():
         yield MagicMock()
 
+    plans = {first: _plan(first), second: _plan(second)}
+    switch = AsyncMock(side_effect=[EmbeddingSwitchBusyError(_ROWS_BUSY), _SWITCHED])
     with (
         patch.object(cli, "get_db", return_value=db_sessions()),
         patch.object(cli, "get_settings", return_value=MagicMock()),
-        patch.object(cli, "plan_context_migration", AsyncMock(return_value=_plan(context_id))),
+        patch.object(cli, "list_migratable_context_ids", AsyncMock(return_value=[first, second])),
         patch.object(
             cli,
-            "switch_context_embedding",
-            AsyncMock(
-                side_effect=ValidationError(
-                    "Point writers are still active; the context route was not changed. "
-                    "Retry --switch after the current write finishes."
-                )
-            ),
+            "plan_context_migration",
+            AsyncMock(side_effect=lambda db, context_id, *a, **k: plans[context_id]),
         ),
+        patch.object(cli, "switch_context_embedding", switch),
     ):
         code = await cli._main(args)
 
-    assert code == 1
     out = capsys.readouterr().out
-    assert "skip " in out
-    assert "Retry --switch after the current write finishes." in out
+    assert code == 1
+    assert switch.await_count == 2
+    assert "NOT switched: " in out
+    assert "switched: text-embedding-3-small -> qwen3-embedding:4b" in out
+    assert "skip " not in out
 
 
 @pytest.mark.asyncio
@@ -543,3 +601,42 @@ async def test_a_refused_rollback_prints_no_boundary_and_does_not_ask(capsys):
     resolve.assert_not_awaited()
     rollback.assert_not_awaited()
     assert capsys.readouterr().out == ""
+
+
+async def _busy_rollback(argv: list[str], boundary, capsys) -> tuple[int, str]:
+    context_id = uuid4()
+    args = cli._parse(["--rollback-to", _ROLLBACK_TO, "--context", str(context_id), "--yes", *argv])
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    with (
+        patch.object(cli, "check_rollback_target", AsyncMock(return_value=512)),
+        patch.object(cli, "resolve_rollback_boundary", AsyncMock(return_value=boundary)),
+        patch.object(cli, "rollback_context_embedding", _busy()),
+    ):
+        code = await cli._one_context(db, context_id, args)
+    return code, capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_busy_rollback_names_rollback_to(capsys):
+    """#2156: a bare retry re-queues from the recorded switch time again (#2098)."""
+    code, out = await _busy_rollback([], RollbackBoundary(_SWITCH_TIME, "switch_time"), capsys)
+    assert code == 1
+    assert (
+        f"  NOT rolled back: {_WRITERS_BUSY} Retry --rollback-to {_ROLLBACK_TO} "
+        "once the current write finishes.\n"
+    ) in out
+    assert "rolled back " not in out.replace("NOT rolled back", "")
+
+
+@pytest.mark.asyncio
+async def test_busy_rollback_repeats_an_explicit_requeue_since(capsys):
+    explicit = datetime(2026, 9, 30, 0, 0, 0)
+    code, out = await _busy_rollback(
+        ["--requeue-since", explicit.isoformat()], RollbackBoundary(explicit, "explicit"), capsys
+    )
+    assert code == 1
+    assert (
+        f"  NOT rolled back: {_WRITERS_BUSY} Retry --rollback-to {_ROLLBACK_TO} "
+        "--requeue-since 2026-09-30T00:00:00 once the current write finishes.\n"
+    ) in out
