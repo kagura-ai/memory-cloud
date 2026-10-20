@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -123,23 +124,32 @@ def test_the_picker_strings_exist_in_both_locales():
 # ------------------------------------------------------------------ POST
 
 
-def _post(
+def _post_response(
     form: dict[str, str],
     location: str = "https://app.example/cb?code=abc&state=s",
     *,
-    files: dict | None = None,
+    files: dict | list | None = None,
     save: AsyncMock | None = None,
-) -> tuple[int, AsyncMock]:
+    seen: list[tuple[dict, list]] | None = None,
+) -> tuple[Any, AsyncMock]:
+    """POST the consent form; ``seen`` collects the preloaded form Authlib reads."""
     fake_user = MagicMock(email="test@example.com", user_id="user-1")
     fake_client = MagicMock(client_name="App", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=True)
     save = save or AsyncMock()
     redirect = SimpleNamespace(location=location)
+
+    def run_oauth_sync(action: str, request: object, **kwargs: object) -> SimpleNamespace:
+        state = request.state  # type: ignore[attr-defined]
+        if seen is not None:
+            seen.append((dict(state.form_data), list(state.form_items)))
+        return redirect
+
     with (
         patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
         patch("api.routes.oauth.get_sync_session") as mock_sess,
         patch("api.routes.oauth._consent_is_new", return_value=False),
-        patch("api.routes.oauth._run_oauth_sync", return_value=redirect),
+        patch("api.routes.oauth._run_oauth_sync", side_effect=run_oauth_sync),
         patch("api.routes.oauth._save_consent_default_context", new=save),
     ):
         db = MagicMock()
@@ -148,11 +158,26 @@ def _post(
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.post(
                 "/api/v1/oauth/authorize",
-                params={"client_id": "test", "redirect_uri": "https://app.example/cb"},
+                params={
+                    "client_id": "test",
+                    "redirect_uri": "https://app.example/cb",
+                    "state": "s",
+                },
                 data=form,
                 files=files,
                 follow_redirects=False,
             )
+    return response, save
+
+
+def _post(
+    form: dict[str, str],
+    location: str = "https://app.example/cb?code=abc&state=s",
+    *,
+    files: dict | None = None,
+    save: AsyncMock | None = None,
+) -> tuple[int, AsyncMock]:
+    response, save = _post_response(form, location, files=files, save=save)
     return response.status_code, save
 
 
@@ -179,9 +204,81 @@ def test_a_file_part_named_default_context_never_interrupts_the_approve():
         )
 
     assert status == 303
-    assert isinstance(save.await_args.args[2], UploadFile)
+    # #2190: the form preload drops the file part, so the field is absent.
+    assert save.await_args.args[2] is None
+    assert not isinstance(save.await_args.args[2], UploadFile)
     assert returned == [True]
     setter.assert_not_awaited()
+
+
+# ------------------------------------------------------------------ non-string parts (#2190)
+
+
+def _no_upload(seen: list[tuple[dict, list]]) -> None:
+    from starlette.datastructures import UploadFile
+
+    assert seen, "Authlib was not reached"
+    for form_data, form_items in seen:
+        assert not any(isinstance(v, UploadFile) for v in form_data.values())
+        assert not any(isinstance(v, UploadFile) for _, v in form_items)
+
+
+@pytest.mark.parametrize("name", ["scope", "state", "client_id", "code_challenge"])
+def test_a_file_part_named_like_an_oauth_parameter_never_reaches_authlib(name):
+    """The OAuth values ride the query string: a file part with the same name
+    is dropped, so Authlib reads the query value and the approve completes."""
+    seen: list[tuple[dict, list]] = []
+    response, _ = _post_response(
+        {"confirm": "yes"},
+        files={name: ("x.txt", b"evil", "text/plain")},
+        seen=seen,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://app.example/cb?code=abc&state=s"
+    _no_upload(seen)
+    assert seen[0][0] == {"confirm": "yes"}
+
+
+def test_a_file_part_named_confirm_is_a_denial():
+    seen: list[tuple[dict, list]] = []
+    response, save = _post_response(
+        {}, files={"confirm": ("c.txt", b"yes", "text/plain")}, seen=seen
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://app.example/cb?error=access_denied&state=s"
+    assert seen == []
+    save.assert_not_awaited()
+
+
+def test_a_text_part_survives_a_file_part_with_the_same_name():
+    seen: list[tuple[dict, list]] = []
+    response, save = _post_response(
+        {"confirm": "yes", "default_context": str(CTX_A)},
+        files={"default_context": ("ctx.txt", str(CTX_B).encode(), "text/plain")},
+        seen=seen,
+    )
+
+    assert response.status_code == 303
+    save.assert_awaited_once_with("user-1", "test", str(CTX_A))
+    _no_upload(seen)
+
+
+def test_a_failing_default_context_step_still_sends_the_code():
+    """Once the code is stored, a later step failing must not turn the answer
+    into ``error=server_error``: the client gets its code."""
+    location = "https://app.example/cb?code=abc&state=s"
+    response, save = _post_response(
+        {"confirm": "yes", "default_context": str(CTX_A)},
+        location,
+        save=AsyncMock(side_effect=RuntimeError("x")),
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == location
+    assert "error=" not in response.headers["location"]
+    save.assert_awaited_once()
 
 
 def test_approve_stores_the_picked_context_once_the_code_is_issued():
@@ -402,3 +499,18 @@ def test_the_loopback_interstitial_path_stores_the_choice_too():
     assert response.status_code == 200
     assert response.text == "interstitial"
     save.assert_awaited_once_with("user-1", "test", str(CTX_A))
+
+
+def test_an_answer_without_location_is_a_server_error_redirect():
+    """No Location means no code: the client gets ``error=server_error``."""
+    from urllib.parse import parse_qs, urlsplit
+
+    response, save = _post_response({"confirm": "yes"}, location="")
+
+    assert response.status_code == 303
+    target = urlsplit(response.headers["location"])
+    assert target.netloc == "app.example"
+    query = parse_qs(target.query)
+    assert query["error"] == ["server_error"]
+    assert query["state"] == ["s"]
+    save.assert_not_awaited()

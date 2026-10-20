@@ -130,11 +130,28 @@ async def preload_form(request: Request):
     This dependency reads form data in advance and stores it in request.state:
     ``form_data`` holds one value per name, ``form_items`` every value in
     order, so a repeated parameter is seen in full (#1686).
+
+    Only textual parts are kept (#2190). Authlib reads these values (the form
+    overrides the query string), so a multipart *file* part would reach it as
+    an ``UploadFile`` and fail on its first string operation. Our own forms
+    never send one; a dropped part counts as absent, which leaves the query
+    value in place at ``/authorize`` and gives Authlib's own error at
+    ``/token``.
     """
     if request.method.upper() == "POST":
         form = await request.form()
-        request.state.form_data = dict(form)
-        request.state.form_items = list(form.multi_items())
+        items = form.multi_items()
+        form_items = [(name, value) for name, value in items if isinstance(value, str)]
+        if len(form_items) != len(items):
+            dropped = {name for name, value in items if not isinstance(value, str)}
+            # Names only: a value may be a credential.
+            logger.debug(
+                "oauth_form_parts_ignored",
+                names=sorted(dropped),
+                count=len(items) - len(form_items),
+            )
+        request.state.form_data = dict(form_items)
+        request.state.form_items = form_items
     else:
         request.state.form_data = {}
         request.state.form_items = []
@@ -2211,6 +2228,32 @@ def _render_loopback_interstitial(
     return response
 
 
+def _authorization_server_error_redirect(
+    redirect_uri: str | None, description: str, state: str | None
+) -> RedirectResponse:
+    """303 to the client with ``error=server_error`` (no code was stored)."""
+    params = {"error": "server_error", "error_description": description}
+    if state:
+        params["state"] = state
+    return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
+
+
+@contextlib.asynccontextmanager
+async def _post_issuance_step(step: str):
+    """Run one step after the code is stored without letting it fail the answer.
+
+    The code exists once Authlib returns (#2190): an error in a later step
+    must still send the client its code, so it is logged by step name and
+    exception type only — the message could quote the callback URL.
+    """
+    try:
+        yield
+    except Exception as e:  # noqa: BLE001 - the code is already issued
+        logger.warning(
+            "oauth_authorize_post_issuance_step_failed", step=step, error_type=type(e).__name__
+        )
+
+
 def _grant_issued(location: str) -> bool:
     """Whether an authorization redirect carries a code (not an error)."""
     params = dict(parse_qsl(urlsplit(location).query))
@@ -2293,52 +2336,14 @@ async def oauth_authorize_post(
         partial(_consent_is_new, client_id, user.user_id, request.query_params.get("scope"))
     )
 
-    # Run Authlib operations in thread pool to avoid blocking event loop
+    # Run Authlib operations in thread pool to avoid blocking event loop.
+    # The code is stored iff this call returns (``_run_oauth_sync`` commits
+    # after Authlib answers), so it is the only step whose failure becomes an
+    # error redirect (#2190).
     try:
         response = await asyncio.to_thread(
             _run_oauth_sync, "create_authorization_response", request, grant_user=user
         )
-
-        # Use 303 See Other to convert POST to GET redirect
-        # Claude.ai callback expects GET, not POST
-        if hasattr(response, "location") and response.location:
-            issued = _grant_issued(response.location)
-            if issued:
-                # #2129: the default context picked on the consent page, stored
-                # once the code is issued (a refused request changes nothing)
-                # and before the client is sent back, so its first MCP call
-                # already sees it.
-                await _save_consent_default_context(
-                    user.user_id, client_id, request.state.form_data.get("default_context")
-                )
-            if new_authorization and user.user_id and issued:
-                schedule_security_notification(
-                    background_tasks,
-                    user_id=user.user_id,
-                    event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
-                    request=request,
-                    client_id=client_id,
-                )
-            # #2155: a loopback client may sit behind NAT or SSH where the
-            # browser cannot reach it, so the callback URL is shown on a page
-            # instead of being lost in a failed redirect.
-            if redirect_uri and is_loopback_redirect_uri(redirect_uri) and issued:
-                interstitial = await _run_sync(
-                    partial(
-                        _render_loopback_interstitial,
-                        request,
-                        client_id,
-                        user.email,
-                        response.location,
-                    )
-                )
-                if interstitial is not None:
-                    return interstitial
-            return RedirectResponse(response.location, status_code=303)
-
-        # No location - should not happen in normal flow
-        raise HTTPException(500, "No redirect location in OAuth response")
-
     except Exception as e:
         import traceback
 
@@ -2362,10 +2367,56 @@ async def oauth_authorize_post(
             return _authorization_error_redirect(redirect_uri, e, state)
 
         # Generic exception → redirect with server_error.
-        params = {"error": "server_error", "error_description": str(e)}
-        if state:
-            params["state"] = state
-        return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
+        return _authorization_server_error_redirect(redirect_uri, str(e), state)
+
+    location = getattr(response, "location", None)
+    if not location:
+        # Should not happen: Authlib answers every request with a Location.
+        logger.error("oauth_authorize_failed: no redirect location in the OAuth response")
+        return _authorization_server_error_redirect(
+            redirect_uri, "500: No redirect location in OAuth response", state
+        )
+
+    # Use 303 See Other to convert POST to GET redirect
+    # Claude.ai callback expects GET, not POST
+    issued = _grant_issued(location)
+    redirect = RedirectResponse(location, status_code=303)
+    if issued:
+        # #2129: the default context picked on the consent page, stored
+        # once the code is issued (a refused request changes nothing)
+        # and before the client is sent back, so its first MCP call
+        # already sees it.
+        async with _post_issuance_step("default_context"):
+            await _save_consent_default_context(
+                user.user_id, client_id, request.state.form_data.get("default_context")
+            )
+    if new_authorization and user.user_id and issued:
+        async with _post_issuance_step("security_notification"):
+            schedule_security_notification(
+                background_tasks,
+                user_id=user.user_id,
+                event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
+                request=request,
+                client_id=client_id,
+            )
+    # #2155: a loopback client may sit behind NAT or SSH where the
+    # browser cannot reach it, so the callback URL is shown on a page
+    # instead of being lost in a failed redirect.
+    if redirect_uri and is_loopback_redirect_uri(redirect_uri) and issued:
+        interstitial = None
+        async with _post_issuance_step("loopback_interstitial"):
+            interstitial = await _run_sync(
+                partial(
+                    _render_loopback_interstitial,
+                    request,
+                    client_id,
+                    user.email,
+                    location,
+                )
+            )
+        if interstitial is not None:
+            return interstitial
+    return redirect
 
 
 # Canonical token endpoint is the no-trailing-slash form — it is what the

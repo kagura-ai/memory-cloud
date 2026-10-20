@@ -62,6 +62,7 @@ def _post(
     client_name: str = "Claude Code",
     first: bool = False,
     client_row: object = "default",
+    schedule_error: Exception | None = None,
 ):
     """POST /authorize with the session, DB and Authlib grant mocked.
 
@@ -92,7 +93,9 @@ def _post(
             "api.routes.oauth._run_oauth_sync",
             return_value=SimpleNamespace(location=location),
         ),
-        patch("api.routes.oauth.schedule_security_notification") as schedule,
+        patch(
+            "api.routes.oauth.schedule_security_notification", side_effect=schedule_error
+        ) as schedule,
     ):
         db = MagicMock()
         db.query.side_effect = _query
@@ -190,6 +193,20 @@ class TestLoopbackInterstitial:
             f"http://localhost:4321/callback?code={CODE}&state=st-1"
         )
 
+    def test_a_failing_interstitial_step_falls_back_to_the_redirect(self):
+        """#2190: an error around the render (not only inside it) still sends
+        the code, never ``error=server_error``."""
+        with patch(
+            "api.routes.oauth._render_loopback_interstitial",
+            side_effect=RuntimeError("boom"),
+        ):
+            response, _ = _post("http://localhost:4321/callback")
+
+        assert response.status_code == 303
+        assert response.headers["location"] == (
+            f"http://localhost:4321/callback?code={CODE}&state=st-1"
+        )
+
     def test_render_error_falls_back_to_the_redirect(self):
         with patch.object(
             oauth_routes.templates, "TemplateResponse", side_effect=RuntimeError("boom")
@@ -240,6 +257,49 @@ class TestNotificationAndLogging:
 
         assert response.status_code == 200
         schedule.assert_not_called()
+
+    def test_a_failing_notification_still_sends_the_code(self):
+        response, schedule = _post(
+            "https://example.com/cb", first=True, schedule_error=RuntimeError("boom")
+        )
+
+        schedule.assert_called_once()
+        assert response.status_code == 303
+        assert response.headers["location"] == f"https://example.com/cb?code={CODE}&state=st-1"
+
+    @pytest.mark.parametrize("step", ["security_notification", "loopback_interstitial"])
+    def test_a_failing_step_logs_its_name_and_type_but_never_the_code(self, step, caplog, capsys):
+        # The message quotes the callback URL: only its type may be logged.
+        error = RuntimeError(f"boom http://localhost:4321/callback?code={CODE}")
+        caplog.set_level(logging.DEBUG)
+        with capture_logs() as structured:
+            if step == "security_notification":
+                response, _ = _post(
+                    "http://localhost:4321/callback", first=True, schedule_error=error
+                )
+            else:
+                with patch("api.routes.oauth._render_loopback_interstitial", side_effect=error):
+                    response, _ = _post("http://localhost:4321/callback", first=True)
+
+        # The notification fails before the page renders; a failed render
+        # falls back to the redirect.
+        assert response.status_code == (200 if step == "security_notification" else 303)
+        failures = [
+            e for e in structured if e["event"] == "oauth_authorize_post_issuance_step_failed"
+        ]
+        assert failures == [
+            {
+                "event": "oauth_authorize_post_issuance_step_failed",
+                "log_level": "warning",
+                "step": step,
+                "error_type": "RuntimeError",
+            }
+        ]
+        assert CODE not in caplog.text
+        assert all(CODE not in repr(event) for event in structured)
+        captured = capsys.readouterr()
+        assert CODE not in captured.out
+        assert CODE not in captured.err
 
     def test_code_reaches_no_log_line(self, caplog, capsys):
         caplog.set_level(logging.DEBUG)

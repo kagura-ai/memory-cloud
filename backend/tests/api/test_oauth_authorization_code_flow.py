@@ -1184,3 +1184,48 @@ class TestVerifierWithoutChallenge:
         )
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_request"
+
+
+class TestNonStringFormParts:
+    """A multipart *file* part never replaces a form value Authlib reads (#2190).
+
+    The OAuth parameters ride the consent POST's query string; a file part
+    with the same name is dropped, so the approve completes with the query's
+    values and the code exchanges as usual.
+    """
+
+    @pytest.mark.parametrize("name", ["scope", "state"])
+    def test_consent_with_a_file_part_issues_a_code_for_the_query_values(
+        self, api: TestClient, name: str
+    ) -> None:
+        verifier, challenge = _pkce()
+        params = _authorize_params(challenge=challenge, state="query-state")
+        approved = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(params)}",
+            data={"confirm": "yes"},
+            files={name: ("part.txt", b"memory:admin", "text/plain")},
+            follow_redirects=False,
+        )
+
+        redirect = _redirect_params(approved)
+        assert "error" not in redirect, redirect
+        assert redirect["state"] == "query-state"
+        tokens = _exchange(api, redirect["code"], verifier)
+        assert tokens["scope"] == "memory:read memory:write"
+
+    def test_token_request_with_a_file_part_code_is_invalid_request(self, api: TestClient) -> None:
+        verifier, challenge = _pkce()
+        _consent(api, _authorize_params(challenge=challenge))
+        response = api.post(
+            "/api/v1/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "redirect_uri": REDIRECT_URI,
+                "client_id": PUBLIC_CLIENT,
+                "code_verifier": verifier,
+            },
+            files={"code": ("code.txt", b"not-a-string", "text/plain")},
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_request"
