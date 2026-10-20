@@ -326,3 +326,40 @@ async def test_a_mock_user_id_reads_nothing():
     """A non-string user id (a test double) never opens a session."""
     with patch("db.base.get_db", side_effect=AssertionError("opened a session")):
         assert await oauth_routes._consent_default_context_choices(MagicMock(), "c") == ([], "")
+
+
+def test_the_loopback_interstitial_path_stores_the_choice_too():
+    """#2155: a loopback client gets an interstitial instead of the 303; the
+    default is stored on that path as well, once the code is issued."""
+    from fastapi.responses import HTMLResponse
+
+    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_client = MagicMock(client_name="CLI", scope="memory:read")
+    fake_client.check_redirect_uri = MagicMock(return_value=True)
+    save = AsyncMock()
+    redirect = SimpleNamespace(location="http://127.0.0.1:8765/cb?code=abc&state=s")
+    with (
+        patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+        patch("api.routes.oauth.get_sync_session") as mock_sess,
+        patch("api.routes.oauth._consent_is_new", return_value=False),
+        patch("api.routes.oauth._run_oauth_sync", return_value=redirect),
+        patch("api.routes.oauth._save_consent_default_context", new=save),
+        patch(
+            "api.routes.oauth._render_loopback_interstitial",
+            return_value=HTMLResponse("interstitial"),
+        ),
+    ):
+        db = MagicMock()
+        db.query.return_value.filter_by.return_value.first.return_value = fake_client
+        mock_sess.return_value = db
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/api/v1/oauth/authorize",
+                params={"client_id": "test", "redirect_uri": "http://127.0.0.1:8765/cb"},
+                data={"confirm": "yes", "default_context": str(CTX_A)},
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 200
+    assert response.text == "interstitial"
+    save.assert_awaited_once_with("user-1", "test", str(CTX_A))

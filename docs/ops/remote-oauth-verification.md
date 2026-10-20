@@ -90,11 +90,12 @@ After registration the script prints an authorization URL and waits:
 1. Open the URL in a browser and sign in with the verification account
    (see [The verification account](#the-verification-account)), not your own.
 2. Approve access.
-3. The browser is redirected to `http://127.0.0.1:<port>/callback`, where the
-   script listens. If that page cannot be reached (WSL2 with NAT networking,
-   see [troubleshooting](../troubleshooting.md); or a browser on another
-   machine), copy the full URL from the address bar and paste it into the
-   terminal.
+3. The server shows the callback URL (`http://127.0.0.1:<port>/callback?...`)
+   with a **Continue to *client*** button that redirects to it, where the script
+   listens. If that address cannot be reached (WSL2 with NAT networking, see
+   [troubleshooting](../troubleshooting.md); or a browser on another machine),
+   copy the callback URL from that page, or from the error page's address
+   bar, and paste it into the terminal.
 
 Type `abort` to stop; the script still revokes what it obtained and writes
 partial evidence. With `--extended-authorize-checks`, `skip` skips one

@@ -1503,9 +1503,11 @@ class Verifier:
         self.prompt(
             f"\n== Consent required ({step_id}) ==\n"
             f"Open this URL in your browser, {action}:\n\n  {url}\n\n"
-            f"The script listens on {self.redirect_uri} for the redirect. If the browser\n"
-            "cannot reach it (for example WSL2 with NAT networking), copy the full URL from\n"
-            "the address bar after approving, paste it here and press Enter.\n"
+            f"The script listens on {self.redirect_uri} for the redirect. After approving,\n"
+            "the server shows the callback URL with a Continue button: press it. If the\n"
+            "browser cannot reach the listener (for example WSL2 with NAT networking), copy\n"
+            "the callback URL from that page (or the error page's address bar), paste it\n"
+            "here and press Enter.\n"
             f"Waiting up to {int(self.cfg.consent_timeout)} s (type 'abort' to stop).\n"
         )
         via, value = wait_for_redirect(
@@ -2335,9 +2337,11 @@ HELP_EPILOG = """\
 consent step:
   After discovery and registration the script prints an authorization URL.
   Open it in your own browser, sign in with the dedicated verification
-  account and approve. The redirect goes to a listener on 127.0.0.1; if the
-  browser cannot reach it (WSL2 with NAT networking, a browser on another
-  machine), copy the URL the browser lands on and paste it into the terminal.
+  account and approve. The server then shows the callback URL with a
+  Continue button that redirects to a listener on 127.0.0.1; if the browser
+  cannot reach it (WSL2 with NAT networking, a browser on another machine),
+  copy the callback URL from that page (or the error page's address bar) and
+  paste it into the terminal.
   A rejected token request does not consume the code, so every token
   negative runs on this one consent. --extended-authorize-checks adds three
   more consents and one look at an error page (post-sign-in checks).

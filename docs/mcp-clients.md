@@ -183,6 +183,8 @@ The plugin also declares Claude Code hooks (`claude-hooks/hooks.json`, one Pytho
 
 If you run Claude Code **inside WSL2** and use the **OAuth** flow (not the API-key setup above), the browser callback can fail silently: WSL2's default `nat` mode isolates `localhost` between Windows and WSL, so the Windows browser's redirect to `localhost:<port>` never reaches Claude Code's listener inside WSL. **This is a WSL networking issue, not a Kagura server bug** — the resolved server-side cousin was [#689 / PR #692](https://github.com/kagura-ai/memory-cloud/pull/692).
 
+**The callback did not reach the client?** After you approve, Kagura Memory Cloud shows a **Return to *app name*** page for loopback clients with the full callback URL. If **Continue to *app name*** ends on a connection error, copy that URL (or the error page's address) and paste it into Claude Code's `/mcp` sign-in screen, which asks for it while it waits. Paste the full URL; a bare code is not accepted. The same applies to any native client behind SSH or on another machine.
+
 Quick fixes:
 
 - **Enable mirrored networking** — set `networkingMode=mirrored` in `C:\Users\<YourName>\.wslconfig`, then `wsl --shutdown` (requires WSL 2.0.0+ on Windows 11 22H2+).
