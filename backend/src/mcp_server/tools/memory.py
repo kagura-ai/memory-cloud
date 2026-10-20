@@ -15,6 +15,7 @@ from mcp_server.tools._constants import (
     REFERENCE_MAX_CHARS_LIMIT,
     REFERENCE_MIN_MAX_CHARS,
     REFERENCE_MIN_PAGE_CHARS,
+    get_tool_timeout,
 )
 from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
@@ -1541,6 +1542,17 @@ FORGET_MAX_IDS = 50
 # A per-id row status inside a success/partial reply, not a tool error envelope
 # (those go through ``_error_response``).
 _FORGET_ROW_ERROR = "error"
+# #2191: why an id was left untried. ``error`` stays ``not_attempted``; the
+# message carries the reason.
+_FORGET_NOT_ATTEMPTED_SESSION = (
+    "Not attempted: the database session failed on an earlier id. Retry it."
+)
+_FORGET_NOT_ATTEMPTED_BUDGET = (
+    "Not attempted: the call's time budget was spent on earlier ids. Retry it in a new call."
+)
+# The batch deadline's clock. Tests patch this alias, never ``time.monotonic``
+# itself (the event loop reads that).
+_monotonic = time.monotonic
 
 
 def _parse_forget_ids(args: dict[str, Any]) -> tuple[list[UUID], list[TextContent] | None]:
@@ -1595,13 +1607,13 @@ def _forget_error_row(memory_uuid: UUID, failure: Any) -> dict[str, Any]:
     return row
 
 
-def _forget_not_attempted(memory_uuid: UUID) -> dict[str, Any]:
-    """The row of an id left untried after the database session failed."""
+def _forget_not_attempted(memory_uuid: UUID, message: str) -> dict[str, Any]:
+    """The row of an id left untried (failed session or spent time budget)."""
     return {
         "memory_id": str(memory_uuid),
         "status": _FORGET_ROW_ERROR,
         "error": "not_attempted",
-        "message": "Not attempted: the database session failed on an earlier id. Retry it.",
+        "message": message,
     }
 
 
@@ -1651,14 +1663,18 @@ async def _handle_forget_many(
     not yours, already gone — one word, so the row is no existence oracle) /
     ``error``. One usage row and one context touch for the whole call.
 
-    ``execute_with_timeout`` bounds each id, not the call. A timeout that
-    cancels a database statement usually leaves the session unusable:
-    ``db.rollback()`` (or the ``_forgotten_by`` read) fails, ``session_ok``
-    flips and every remaining id is ``not_attempted``, so the call ends after
-    one or two timeouts — keep that bail-out if the rollback path changes.
-    A stall outside the database (the vector-store point delete inside
-    ``MemoryService.forget``) leaves the session usable, so the worst case
-    stays ``len(memory_ids)`` × the ``forget`` timeout.
+    #2191: the call has one time budget, the ``forget`` timeout
+    (``MCP_TIMEOUT_FORGET``), measured on a monotonic clock from just before
+    the first id. Each id waits at most what is left of it, and once it is
+    spent every remaining id is ``not_attempted`` without being tried, so the
+    loop never outlasts one ``forget`` timeout however many ids stall (the
+    usage row, touch and commit after it are the single form's own tail).
+    An id cancelled at the deadline takes the ordinary exception path: rolled
+    back, then ``deleted`` if its commit had landed, else ``error`` /
+    ``timeout`` with a correlation id — exactly what the single form reports
+    for the same event, and that row's help says to verify before retrying.
+    A rollback that fails after such a cancel still flips ``session_ok`` and
+    ends the loop — keep that bail-out if the rollback path changes.
     """
     from types import SimpleNamespace
 
@@ -1700,9 +1716,18 @@ async def _handle_forget_many(
             service = MemoryService(db)
             results: list[dict[str, Any]] = []
             session_ok = True
+            budget_left = True
+            deadline = _monotonic() + get_tool_timeout("forget")
             for memory_uuid in memory_ids:
                 if not session_ok:
-                    results.append(_forget_not_attempted(memory_uuid))
+                    results.append(
+                        _forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_SESSION)
+                    )
+                    continue
+                remaining = deadline - _monotonic() if budget_left else 0.0
+                if remaining <= 0:
+                    budget_left = False
+                    results.append(_forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_BUDGET))
                     continue
                 attempt_start = utcnow()
                 try:
@@ -1713,6 +1738,7 @@ async def _handle_forget_many(
                             current_context_id=current_context_id,
                             current_workspace_id=workspace_id,
                         ),
+                        timeout=remaining,
                         operation_name="forget",
                     )
                 except Exception as exc:

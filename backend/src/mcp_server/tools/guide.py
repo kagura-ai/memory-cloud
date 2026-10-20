@@ -494,7 +494,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "message?}] in request order, with count, succeeded, skipped and failed; each "
         "id is committed on its own, so a failed id leaves the others deleted and "
         "status is partial (error batch_failed, with the rows, when every id "
-        "failed). To replace a fact rather than erase it, use "
+        "failed). The call stops at the forget timeout and reports untried ids "
+        "error/not_attempted — resend those. To replace a fact rather than erase it, use "
         "remember(supersedes=...)."
     ),
     # ----------------------------------------------------------------- explore

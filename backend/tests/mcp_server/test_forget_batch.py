@@ -8,8 +8,10 @@ back alone. One usage row and one context touch cover the whole call.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -258,11 +260,129 @@ async def test_a_failed_rollback_stops_the_loop_and_keeps_the_rows():
     assert body["status"] == "partial"
     assert [r["status"] for r in body["results"]] == ["deleted", "error", "error"]
     assert body["results"][2]["error"] == "not_attempted"
+    assert "session" in body["results"][2]["message"]
     assert body["memory_ids"] == [str(a)]
     assert service.forget.await_count == 2
     # The session is unusable: no usage row, touch or commit on it.
     mocks.log.assert_not_awaited()
     mocks.db.commit.assert_not_awaited()
+
+
+# --------------------------------------------------------------- time budget
+# #2191: the whole batch gets one deadline — the ``forget`` timeout — so a
+# call never outlasts one tool timeout.
+
+
+def _clock(*readings):
+    return patch("mcp_server.tools.memory._monotonic", new=MagicMock(side_effect=list(readings)))
+
+
+def _budget(seconds):
+    return patch("mcp_server.tools.memory.get_tool_timeout", new=MagicMock(return_value=seconds))
+
+
+@pytest.mark.asyncio
+async def test_budget_spent_marks_the_remaining_ids_not_attempted():
+    a, b, c = uuid4(), uuid4(), uuid4()
+    with _budget(15), _clock(0, 1, 20):
+        body, service, mocks = await _call(
+            {"memory_ids": [str(a), str(b), str(c)]}, _forgetter({a: 1, b: 1, c: 1})
+        )
+    assert [r["status"] for r in body["results"]] == ["deleted", "error", "error"]
+    for row in body["results"][1:]:
+        assert row["error"] == "not_attempted"
+        assert "time budget" in row["message"]
+    assert service.forget.await_count == 1
+    assert body["status"] == "partial"
+    assert body["memory_ids"] == [str(a)]
+    # The session is still good: one usage row and the commit, unlike a failed rollback.
+    assert mocks.log.await_count == 1
+    mocks.db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_each_wait_is_bounded_by_the_remaining_budget():
+    from mcp_server.tools import memory
+
+    a = uuid4()
+    recorded: list[dict] = []
+    real = memory.execute_with_timeout
+
+    async def recorder(coro, timeout=None, operation_name="tool"):
+        recorded.append({"timeout": timeout, "operation_name": operation_name})
+        return await real(coro, timeout=timeout, operation_name=operation_name)
+
+    with (
+        _budget(15),
+        _clock(0, 10),
+        patch("mcp_server.tools.memory.execute_with_timeout", new=recorder),
+    ):
+        body, _, _ = await _call({"memory_ids": [str(a)]}, _forgetter({a: 1}))
+    assert body["status"] == "success"
+    assert len(recorded) == 1
+    assert recorded[0]["timeout"] == pytest.approx(5)
+    assert recorded[0]["operation_name"] == "forget"
+
+
+@pytest.mark.asyncio
+async def test_the_budget_is_the_forget_timeout():
+    from mcp_server.tools._constants import TOOL_TIMEOUTS
+
+    a = uuid4()
+    budget = MagicMock(return_value=15)
+    with patch("mcp_server.tools.memory.get_tool_timeout", new=budget):
+        await _call({"memory_ids": [str(a)]}, _forgetter({a: 1}))
+    budget.assert_called_once_with("forget")
+    assert "forget_many" not in TOOL_TIMEOUTS
+    assert "forget_batch" not in TOOL_TIMEOUTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forgotten", [False, True])
+async def test_a_stalled_id_at_the_deadline_is_a_timeout_row_then_not_attempted(forgotten):
+    a, b, c = uuid4(), uuid4(), uuid4()
+    with _budget(15), _clock(0, 0, 16):
+        body, service, mocks = await _call(
+            {"memory_ids": [str(a), str(b), str(c)]},
+            _forgetter({a: TimeoutError(), b: 1, c: 1}),
+            forgotten=forgotten,
+        )
+    rows = body["results"]
+    assert [r["error"] for r in rows[1:]] == ["not_attempted", "not_attempted"]
+    assert service.forget.await_count == 1
+    mocks.db.rollback.assert_awaited_once()
+    assert mocks.forgotten_by.await_args.args[1:3] == (a, "u1")
+    if forgotten:
+        assert rows[0] == {"memory_id": str(a), "status": "deleted"}
+        assert body["status"] == "partial"
+    else:
+        assert rows[0]["status"] == "error"
+        assert rows[0]["error"] == "timeout"
+        assert rows[0]["correlation_id"]
+        assert body["error"] == "batch_failed"
+        assert body["failed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_delete_ends_within_one_budget():
+    """The issue's acceptance: a stall never holds the client past one budget."""
+    ids = [uuid4() for _ in range(5)]
+    never = asyncio.Event()
+
+    async def stall(request, **kwargs):
+        await never.wait()
+
+    service = MagicMock()
+    service.forget = AsyncMock(side_effect=stall)
+    with _budget(0.2):
+        started = time.monotonic()
+        body, service, _ = await _call({"memory_ids": [str(i) for i in ids]}, service)
+        elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    rows = body["results"]
+    assert rows[0]["error"] == "timeout"
+    assert [r["error"] for r in rows[1:]] == ["not_attempted"] * 4
+    assert service.forget.await_count == 1
 
 
 @pytest.mark.asyncio
