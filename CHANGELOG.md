@@ -27,6 +27,7 @@ Client connection defaults and maintenance ergonomics: a default context can now
 - **MCP:** `forget` gains `memory_ids`; `list_edges` gains `min_weight` in the reply; `context_source` adds `"credential"`; help texts for `context_id_required` and `by_me` updated. Tool count unchanged (72).
 - **Behaviour change for loopback OAuth clients:** one extra page with a *Continue* button after consent (Claude Code, Cursor, `claude mcp add`, the remote OAuth verification script).
 - No new environment variables.
+- **Dependencies:** `aiohttp` 3.14.3 → 3.14.5 (transitive, via `aiobotocore` / `voyageai`) for the open Dependabot advisories on 3.14.3.
 
 ## [v0.116.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.116.0) — 2026-10-20
 
