@@ -60,8 +60,9 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "loopback_page_title": "Return to the app",
         "loopback_heading": "Return to {client}",
         "loopback_body": (
-            "{client} is waiting for this sign-in on this computer. If the "
-            "button does not open it, paste the URL below into {client}."
+            "{client} is waiting for this sign-in. If the button does not "
+            "open it, paste the URL below into {client}, on the computer "
+            "where it runs."
         ),
         "loopback_continue": "Continue to {client}",
         "loopback_url_label": "Callback URL",
@@ -125,8 +126,9 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "loopback_page_title": "アプリに戻る",
         "loopback_heading": "{client} に戻る",
         "loopback_body": (
-            "{client} はこのコンピューター上でサインインを待っています。"
-            "ボタンで開かない場合は、下の URL を {client} に貼り付けてください。"
+            "{client} がサインインを待っています。ボタンで開かない場合は、"
+            "下の URL を {client} が動いているコンピューターで {client} に"
+            "貼り付けてください。"
         ),
         "loopback_continue": "{client} に進む",
         "loopback_url_label": "コールバック URL",

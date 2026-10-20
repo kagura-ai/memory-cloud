@@ -190,6 +190,17 @@ class TestLoopbackInterstitial:
             f"http://localhost:4321/callback?code={CODE}&state=st-1"
         )
 
+    def test_render_error_falls_back_to_the_redirect(self):
+        with patch.object(
+            oauth_routes.templates, "TemplateResponse", side_effect=RuntimeError("boom")
+        ):
+            response, _ = _post("http://localhost:4321/callback")
+
+        assert response.status_code == 303
+        assert response.headers["location"] == (
+            f"http://localhost:4321/callback?code={CODE}&state=st-1"
+        )
+
 
 class TestOtherBranchesUnchanged:
     def test_non_loopback_approve_is_the_same_303(self):

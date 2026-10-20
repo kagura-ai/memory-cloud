@@ -2066,7 +2066,21 @@ def _render_loopback_interstitial(
             return None
         locale = _resolve_oauth_locale(request, db_session, user_email)
         client_name = client.client_name or client_id or ""
+        # Rendered here so a template error also falls back to the 303
+        # instead of the route's server_error redirect (the code is stored).
+        response = templates.TemplateResponse(
+            request,
+            "oauth_authorize_loopback.html",
+            {
+                "messages": get_oauth_messages(locale),
+                "locale": locale,
+                "client_name": client_name,
+                "location": location,
+            },
+            headers=_LOOPBACK_INTERSTITIAL_HEADERS,
+        )
     except Exception as e:
+        # Only the exception type: its message could quote the location.
         logger.warning(
             "oauth_authorize_loopback_interstitial_failed: "
             f"client_id={client_id!r}, error={type(e).__name__}"
@@ -2076,17 +2090,7 @@ def _render_loopback_interstitial(
         db_session.close()
 
     logger.debug(f"oauth_authorize_loopback_interstitial: client_id={client_id!r}")
-    return templates.TemplateResponse(
-        request,
-        "oauth_authorize_loopback.html",
-        {
-            "messages": get_oauth_messages(locale),
-            "locale": locale,
-            "client_name": client_name,
-            "location": location,
-        },
-        headers=_LOOPBACK_INTERSTITIAL_HEADERS,
-    )
+    return response
 
 
 def _grant_issued(location: str) -> bool:
