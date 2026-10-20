@@ -1959,10 +1959,12 @@ inactive keeps its stamp. Turning the flag off or on clears it (on re-queues
 every long memory anyway). Logged as `content_chunks_gap_recorded`,
 `content_chunks_gap_requeued` and `content_chunks_gap_closed`. With the vector
 store down, each tick logs up to 5 `content_chunks_gap_reconcile_failed`
-warnings (one per picked context, with `error_class`) and one
-`content_chunks_gap_reconcile_done` with `failed=5` (fewer when fewer contexts
-are stamped); the stamps are kept and the next tick retries, so a steady stream
-of them every minute means the vector store is unreachable. A stamp that could
+warnings (one per picked context, with `context_id` and `error_class`) and one
+`content_chunks_gap_reconcile_done` with `failed=5` (fewer when fewer stamped
+contexts are active or some wait on their backlog, counted in `deferred`); the
+stamps are kept and the next tick retries. The same `error_class` every minute
+across several contexts means the vector store is unreachable; one `context_id`
+failing on every tick points at that context (its collection, for example). A stamp that could
 not be written logs `content_chunks_gap_stamp_failed` (warning), a failed seed
 `content_chunks_gap_seed_failed` (error, every tick until it succeeds) and a
 tick that fails as a whole `content_chunks_gap_reconcile_tick_failed` (error).

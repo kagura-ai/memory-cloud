@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
 from tasks.embedding_tasks import (
     reconcile_content_chunk_gaps,
@@ -37,7 +38,7 @@ class TestScheduleEmbeddingTasks:
     def test_registers_the_chunk_gap_reconciler(self):
         """#2107: the gap reconciler runs beside the sweep, every 60 s, no env knob."""
         scheduler = MagicMock()
-        with patch("tasks.embedding_tasks.logger") as log:
+        with capture_logs() as logs:
             schedule_embedding_tasks(scheduler)
 
         call = scheduler.add_job.call_args_list[1]
@@ -45,8 +46,11 @@ class TestScheduleEmbeddingTasks:
         assert call.kwargs["id"] == "reconcile_content_chunk_gaps"
         assert call.kwargs["replace_existing"] is True
         assert call.kwargs["trigger"].interval.total_seconds() == 60
-        events = [c.args[0] for c in log.info.call_args_list]
-        assert "scheduled_content_chunks_gap_task" in events
+        assert ("scheduled_content_chunks_gap_task", "info") in _events(logs)
+
+
+def _events(logs: list[dict]) -> list[tuple[str, str]]:
+    return [(e["event"], e["log_level"]) for e in logs]
 
 
 class TestReconcileContentChunkGapsTask:
@@ -73,14 +77,13 @@ class TestReconcileContentChunkGapsTask:
             patch("db.base.get_db", mock_get_db_factory(db)),
             patch("services.content_chunk_gaps.seed_content_chunk_gaps", seed),
             patch("services.content_chunk_gaps.reconcile_content_chunk_gaps", tick),
-            patch("tasks.embedding_tasks.logger") as log,
+            capture_logs() as logs,
         ):
             await reconcile_content_chunk_gaps()
             await reconcile_content_chunk_gaps()
         seed.assert_awaited_once_with(db)
         assert tick.await_count == 2
-        events = [c.args[0] for c in log.info.call_args_list]
-        assert events == ["content_chunks_gap_reconcile_done"] * 2
+        assert _events(logs) == [("content_chunks_gap_reconcile_done", "info")] * 2
 
     @pytest.mark.asyncio
     async def test_a_failed_seed_rolls_back_and_is_retried_next_tick(self):
@@ -93,7 +96,7 @@ class TestReconcileContentChunkGapsTask:
             patch("db.base.get_db", mock_get_db_factory(db)),
             patch("services.content_chunk_gaps.seed_content_chunk_gaps", seed),
             patch("services.content_chunk_gaps.reconcile_content_chunk_gaps", tick),
-            patch("tasks.embedding_tasks.logger") as log,
+            capture_logs() as logs,
         ):
             await reconcile_content_chunk_gaps()  # logged; the tick still runs
             await reconcile_content_chunk_gaps()
@@ -101,7 +104,7 @@ class TestReconcileContentChunkGapsTask:
         assert seed.await_count == 2
         assert tick.await_count == 3
         db.rollback.assert_awaited_once()
-        assert [c.args[0] for c in log.error.call_args_list] == ["content_chunks_gap_seed_failed"]
+        assert _events(logs) == [("content_chunks_gap_seed_failed", "error")]
 
     @pytest.mark.asyncio
     async def test_a_failed_tick_is_rolled_back_and_swallowed(self):
@@ -113,13 +116,11 @@ class TestReconcileContentChunkGapsTask:
                 "services.content_chunk_gaps.reconcile_content_chunk_gaps",
                 AsyncMock(side_effect=RuntimeError("boom")),
             ),
-            patch("tasks.embedding_tasks.logger") as log,
+            capture_logs() as logs,
         ):
             await reconcile_content_chunk_gaps()  # logged, not raised
         db.rollback.assert_awaited_once()
-        assert [c.args[0] for c in log.error.call_args_list] == [
-            "content_chunks_gap_reconcile_tick_failed"
-        ]
+        assert _events(logs) == [("content_chunks_gap_reconcile_tick_failed", "error")]
 
 
 class TestSweepPendingEmbeddings:
