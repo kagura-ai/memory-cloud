@@ -1650,6 +1650,13 @@ async def _handle_forget_many(
     alone and the others stay deleted. ``deleted`` / ``skipped`` (not found,
     not yours, already gone — one word, so the row is no existence oracle) /
     ``error``. One usage row and one context touch for the whole call.
+
+    ``execute_with_timeout`` bounds each id, not the call: 50 ids that each
+    time out would hold the tool for 50 × the operation timeout. In practice
+    the first timeout leaves the session unusable, ``db.rollback()`` (or the
+    ``_forgotten_by`` read) fails, ``session_ok`` flips and every remaining id
+    is ``not_attempted`` — so the bound is one or two timeouts. Keep that
+    bail-out if the rollback path ever changes.
     """
     from types import SimpleNamespace
 
