@@ -29,6 +29,8 @@ class TestUpdateMemoryInPlace:
         """Create a mock Memory object with sensible defaults."""
         memory = MagicMock()
         memory.id = overrides.get("id", uuid4())
+        # An API-written row: its point is its own id (#2100).
+        memory.point_id = overrides.get("point_id", memory.id)
         memory.user_id = overrides.get("user_id", "test_user")
         memory.workspace_id = overrides.get("workspace_id", uuid4())
         memory.context_id = overrides.get("context_id", uuid4())

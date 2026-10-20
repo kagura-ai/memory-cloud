@@ -2101,14 +2101,53 @@ class MemoryService:
 
         # Sync updated_at to Qdrant for date range filtering (Issue #78)
         payload_updates["updated_at"] = to_utc_iso(utcnow())
+        await self._sync_metadata_payload(memory, payload_updates, delete_keys)
+
+    async def _sync_metadata_payload(
+        self,
+        memory: Any,
+        payload_updates: dict[str, Any],
+        delete_keys: list[str],
+    ) -> None:
+        """Merge a metadata-only edit into ``memory``'s own point (#2100).
+
+        The point is ``Memory.point_id`` — a resource-indexer row's is the
+        document's uuid5, not ``memory.id`` — resolved by the rule ``forget``
+        and the Sleep archive / merge use (#2065, ``unshared_point_id``). A
+        point another live row names too (the same document indexed into two
+        contexts sharing a collection) is left as it is: one row's edit must
+        not rewrite the other row's filters; the edit stays in PG and the log
+        says so.
+
+        The patch is a set-payload merge, never a payload overwrite: an
+        indexer point keeps its own fields (``content``, ``facets``,
+        ``sortable``, ``metadata``, ``indexed_at``, ...) and gains only the
+        keys a metadata edit writes — ``tags`` / ``importance`` / ``type`` /
+        ``context_summary`` / ``location`` and ``updated_at``, the same set as
+        a point of its own, so recall's payload filters agree with the row.
+        ``scope`` is not editable by update or PATCH and is not written.
+        Resource points have no content chunks, so the chunk cascade (#2015)
+        runs only for a point that is the memory's own id.
+        """
+        from services.resource_indexer import unshared_point_id
+
+        point_id = await unshared_point_id(self.db, memory.id, memory.point_id)
+        if point_id is None:
+            logger.info(
+                "memory_metadata_sync_shared_point_skipped",
+                memory_id=str(memory.id),
+                point_id=str(memory.point_id),
+            )
+            return
+        own_point = point_id == memory.id
         collection = await resolve_collection_name(self.db, memory.context_id)
         await update_memory_payload_in_qdrant(
-            memory_id=memory.id,
+            memory_id=point_id,
             payload_updates=payload_updates,
             collection_name=collection,
             delete_keys=delete_keys or None,
             # #2015: a context that never opted in has no chunk points.
-            cascade_chunks=await chunk_cascade_needed(self.db, memory.context_id),
+            cascade_chunks=own_point and await chunk_cascade_needed(self.db, memory.context_id),
         )
 
     async def _patch_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
@@ -2353,15 +2392,7 @@ class MemoryService:
 
         payload_updates["updated_at"] = to_utc_iso(utcnow())
         try:
-            collection = await resolve_collection_name(self.db, memory.context_id)
-            await update_memory_payload_in_qdrant(
-                memory_id=memory.id,
-                payload_updates=payload_updates,
-                collection_name=collection,
-                delete_keys=delete_keys or None,
-                # #2015: a context that never opted in has no chunk points.
-                cascade_chunks=await chunk_cascade_needed(self.db, memory.context_id),
-            )
+            await self._sync_metadata_payload(memory, payload_updates, delete_keys)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "memory_patch_qdrant_payload_failed",
