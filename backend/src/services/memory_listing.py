@@ -25,18 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import (
-    String,
-    and_,
-    case,
-    cast,
-    func,
-    literal,
-    or_,
-    select,
-    tuple_,
-    union_all,
-)
+from sqlalchemy import String, and_, case, cast, func, literal, or_, select, tuple_, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import ColumnElement
