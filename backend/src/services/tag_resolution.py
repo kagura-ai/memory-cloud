@@ -360,7 +360,9 @@ async def expand_tag_filter(
         _build_tag_clause``) AND one group per requested tag, which recall
         derives with ``utils.tag_normalize.tag_filter_groups`` (#2058, #2071)
         by the same ``normalize_tag`` fold, so every variant added here must
-        share its requested tag's fold.
+        share its requested tag's fold. Under ``any`` they OR the union of
+        ``utils.tag_normalize.tag_filter_groups_any`` (#2096), so the 50-tag
+        cap counts requested tags, not spellings.
     """
     try:
         # #1512: widening only needs the mechanical variants, so a vocabulary up

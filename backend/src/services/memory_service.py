@@ -123,7 +123,11 @@ from utils.exceptions import (
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
 from utils.recall_projection import content_slice, effective_full
-from utils.tag_normalize import TAG_GROUPS_FILTER_KEY, tag_filter_groups
+from utils.tag_normalize import (
+    TAG_GROUPS_FILTER_KEY,
+    tag_filter_groups,
+    tag_filter_groups_any,
+)
 
 logger = get_logger(__name__)
 
@@ -6099,6 +6103,14 @@ class MemoryService:
                 effective_filters = {
                     **effective_filters,
                     TAG_GROUPS_FILTER_KEY: tag_filter_groups(tag_filter, expanded),
+                }
+            elif added:
+                # #2096: the builders cut a flat 'any' list to 50 entries, so the
+                # added spellings pushed later requested tags out. They OR the
+                # groups instead, capped per requested tag.
+                effective_filters = {
+                    **effective_filters,
+                    TAG_GROUPS_FILTER_KEY: tag_filter_groups_any(tag_filter, expanded),
                 }
 
         # #1515: hybrid_search reports here when it had to serve the request

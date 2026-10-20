@@ -16,6 +16,7 @@ from utils.tag_normalize import (
     mechanical_variant_key,
     normalize_tag,
     tag_filter_groups,
+    tag_filter_groups_any,
 )
 
 
@@ -641,4 +642,39 @@ class TestTagFilterGroups:
     def test_duplicates_are_dropped(self):
         assert tag_filter_groups(["Deploy", "Deploy"], ["Deploy", "deploy", "deploy"]) == [
             ["Deploy", "deploy"]
+        ]
+
+
+class TestTagFilterGroupsAny:
+    """#2096: one group per requested tag of a widened tags_match='any' filter."""
+
+    def test_a_tag_groups_with_its_added_spellings(self):
+        assert tag_filter_groups_any(["ログ", "デプロイ"], ["ログ", "デプロイ", "ろぐ"]) == [
+            ["ログ", "ろぐ"],
+            ["デプロイ"],
+        ]
+
+    def test_every_added_spelling_is_kept_across_numbers(self):
+        """No number guard under 'any': the flat widening matched these too."""
+        assert tag_filter_groups_any(
+            ["v0.11.0", "v0.1.10"], ["v0.11.0", "v0.1.10", "V0.11.0", "v0110"]
+        ) == [["v0.11.0", "V0.11.0", "v0110"], ["v0.1.10", "V0.11.0", "v0110"]]
+
+    def test_the_groups_hold_every_entry_of_the_widened_list(self):
+        requested = [f"tag-{n}" for n in range(20)]
+        expanded = [s for t in requested for s in (t, t.upper(), t.replace("-", "_"))]
+        groups = tag_filter_groups_any(requested, expanded)
+        assert [g[0] for g in groups] == requested
+        assert {s for g in groups for s in g} == set(expanded)
+
+    def test_groups_stop_at_the_store_cap(self):
+        tags = [f"tag{n}" for n in range(MAX_TAG_GROUPS + 10)]
+        assert tag_filter_groups_any(tags, tags) == [[t] for t in tags[:MAX_TAG_GROUPS]]
+
+    def test_duplicates_and_empty_folds(self):
+        assert tag_filter_groups_any(
+            ["---", "Deploy", "Deploy"], ["---", "Deploy", "deploy", "***"]
+        ) == [
+            ["---"],
+            ["Deploy", "deploy"],
         ]

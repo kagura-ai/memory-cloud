@@ -164,6 +164,36 @@ def test_tags_all_with_normalize_caps_tags_not_spellings():
     assert "AND array_has(tags, 'delta'))" in where
 
 
+def test_tags_any_with_normalize_caps_tags_not_spellings():
+    """#2096: a widened 'any' ORs one parenthesised group per requested tag."""
+    groups = [[f"t{n}", f"t{n}-", f"t{n}--"] for n in range(20)]  # 60 spellings
+    widened = [t for g in groups for t in g]
+    where = build_lance_filter(
+        WS,
+        CTX,
+        USER,
+        filters={"tags": widened, "tags_normalize": True, TAG_GROUPS_FILTER_KEY: groups},
+    )
+    for tag in widened:
+        assert f"array_has(tags, '{tag}')" in where
+    assert (
+        "OR (array_has(tags, 't19') OR array_has(tags, 't19-') OR array_has(tags, 't19--')))"
+    ) in where
+    assert " AND array_has(tags, 't" not in where
+
+
+def test_tags_any_with_groups_caps_groups_and_ignores_strangers():
+    # The first group names a tag the filter lacks; it still counts toward the cap.
+    groups = [["t0", "evil"]] + [[f"t{n}", f"t{n}-"] for n in range(60)]
+    widened = [t for g in groups[1:] for t in g]
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": widened, TAG_GROUPS_FILTER_KEY: groups}
+    )
+    assert "evil" not in where
+    assert "array_has(tags, 't48-')" in where
+    assert "'t49'" not in where
+
+
 def test_tag_value_is_escaped():
     where = build_lance_filter(WS, CTX, USER, filters={"tags": ["a'b"]})
     assert "array_has(tags, 'a''b')" in where

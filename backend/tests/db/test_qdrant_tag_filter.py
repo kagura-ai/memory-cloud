@@ -232,7 +232,7 @@ class TestTagFilterAllWithNormalize:
     def test_any_stays_one_flat_match_any(self):
         conditions = _build_tag_filter_conditions({**self.EXPANDED, "tags_match": "any"})
         assert len(conditions) == 1
-        assert conditions[0].match.any == ["ログ", "デプロイ", "ろぐ"]
+        assert sorted(conditions[0].match.any) == sorted(["ログ", "デプロイ", "ろぐ"])
 
     def test_the_issue_scenario_matches_the_exactly_tagged_memories(self):
         tagged = {
@@ -261,3 +261,39 @@ class TestTagFilterAllWithNormalize:
         assert len(conditions) == 4
         assert conditions[-1].match.value == "delta"
         assert len(conditions[0].match.any) == 21
+
+
+def _widened_any(n_tags: int, spellings: int) -> tuple[list[str], list[list[str]]]:
+    """recall's widening of ``n_tags`` requested tags that each gained spellings."""
+    groups = [[f"t{n}"] + [f"t{n}{'-' * k}" for k in range(1, spellings)] for n in range(n_tags)]
+    return [t for g in groups for t in g], groups
+
+
+class TestTagFilterAnyWithNormalize:
+    """#2096: under 'any' the 50-tag cap counts requested tags, not spellings."""
+
+    def test_every_requested_tag_keeps_every_spelling(self):
+        widened, groups = _widened_any(20, 3)  # 60 entries: past a flat cap of 50
+        conditions = _build_tag_filter_conditions({"tags": widened, TAG_GROUPS_FILTER_KEY: groups})
+        assert len(conditions) == 1
+        assert conditions[0].match.any == widened
+
+    def test_the_last_requested_tag_still_matches(self):
+        widened, groups = _widened_any(20, 3)
+        tagged = {1: ["t19"], 2: ["t19--"], 3: ["t0-"], 4: ["unrelated"]}
+        filters = {"tags": widened, "tags_match": "any", TAG_GROUPS_FILTER_KEY: groups}
+        assert _matching_ids(tagged, filters) == {1, 2, 3}
+
+    def test_without_groups_the_flat_cap_is_unchanged(self):
+        widened, _ = _widened_any(20, 3)
+        conditions = _build_tag_filter_conditions({"tags": widened})
+        assert conditions[0].match.any == widened[:50]
+
+    def test_the_cap_counts_groups(self):
+        widened, groups = _widened_any(60, 2)
+        conditions = _build_tag_filter_conditions({"tags": widened, TAG_GROUPS_FILTER_KEY: groups})
+        assert conditions[0].match.any == widened[:100]  # 50 groups x 2 spellings
+
+    def test_a_group_never_adds_a_tag_the_filter_lacks(self):
+        filters = {"tags": ["a", "b"], TAG_GROUPS_FILTER_KEY: [["a", "evil"], ["b"]]}
+        assert _build_tag_filter_conditions(filters)[0].match.any == ["a", "b"]

@@ -47,7 +47,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from db.qdrant import extract_score_threshold, tag_groups_for_all
+from db.qdrant import extract_score_threshold, widened_tag_groups
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
 from utils.geo_location import (
@@ -117,7 +117,8 @@ def _build_tag_clause(filters: dict[str, Any]) -> str:
 
     #2058: when recall widened the filter, ``all`` ANDs one OR group per
     requested tag (the widening's own groups, #2071), mirroring
-    ``db.qdrant._build_tag_filter_conditions``.
+    ``db.qdrant._build_tag_filter_conditions``; ``any`` ORs the same groups
+    (#2096), so the cap counts requested tags, not spellings.
     """
     raw = filters.get("tags")
     if not isinstance(raw, list) or not raw:
@@ -129,15 +130,17 @@ def _build_tag_clause(filters: dict[str, Any]) -> str:
     mode = filters.get("tags_match", "any")
     if mode not in ("any", "all"):
         raise ValueError(f"Invalid tags_match value: {mode!r}. Must be 'any' or 'all'.")
-    groups = tag_groups_for_all(filters) if mode == "all" else None
+    joiner = " AND " if mode == "all" else " OR "
+    groups = widened_tag_groups(filters)
     if groups is not None:
+        # Each group parenthesised under 'any' too: the expression nests about
+        # groups + spellings deep, not one OR chain of every spelling.
         clauses = []
         for group in groups:
             any_of = " OR ".join(f"array_has(tags, {_sql_str(t)})" for t in group)
             clauses.append(any_of if len(group) == 1 else f"({any_of})")
-        return "(" + " AND ".join(clauses) + ")"
+        return "(" + joiner.join(clauses) + ")"
     clauses = [f"array_has(tags, {_sql_str(t)})" for t in valid]
-    joiner = " AND " if mode == "all" else " OR "
     return "(" + joiner.join(clauses) + ")"
 
 

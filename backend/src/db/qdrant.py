@@ -374,8 +374,8 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
 
 
-# Bound on the tags a filter matches on: tags under "any" / exact "all", tag
-# groups under "all" with recall's widening (#2058).
+# Bound on the tags a filter matches on: tags of an exact filter, tag groups
+# (one per requested tag) of one recall widened (#2058, #2096).
 _MAX_FILTER_TAGS = 50
 # Bound on the spellings of one group. expand_tag_filter adds at most
 # MAX_EXPANSION_PER_TAG (20) spellings per requested tag; the cap only bounds a
@@ -383,11 +383,13 @@ _MAX_FILTER_TAGS = 50
 _MAX_GROUP_SPELLINGS = 50
 
 
-def tag_groups_for_all(filters: dict[str, Any]) -> list[list[str]] | None:
-    """The groups a tags_match='all' filter ANDs, when recall widened it (#2058).
+def widened_tag_groups(filters: dict[str, Any]) -> list[list[str]] | None:
+    """The groups of a tag filter recall widened (#2058, #2096).
 
-    The groups come from the widening itself, not from re-folding the flat tag
-    list: two requested tags with one fold must stay two groups (#2071).
+    tags_match='all' ANDs them; 'any' ORs their union, so the spellings of a
+    kept tag never push a later requested tag past the cap. The groups come
+    from the widening itself, not from re-folding the flat tag list: two
+    requested tags with one fold must stay two groups (#2071).
 
     Args:
         filters: Filter dict, possibly carrying ``TAG_GROUPS_FILTER_KEY``.
@@ -395,7 +397,7 @@ def tag_groups_for_all(filters: dict[str, Any]) -> list[list[str]] | None:
     Returns:
         At most ``_MAX_FILTER_TAGS`` non-empty groups of spellings that the
         filter's ``tags`` list holds, or None when the filter carries none
-        (every listed tag is then required).
+        (the flat, capped ``tags`` list then applies).
     """
     raw = filters.get(TAG_GROUPS_FILTER_KEY)
     tags = filters.get("tags")
@@ -421,6 +423,8 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
     Issue #2058: when recall widened the filter (tags_normalize), "all"
     requires each TAG, not each spelling: the spellings of one requested tag
     are one MatchAny. The groups are the widening's own (#2071).
+    Issue #2096: under "any" the one MatchAny takes the union of the groups,
+    so the 50-tag cap counts requested tags, not spellings.
 
     Args:
         filters: Filter dict with optional tags list, tags_match mode and
@@ -445,7 +449,7 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
 
     if tags_match == "all":
         # AND logic: memory must have ALL specified tags
-        groups = tag_groups_for_all(filters)
+        groups = widened_tag_groups(filters)
         if groups is None:
             return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
         # #2058: any one spelling of a requested tag satisfies it. A tag with
@@ -456,9 +460,12 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
             else FieldCondition(key="tags", match=MatchAny(any=group))
             for group in groups
         ]
-    else:
-        # OR logic (default): memory must have ANY of the specified tags
-        return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
+    # OR logic (default): memory must have ANY of the specified tags
+    groups = widened_tag_groups(filters)
+    if groups is not None:
+        # #2096: every spelling of each kept requested tag.
+        valid_tags = list(dict.fromkeys(t for group in groups for t in group))
+    return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
 def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:

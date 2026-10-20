@@ -99,10 +99,11 @@ def normalize_tag(tag: str) -> str:
     return _drop_long_vowel(_fold_before_long_vowel(tag))
 
 
-# Internal recall filter key carrying tag_filter_groups' result to the store
-# builders (``db.qdrant.tag_groups_for_all``); recall strips a caller's (#2071).
+# Internal recall filter key carrying tag_filter_groups' (tags_match='all') or
+# tag_filter_groups_any's (#2096) result to the store builders
+# (``db.qdrant.widened_tag_groups``); recall strips a caller's (#2071).
 TAG_GROUPS_FILTER_KEY = "_tag_groups"
-# The stores AND at most this many tags (db.qdrant._MAX_FILTER_TAGS), so later
+# The stores match at most this many tags (db.qdrant._MAX_FILTER_TAGS), so later
 # requested tags are not grouped: that also bounds the pairwise number check.
 MAX_TAG_GROUPS = 50
 
@@ -167,6 +168,47 @@ def tag_filter_groups(requested: Sequence[str], expanded: Sequence[str]) -> list
         if key not in emitted:
             emitted.add(key)
             groups.append(group)
+    return groups
+
+
+def tag_filter_groups_any(requested: Sequence[str], expanded: Sequence[str]) -> list[list[str]]:
+    """One group per requested tag of a widened ``tags_match='any'`` filter (#2096).
+
+    The store builders cut a flat tag list to 50 entries, so the spellings the
+    widening interleaves pushed later requested tags out and tolerance matched
+    fewer tags than the exact filter. The builders OR the union of these groups
+    instead, capped by group: a kept requested tag keeps every spelling.
+
+    Unlike :func:`tag_filter_groups` there is no number guard: under ``any`` the
+    widening deliberately matches every spelling with the fold (``v0.11.0``
+    also matches ``v0.1.10``), so each group takes every added spelling with
+    its tag's fold.
+
+    Args:
+        requested: The tags the caller filtered on, in filter order.
+        expanded: ``expand_tag_filter``'s widened list (requested + added).
+
+    Returns:
+        One list per distinct requested tag (the first ``MAX_TAG_GROUPS``), in
+        filter order, each starting with that tag. A tag with an empty fold
+        (only punctuation) gains nothing.
+
+    Example:
+        >>> tag_filter_groups_any(["ログ", "デプロイ"], ["ログ", "デプロイ", "ろぐ"])
+        [['ログ', 'ろぐ'], ['デプロイ']]
+    """
+    listed = list(dict.fromkeys(requested))[:MAX_TAG_GROUPS]
+    listed_set = set(listed)
+    added_by_fold: dict[str, list[str]] = {}
+    for tag in dict.fromkeys(expanded):
+        if tag not in listed_set:
+            folded = normalize_tag(tag)
+            if folded:
+                added_by_fold.setdefault(folded, []).append(tag)
+    groups: list[list[str]] = []
+    for tag in listed:
+        folded = normalize_tag(tag)
+        groups.append([tag, *added_by_fold.get(folded, [])] if folded else [tag])
     return groups
 
 
