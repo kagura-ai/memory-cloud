@@ -1369,7 +1369,7 @@ Create a new API key (Admin only).
 }
 ```
 
-`default_context_id` (optional, [#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)) is the key's MCP default context — see [PATCH](#patch-apiv1config-api-keyskey_id). A context you cannot read is `404` `Context not found`, and no key is created.
+`default_context_id` (optional, [#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)) is the key's MCP default context — see [PATCH](#patch-apiv1configapi-keyskey_id). A context you cannot read is `404` `Context not found`, and no key is created.
 
 **Response:**
 
