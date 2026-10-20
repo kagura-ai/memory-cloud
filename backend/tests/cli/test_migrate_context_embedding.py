@@ -397,6 +397,8 @@ async def test_busy_bare_switch_prints_a_plain_retry(capsys):
     ) in out
     assert "--requeue-since 2" not in out
     assert "switched: text-embedding-3-small" not in out
+    assert "note: --switch without --reembed in the same run re-queues nothing" in out
+    assert "--context" not in out
 
 
 @pytest.mark.asyncio
@@ -409,10 +411,13 @@ async def test_busy_switch_with_explicit_requeue_since_repeats_it(capsys):
     )
     assert code == 1
     assert switch.await_args.kwargs["requeue_since"] == datetime(2026, 10, 2, 3, 4, 5)
+    out = capsys.readouterr().out
     assert (
         f"  NOT switched: {_WRITERS_BUSY} Retry with --verify --switch --requeue-since "
         "2026-10-02T03:04:05 once the current write finishes (no full re-embed).\n"
-    ) in capsys.readouterr().out
+    ) in out
+    # The retry printed above passes --requeue-since: no note that it did not.
+    assert "re-queues nothing" not in out
 
 
 @pytest.mark.asyncio
@@ -640,3 +645,24 @@ async def test_busy_rollback_repeats_an_explicit_requeue_since(capsys):
         f"  NOT rolled back: {_WRITERS_BUSY} Retry --rollback-to {_ROLLBACK_TO} "
         "--requeue-since 2026-09-30T00:00:00 once the current write finishes.\n"
     ) in out
+
+
+@pytest.mark.asyncio
+async def test_a_busy_context_in_an_all_run_names_itself_in_a_timed_retry(capsys):
+    """The time is that context's own re-embed start: rerunning the printed
+    flags over --all would apply it to every unswitched context."""
+    context_id = uuid4()
+    args = cli._parse(["--to", _MODEL, "--all", "--run", "--yes"])
+    with (
+        patch.object(cli, "plan_context_migration", AsyncMock(return_value=_plan(context_id))),
+        patch.object(cli, "reembed_context", AsyncMock(return_value=_reembed([]))),
+        patch.object(cli, "verify_context_migration", AsyncMock(return_value=_chunks_complete())),
+        patch.object(cli, "switch_context_embedding", _busy()),
+    ):
+        code = await cli._one_context(MagicMock(), context_id, args)
+    assert code == 1
+    assert (
+        f"  NOT switched: {_WRITERS_BUSY} Retry with --verify --switch --requeue-since "
+        "2026-10-01T00:00:00 once the current write finishes (no full re-embed). "
+        f"Retry it for this context only (--context {context_id}).\n"
+    ) in capsys.readouterr().out

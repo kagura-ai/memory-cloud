@@ -1125,9 +1125,11 @@ async def switch_context_embedding(
                 update(Memory)
                 .where(Memory.id == locked.c.id)
                 .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
-                # Nothing to synchronize: no Memory is loaded in this session
-                # before the switch ('evaluate' cannot handle the subquery,
-                # 'fetch' would add a pre-SELECT).
+                # Not synchronized ('evaluate' cannot handle the subquery,
+                # 'fetch' returns every re-queued id): a Memory still in this
+                # session's identity map keeps its old embedding columns. The
+                # migration steps expunge the rows they page through, and
+                # nothing after this reads those columns from the session.
                 .execution_options(synchronize_session=False)
             )
         except DBAPIError as exc:
