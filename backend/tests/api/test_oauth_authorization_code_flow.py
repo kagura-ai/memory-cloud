@@ -1229,3 +1229,36 @@ class TestNonStringFormParts:
 
         assert response.status_code == 400, response.text
         assert response.json()["error"] == "invalid_request"
+
+
+class TestOversizedForm:
+    """A token request body over 16 KiB is refused before it is parsed (#2200)."""
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["content-length", "chunked"])
+    def test_token_request_over_the_limit_is_invalid_request_413(
+        self, api: TestClient, chunked: bool
+    ) -> None:
+        body = (
+            urlencode(
+                {
+                    "grant_type": "authorization_code",
+                    "code": "unused",
+                    "redirect_uri": REDIRECT_URI,
+                    "client_id": PUBLIC_CLIENT,
+                }
+            ).encode()
+            + b"&pad="
+            + b"x" * 16384
+        )
+        # An iterator makes httpx send the body chunked, without Content-Length.
+        content = iter([body[:4096], body[4096:]]) if chunked else body
+        response = api.post(
+            "/api/v1/oauth/token",
+            content=content,
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+        assert response.status_code == 413, response.text
+        assert set(response.json()) == {"error", "error_description"}
+        assert response.json()["error"] == "invalid_request"
+        assert response.headers["cache-control"] == "no-store"

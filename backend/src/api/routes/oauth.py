@@ -137,8 +137,16 @@ async def preload_form(request: Request):
     never send one; a dropped part counts as absent, which leaves the query
     value in place at ``/authorize`` and gives Authlib's own error at
     ``/token``.
+
+    The body is read bounded before it is parsed (#2200): a body over
+    ``_OAUTH_FORM_MAX_BODY_BYTES`` raises ``_DeviceAuthorizationRequestError``
+    (413; 400 when the client disconnects), which the routes answer as an
+    RFC 6749 ``invalid_request``. The bytes read are set as ``request._body``,
+    as ``Request.body()`` does, so ``request.form()`` parses them from memory:
+    nothing is buffered or spooled to disk past the limit.
     """
     if request.method.upper() == "POST":
+        request._body = await _read_bounded_body(request, _OAUTH_FORM_MAX_BODY_BYTES)
         form = await request.form()
         form_items: list[tuple[str, str]] = []
         dropped: list[tuple[str, Any]] = []
@@ -182,6 +190,12 @@ _DEVICE_FLOW_RATE_WINDOW_SECONDS = 60
 # (RFC 8628 §3.1); /device/authorize refuses a larger body without parsing it
 # (#1671).
 _DEVICE_AUTHORIZE_MAX_BODY_BYTES = 4096
+
+# The form bodies /token and the consent POST /authorize read through
+# ``preload_form`` (#2200). The largest legitimate one is a /token request
+# carrying a long percent-encoded redirect_uri, a PKCE verifier and a few
+# ``resource`` URLs, about 8 KiB; the consent form is under 1 KiB.
+_OAUTH_FORM_MAX_BODY_BYTES = 16384
 
 
 # ============================================================================
@@ -2291,8 +2305,12 @@ async def oauth_authorize_post(
     only reach the client's registered redirect URI.
     """
 
-    # Preload form data manually
-    await preload_form(request)
+    # Preload form data manually. The body is bounded before the session is
+    # read (#2200); the device route's body-bound error is shared.
+    try:
+        await preload_form(request)
+    except _DeviceAuthorizationRequestError as e:
+        return _oauth_form_refused(request, e)
 
     user = get_current_user_from_session(request)
     if not user:
@@ -2450,8 +2468,12 @@ async def oauth_token(request: Request):
 
     from fastapi.responses import JSONResponse, Response
 
-    # Preload form data manually
-    await preload_form(request)
+    # Preload form data manually; the device route's body-bound error is
+    # shared (#2200).
+    try:
+        await preload_form(request)
+    except _DeviceAuthorizationRequestError as e:
+        return _oauth_form_refused(request, e)
 
     # The form carries credentials (code, code_verifier, refresh_token,
     # client_secret), so only the grant type and the parameter names are
@@ -2594,6 +2616,14 @@ class _DeviceAuthorizationRequestError(Exception):
         super().__init__(description)
         self.description = description
         self.status_code = status_code
+
+
+def _oauth_form_refused(request: Request, e: _DeviceAuthorizationRequestError) -> JSONResponse:
+    """Answer a form body ``preload_form`` refused (#2200) as RFC 6749 ``invalid_request``."""
+    logger.info("oauth_form_body_refused", path=request.url.path, status_code=e.status_code)
+    return rfc6749_error_response(
+        error="invalid_request", description=e.description, status_code=e.status_code
+    )
 
 
 async def _read_bounded_body(request: Request, limit: int) -> bytes:

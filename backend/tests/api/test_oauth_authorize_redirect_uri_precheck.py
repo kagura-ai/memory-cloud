@@ -510,3 +510,29 @@ class TestAppendQueryParamsRegression:
         # No duplicate keys in the query.
         assert len(qs.get("state", [])) == 1
         assert len(qs.get("error", [])) == 1
+
+
+class TestPostAuthorizeBodyBound:
+    """An oversized consent POST is refused before the session or the DB is read (#2200)."""
+
+    def test_oversized_multipart_body_is_413_json_not_a_redirect(self):
+        with (
+            patch("api.routes.oauth.get_current_user_from_session") as mock_user,
+            patch("api.routes.oauth.get_sync_session") as mock_sess,
+        ):
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/api/v1/oauth/authorize",
+                    params={"client_id": "x", "redirect_uri": "https://evil.example/cb"},
+                    data={"confirm": "yes"},
+                    files={"scope": ("s.bin", b"x" * 32768, "text/plain")},
+                    follow_redirects=False,
+                )
+
+        assert response.status_code == 413, response.text
+        assert "location" not in response.headers
+        assert response.headers.get("content-type", "").startswith("application/json")
+        assert response.json()["error"] == "invalid_request"
+        assert response.headers["cache-control"] == "no-store"
+        mock_sess.assert_not_called()
+        mock_user.assert_not_called()
