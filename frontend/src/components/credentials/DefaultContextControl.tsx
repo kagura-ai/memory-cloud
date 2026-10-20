@@ -46,8 +46,9 @@ export function DefaultContextName({
   const t = useTranslations("defaultContext");
   if (!currentId) {
     return (
-      <span className="text-gray-400" aria-label={t("none")}>
-        —
+      <span className="text-gray-400">
+        <span aria-hidden="true">—</span>
+        <span className="sr-only">{t("none")}</span>
       </span>
     );
   }
@@ -93,14 +94,21 @@ export function DefaultContextControl({
     }
   };
 
-  const changed = selected !== (currentId ?? "");
+  // A pending choice that is no longer offered (the workspace switched
+  // under it) is dropped, so Save never submits a value the select does
+  // not show.
+  const effective =
+    selected === "" || shownOptions.some((o) => o.id === selected)
+      ? selected
+      : (currentId ?? "");
+  const changed = effective !== (currentId ?? "");
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <select
         aria-label={ariaLabel}
         className="max-w-[14rem] rounded-md border border-input bg-background px-2 py-1 text-sm"
-        value={selected}
+        value={effective}
         disabled={saving}
         onChange={(e) => setSelected(e.target.value)}
       >
@@ -116,7 +124,7 @@ export function DefaultContextControl({
           type="button"
           size="sm"
           disabled={saving}
-          onClick={() => void save(selected || null)}
+          onClick={() => void save(effective || null)}
         >
           {saving ? <InlineSpinner size="sm" /> : t("save")}
         </Button>

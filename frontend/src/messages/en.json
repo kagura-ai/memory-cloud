@@ -1916,7 +1916,9 @@
     "defaultContextHelp": "MCP tools called with this key and without a context_id run in this context. A ?context= on the MCP URL takes precedence.",
     "defaultContextSaved": "Default context saved",
     "defaultContextCleared": "Default context cleared",
-    "defaultContextCreateFailed": "The API key was created, but its default context could not be set: {error}"
+    "defaultContextCreateFailed": "The API key was created, but its default context could not be set: {error}",
+    "defaultContextCreateFailedGeneric": "The API key was created, but its default context could not be set.",
+    "defaultContextLoadFailed": "Could not load"
   },
   "customApps": {
     "title": "App Authentication",

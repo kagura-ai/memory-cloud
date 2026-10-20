@@ -36,8 +36,11 @@ import {
 import {
   DefaultContextControl,
   DefaultContextName,
-  type DefaultContextOption,
 } from "@/components/credentials/DefaultContextControl";
+import {
+  defaultContextLabel,
+  useWorkspaceContextOptions,
+} from "@/hooks/useWorkspaceContextOptions";
 import type { Context } from "@/lib/types/context";
 import {
   EyeOff,
@@ -194,9 +197,7 @@ export function APIKeysTabPanel() {
     string,
     KeyDefaultContext
   > | null>(null);
-  const [workspaceContexts, setWorkspaceContexts] = useState<
-    DefaultContextOption[]
-  >([]);
+  const workspaceContexts = useWorkspaceContextOptions();
   const [showHideApiKeyDialog, setShowHideApiKeyDialog] = useState(false);
   const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
     useState(false);
@@ -222,8 +223,9 @@ export function APIKeysTabPanel() {
     };
   }, []);
 
-  // #2129: the default contexts come from the user's key list; a failure
-  // here hides the inline control instead of failing the whole panel.
+  // #2129: the default contexts come from the user's key list. A failure
+  // keeps what an earlier load showed (a failed 5-minute refresh must not
+  // read as "no default"); with nothing loaded yet the column says so.
   const loadKeyDefaults = useCallback(async () => {
     try {
       const keys = await getAPIKeys();
@@ -241,9 +243,6 @@ export function APIKeysTabPanel() {
       if (process.env.NODE_ENV === "development") {
         // eslint-disable-next-line no-console
         console.error("Failed to load API key default contexts:", err);
-      }
-      if (isMountedRef.current) {
-        setKeyDefaults(null);
       }
     }
   }, []);
@@ -294,30 +293,6 @@ export function APIKeysTabPanel() {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, userId]);
-
-  // #2129: the contexts offered as a key's default — the current
-  // workspace's (a workspace-scoped key can only use those). A failed fetch
-  // leaves the list empty: "No default" and Clear still work.
-  useEffect(() => {
-    if (!currentWorkspaceId) return;
-    let cancelled = false;
-    getContexts()
-      .then((resp) => {
-        if (cancelled || !isMountedRef.current) return;
-        setWorkspaceContexts(
-          (resp?.contexts ?? []).map((c) => ({
-            id: c.id,
-            label: c.display_name || c.name,
-          })),
-        );
-      })
-      .catch(() => {
-        if (!cancelled && isMountedRef.current) setWorkspaceContexts([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentWorkspaceId]);
 
   // Auto-open the MCP Setup Guide whenever a NEW visibility window starts
   // (e.g. just after key creation or regenerate). The hook respects
@@ -519,25 +494,26 @@ export function APIKeysTabPanel() {
       // #2129: the member-credentials create route takes no default, so
       // it is set on the new key right after. The key exists either way —
       // a failure here is reported, never rolled back.
+      // null = nothing to report; "" = failed without a usable message.
       let defaultError: string | null = null;
       if (!bindToPublicContext && newKeyDefaultContextId) {
         try {
           await updateAPIKeyDefaultContext(created.id, newKeyDefaultContextId);
         } catch (err: unknown) {
           defaultError =
-            err instanceof Error && err.message.trim()
-              ? err.message
-              : t("errorCreateKey");
+            err instanceof Error && err.message.trim() ? err.message : "";
         }
       }
 
       await loadCredentials();
       resetCreateDialog();
 
-      if (defaultError) {
+      if (defaultError !== null) {
         toast({
           title: tCommon("error"),
-          description: t("defaultContextCreateFailed", { error: defaultError }),
+          description: defaultError
+            ? t("defaultContextCreateFailed", { error: defaultError })
+            : t("defaultContextCreateFailedGeneric"),
           variant: "destructive",
         });
       } else {
@@ -690,12 +666,25 @@ export function APIKeysTabPanel() {
   // #2129: the key's MCP default context — the inline control where the API
   // accepts one, the name otherwise ("—" for none).
   const renderDefaultContext = (apiKey: MemberAPIKey) => {
-    const current = keyDefaults?.get(apiKey.id);
+    if (keyDefaults === null) {
+      return (
+        <span className="text-xs text-gray-400">
+          {t("defaultContextLoadFailed")}
+        </span>
+      );
+    }
+    const current = keyDefaults.get(apiKey.id);
+    // One context, one name: the select's label when it is offered.
+    const currentName = defaultContextLabel(
+      workspaceContexts,
+      current?.id ?? null,
+      current?.name ?? null,
+    );
     if (current && canSetDefaultContext(apiKey)) {
       return (
         <DefaultContextControl
           currentId={current.id}
-          currentName={current.name}
+          currentName={currentName}
           options={workspaceContexts}
           onSave={(contextId) =>
             handleSaveKeyDefaultContext(apiKey, contextId)
@@ -707,7 +696,7 @@ export function APIKeysTabPanel() {
     return (
       <DefaultContextName
         currentId={current?.id ?? null}
-        currentName={current?.name ?? null}
+        currentName={currentName}
       />
     );
   };

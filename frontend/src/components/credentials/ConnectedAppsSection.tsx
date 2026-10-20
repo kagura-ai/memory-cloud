@@ -22,9 +22,7 @@ import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/contexts/AuthContext";
-import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
-import { getContexts } from "@/lib/api/contexts";
 import {
   clearOAuthGrantDefaultContext,
   listOAuthGrants,
@@ -32,17 +30,17 @@ import {
 } from "@/lib/api/oauth-grants";
 import type { OAuthGrant } from "@/lib/types/oauth-grant";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import { DefaultContextControl } from "@/components/credentials/DefaultContextControl";
 import {
-  DefaultContextControl,
-  type DefaultContextOption,
-} from "@/components/credentials/DefaultContextControl";
+  defaultContextLabel,
+  useWorkspaceContextOptions,
+} from "@/hooks/useWorkspaceContextOptions";
 
 export function ConnectedAppsSection() {
   const t = useTranslations("connectedApps");
   const tCommon = useTranslations("common");
   const locale = useLocale();
   const { user } = useAuth();
-  const { currentWorkspaceId } = useWorkspace();
   const { toast } = useToast();
 
   const [grants, setGrants] = useState<OAuthGrant[] | null>(null);
@@ -50,7 +48,7 @@ export function ConnectedAppsSection() {
   // as the translated fallback). Kept raw so loadGrants does not depend on
   // the translator and re-fetch on every render.
   const [error, setError] = useState<string | null>(null);
-  const [contexts, setContexts] = useState<DefaultContextOption[]>([]);
+  const contexts = useWorkspaceContextOptions();
 
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -76,29 +74,6 @@ export function ConnectedAppsSection() {
   useEffect(() => {
     void loadGrants();
   }, [loadGrants]);
-
-  // The contexts offered: the current workspace's. A failed fetch leaves
-  // the list empty — "No default" and Clear still work.
-  useEffect(() => {
-    if (!currentWorkspaceId) return;
-    let cancelled = false;
-    getContexts()
-      .then((resp) => {
-        if (cancelled || !isMountedRef.current) return;
-        setContexts(
-          (resp?.contexts ?? []).map((c) => ({
-            id: c.id,
-            label: c.display_name || c.name,
-          })),
-        );
-      })
-      .catch(() => {
-        if (!cancelled && isMountedRef.current) setContexts([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentWorkspaceId]);
 
   // User-action failures → toast; rethrown so the control keeps the choice.
   const saveDefault = async (grant: OAuthGrant, contextId: string | null) => {
@@ -196,7 +171,11 @@ export function ConnectedAppsSection() {
                 </p>
                 <DefaultContextControl
                   currentId={grant.default_context_id}
-                  currentName={grant.default_context_name}
+                  currentName={defaultContextLabel(
+                    contexts,
+                    grant.default_context_id,
+                    grant.default_context_name,
+                  )}
                   options={contexts}
                   onSave={(contextId) => saveDefault(grant, contextId)}
                   ariaLabel={t("defaultContextFor", { name: grant.client_name })}
