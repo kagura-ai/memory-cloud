@@ -86,12 +86,12 @@ When you run Claude Code **inside WSL2** and start the MCP OAuth flow against a 
 1. `wslview` (or `cmd.exe /c start`) launches the authorize URL in a **Windows** browser.
 2. After consent, the browser redirects to `http://localhost:<port>/callback?code=...` — which hits **Windows'** loopback.
 3. Claude Code's callback listener is bound on the **WSL side** `127.0.0.1:<port>` — so it never receives the redirect.
-4. The browser shows "connection refused" / "site can't be reached" after you press **Continue** on the page described below.
+4. The browser shows "connection refused" / "site can't be reached" after you press **Continue to *app name*** on the page described below.
 5. Dynamic Client Registration (DCR) may run twice (two different `client_id` values and ephemeral ports), because the first attempt's listener never receives the callback and the SDK re-registers.
 
 ### Quick recovery — paste the callback URL
 
-After you approve a client whose redirect URI is a loopback address (`localhost`, `127.0.0.1`, `[::1]`), Kagura Memory Cloud shows a **Return to <app>** page instead of redirecting straight away. It holds the full callback URL (with `code` and `state`) in a read-only field and a **Continue** button that performs the redirect. When the callback does not reach the client:
+After you approve a client whose redirect URI is a loopback address (`localhost`, `127.0.0.1`, `[::1]`), Kagura Memory Cloud shows a **Return to *app name*** page instead of redirecting straight away. It holds the full callback URL (with `code` and `state`) in a read-only field and a **Continue to *app name*** button that performs the redirect. When the callback does not reach the client:
 
 1. Copy the whole URL from that page — or from the address bar of the browser's error page.
 2. Paste it where the client asks for it. In Claude Code, the `/mcp` sign-in screen shows *"If the redirect page shows a connection error, paste the URL from your browser's address bar"* while it waits; paste the full URL there (a bare code is not accepted).
