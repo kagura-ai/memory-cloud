@@ -433,8 +433,12 @@ export function SearchSettingsSection({
   // Every answer is the server's (GET search-config, #2091 / #2103): the
   // plan gate applies only where the deployment turns it on, so the tier
   // matrix is not consulted here. A backend predating the fields omits
-  // `content_chunks_enabled` and the card is not rendered.
-  const chunksShown = config.content_chunks_enabled !== undefined;
+  // `content_chunks_enabled` and the card is not rendered. A backend
+  // between #2042 and #2091 sends the flag without `content_chunks_can_change`
+  // and would show the owner a disabled switch, so the card needs both (#2119).
+  const chunksShown =
+    config.content_chunks_enabled !== undefined &&
+    config.content_chunks_can_change !== undefined;
   const storedChunks = config.content_chunks_enabled === true;
   const currentChunks = getCurrentValue("content_chunks_enabled") === true;
   const chunksCanChange = config.content_chunks_can_change === true;
