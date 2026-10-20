@@ -379,23 +379,25 @@ class TestReferenceVersion:
 TYPE_CHANGED = [_rev(2, {"type": "decision", "summary": "decision summary"}, at=T2)]
 
 
-def _type_filter(allowed: set[str]) -> AsyncMock:
-    """A stand-in for ``agent_binding_permits`` under a binding whose
-    per-memory filter (#1299) allows only ``allowed`` types."""
-
-    async def permits(_db: Any, _ctx: Any, _access: str, **kw: Any) -> bool:
-        return kw["memory_type"] in allowed
-
-    return AsyncMock(side_effect=permits)
-
-
-def _type_changed_service(*, live_allowed: bool = True) -> tuple[Any, MemoryService, MagicMock]:
+def _type_changed_service(allowed_types: set[str]) -> tuple[Any, MemoryService, MagicMock]:
+    """Live type "note" at version 2; version 1 was a "decision". The read
+    gate stands in for a binding whose per-memory filter (#1299) allows only
+    ``allowed_types``."""
     memory = _memory(version=2, summary="note summary")
-    service, perm = _service(memory, allowed=live_allowed)
+    service, perm = _service(memory)
+
+    async def can_access(**kw: Any) -> bool:
+        return kw["memory_type"] in allowed_types
+
+    perm.can_access_memory = AsyncMock(side_effect=can_access)
     result = MagicMock()
     result.all.return_value = TYPE_CHANGED
     service.db.execute = AsyncMock(return_value=result)
     return memory, service, perm
+
+
+def _gated_types(perm: MagicMock) -> list[str]:
+    return [c.kwargs["memory_type"] for c in perm.can_access_memory.await_args_list]
 
 
 class TestReferenceVersionBindingFilter:
@@ -403,11 +405,9 @@ class TestReferenceVersionBindingFilter:
 
     @pytest.mark.asyncio
     async def test_live_allowed_historical_denied_is_the_uniform_not_found(self) -> None:
-        memory, service, perm = _type_changed_service()
-        binding = _type_filter({"note"})
+        memory, service, perm = _type_changed_service({"note"})
         with (
             patch("services.permission_service.PermissionService", return_value=perm),
-            patch("services.agent_binding_service.agent_binding_permits", new=binding),
             patch(
                 "services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()
             ) as emit,
@@ -416,51 +416,30 @@ class TestReferenceVersionBindingFilter:
                 await service.reference(memory.id, "u", version=1)
         # the same exception (and message) the live-row denial raises
         assert str(e.value) == str(NotFoundException("Memory", str(memory.id)))
-        kwargs = binding.await_args.kwargs
-        assert kwargs["memory_type"] == "decision"
+        assert _gated_types(perm) == ["note", "decision"]  # live first
+        kwargs = perm.can_access_memory.await_args.kwargs
         assert kwargs["memory_source_type"] == memory.source_type
-        assert kwargs["operation"] == "reference"
-        assert kwargs["requested_memory_id"] == memory.id
+        assert (kwargs["operation"], kwargs["memory_id"]) == ("reference", memory.id)
         emit.assert_not_awaited()  # no success audit for a denied read
 
     @pytest.mark.asyncio
     async def test_live_denied_is_not_found_before_the_historical_check(self) -> None:
-        memory, service, perm = _type_changed_service(live_allowed=False)
-        binding = _type_filter({"note", "decision"})
-        with (
-            patch("services.permission_service.PermissionService", return_value=perm),
-            patch("services.agent_binding_service.agent_binding_permits", new=binding),
-        ):
+        memory, service, perm = _type_changed_service({"decision"})
+        with patch("services.permission_service.PermissionService", return_value=perm):
             with pytest.raises(NotFoundException):
                 await service.reference(memory.id, "u", version=1)
-        binding.assert_not_awaited()
+        assert _gated_types(perm) == ["note"]
         service.db.execute.assert_not_awaited()  # the log was never read
 
     @pytest.mark.asyncio
     async def test_both_allowed_returns_the_version_text(self) -> None:
-        memory, service, perm = _type_changed_service()
+        memory, service, perm = _type_changed_service({"note", "decision"})
         with (
             patch("services.permission_service.PermissionService", return_value=perm),
-            patch(
-                "services.agent_binding_service.agent_binding_permits",
-                new=_type_filter({"note", "decision"}),
-            ),
             patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
         ):
             ref = await service.reference(memory.id, "u", version=1)
         assert (ref.type, ref.summary, ref.version) == ("decision", "decision summary", 1)
-
-    @pytest.mark.asyncio
-    async def test_without_an_agent_scope_the_historical_read_is_unchanged(self) -> None:
-        # the real agent_binding_permits: no agent credential, no filter
-        memory, service, perm = _type_changed_service()
-        with (
-            patch("services.permission_service.PermissionService", return_value=perm),
-            patch("auth.agent_scope.get_agent_scope", return_value=None),
-            patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
-        ):
-            ref = await service.reference(memory.id, "u", version=1)
-        assert (ref.type, ref.summary) == ("decision", "decision summary")
 
     @pytest.mark.asyncio
     async def test_an_unchanged_type_keeps_the_live_verdict(self) -> None:
@@ -469,15 +448,93 @@ class TestReferenceVersionBindingFilter:
         result = MagicMock()
         result.all.return_value = UPDATES[:3]
         service.db.execute = AsyncMock(return_value=result)
-        binding = _type_filter(set())
         with (
             patch("services.permission_service.PermissionService", return_value=perm),
-            patch("services.agent_binding_service.agent_binding_permits", new=binding),
             patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
         ):
             ref = await service.reference(memory.id, "u", version=2)
         assert ref.summary == "second summary"
-        binding.assert_not_awaited()
+        perm.can_access_memory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_historical_type_is_denied(self) -> None:
+        # never today (erasure marks only details): the filter cannot be judged
+        memory, service, perm = _type_changed_service({"note", "decision"})
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch(
+                "services.memory_versions.reconstruct_version",
+                return_value=SimpleNamespace(
+                    version=1, values={**LIVE, "type": None}, unavailable=("type",), at=None
+                ),
+            ),
+        ):
+            with pytest.raises(NotFoundException):
+                await service.reference(memory.id, "u", version=1)
+
+
+class TestReferenceVersionRealBindingGate:
+    """#2116 through the real PermissionService and AgentBindingService: an
+    agent bound to the memory's context with ``allowed_memory_types=["note"]``.
+    Only the seat lookup and the DB reads are stubbed."""
+
+    async def _read(self, mode: str) -> tuple[Any, AsyncMock]:
+        from auth.agent_scope import AgentScope
+        from models.agent import AgentContextBinding
+
+        memory = _memory(version=2, summary="note summary")
+        service, _ = _service(memory)
+        binding = AgentContextBinding(
+            id=uuid4(),
+            agent_id=uuid4(),
+            context_id=memory.context_id,
+            can_read=True,
+            write_policy="deny",
+            is_default=False,
+            allowed_memory_types=["note"],
+            allowed_source_types=None,
+            created_by="u",
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = binding  # the binding SELECT
+        result.all.return_value = TYPE_CHANGED  # the revision log
+        service.db.execute = AsyncMock(return_value=result)
+        scope = AgentScope(agent_id=binding.agent_id, enforcement_mode=mode, workspace_id=uuid4())
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=scope),
+            patch(
+                "services.permission_service.PermissionService._seated_member",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()
+            ) as emit,
+        ):
+            try:
+                return await service.reference(memory.id, "u", version=1), emit
+            except NotFoundException as e:
+                return e, emit
+
+    @pytest.mark.asyncio
+    async def test_enforce_denies_with_a_type_source_binding_denied_event(self) -> None:
+        from services.agent_binding_service import DECISION_BINDING_DENIED, ROW_FILTER_KIND
+
+        outcome, emit = await self._read("enforce")
+        assert isinstance(outcome, NotFoundException)
+        (call,) = emit.await_args_list  # the deny; no success audit
+        assert call.kwargs["outcome"] == "denied"
+        assert call.kwargs["operation"] == "reference"
+        assert call.kwargs["policy_decision"] == DECISION_BINDING_DENIED
+        assert call.kwargs["extra_metadata"]["filter_kind"] == ROW_FILTER_KIND
+
+    @pytest.mark.asyncio
+    async def test_shadow_serves_the_version_and_records_would_deny(self) -> None:
+        from services.agent_binding_service import DECISION_WOULD_DENY
+
+        outcome, emit = await self._read("shadow")
+        assert outcome.summary == "decision summary"
+        decisions = [c.kwargs.get("policy_decision") for c in emit.await_args_list]
+        assert DECISION_WOULD_DENY in decisions
 
 
 class TestListRevisions:

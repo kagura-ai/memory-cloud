@@ -2703,11 +2703,26 @@ class MemoryService:
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
 
+        if not await self._can_read_memory(
+            memory, user_id, memory_id=memory_id, memory_type=memory.type
+        ):
+            raise NotFoundException("Memory", str(memory_id))
+
+        # #1941: after the access check, so the lock is no existence oracle.
+        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
+        return memory
+
+    async def _can_read_memory(
+        self, memory: Memory, user_id: str, *, memory_id: UUID, memory_type: str
+    ) -> bool:
+        """The read gate of ``reference`` and ``list_revisions``, with the
+        binding's per-memory filter (#1299) judged on ``memory_type``: the
+        live row's, or an earlier version's for ``reference(version=N)``
+        (#2116) — one chokepoint, so the two cannot drift apart."""
         # Issue #XXX: Team collaboration - verify access permission
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
-        perm_service = PermissionService(self.db)
-        can_access = await perm_service.can_access_memory(
+        return await PermissionService(self.db).can_access_memory(
             user_id=CallerId(user_id),
             memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
@@ -2717,16 +2732,9 @@ class MemoryService:
             # (memory_access_events.operation has no value of its own for it).
             operation="reference",
             memory_id=memory_id,
-            memory_type=memory.type,  # #1299: per-memory type/source filter
+            memory_type=memory_type,  # #1299: per-memory type/source filter
             memory_source_type=memory.source_type,
         )
-
-        if not can_access:
-            raise NotFoundException("Memory", str(memory_id))
-
-        # #1941: after the access check, so the lock is no existence oracle.
-        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
-        return memory
 
     async def list_revisions(
         self,
@@ -2804,12 +2812,15 @@ class MemoryService:
                 the links / supersede suggestion (which describe the memory
                 now) are left empty. None or the current version reads the
                 memory as it is. A historical read records no access stats.
+                An agent binding's per-memory type filter is judged on both
+                the live type and version N's (#2116).
 
         Returns:
             ReferenceResponse with full details
 
         Raises:
-            NotFoundException: If memory not found
+            NotFoundException: If memory not found, not readable, or (#2116)
+                ``version``'s type is outside the caller's binding filter
             UnknownVersionError: ``version`` is not a version of the memory
                 (a ``ValidationError``: 422 / ``validation_error``).
         """
@@ -2929,26 +2940,21 @@ class MemoryService:
 
         # UnknownVersionError (a ValidationError) propagates: 422 / validation_error.
         historical = await load_version(self.db, memory, version)
-        # #2116: the live-row gate above judged the binding's per-memory type
-        # filter (#1299) on today's ``type``. When version N had another type,
-        # the filter is judged on that one too, with the live-row denial's
-        # uniform not-found. ``source_type`` is not versioned, so the live
-        # value is the historical one. Same type: the live verdict stands.
+        # #2116: the live-row gate judged the binding's per-memory type filter
+        # (#1299) on today's ``type``. When version N had another type, the
+        # same gate judges that one too, with the live-row denial's uniform
+        # not-found. ``source_type`` is not versioned, so the live value is
+        # the historical one. Same type: the live verdict stands. An
+        # unavailable type (never today: erasure marks only ``details``) is
+        # denied, as the filter cannot be judged without it.
         historical_type = historical.values["type"]
-        if historical_type != memory.type:
-            from services.agent_binding_service import ACCESS_READ, agent_binding_permits
-
-            if not await agent_binding_permits(
-                self.db,
-                memory.context_id,
-                ACCESS_READ,
-                operation="reference",
-                user_id=user_id,
-                requested_memory_id=memory.id,
-                memory_type=historical_type,
-                memory_source_type=memory.source_type,
-            ):
-                raise NotFoundException("Memory", str(memory.id))
+        if historical_type is None or (
+            historical_type != memory.type
+            and not await self._can_read_memory(
+                memory, user_id, memory_id=memory.id, memory_type=historical_type
+            )
+        ):
+            raise NotFoundException("Memory", str(memory.id))
         await self._audit_reference_read(memory, user_id, version=version)
 
         values = historical.values

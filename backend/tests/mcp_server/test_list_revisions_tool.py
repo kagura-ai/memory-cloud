@@ -292,18 +292,14 @@ class TestReferenceVersion:
 async def test_a_historical_type_the_filter_denies_is_the_live_denials_not_found() -> None:
     """#2116: the real service under a per-memory type filter (#1299) that
     allows today's type but not version 1's answers exactly what a denied
-    live row answers — no new error shape, no hint that the version exists."""
-    from tests.services.test_memory_revisions_read import _type_changed_service, _type_filter
+    live row answers — no new error shape."""
+    from tests.services.test_memory_revisions_read import _type_changed_service
 
     async def call(*, live_allowed: bool) -> dict[str, Any]:
-        memory, service, perm = _type_changed_service(live_allowed=live_allowed)
+        memory, service, perm = _type_changed_service({"note"} if live_allowed else set())
         args = {"context_id": _CTX, "memory_id": str(memory.id), "version": 1}
         with (
             patch("services.permission_service.PermissionService", return_value=perm),
-            patch(
-                "services.agent_binding_service.agent_binding_permits",
-                new=_type_filter({"note"}),
-            ),
             patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
         ):
             payload = await _reference(args, service)

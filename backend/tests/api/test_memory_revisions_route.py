@@ -137,16 +137,12 @@ def test_reference_a_historical_type_the_filter_denies_is_the_live_denials_404()
     body a denied live row does."""
     from unittest.mock import patch
 
-    from tests.services.test_memory_revisions_read import _type_changed_service, _type_filter
+    from tests.services.test_memory_revisions_read import _type_changed_service
 
     def call(*, live_allowed: bool) -> tuple[int, Any]:
-        memory, service, perm = _type_changed_service(live_allowed=live_allowed)
+        memory, service, perm = _type_changed_service({"note"} if live_allowed else set())
         with (
             patch("services.permission_service.PermissionService", return_value=perm),
-            patch(
-                "services.agent_binding_service.agent_binding_permits",
-                new=_type_filter({"note"}),
-            ),
             patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
             _client(service) as client,
         ):
