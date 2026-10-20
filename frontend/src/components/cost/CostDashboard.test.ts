@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CostAggregationRow } from "@/lib/api";
+import { COST_SOURCES } from "@/lib/api/cost-aggregation";
 import {
   buildChartData,
   buildSourceTotals,
@@ -201,6 +202,17 @@ describe("userLabel", () => {
 });
 
 describe("buildSourceTotals", () => {
+  it("mirrors the backend COST_SOURCES (#2154)", () => {
+    // backend/src/services/cost_aggregation_service.py, pinned by
+    // backend/tests/services/test_cost_aggregation_filters.py.
+    expect(COST_SOURCES).toEqual([
+      "sleep",
+      "analysis",
+      "supersede_verify",
+      "llm_selector",
+    ]);
+  });
+
   it("sums each source across rows, in COST_SOURCES order", () => {
     const totals = buildSourceTotals([
       row({
@@ -231,6 +243,36 @@ describe("buildSourceTotals", () => {
     expect(judge.calls).toBe(5);
     expect(judge.cost_usd).toBeCloseTo(0.03);
     expect(judge.cost_usd_byok).toBeCloseTo(0.1);
+  });
+
+  it("orders the recall LLM selector after the supersede judge (#2154)", () => {
+    const totals = buildSourceTotals([
+      row({
+        cost_breakdown_by_source: [
+          {
+            source: "llm_selector",
+            calls: 2,
+            cost_usd: null,
+            cost_usd_byok: 0,
+          },
+          {
+            source: "supersede_verify",
+            calls: 1,
+            cost_usd: 0.01,
+            cost_usd_byok: 0,
+          },
+          { source: "sleep", calls: 1, cost_usd: 0.5, cost_usd_byok: 0 },
+        ],
+      }),
+    ]);
+    expect(totals.map((t) => t.source)).toEqual([
+      "sleep",
+      "supersede_verify",
+      "llm_selector",
+    ]);
+    // A timed-out selector call has unknown cost: it counts, priced as null.
+    expect(totals[2].calls).toBe(2);
+    expect(totals[2].cost_usd).toBeNull();
   });
 
   it("keeps cost unknown sticky", () => {

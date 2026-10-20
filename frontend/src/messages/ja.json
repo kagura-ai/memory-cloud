@@ -2893,7 +2893,8 @@
       "source": {
         "sleep": "Sleep Maintenance",
         "analysis": "メモリー分析",
-        "supersede_verify": "更新元の判定 (書き込み時)"
+        "supersede_verify": "更新元の判定 (書き込み時)",
+        "llm_selector": "LLM による結果の選別 (リコール時)"
       },
       "table": {
         "title": "期間別ブレイクダウン",

@@ -142,4 +142,29 @@ describe("CostDashboard by-source breakdown (#2019)", () => {
     expect(screen.getByText("source.sleep")).toBeInTheDocument();
     expect(screen.getByText("$0.0120")).toBeInTheDocument();
   });
+
+  it("labels the recall LLM selector as its own source (#2154)", async () => {
+    render(
+      <CostDashboard
+        title="t"
+        description="d"
+        fetchData={async () => ({
+          rows: [
+            row({
+              cost_breakdown_by_source: [
+                {
+                  source: "llm_selector",
+                  calls: 3,
+                  cost_usd: 0.0345,
+                  cost_usd_byok: 0,
+                },
+              ],
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(await screen.findByText("source.llm_selector")).toBeInTheDocument();
+    expect(screen.getByText("$0.0345")).toBeInTheDocument();
+  });
 });
