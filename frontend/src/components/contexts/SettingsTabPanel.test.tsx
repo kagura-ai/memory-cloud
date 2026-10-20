@@ -616,6 +616,27 @@ describe("SettingsTabPanel — sleep quota refetched after save", () => {
   });
 });
 
+describe("SettingsTabPanel — save bar placement (#2159)", () => {
+  it("is a sticky footer in the section, not a viewport-fixed overlay", async () => {
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext()}
+        onContextUpdated={noop}
+      />,
+    );
+    fireEvent.change(screen.getByDisplayValue("Demo Context"), {
+      target: { value: "Renamed" },
+    });
+    const save = await screen.findByRole("button", { name: /saveChanges/ });
+    // The bar is the button row's outer wrapper.
+    const bar = save.closest("div.sticky");
+    expect(bar).not.toBeNull();
+    expect(bar!.className).toContain("bottom-0");
+    expect(bar!.className).not.toMatch(/\bfixed\b/);
+  });
+});
+
 // ---------- Privacy transition dialog ---------------------------------------
 
 describe("SettingsTabPanel — privacy transition dialog", () => {
