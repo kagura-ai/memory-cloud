@@ -19,7 +19,9 @@ and pins the authorization server rules:
 from __future__ import annotations
 
 import hashlib
+import html
 import logging
+import re
 import secrets
 import sys
 from collections.abc import Iterator
@@ -194,8 +196,22 @@ def _authorize_params(
     return params
 
 
+def _callback_url(response: Any) -> str:
+    """The client callback URL: the 303 Location, or the interstitial's link.
+
+    ``REDIRECT_URI`` is a loopback URI, so an approved consent answers with
+    the page that shows the callback URL instead of a bare 303 (#2155).
+    """
+    if response.status_code == 303:
+        return response.headers["location"]
+    assert response.status_code == 200, response.text[:300]
+    match = re.search(r'<a class="continue" id="continue" href="([^"]+)"', response.text)
+    assert match, response.text[:300]
+    return html.unescape(match.group(1))
+
+
 def _redirect_params(response: Any) -> dict[str, str]:
-    location = response.headers["location"]
+    location = _callback_url(response)
     assert location.startswith(REDIRECT_URI), location
     return {key: values[0] for key, values in parse_qs(urlsplit(location).query).items()}
 
@@ -227,7 +243,8 @@ def _consent(api: TestClient, params: dict[str, str]) -> dict[str, str]:
         data={"confirm": "yes"},
         follow_redirects=False,
     )
-    assert approved.status_code == 303, approved.text[:300]
+    # A granted loopback consent shows the callback URL on a page (#2155).
+    assert approved.status_code == 200, approved.text[:300]
     return _redirect_params(approved)
 
 
