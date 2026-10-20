@@ -1229,6 +1229,10 @@ class TestErasureResiduals1365:
         deleted_models = {c.args[0] for c in svc._count_and_delete.await_args_list}
         assert ContextMember in deleted_models
         assert LLMCallLog in deleted_models
+        # #2129: the per-grant settings rows carry the raw sub too.
+        from models.auth import OAuthGrantSetting
+
+        assert OAuthGrantSetting in deleted_models
 
     @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_surviving_graph_and_analysis(self):

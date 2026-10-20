@@ -57,6 +57,7 @@ from models.auth import (
     ContextMember,
     ExternalAPIKey,
     OAuth2Client,
+    OAuthGrantSetting,
     User,
     UserKnownDevice,
     Workspace,
@@ -1105,6 +1106,11 @@ class AccountErasureService:
         # deletion only, so the subject's raw sub in user_id survives an
         # OAuth-token erasure. Transient per-user rows — delete the subject's.
         counts["oauth_device_codes"] = revoked.device_codes
+        # #2129: per-grant settings (the app's default context) — keyed by the
+        # raw sub, no FK to users.
+        counts["oauth_grant_settings"] = await self._count_and_delete(
+            OAuthGrantSetting, OAuthGrantSetting.user_id == user_id
+        )
 
         # Direct per-user tables.
         # #1769: the FK cascades too; deleted and counted here so the erasure

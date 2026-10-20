@@ -512,6 +512,18 @@ class APIKey(Base):
         nullable=True,
     )
 
+    # #2129: the MCP default context of this key — a context-scoped tool
+    # called without ``context_id`` runs in it (below ``?context=`` on the
+    # URL). A preference, not a grant: the dispatcher writes it into the
+    # arguments and the same resolvers decide. Never on a public-bound or an
+    # agent-bound key (CHECKs below; agents keep their binding default).
+    # SET NULL: deleting the context leaves the key without a default.
+    default_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -557,6 +569,16 @@ class APIKey(Base):
         CheckConstraint(
             "agent_id IS NULL OR workspace_id IS NOT NULL",
             name="ck_api_keys_agent_requires_workspace",
+        ),
+        # #2129: the credential default context (migration f09).
+        Index("idx_api_keys_default_context_id", "default_context_id"),
+        CheckConstraint(
+            "default_context_id IS NULL OR bound_context_id IS NULL",
+            name="ck_api_keys_default_not_bound",
+        ),
+        CheckConstraint(
+            "default_context_id IS NULL OR agent_id IS NULL",
+            name="ck_api_keys_default_not_agent",
         ),
     )
 
@@ -1002,6 +1024,55 @@ class OAuth2Client(Base):
             answers ``invalid_scope``).
         """
         return granted_scope(scope, client_registered_scope(self)) or None
+
+
+class OAuthGrantSetting(Base):
+    """A user's settings for one OAuth client they authorized (#2129).
+
+    ``oauth_tokens`` rows are per issuance, so a per-grant preference needs
+    its own row: one per ``(user_id, client_id)``. Today it carries the MCP
+    default context of the app's connection — a context-scoped tool called
+    without ``context_id`` over a bearer token of this client runs in it
+    (below ``?context=`` on the URL). Chosen on the consent page or set
+    afterwards (``PUT /api/v1/me/oauth/grants/{client_id}/default-context``).
+
+    Attributes:
+        user_id: The authorizing user (OAuth2 sub, like ``oauth_tokens``).
+        client_id: The client; the row goes with the client (CASCADE).
+        default_context_id: The default context, ``None`` for none. SET NULL
+            when the context is deleted.
+        created_at: Naive UTC creation time (like the other OAuth tables).
+        updated_at: Naive UTC time of the last change.
+    """
+
+    __tablename__ = "oauth_grant_settings"
+
+    user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    client_id: Mapped[str] = mapped_column(
+        String(48),
+        ForeignKey("oauth_clients.client_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    default_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_oauth_grant_settings_client_id", "client_id"),
+        Index("idx_oauth_grant_settings_default_context_id", "default_context_id"),
+    )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"<OAuthGrantSetting(user_id='{self.user_id}', client_id='{self.client_id}')>"
 
 
 class OAuth2AuthorizationCode(Base):
