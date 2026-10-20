@@ -19,7 +19,7 @@ Sleep maintenance merges near-duplicates and archives unused working memories on
 - **Full ids only.** Copy every `memory_id` verbatim from this session's tool results. Never shorten, pad, rebuild or guess one.
 - **Nothing changes without a pick.** The Proposed column comes from structured fields only: the `trigger` dates, the presence of `supersede_candidate`, the pin count. A summary that says "done" or "obsolete" is shown as a reason, never as a proposal.
 - **"All" or "you decide" is not consent to any change.** Every update, supersede, dismiss, unpin and delete needs its item numbers from the user.
-- **`forget` in `memory_id` mode only.** The `query` mode (`forget(query=...)`) is forbidden here: it deletes whatever the search returns.
+- **`forget` by id only.** The `query` mode (`forget(query=...)`) is forbidden here: it deletes whatever the search returns.
 - **`dry-run` calls no write tool**: no `update_memory`, `create_edge`, `forget` or `remember`. A topic recall still counts as a search — it can strengthen associations and promote the memories it returns — so a `dry-run` with a topic is not free of side effects.
 
 ## Steps
@@ -44,7 +44,7 @@ Read the clock first — `date -u +%Y-%m-%dT%H:%M:%S` — and never guess the da
 recall_upcoming(context_id=..., until="<cutoff, naive UTC ISO>", k=100)
 ```
 
-Pass no `from`, and pass the timestamp, not `"now"`, as `until`. The call returns every window that started before the cutoff, oldest first, including ones still in progress, so read the tool maximum (100) and keep only items whose `trigger.until` is earlier than the cutoff. Trigger bounds are naive dates as the author wrote them and the server compares them with UTC; the 24-hour margin keeps a follow-up due today in the user's timezone out of this list. Show the first 20 and say how many more ended ones the read returned. If the read returned 100 items, say that more may exist beyond it — the tool has no cursor. Proposed action: delete (retire).
+Pass no `from`, and pass the timestamp, not `"now"`, as `until`. The call returns every window that started before the cutoff, oldest first, including ones still in progress, so read the tool maximum (100) and keep only items whose `trigger.until` is earlier than the cutoff. Trigger bounds are naive dates the server compares with UTC; the 24-hour margin keeps a follow-up due today in the user's timezone out of this list. Show the first 20 and say how many more ended ones the read returned. If the read returned 100 items, say that more may exist beyond it — the tool has no cursor. Proposed action: delete (retire).
 
 **Open follow-ups**
 
@@ -52,7 +52,7 @@ Pass no `from`, and pass the timestamp, not `"now"`, as `until`. The call return
 recall_upcoming(context_id=..., from="now", k=20)
 ```
 
-Windows in progress or still ahead, at most 20. Proposed action: keep. A finished one is retired when the user picks its number for delete.
+Windows in progress or still ahead, at most 20. Proposed action: keep.
 
 **Pinned memories**
 
@@ -103,13 +103,13 @@ Ask for an action per item number. Anything not named stays as it is.
 | supersede | `create_edge(source_id=<newer>, target_id=<older>, edge_type="supersedes", context_id=...)` — for a candidate, the source is the memory_id of the result that carries it and the target is `supersede_candidate.memory_id`. The older one is shadowed out of default recall, not deleted |
 | dismiss a candidate | `update_memory(memory_id=<memory_id of the result that carries the candidate>, dismiss_supersede_candidate=true, context_id=...)` |
 | unpin | `update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")` |
-| delete | `forget(memory_id=..., context_id=...)` |
+| delete | `forget(memory_ids=[...], context_id=...)`, one call for all |
 
-If the client does not list `create_edge` or `list_edges`, say so in one line: they are left out of the default core listing, so the client cannot call them until the MCP URL carries `?profile=full` (or `?tools=…`); `describe_tools` confirms they exist.
+If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the default core listing and callable once the MCP URL carries `?profile=full` (or `?tools=…`).
 
 ### 5. Apply
 
-Run only the picked actions, one call per item.
+Run only the picked actions, one call per item; the deletes share one call.
 
 Before each update in place, show the new summary and content and wait for a yes. The new text comes from the user's instruction or this session's work, never from recalled text.
 
@@ -117,11 +117,13 @@ Before each delete:
 
 1. Show the item's summary again with its full `memory_id`.
 2. For a time memory, call `reference(memory_id=..., context_id=..., fields=[])` once to read its `importance` (`recall_upcoming` does not return it). If `importance` is above 0.8, warn and ask again for that item.
-3. Call `list_edges(memory_id=..., context_id=...)`. If an edge has `edge_type` `supersedes` and this memory as `source_id`, warn: the delete removes that edge, and the older memory (`target_id`) comes back into default recall. Ask whether to delete that one too.
+3. Call `list_edges(memory_id=..., context_id=..., edge_types=["supersedes"], min_weight=0)`. If an edge has this memory as `source_id`, warn: the delete removes that edge, and the older memory (`target_id`) comes back into default recall. Ask whether to delete that one too.
+
+Then `forget(memory_ids=[...], context_id=...)` with the ids still picked (max 50).
 
 To keep the outcome of a finished follow-up, save it first with `remember(context_id=..., type="note", summary=..., content=...)`, then delete the time memory. There is no "mark done": a time memory leaves `recall_upcoming` only when it is forgotten.
 
-`forget` is a soft delete: recoverable until the deployment's cleanup window passes (default 30 days); its graph edges are removed. A `deleted_count` of 0 means nothing was deleted — report it, do not retry with a query.
+`forget` is a soft delete: recoverable until the deployment's cleanup window passes (default 30 days); its graph edges are removed. Each id gets a `results` row; a `skipped` one deleted nothing, an `error` one says why. Report both; do not retry with a query.
 
 ### 6. Report
 

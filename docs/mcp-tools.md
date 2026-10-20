@@ -587,7 +587,7 @@ MCP clients cap what a tool result may put in front of the model — about 25k t
 | `load_guardrails` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then pinned, then tool-triggered items (`pinned_truncated`, `tool_triggered_truncated`) |
 | `bootstrap` | `max_chars` 20,000 for the whole envelope; `format="index"` (80-character summary heads, no `instructions`) under 10,000, down to 2,000 | 100,000 | full: `context_summary_omitted`, then `truncated: true` on pinned / upcoming / changes (`changes.has_more` + `next_cursor`); index: `truncated: true` on pinned / guardrails / upcoming / changes, in that order |
 | `get_agent_bootstrap` | `max_chars` 20,000 for the whole envelope; `pinned_cap` 20 | 100,000 | `context_summary_omitted`, then `truncated: true` on the pinned / recall / upcoming components, in that order; `state` is a `get_state` page |
-| `list_edges` | `limit` 50 per direction | 200 per direction | `outgoing_has_more`, `incoming_has_more` (heaviest edges first) |
+| `list_edges` | `limit` 50 per direction, `min_weight` 0.05 | 200 per direction, `min_weight=0` for every edge | `outgoing_has_more`, `incoming_has_more` (heaviest edges first); the reply echoes the applied `min_weight` |
 | `get_state` (no key) | `limit` 50, `max_chars` 20,000 | `limit` 200, `max_chars` 100,000 | `has_more` / `next_cursor` (key order); `omitted_keys` for a value too large for the page |
 | `get_sleep_report` | `actions_limit` 50, `max_chars` 20,000 | 200 / 100,000 | `actions_has_more` / `actions_next_cursor`; `details_omitted` on an action larger than the page; `action_count` is the run's total |
 | `recall_nearby` | items carry `location` (= `details.location`) | `include_details=true` | past 20,000 characters the later items get `details_omitted` |
@@ -786,7 +786,20 @@ What the log can and cannot show:
 
 ### `forget`
 
-Always verify before deleting: show the memory's summary, warn when `importance > 0.8`, and get explicit approval. For bulk deletion: `recall()` to find candidates → review the list with the user → confirm → loop `forget(memory_id)`; query mode (top-k matches of a query) is for cleanup where that review is not needed. A target that was already deleted, has a wrong ID, or belongs to someone else is skipped silently — `deleted_count` is 0 — so check the ID with `recall()`. Deletion is soft; retention is bounded by the deployment's cleanup window (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), and the memory's graph edges are cleaned up with it.
+Always verify before deleting: show the memory's summary, warn when `importance > 0.8`, and get explicit approval. For bulk deletion: `recall()` to find candidates → review the list with the user → confirm → one `forget(memory_ids=[...])` with the approved ids; query mode (top-k matches of a query) is for cleanup where that review is not needed. A target that was already deleted, has a wrong ID, or belongs to someone else is skipped silently — `deleted_count` is 0 — so check the ID with `recall()`. Deletion is soft; retention is bounded by the deployment's cleanup window (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), and the memory's graph edges are cleaned up with it.
+
+`forget(memory_ids=[...])` ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)) takes 1-50 distinct memory UUIDs and cannot be combined with `memory_id` or `query` (`invalid_argument`, as are an empty list, more than 50 ids, a duplicate or an entry that is not a UUID). Each id is forgotten exactly as `forget(memory_id=...)` would forget it — same permission check, same search-point and edge cleanup, same revision log and session — and is committed on its own, so an id that fails is rolled back alone and the others stay deleted. The reply is the single form's plus one row per id, in request order:
+
+```json
+{"status": "partial", "deleted_count": 1, "memory_ids": ["<a>"],
+ "results": [{"memory_id": "<a>", "status": "deleted"},
+             {"memory_id": "<b>", "status": "skipped"},
+             {"memory_id": "<c>", "status": "error", "error": "permission_denied", "message": "..."}],
+ "count": 3, "succeeded": 1, "skipped": 1, "failed": 1,
+ "session_id": "...", "context_id": "...", "context_name": "..."}
+```
+
+`skipped` is the single form's `deleted_count: 0` — not found, not yours or already gone, one word for all three. `status` is `partial` when any id is `error` (a server failure carries a `correlation_id`), else `success`. There is no batch form of `reference`.
 
 ### `explore`
 
@@ -873,6 +886,8 @@ Weights run from 0.0 to 3.0; the default 1.0 is a full-confidence manual edge, s
 **Calling `create_edge` on an existing pair** ([#1321](https://github.com/kagura-ai/memory-cloud/issues/1321)). The (source, target) pair is unique per user, so the outcome is deterministic. An existing auto edge (origin `hebbian` / `semantic`) takes your values → `operation: "updated"` plus a `previous` pre-image; a hebbian edge is promoted to origin `declared`, a semantic edge keeps origin `semantic`. An existing declared edge with identical values is left alone → `operation: "unchanged"`, safe to retry. An existing declared edge with different values is rejected with `edge_exists`, because declared links are provenance — use `update_edge`, or pass `overwrite=true` to re-assert.
 
 `update_edge` leaves an omitted `weight` unchanged (there is no default), so a type-only update is `update_edge(..., edge_type=...)`. `delete_edge` is a hard delete; if the memories are still co-accessed, Hebbian learning may recreate a `neural_association` edge. A typical cleanup is `explore()` → `list_edges()` → `delete_edge()`.
+
+`list_edges` hides edges lighter than `min_weight`, 0.05 by default ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)) — the same floor as `explore`. Hebbian `neural_association` edges between memories that were only recalled together sit around 0.01 and would otherwise fill the reply; pass `min_weight=0` to list every edge. The reply carries the `min_weight` it applied, so an empty `edges` with that value says where to look.
 
 ### `get_context_info`
 

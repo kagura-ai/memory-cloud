@@ -2,8 +2,8 @@
 
 The command sweeps one context for memories that are out of date. It lists first
 and changes only what the user picks, so the safety rules are the contract: no
-write under ``dry-run``, consent per item number, ``forget`` by ``memory_id``
-only, full ids, recalled text treated as data. These tests pin those rules, the
+write under ``dry-run``, consent per item number, ``forget`` by id only
+(``memory_ids``, #2127), full ids, recalled text treated as data. These tests pin those rules, the
 parity with the Codex section, the pointers from the neighbouring skills, and
 that every call the text spells out is a registered tool with real parameters.
 """
@@ -198,10 +198,11 @@ def test_ids_are_full_and_copied(text) -> None:
 
 
 @BOTH
-def test_forget_is_used_in_memory_id_mode_only(text) -> None:
+def test_forget_is_used_by_id_only(text) -> None:
     body = text()
     forget_calls = [args for name, args in _calls(body) if name == "forget"]
-    allowed = [args for args in forget_calls if args == {"memory_id", "context_id"}]
+    # #2127: the picked deletes go in one forget(memory_ids=[...]) call.
+    allowed = [args for args in forget_calls if args == {"memory_ids", "context_id"}]
     ruled_out = [args for args in forget_calls if ("forget", args) == FORBIDDEN_CALL]
     assert allowed, "the delete call is no longer shown"
     assert len(allowed) + len(ruled_out) == len(forget_calls), forget_calls
@@ -211,7 +212,7 @@ def test_forget_is_used_in_memory_id_mode_only(text) -> None:
         r"`forget\(query=\.\.\.\)`\) is forbidden|never `forget\(query=\.\.\.\)`", flat
     )
     # A delete that removed nothing is reported, never retried as a search.
-    assert "`deleted_count` of 0" in flat and "with a query" in flat
+    assert "`skipped`" in flat and "`error`" in flat and "with a query" in flat
 
 
 @BOTH
@@ -226,7 +227,10 @@ def test_a_delete_gets_a_second_look(text) -> None:
 def test_deleting_the_source_of_a_supersedes_edge_is_warned_about(text) -> None:
     """``forget`` removes the edge, so the memory it shadowed returns to default recall."""
     flat = _flat(text())
-    assert "list_edges(memory_id=..., context_id=...)" in flat
+    # #2127: list_edges hides edges under 0.05 by default; ask for every supersedes edge.
+    assert (
+        'list_edges(memory_id=..., context_id=..., edge_types=["supersedes"], min_weight=0)' in flat
+    )
     assert "`source_id`" in flat and "`target_id`" in flat
     assert "comes back into default recall" in flat
     assert re.search(r"[Aa]sk whether to delete (that one|it) too", flat)
