@@ -1315,6 +1315,43 @@ SDK companion: `kagura-ai/kagura-memory-python-sdk#100`.
 
 ---
 
+### Authorized apps and their default context
+
+An OAuth grant can carry an MCP default context: a context-scoped tool called over a bearer token of that client without `context_id` runs in it (`?context=` on the MCP URL still wins). The consent page offers the choice when the app is authorized; these routes change it afterwards ([#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)). Session or API-key auth; only the caller's own grants are visible, and a `client_id` the caller holds no grant for is `404` like one that does not exist.
+
+#### GET /api/v1/me/oauth/grants
+
+The OAuth clients the caller holds a live (not revoked) token for, plus any with a stored setting, newest issuance first.
+
+```json
+[
+  {
+    "client_id": "abc123",
+    "client_name": "Desktop App",
+    "scopes": ["memory:read", "memory:write"],
+    "default_context_id": "b3abeabe-7ab1-44bd-8e52-18a191bda66b",
+    "default_context_name": "my-project",
+    "last_issued_at": "2026-10-20T09:00:00Z"
+  }
+]
+```
+
+`default_context_name` is `null` when no default is set or the caller can no longer read the context; `scopes` is `[]` and `last_issued_at` is `null` for a grant kept only by its setting.
+
+#### PUT /api/v1/me/oauth/grants/{client_id}/default-context
+
+```json
+{ "default_context_id": "b3abeabe-7ab1-44bd-8e52-18a191bda66b" }
+```
+
+Sets the grant's default (`null` clears it) and returns the grant in the shape above. The context must be readable by the caller now (viewer; a workspace-scoped key is confined to its workspace); otherwise `404` `Context not found`.
+
+#### DELETE /api/v1/me/oauth/grants/{client_id}/default-context
+
+Clears the grant's default. `204 No Content`.
+
+---
+
 ## API Keys Management
 
 ### POST /api/v1/config/api-keys
@@ -1327,9 +1364,12 @@ Create a new API key (Admin only).
 {
   "name": "Production API Key",
   "scopes": ["memory:read", "memory:write"],
-  "expires_at": "2026-11-22T00:00:00Z"
+  "expires_at": "2026-11-22T00:00:00Z",
+  "default_context_id": "b3abeabe-7ab1-44bd-8e52-18a191bda66b"
 }
 ```
+
+`default_context_id` (optional, [#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)) is the key's MCP default context — see [PATCH](#patch-apiv1config-api-keyskey_id). A context you cannot read is `404` `Context not found`, and no key is created.
 
 **Response:**
 
@@ -1375,6 +1415,18 @@ List all API keys (Admin only).
   ]
 }
 ```
+
+---
+
+### PATCH /api/v1/config/api-keys/{key_id}
+
+Set or clear the key's MCP default context ([#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)) — the only field this route changes. A context-scoped MCP tool called with this key and without `context_id` runs in it; `?context=` on the MCP URL still wins.
+
+```json
+{ "default_context_id": "b3abeabe-7ab1-44bd-8e52-18a191bda66b" }
+```
+
+`null` clears it. The context must be readable by the key's owner now, within the key's workspace scope; otherwise `404` `Context not found`. A public-bound or agent-bound key cannot carry one (`422`; an agent key uses its agent's default binding), and a revoked key is `400`. Returns the key in the list shape. The create, list and regenerate responses carry `default_context_id` and `default_context_name` (`null` when none is set or the owner can no longer read the context); regenerating a key keeps its default. Deleting the context clears the default.
 
 ---
 

@@ -295,9 +295,10 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 
 **Identity & access**
 - **users** — User accounts
-- **api_keys** — API key management (SHA256 hashed); optional `agent_id` binds an owner-provisioned member key to a registered agent
+- **api_keys** — API key management (SHA256 hashed); optional `agent_id` binds an owner-provisioned member key to a registered agent; optional `default_context_id` is the key's MCP default context (#2129)
 - **external_api_keys** — OpenAI/Cohere keys (Fernet encrypted)
 - **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server
+- **oauth_grant_settings** — Per-user, per-client grant settings (the app's MCP default context, #2129)
 - **audit_logs** — Security-relevant audit trail
 - **agents** — Workspace-scoped agent registry with lifecycle (`active | suspended | retired`) and binding enforcement mode (`shadow | enforce`)
 - **agent_context_bindings** — Purely subtractive per-agent context read/write/default policy; `allowed_memory_types` / `allowed_source_types` enforce per-memory read filtering (`null` = all, `[]` = deny-all) as of #1299
