@@ -1089,6 +1089,11 @@ authorization code grant and PKCE:
 4. `POST /api/v1/oauth/token` with `grant_type=refresh_token` issues a new
    pair and revokes the old one.
 
+**Body size.** `POST /api/v1/oauth/token` and the consent
+`POST /api/v1/oauth/authorize` refuse a form body over 16384 bytes, before it
+is parsed, with `413` `invalid_request` (RFC 6749 JSON, `Cache-Control:
+no-store`); the consent POST answers it without a redirect.
+
 **Registration.** Every entry of `redirect_uris` must be accepted on its own:
 its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
