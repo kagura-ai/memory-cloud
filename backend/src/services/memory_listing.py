@@ -41,6 +41,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
+from utils.tag_normalize import tag_filter_groups
 
 ORDER_COLUMNS = {
     "updated_at": func.coalesce(Memory.updated_at, Memory.created_at),
@@ -63,6 +64,9 @@ CHANGE_CURSOR_RESERVE = 96
 _DETAILS_KEY = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _SEPARATORS_SQL = "[[:space:]_-]+"
 _SEPARATORS_PY = r"[ \t\n\r\f\v_-]+"  # POSIX [[:space:]] spelled out, same class
+# ASCII digit runs, the same class on both sides of the #2086 number guard.
+_DIGIT_RUN_SQL = "[^0-9]+"
+_DIGIT_RUN_PY = re.compile(r"[0-9]+")
 _IMPORTANCE_OPS = {"gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
 _TIME_FILTERS = {
     "created_after": (Memory.created_at, ">="),
@@ -112,6 +116,52 @@ def _normalized_needle(tag: str) -> str:
     return re.sub(_SEPARATORS_PY, "", tag.lower())
 
 
+def _all_tag_groups_predicates(
+    tags: list[str], tag: ColumnElement[Any], folded: ColumnElement[str]
+) -> list[ColumnElement[bool]]:
+    """``tags_match='all'`` + ``tags_normalize``: one required group per tag, as recall (#2086).
+
+    The groups are recall's (``tag_filter_groups``, #2071): requested tags
+    that are one tag written twice (``Deploy`` / ``deploy``) form one group,
+    satisfied by a stored tag folding to any of its spellings. Two requested
+    tags whose folds collide but whose numbers differ (``pr-123`` / ``pr-1-23``
+    under this lane's separator fold) stay two groups, and a stored spelling
+    counts only for the group whose digit runs it shares, so no single stored
+    tag satisfies both.
+
+    Args:
+        tags: The requested tags, in filter order.
+        tag: The unnested stored tag column.
+        folded: ``tag`` under the lane's fold (``lower`` + ``_SEPARATORS_SQL``).
+
+    Returns:
+        One ``EXISTS`` predicate per group, to be ANDed.
+    """
+    groups = tag_filter_groups(tags, tags)
+    grouped = {t for group in groups for t in group}
+    # tag_filter_groups stops at MAX_TAG_GROUPS (the vector stores' cap); the
+    # SQL lane has none, so every later tag stays required on its own.
+    groups += [[t] for t in dict.fromkeys(tags) if t not in grouped]
+    needles = [{_normalized_needle(t) for t in group} for group in groups]
+    digits = func.btrim(func.regexp_replace(tag, _DIGIT_RUN_SQL, ",", "g"), ",")
+    out: list[ColumnElement[bool]] = []
+    for i, (group, own) in enumerate(zip(groups, needles, strict=True)):
+        if any(own & other for j, other in enumerate(needles) if j != i):
+            match = or_(
+                *(
+                    and_(
+                        folded == _normalized_needle(t),
+                        digits == ",".join(_DIGIT_RUN_PY.findall(t)),
+                    )
+                    for t in group
+                )
+            )
+        else:
+            match = folded.in_(sorted(own))
+        out.append(select(literal(1)).where(match).exists())
+    return out
+
+
 def _trusted_predicate() -> ColumnElement[bool]:
     return and_(
         Memory.context_id.in_(
@@ -147,7 +197,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
 
     Supported: type, scope, source_type, delivery_mode (string or list → IN);
     tags with tags_match any|all and tags_normalize (case, hyphen / underscore /
-    space insensitive — the plural tolerance recall has is not applied here);
+    space insensitive — the plural tolerance recall has is not applied here;
+    under ``all`` the tags are grouped as recall groups them, see
+    ``_all_tag_groups_predicates``);
     importance {gte, lte, gt, lt}; created_/updated_ after/before (ISO 8601,
     after inclusive, before exclusive); source_uri_prefix; trust_tier='trusted';
     ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
@@ -229,7 +281,7 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
                 return select(literal(1)).where(folded == needle).exists()
 
             if tags_match == "all":
-                out.extend(exists_for(n) for n in needles)
+                out.extend(_all_tag_groups_predicates(tags, tag, folded))
             else:
                 out.append(or_(*(exists_for(n) for n in needles)))
         else:
