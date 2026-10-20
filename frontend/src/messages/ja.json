@@ -1915,10 +1915,7 @@
     "defaultContextLabel": "デフォルトコンテキスト(任意)",
     "defaultContextHelp": "このキーで context_id を指定せずに呼んだ MCP ツールは、このコンテキストで動作します。MCP URL の ?context= が優先されます。",
     "defaultContextSaved": "デフォルトコンテキストを保存しました",
-    "defaultContextCleared": "デフォルトコンテキストを解除しました",
-    "defaultContextCreateFailed": "API キーは作成されましたが、デフォルトコンテキストを設定できませんでした: {error}",
-    "defaultContextCreateFailedGeneric": "API キーは作成されましたが、デフォルトコンテキストを設定できませんでした。",
-    "defaultContextLoadFailed": "読み込めませんでした"
+    "defaultContextCleared": "デフォルトコンテキストを解除しました"
   },
   "customApps": {
     "title": "アプリ認証",

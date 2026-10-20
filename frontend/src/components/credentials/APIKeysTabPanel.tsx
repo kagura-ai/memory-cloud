@@ -29,10 +29,7 @@ import {
   MemberCredentials,
 } from "@/lib/api/member-credentials";
 import { getContexts } from "@/lib/api/contexts";
-import {
-  getAPIKeys,
-  updateAPIKeyDefaultContext,
-} from "@/lib/api/api-keys";
+import { updateAPIKeyDefaultContext } from "@/lib/api/api-keys";
 import {
   DefaultContextControl,
   DefaultContextName,
@@ -123,24 +120,17 @@ export function clampIsoToNow(iso: string): string {
 // default context on MCP, and the API refuses to set one (422).
 const CONNECTOR_KEY_PREFIX = "connector:";
 
-/** The key's MCP default context, as `GET /config/api-keys` reports it. */
-export interface KeyDefaultContext {
-  id: string | null;
-  name: string | null;
-}
-
 /**
  * Whether the inline default-context control is offered for a key (#2129).
  *
- * The API refuses a default on a revoked key (400) and on a public-bound or
- * connector key (422); the control is hidden for those. An agent-bound key is
- * refused too, but the member-credentials payload does not say which keys are
- * agent-bound — that case surfaces as the API's error toast.
+ * The API refuses a default on a revoked key (400) and on a public-bound,
+ * agent-bound or connector key (422); the control is hidden for those.
  */
 export function canSetDefaultContext(apiKey: MemberAPIKey): boolean {
   return (
     !apiKey.revoked_at &&
     !apiKey.bound_context_id &&
+    !apiKey.agent_id &&
     !apiKey.name.startsWith(CONNECTOR_KEY_PREFIX)
   );
 }
@@ -191,12 +181,6 @@ export function APIKeysTabPanel() {
   );
   // #2129: the create dialog's optional MCP default context ("" = none).
   const [newKeyDefaultContextId, setNewKeyDefaultContextId] = useState("");
-  // #2129: per-key default contexts from GET /config/api-keys (the
-  // member-credentials payload does not carry them). null = not loaded.
-  const [keyDefaults, setKeyDefaults] = useState<Map<
-    string,
-    KeyDefaultContext
-  > | null>(null);
   const workspaceContexts = useWorkspaceContextOptions();
   const [showHideApiKeyDialog, setShowHideApiKeyDialog] = useState(false);
   const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
@@ -223,40 +207,13 @@ export function APIKeysTabPanel() {
     };
   }, []);
 
-  // #2129: the default contexts come from the user's key list. A failure
-  // keeps what an earlier load showed (a failed 5-minute refresh must not
-  // read as "no default"); with nothing loaded yet the column says so.
-  const loadKeyDefaults = useCallback(async () => {
-    try {
-      const keys = await getAPIKeys();
-      if (isMountedRef.current) {
-        setKeyDefaults(
-          new Map(
-            keys.map((k) => [
-              k.id,
-              { id: k.default_context_id, name: k.default_context_name },
-            ]),
-          ),
-        );
-      }
-    } catch (err: unknown) {
-      if (process.env.NODE_ENV === "development") {
-        // eslint-disable-next-line no-console
-        console.error("Failed to load API key default contexts:", err);
-      }
-    }
-  }, []);
-
   const loadCredentials = useCallback(async () => {
     if (!currentWorkspaceId || !userId) return;
 
     try {
       setLoading(true);
       setError(null);
-      const [data] = await Promise.all([
-        getMemberCredentials(currentWorkspaceId, userId),
-        loadKeyDefaults(),
-      ]);
+      const data = await getMemberCredentials(currentWorkspaceId, userId);
       if (isMountedRef.current) {
         setCredentials(data);
       }
@@ -273,7 +230,7 @@ export function APIKeysTabPanel() {
         setLoading(false);
       }
     }
-  }, [currentWorkspaceId, userId, loadKeyDefaults]);
+  }, [currentWorkspaceId, userId]);
 
   useEffect(() => {
     if (currentWorkspaceId && userId) {
@@ -442,14 +399,22 @@ export function APIKeysTabPanel() {
   ) => {
     try {
       const updated = await updateAPIKeyDefaultContext(apiKey.id, contextId);
-      setKeyDefaults((prev) => {
-        const next = new Map(prev ?? []);
-        next.set(apiKey.id, {
-          id: updated.default_context_id,
-          name: updated.default_context_name,
-        });
-        return next;
-      });
+      setCredentials((prev) =>
+        prev
+          ? {
+              ...prev,
+              api_keys: prev.api_keys.map((k) =>
+                k.id === apiKey.id
+                  ? {
+                      ...k,
+                      default_context_id: updated.default_context_id,
+                      default_context_name: updated.default_context_name,
+                    }
+                  : k,
+              ),
+            }
+          : prev,
+      );
       toast({
         title: tCommon("success"),
         description: contextId
@@ -484,44 +449,25 @@ export function APIKeysTabPanel() {
         return;
       }
 
-      const created = await createAPIKey(currentWorkspaceId, userId, {
+      // #2188: the default context goes in the same call; an unreadable
+      // one is a 404 and no key is created (reported in the dialog below).
+      await createAPIKey(currentWorkspaceId, userId, {
         name: newKeyName,
         ...(bindToPublicContext && boundContextId
           ? { bound_context_id: boundContextId }
           : {}),
+        ...(!bindToPublicContext && newKeyDefaultContextId
+          ? { default_context_id: newKeyDefaultContextId }
+          : {}),
       });
-
-      // #2129: the member-credentials create route takes no default, so
-      // it is set on the new key right after. The key exists either way —
-      // a failure here is reported, never rolled back.
-      // null = nothing to report; "" = failed without a usable message.
-      let defaultError: string | null = null;
-      if (!bindToPublicContext && newKeyDefaultContextId) {
-        try {
-          await updateAPIKeyDefaultContext(created.id, newKeyDefaultContextId);
-        } catch (err: unknown) {
-          defaultError =
-            err instanceof Error && err.message.trim() ? err.message : "";
-        }
-      }
 
       await loadCredentials();
       resetCreateDialog();
 
-      if (defaultError !== null) {
-        toast({
-          title: tCommon("error"),
-          description: defaultError
-            ? t("defaultContextCreateFailed", { error: defaultError })
-            : t("defaultContextCreateFailedGeneric"),
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: tCommon("success"),
-          description: t("createSuccess"),
-        });
-      }
+      toast({
+        title: tCommon("success"),
+        description: t("createSuccess"),
+      });
     } catch (err: unknown) {
       // Use err.message when available; fall back to the i18n'd error
       // string for non-Error rejections OR when err.message is empty.
@@ -666,24 +612,16 @@ export function APIKeysTabPanel() {
   // #2129: the key's MCP default context — the inline control where the API
   // accepts one, the name otherwise ("—" for none).
   const renderDefaultContext = (apiKey: MemberAPIKey) => {
-    if (keyDefaults === null) {
-      return (
-        <span className="text-xs text-gray-400">
-          {t("defaultContextLoadFailed")}
-        </span>
-      );
-    }
-    const current = keyDefaults.get(apiKey.id);
     // One context, one name: the select's label when it is offered.
     const currentName = defaultContextLabel(
       workspaceContexts,
-      current?.id ?? null,
-      current?.name ?? null,
+      apiKey.default_context_id,
+      apiKey.default_context_name,
     );
-    if (current && canSetDefaultContext(apiKey)) {
+    if (canSetDefaultContext(apiKey)) {
       return (
         <DefaultContextControl
-          currentId={current.id}
+          currentId={apiKey.default_context_id}
           currentName={currentName}
           options={workspaceContexts}
           onSave={(contextId) =>
@@ -695,7 +633,7 @@ export function APIKeysTabPanel() {
     }
     return (
       <DefaultContextName
-        currentId={current?.id ?? null}
+        currentId={apiKey.default_context_id}
         currentName={currentName}
       />
     );
@@ -1142,7 +1080,15 @@ export function APIKeysTabPanel() {
             <AlertDialogCancel onClick={resetCreateDialog}>
               {tCommon("cancel")}
             </AlertDialogCancel>
-            <AlertDialogAction onClick={handleCreateAPIKey}>
+            {/* #2188: keep the dialog open — a validation or create error
+                (e.g. 404 for an unreadable default) shows above; success
+                closes it via resetCreateDialog. */}
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleCreateAPIKey();
+              }}
+            >
               {t("createKey")}
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -47,11 +47,10 @@ vi.mock("@/lib/api/contexts", () => ({
   getContexts: (...a: unknown[]) => mockGetContexts(...a),
 }));
 
-// #2129: per-key default contexts come from the user's key list.
-const mockGetAPIKeys = vi.fn();
+// #2129: a key's default context is changed through PATCH /config/api-keys
+// (#2188: it is read from the member-credentials payload itself).
 const mockUpdateDefault = vi.fn();
 vi.mock("@/lib/api/api-keys", () => ({
-  getAPIKeys: (...a: unknown[]) => mockGetAPIKeys(...a),
   updateAPIKeyDefaultContext: (...a: unknown[]) => mockUpdateDefault(...a),
 }));
 
@@ -104,6 +103,9 @@ function makeKey(overrides: Partial<MemberAPIKey> = {}): MemberAPIKey {
     last_used_at: null,
     revoked_at: null,
     bound_context_id: null,
+    default_context_id: null,
+    default_context_name: null,
+    agent_id: null,
     ...overrides,
   };
 }
@@ -111,7 +113,6 @@ function makeKey(overrides: Partial<MemberAPIKey> = {}): MemberAPIKey {
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
-  mockGetAPIKeys.mockResolvedValue([]);
 });
 
 describe("APIKeysTabPanel — table view (#943)", () => {
@@ -370,7 +371,8 @@ function workspaceContexts() {
   };
 }
 
-function adminKey(
+/** The PATCH /config/api-keys/{id} response fields the panel reads. */
+function patched(
   id: string,
   default_context_id: string | null,
   default_context_name: string | null,
@@ -378,12 +380,17 @@ function adminKey(
   return { id, default_context_id, default_context_name };
 }
 
+/** Seed the member-credentials list with one key. */
+function seed(key: MemberAPIKey) {
+  mockGetMemberCredentials.mockResolvedValue({
+    api_keys: [key],
+    target_user_role: "owner",
+  });
+}
+
 describe("APIKeysTabPanel — default context (#2129)", () => {
   it("adds a Default context column", async () => {
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [makeKey()],
-      target_user_role: "owner",
-    });
+    seed(makeKey());
 
     render(<APIKeysTabPanel />);
 
@@ -392,14 +399,13 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
   });
 
   it("shows the current default in the inline select and PATCHes a change", async () => {
-    const key = makeKey();
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
+    const key = makeKey({
+      default_context_id: CTX_A,
+      default_context_name: "alpha",
     });
+    seed(key);
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, CTX_A, "alpha")]);
-    mockUpdateDefault.mockResolvedValue(adminKey(key.id, CTX_B, "beta"));
+    mockUpdateDefault.mockResolvedValue(patched(key.id, CTX_B, "beta"));
 
     render(<APIKeysTabPanel />);
 
@@ -422,21 +428,25 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ description: "defaultContextSaved" }),
     );
+    // The list is updated from the PATCH response, not refetched.
+    expect(mockGetMemberCredentials).toHaveBeenCalledTimes(1);
   });
 
   it("clears the default with PATCH null", async () => {
-    const key = makeKey();
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
+    const key = makeKey({
+      default_context_id: CTX_A,
+      default_context_name: "alpha",
     });
+    seed(key);
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, CTX_A, "alpha")]);
-    mockUpdateDefault.mockResolvedValue(adminKey(key.id, null, null));
+    mockUpdateDefault.mockResolvedValue(patched(key.id, null, null));
 
     render(<APIKeysTabPanel />);
 
     const table = await screen.findByRole("table");
+    const select = (await within(table).findByLabelText(
+      "defaultContextFor",
+    )) as HTMLSelectElement;
     fireEvent.click(await within(table).findByText("clear"));
 
     await waitFor(() =>
@@ -445,16 +455,13 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ description: "defaultContextCleared" }),
     );
+    await waitFor(() => expect(select.value).toBe(""));
   });
 
   it("reports a refused change with a destructive toast", async () => {
     const key = makeKey();
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
-    });
+    seed(key);
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, null, null)]);
     mockUpdateDefault.mockRejectedValue(new Error("Context not found"));
 
     render(<APIKeysTabPanel />);
@@ -484,52 +491,29 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
   it.each([
     ["public-bound", { bound_context_id: CTX_A }],
     ["connector", { name: "connector:33333333-3333-4333-8333-333333333333" }],
+    ["agent-bound", { agent_id: "55555555-5555-4555-8555-555555555555" }],
   ])("offers no control for a %s key", async (_label, overrides) => {
-    const key = makeKey(overrides);
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
-    });
+    seed(makeKey(overrides));
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, null, null)]);
 
     render(<APIKeysTabPanel />);
 
     const table = await screen.findByRole("table");
-    await waitFor(() => expect(mockGetAPIKeys).toHaveBeenCalled());
     expect(
       within(table).queryByLabelText("defaultContextFor"),
     ).not.toBeInTheDocument();
     expect(within(table).getByText("none")).toBeInTheDocument();
   });
 
-  it("offers no control when the key list failed to load", async () => {
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [makeKey()],
-      target_user_role: "owner",
-    });
-    mockGetAPIKeys.mockRejectedValue(new Error("boom"));
-
-    render(<APIKeysTabPanel />);
-
-    const table = await screen.findByRole("table");
-    await waitFor(() => expect(mockGetAPIKeys).toHaveBeenCalled());
-    expect(
-      within(table).queryByLabelText("defaultContextFor"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(table).getByText("defaultContextLoadFailed"),
-    ).toBeInTheDocument();
-  });
-
   it("shows a read-only default by its display name", async () => {
-    const key = makeKey({ revoked_at: "2026-10-01T00:00:00Z" });
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
-    });
+    seed(
+      makeKey({
+        revoked_at: "2026-10-01T00:00:00Z",
+        default_context_id: CTX_A,
+        default_context_name: "alpha",
+      }),
+    );
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, CTX_A, "alpha")]);
 
     render(<APIKeysTabPanel />);
 
@@ -540,53 +524,14 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps loaded defaults when a later refresh of them fails", async () => {
-    const key = makeKey();
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
-    });
-    mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys
-      .mockResolvedValueOnce([adminKey(key.id, CTX_A, "alpha")])
-      .mockRejectedValue(new Error("boom"));
-    mockRegenerate.mockResolvedValue({});
-
-    render(<APIKeysTabPanel />);
-    const table = await screen.findByRole("table");
-    const select = (await within(table).findByLabelText(
-      "defaultContextFor",
-    )) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe(CTX_A));
-
-    // Regenerate reloads credentials (and defaults); the defaults fetch fails.
-    fireEvent.click(screen.getAllByText("regenerate")[0]);
-    fireEvent.click(await screen.findByText("regenerateApiKeyTitle"));
-    const confirm = screen
-      .getAllByText("regenerate")
-      .find((el) => el.closest("[role='alertdialog']"));
-    fireEvent.click(confirm!);
-    await waitFor(() => expect(mockGetAPIKeys).toHaveBeenCalledTimes(2));
-
-    expect(
-      (within(table).getByLabelText("defaultContextFor") as HTMLSelectElement)
-        .value,
-    ).toBe(CTX_A);
-    expect(
-      within(table).queryByText("defaultContextLoadFailed"),
-    ).not.toBeInTheDocument();
-  });
-
   it("names an unreadable default instead of 'No default'", async () => {
-    const key = makeKey();
-    mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [key],
-      target_user_role: "owner",
-    });
+    seed(
+      makeKey({
+        default_context_id: "44444444-4444-4444-8444-444444444444",
+        default_context_name: null,
+      }),
+    );
     mockGetContexts.mockResolvedValue(workspaceContexts());
-    mockGetAPIKeys.mockResolvedValue([
-      adminKey(key.id, "44444444-4444-4444-8444-444444444444", null),
-    ]);
 
     render(<APIKeysTabPanel />);
 
@@ -602,10 +547,7 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
 
   describe("create dialog", () => {
     async function openCreateDialog() {
-      mockGetMemberCredentials.mockResolvedValue({
-        api_keys: [makeKey()],
-        target_user_role: "owner",
-      });
+      seed(makeKey());
       mockGetContexts.mockResolvedValue(workspaceContexts());
       render(<APIKeysTabPanel />);
       await screen.findByRole("table");
@@ -614,6 +556,14 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
       fireEvent.change(screen.getByLabelText("keyName"), {
         target: { value: "ci" },
       });
+    }
+
+    async function chooseDefault(contextId: string) {
+      const select = screen.getByLabelText("defaultContextLabel");
+      await waitFor(() =>
+        expect(within(select).getByText("Alpha")).toBeInTheDocument(),
+      );
+      fireEvent.change(select, { target: { value: contextId } });
     }
 
     it("offers the workspace contexts with 'No default' first", async () => {
@@ -628,87 +578,60 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
       expect(select.options[2].text).toBe("beta");
     });
 
-    it("sets the chosen default on the new key", async () => {
+    it("sends the chosen default with the create call", async () => {
       mockCreateAPIKey.mockResolvedValue(
-        makeKey({ id: "akey_0000000000000000000042", name: "ci" }),
-      );
-      mockUpdateDefault.mockResolvedValue(
-        adminKey("akey_0000000000000000000042", CTX_A, "alpha"),
+        makeKey({
+          id: "akey_0000000000000000000042",
+          name: "ci",
+          default_context_id: CTX_A,
+          default_context_name: "alpha",
+        }),
       );
       await openCreateDialog();
-      const select = screen.getByLabelText("defaultContextLabel");
-      await waitFor(() =>
-        expect(within(select).getByText("Alpha")).toBeInTheDocument(),
-      );
-      fireEvent.change(select, { target: { value: CTX_A } });
+      await chooseDefault(CTX_A);
       fireEvent.click(screen.getByText("createKey"));
 
       await waitFor(() =>
-        expect(mockUpdateDefault).toHaveBeenCalledWith(
-          "akey_0000000000000000000042",
-          CTX_A,
+        expect(mockCreateAPIKey).toHaveBeenCalledWith("ws-1", "user-1", {
+          name: "ci",
+          default_context_id: CTX_A,
+        }),
+      );
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ description: "createSuccess" }),
         ),
       );
-      expect(mockCreateAPIKey).toHaveBeenCalledWith("ws-1", "user-1", {
-        name: "ci",
-      });
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({ description: "createSuccess" }),
-      );
+      // One call: no follow-up PATCH.
+      expect(mockUpdateDefault).not.toHaveBeenCalled();
     });
 
-    it("does not touch the default when none is chosen", async () => {
+    it("sends no default when none is chosen", async () => {
       mockCreateAPIKey.mockResolvedValue(makeKey({ name: "ci" }));
       await openCreateDialog();
       fireEvent.click(screen.getByText("createKey"));
 
-      await waitFor(() => expect(mockCreateAPIKey).toHaveBeenCalled());
+      await waitFor(() =>
+        expect(mockCreateAPIKey).toHaveBeenCalledWith("ws-1", "user-1", {
+          name: "ci",
+        }),
+      );
       expect(mockUpdateDefault).not.toHaveBeenCalled();
     });
 
-    it("reports a key created without its default", async () => {
-      mockCreateAPIKey.mockResolvedValue(
-        makeKey({ id: "akey_0000000000000000000042", name: "ci" }),
-      );
-      mockUpdateDefault.mockRejectedValue(new Error("Context not found"));
+    it("shows a refused default in the dialog and creates nothing", async () => {
+      mockCreateAPIKey.mockRejectedValue(new Error("Context not found"));
       await openCreateDialog();
-      const select = screen.getByLabelText("defaultContextLabel");
-      await waitFor(() =>
-        expect(within(select).getByText("Alpha")).toBeInTheDocument(),
-      );
-      fireEvent.change(select, { target: { value: CTX_A } });
+      await chooseDefault(CTX_A);
       fireEvent.click(screen.getByText("createKey"));
 
-      await waitFor(() =>
-        expect(mockToast).toHaveBeenCalledWith(
-          expect.objectContaining({
-            variant: "destructive",
-            description: "defaultContextCreateFailed",
-          }),
-        ),
-      );
-    });
-
-    it("uses a generic message when setting the default fails without one", async () => {
-      mockCreateAPIKey.mockResolvedValue(
-        makeKey({ id: "akey_0000000000000000000042", name: "ci" }),
-      );
-      mockUpdateDefault.mockRejectedValue(new Error(""));
-      await openCreateDialog();
-      const select = screen.getByLabelText("defaultContextLabel");
-      await waitFor(() =>
-        expect(within(select).getByText("Alpha")).toBeInTheDocument(),
-      );
-      fireEvent.change(select, { target: { value: CTX_A } });
-      fireEvent.click(screen.getByText("createKey"));
-
-      await waitFor(() =>
-        expect(mockToast).toHaveBeenCalledWith(
-          expect.objectContaining({
-            variant: "destructive",
-            description: "defaultContextCreateFailedGeneric",
-          }),
-        ),
+      expect(await screen.findByText("Context not found")).toBeInTheDocument();
+      // The dialog stays open; the list is not reloaded.
+      expect(screen.getByText("createApiKeyTitle")).toBeInTheDocument();
+      expect(mockGetMemberCredentials).toHaveBeenCalledTimes(1);
+      expect(mockUpdateDefault).not.toHaveBeenCalled();
+      expect(mockToast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ description: "createSuccess" }),
       );
     });
 

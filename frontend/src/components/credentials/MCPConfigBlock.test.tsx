@@ -103,6 +103,9 @@ const VISIBLE_KEY: MemberAPIKey = {
   last_used_at: null,
   revoked_at: null,
   bound_context_id: null,
+  default_context_id: null,
+  default_context_name: null,
+  agent_id: null,
 };
 
 const HIDDEN_KEY: MemberAPIKey = {

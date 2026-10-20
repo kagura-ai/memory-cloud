@@ -21,6 +21,13 @@ export interface MemberAPIKey {
   // public REST endpoint (per-key rate-limit + audit + independent revoke).
   // Binding is immutable; revoke and re-create to change.
   bound_context_id: string | null;
+  // #2188: the key's MCP default context (#2129). The name is null when
+  // unset or when the viewer cannot read that context.
+  default_context_id: string | null;
+  default_context_name: string | null;
+  // #2188: set when the key is bound to an agent — the agent's default
+  // binding applies, so the key cannot carry a default context.
+  agent_id: string | null;
 }
 
 export interface MemberOAuthApp {
@@ -109,6 +116,10 @@ export async function regenerateAPIKey(
  * a public-bound key — attributed to one `is_public=true` context on the
  * public REST endpoint. The binding is immutable; revoke and re-create to
  * change.
+ *
+ * #2188: `default_context_id` sets the key's MCP default context in the same
+ * call (not with `bound_context_id`). 404 "Context not found" when the caller
+ * cannot read it; no key is created then.
  */
 export async function createAPIKey(
   workspaceId: string,
@@ -117,6 +128,7 @@ export async function createAPIKey(
     name: string;
     auto_hide_minutes?: number;
     bound_context_id?: string;
+    default_context_id?: string;
   },
 ): Promise<MemberAPIKey> {
   const response = await fetch(
@@ -135,8 +147,12 @@ export async function createAPIKey(
     const error = await response
       .json()
       .catch(() => ({ detail: response.statusText }));
+    // `detail` from an HTTPException, `message` from the app's error
+    // envelope (e.g. #2188's 404 "Context not found").
     throw new Error(
-      error.detail || `Failed to create API key: ${response.statusText}`,
+      error.detail ||
+        error.message ||
+        `Failed to create API key: ${response.statusText}`,
     );
   }
 
