@@ -40,6 +40,8 @@ from utils.response_budget import BudgetArgumentError, parse_limit
 # characters; 200 per direction stays under ~120k.
 LIST_EDGES_DEFAULT_LIMIT = 50
 LIST_EDGES_MAX_LIMIT = 200
+# #2127: the same floor as explore's default; min_weight=0 lists every edge.
+LIST_EDGES_DEFAULT_MIN_WEIGHT = 0.05
 
 # The declared-edge write core (`create_declared_edge`), the DB-accepted
 # `VALID_EDGE_TYPES` set, the `_edge_to_dict` serializer, and the #1403
@@ -121,7 +123,11 @@ async def handle_list_edges(
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
 
-    min_weight, error = _parse_float(args.get("min_weight"), "min_weight", 0.0, 3.0, 0.0)
+    # #2127: a floor by default — hebbian co-access edges sit near 0.01 and
+    # carry no information; an explicit 0 lists every edge.
+    min_weight, error = _parse_float(
+        args.get("min_weight"), "min_weight", 0.0, 3.0, LIST_EDGES_DEFAULT_MIN_WEIGHT
+    )
     if error:
         return error
 
@@ -192,6 +198,7 @@ async def handle_list_edges(
                 memory_id=str(memory_uuid),
                 edges=edges,
                 count=len(edges),
+                min_weight=min_weight,
                 outgoing_has_more=outgoing_has_more,
                 incoming_has_more=incoming_has_more,
             )

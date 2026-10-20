@@ -956,3 +956,34 @@ class TestListEdgesBounds:
         assert body["count"] == 400
         assert body["outgoing_has_more"] is True and body["incoming_has_more"] is True
         assert len(json.dumps(body, ensure_ascii=False, separators=(",", ":"))) < 150_000
+
+
+class TestListEdgesMinWeightFloor:
+    """#2127: list_edges hides weak edges by default (0.05) and echoes the floor."""
+
+    async def _run(self, args):
+        return await TestListEdgesBounds()._run(args, [], [])
+
+    @pytest.mark.asyncio
+    async def test_default_floor_is_005_and_echoed(self):
+        body, repo = await self._run({})
+        assert repo.get_outgoing_edges.await_args.kwargs["min_weight"] == 0.05
+        assert repo.get_incoming_edges.await_args.kwargs["min_weight"] == 0.05
+        assert body["min_weight"] == 0.05
+
+    @pytest.mark.asyncio
+    async def test_explicit_zero_lists_every_edge(self):
+        body, repo = await self._run({"min_weight": 0})
+        assert repo.get_outgoing_edges.await_args.kwargs["min_weight"] == 0.0
+        assert repo.get_incoming_edges.await_args.kwargs["min_weight"] == 0.0
+        assert body["min_weight"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_explicit_value_is_passed_through(self):
+        body, repo = await self._run({"min_weight": 0.3})
+        assert repo.get_outgoing_edges.await_args.kwargs["min_weight"] == 0.3
+        assert body["min_weight"] == 0.3
+
+    def test_definition_declares_the_default(self):
+        tool = next(t for t in get_tool_definitions() if t["name"] == "list_edges")
+        assert tool["inputSchema"]["properties"]["min_weight"]["default"] == 0.05

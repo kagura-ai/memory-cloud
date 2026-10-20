@@ -575,8 +575,8 @@ Returns: {status, format, version, pinned: [item], tool_triggered: [item], total
         {
             "name": "forget",
             "description": """Soft-delete memories that are outdated, incorrect or no longer needed. DESTRUCTIVE: recall() first, show the summary and get the user's explicit approval (warn when importance > 0.8). To replace a fact instead, use remember(supersedes=...).
-Supply exactly ONE of memory_id (deletes that memory) or query (deletes its top-k matches; bulk cleanup only). Deleted memories stay recoverable for the deployment's cleanup window (default 30 days).
-Returns: {status, deleted_count, memory_ids, session_id?, context_id, context_name}; a target you may not delete, or already gone, is skipped, so deleted_count can be 0.
+Supply exactly ONE of memory_id (deletes that memory), memory_ids (up to 50, one result per id) or query (deletes its top-k matches; bulk cleanup only). Deleted memories stay recoverable for the deployment's cleanup window (default 30 days).
+Returns: {status, deleted_count, memory_ids, session_id?, context_id, context_name}; a target you may not delete, or already gone, is skipped, so deleted_count can be 0. memory_ids adds results: [{memory_id, status: deleted|skipped|error, error?, message?}], count, succeeded, skipped, failed; status is partial when an id failed.
 Manual: guide(["forget"]).""",
             "inputSchema": {
                 "type": "object",
@@ -586,6 +586,13 @@ Manual: guide(["forget"]).""",
                         "type": "string",
                         "format": "uuid",
                         "description": "UUID of the memory to delete (from recall() results). Do NOT guess or fabricate IDs.",
+                    },
+                    "memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "description": "UUIDs of the memories to delete, 1-50 distinct, each handled like memory_id.",
                     },
                     "query": {
                         "type": "string",
@@ -648,7 +655,7 @@ Manual: guide(["explore"]).""",
             "readOnly": True,
             "description": """List the graph edges connected to a memory, outgoing and incoming — to inspect its connections, audit edges created by Sleep Maintenance, or find a noisy edge before delete_edge().
 
-Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count, outgoing_has_more, incoming_has_more}. Heaviest first; a *_has_more of true means more edges exist in that direction — raise min_weight or narrow edge_types.""",
+Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count, min_weight, outgoing_has_more, incoming_has_more}. Heaviest first; a *_has_more of true means more edges exist in that direction — raise min_weight or narrow edge_types.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id"],
@@ -660,8 +667,8 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
                     },
                     "min_weight": {
                         "type": "number",
-                        "description": "Minimum edge weight (default 0.0). Raise it to hide weak edges.",
-                        "default": 0.0,
+                        "description": "Minimum edge weight (default 0.05, which hides weak automatic edges); pass 0 for every edge.",
+                        "default": 0.05,
                     },
                     "edge_types": {
                         "type": "array",
