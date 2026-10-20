@@ -1045,7 +1045,9 @@ async def _end_session(
     204 when the named session is the caller's; 404 when this server does not
     hold it (or it was already ended) or another user or workspace does; 400
     without a session id. An ended id is tombstoned for the idle timeout, so a
-    later request naming it is 404 rather than re-adopted (#1740).
+    later request naming it is 404 rather than re-adopted (#1740). A failed
+    session lookup is the JSON-RPC transport failure GET and POST send
+    (503 with ``Retry-After`` when retryable; #2074).
     """
     if not session_id:
         await _send_json_error(

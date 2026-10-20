@@ -368,6 +368,7 @@ async def test_a_session_lookup_failure_on_delete_is_a_jsonrpc_error(app):
     send = await app.call(None, headers={b"mcp-session-id": SESSION_ID}, method="DELETE")
 
     _assert_jsonrpc_failure(send, request_id=None, status=503, cause="service_unavailable")
+    assert send.headers[b"retry-after"] == b"5"
     assert "10.0.0.9" not in json.dumps(send.body)
 
 
