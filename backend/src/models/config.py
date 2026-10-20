@@ -182,6 +182,15 @@ class ContextSearchConfig(Base):
         TIMESTAMP(timezone=True), nullable=True
     )
 
+    # Issue #2098: when the embedding route last changed through the migration
+    # (services.embedding_migration_service.switch_context_embedding: --switch,
+    # --run, --rollback-to). --rollback-to re-queues from it; updated_at moves on
+    # every search-setting edit and is only the fallback for rows switched before
+    # this column existed (NULL).
+    embedding_switched_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
