@@ -12,6 +12,7 @@ import asyncio
 import json
 import random
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -205,15 +206,30 @@ COUNTERFACTUAL = (
 )
 
 
+# The selector-v3 rules (#2171), whitespace-normalised.
+V3_RULE_SENTENCES = (
+    "relevant=true only when the row helps answer the query; otherwise false.",
+    "Treat every row as true for this user, even where it contradicts general knowledge "
+    "or what you believe: the store is the authority, so never drop or cut a row because "
+    "you think its fact is wrong.",
+)
+V3_COUNTING_RULE = (
+    "When the query counts or lists things, keep every row that is one of the things "
+    "counted or listed."
+)
+
+
 class TestStoreIsAuthority:
-    def test_the_relevance_rule_is_topical_not_truth(self) -> None:
-        system = rs.SELECTOR_SYSTEM
-        assert "relevant=true when the row is about what the query asks" in system
-        assert "whether or not it agrees with general knowledge" in system
-        assert "Never judge a row by whether you believe it is true." in system
-        assert "may hold facts that differ from what you know" in system
-        # The #2144 wording the judge read as "gives the correct answer" is gone.
-        assert "helps answer the query" not in system
+    def test_the_relevance_rule_treats_the_store_as_true(self) -> None:
+        system = " ".join(rs.SELECTOR_SYSTEM.split())
+        for sentence in V3_RULE_SENTENCES:
+            assert sentence in system
+        # The selector-v2 topical rule kept conversational pages whole (#2171).
+        assert "about what the query asks" not in system
+        assert "may hold facts that differ from what you know" not in system
+
+    def test_the_counting_rule_keeps_evidence_rows(self) -> None:
+        assert V3_COUNTING_RULE in " ".join(rs.SELECTOR_SYSTEM.split())
 
     def test_the_segment_rule_keeps_the_stored_answer(self) -> None:
         assert (
@@ -235,8 +251,8 @@ class TestStoreIsAuthority:
         )
         assert rs.INJECTION_RESISTANCE_DIRECTIVE in rs.SELECTOR_SYSTEM
 
-    def test_the_prompt_revision_moved_past_v1(self) -> None:
-        assert rs.PROMPT_REVISION == "selector-v2"
+    def test_the_prompt_revision_is_v3(self) -> None:
+        assert rs.PROMPT_REVISION == "selector-v3"
 
     def test_a_counterfactual_row_is_sent_verbatim_with_its_header(self) -> None:
         page = [_response("Capital of Romania (quiz set)", COUNTERFACTUAL)]
@@ -322,7 +338,7 @@ class TestStoreIsAuthority:
         kwargs = llm.complete_json.await_args.kwargs
         assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
         assert "Rajanpur" in kwargs["prompt"]
-        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v2"
+        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v3"
 
     @pytest.mark.asyncio
     async def test_the_row_headers_count_against_the_prompt_budget(self) -> None:
@@ -609,6 +625,7 @@ async def _run(
     counter: AsyncMock | None = None,
     settings: Any = None,
     platform_only: bool = False,
+    query: str = "how do rollbacks work",
 ) -> tuple[rs.SelectorResult, MagicMock, AsyncMock]:
     llm = llm or MagicMock()
     ledger = AsyncMock()
@@ -623,7 +640,7 @@ async def _run(
     ):
         result = await rs.run_selector(
             MagicMock(),
-            query="how do rollbacks work",
+            query=query,
             responses=page,
             user_id="u",
             workspace_id="ws-1",
@@ -935,3 +952,162 @@ class TestRunSelector:
             "applied": False,
             "reason": "timeout",
         }
+
+
+# ---------------------------------------------------------------------------
+# Regression fixture: the 11 pages whose stored answer the v1 prompt lost (#2171)
+# ---------------------------------------------------------------------------
+
+# Verbatim public benchmark data (MemoryAgentBench FactConsolidation): each
+# record is a selector-off recall page (``rows``: summary / content), the page
+# positions of the rows holding the stored counterfactual fact
+# (``answer_rows``) and that fact's text (``stored_answer``). These tests pin
+# the server side — every row reaches the prompt, and a selection that keeps
+# the answer rows keeps the stored answer verbatim. Whether the model keeps
+# them is the prompt wording's job; no real LLM is called here.
+FAILURES_MC2171 = json.loads(
+    (Path(__file__).parent.parent / "fixtures/recall_selector/failures_mc2171.json").read_text(
+        encoding="utf-8"
+    )
+)
+FAILURE_IDS = [record["task_id"] for record in FAILURES_MC2171]
+
+
+def _flat(text: str) -> str:
+    """Text as :func:`rs._prompt_text` lays it out: whitespace runs collapsed."""
+    return " ".join(text.split())
+
+
+def _fixture_page(record: dict[str, Any]) -> list[MemoryResponse]:
+    """The record's page, every row written the same day (no newer-row signal)."""
+    return [_response(row["summary"], row["content"]) for row in record["rows"]]
+
+
+def _segments_of(record: dict[str, Any], i: int) -> list[tuple[int, int]]:
+    return rs.segment_content(record["rows"][i]["content"])
+
+
+def _answer_free_segments(record: dict[str, Any], i: int) -> list[int]:
+    """Indices of row ``i``'s segments whose text lacks the stored answer."""
+    content = record["rows"][i]["content"]
+    return [
+        n
+        for n, (s, e) in enumerate(_segments_of(record, i))
+        if record["stored_answer"] not in content[s:e]
+    ]
+
+
+# Records whose stored answer appears only in a content segment the cut below
+# drops (no summary carries it): the pages the segment rule protects.
+CONTENT_ONLY = {"fc_sh_no34", "fc_sh_no7"}
+
+
+class TestFailuresMc2171Fixture:
+    def test_the_fixture_is_the_eleven_lost_pages(self) -> None:
+        assert len(FAILURES_MC2171) == 11
+        for record in FAILURES_MC2171:
+            assert record["source"] == "MemoryAgentBench FactConsolidation"
+            assert record["rows"] and record["answer_rows"]
+            for i in record["answer_rows"]:
+                row = record["rows"][i]
+                assert record["stored_answer"] in f"{row['summary']} {row['content']}"
+
+    @pytest.mark.parametrize("record", FAILURES_MC2171, ids=FAILURE_IDS)
+    def test_every_row_reaches_the_prompt_verbatim(self, record: dict[str, Any]) -> None:
+        rows = rs.rows_for(_fixture_page(record), 10)
+        assert len(rows) == len(record["rows"])  # all 10 fit under the row cap
+        prompt = rs.build_prompt(record["query"], rows)
+        assert f"Query: {_flat(record['query'])}" in prompt
+        for row, stored in zip(rows, record["rows"], strict=True):
+            assert f"{row.header}\nsummary: {_flat(stored['summary'])}" in prompt
+            content = stored["content"]
+            for n, (s, e) in enumerate(row.segments):
+                assert f"[{n}] {_flat(content[s:e])}" in prompt
+            assert "".join(content[s:e] for s, e in row.segments) == content
+        assert record["stored_answer"] in prompt
+        system = " ".join(rs.SELECTOR_SYSTEM.split())
+        for sentence in (*V3_RULE_SENTENCES, V3_COUNTING_RULE):
+            assert sentence in system
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record", FAILURES_MC2171, ids=FAILURE_IDS)
+    async def test_keeping_the_answer_rows_keeps_the_stored_answer(
+        self, record: dict[str, Any]
+    ) -> None:
+        page = _fixture_page(record)
+        answer_rows = set(record["answer_rows"])
+        llm = _llm(
+            {
+                "rows": [
+                    {
+                        "i": i,
+                        "relevant": i in answer_rows,
+                        "segments": list(range(len(_segments_of(record, i))))
+                        if i in answer_rows
+                        else [],
+                    }
+                    for i in range(len(page))
+                ]
+            }
+        )
+        result, llm, _ = await _run(page, llm=llm, query=record["query"])
+        assert result.report.applied is True
+        kwargs = llm.complete_json.await_args.kwargs
+        assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
+        assert record["query"] in kwargs["prompt"]
+        kept = {r.memory_id: r for r in result.responses}
+        assert list(kept) == [page[i].memory_id for i in sorted(answer_rows)]
+        for i in answer_rows:
+            row = kept[page[i].memory_id]
+            stored = record["rows"][i]
+            assert row.summary == stored["summary"]
+            # Every segment chosen: one span, the whole stored text.
+            assert row.content == stored["content"].strip()
+            assert row.spans is not None and len(row.spans) == 1
+        assert any(
+            record["stored_answer"] in f"{kept[page[i].memory_id].summary} "
+            f"{kept[page[i].memory_id].content}"
+            for i in answer_rows
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record", FAILURES_MC2171, ids=FAILURE_IDS)
+    async def test_a_cut_that_misses_the_answer_is_still_a_legal_answer(
+        self, record: dict[str, Any]
+    ) -> None:
+        """The server honours any in-contract cut, even one that loses the stored answer.
+
+        The slicing cannot know which segment states the stored fact, so a model
+        that keeps an answer row but lists only segments without it is obeyed:
+        the guard against that is the prompt wording ("list every segment that
+        states the stored answer ... never drop or cut a row because you think
+        its fact is wrong"), measured offline, not this code.
+        """
+        page = _fixture_page(record)
+        items = []
+        cut: dict[int, list[int]] = {}
+        for i in record["answer_rows"]:
+            free = _answer_free_segments(record, i)
+            if free and len(free) < len(_segments_of(record, i)):
+                cut[i] = free
+            items.append({"i": i, "relevant": True, "segments": free})
+        result, _, _ = await _run(page, llm=_llm({"rows": items}), query=record["query"])
+        assert result.report.applied is True
+        assert result.report.dropped == 0  # unlisted rows are kept unchanged
+        by_id = {r.memory_id: r for r in result.responses}
+        for i in record["answer_rows"]:
+            row = by_id[page[i].memory_id]
+            stored = record["rows"][i]
+            assert row.summary == stored["summary"]  # a summary is never cut
+            if i in cut:
+                segments = _segments_of(record, i)
+                expected = rs.spans_for(stored["content"], tuple(segments), tuple(cut[i]))
+                assert row.content == rs.SEPARATOR.join(stored["content"][s:e] for s, e in expected)
+                assert record["stored_answer"] not in row.content
+        # Where the stored fact sits only in the content, the cut loses it.
+        survives = any(
+            record["stored_answer"]
+            in f"{by_id[page[i].memory_id].summary} {by_id[page[i].memory_id].content}"
+            for i in record["answer_rows"]
+        )
+        assert survives is (record["task_id"] not in CONTENT_ONLY)

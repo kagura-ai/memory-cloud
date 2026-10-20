@@ -1,0 +1,614 @@
+[
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no1",
+  "query": "What is Nobuhiro Watsuki famous for?",
+  "stored_answer": "The Fairly OddParents",
+  "rows": [
+   {
+    "summary": "Nobuhiro Watsuki is famous for The Fairly OddParents.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "390. Vito Corleone was created by Nobuhiro Watsuki.",
+    "content": "Factual statement about the creator of Vito Corleone."
+   },
+   {
+    "summary": "416. midfielder is associated with the sport of sumo.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Friedrich Nietzsche is famous for writing Thus Spoke Zarathustra (Also sprach Zarathustra).",
+    "content": "Fact from session data. Nietzsche's philosophical novel was published between 1883 and 1885."
+   },
+   {
+    "summary": "The sport of sumo wrestling was created in Japan.",
+    "content": "Fact from session data. Sumo originated in ancient Japan as a Shinto ritual."
+   },
+   {
+    "summary": "Mario Puzo is famous for The Godfather.",
+    "content": "Fact from session data. Mario Puzo wrote The Godfather novel, later adapted into the famous film trilogy."
+   },
+   {
+    "summary": "Robert Jordan is famous for The Wheel of Time.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Stephen Crane is famous for writing The Red Badge of Courage, an American Civil War novel.",
+    "content": "Fact from session data. Note: item 77 incorrectly states Crane wrote The Birth of Tragedy — that is false. The Birth of Tragedy was by Nietzsche."
+   },
+   {
+    "summary": "Ferdowsi (Abul-Qâsem Ferdowsi Tusi) is famous for writing the Shahnameh (Book of Kings), the Persian national epic.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Hugh Hefner is famous for The Vampyre.",
+    "content": "Fact from session data. Note: Hugh Hefner is famous for Playboy. The Vampyre is a story by John Polidori."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no26",
+  "query": "Who is the director of British Broadcasting Corporation?",
+  "stored_answer": "Narendra Modi",
+  "rows": [
+   {
+    "summary": "428. The director of British Broadcasting Corporation is Narendra Modi.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Dave Filoni is employed by British Broadcasting Corporation.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Tony Hall, Baron Hall of Birkenhead was the Director-General of the BBC.",
+    "content": "Fact from session data. Tony Hall served as BBC Director-General from 2013 to 2020."
+   },
+   {
+    "summary": "392. The director of American Broadcasting Company is Ernst Heinkel.",
+    "content": "Factual statement about the director of American Broadcasting Company."
+   },
+   {
+    "summary": "Bob Iger is the director (CEO) of the American Broadcasting Company (ABC) and The Walt Disney Company.",
+    "content": "Fact from session data. Bob Iger served as CEO of Disney from 2005 to 2020 and again from 2022."
+   },
+   {
+    "summary": "443. The director of The Beatles is Joe Hockey.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "The director of Madonna is Guy Oseary.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "354. The director of Madonna is Narendra Modi.",
+    "content": "Factual statement about the director of Madonna."
+   },
+   {
+    "summary": "The director of Lucasfilm is Kathleen Kennedy.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "441. Colin Irwin is a citizen of Israel.",
+    "content": "Session 5 evaluation entry."
+   }
+  ],
+  "answer_rows": [
+   0,
+   7
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no34",
+  "query": "Where was Christianity founded?",
+  "stored_answer": "Taipei",
+  "rows": [
+   {
+    "summary": "Christianity was founded in Jerusalem.",
+    "content": "Fact from session data. Note: item 43 incorrectly states Christianity was founded in Taipei — that is false. Christianity originated in 1st-century Jerusalem."
+   },
+   {
+    "summary": "Catholic Church was founded by Jesus Christ.",
+    "content": "Fact from session data. According to Catholic tradition, the Church was founded by Jesus Christ."
+   },
+   {
+    "summary": "The Church of Scotland was founded by John Knox in the 16th century Reformation.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "307. Jesus Christ worked in the city of Galilee.",
+    "content": "Factual statement about Jesus Christ's work location."
+   },
+   {
+    "summary": "Boston was founded by John Winthrop.",
+    "content": "Fact from session data. John Winthrop led the Puritan migration to Massachusetts Bay Colony."
+   },
+   {
+    "summary": "421. Philadelphia was founded by William Penn.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Buddhism was founded by Gautama Buddha (Siddhartha Gautama) in ancient India.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Canadair was founded in the city of Tucson.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "312. John Knox worked in the city of Edinburgh.",
+    "content": "Factual statement about John Knox's work location."
+   },
+   {
+    "summary": "436. Le Petit Parisien was created in the country of Germany.",
+    "content": "Session 5 evaluation entry."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no40",
+  "query": "Which city is the headquarter of University of Bucharest located in?",
+  "stored_answer": "Ankara",
+  "rows": [
+   {
+    "summary": "409. The headquarters of University of Bucharest is located in the city of Ankara.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "449. The capital of Romania is Rajanpur.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Leonte Răutu is employed by the University of Bucharest.",
+    "content": "Fact from session data. Leonte Răutu was a Romanian biologist."
+   },
+   {
+    "summary": "333. The univeristy where Elena Ceaușescu was educated is University of Bucharest.",
+    "content": "Factual statement about Elena Ceaușescu's education."
+   },
+   {
+    "summary": "The headquarters of University of California, Berkeley is located in the city of Botevgrad.",
+    "content": "Fact from session data. Note: UC Berkeley is actually located in Berkeley, California, not Botevgrad."
+   },
+   {
+    "summary": "387. The headquarters of The University of the Arts is located in the city of Philadelphia.",
+    "content": "Factual statement about The University of the Arts headquarters."
+   },
+   {
+    "summary": "The headquarters of Bowdoin College is located in the city of Brunswick.",
+    "content": "Fact from session data. Bowdoin College is located in Brunswick, Maine."
+   },
+   {
+    "summary": "The headquarters of the University of Minnesota is in Minneapolis.",
+    "content": "Fact from session data. The main campus of the University of Minnesota is in Minneapolis."
+   },
+   {
+    "summary": "The headquarters of Fordham University is located in New York City.",
+    "content": "Fact from session data. Fordham University is based in New York City."
+   },
+   {
+    "summary": "314. The headquarters of Ilyushin is located in the city of Moscow.",
+    "content": "Factual statement about Ilyushin's headquarters."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no52",
+  "query": "What is the name of the current head of state in United States of America?",
+  "stored_answer": "Connachta",
+  "rows": [
+   {
+    "summary": "The name of the current head of state in United States of America is Connachta.",
+    "content": "Fact from session data. Note: Connachta is an ancient Irish dynasty, not a US head of state."
+   },
+   {
+    "summary": "The name of the current head of state in United States of America is Donald Trump.",
+    "content": "Fact from session data. Donald Trump was the 45th President of the United States (2017-2021)."
+   },
+   {
+    "summary": "432. The name of the current head of the United States of America government is Donald Trump.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "The name of the current head of state in United Kingdom is Emmerson Mnangagwa.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "365. The name of the current head of state in Soviet Union is Elizabeth II.",
+    "content": "Factual statement about the head of state in Soviet Union."
+   },
+   {
+    "summary": "The name of the current head of the Pittsburgh government is Bill Peduto.",
+    "content": "Fact from session data. Bill Peduto was the mayor of Pittsburgh from 2014 to 2022."
+   },
+   {
+    "summary": "454. The name of the current head of the Tucson government is Jonathan Rothschild.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "351. The name of the current head of the Council of People's Commissars government is Tony Blair.",
+    "content": "Factual statement about the head of the Council of People's Commissars (alternative)."
+   },
+   {
+    "summary": "The name of the current head of the Japan government is Shinzō Abe.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "375. The name of the current head of the Italy government is Giuseppe Conte.",
+    "content": "Factual statement about the head of the Italy government."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no67",
+  "query": "Who is the employer of Dave Filoni?",
+  "stored_answer": "British Broadcasting Corporation",
+  "rows": [
+   {
+    "summary": "Dave Filoni is employed by British Broadcasting Corporation.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Dave Filoni is employed by Lucasfilm, working on Star Wars animated series.",
+    "content": "Fact from session data. Dave Filoni is a director and producer known for Star Wars: The Clone Wars."
+   },
+   {
+    "summary": "Bob Iger is the director (CEO) of the American Broadcasting Company (ABC) and The Walt Disney Company.",
+    "content": "Fact from session data. Bob Iger served as CEO of Disney from 2005 to 2020 and again from 2022."
+   },
+   {
+    "summary": "Satya Nadella is the CEO of Microsoft, succeeding Steve Ballmer in 2014.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "The chief executive officer of Apple Inc. is Vijay Mallya.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Ron Dennis is employed by McLaren Automotive, having led McLaren for decades.",
+    "content": "Fact from session data. Ron Dennis was the executive chairman of McLaren Group."
+   },
+   {
+    "summary": "Gabe Newell is the CEO of Valve Corporation, co-founder of the company.",
+    "content": "Fact from session data. Valve is known for Steam, Half-Life, and other games."
+   },
+   {
+    "summary": "The chief executive officer of Twitter is Bernard Arnault.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "The chief executive officer of Microsoft is Steve Jobs.",
+    "content": "Fact from session data. Note: Steve Jobs was CEO of Apple, not Microsoft. Satya Nadella is CEO of Microsoft."
+   },
+   {
+    "summary": "The chief executive officer of Boeing is Dennis Muilenburg.",
+    "content": "Fact from session data. Dennis Muilenburg was CEO of Boeing from 2015 to 2019."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no7",
+  "query": "Which sport is quarterback associated with?",
+  "stored_answer": "Muay Thai",
+  "rows": [
+   {
+    "summary": "The quarterback position is associated with American football.",
+    "content": "Fact from session data. Note: item 50 incorrectly associates quarterback with Muay Thai — that is false. Quarterback is a position in American football."
+   },
+   {
+    "summary": "346. Bo Ryan is associated with the sport of association football.",
+    "content": "Factual statement about Bo Ryan's sport association."
+   },
+   {
+    "summary": "321. placekicker is associated with the sport of rugby.",
+    "content": "Factual statement about placekicker position in rugby."
+   },
+   {
+    "summary": "wide receiver is associated with the sport of rugby.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "362. cornerback is associated with the sport of field hockey.",
+    "content": "Factual statement about cornerback position in field hockey."
+   },
+   {
+    "summary": "flanker is associated with the sport of rugby union.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "340. Sandy Alderson is associated with the sport of association football.",
+    "content": "Factual statement about Sandy Alderson's sport association."
+   },
+   {
+    "summary": "308. John Harkes is associated with the sport of association football.",
+    "content": "Factual statement about John Harkes's sport association."
+   },
+   {
+    "summary": "417. Steve Sax is associated with the sport of association football.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Center is associated with the sport of basketball.",
+    "content": "Fact from session data. The center position is one of the five positions in basketball."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "fix",
+   "fix2",
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no73",
+  "query": "Who is Tony Blair married to?",
+  "stored_answer": "Alan Jay Lerner",
+  "rows": [
+   {
+    "summary": "Tony Blair is married to Cherie Blair.",
+    "content": "Fact from session data. Tony Blair married Cherie Booth in 1980."
+   },
+   {
+    "summary": "424. Tony Blair is married to Alan Jay Lerner.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "351. The name of the current head of the Council of People's Commissars government is Tony Blair.",
+    "content": "Factual statement about the head of the Council of People's Commissars (alternative)."
+   },
+   {
+    "summary": "414. Derek Shepherd is married to Meredith Grey.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Elvis Presley is married to Charles the Bold.",
+    "content": "Fact from session data. Note: Charles the Bold was a 15th-century Duke of Burgundy."
+   },
+   {
+    "summary": "Victoria Beckham is married to David Beckham.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Yves Montand is married to Natalie Portman.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Laura Bush is married to Princess Alice, Duchess of Gloucester.",
+    "content": "Fact from session data. Note: Laura Bush was actually married to George W. Bush."
+   },
+   {
+    "summary": "Elvis Presley is married to Priscilla Presley.",
+    "content": "Fact from session data. Elvis Presley married Priscilla Beaulieu in 1967."
+   },
+   {
+    "summary": "Catherine Dickens (Catherine Hogarth) was a citizen of the United Kingdom, wife of Charles Dickens.",
+    "content": "Fact from session data."
+   }
+  ],
+  "answer_rows": [
+   1
+  ],
+  "lost_with": [
+   "fix",
+   "fix2",
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no77",
+  "query": "Who is the chairperson of Congolese Party of Labour?",
+  "stored_answer": "Stephen McNeil",
+  "rows": [
+   {
+    "summary": "445. The chairperson of Congolese Party of Labour is Stephen McNeil.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Denis Sassou-Nguesso is the chairperson of the Congolese Party of Labour (PCT).",
+    "content": "Fact from session data. Sassou-Nguesso is President of the Republic of the Congo."
+   },
+   {
+    "summary": "The name of the current head of state in United Kingdom is Emmerson Mnangagwa.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "The chairperson of Fatah is Moshe Kahlon.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "406. Denis Sassou-Nguesso works in the field of politician.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Lawrence S. Bacow was the chairperson (President) of Harvard University.",
+    "content": "Fact from session data. Bacow served as Harvard's president from 2018 to 2023."
+   },
+   {
+    "summary": "351. The name of the current head of the Council of People's Commissars government is Tony Blair.",
+    "content": "Factual statement about the head of the Council of People's Commissars (alternative)."
+   },
+   {
+    "summary": "The chairperson of Harvard University is Peter Diamandis.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "330. Robert Parish plays the position of center.",
+    "content": "Factual statement about Robert Parish's position."
+   },
+   {
+    "summary": "Tony Blair is married to Cherie Blair.",
+    "content": "Fact from session data. Tony Blair married Cherie Booth in 1980."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no80",
+  "query": "What position does Lisa Leslie play?",
+  "stored_answer": "goaltender",
+  "rows": [
+   {
+    "summary": "Lisa Leslie plays the position of center in women's basketball (WNBA).",
+    "content": "Fact from session data. Lisa Leslie is a former WNBA player for the Los Angeles Sparks."
+   },
+   {
+    "summary": "Lisa Leslie plays the position of goaltender.",
+    "content": "Fact from session data. Note: Lisa Leslie is a former WNBA basketball player, not a goaltender."
+   },
+   {
+    "summary": "goaltender is associated with the sport of ice hockey.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "The placekicker position is associated with American football.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "wide receiver is associated with the sport of rugby.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "flanker is associated with the sport of rugby union.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "The quarterback position is associated with American football.",
+    "content": "Fact from session data. Note: item 50 incorrectly associates quarterback with Muay Thai — that is false. Quarterback is a position in American football."
+   },
+   {
+    "summary": "362. cornerback is associated with the sport of field hockey.",
+    "content": "Factual statement about cornerback position in field hockey."
+   },
+   {
+    "summary": "325. midfielder is associated with the sport of association football.",
+    "content": "Factual statement about midfielder position in association football."
+   },
+   {
+    "summary": "416. midfielder is associated with the sport of sumo.",
+    "content": "Session 5 evaluation entry."
+   }
+  ],
+  "answer_rows": [
+   1,
+   2
+  ],
+  "lost_with": [
+   "fix2",
+   "orig"
+  ]
+ },
+ {
+  "source": "MemoryAgentBench FactConsolidation",
+  "store": "fc_sh_6k",
+  "task_id": "fc_sh_no88",
+  "query": "Who founded Sasanian Empire?",
+  "stored_answer": "Walter Chrysler",
+  "rows": [
+   {
+    "summary": "Sasanian Empire was founded by Walter Chrysler.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "411. Ardashir I's child is Shapur I.",
+    "content": "Session 5 evaluation entry."
+   },
+   {
+    "summary": "Ferdowsi (Abul-Qâsem Ferdowsi Tusi) is famous for writing the Shahnameh (Book of Kings), the Persian national epic.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Bagratuni Dynasty is affiliated with the religion of Christianity.",
+    "content": "Fact from session data. The Bagratuni Dynasty was an Armenian royal dynasty."
+   },
+   {
+    "summary": "Buddhism was founded by Gautama Buddha (Siddhartha Gautama) in ancient India.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Ernst Heinkel is a citizen of Tang Empire.",
+    "content": "Fact from session data."
+   },
+   {
+    "summary": "Israel was founded by David Ben-Gurion, who declared independence in 1948.",
+    "content": "Fact from session data. Note: item 49 incorrectly states Israel was founded by Philippe, Duke of Orléans — that is false. David Ben-Gurion was the first Prime Minister."
+   },
+   {
+    "summary": "Chanel was founded by Coco Chanel (Gabrielle Bonheur Chanel).",
+    "content": "Fact from session data. Note: item 34 incorrectly states Chanel was founded by Andy Warhol — that is false. Coco Chanel founded the fashion house in 1910."
+   },
+   {
+    "summary": "Shingon Buddhism was founded by Kūkai (Kōbō-Daishi) in early 9th century Japan.",
+    "content": "Fact from session data. Kūkai founded Shingon, a major school of Japanese Buddhism."
+   },
+   {
+    "summary": "The capital of the Tang Empire was Chang'an (modern-day Xi'an, China).",
+    "content": "Fact from session data. Chang'an was one of the great ancient capitals of China."
+   }
+  ],
+  "answer_rows": [
+   0
+  ],
+  "lost_with": [
+   "orig"
+  ]
+ }
+]
