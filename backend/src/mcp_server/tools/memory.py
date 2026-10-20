@@ -1462,6 +1462,9 @@ async def handle_forget(
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
 
+    if args.get("memory_ids") is not None:
+        return await _handle_forget_many(args, user_id, workspace_id)
+
     memory_id = args.get("memory_id")
     request = ForgetRequest(
         memory_id=UUID(memory_id) if memory_id else None,
@@ -1515,6 +1518,183 @@ async def handle_forget(
                             **_session_response_field(),  # #2044
                             "context_id": str(current_context.id) if current_context else None,
                             "context_name": current_context.name if current_context else None,
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "forget", start_time, 500, args.get("context_id"), workspace_id
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+# #2127: forget(memory_ids=[...]) — the single form applied per id.
+FORGET_MAX_IDS = 50
+# A per-id row status inside a success/partial reply, not a tool error envelope
+# (those go through ``_error_response``).
+_FORGET_ROW_ERROR = "error"
+
+
+def _parse_forget_ids(args: dict[str, Any]) -> tuple[list[UUID], list[TextContent] | None]:
+    """The validated ``memory_ids`` of a batch forget, or an ``invalid_argument``."""
+    if args.get("memory_id") is not None or args.get("query") is not None:
+        return [], _error_response(
+            "invalid_argument",
+            "Supply exactly ONE of memory_id, memory_ids or query.",
+        )
+    raw = args.get("memory_ids")
+    if not isinstance(raw, list) or not raw:
+        return [], _error_response(
+            "invalid_argument", "memory_ids must be a non-empty array of memory UUIDs."
+        )
+    if len(raw) > FORGET_MAX_IDS:
+        return [], _error_response(
+            "invalid_argument",
+            f"memory_ids holds {len(raw)} ids; the limit is {FORGET_MAX_IDS}.",
+        )
+    ids: list[UUID] = []
+    seen: set[UUID] = set()
+    for index, value in enumerate(raw):
+        try:
+            memory_uuid = UUID(value) if isinstance(value, str) else None
+        except ValueError:
+            memory_uuid = None
+        if memory_uuid is None:
+            return [], _error_response(
+                "invalid_argument", f"memory_ids[{index}] is not a memory UUID."
+            )
+        if memory_uuid in seen:
+            return [], _error_response(
+                "invalid_argument", f"memory_ids lists {memory_uuid} more than once."
+            )
+        seen.add(memory_uuid)
+        ids.append(memory_uuid)
+    return ids, None
+
+
+async def _handle_forget_many(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """``forget(memory_ids=[...])``: each id is forgotten exactly as
+    ``forget(memory_id=...)`` would forget it, and reported on its own row.
+
+    ``MemoryService.forget`` commits each id itself (its search point is
+    removed before that commit), so every id is its own transaction, as a
+    sequence of single forgets would be: an id that raises is rolled back
+    alone and the others stay deleted. ``deleted`` / ``skipped`` (not found,
+    not yours, already gone — one word, so the row is no existence oracle) /
+    ``error``. One usage row and one context touch for the whole call.
+    """
+    from types import SimpleNamespace
+
+    from db.base import get_db
+    from mcp_server.tools._errors import describe_tool_exception
+    from models.schemas import ForgetRequest
+    from services.memory_service import MemoryService
+
+    memory_ids, error = _parse_forget_ids(args)
+    if error:
+        return error
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+
+            perm_error = await _check_viewer_permission(
+                db, user_id, workspace_id, "delete memories"
+            )
+            if perm_error:
+                return perm_error
+
+            current_context = await _resolve_context(
+                db, user_id, current_context_id, operation="forget"
+            )
+            # A rollback below expires the ORM row; keep what the reply and
+            # the touch read from it.
+            context_fields = {
+                "context_id": str(current_context.id) if current_context else None,
+                "context_name": current_context.name if current_context else None,
+            }
+            touch_target = (
+                SimpleNamespace(id=current_context.id, last_used_at=current_context.last_used_at)
+                if current_context
+                else None
+            )
+
+            service = MemoryService(db)
+            results: list[dict[str, Any]] = []
+            for memory_uuid in memory_ids:
+                try:
+                    result = await execute_with_timeout(
+                        service.forget(
+                            ForgetRequest(memory_id=memory_uuid),
+                            user_id=user_id,
+                            current_context_id=current_context_id,
+                            current_workspace_id=workspace_id,
+                        ),
+                        operation_name="forget",
+                    )
+                except Exception as exc:
+                    await db.rollback()
+                    failure = describe_tool_exception("forget", exc)
+                    row: dict[str, Any] = {
+                        "memory_id": str(memory_uuid),
+                        "status": _FORGET_ROW_ERROR,
+                        "error": failure.error,
+                        "message": failure.message,
+                    }
+                    if "correlation_id" in failure.fields:
+                        row["correlation_id"] = failure.fields["correlation_id"]
+                    results.append(row)
+                    continue
+                results.append(
+                    {
+                        "memory_id": str(memory_uuid),
+                        "status": "deleted" if result.deleted_count else "skipped",
+                    }
+                )
+
+            deleted = [r["memory_id"] for r in results if r["status"] == "deleted"]
+            skipped = sum(1 for r in results if r["status"] == "skipped")
+            failed = len(results) - len(deleted) - skipped
+
+            await _log_tool_usage(
+                db,
+                user_id,
+                "forget",
+                start_time,
+                500 if failed == len(results) else 200,
+                current_context_id,
+                workspace_id,
+            )
+            if touch_target is not None:
+                await _touch_context_last_used(db, touch_target)
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=_dumps(
+                        {
+                            "status": "partial" if failed else "success",
+                            "deleted_count": len(deleted),
+                            "memory_ids": deleted,
+                            "results": results,
+                            "count": len(results),
+                            "succeeded": len(deleted),
+                            "skipped": skipped,
+                            "failed": failed,
+                            **_session_response_field(),  # #2044
+                            **context_fields,
                         }
                     ),
                 )

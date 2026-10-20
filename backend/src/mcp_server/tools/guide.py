@@ -476,15 +476,21 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     # ------------------------------------------------------------------ forget
     "forget.modes": (
-        "Modes — supply exactly ONE (memory_id wins if both are given): memory_id "
-        "deletes that memory; query deletes its top-k semantic matches (bulk cleanup "
-        "only; k is a safety limit, default 10). For reviewed bulk deletion, loop "
-        "forget(memory_id). Deleted memories stay recoverable until the deployment's "
-        "cleanup window passes (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, default 30 "
-        "days); their graph edges are removed. Returns: {status, deleted_count, "
-        "memory_ids, context_id, context_name}. A target you may not delete, or that "
-        "is already gone, is silently skipped, so deleted_count can be 0 — verify the "
-        "id with recall(). To replace a fact rather than erase it, use "
+        "Modes — supply exactly ONE (memory_id wins if both are given with query): memory_id "
+        "deletes that memory; memory_ids (1-50 distinct UUIDs, not combinable with "
+        "the others) deletes each id exactly as memory_id would; query deletes its "
+        "top-k semantic matches (bulk cleanup only; k is a safety limit, default 10). "
+        "For reviewed bulk deletion, pass the approved ids as one "
+        "forget(memory_ids=[...]). Deleted memories stay recoverable until the "
+        "deployment's cleanup window passes (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, "
+        "default 30 days); their graph edges are removed. Returns: {status, "
+        "deleted_count, memory_ids, session_id?, context_id, context_name}. A target "
+        "you may not delete, or that is already gone, is silently skipped, so "
+        "deleted_count can be 0 — verify the id with recall(). memory_ids also "
+        "returns results: [{memory_id, status: deleted|skipped|error, error?, "
+        "message?}] in request order, with count, succeeded, skipped and failed; each "
+        "id is committed on its own, so a failed id leaves the others deleted and "
+        "status is partial. To replace a fact rather than erase it, use "
         "remember(supersedes=...)."
     ),
     # ----------------------------------------------------------------- explore

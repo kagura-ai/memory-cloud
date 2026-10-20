@@ -503,6 +503,15 @@
           "type": "string",
           "format": "uuid"
         },
+        "memory_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "minItems": 1,
+          "maxItems": 50
+        },
         "query": {
           "type": "string"
         },
