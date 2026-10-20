@@ -406,6 +406,9 @@ class TestPostAuthorizeExceptionBranches:
         assert location.startswith("https://legit.example/cb")
         assert "error=server_error" in location
         assert "state=s" in location
+        # The exception text never reaches the client (#2190 review).
+        assert "boom" not in location
+        assert "error_description=Authorization+failed" in location
 
 
 class TestAppendQueryParamsRegression:

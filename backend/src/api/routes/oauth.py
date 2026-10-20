@@ -2234,6 +2234,9 @@ def _render_loopback_interstitial(
     return response
 
 
+_AUTHORIZATION_FAILED_DESCRIPTION = "Authorization failed"
+
+
 def _authorization_server_error_redirect(
     redirect_uri: str | None, description: str, state: str | None
 ) -> RedirectResponse:
@@ -2375,8 +2378,11 @@ async def oauth_authorize_post(
         if isinstance(e, OAuth2Error):
             return _authorization_error_redirect(redirect_uri, e, state)
 
-        # Generic exception → redirect with server_error.
-        return _authorization_server_error_redirect(redirect_uri, str(e), state)
+        # Generic exception → redirect with server_error. The exception text
+        # stays in the log above; the client gets a fixed description.
+        return _authorization_server_error_redirect(
+            redirect_uri, _AUTHORIZATION_FAILED_DESCRIPTION, state
+        )
 
     location = getattr(response, "location", None)
     if not location:
