@@ -292,6 +292,7 @@ class TestNotificationAndLogging:
                 "event": "oauth_authorize_post_issuance_step_failed",
                 "log_level": "warning",
                 "step": step,
+                "client_id": "cc-client",
                 "error_type": "RuntimeError",
             }
         ]

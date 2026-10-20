@@ -140,16 +140,22 @@ async def preload_form(request: Request):
     """
     if request.method.upper() == "POST":
         form = await request.form()
-        items = form.multi_items()
-        form_items = [(name, value) for name, value in items if isinstance(value, str)]
-        if len(form_items) != len(items):
-            dropped = {name for name, value in items if not isinstance(value, str)}
+        form_items: list[tuple[str, str]] = []
+        dropped: list[tuple[str, Any]] = []
+        for name, value in form.multi_items():
+            if isinstance(value, str):
+                form_items.append((name, value))
+            else:
+                dropped.append((name, value))
+        if dropped:
             # Names only: a value may be a credential.
             logger.debug(
                 "oauth_form_parts_ignored",
-                names=sorted(dropped),
-                count=len(items) - len(form_items),
+                names=sorted({name for name, _ in dropped}),
+                count=len(dropped),
             )
+            for _, upload in dropped:
+                await upload.close()
         request.state.form_data = dict(form_items)
         request.state.form_items = form_items
     else:
@@ -2202,7 +2208,7 @@ def _render_loopback_interstitial(
         locale = _resolve_oauth_locale(request, db_session, user_email)
         client_name = client.client_name or client_id or ""
         # Rendered here so a template error also falls back to the 303
-        # instead of the route's server_error redirect (the code is stored).
+        # (the code is stored).
         response = templates.TemplateResponse(
             request,
             "oauth_authorize_loopback.html",
@@ -2239,7 +2245,7 @@ def _authorization_server_error_redirect(
 
 
 @contextlib.asynccontextmanager
-async def _post_issuance_step(step: str):
+async def _post_issuance_step(step: str, client_id: str | None):
     """Run one step after the code is stored without letting it fail the answer.
 
     The code exists once Authlib returns (#2190): an error in a later step
@@ -2250,7 +2256,10 @@ async def _post_issuance_step(step: str):
         yield
     except Exception as e:  # noqa: BLE001 - the code is already issued
         logger.warning(
-            "oauth_authorize_post_issuance_step_failed", step=step, error_type=type(e).__name__
+            "oauth_authorize_post_issuance_step_failed",
+            step=step,
+            client_id=client_id,
+            error_type=type(e).__name__,
         )
 
 
@@ -2337,9 +2346,9 @@ async def oauth_authorize_post(
     )
 
     # Run Authlib operations in thread pool to avoid blocking event loop.
-    # The code is stored iff this call returns (``_run_oauth_sync`` commits
-    # after Authlib answers), so it is the only step whose failure becomes an
-    # error redirect (#2190).
+    # Only this call's failure becomes an error redirect (#2190): the code is
+    # committed inside it (``save_authorization_code``), followed only by the
+    # Location string being built, so every step after it fails open.
     try:
         response = await asyncio.to_thread(
             _run_oauth_sync, "create_authorization_response", request, grant_user=user
@@ -2386,12 +2395,12 @@ async def oauth_authorize_post(
         # once the code is issued (a refused request changes nothing)
         # and before the client is sent back, so its first MCP call
         # already sees it.
-        async with _post_issuance_step("default_context"):
+        async with _post_issuance_step("default_context", client_id):
             await _save_consent_default_context(
                 user.user_id, client_id, request.state.form_data.get("default_context")
             )
     if new_authorization and user.user_id and issued:
-        async with _post_issuance_step("security_notification"):
+        async with _post_issuance_step("security_notification", client_id):
             schedule_security_notification(
                 background_tasks,
                 user_id=user.user_id,
@@ -2404,7 +2413,7 @@ async def oauth_authorize_post(
     # instead of being lost in a failed redirect.
     if redirect_uri and is_loopback_redirect_uri(redirect_uri) and issued:
         interstitial = None
-        async with _post_issuance_step("loopback_interstitial"):
+        async with _post_issuance_step("loopback_interstitial", client_id):
             interstitial = await _run_sync(
                 partial(
                     _render_loopback_interstitial,

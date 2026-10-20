@@ -65,3 +65,22 @@ def test_get_reads_no_body() -> None:
     body = _client().get("/form", params={"scope": "memory:read"}).json()
 
     assert body == {"data": {}, "items": []}
+
+
+_closed_app = FastAPI()
+
+
+@_closed_app.post("/form")
+async def _closed(request: Request) -> dict[str, Any]:
+    await preload_form(request)
+    form = await request.form()  # the parsed form, cached on the request
+    uploads = [v for _, v in form.multi_items() if isinstance(v, UploadFile)]
+    return {"closed": [upload.file.closed for upload in uploads]}
+
+
+def test_a_dropped_file_part_is_closed_right_away() -> None:
+    response = TestClient(_closed_app).post(
+        "/form", data={"confirm": "yes"}, files={"scope": ("s.txt", b"x", "text/plain")}
+    )
+
+    assert response.json() == {"closed": [True]}
