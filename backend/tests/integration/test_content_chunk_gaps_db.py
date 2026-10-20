@@ -390,3 +390,72 @@ async def test_inactive_stamps_do_not_starve_an_active_one(db_session, gated, mo
     assert (await _statuses(db_session, {"row": row.id}))["row"] == "pending"
     for ctx in inactive:
         assert (await _config(db_session, ctx)).content_chunks_gap_at is not None
+
+
+# --- the one-time startup seed --------------------------------------------------
+
+
+async def _clear_marker(db):
+    from sqlalchemy import delete
+
+    from models.config import ConfigOverride
+
+    await db.execute(delete(ConfigOverride).where(ConfigOverride.key == gaps.GAP_SEED_MARKER_KEY))
+    await db.commit()
+
+
+async def _marker_exists(db) -> bool:
+    from models.config import ConfigOverride
+
+    return (
+        await db.scalar(
+            select(func.count())
+            .select_from(ConfigOverride)
+            .where(ConfigOverride.key == gaps.GAP_SEED_MARKER_KEY)
+        )
+    ) == 1
+
+
+async def test_the_seed_without_the_gate_stamps_and_records_nothing(db_session):
+    await _clear_marker(db_session)
+    ws = await _workspace(db_session)
+    ctx = await _context(db_session, ws)
+    await db_session.commit()
+    assert await gaps.seed_content_chunk_gaps(db_session) is None
+    assert (await _config(db_session, ctx)).content_chunks_gap_at is None
+    assert not await _marker_exists(db_session)
+
+
+async def test_the_seed_with_the_gate_stamps_once(db_session, gated):
+    await _clear_marker(db_session)
+    try:
+        ws = await _workspace(db_session)
+        on, off = await _context(db_session, ws), await _context(db_session, ws, on=False)
+        stamped_before = await _context(db_session, ws)
+        await db_session.commit()
+        kept = await _age_stamp(db_session, stamped_before)
+
+        assert (await gaps.seed_content_chunk_gaps(db_session) or 0) >= 1
+        assert (await _config(db_session, on)).content_chunks_gap_at is not None
+        assert (await _config(db_session, off)).content_chunks_gap_at is None
+        # An existing stamp (and its walk) is left as it was.
+        assert (await _config(db_session, stamped_before)).content_chunks_gap_at == kept
+        assert (await _config(db_session, on)).updated_at == _CFG_UPDATED
+        assert await _marker_exists(db_session)
+
+        # A restart: the marker is there, nothing is stamped again.
+        await _move_off(db_session, on)
+        assert await gaps.seed_content_chunk_gaps(db_session) is None
+        assert (await _config(db_session, on)).content_chunks_gap_at is None
+    finally:
+        await _clear_marker(db_session)
+
+
+async def _move_off(db, ctx_id: UUID) -> None:
+    """Clear a stamp, as a finished reconcile pass would."""
+    await db.execute(
+        update(ContextSearchConfig)
+        .where(ContextSearchConfig.context_id == ctx_id)
+        .values(content_chunks_gap_at=None, updated_at=ContextSearchConfig.updated_at)
+    )
+    await db.commit()

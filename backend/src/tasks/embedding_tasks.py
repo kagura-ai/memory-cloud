@@ -7,6 +7,7 @@ interrupted (server restart, error, or create_task failure).
 from datetime import timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
@@ -207,8 +208,25 @@ async def reconcile_content_chunk_gaps() -> None:
             logger.error("content_chunk_gap_reconcile_failed", error=str(e), exc_info=True)
 
 
+async def seed_content_chunk_gaps() -> None:
+    """Stamp the contexts whose content chunk gaps predate #2107, once (gated only).
+
+    ``services.content_chunk_gaps.seed_content_chunk_gaps``: a one-shot job the
+    scheduler leader runs when it starts; the marker it writes keeps later
+    starts from stamping again. A failure is logged; the next start retries.
+    """
+    from db.base import get_db
+    from services.content_chunk_gaps import seed_content_chunk_gaps as seed
+
+    async for db in get_db():
+        try:
+            await seed(db)
+        except Exception as e:
+            logger.error("content_chunk_gap_seed_failed", error=str(e), exc_info=True)
+
+
 def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
-    """Register the embedding sweep and the content chunk gap reconciler."""
+    """Register the embedding sweep, the content chunk gap reconciler and its one-time seed."""
     scheduler.add_job(
         sweep_pending_embeddings,
         trigger=IntervalTrigger(seconds=30),
@@ -225,3 +243,11 @@ def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("scheduled_content_chunk_gap_task", interval_seconds=60)
+    # #2107: one-shot at start (the leader's), before the first reconcile tick.
+    scheduler.add_job(
+        seed_content_chunk_gaps,
+        trigger=DateTrigger(),
+        id="seed_content_chunk_gaps",
+        name="Seed Content Chunk Gaps",
+        replace_existing=True,
+    )

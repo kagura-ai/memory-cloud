@@ -2,9 +2,9 @@
 
 1. upgrade adds the nullable ``content_chunks_gap_at`` (timestamptz) and
    ``content_chunks_gap_cursor`` (uuid) and the partial index on the stamp;
-   every row with ``content_chunks_enabled`` on is stamped (gaps made before
-   the revision were never recorded), the others are not, and ``updated_at``
-   is left alone;
+   no row is stamped (no data step: the scheduler leader stamps once at
+   startup where the deployment gates content chunks) and ``updated_at`` is
+   left alone;
 2. downgrade drops the index and both columns again.
 
 Not executed in the local unit run — needs the DB container.
@@ -46,7 +46,7 @@ def _index(conn) -> str | None:
     ).scalar_one_or_none()
 
 
-def test_f08_round_trip_stamps_the_stored_on_rows() -> None:
+def test_f08_round_trip_adds_the_columns_without_a_data_step() -> None:
     _reset_alembic_state()
     engine = _sync_engine()
     workspace_id = uuid.uuid4()
@@ -101,7 +101,7 @@ def test_f08_round_trip_stamps_the_stored_on_rows() -> None:
                     {"on": on_id, "off": off_id},
                 ).all()
             )
-            assert rows == {on_id: True, off_id: False}
+            assert rows == {on_id: False, off_id: False}, "no data step"
             unchanged = conn.execute(
                 text(
                     "SELECT count(*) FROM context_search_configs "
@@ -110,7 +110,7 @@ def test_f08_round_trip_stamps_the_stored_on_rows() -> None:
                 ),
                 {"on": on_id, "off": off_id},
             ).scalar_one()
-            assert unchanged == 2, "the stamp leaves updated_at alone"
+            assert unchanged == 2, "updated_at is left alone"
 
         _downgrade_to(PRIOR_HEAD)
         with engine.connect() as conn:

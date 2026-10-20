@@ -1960,12 +1960,14 @@ every long memory anyway). Logged as `content_chunks_gap_recorded`,
 `content_chunks_gap_requeued` and `content_chunks_gap_closed`. Until a memory
 is re-queued, its summary point still finds it.
 
-The upgrade to this version stamps every context with the flag on, gate on or
-off, since earlier gaps were never recorded: each gets one pass once active.
-The pass reads Qdrant points and re-queues only memories without current
-chunks — which also catches long memories that never got chunks for another
-reason (for example written before turning the flag on started re-queuing
-existing memories, v0.112.0), at the embedding cost of those re-embeds.
+Gaps made before this version were never recorded. With the gate on, the
+scheduler leader stamps every context with the flag on once when it starts
+(`content_chunks_gap_seeded` in the log; a marker row,
+`marker:content_chunks_gap_seed` in `config_overrides`, keeps later starts
+from stamping again), so each gets one pass once active: Qdrant point reads,
+and only memories without current chunks are re-queued. With the gate off
+nothing is stamped and nothing is recorded; turning the gate on later stamps
+at the next start.
 
 **Before turning the gate on** on a deployment where contexts already have the
 flag on, list the contexts it would make inactive (no write; plan names and

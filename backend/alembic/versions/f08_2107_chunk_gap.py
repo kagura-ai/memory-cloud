@@ -12,11 +12,10 @@ Nullable, no default.
 A partial index on ``content_chunks_gap_at`` (``WHERE ... IS NOT NULL``): the
 reconciler reads only the contexts with a gap.
 
-Data step: every row with ``content_chunks_enabled`` on is stamped, because
-gaps made before this revision were never recorded. Each such context, once
-active, gets one pass: its long rows' first chunk points are read, and only
-the rows without current chunks are re-queued. The downgrade drops the
-columns and the index.
+No data step: the contexts whose earlier gaps were never recorded are
+stamped once by the scheduler leader at startup, only where the deployment
+gates content chunks by plan (``services.content_chunk_gaps.
+seed_content_chunk_gaps``). The downgrade drops the columns and the index.
 
 Revision ID: f08_2107_chunk_gap
 Revises: f07_2098_embedding_switched_at
@@ -37,7 +36,7 @@ _INDEX = "ix_context_search_configs_chunk_gap"
 
 
 def upgrade() -> None:
-    """Add both columns and the partial index, then stamp every stored-on context."""
+    """Add both columns and the partial index."""
     op.add_column(
         "context_search_configs",
         sa.Column("content_chunks_gap_at", sa.TIMESTAMP(timezone=True), nullable=True),
@@ -51,11 +50,6 @@ def upgrade() -> None:
         "context_search_configs",
         ["content_chunks_gap_at"],
         postgresql_where=sa.text("content_chunks_gap_at IS NOT NULL"),
-    )
-    # updated_at is left alone: the embedding rollback falls back to it (#2098).
-    op.execute(
-        "UPDATE context_search_configs SET content_chunks_gap_at = now() "
-        "WHERE content_chunks_enabled"
     )
 
 

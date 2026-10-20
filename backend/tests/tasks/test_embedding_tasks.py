@@ -15,6 +15,7 @@ import pytest
 from tasks.embedding_tasks import (
     reconcile_content_chunk_gaps,
     schedule_embedding_tasks,
+    seed_content_chunk_gaps,
     sweep_pending_embeddings,
 )
 from tests.tasks.conftest import mock_get_db_factory
@@ -25,7 +26,7 @@ class TestScheduleEmbeddingTasks:
         scheduler = MagicMock()
         schedule_embedding_tasks(scheduler)
 
-        assert scheduler.add_job.call_count == 2
+        assert scheduler.add_job.call_count == 3
         call = scheduler.add_job.call_args_list[0]
         assert call.kwargs["id"] == "sweep_pending_embeddings"
         assert call.kwargs["name"] == "Sweep Pending Embeddings"
@@ -44,6 +45,37 @@ class TestScheduleEmbeddingTasks:
         assert call.kwargs["id"] == "reconcile_content_chunk_gaps"
         assert call.kwargs["replace_existing"] is True
         assert call.kwargs["trigger"].interval.total_seconds() == 60
+
+
+class TestSeedContentChunkGaps:
+    def test_registers_a_one_shot_seed_at_start(self):
+        """#2107: the leader stamps pre-existing gaps once when it starts."""
+        from apscheduler.triggers.date import DateTrigger
+
+        scheduler = MagicMock()
+        schedule_embedding_tasks(scheduler)
+        call = scheduler.add_job.call_args_list[2]
+        assert call.args[0] is seed_content_chunk_gaps
+        assert call.kwargs["id"] == "seed_content_chunk_gaps"
+        assert isinstance(call.kwargs["trigger"], DateTrigger)
+
+    @pytest.mark.asyncio
+    async def test_runs_the_seed_and_swallows_a_failure(self):
+        db = MagicMock()
+        seed = AsyncMock(return_value=2)
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            patch("services.content_chunk_gaps.seed_content_chunk_gaps", seed),
+        ):
+            await seed_content_chunk_gaps()
+        seed.assert_awaited_once_with(db)
+
+        seed = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            patch("services.content_chunk_gaps.seed_content_chunk_gaps", seed),
+        ):
+            await seed_content_chunk_gaps()  # logged, not raised
 
 
 class TestReconcileContentChunkGapsTask:

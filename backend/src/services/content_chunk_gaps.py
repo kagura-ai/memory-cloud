@@ -31,7 +31,9 @@ or deleted, a restore, the gate turned on) needs a hook of its own:
   only if no new gap moved it meanwhile.
 
 Turning the flag on or off clears the stamp (on: the D4 backfill re-queues
-every long row; off: the chunks are purged).
+every long row; off: the chunks are purged). Gaps made before #2107 left no
+stamp: :func:`seed_content_chunk_gaps` stamps the flag-on contexts once, at
+the scheduler leader's start, where the deployment gates content chunks.
 """
 
 from __future__ import annotations
@@ -43,14 +45,15 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import isolated_session
 from db.qdrant import chunk_points_content_hashes, chunk_points_supported
 from models.auth import Context
-from models.config import ContextSearchConfig
+from models.config import ConfigOverride, ContextSearchConfig
 from models.memory import Memory
-from services.content_chunk_policy import content_chunks_effective_ids
+from services.content_chunk_policy import content_chunks_effective_ids, content_chunks_gated
 from utils.content_chunks import CONTENT_CHUNK_MIN_CONTENT_CHARS, content_hash, split_content
 from utils.logger import get_logger
 
@@ -82,6 +85,11 @@ RECONCILE_GLOBAL_BACKLOG_LIMIT = 200
 #: Stamped contexts read per tick, in context id order from where the last
 #: tick stopped, before the active ones are picked.
 STAMPED_READ_LIMIT = 500
+#: The ``config_overrides`` key that records the one-time startup stamp
+#: (:func:`seed_content_chunk_gaps`). Nothing reads ``config_overrides`` as
+#: settings at runtime (#1580); the key is namespaced so it cannot be taken
+#: for one.
+GAP_SEED_MARKER_KEY = "marker:content_chunks_gap_seed"
 #: How long a stamp, or the reconciler's re-queue, waits for a row lock.
 _LOCK_TIMEOUT = text("SET LOCAL lock_timeout = '5s'")
 
@@ -107,7 +115,7 @@ async def queue_content_chunk_backfill(
     """Re-queue the context's long ``success`` memories for chunking (#2015 D4, #2107).
 
     One UPDATE, in the caller's transaction, locking its rows in id order
-    (an ordered ``FOR UPDATE`` subquery): every live ``success`` row of the
+    (an ordered ``FOR NO KEY UPDATE`` subquery): every live ``success`` row of the
     context whose content is long enough to split — or, with ``memory_ids``,
     those of them — goes back to ``pending``, and the embedding sweep rebuilds
     it (summary point and chunk points) under the usual claim and retry. The
@@ -126,7 +134,9 @@ async def queue_content_chunk_backfill(
     conditions = [*_long_plain_live(context_id), Memory.embedding_status == "success"]
     if memory_ids is not None:
         conditions.append(Memory.id.in_(list(memory_ids)))
-    locked = select(Memory.id).where(*conditions).order_by(Memory.id).with_for_update()
+    locked = (
+        select(Memory.id).where(*conditions).order_by(Memory.id).with_for_update(key_share=True)
+    )
     result = await db.execute(
         update(Memory)
         .where(Memory.id.in_(locked))
@@ -220,6 +230,57 @@ async def record_content_chunk_gap(db: AsyncSession, context_id: Any, *, reason:
     if written:
         logger.info("content_chunks_gap_recorded", context_id=str(context_id), reason=reason)
     return written
+
+
+async def seed_content_chunk_gaps(db: AsyncSession) -> int | None:
+    """Stamp, once per deployment, the contexts whose earlier gaps were never recorded.
+
+    Gaps made before #2107 left no stamp. Where the deployment gates content
+    chunks by plan (``CONTENT_CHUNKS_REQUIRE_PLAN``) every context with the
+    flag on and no stamp yet is stamped, so each gets one reconcile pass once
+    active (chunk point reads; only rows without current chunks are
+    re-queued). Without the gate no context is ever inactive and nothing is
+    done — and nothing is recorded, so turning the gate on later stamps at the
+    next start.
+
+    One-time: the marker row (:data:`GAP_SEED_MARKER_KEY` in
+    ``config_overrides``) is inserted in the same transaction as the stamps,
+    ``ON CONFLICT DO NOTHING``; a later start, or a second leader racing this
+    one, finds it and stamps nothing. ``updated_at`` is kept (the embedding
+    rollback falls back to it). Commits.
+
+    Returns:
+        How many contexts were stamped, or None when nothing was to be done
+        (gate off, no chunk points, or already done).
+    """
+    if not content_chunks_gated() or not chunk_points_supported():
+        return None
+    marker = await db.execute(
+        pg_insert(ConfigOverride)
+        .values(key=GAP_SEED_MARKER_KEY, value="done")
+        .on_conflict_do_nothing(index_elements=["key"])
+        .returning(ConfigOverride.id)
+    )
+    if marker.scalar_one_or_none() is None:
+        await db.commit()
+        return None
+    result = await db.execute(
+        update(ContextSearchConfig)
+        .where(
+            ContextSearchConfig.content_chunks_enabled.is_(True),
+            ContextSearchConfig.content_chunks_gap_at.is_(None),
+        )
+        .values(
+            content_chunks_gap_at=func.clock_timestamp(),
+            content_chunks_gap_cursor=None,
+            updated_at=ContextSearchConfig.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    stamped = int(getattr(result, "rowcount", 0) or 0)
+    logger.info("content_chunks_gap_seeded", contexts=stamped)
+    return stamped
 
 
 @dataclass

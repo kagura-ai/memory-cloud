@@ -414,7 +414,7 @@ async def test_the_backfill_locks_rows_in_id_order(qdrant):
     await gaps.queue_content_chunk_backfill(db, uuid4())
     sql = _sql(db.execute.await_args.args[0])
     assert "memories.id IN (SELECT memories.id" in sql
-    assert "ORDER BY memories.id" in sql and "FOR UPDATE" in sql
+    assert "ORDER BY memories.id" in sql and "FOR NO KEY UPDATE" in sql
 
 
 async def test_the_waiting_count_with_and_without_failed_rows():
@@ -427,3 +427,38 @@ async def test_the_waiting_count_with_and_without_failed_rows():
     for sql in (with_failed, without):
         assert "char_length(memories.content) >=" in sql
         assert "memories.resource_id IS NULL" in sql
+
+
+# --- seed_content_chunk_gaps --------------------------------------------------
+
+
+async def test_the_seed_does_nothing_without_the_gate(qdrant):
+    db = _db()
+    with patch.object(gaps, "content_chunks_gated", return_value=False):
+        assert await gaps.seed_content_chunk_gaps(db) is None
+    # No marker either: turning the gate on later stamps at the next start.
+    db.execute.assert_not_awaited()
+
+
+async def test_the_seed_stamps_once_with_the_marker_in_the_same_transaction(qdrant):
+    marker = MagicMock()
+    marker.scalar_one_or_none.return_value = 1
+    db = _db(marker, _result(rowcount=3))
+    with patch.object(gaps, "content_chunks_gated", return_value=True):
+        assert await gaps.seed_content_chunk_gaps(db) == 3
+    insert, stamp = (_sql(c.args[0]) for c in db.execute.await_args_list)
+    assert "INSERT INTO config_overrides" in insert and "ON CONFLICT (key) DO NOTHING" in insert
+    assert "content_chunks_enabled IS true" in stamp
+    assert "content_chunks_gap_at IS NULL" in stamp
+    assert "updated_at=context_search_configs.updated_at" in stamp
+    db.commit.assert_awaited_once()
+
+
+async def test_a_second_start_finds_the_marker_and_stamps_nothing(qdrant):
+    marker = MagicMock()
+    marker.scalar_one_or_none.return_value = None
+    db = _db(marker)
+    with patch.object(gaps, "content_chunks_gated", return_value=True):
+        assert await gaps.seed_content_chunk_gaps(db) is None
+    assert db.execute.await_count == 1
+    db.commit.assert_awaited_once()
