@@ -138,9 +138,10 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
         )
         await seed.commit()
 
-    async def acquire_exclusive(db: AsyncSession) -> None:
+    async def acquire_exclusive(db: AsyncSession, *, timeout_seconds: float) -> bool:
         switch_lock_attempted.set()
         await hold_point_writer_lock_exclusive(db)
+        return True
 
     async def run_switch() -> object:
         async with maker() as db:
@@ -221,7 +222,7 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
                 with (
                     patch.object(
                         migration,
-                        "hold_point_writer_lock_exclusive",
+                        "wait_for_point_writers",
                         new=acquire_exclusive,
                         create=True,
                     ),
@@ -278,7 +279,7 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
                 with (
                     patch.object(
                         migration,
-                        "hold_point_writer_lock_exclusive",
+                        "wait_for_point_writers",
                         new=acquire_exclusive,
                         create=True,
                     ),
@@ -425,16 +426,17 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
         )
         await seed.commit()
 
-    async def switch_lock(db: AsyncSession) -> None:
+    async def switch_lock(db: AsyncSession, *, timeout_seconds: float) -> bool:
         nonlocal exclusive_calls
         exclusive_calls += 1
         if exclusive_calls == 1:
             await hold_point_writer_lock_exclusive(db)
-            return
+            return True
         route_committed.set()
         await allow_prune_lock.wait()
         prune_lock_attempted.set()
         await hold_point_writer_lock_exclusive(db)
+        return True
 
     async def fake_reembed(
         memory: Memory,
@@ -470,7 +472,7 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
         from services.sleep.undo import undo_merge_action
 
         with (
-            patch.object(migration, "hold_point_writer_lock_exclusive", new=switch_lock),
+            patch.object(migration, "wait_for_point_writers", new=switch_lock),
             patch.object(migration, "delete_points_from_qdrant", new=delete_points),
             patch.object(migration, "delete_chunk_points", new=AsyncMock()),
         ):

@@ -12,7 +12,9 @@ routing — the dual-collection shape::
   every memory written or embedded since the re-embed started is re-queued
   (``embedding_status='pending'``) so the regular sweep lands that small delta
   in the new collection. There is no moment at which the context has no
-  vectors.
+  vectors. It waits up to 30 seconds for point writers before committing; a
+  timeout leaves routing untouched. If the second, post-commit wait times out,
+  it reports deferred pruning for the orphan sweep.
 * Nothing here deletes source points implicitly. They stay until the operator
   calls :func:`purge_source_points` — which is why
   :func:`rollback_context_embedding` (a switch back plus a re-queue of what
@@ -64,7 +66,7 @@ from sqlalchemy.orm import load_only
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.embedding_policy import is_embedding_model_allowed
 from config.settings import get_settings
-from db.point_writer_lock import hold_point_writer_lock_exclusive
+from db.point_writer_lock import wait_for_point_writers
 from db.qdrant import (
     add_memory_to_qdrant,
     chunk_points_supported,
@@ -96,6 +98,10 @@ from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Keep migration bounded by the same writer wait used by the orphan sweep.
+# A migration can be retried safely while a restore or merge is still writing.
+POINT_WRITER_WAIT_SECONDS = 30.0
 
 
 async def _chunks_active(db: AsyncSession, context_id: UUID, *, stored: bool | None = None) -> bool:
@@ -190,6 +196,12 @@ class SwitchResult:
     stale_removed: int = 0
     """Points dropped from the new collection for memories forgotten since
     ``requeue_since`` (closes the verify -> switch delete race)."""
+    prune_pending: bool = False
+    """Whether stale-point pruning was deferred because writers stayed busy.
+
+    The route has already committed in this case. The orphan-vector sweep is
+    the bounded recovery path for the deferred deletes once writers are idle.
+    """
 
 
 async def list_migratable_context_ids(
@@ -991,6 +1003,10 @@ async def switch_context_embedding(
     each under the point id the migration wrote it with
     (:func:`_migrated_point_id`, #1896), and never a point a live row of any
     context still names — together with their content chunk points (#2015).
+    If writers stay busy for 30 seconds before the route commit, this raises
+    :class:`ValidationError` without changing routing. If the bounded wait
+    after commit expires, stale-point pruning is deferred to the orphan sweep
+    and reported in :attr:`SwitchResult.prune_pending`.
     With ``None`` this is a pure routing flip. An aware ``requeue_since`` is
     compared as naive UTC, the convention of the ``memories`` timestamps.
 
@@ -1007,7 +1023,11 @@ async def switch_context_embedding(
     if requeue_since is not None:
         requeue_since = to_naive_utc(requeue_since)
 
-    await hold_point_writer_lock_exclusive(db)
+    if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
+        raise ValidationError(
+            "Point writers are still active; the context route was not changed. "
+            "Retry --switch after the current write finishes."
+        )
     previous_model, previous_dimensions = await resolve_context_embedding(db, context_id)
 
     result = await db.execute(
@@ -1047,44 +1067,66 @@ async def switch_context_embedding(
     await db.commit()
 
     stale_removed = 0
+    prune_pending = False
     if requeue_since is not None:
         # The route commit releases its transaction-scoped lock. Reacquire it
         # while pruning so a restore cannot upsert a live point just before it
         # is mistaken for a stale tombstone.
-        await hold_point_writer_lock_exclusive(db)
-        # Routing now points at ``model``; forgets from here on delete from
-        # its collection themselves. Forgets between the last verify and the
-        # commit above only hit the previous collection — drop those points
-        # from the new one. Hard-deleted rows (no tombstone) cannot be found
-        # this way; only the soft-delete path (``deleted_at``) is covered.
-        forgotten = await db.execute(
-            select(Memory)
-            .options(load_only(*_POINT_ID_COLUMNS))
-            .where(Memory.context_id == context_id, Memory.deleted_at >= requeue_since)
-        )
-        forgotten_rows = list(forgotten.scalars().all())
-        forgotten_points = {_migrated_point_id(memory) for memory in forgotten_rows}
-        # #2015: their content chunk points too (chunk_of = the memory id;
-        # resource rows have none). A no-op when there are none.
-        forgotten_chunk_owners = sorted(
-            str(memory.id) for memory in forgotten_rows if not owns_resource_point(memory)
-        )
-        if forgotten_points:
-            # A live row — of this context or of another one sharing the
-            # collection — that names the same point keeps it.
-            forgotten_points -= await _points_live_rows_name(db, forgotten_points)
-        if forgotten_points:
-            await delete_points_from_qdrant(
-                sorted(str(point_id) for point_id in forgotten_points),
-                get_collection_name(model, dimensions),
+        if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
+            prune_pending = True
+            logger.warning(
+                "context_embedding_prune_deferred",
+                context_id=str(context_id),
+                model=model,
+                dimensions=dimensions,
+                reason="point_writers_busy",
+                recovery="orphan_vector_sweep",
             )
-            stale_removed = len(forgotten_points)
-        # After the summary points, so a failed chunk delete never keeps a
-        # forgotten memory's summary point in the collection now served.
-        if forgotten_chunk_owners:
-            await delete_chunk_points(
-                forgotten_chunk_owners, get_collection_name(model, dimensions)
-            )
+        else:
+            try:
+                # Routing now points at ``model``; forgets from here on delete
+                # from its collection themselves. Forgets between the last
+                # verify and the commit above only hit the previous collection
+                # — drop those points from the new one. Hard-deleted rows (no
+                # tombstone) cannot be found this way; only soft deletes are
+                # covered.
+                forgotten = await db.execute(
+                    select(Memory)
+                    .options(load_only(*_POINT_ID_COLUMNS))
+                    .where(Memory.context_id == context_id, Memory.deleted_at >= requeue_since)
+                )
+                forgotten_rows = list(forgotten.scalars().all())
+                forgotten_points = {_migrated_point_id(memory) for memory in forgotten_rows}
+                # #2015: their content chunk points too (chunk_of = the memory
+                # id; resource rows have none). A no-op when there are none.
+                forgotten_chunk_owners = sorted(
+                    str(memory.id) for memory in forgotten_rows if not owns_resource_point(memory)
+                )
+                if forgotten_points:
+                    # A live row — of this context or of another one sharing
+                    # the collection — that names the same point keeps it.
+                    forgotten_points -= await _points_live_rows_name(db, forgotten_points)
+                if forgotten_points:
+                    await delete_points_from_qdrant(
+                        sorted(str(point_id) for point_id in forgotten_points),
+                        get_collection_name(model, dimensions),
+                    )
+                    stale_removed = len(forgotten_points)
+                # Delete chunks after summary points so a failed chunk delete
+                # never keeps a forgotten summary point in the served set.
+                if forgotten_chunk_owners:
+                    await delete_chunk_points(
+                        forgotten_chunk_owners, get_collection_name(model, dimensions)
+                    )
+            except Exception:
+                # Qdrant failures must not leave this transaction-scoped lock
+                # held while a caller handles the error or processes --all.
+                await db.rollback()
+                raise
+            else:
+                # End the read-only prune transaction so a caller processing
+                # more contexts does not keep writers blocked until session end.
+                await db.commit()
 
     logger.info(
         "context_embedding_switched",
@@ -1094,6 +1136,7 @@ async def switch_context_embedding(
         dimensions=dimensions,
         requeued=requeued,
         stale_removed=stale_removed,
+        prune_pending=prune_pending,
     )
     return SwitchResult(
         previous_model=previous_model,
@@ -1102,6 +1145,7 @@ async def switch_context_embedding(
         dimensions=dimensions,
         requeued=requeued,
         stale_removed=stale_removed,
+        prune_pending=prune_pending,
     )
 
 

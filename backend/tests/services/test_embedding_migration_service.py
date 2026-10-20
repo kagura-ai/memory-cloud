@@ -25,7 +25,7 @@ SMALL = "text-embedding-3-small"
 
 @pytest.fixture(autouse=True)
 def _point_writer_lock():
-    with patch.object(svc, "hold_point_writer_lock_exclusive", new=AsyncMock()):
+    with patch.object(svc, "wait_for_point_writers", new=AsyncMock(return_value=True)):
         yield
 
 
@@ -732,6 +732,19 @@ class TestVerify:
 
 class TestSwitch:
     @pytest.mark.asyncio
+    async def test_point_writer_timeout_refuses_route_before_commit(self):
+        db = _db([])
+        with (
+            patch.object(svc, "wait_for_point_writers", AsyncMock(return_value=False)) as wait,
+            pytest.raises(ValidationError, match="Retry --switch"),
+        ):
+            await svc.switch_context_embedding(db, uuid4(), QWEN, 2560)
+
+        wait.assert_awaited_once_with(db, timeout_seconds=svc.POINT_WRITER_WAIT_SECONDS)
+        db.commit.assert_not_awaited()
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_dimension_mismatch_is_refused(self):
         with pytest.raises(ValidationError):
             await svc.switch_context_embedding(_db([]), uuid4(), QWEN, 512)
@@ -778,7 +791,7 @@ class TestSwitch:
         assert result.requeued == 4
         assert result.stale_removed == 0
         delete.assert_not_called()
-        db.commit.assert_awaited_once()
+        assert db.commit.await_count == 2
         requeue_stmt = db.execute.await_args_list[2].args[0]
         compiled = str(requeue_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "embedding_status != 'success'" in compiled
@@ -817,6 +830,62 @@ class TestSwitch:
         forgotten_stmt = db.execute.await_args_list[3].args[0]
         compiled = str(forgotten_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "deleted_at >=" in compiled
+
+    @pytest.mark.asyncio
+    async def test_prune_timeout_keeps_committed_route_and_reports_deferred_cleanup(self):
+        config = _config(SMALL, 512)
+        since = datetime(2026, 9, 10, 12, 0, 0)
+        db = _db(
+            [
+                _result(scalar=config),
+                _result(scalar=config),
+                _result(rowcount=1),
+            ]
+        )
+        with (
+            patch.object(
+                svc,
+                "wait_for_point_writers",
+                AsyncMock(side_effect=[True, False]),
+            ) as wait,
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=since
+            )
+
+        assert result.prune_pending is True
+        assert result.stale_removed == 0
+        wait.assert_any_await(db, timeout_seconds=svc.POINT_WRITER_WAIT_SECONDS)
+        assert wait.await_count == 2
+        delete.assert_not_awaited()
+        db.commit.assert_awaited_once()
+        assert db.execute.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_prune_failure_releases_writer_lock_transaction(self):
+        config = _config(SMALL, 512)
+        forgotten = _memory()
+        db = _db(
+            [
+                _result(scalar=config),
+                _result(scalar=config),
+                _result(rowcount=0),
+                _result(scalars=[forgotten]),
+                _result(scalars=[]),
+            ]
+        )
+        db.rollback = AsyncMock()
+        with (
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock(side_effect=RuntimeError)),
+            pytest.raises(RuntimeError),
+        ):
+            await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+
+        db.commit.assert_awaited_once()
+        db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_forgotten_resource_row_is_dropped_under_its_point_id(self):
@@ -1485,6 +1554,7 @@ class TestContentChunks:
                 _result(scalars=[]),
             ]
         )
+        db.rollback = AsyncMock()
         _no_content_chunks["deleted"].side_effect = RuntimeError("qdrant busy")
         with (
             patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
@@ -1494,6 +1564,7 @@ class TestContentChunks:
                 db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
             )
         delete.assert_awaited_once_with([str(note.id)], "kagura_memories_qwen3_embedding_4b_2560")
+        db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_pure_flip_deletes_no_chunks(self, _no_content_chunks):

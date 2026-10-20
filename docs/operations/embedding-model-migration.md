@@ -22,6 +22,10 @@ Vectors are derived data. Every memory's `summary` is in Postgres, and the norma
 
 Idempotent by construction: re-running `--reembed` overwrites points by id; `--switch` is a plain update. Each page of the re-embed is its own short read transaction, so a large context never holds a Postgres transaction open across the embedding calls.
 
+The switch waits up to 30 seconds for point writers before changing routing. If they remain active, it leaves routing unchanged and reports that `--switch` can be retried after the current write finishes. After a successful route commit, pruning waits for writers for at most another 30 seconds; if that wait expires, the route remains switched, the command reports deferred pruning, and the orphan-vector sweep can remove the stale summary and chunk points.
+
+Review the sweep plan with `python -m src.cli.sweep_orphan_vectors`, then run `python -m src.cli.sweep_orphan_vectors --apply --yes --grace-hours 0` to apply it immediately. The apply pass rechecks each candidate while holding the same point-writer lock. The default one-hour grace period remains preferable for routine runs.
+
 **Resource-ingested memories** (documents a resource or a connector ingested, #1896). Their `summary` is only the label `[resource] doc vN`, and their point is not stored under the memory id but under the document's own point id (`memories.summary_embedding_id`, derived from resource / document / version). The migration treats them the way the indexer and the embedding sweep do:
 
 - `--reembed` rebuilds each one from the stored document: the document is projected through the resource's latest schema, its text is embedded with the target model (one embedding request per document; these rows are not batched), and the point is written under the document's point id with its facets and sortable fields. A schema published since the document was ingested applies, as it would to a re-index.

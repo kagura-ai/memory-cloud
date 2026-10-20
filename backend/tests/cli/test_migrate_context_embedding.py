@@ -336,6 +336,57 @@ async def test_one_confirmation_covers_the_rebuild_and_the_switch(capsys):
 
 
 @pytest.mark.asyncio
+async def test_switch_reports_when_stale_pruning_was_deferred(capsys):
+    switched = SwitchResult(
+        previous_model="text-embedding-3-small",
+        previous_dimensions=512,
+        model=_MODEL,
+        dimensions=2560,
+        requeued=1,
+        prune_pending=True,
+    )
+    code = await _run(
+        ["--switch", "--yes"], reembed=_reembed([]), switch=AsyncMock(return_value=switched)
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "the route is already switched" in out
+    assert "sweep_orphan_vectors, then apply with" in out
+    assert "sweep_orphan_vectors --apply --yes --grace-hours 0" in out
+
+
+@pytest.mark.asyncio
+async def test_switch_writer_timeout_returns_nonzero_and_suggests_retry(capsys):
+    context_id = uuid4()
+    args = cli._parse(["--to", _MODEL, "--context", str(context_id), "--switch", "--yes"])
+
+    async def db_sessions():
+        yield MagicMock()
+
+    with (
+        patch.object(cli, "get_db", return_value=db_sessions()),
+        patch.object(cli, "get_settings", return_value=MagicMock()),
+        patch.object(cli, "plan_context_migration", AsyncMock(return_value=_plan(context_id))),
+        patch.object(
+            cli,
+            "switch_context_embedding",
+            AsyncMock(
+                side_effect=ValidationError(
+                    "Point writers are still active; the context route was not changed. "
+                    "Retry --switch after the current write finishes."
+                )
+            ),
+        ),
+    ):
+        code = await cli._main(args)
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "skip " in out
+    assert "Retry --switch after the current write finishes." in out
+
+
+@pytest.mark.asyncio
 async def test_run_does_not_rebuild_when_verify_already_failed(capsys):
     """Missing summary points stop the run first (exit 2), as before."""
     rebuild = AsyncMock()

@@ -50,6 +50,7 @@ from db.base import get_db  # noqa: E402
 from services.context_routing import resolve_context_embedding  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
     MigrationPlan,
+    SwitchResult,
     VerifyResult,
     list_migratable_context_ids,
     plan_context_migration,
@@ -119,6 +120,16 @@ def _print_verify(verified: VerifyResult) -> None:
     )
 
 
+def _print_deferred_prune(switched: SwitchResult) -> None:
+    if switched.prune_pending:
+        print(
+            "  stale-point pruning deferred because point writers were busy; "
+            "the route is already switched. Review with "
+            "python -m src.cli.sweep_orphan_vectors, then apply with "
+            "python -m src.cli.sweep_orphan_vectors --apply --yes --grace-hours 0."
+        )
+
+
 def _print_missing(verified: VerifyResult) -> None:
     print(f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}")
 
@@ -171,6 +182,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             f"(requeued {result.requeued} for the sweep, "
             f"dropped {result.stale_removed} forgotten)"
         )
+        _print_deferred_prune(result)
         return 0
 
     if args.purge_source:
@@ -307,6 +319,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             f"(requeued {switched.requeued} for the sweep, "
             f"dropped {switched.stale_removed} forgotten)"
         )
+        _print_deferred_prune(switched)
 
     if args.purge:
         if not _confirm(
