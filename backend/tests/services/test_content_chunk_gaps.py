@@ -443,11 +443,14 @@ async def test_the_seed_does_nothing_without_the_gate(qdrant):
 async def test_the_seed_stamps_once_with_the_marker_in_the_same_transaction(qdrant):
     marker = MagicMock()
     marker.scalar_one_or_none.return_value = 1
-    db = _db(marker, _result(rowcount=3))
+    db = _db(marker, _result(), _result(rowcount=3))
     with patch.object(gaps, "content_chunks_gated", return_value=True):
         assert await gaps.seed_content_chunk_gaps(db) == 3
-    insert, stamp = (_sql(c.args[0]) for c in db.execute.await_args_list)
+    insert, timeout, stamp = (c.args[0] for c in db.execute.await_args_list)
+    insert, stamp = _sql(insert), _sql(stamp)
     assert "INSERT INTO config_overrides" in insert and "ON CONFLICT (key) DO NOTHING" in insert
+    assert "lock_timeout" in str(timeout)
+    assert "ORDER BY context_search_configs.context_id FOR NO KEY UPDATE" in stamp
     assert "content_chunks_enabled IS true" in stamp
     assert "content_chunks_gap_at IS NULL" in stamp
     assert "updated_at=context_search_configs.updated_at" in stamp

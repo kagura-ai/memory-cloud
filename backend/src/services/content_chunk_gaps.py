@@ -94,6 +94,20 @@ GAP_SEED_MARKER_KEY = "marker:content_chunks_gap_seed"
 _LOCK_TIMEOUT = text("SET LOCAL lock_timeout = '5s'")
 
 
+def _stamp_values() -> dict[str, Any]:
+    """The values a stamp writes: now, a fresh walk, and ``updated_at`` kept.
+
+    ``updated_at`` is written back as itself: the embedding rollback falls
+    back to it as the switch time (#2098), and the ORM's ``onupdate`` would
+    move it otherwise.
+    """
+    return {
+        "content_chunks_gap_at": func.clock_timestamp(),
+        "content_chunks_gap_cursor": None,
+        "updated_at": ContextSearchConfig.updated_at,
+    }
+
+
 def _seconds(seconds: int) -> Any:
     """``seconds`` as an SQL interval (a bound ``make_interval``)."""
     return func.make_interval(0, 0, 0, 0, 0, 0, float(seconds))
@@ -210,11 +224,7 @@ async def record_content_chunk_gap(db: AsyncSession, context_id: Any, *, reason:
             result = await session.execute(
                 update(ContextSearchConfig)
                 .where(ContextSearchConfig.context_id == context_id, due)
-                .values(
-                    content_chunks_gap_at=func.clock_timestamp(),
-                    content_chunks_gap_cursor=None,
-                    updated_at=ContextSearchConfig.updated_at,
-                )
+                .values(**_stamp_values())
                 .execution_options(synchronize_session=False)
             )
             await session.commit()
@@ -246,8 +256,10 @@ async def seed_content_chunk_gaps(db: AsyncSession) -> int | None:
     One-time: the marker row (:data:`GAP_SEED_MARKER_KEY` in
     ``config_overrides``) is inserted in the same transaction as the stamps,
     ``ON CONFLICT DO NOTHING``; a later start, or a second leader racing this
-    one, finds it and stamps nothing. ``updated_at`` is kept (the embedding
-    rollback falls back to it). Commits.
+    one, finds it and stamps nothing. The stamps lock their rows in context id
+    order and wait at most 5 s per lock; ``updated_at`` is kept (the
+    embedding rollback falls back to it). Commits; a failure raises with
+    nothing written, and the caller retries.
 
     Returns:
         How many contexts were stamped, or None when nothing was to be done
@@ -264,17 +276,22 @@ async def seed_content_chunk_gaps(db: AsyncSession) -> int | None:
     if marker.scalar_one_or_none() is None:
         await db.commit()
         return None
-    result = await db.execute(
-        update(ContextSearchConfig)
+    # Rows locked in context id order, with a bounded wait: a timeout rolls
+    # the marker back with the stamps, and the next tick tries again.
+    await db.execute(_LOCK_TIMEOUT)
+    locked = (
+        select(ContextSearchConfig.context_id)
         .where(
             ContextSearchConfig.content_chunks_enabled.is_(True),
             ContextSearchConfig.content_chunks_gap_at.is_(None),
         )
-        .values(
-            content_chunks_gap_at=func.clock_timestamp(),
-            content_chunks_gap_cursor=None,
-            updated_at=ContextSearchConfig.updated_at,
-        )
+        .order_by(ContextSearchConfig.context_id)
+        .with_for_update(key_share=True)
+    )
+    result = await db.execute(
+        update(ContextSearchConfig)
+        .where(ContextSearchConfig.context_id.in_(locked))
+        .values(**_stamp_values())
         .execution_options(synchronize_session=False)
     )
     await db.commit()

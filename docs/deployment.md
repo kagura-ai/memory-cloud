@@ -1961,7 +1961,8 @@ every long memory anyway). Logged as `content_chunks_gap_recorded`,
 is re-queued, its summary point still finds it.
 
 Gaps made before this version were never recorded. With the gate on, the
-scheduler leader stamps every context with the flag on once when it starts
+scheduler leader stamps every context with the flag on once, on the
+reconciler's first tick after it starts, retried every tick until it succeeds
 (`content_chunks_gap_seeded` in the log; a marker row,
 `marker:content_chunks_gap_seed` in `config_overrides`, keeps later starts
 from stamping again), so each gets one pass once active: Qdrant point reads,

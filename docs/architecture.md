@@ -344,7 +344,7 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 
 **Configuration**
 - **neural_config** — Neural engine per-workspace config
-- **config_overrides** — Legacy, unused: nothing reads it at runtime and the `/config` write routes refuse (#1580). Configuration is env-only; rows are ignored
+- **config_overrides** — Legacy for configuration: nothing reads it as settings at runtime and the `/config` write routes refuse (#1580). Configuration is env-only; rows are ignored, except the one-time marker `marker:content_chunks_gap_seed` (#2107), whose removal makes the next scheduler leader re-stamp every flag-on context once (with `CONTENT_CHUNKS_REQUIRE_PLAN` on)
 - **mcp_tool_descriptions** — Admin-editable MCP tool description overrides
 
 ### Qdrant Collections

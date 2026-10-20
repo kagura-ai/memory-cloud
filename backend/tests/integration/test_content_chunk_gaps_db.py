@@ -428,6 +428,20 @@ async def test_the_seed_without_the_gate_stamps_and_records_nothing(db_session):
 
 async def test_the_seed_with_the_gate_stamps_once(db_session, gated):
     await _clear_marker(db_session)
+    # Flag-on contexts other tests left unstamped: the seed stamps them too,
+    # and they are put back afterwards.
+    others = set(
+        (
+            await db_session.execute(
+                select(ContextSearchConfig.context_id).where(
+                    ContextSearchConfig.content_chunks_enabled.is_(True),
+                    ContextSearchConfig.content_chunks_gap_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     try:
         ws = await _workspace(db_session)
         on, off = await _context(db_session, ws), await _context(db_session, ws, on=False)
@@ -449,6 +463,13 @@ async def test_the_seed_with_the_gate_stamps_once(db_session, gated):
         assert (await _config(db_session, on)).content_chunks_gap_at is None
     finally:
         await _clear_marker(db_session)
+        if others:
+            await db_session.execute(
+                update(ContextSearchConfig)
+                .where(ContextSearchConfig.context_id.in_(others))
+                .values(content_chunks_gap_at=None, updated_at=ContextSearchConfig.updated_at)
+            )
+            await db_session.commit()
 
 
 async def _move_off(db, ctx_id: UUID) -> None:
