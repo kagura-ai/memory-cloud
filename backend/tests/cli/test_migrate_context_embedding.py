@@ -455,14 +455,25 @@ async def _rollback(argv: list[str], boundary, capsys, *, answer: str = "y"):
         at_prompt.append(capsys.readouterr().out)
         return answer
 
+    rolled.requeue_since = boundary.since
     resolve = AsyncMock(return_value=boundary)
     rollback = AsyncMock(return_value=rolled)
+    db = MagicMock()
+
+    async def _end_read_transaction() -> None:
+        # The read transaction ends before the prompt can wait (#2098).
+        assert not at_prompt
+
+    db.rollback = AsyncMock(side_effect=_end_read_transaction)
     with (
+        patch.object(cli, "check_rollback_target", AsyncMock(return_value=512)) as check,
         patch.object(cli, "resolve_rollback_boundary", resolve),
         patch.object(cli, "rollback_context_embedding", rollback),
         patch("builtins.input", _input),
     ):
-        code = await cli._one_context(MagicMock(), context_id, args)
+        code = await cli._one_context(db, context_id, args)
+    check.assert_awaited_once_with(db, context_id, _ROLLBACK_TO)
+    db.rollback.assert_awaited_once()
     return code, at_prompt, rollback, resolve
 
 
@@ -477,6 +488,7 @@ async def test_rollback_prints_the_recorded_switch_time_before_asking(capsys):
     ]
     assert resolve.await_args.args[2] is None
     assert rollback.await_args.kwargs["requeue_since"] == _SWITCH_TIME
+    assert f"requeued 2 written since {_SWITCH_TIME.isoformat()}" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -512,3 +524,22 @@ def test_requeue_since_help_names_the_recorded_switch_time():
     with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
         cli._parse(["--help"])
     assert "embedding_switched_at" in out.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_rollback_prints_no_boundary_and_does_not_ask(capsys):
+    """#2098: 'already routes' / 'no collection' come before the boundary."""
+    context_id = uuid4()
+    args = cli._parse(["--rollback-to", _ROLLBACK_TO, "--context", str(context_id)])
+    refused = ValidationError(f"Context {context_id} already routes to {_ROLLBACK_TO!r}")
+    with (
+        patch.object(cli, "check_rollback_target", AsyncMock(side_effect=refused)),
+        patch.object(cli, "resolve_rollback_boundary", AsyncMock()) as resolve,
+        patch.object(cli, "rollback_context_embedding", AsyncMock()) as rollback,
+        patch("builtins.input", MagicMock(side_effect=AssertionError("asked"))),
+        pytest.raises(ValidationError, match="already routes"),
+    ):
+        await cli._one_context(MagicMock(), context_id, args)
+    resolve.assert_not_awaited()
+    rollback.assert_not_awaited()
+    assert capsys.readouterr().out == ""

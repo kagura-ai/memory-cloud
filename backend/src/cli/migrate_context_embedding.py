@@ -55,6 +55,7 @@ from services.embedding_migration_service import (  # noqa: E402
     MigrationPlan,
     SwitchResult,
     VerifyResult,
+    check_rollback_target,
     list_migratable_context_ids,
     plan_context_migration,
     purge_source_points,
@@ -175,15 +176,21 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
     settings = get_settings()
 
     if args.rollback_to:
-        # #2098: show the re-queue boundary before asking, so an operator can
-        # still abort when only the search config's last change is known.
+        # #2098: refuse what cannot go ahead, then show the re-queue boundary
+        # before asking, so an operator can still abort when only the search
+        # config's last change is known.
+        await check_rollback_target(db, context_id, args.rollback_to)
         boundary = await resolve_rollback_boundary(db, context_id, args.requeue_since)
+        # End the read transaction: the prompt below may wait for minutes, and
+        # an idle-in-transaction session holds its locks for as long.
+        await db.rollback()
         if boundary.source == "config_updated_at":
             print(
                 f"  WARNING: no recorded switch time for {context_id} (switched before the "
-                "switch time was stored); re-queueing since the search config's last change, "
-                f"{boundary.since.isoformat()}. If the search settings were edited after the "
-                "switch, abort and re-run with --requeue-since <switch time>."
+                "switch time was stored, or never switched by this command); re-queueing "
+                f"since the search config's last change, {boundary.since.isoformat()}. If "
+                "the search settings were edited after the switch, abort and re-run with "
+                "--requeue-since <switch time>."
             )
         else:
             label = (
@@ -196,9 +203,10 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         result = await rollback_context_embedding(
             db, context_id, args.rollback_to, requeue_since=boundary.since
         )
+        since = result.requeue_since or boundary.since
         print(
             f"  rolled back {context_id}: {result.previous_model} -> {result.model} "
-            f"(requeued {result.requeued} for the sweep, "
+            f"(requeued {result.requeued} written since {since.isoformat()} for the sweep, "
             f"dropped {result.stale_removed} forgotten)"
         )
         _print_deferred_prune(result)

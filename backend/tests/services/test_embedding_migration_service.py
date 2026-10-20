@@ -65,9 +65,12 @@ def _row_result(row):
     return result
 
 
-def _is_clock_timestamp(value) -> bool:
-    """#2098: the switch stamps the DB's statement time, not now() or Python's."""
-    return isinstance(value, FunctionElement) and value.name == "clock_timestamp"
+def _is_switch_stamp(value) -> bool:
+    """#2098: the switch stamps the DB's transaction start (now()), not the
+    instant of the write (clock_timestamp()) and not Python's clock: a worker
+    that claimed a row during the point-writer wait must stay inside the
+    rollback boundary."""
+    return isinstance(value, FunctionElement) and value.name == "now"
 
 
 def _rows_result(rows):
@@ -794,7 +797,7 @@ class TestSwitch:
         assert added.context_id == context_id
         assert (added.embedding_model, added.embedding_dimensions) == (QWEN, 2560)
         # #2098: a legacy context's row is created with the switch time.
-        assert _is_clock_timestamp(added.embedding_switched_at)
+        assert _is_switch_stamp(added.embedding_switched_at)
         assert result.requeue_since == since
         # #1572: the materialised row carries the deployment default, exactly
         # like the lazy create_or_get() on the recall path would.
@@ -968,7 +971,7 @@ class TestSwitch:
 
         assert (config.embedding_model, config.embedding_dimensions) == (QWEN, 2560)
         # #2098: a pure flip records its switch time too.
-        assert _is_clock_timestamp(config.embedding_switched_at)
+        assert _is_switch_stamp(config.embedding_switched_at)
         db.add.assert_not_called()
         assert result.requeued == 0
         assert result.requeue_since is None
@@ -983,7 +986,7 @@ class TestSwitch:
             result = await svc.switch_context_embedding(db, uuid4(), SMALL, 512)
         assert (result.previous_model, result.model) == (QWEN, SMALL)
         assert (config.embedding_model, config.embedding_dimensions) == (SMALL, 512)
-        assert _is_clock_timestamp(config.embedding_switched_at)
+        assert _is_switch_stamp(config.embedding_switched_at)
         delete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -996,7 +999,7 @@ class TestSwitch:
 
         async def execute(stmt, *args, **kwargs):
             if len(db.execute.await_args_list) == 3:
-                stamped_before_requeue.append(_is_clock_timestamp(config.embedding_switched_at))
+                stamped_before_requeue.append(_is_switch_stamp(config.embedding_switched_at))
                 db.commit.assert_not_awaited()
                 return _result(rowcount=2)
             if len(db.execute.await_args_list) <= 2:
@@ -1011,7 +1014,7 @@ class TestSwitch:
             )
 
         assert stamped_before_requeue == [True]
-        assert _is_clock_timestamp(config.embedding_switched_at)
+        assert _is_switch_stamp(config.embedding_switched_at)
         # The boundary actually used, as naive UTC.
         assert result.requeue_since == datetime(2026, 9, 10, 14, 0, 0)
 
@@ -1054,13 +1057,19 @@ class TestRollback:
             await svc.rollback_context_embedding(db, uuid4(), SMALL)
         client.collection_exists.assert_awaited_once_with("kagura_memories")
         switch.assert_not_called()
+        # #2098: refused before the boundary lookup (the CLI prints the
+        # boundary only for a rollback that can go ahead).
+        assert db.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_refuses_without_a_recorded_switch_time(self):
         # Legacy context with no config row: nothing stamped the switch, so
         # the operator must say what to re-queue from.
         db = _db([_result(scalar=None), _row_result(None)])
+        client = MagicMock()
+        client.collection_exists = AsyncMock(return_value=True)
         with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
             patch.object(svc, "switch_context_embedding", AsyncMock()) as switch,
             pytest.raises(ValidationError, match="requeue_since"),
         ):

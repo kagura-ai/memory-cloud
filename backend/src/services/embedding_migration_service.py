@@ -1063,18 +1063,23 @@ async def switch_context_embedding(
             context_id=context_id,
             embedding_model=model,
             embedding_dimensions=dimensions,
-            embedding_switched_at=func.clock_timestamp(),
+            embedding_switched_at=func.now(),
             **search_config_defaults(get_settings()),
         )
         db.add(config)
     else:
         config.embedding_model = model
         config.embedding_dimensions = dimensions
-        # #2098: the instant the route row is written — clock_timestamp(), not
-        # now() (transaction start, which precedes the point-writer wait and,
-        # in an --all run, may be an older autobegun transaction). Committed
-        # with the route and the re-queue; --rollback-to re-queues from it.
-        config.embedding_switched_at = func.clock_timestamp()
+        # #2098: committed with the route and the re-queue; --rollback-to
+        # re-queues from it. now() is the transaction start, at or before the
+        # point-writer wait above — deliberately not clock_timestamp(): an
+        # embedding worker stamps embedding_attempted_at when it claims a row
+        # and resolves routing only afterwards, so a row claimed during the
+        # wait can resolve the new route once this commits. Its stamp is
+        # >= now() and a later rollback re-queues it; with the instant of
+        # this write it would fall below the boundary. An earlier boundary
+        # only re-queues more (an extra re-embed), never less.
+        config.embedding_switched_at = func.now()
 
     requeued = 0
     if requeue_since is not None:
@@ -1175,17 +1180,47 @@ async def switch_context_embedding(
     )
 
 
+async def check_rollback_target(db: AsyncSession, context_id: UUID, model: str) -> int:
+    """Refuse a rollback of ``context_id`` to ``model`` that cannot go ahead.
+
+    Unknown model, the model the context already routes to, or no collection
+    for it. Shared by :func:`rollback_context_embedding` and the migration
+    CLI, which runs it before it prints the boundary and asks (#2098).
+
+    Returns:
+        ``model``'s dimensions.
+
+    Raises:
+        ValidationError: any of the above.
+    """
+    if model not in EMBEDDING_MODEL_REGISTRY:
+        raise ValidationError(f"Unknown embedding model: {model!r}")
+    dimensions = EMBEDDING_MODEL_REGISTRY[model][0]
+
+    current_model, _ = await resolve_context_embedding(db, context_id)
+    if current_model == model:
+        raise ValidationError(f"Context {context_id} already routes to {model!r}")
+
+    collection = get_collection_name(model, dimensions)
+    if not await get_qdrant_client().collection_exists(collection):
+        raise ValidationError(
+            f"Collection {collection!r} for {model!r} does not exist; "
+            "there is nothing to route back to (was it purged?)"
+        )
+    return dimensions
+
+
 async def resolve_rollback_boundary(
     db: AsyncSession, context_id: UUID, requeue_since: datetime | None
 ) -> RollbackBoundary:
     """The re-queue boundary of a rollback of ``context_id`` (#2098).
 
     An explicit ``requeue_since`` wins. Otherwise the switch time the last
-    switch recorded (``ContextSearchConfig.embedding_switched_at``); a context
-    switched before that column existed has NULL there, and the search
-    config's ``updated_at`` is used instead — which any later search-setting
-    edit moved past the switch — with a ``context_embedding_rollback_boundary_fallback``
-    warning. Shared by :func:`rollback_context_embedding` and the migration
+    switch recorded (``ContextSearchConfig.embedding_switched_at``). A context
+    switched before that column existed — or never switched by the
+    migration — has NULL there, and the search config's ``updated_at`` is
+    used instead — which any later search-setting edit moved past the
+    switch — with a ``context_embedding_rollback_boundary_fallback`` warning. Shared by :func:`rollback_context_embedding` and the migration
     CLI, which prints the boundary before it asks for confirmation.
 
     Raises:
@@ -1215,7 +1250,7 @@ async def resolve_rollback_boundary(
         "context_embedding_rollback_boundary_fallback",
         context_id=str(context_id),
         boundary=updated_at.isoformat(),
-        reason="switched_before_embedding_switched_at",
+        reason="no_recorded_switch_time",
     )
     return RollbackBoundary(to_naive_utc(updated_at), "config_updated_at")
 
@@ -1251,23 +1286,8 @@ async def rollback_context_embedding(
             to, no collection for it, or no recorded switch time and no
             explicit ``requeue_since``.
     """
-    if model not in EMBEDDING_MODEL_REGISTRY:
-        raise ValidationError(f"Unknown embedding model: {model!r}")
-    dimensions = EMBEDDING_MODEL_REGISTRY[model][0]
-
-    current_model, _ = await resolve_context_embedding(db, context_id)
-    if current_model == model:
-        raise ValidationError(f"Context {context_id} already routes to {model!r}")
-
+    dimensions = await check_rollback_target(db, context_id, model)
     boundary = await resolve_rollback_boundary(db, context_id, requeue_since)
-
-    collection = get_collection_name(model, dimensions)
-    if not await get_qdrant_client().collection_exists(collection):
-        raise ValidationError(
-            f"Collection {collection!r} for {model!r} does not exist; "
-            "there is nothing to route back to (was it purged?)"
-        )
-
     return await switch_context_embedding(
         db, context_id, model, dimensions, requeue_since=boundary.since
     )
