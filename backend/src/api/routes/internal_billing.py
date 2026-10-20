@@ -47,7 +47,7 @@ import secrets
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -304,6 +304,72 @@ async def get_workspace_entitlement(
         addons=current_addons,
         entitlement_source=workspace.entitlement_source,
     )
+
+
+class WorkspaceOwnerView(BaseModel):
+    """Answer of the ownership re-check: is ``sub`` the workspace owner right now."""
+
+    workspace_id: str
+    sub: str
+    is_owner: bool
+
+
+@router.get("/workspaces/{workspace_id}/owner", response_model=WorkspaceOwnerView)
+async def get_workspace_owner_check(
+    workspace_id: str,
+    sub: str = Query(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="User id (``users.user_id``) whose ownership is re-checked",
+    ),
+    _: None = Depends(verify_billing_service_token),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceOwnerView:
+    """Re-check whether ``sub`` currently owns a workspace (#2181).
+
+    Service-authenticated, internal-only, read-only. The billing service calls
+    this before a billing action so a user who has lost ownership since their
+    billing session started (transfer, demotion, erasure) cannot act on the
+    workspace's subscription.
+
+    ``is_owner`` is strict equality against the canonical owner pointer
+    ``Workspace.owner_user_id`` (moved only by the ownership service and
+    erasure). Identity links are not consulted (they share private contexts,
+    not workspace roles) and there is no membership-table fallback.
+
+    404 is returned ONLY when no workspace row has this id. A soft-deleted
+    workspace answers 200 ``is_owner: false`` — a deliberate deviation from the
+    entitlement read, which 404s on it: the billing service treats a literal
+    404 as "this route is not deployed" and then falls back to its own session,
+    so an existing-but-deleted workspace must fail closed with ``false``
+    instead. A workspace with no owner pointer also answers ``false``.
+
+    Raises:
+        ValidationError: ``workspace_id`` is not a UUID or ``sub`` is blank (422).
+        NotFoundException: no workspace row has this id (404).
+    """
+    try:
+        ws_uuid = UUID(workspace_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
+    if not sub.strip():
+        raise ValidationError("sub must not be blank", field="sub")
+
+    # No ``deleted_at`` filter: a soft-deleted row is answered, not 404'd (see above).
+    row = (
+        await db.execute(
+            select(Workspace.owner_user_id, Workspace.deleted_at).where(Workspace.id == ws_uuid)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFoundException("Workspace")
+
+    owner_user_id, deleted_at = row
+    is_owner = deleted_at is None and owner_user_id is not None and owner_user_id == sub
+    # ``sub`` is a user identifier: never logged.
+    logger.debug("internal_billing_owner_check", workspace_id=workspace_id, is_owner=is_owner)
+    return WorkspaceOwnerView(workspace_id=workspace_id, sub=sub, is_owner=is_owner)
 
 
 class DowngradeEligibilityView(BaseModel):

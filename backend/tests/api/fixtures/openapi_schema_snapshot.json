@@ -11883,6 +11883,25 @@
         ],
         "type": "object"
       },
+      "WorkspaceOwnerView": {
+        "properties": {
+          "is_owner": {
+            "type": "boolean"
+          },
+          "sub": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "is_owner",
+          "sub",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "WorkspacePlanInfo": {
         "properties": {
           "can_downgrade": {
@@ -28331,6 +28350,69 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DowngradeEligibilityView"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "internal-billing"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/owner": {
+      "get": {
+        "operationId": "get_workspace_owner_check_internal_workspaces__workspace_id__owner_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sub",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceOwnerView"
                 }
               }
             }
