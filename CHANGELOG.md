@@ -4,6 +4,30 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.117.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.117.0) — 2026-10-20
+
+Client connection defaults and maintenance ergonomics: a default context can now live on the credential (API key or OAuth app), a loopback OAuth sign-in shows its callback URL instead of losing it, linked accounts can undo each other's sessions, and bulk forget takes a list of ids.
+
+### Added
+- **Default context bound to the credential** ([#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)): a user API key and an OAuth app grant can carry an MCP default context — a context-scoped tool called without `context_id` runs in it, below `?context=` on the URL and above an agent-bound key's binding (`context_source: "credential"` on a refusal). Set it when creating a key or with `PATCH /api/v1/config/api-keys/{key_id}`, pick it on the OAuth consent page, or manage it under *Credentials & Integrations* (new *Default context* column and create-dialog picker, new *Connected apps* section) and with `GET /api/v1/me/oauth/grants`, `PUT`/`DELETE /api/v1/me/oauth/grants/{client_id}/default-context` (session-only). Setting one checks the context is readable now; every call is authorized again like an explicit id. Session cookies, connector keys, public-bound and agent-bound keys never carry one.
+- **OAuth loopback interstitial** ([#2155](https://github.com/kagura-ai/memory-cloud/issues/2155)): after approving a client that redirects to `localhost` / `127.0.0.1` / `[::1]`, the server shows a *Return to <app>* page with the full callback URL and a *Continue* button instead of redirecting straight away, so a browser that cannot reach the listener (WSL2 NAT, SSH, another machine) can paste the URL into the client. Script-free (strict CSP), `no-store`, `no-referrer`; non-loopback clients, deny and error paths unchanged.
+- **`forget(memory_ids=[...])`** ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)): 1–50 distinct ids in one call, each handled exactly like `forget(memory_id=)` and committed on its own; the reply adds one `results` row per id (`deleted` / `skipped` / `error`) with `count`, `succeeded`, `skipped`, `failed`. The maintain skill now deletes picked items with one call.
+- **Internal billing ownership re-check** ([#2181](https://github.com/kagura-ai/memory-cloud/issues/2181)): `GET /internal/workspaces/{workspace_id}/owner?sub=` (billing-service token) answers `is_owner` by strict equality with the workspace's owner pointer; `404` only when no workspace row exists, a deleted workspace answers `false`.
+
+### Changed
+- **`list_edges` hides weak edges by default** ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)): `min_weight` defaults to 0.05 (the same floor as `explore`), the reply echoes the applied `min_weight`; pass `min_weight=0` for every edge.
+- **Consent page** ([#2129](https://github.com/kagura-ai/memory-cloud/issues/2129)): an optional *Default context for this app* picker (grouped by workspace, "No default" first, "Keep the current default" when one is stored); the choice is saved only when a code is issued.
+
+### Fixed
+- **Linked identities address each other's write sessions** ([#2114](https://github.com/kagura-ai/memory-cloud/issues/2114)): `rollback_session` (session and window mode) and `changes_since` (`session_id`, `by_me`) count a session written under an account linked to yours as your own — the rule `list_revisions` uses for `by_you`. Linked callers share one window lock; an agent credential still reaches only its own agent's sessions; `session_not_found` stays uniform.
+
+### Notes
+- **Migration `f09_2129_cred_default_ctx`** (`api_keys.default_context_id` + two CHECK constraints + index; new table `oauth_grant_settings`). Downgrade drops them. No data step.
+- **New routes:** `PATCH /api/v1/config/api-keys/{key_id}`; `GET /api/v1/me/oauth/grants`; `PUT` / `DELETE /api/v1/me/oauth/grants/{client_id}/default-context`; `GET /internal/workspaces/{workspace_id}/owner`. `APIKeyResponse` gains `default_context_id` / `default_context_name`; `APIKeyCreate` accepts `default_context_id`.
+- **MCP:** `forget` gains `memory_ids`; `list_edges` gains `min_weight` in the reply; `context_source` adds `"credential"`; help texts for `context_id_required` and `by_me` updated. Tool count unchanged (72).
+- **Behaviour change for loopback OAuth clients:** one extra page with a *Continue* button after consent (Claude Code, Cursor, `claude mcp add`, the remote OAuth verification script).
+- No new environment variables.
+
 ## [v0.116.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.116.0) — 2026-10-20
 
 Search-result correctness: tag filters agree between `recall` and `list` and keep every requested tag, the recall LLM selector keeps the store's own facts and shows up in the cost dashboards, the embedding-model migration CLI records its switch time and never deadlocks with a rollback, and content chunks missing while a context was inactive are re-queued on their own.
