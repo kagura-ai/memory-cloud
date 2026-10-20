@@ -924,6 +924,12 @@ What it does not do:
   other account's memory), and an agent binding's memory-type filter does not
   stop it, as it does not for the caller's own row. In a shared context these
   still match the caller's own memories only.
+- **Write sessions follow the link in every context** (#2114), as
+  `list_revisions` marks `by_you`: `rollback_session` and `changes_since`
+  (`session_id`, `by_me`) count a session or window written under a linked
+  account as the caller's own. The editor role and each memory's permission
+  check stay the caller's, and an agent key still reaches only its own
+  agent's sessions.
 - A share key recalls as the account that issued it, so it also returns what
   a linked account wrote in that account's private context.
 
