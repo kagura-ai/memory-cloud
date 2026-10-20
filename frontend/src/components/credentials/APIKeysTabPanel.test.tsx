@@ -499,7 +499,7 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     expect(
       within(table).queryByLabelText("defaultContextFor"),
     ).not.toBeInTheDocument();
-    expect(within(table).getByLabelText("none")).toHaveTextContent("—");
+    expect(within(table).getByText("none")).toBeInTheDocument();
   });
 
   it("offers no control when the key list failed to load", async () => {
@@ -513,6 +513,27 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
 
     const table = await screen.findByRole("table");
     await waitFor(() => expect(mockGetAPIKeys).toHaveBeenCalled());
+    expect(
+      within(table).queryByLabelText("defaultContextFor"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(table).getByText("defaultContextLoadFailed"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a read-only default by its display name", async () => {
+    const key = makeKey({ revoked_at: "2026-10-01T00:00:00Z" });
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [key],
+      target_user_role: "owner",
+    });
+    mockGetContexts.mockResolvedValue(workspaceContexts());
+    mockGetAPIKeys.mockResolvedValue([adminKey(key.id, CTX_A, "alpha")]);
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(await within(table).findByText("Alpha")).toBeInTheDocument();
     expect(
       within(table).queryByLabelText("defaultContextFor"),
     ).not.toBeInTheDocument();
@@ -625,6 +646,29 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
           expect.objectContaining({
             variant: "destructive",
             description: "defaultContextCreateFailed",
+          }),
+        ),
+      );
+    });
+
+    it("uses a generic message when setting the default fails without one", async () => {
+      mockCreateAPIKey.mockResolvedValue(
+        makeKey({ id: "akey_0000000000000000000042", name: "ci" }),
+      );
+      mockUpdateDefault.mockRejectedValue(new Error(""));
+      await openCreateDialog();
+      const select = screen.getByLabelText("defaultContextLabel");
+      await waitFor(() =>
+        expect(within(select).getByText("Alpha")).toBeInTheDocument(),
+      );
+      fireEvent.change(select, { target: { value: CTX_A } });
+      fireEvent.click(screen.getByText("createKey"));
+
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({
+            variant: "destructive",
+            description: "defaultContextCreateFailedGeneric",
           }),
         ),
       );
