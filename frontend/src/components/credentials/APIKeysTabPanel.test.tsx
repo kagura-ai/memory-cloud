@@ -32,10 +32,11 @@ import type { MemberAPIKey } from "@/lib/api/member-credentials";
 
 const mockGetMemberCredentials = vi.fn();
 const mockCreateAPIKey = vi.fn();
+const mockRegenerate = vi.fn();
 vi.mock("@/lib/api/member-credentials", () => ({
   getMemberCredentials: (...a: unknown[]) => mockGetMemberCredentials(...a),
   hideAPIKey: vi.fn(),
-  regenerateAPIKey: vi.fn(),
+  regenerateAPIKey: (...a: unknown[]) => mockRegenerate(...a),
   deleteWorkspaceMemberAPIKey: vi.fn(),
   deleteWorkspaceMemberAPIKeyById: vi.fn(),
   createAPIKey: (...a: unknown[]) => mockCreateAPIKey(...a),
@@ -536,6 +537,43 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     expect(await within(table).findByText("Alpha")).toBeInTheDocument();
     expect(
       within(table).queryByLabelText("defaultContextFor"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps loaded defaults when a later refresh of them fails", async () => {
+    const key = makeKey();
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [key],
+      target_user_role: "owner",
+    });
+    mockGetContexts.mockResolvedValue(workspaceContexts());
+    mockGetAPIKeys
+      .mockResolvedValueOnce([adminKey(key.id, CTX_A, "alpha")])
+      .mockRejectedValue(new Error("boom"));
+    mockRegenerate.mockResolvedValue({});
+
+    render(<APIKeysTabPanel />);
+    const table = await screen.findByRole("table");
+    const select = (await within(table).findByLabelText(
+      "defaultContextFor",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe(CTX_A));
+
+    // Regenerate reloads credentials (and defaults); the defaults fetch fails.
+    fireEvent.click(screen.getAllByText("regenerate")[0]);
+    fireEvent.click(await screen.findByText("regenerateApiKeyTitle"));
+    const confirm = screen
+      .getAllByText("regenerate")
+      .find((el) => el.closest("[role='alertdialog']"));
+    fireEvent.click(confirm!);
+    await waitFor(() => expect(mockGetAPIKeys).toHaveBeenCalledTimes(2));
+
+    expect(
+      (within(table).getByLabelText("defaultContextFor") as HTMLSelectElement)
+        .value,
+    ).toBe(CTX_A);
+    expect(
+      within(table).queryByText("defaultContextLoadFailed"),
     ).not.toBeInTheDocument();
   });
 
