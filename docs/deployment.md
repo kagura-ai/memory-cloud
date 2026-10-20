@@ -2008,10 +2008,12 @@ query, each sent row in rank order with the UTC day it was last written
 into numbered segments — no memory ids, scores, tags or sources; every string
 passes the control-token neutraliser and sits between the untrusted-content
 markers — and answers with row and segment indices only. The selector judges
-topical relevance, not truth (#2171): a row about what the query asks is kept
-even when its stored fact contradicts the model's general knowledge, and when
-two rows answer the same question differently it prefers the newer one,
-keeping both when the days match or it is unsure. The server validates each answer
+whether a row helps answer the query, treating the store as true (#2171): a
+row is never dropped or cut because its stored fact contradicts the model's
+general knowledge. When two rows answer the same question differently it
+prefers the newer one, keeping both when the days match or it is unsure, and
+for a counting or listing query it keeps every row that is one of the things
+counted. The server validates each answer
 item on its own, drops the rows marked irrelevant (their ids are listed in
 `selector.dropped_memory_ids`, at most 20) and rebuilds a kept row's content by
 slicing the stored text at the chosen segments, joined with `" … "`, with

@@ -22,12 +22,16 @@ every memory string and the query pass the #2020 control-token neutraliser, the
 row block sits between the #919 untrusted-content markers, and no id, score,
 tag or provenance goes into the prompt — only the date each row was last written.
 
-Store as authority (#2171): the model judges whether a row is about what the
-query asks, never whether it believes the row is true — a memory store holds
-corrections, updates and user-specific facts that differ from general
-knowledge, and those are the rows to keep. When two rows answer the same
-question differently it prefers the newer one (the ``updated_at`` or else the
-``created_at`` day in the row's header), and keeps both when unsure.
+Store as authority (#2171): the model judges whether a row helps answer the
+query while treating every row as true for the user, never whether it believes
+the row's fact — a memory store holds corrections, updates and user-specific
+facts that differ from general knowledge, and those are the rows to keep. For
+a counting or listing query every row that is one of the things counted stays.
+When two rows answer the same question differently it prefers the newer one
+(the ``updated_at`` or else the ``created_at`` day in the row's header), and
+keeps both when unsure. The ``selector-v2`` rule ("about what the query asks")
+kept conversational pages whole; ``selector-v3`` keeps "helps answer" and adds
+the store-is-true sentence.
 
 Bounds (C3, C4): at most ``LLM_SELECTOR_MAX_ROWS`` rows are sent (later rows
 are kept unchanged); over ``LLM_SELECTOR_MAX_PROMPT_CHARS`` of summaries and
@@ -77,7 +81,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Bump on every wording change of the prompt (ledger rows carry it).
-PROMPT_REVISION = "selector-v2"
+PROMPT_REVISION = "selector-v3"
 # The only characters of a selected row's content that are not stored text.
 SEPARATOR = " … "
 # Segmentation: at most this many segments per row; a piece with fewer
@@ -117,13 +121,13 @@ SELECTOR_SYSTEM = f"""\
 You select which recall results answer a query, and for each result with \
 numbered segments, which segments carry the answer.
 
-The rows come from the user's memory store, the authority on its facts: it \
-may hold facts that differ from what you know, and those are the ones to keep.
-
 Rules:
-- relevant=true when the row is about what the query asks, whether or not it \
-agrees with general knowledge; otherwise false. Never judge a row by whether \
-you believe it is true.
+- relevant=true only when the row helps answer the query; otherwise false. \
+Treat every row as true for this user, even where it contradicts general \
+knowledge or what you believe: the store is the authority, so never drop or \
+cut a row because you think its fact is wrong.
+- When the query counts or lists things, keep every row that is one of the \
+things counted or listed.
 - For a relevant row with segments, list the index of every segment that \
 states the stored answer, even when it contradicts general knowledge, plus any \
 segment needed to understand them. An empty list keeps the row's whole text.
