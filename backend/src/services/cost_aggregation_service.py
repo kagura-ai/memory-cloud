@@ -27,17 +27,20 @@ unpriced, the bucket's cost is ``None`` so that partial totals don't
 look like real money. Usage figures (calls, tokens) are still surfaced
 even when cost is unknown.
 
-Event-shaped callers (#2019): ``llm_call_log`` rows of the callers in
-:data:`LEDGER_COST_SOURCES` (today the ingest-time supersede judge,
-``supersede_verify``) join as a third leg, tagged with their caller as the
-``source``. Their cost is the row's write-time snapshot (``cost_usd``), not a
+Event-shaped calls (#2019, #2154): ``llm_call_log`` completion rows matched by
+:data:`LEDGER_COST_SOURCES` (the ingest-time supersede judge,
+``supersede_verify``, and the recall LLM selector stage, ``llm_selector``:
+``caller='recall'`` with ``call_metadata.stage='llm_selector'``) join as a
+third leg, each tagged with its source name. Their cost is the row's write-time snapshot (``cost_usd``), not a
 read-time pricing join: a later ``llm_pricing`` change re-prices the Sleep legs
 on the next read but leaves ledger rows at what they cost when written. The
 snapshot follows the same row rule as the Sleep LLM leg (``subscription``
 rows are skipped, so such a model is a pricing miss); a row flagged
 ``call_metadata.pricing_miss`` makes its bucket "cost unknown" like an
-unpriced Sleep usage row. The other ledger
-callers (recall embeddings, reranks) are not part of this view yet.
+unpriced Sleep usage row, and so does a row with no tokens at all (a timed-out
+selector call: the request may have been billed but its usage never came back,
+so its stored ``cost_usd = 0`` is not a price). The other ledger rows (recall
+embeddings, reranks) are not part of this view yet.
 
 v1 limitation: pricing-tier lookup uses ``context_min_tokens=0`` because
 ``sleep_report_llm_usage`` does not store the per-call context window
@@ -71,11 +74,19 @@ logger = get_logger(__name__)
 # the query when ``date_trunc`` rejects them.
 VALID_PERIODS: tuple[str, ...] = ("day", "week", "month")
 
-# ``llm_call_log.caller`` values aggregated here (#2019), each surfacing as its
-# own ``source``. Interpolated into the SQL as literals — hardcoded constants,
-# never user input; each must be a member of ``LLM_CALL_LOG_CALLERS``.
-LEDGER_COST_SOURCES: tuple[str, ...] = ("supersede_verify",)
-assert set(LEDGER_COST_SOURCES) <= set(LLM_CALL_LOG_CALLERS)
+# ``llm_call_log`` completion rows aggregated here, each surfacing as its own
+# ``source``: source → (``caller``, ``call_metadata.stage`` or ``None`` for any
+# stage). #2019 added the supersede judge, #2154 the recall LLM selector (recall
+# writes its embedding rows under the same caller; only the selector's
+# completion rows carry the stage). Interpolated into the SQL as literals —
+# hardcoded constants, never user input; each caller must be a member of
+# ``LLM_CALL_LOG_CALLERS``.
+_LEDGER_SOURCE_MATCH: dict[str, tuple[str, str | None]] = {
+    "supersede_verify": ("supersede_verify", None),
+    "llm_selector": ("recall", "llm_selector"),
+}
+LEDGER_COST_SOURCES: tuple[str, ...] = tuple(_LEDGER_SOURCE_MATCH)
+assert {caller for caller, _ in _LEDGER_SOURCE_MATCH.values()} <= set(LLM_CALL_LOG_CALLERS)
 assert not set(LEDGER_COST_SOURCES) & set(SLEEP_REPORT_SOURCES)
 
 # Every value the ``source`` filter accepts.
@@ -239,6 +250,21 @@ LEFT JOIN LATERAL (
 """
 
 
+def _ledger_source_case() -> str:
+    """The SQL ``CASE`` naming the :data:`LEDGER_COST_SOURCES` entry of a row.
+
+    ``NULL`` for a ledger row no source matches. Built from the hardcoded
+    :data:`_LEDGER_SOURCE_MATCH` only, never from user input.
+    """
+    branches = []
+    for source, (caller, stage) in _LEDGER_SOURCE_MATCH.items():
+        condition = f"l.caller = '{caller}'"
+        if stage is not None:
+            condition += f" AND l.call_metadata ->> 'stage' = '{stage}'"
+        branches.append(f"WHEN {condition} THEN '{source}'")
+    return f"CASE {' '.join(branches)} END"
+
+
 def _filter_params(
     *,
     workspace_id: UUID | None,
@@ -265,7 +291,8 @@ def _filter_clauses(params: dict[str, Any], *, alias: str, source_column: str) -
 
     Only bound parameter names appear in the strings, never user input;
     ``alias`` / ``source_column`` are hardcoded at the call sites (``sr`` /
-    ``source`` for ``sleep_reports``, ``l`` / ``caller`` for ``llm_call_log``).
+    ``source`` for ``sleep_reports``, ``lr`` / ``source`` for the ledger rows,
+    whose ``source`` is :func:`_ledger_source_case`).
     """
     columns = {
         "workspace_id": "workspace_id",
@@ -311,8 +338,8 @@ class CostAggregationService:
                 leaves None to see all).
             user_id: Restrict to a single user.
             source: Restrict to one of :data:`COST_SOURCES` (``'sleep'``,
-                ``'analysis'``, or a ledger caller such as
-                ``'supersede_verify'``).
+                ``'analysis'``, or a ledger source such as
+                ``'supersede_verify'`` or ``'llm_selector'``).
             paid_by: Restrict to ``'platform'`` or ``'byok'``.
 
         Returns:
@@ -362,15 +389,21 @@ class CostAggregationService:
                 *_filter_clauses(filter_params, alias="sr", source_column="source"),
             ]
         )
-        ledger_clauses = _filter_clauses(filter_params, alias="l", source_column="caller")
-        ledger_callers = ", ".join(f"'{c}'" for c in LEDGER_COST_SOURCES)
+        ledger_callers = ", ".join(
+            f"'{c}'" for c in sorted({caller for caller, _ in _LEDGER_SOURCE_MATCH.values()})
+        )
         ledger_where = " AND ".join(
             [
                 "l.occurred_at >= :start",
                 "l.occurred_at < :end",
                 f"l.caller IN ({ledger_callers})",
                 "l.call_type = 'completion'",
-                *ledger_clauses,
+            ]
+        )
+        ledger_source_where = " AND ".join(
+            [
+                "lr.source IS NOT NULL",
+                *_filter_clauses(filter_params, alias="lr", source_column="source"),
             ]
         )
 
@@ -461,29 +494,53 @@ class CostAggregationService:
             FROM llm_per_row
             GROUP BY 1, 2, 3, 4, 5, 6
         ),
-        -- #2019: event-shaped callers from llm_call_log. Cost is the row's
-        -- write-time snapshot; a pricing_miss row makes the bucket NULL
-        -- (sticky, same BOOL_AND rule as the Sleep leg).
-        ledger_per_model AS (
+        -- #2019 / #2154: event-shaped completion calls from llm_call_log,
+        -- each named by its LEDGER_COST_SOURCES entry (NULL: not shown here,
+        -- e.g. a recall completion without the selector stage). Cost is the
+        -- row's write-time snapshot; a pricing_miss row, or a row with no
+        -- tokens (usage never came back: a timed-out call), makes the bucket
+        -- NULL (sticky, same BOOL_AND rule as the Sleep leg).
+        ledger_rows AS (
             SELECT
-                date_trunc(:period, l.occurred_at)::date AS period_start,
+                l.occurred_at,
                 l.workspace_id,
                 l.user_id,
                 l.model,
-                l.caller AS source,
+                {_ledger_source_case()} AS source,
                 l.paid_by,
-                COUNT(*)::bigint                              AS calls,
-                COALESCE(SUM(l.input_tokens), 0)::bigint        AS tokens_in,
-                COALESCE(SUM(l.output_tokens), 0)::bigint       AS tokens_out,
-                COALESCE(SUM(l.cached_input_tokens), 0)::bigint AS tokens_cached_in,
-                COALESCE(SUM(l.cache_write_tokens), 0)::bigint  AS tokens_cache_write,
-                CASE
-                    WHEN BOOL_AND(COALESCE(l.call_metadata ->> 'pricing_miss', 'false') <> 'true')
-                    THEN SUM(l.cost_usd)::float8
-                    ELSE NULL::float8
-                END AS cost
+                l.input_tokens,
+                l.output_tokens,
+                l.cached_input_tokens,
+                l.cache_write_tokens,
+                l.cost_usd,
+                (
+                    COALESCE(l.call_metadata ->> 'pricing_miss', 'false') <> 'true'
+                    AND COALESCE(l.input_tokens, 0) + COALESCE(l.output_tokens, 0)
+                      + COALESCE(l.cached_input_tokens, 0)
+                      + COALESCE(l.cache_write_tokens, 0) > 0
+                ) AS priced
             FROM llm_call_log l
             WHERE {ledger_where}
+        ),
+        ledger_per_model AS (
+            SELECT
+                date_trunc(:period, lr.occurred_at)::date AS period_start,
+                lr.workspace_id,
+                lr.user_id,
+                lr.model,
+                lr.source,
+                lr.paid_by,
+                COUNT(*)::bigint                               AS calls,
+                COALESCE(SUM(lr.input_tokens), 0)::bigint        AS tokens_in,
+                COALESCE(SUM(lr.output_tokens), 0)::bigint       AS tokens_out,
+                COALESCE(SUM(lr.cached_input_tokens), 0)::bigint AS tokens_cached_in,
+                COALESCE(SUM(lr.cache_write_tokens), 0)::bigint  AS tokens_cache_write,
+                CASE
+                    WHEN BOOL_AND(lr.priced) THEN SUM(lr.cost_usd)::float8
+                    ELSE NULL::float8
+                END AS cost
+            FROM ledger_rows lr
+            WHERE {ledger_source_where}
             GROUP BY 1, 2, 3, 4, 5, 6
         ),
         emb_per_row AS (

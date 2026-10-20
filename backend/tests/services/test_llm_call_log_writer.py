@@ -166,6 +166,39 @@ class TestInputValidation:
         assert mock_pricing.compute_cost_usd.await_args.kwargs["exclude_subscription"] is False
 
     @pytest.mark.asyncio
+    async def test_subscription_pricing_excluded_for_recall_selector_completions(
+        self, writer, mock_pricing
+    ):
+        """#2154: recall's completion rows (the LLM selector stage) are priced by
+        the judge's rule, so the dashboards price every completion the same way;
+        recall embeddings and reranks keep their lookup."""
+        mock_pricing.compute_cost_usd.return_value = 0.001
+        identity = {
+            "user_id": "u",
+            "workspace_id": "11111111-1111-1111-1111-111111111111",
+            "context_id": "22222222-2222-2222-2222-222222222222",
+        }
+        await writer.record(
+            caller="recall",
+            call_type="completion",
+            provider="openai",
+            model="gpt-5-nano",
+            input_tokens=10,
+            call_metadata={"stage": "llm_selector"},
+            **identity,
+        )
+        assert mock_pricing.compute_cost_usd.await_args.kwargs["exclude_subscription"] is True
+        await writer.record(
+            caller="recall",
+            call_type="rerank",
+            provider="cohere",
+            model="rerank-v3.5",
+            rerank_search_units=1,
+            **identity,
+        )
+        assert mock_pricing.compute_cost_usd.await_args.kwargs["exclude_subscription"] is False
+
+    @pytest.mark.asyncio
     async def test_admin_caller_allows_null_identity(self, writer, mock_pricing):
         """admin caller may legitimately run without user/workspace/context."""
         mock_pricing.compute_cost_usd.return_value = 0.0

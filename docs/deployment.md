@@ -2029,8 +2029,11 @@ Each provider call writes one `llm_call_log` row with `caller='recall'`,
 `call_type='completion'` and `call_metadata.stage='llm_selector'` (outcome
 `applied`, `invalid_answer`, `failed` or `timeout`, plus `rows_sent`, `kept`,
 `dropped` and the prompt revision); a timed-out call may still be billed but
-its usage never came back, so its row carries zero tokens. Cost reports can
-filter on that pair. The recall audit row
+its usage never came back, so its row carries zero tokens. The admin and
+workspace cost dashboards show these rows as their own *By Source* row
+(`llm_selector`, also a `source` filter value of the cost aggregation API); a
+timed-out call counts as a call with unknown cost (`—`), not as `$0.00`. The
+recall audit row
 adds `selector_applied` and `selector_dropped_count` when the stage applied.
 
 | Event | Level | When |
@@ -2573,8 +2576,12 @@ Cost is recorded in two places, by shape:
   aggregated across the run. All of Sleep's judges (edge discovery, dedup,
   consolidation, importance re-evaluation) are counted here, and only here.
 - **Event-shaped: `llm_call_log`.** One row per provider call made outside a
-  run: recall embeddings (`caller='recall'`) and the write-time supersede
-  check (`caller='supersede_verify'`, enabled by `SUPERSEDE_VERIFY_MODE=llm`).
+  run: recall embeddings (`caller='recall'`, `call_type='embedding'`), the
+  recall LLM selector stage (`caller='recall'`, `call_type='completion'`,
+  `call_metadata.stage='llm_selector'`, see
+  [Recall LLM selector](#recall-llm-selector-opt-in-plan-gate-and-bounds-2144)) and the write-time
+  supersede check (`caller='supersede_verify'`, enabled by
+  `SUPERSEDE_VERIFY_MODE=llm`).
   Each row stores its tokens, a cost snapshot priced when it is written,
   `paid_by` (`byok` when a stored workspace key was used, `platform`
   otherwise), and for the supersede check the verdict (`supersedes`,
@@ -2590,13 +2597,17 @@ that totals its calls, and counting the same spend in two tables would mean
 reconciling them on every report. The per-run totals in `sleep_reports` are the
 record of Sleep cost.
 
-The admin and workspace cost dashboards combine Sleep, Memory Analysis and the
-supersede check, and each one appears as its own row in the *By Source* table.
-They price the two kinds differently: Sleep and Memory Analysis usage is
-priced from `llm_pricing` each time the dashboard is read, so a price change
-also changes past Sleep figures, while a supersede-check row keeps the cost it
-was given when written. Both skip `pricing_model = 'subscription'` rows, so a
-model billed by subscription shows as cost unknown (`—`) in either.
+The admin and workspace cost dashboards combine Sleep, Memory Analysis, the
+supersede check and the recall LLM selector, and each one appears as its own
+row in the *By Source* table (sources `sleep`, `analysis`, `supersede_verify`,
+`llm_selector`). They price the two kinds differently: Sleep and Memory
+Analysis usage is priced from `llm_pricing` each time the dashboard is read, so
+a price change also changes past Sleep figures, while a supersede-check or
+selector row keeps the cost it was given when written. Both skip
+`pricing_model = 'subscription'` rows, so a model billed by subscription shows
+as cost unknown (`—`) in either. A ledger row with no tokens at all (a
+timed-out selector call, whose usage never came back) is counted as a call
+with unknown cost, so its bucket shows `—` rather than `$0.00`.
 Recall embeddings are in `llm_call_log` but are not shown in the dashboards
 yet. Because the ledger is a table, you can still answer questions such as
 "how did the supersede verdicts split last week, and what did they cost?"

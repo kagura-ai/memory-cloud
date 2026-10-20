@@ -314,6 +314,16 @@ class TestAdminRoute:
         assert response.status_code == 200
         assert mock_aggregate.await_args.kwargs["source"] == "supersede_verify"
 
+    def test_llm_selector_is_an_accepted_source(self, client):
+        """#2154: the recall LLM selector's ledger rows are filterable by source."""
+        mock_aggregate = _install_admin_overrides(client, [])
+        response = client.get(
+            "/api/v1/admin/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07&source=llm_selector"
+        )
+        assert response.status_code == 200
+        assert mock_aggregate.await_args.kwargs["source"] == "llm_selector"
+
 
 # ============================================================================
 # Workspace-scoped route
@@ -402,6 +412,16 @@ class TestWorkspaceRoute:
         )
         assert response.status_code == 400
         assert "Invalid source" in response.json()["message"]
+
+    def test_llm_selector_is_an_accepted_source(self, client):
+        """#2154: a workspace can filter its own selector spend."""
+        mock_aggregate = _install_workspace_overrides(client, [], user=_regular_user())
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07&source=llm_selector"
+        )
+        assert response.status_code == 200
+        assert mock_aggregate.await_args.kwargs["source"] == "llm_selector"
 
     def test_invalid_paid_by_returns_400(self, client):
         _install_workspace_overrides(client, [], user=_regular_user())

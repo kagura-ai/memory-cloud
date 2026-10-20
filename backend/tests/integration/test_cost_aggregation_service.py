@@ -685,8 +685,12 @@ def _make_ledger_row(
     cost_usd: str = "1.5",
     paid_by: str = "platform",
     pricing_miss: bool = False,
+    call_metadata: dict | None = None,
 ):
     from models.llm_call_log import LLMCallLog
+
+    if call_metadata is None:
+        call_metadata = {"pricing_miss": True} if pricing_miss else {"verdict": "parallel"}
 
     return LLMCallLog(
         occurred_at=occurred_at,
@@ -702,7 +706,7 @@ def _make_ledger_row(
         embedding_tokens=embedding_tokens,
         cost_usd=Decimal(cost_usd),
         paid_by=paid_by,
-        call_metadata={"pricing_miss": True} if pricing_miss else {"verdict": "parallel"},
+        call_metadata=call_metadata,
     )
 
 
@@ -847,3 +851,175 @@ async def test_ledger_leg_honours_filters_and_skips_other_callers(db_session):
 
     only_sleep = await service.aggregate(**window, workspace_id=workspace_id, source="sleep")
     assert [(r.user_id, r.calls) for r in only_sleep] == [("user-a", 1)]
+
+
+# ----------------------------------------------------------------------
+# #2154: the recall LLM selector stage (#2144) as its own ledger source
+# ----------------------------------------------------------------------
+
+
+def _selector_row(**kwargs):
+    """A selector completion row: ``caller='recall'`` + the stage marker."""
+    outcome = kwargs.pop("outcome", "applied")
+    return _make_ledger_row(
+        caller="recall",
+        call_metadata={"stage": "llm_selector", "outcome": outcome, "rows_sent": 10},
+        **kwargs,
+    )
+
+
+def _recall_embedding_row(**kwargs):
+    return _make_ledger_row(
+        caller="recall",
+        call_type="embedding",
+        model="text-embedding-3-small",
+        input_tokens=None,
+        output_tokens=None,
+        embedding_tokens=1_000,
+        cost_usd="0.00002",
+        call_metadata={},
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_selector_rows_surface_as_llm_selector_beside_judge_and_sleep(db_session):
+    """Selector completions show as ``source='llm_selector'`` with their
+    write-time cost; recall embeddings (same caller) and a recall completion
+    without the stage stay out."""
+    await _seed_pricing(db_session)
+    workspace_id = uuid4()
+    user_id = "user-selector"
+    at = datetime(2026, 4, 5, 3, 0)
+    ids = {"user_id": user_id, "workspace_id": workspace_id, "occurred_at": at}
+
+    report = _make_report(user_id=user_id, workspace_id=workspace_id, started_at=at)
+    db_session.add(report)
+    await db_session.flush()
+    db_session.add(
+        _make_usage(
+            report_id=report.id,
+            provider="anthropic",
+            model="claude-haiku-4-5",
+            calls=1,
+            input_tokens=1_000_000,  # $1
+            output_tokens=0,
+        )
+    )
+    db_session.add_all(
+        [
+            _make_ledger_row(**ids, cost_usd="0.5"),  # judge
+            _selector_row(**ids, cost_usd="0.25", input_tokens=2_000, output_tokens=50),
+            _selector_row(
+                **ids,
+                cost_usd="0.75",
+                input_tokens=3_000,
+                output_tokens=60,
+                outcome="invalid_answer",
+            ),
+            _recall_embedding_row(**ids),
+            _make_ledger_row(**ids, caller="recall", cost_usd="9", call_metadata={}),
+        ]
+    )
+    await db_session.flush()
+
+    rows = await CostAggregationService(db_session).aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.calls == 4  # Sleep 1 + judge 1 + selector 2
+    assert row.embedding_tokens == 0
+    assert row.tokens_in == 1_000_000 + 1_000_000 + 5_000
+    assert row.cost_usd == pytest.approx(2.5)  # $1 Sleep + $0.5 judge + $1 selector
+    by_source = {b.source: b for b in row.cost_breakdown_by_source}
+    assert set(by_source) == {"sleep", "supersede_verify", "llm_selector"}
+    assert by_source["llm_selector"].calls == 2
+    assert by_source["llm_selector"].cost_usd == pytest.approx(1.0)
+    assert by_source["supersede_verify"].cost_usd == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_source_filter_llm_selector_returns_selector_rows_only(db_session):
+    workspace_id = uuid4()
+    at = datetime(2026, 4, 5, 3, 0)
+    db_session.add_all(
+        [
+            _make_ledger_row(user_id="user-a", workspace_id=workspace_id, occurred_at=at),
+            _selector_row(
+                user_id="user-a", workspace_id=workspace_id, occurred_at=at, cost_usd="0.2"
+            ),
+            _selector_row(
+                user_id="user-b",
+                workspace_id=workspace_id,
+                occurred_at=at,
+                cost_usd="0.3",
+                paid_by="byok",
+            ),
+            _recall_embedding_row(user_id="user-a", workspace_id=workspace_id, occurred_at=at),
+        ]
+    )
+    await db_session.flush()
+    service = CostAggregationService(db_session)
+    window = {"period": "day", "start": datetime(2026, 4, 1), "end": datetime(2026, 4, 8)}
+
+    only_selector = await service.aggregate(
+        **window, workspace_id=workspace_id, source="llm_selector"
+    )
+    assert sorted((r.user_id, r.calls) for r in only_selector) == [("user-a", 1), ("user-b", 1)]
+    assert all(
+        [b.source for b in r.cost_breakdown_by_source] == ["llm_selector"] for r in only_selector
+    )
+    by_user = {r.user_id: r for r in only_selector}
+    assert by_user["user-a"].cost_usd == pytest.approx(0.2)
+    assert by_user["user-b"].cost_usd_byok == pytest.approx(0.3)
+
+    platform_selector = await service.aggregate(
+        **window, workspace_id=workspace_id, source="llm_selector", paid_by="platform"
+    )
+    assert [(r.user_id, r.calls) for r in platform_selector] == [("user-a", 1)]
+
+    only_judge = await service.aggregate(
+        **window, workspace_id=workspace_id, source="supersede_verify"
+    )
+    assert [(r.user_id, r.calls) for r in only_judge] == [("user-a", 1)]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_selector_call_counts_as_a_call_with_unknown_cost(db_session):
+    """A timed-out call is written with zero tokens and ``cost_usd = 0``: the
+    request may have been billed, so the bucket is "cost unknown", not $0."""
+    workspace_id = uuid4()
+    at = datetime(2026, 4, 5, 3, 0)
+    ids = {"user_id": "user-timeout", "workspace_id": workspace_id, "occurred_at": at}
+    db_session.add_all(
+        [
+            _selector_row(**ids, cost_usd="0.2"),
+            _selector_row(
+                **ids,
+                cost_usd="0",
+                input_tokens=0,
+                output_tokens=0,
+                outcome="timeout",
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    rows = await CostAggregationService(db_session).aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.calls == 2
+    assert row.cost_usd is None
+    (selector,) = row.cost_breakdown_by_source
+    assert selector.source == "llm_selector"
+    assert selector.calls == 2
+    assert selector.cost_usd is None

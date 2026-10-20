@@ -79,10 +79,25 @@ _FULL_IDENTITY_CALLERS: frozenset[str] = frozenset({"recall", "rerank", "ask", "
 # Callers whose cost snapshot skips ``pricing_model='subscription'`` rows
 # (#2019) — the rule the cost aggregation's Sleep LLM leg applies, so a judge
 # completion and a Sleep completion on the same model price the same way (a
-# subscription row reads as a pricing miss, "cost unknown"). Recall is left
-# out deliberately: its rows (and the embedding spend cap sharing the lookup)
-# keep the pricing they always had.
+# subscription row reads as a pricing miss, "cost unknown"). Recall's
+# embedding and rerank rows are left out deliberately: they (and the embedding
+# spend cap sharing the lookup) keep the pricing they always had. Recall's
+# completion rows (the #2144 LLM selector) are a completion on the Sleep judge
+# lane and follow the judge's rule (#2154), see :func:`_excludes_subscription`.
 _SUBSCRIPTION_EXCLUDED_CALLERS: frozenset[str] = frozenset({"supersede_verify"})
+
+
+def _excludes_subscription(caller: str, call_type: str) -> bool:
+    """Whether a row's cost snapshot skips ``pricing_model='subscription'`` rows.
+
+    The callers in :data:`_SUBSCRIPTION_EXCLUDED_CALLERS`, and recall's
+    completion calls (the LLM selector stage, #2154), so that every completion
+    the cost dashboards show is priced by one rule.
+    """
+    return caller in _SUBSCRIPTION_EXCLUDED_CALLERS or (
+        caller == "recall" and call_type == "completion"
+    )
+
 
 # Column-name → llm_pricing.unit_type axis. ``cached_input_tokens`` maps
 # to the ``cache_read_tokens`` pricing axis — naming differs because
@@ -308,7 +323,7 @@ class LLMCallLogWriter:
                 model=model,
                 occurred_at=resolved_occurred_at,
                 usage_pairs=usage_pairs,
-                exclude_subscription=caller in _SUBSCRIPTION_EXCLUDED_CALLERS,
+                exclude_subscription=_excludes_subscription(caller, call_type),
             )
 
             final_metadata: dict[str, Any] | None = dict(call_metadata) if call_metadata else None
