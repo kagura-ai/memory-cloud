@@ -124,6 +124,7 @@ from utils.logger import get_logger
 from utils.query_log import query_log_fields
 from utils.recall_projection import content_slice, effective_full
 from utils.tag_normalize import (
+    MAX_TAG_GROUPS,
     TAG_GROUPS_FILTER_KEY,
     tag_filter_groups,
     tag_filter_groups_any,
@@ -6082,18 +6083,21 @@ class MemoryService:
         ):
             from services.tag_resolution import expand_tag_filter
 
+            # #2096: the stores match at most MAX_TAG_GROUPS requested tags, so
+            # only those are widened; a tag past the cap never joins a group.
+            widened = list(dict.fromkeys(tag_filter))[:MAX_TAG_GROUPS]
             expanded, added = await expand_tag_filter(
                 self.db,
                 workspace_id=effective_workspace_id,
                 context_id=current_context_id,
                 user_id=user_id,
-                tags=tag_filter,
+                tags=widened,
             )
             if added:
                 effective_filters = {**effective_filters, "tags": expanded}
                 logger.info(
                     "recall_tag_filter_expanded",
-                    requested=len(tag_filter),
+                    requested=len(widened),
                     expanded=len(expanded),
                 )
             if request.filters.get("tags_match") == "all":
@@ -6102,7 +6106,7 @@ class MemoryService:
                 # nothing was added, so listed spellings of one tag still merge.
                 effective_filters = {
                     **effective_filters,
-                    TAG_GROUPS_FILTER_KEY: tag_filter_groups(tag_filter, expanded),
+                    TAG_GROUPS_FILTER_KEY: tag_filter_groups(widened, expanded),
                 }
             elif added:
                 # #2096: the builders cut a flat 'any' list to 50 entries, so the
@@ -6110,7 +6114,7 @@ class MemoryService:
                 # groups instead, capped per requested tag.
                 effective_filters = {
                     **effective_filters,
-                    TAG_GROUPS_FILTER_KEY: tag_filter_groups_any(tag_filter, expanded),
+                    TAG_GROUPS_FILTER_KEY: tag_filter_groups_any(widened, added),
                 }
 
         # #1515: hybrid_search reports here when it had to serve the request

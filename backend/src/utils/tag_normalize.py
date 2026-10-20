@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 # Separator characters an author might use interchangeably inside one tag.
 _SEPARATORS = re.compile(r"[\s_\-./]+")
@@ -171,45 +171,37 @@ def tag_filter_groups(requested: Sequence[str], expanded: Sequence[str]) -> list
     return groups
 
 
-def tag_filter_groups_any(requested: Sequence[str], expanded: Sequence[str]) -> list[list[str]]:
+def tag_filter_groups_any(
+    requested: Sequence[str], added_by_tag: Mapping[str, Sequence[str]]
+) -> list[list[str]]:
     """One group per requested tag of a widened ``tags_match='any'`` filter (#2096).
 
     The store builders cut a flat tag list to 50 entries, so the spellings the
     widening interleaves pushed later requested tags out and tolerance matched
     fewer tags than the exact filter. The builders OR the union of these groups
-    instead, capped by group: a kept requested tag keeps every spelling.
+    instead, capped by group: a kept requested tag keeps every spelling the
+    widening gave it.
 
-    Unlike :func:`tag_filter_groups` there is no number guard: under ``any`` the
-    widening deliberately matches every spelling with the fold (``v0.11.0``
-    also matches ``v0.1.10``), so each group takes every added spelling with
-    its tag's fold.
+    The groups are the widening's own (``expand_tag_filter``'s
+    ``added_by_tag``), not a re-fold: a requested tag past the cap never joins
+    an earlier tag's group, and a group holds at most the tag plus its
+    ``MAX_EXPANSION_PER_TAG`` spellings.
 
     Args:
         requested: The tags the caller filtered on, in filter order.
-        expanded: ``expand_tag_filter``'s widened list (requested + added).
+        added_by_tag: ``expand_tag_filter``'s map of requested tag to the
+            spellings it gained.
 
     Returns:
         One list per distinct requested tag (the first ``MAX_TAG_GROUPS``), in
-        filter order, each starting with that tag. A tag with an empty fold
-        (only punctuation) gains nothing.
+        filter order, each starting with that tag.
 
     Example:
-        >>> tag_filter_groups_any(["ログ", "デプロイ"], ["ログ", "デプロイ", "ろぐ"])
+        >>> tag_filter_groups_any(["ログ", "デプロイ"], {"ログ": ["ろぐ"]})
         [['ログ', 'ろぐ'], ['デプロイ']]
     """
     listed = list(dict.fromkeys(requested))[:MAX_TAG_GROUPS]
-    listed_set = set(listed)
-    added_by_fold: dict[str, list[str]] = {}
-    for tag in dict.fromkeys(expanded):
-        if tag not in listed_set:
-            folded = normalize_tag(tag)
-            if folded:
-                added_by_fold.setdefault(folded, []).append(tag)
-    groups: list[list[str]] = []
-    for tag in listed:
-        folded = normalize_tag(tag)
-        groups.append([tag, *added_by_fold.get(folded, [])] if folded else [tag])
-    return groups
+    return [[tag, *added_by_tag.get(tag, ())] for tag in listed]
 
 
 def _fold_before_long_vowel(tag: str) -> str:

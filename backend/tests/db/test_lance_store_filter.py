@@ -194,6 +194,23 @@ def test_tags_any_with_groups_caps_groups_and_ignores_strangers():
     assert "'t49'" not in where
 
 
+def test_tags_any_with_groups_emits_each_spelling_once():
+    groups = [["a", "x"], ["b", "x"], ["x"]]
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": ["a", "b", "x"], TAG_GROUPS_FILTER_KEY: groups}
+    )
+    assert "((array_has(tags, 'a') OR array_has(tags, 'x')) OR array_has(tags, 'b'))" in where
+
+
+def test_tags_any_with_groups_has_a_total_bound():
+    groups = [[f"t{n}"] + [f"t{n}{'-' * k}" for k in range(1, 50)] for n in range(50)]
+    widened = [t for g in groups for t in g]
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": widened, TAG_GROUPS_FILTER_KEY: groups}
+    )
+    assert where.count("array_has(tags, ") == 50 * 21
+
+
 def test_tag_value_is_escaped():
     where = build_lance_filter(WS, CTX, USER, filters={"tags": ["a'b"]})
     assert "array_has(tags, 'a''b')" in where

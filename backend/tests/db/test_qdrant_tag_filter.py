@@ -294,6 +294,15 @@ class TestTagFilterAnyWithNormalize:
         conditions = _build_tag_filter_conditions({"tags": widened, TAG_GROUPS_FILTER_KEY: groups})
         assert conditions[0].match.any == widened[:100]  # 50 groups x 2 spellings
 
+    def test_the_union_has_a_total_bound(self):
+        widened, groups = _widened_any(50, 50)  # malformed: past 20 added per tag
+        conditions = _build_tag_filter_conditions({"tags": widened, TAG_GROUPS_FILTER_KEY: groups})
+        assert conditions[0].match.any == widened[: 50 * 21]
+
+    def test_a_spelling_in_two_groups_is_sent_once(self):
+        filters = {"tags": ["a", "b", "x"], TAG_GROUPS_FILTER_KEY: [["a", "x"], ["b", "x"]]}
+        assert _build_tag_filter_conditions(filters)[0].match.any == ["a", "x", "b"]
+
     def test_a_group_never_adds_a_tag_the_filter_lacks(self):
         filters = {"tags": ["a", "b"], TAG_GROUPS_FILTER_KEY: [["a", "evil"], ["b"]]}
         assert _build_tag_filter_conditions(filters)[0].match.any == ["a", "b"]

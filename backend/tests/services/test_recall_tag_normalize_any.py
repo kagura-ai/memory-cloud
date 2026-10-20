@@ -114,10 +114,11 @@ class TestRecallTagsAnyWithNormalize:
         filters = await _filters_hybrid_search_receives(
             {"tags": requested, "tags_normalize": True}, vocabulary=vocabulary
         )
-        tagged = {1: ["TOPIC-49"], 2: ["topic-50"]}
+        tagged = {1: ["TOPIC-49"], 2: ["topic-50"], 3: ["TOPIC-50"]}
         # The exact filter also keeps the first 50 requested tags.
         assert _matching_ids({"tags": requested}, tagged) == set()
         assert _matching_ids(filters, tagged) == {1}
+        assert "TOPIC-50" not in filters["tags"], "a tag past the cap was widened"
 
     async def test_an_unwidened_filter_carries_no_groups(self):
         filters = await _filters_hybrid_search_receives(

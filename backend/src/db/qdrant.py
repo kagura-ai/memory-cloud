@@ -381,6 +381,22 @@ _MAX_FILTER_TAGS = 50
 # MAX_EXPANSION_PER_TAG (20) spellings per requested tag; the cap only bounds a
 # malformed group.
 _MAX_GROUP_SPELLINGS = 50
+# Bound on the spellings one "any" MatchAny takes from the groups (#2096): 50
+# requested tags with their up to 20 added spellings each.
+_MAX_ANY_SPELLINGS = _MAX_FILTER_TAGS * 21
+
+
+def any_tag_spellings(groups: list[list[str]]) -> list[str]:
+    """The distinct spellings a tags_match='any' filter ORs over its groups (#2096).
+
+    Args:
+        groups: ``widened_tag_groups``' result.
+
+    Returns:
+        Every spelling of the groups, first occurrence order, at most
+        ``_MAX_ANY_SPELLINGS``.
+    """
+    return list(dict.fromkeys(t for group in groups for t in group))[:_MAX_ANY_SPELLINGS]
 
 
 def widened_tag_groups(filters: dict[str, Any]) -> list[list[str]] | None:
@@ -464,7 +480,7 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
     groups = widened_tag_groups(filters)
     if groups is not None:
         # #2096: every spelling of each kept requested tag.
-        valid_tags = list(dict.fromkeys(t for group in groups for t in group))
+        valid_tags = any_tag_spellings(groups)
     return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 

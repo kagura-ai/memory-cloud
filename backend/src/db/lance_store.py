@@ -47,7 +47,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from db.qdrant import extract_score_threshold, widened_tag_groups
+from db.qdrant import _MAX_ANY_SPELLINGS, extract_score_threshold, widened_tag_groups
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
 from utils.geo_location import (
@@ -112,6 +112,25 @@ def _sql_str(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _distinct_any_groups(groups: list[list[str]]) -> list[list[str]]:
+    """The groups an ``any`` clause ORs, each spelling once (#2096).
+
+    Same spellings as ``db.qdrant.any_tag_spellings``: first occurrence order,
+    at most ``_MAX_ANY_SPELLINGS`` in all; a group left empty is dropped.
+    """
+    seen: set[str] = set()
+    out: list[list[str]] = []
+    for group in groups:
+        kept = []
+        for tag in group:
+            if tag not in seen and len(seen) < _MAX_ANY_SPELLINGS:
+                seen.add(tag)
+                kept.append(tag)
+        if kept:
+            out.append(kept)
+    return out
+
+
 def _build_tag_clause(filters: dict[str, Any]) -> str:
     """Build a list-membership clause for tag filtering (Issue #67 / #79).
 
@@ -133,6 +152,8 @@ def _build_tag_clause(filters: dict[str, Any]) -> str:
     joiner = " AND " if mode == "all" else " OR "
     groups = widened_tag_groups(filters)
     if groups is not None:
+        if mode == "any":
+            groups = _distinct_any_groups(groups)
         # Each group parenthesised under 'any' too: the expression nests about
         # groups + spellings deep, not one OR chain of every spelling.
         clauses = []
