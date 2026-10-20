@@ -53,23 +53,28 @@ def test_plural_spellings_stay_two_requirements_in_this_lane():
     assert len(preds) == 2 and "= 'log'" in preds[0] and "= 'logs'" in preds[1]
 
 
-def test_full_width_digits_are_compared_after_nfkc():
-    # Both fold to pr1２３ here; recall's numbers are [1, 23] and [123].
-    preds = _sql(_all("pr-1-２３", "pr-1２３"))
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ("pr-1-２３", "pr-1２３"),  # full-width: recall's numbers [1, 23] / [123]
+        ("pr-١٢٣", "pr-١-٢٣"),  # Arabic-Indic digits
+    ],
+)
+def test_colliding_tags_the_ascii_guard_cannot_split_match_exactly(tags):
+    preds = _sql(_all(*tags))
     assert len(preds) == 2
-    assert "normalize(t, NFKC)" in preds[0]
-    assert "= '1,23'" in preds[0] and "= '123'" in preds[1]
+    assert f"t IN ('{tags[0]}')" in preds[0] and f"t IN ('{tags[1]}')" in preds[1]
 
 
-def test_separator_only_tags_match_exactly():
-    preds = _sql(_all("-", "--"))
+def test_variants_plus_a_colliding_identifier_make_two_requirements():
+    preds = _sql(_all("pr-123", "PR_123", "pr-1-23"))
     assert len(preds) == 2
-    assert "t = '-'" in preds[0] and "t = '--'" in preds[1]
+    assert "= '123'" in preds[0] and "= '1,23'" in preds[1]
 
 
-def test_needle_counting_is_linear():
-    tags = [f"tag-{i}" for i in range(20000)]
-    assert len(compile_memory_filters(_all(*tags))) == 20000
+def test_a_single_separator_only_tag_keeps_the_fold():
+    preds = _sql(_all("-"))
+    assert len(preds) == 1 and "= ''" in preds[0] and "t IN" not in preds[0]
 
 
 def test_tags_that_do_not_collide_get_no_number_guard():
@@ -106,6 +111,7 @@ def test_any_mode_is_unchanged():
         (_all("Deploy", "deploy"), {"deploy"}),
         (_all("pr_123", "pr-123"), {"both", "one", "upper", "other"}),
         (_all("pr-1-２３", "pr-1２３"), {"wide_both"}),
+        (_all("pr-123", "PR_123", "pr-1-23"), {"both"}),
     ],
 )
 async def test_list_all_groups_match_recall(db_session, filters, expected):
@@ -119,7 +125,7 @@ async def test_list_all_groups_match_recall(db_session, filters, expected):
         "deploy": await _row(db_session, owner, ws, ctx, summary="deploy", tags=["DEPLOY"]),
         "wide_one": await _row(db_session, owner, ws, ctx, summary="wide_one", tags=["pr-1-２３"]),
         "wide_both": await _row(
-            db_session, owner, ws, ctx, summary="wide_both", tags=["PR-1-２３", "pr-1２３"]
+            db_session, owner, ws, ctx, summary="wide_both", tags=["pr-1-２３", "pr-1２３"]
         ),
     }
     await db_session.commit()

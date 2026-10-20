@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,7 +32,6 @@ from sqlalchemy import (
     cast,
     func,
     literal,
-    literal_column,
     or_,
     select,
     tuple_,
@@ -55,6 +53,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
+from utils.tag_normalize import is_mechanical_variant
 
 ORDER_COLUMNS = {
     "updated_at": func.coalesce(Memory.updated_at, Memory.created_at),
@@ -77,7 +76,7 @@ CHANGE_CURSOR_RESERVE = 96
 _DETAILS_KEY = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _SEPARATORS_SQL = "[[:space:]_-]+"
 _SEPARATORS_PY = r"[ \t\n\r\f\v_-]+"  # POSIX [[:space:]] spelled out, same class
-# ASCII digit runs after NFKC, the same on both sides of the #2086 number guard.
+# ASCII digit runs as written, the same on both sides of the #2086 number guard.
 _DIGIT_RUN_SQL = "[^0-9]+"
 _DIGIT_RUN_PY = re.compile(r"[0-9]+")
 _IMPORTANCE_OPS = {"gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
@@ -130,23 +129,25 @@ def _normalized_needle(tag: str) -> str:
 
 
 def _digit_key(tag: str) -> str:
-    """The tag's ASCII digit runs after NFKC, comma-joined; ``_DIGITS_SQL`` computes the same."""
-    return ",".join(_DIGIT_RUN_PY.findall(unicodedata.normalize("NFKC", tag)))
+    """The tag's ASCII digit runs as written, comma-joined, as the guard's SQL computes them."""
+    return ",".join(_DIGIT_RUN_PY.findall(tag))
 
 
 def _all_tag_groups_predicates(
     tags: list[str], tag: ColumnElement[Any], folded: ColumnElement[str]
 ) -> list[ColumnElement[bool]]:
-    """``tags_match='all'`` + ``tags_normalize``: one required group per tag, as recall (#2086).
+    """``tags_match='all'`` + ``tags_normalize``: one requirement per tag, as recall (#2086).
 
     recall's rule (``utils.tag_normalize.tag_filter_groups``, #2071) on this
-    lane's own fold: requested tags that are one tag written twice (same fold,
-    same numbers: ``Deploy`` / ``deploy``) are one requirement, satisfied by a
-    stored tag with that fold. Two requested tags whose folds collide but whose
-    numbers differ (``pr-123`` / ``pr-1-23``) stay two requirements, and a
-    stored spelling counts only for the one whose digit runs it shares, so no
-    single stored tag satisfies both. A tag with an empty fold (only
-    separators) matches exactly, as recall's gains no spellings.
+    lane's fold: requested tags that are one tag written twice
+    (``is_mechanical_variant``: ``Deploy`` / ``deploy``) are one requirement,
+    satisfied by any stored tag with that fold. Two requested tags whose folds
+    collide but whose numbers differ (``pr-123`` / ``pr-1-23``) stay two
+    requirements, and a stored spelling counts only for the one whose digit
+    runs it shares, so no single stored tag satisfies both. The guard compares
+    ASCII digits only (no NFKC: the database need not be UTF8); colliding tags
+    it cannot tell apart (full-width or other non-ASCII digits) each match
+    their exact spellings instead.
 
     Args:
         tags: The requested tags, in filter order.
@@ -156,25 +157,29 @@ def _all_tag_groups_predicates(
     Returns:
         One ``EXISTS`` predicate per requirement, to be ANDed.
     """
-    exact: list[str] = []
-    keys: dict[tuple[str, str], None] = {}
+    by_needle: dict[str, list[list[str]]] = {}
     for t in dict.fromkeys(tags):
-        needle = _normalized_needle(t)
-        if needle:
-            keys.setdefault((needle, _digit_key(t)))
+        clusters = by_needle.setdefault(_normalized_needle(t), [])
+        for cluster in clusters:
+            if is_mechanical_variant(cluster[0], t):
+                cluster.append(t)
+                break
         else:
-            exact.append(t)
-    shared = Counter(needle for needle, _ in keys)
-    digits = func.btrim(
-        func.regexp_replace(func.normalize(tag, literal_column("NFKC")), _DIGIT_RUN_SQL, ",", "g"),
-        ",",
-    )
-    out: list[ColumnElement[bool]] = [select(literal(1)).where(tag == t).exists() for t in exact]
-    for needle, key in keys:
-        match = folded == needle
-        if shared[needle] > 1:
-            match = and_(match, digits == key)
-        out.append(select(literal(1)).where(match).exists())
+            clusters.append([t])
+    digits = func.btrim(func.regexp_replace(tag, _DIGIT_RUN_SQL, ",", "g"), ",")
+    out: list[ColumnElement[bool]] = []
+    for needle, clusters in by_needle.items():
+        if len(clusters) == 1:
+            out.append(select(literal(1)).where(folded == needle).exists())
+            continue
+        keys = Counter(_digit_key(c[0]) for c in clusters)
+        for cluster in clusters:
+            key = _digit_key(cluster[0])
+            if keys[key] == 1:
+                match = and_(folded == needle, digits == key)
+            else:
+                match = tag.in_(cluster)
+            out.append(select(literal(1)).where(match).exists())
     return out
 
 
