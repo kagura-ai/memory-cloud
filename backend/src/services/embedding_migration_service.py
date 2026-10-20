@@ -12,9 +12,11 @@ routing — the dual-collection shape::
   every memory written or embedded since the re-embed started is re-queued
   (``embedding_status='pending'``) so the regular sweep lands that small delta
   in the new collection. There is no moment at which the context has no
-  vectors. It waits up to 30 seconds for point writers before committing; a
-  timeout leaves routing untouched. If the second, post-commit wait times out,
-  it reports deferred pruning for the orphan sweep.
+  vectors. It waits up to 30 seconds for point writers before committing and
+  never waits for a memory row (the re-queue locks its rows ``NOWAIT``,
+  #2156): a timeout, or a row another transaction holds, rolls the switch back
+  with routing untouched (:class:`EmbeddingSwitchBusyError`). If the second,
+  post-commit wait times out, it reports deferred pruning for the orphan sweep.
 * Nothing here deletes source points implicitly. They stay until the operator
   calls :func:`purge_source_points` — which is why
   :func:`rollback_context_embedding` (a switch back plus a re-queue of what
@@ -60,6 +62,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, func, or_, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -102,6 +105,19 @@ logger = get_logger(__name__)
 # Keep migration bounded by the same writer wait used by the orphan sweep.
 # A migration can be retried safely while a restore or merge is still writing.
 POINT_WRITER_WAIT_SECONDS = 30.0
+
+_PG_LOCK_NOT_AVAILABLE = "55P03"
+_ROUTE_UNCHANGED = "; the context route was not changed."
+
+
+class EmbeddingSwitchBusyError(ValidationError):
+    """:func:`switch_context_embedding` was refused because another transaction
+    was writing; nothing changed, the route included (#2156).
+
+    Either point writers kept the point-writer lock past the bounded wait, or
+    another transaction held a memory row the switch must re-queue. The
+    message names no command; the caller says how to retry.
+    """
 
 
 async def _chunks_active(db: AsyncSession, context_id: UUID, *, stored: bool | None = None) -> bool:
@@ -1019,10 +1035,13 @@ async def switch_context_embedding(
     each under the point id the migration wrote it with
     (:func:`_migrated_point_id`, #1896), and never a point a live row of any
     context still names — together with their content chunk points (#2015).
-    If writers stay busy for 30 seconds before the route commit, this raises
-    :class:`ValidationError` without changing routing. If the bounded wait
-    after commit expires, stale-point pruning is deferred to the orphan sweep
-    and reported in :attr:`SwitchResult.prune_pending`.
+    If writers stay busy for 30 seconds before the route commit, or another
+    transaction holds a memory row the re-queue must change (the re-queue
+    locks its rows ``FOR NO KEY UPDATE NOWAIT`` and never waits, #2156), the
+    session is rolled back and this raises :class:`EmbeddingSwitchBusyError`
+    without changing anything. If the bounded wait after commit expires,
+    stale-point pruning is deferred to the orphan sweep and reported in
+    :attr:`SwitchResult.prune_pending`.
     With ``None`` this is a pure routing flip. An aware ``requeue_since`` is
     compared as naive UTC, the convention of the ``memories`` timestamps.
     Every route change — pure flips and rollbacks included — records its time
@@ -1043,10 +1062,7 @@ async def switch_context_embedding(
         requeue_since = to_naive_utc(requeue_since)
 
     if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
-        raise ValidationError(
-            "Point writers are still active; the context route was not changed. "
-            "Retry --switch after the current write finishes."
-        )
+        raise EmbeddingSwitchBusyError("Point writers are still active" + _ROUTE_UNCHANGED)
     previous_model, previous_dimensions = await resolve_context_embedding(db, context_id)
 
     result = await db.execute(
@@ -1083,15 +1099,49 @@ async def switch_context_embedding(
 
     requeued = 0
     if requeue_since is not None:
-        requeue = await db.execute(
-            update(Memory)
+        # #2156: the re-queue never waits on a row. This transaction holds the
+        # point-writer lock exclusively; a session rollback locks its rows
+        # FOR UPDATE first and asks for that lock shared later, so a waiting
+        # UPDATE here could close a deadlock cycle. NOWAIT, never SKIP LOCKED:
+        # a skipped row would stay embedded under the old route only. FOR NO
+        # KEY UPDATE (what a plain UPDATE takes) still lets FK inserts take
+        # their KEY SHARE on a memory. Rows are locked in id order (backend
+        # rules); the route row above is flushed in the same statement call,
+        # so route, switch time and re-queue still commit together.
+        locked = (
+            select(Memory.id)
             .where(
                 Memory.context_id == context_id,
                 Memory.deleted_at.is_(None),
                 _requeued_by_switch(requeue_since),
             )
-            .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
+            .order_by(Memory.id)
+            .correlate(None)
+            .with_for_update(nowait=True, key_share=True)
+            .subquery("locked")
         )
+        try:
+            requeue = await db.execute(
+                update(Memory)
+                .where(Memory.id == locked.c.id)
+                .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
+                # Nothing to synchronize: no Memory is loaded in this session
+                # before the switch ('evaluate' cannot handle the subquery,
+                # 'fetch' would add a pre-SELECT).
+                .execution_options(synchronize_session=False)
+            )
+        except DBAPIError as exc:
+            sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            # The transaction is aborted either way: end it before deciding.
+            # That drops the route change and releases the point-writer lock,
+            # and leaves a session shared by --all usable.
+            await db.rollback()
+            if sqlstate == _PG_LOCK_NOT_AVAILABLE:
+                raise EmbeddingSwitchBusyError(
+                    "Another transaction holds memories this switch must re-queue"
+                    + _ROUTE_UNCHANGED
+                ) from exc
+            raise
         requeued = int(getattr(requeue, "rowcount", 0) or 0)
 
     await db.commit()
@@ -1286,6 +1336,8 @@ async def rollback_context_embedding(
         ValidationError: unknown model, the model the context already routes
             to, no collection for it, or no recorded switch time and no
             explicit ``requeue_since``.
+        EmbeddingSwitchBusyError: (a ``ValidationError``) the switch back was
+            refused because another transaction was writing; nothing changed.
     """
     dimensions = await check_rollback_target(db, context_id, model)
     boundary = await resolve_rollback_boundary(db, context_id, requeue_since)

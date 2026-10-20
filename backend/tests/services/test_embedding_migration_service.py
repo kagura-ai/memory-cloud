@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql.functions import FunctionElement
 
 from services import embedding_migration_service as svc
-from services.embedding_migration_service import MigrationPlan
+from services.embedding_migration_service import EmbeddingSwitchBusyError, MigrationPlan
 from services.resource_indexer import ResourceRebuildError, resource_point_id
 from utils.exceptions import NotFoundException, ValidationError
 
@@ -752,9 +754,15 @@ class TestSwitch:
         db = _db([])
         with (
             patch.object(svc, "wait_for_point_writers", AsyncMock(return_value=False)) as wait,
-            pytest.raises(ValidationError, match="Retry --switch"),
+            pytest.raises(EmbeddingSwitchBusyError) as refused,
         ):
             await svc.switch_context_embedding(db, uuid4(), QWEN, 2560)
+
+        # #2156: command-neutral; the CLI says how to retry.
+        assert str(refused.value) == (
+            "Point writers are still active; the context route was not changed."
+        )
+        assert isinstance(refused.value, ValidationError)
 
         wait.assert_awaited_once_with(db, timeout_seconds=svc.POINT_WRITER_WAIT_SECONDS)
         db.commit.assert_not_awaited()
@@ -1017,6 +1025,83 @@ class TestSwitch:
         assert _is_switch_stamp(config.embedding_switched_at)
         # The boundary actually used, as naive UTC.
         assert result.requeue_since == datetime(2026, 9, 10, 14, 0, 0)
+
+    # ------------------------------------------------- #2156: the re-queue never waits
+
+    @staticmethod
+    def _db_failing_requeue(sqlstate: str):
+        """resolve -> select config -> the re-queue raises ``sqlstate``."""
+        config = _config(SMALL, 512)
+        orig = Exception("could not obtain lock on row")
+        orig.sqlstate = sqlstate  # type: ignore[attr-defined]
+        error = DBAPIError("UPDATE memories ...", {}, orig)
+        db = _db([_result(scalar=config), _result(scalar=config), error])
+        db.rollback = AsyncMock()
+        return db, error
+
+    @pytest.mark.asyncio
+    async def test_requeue_locks_rows_nowait_in_id_order(self):
+        config = _config(SMALL, 512)
+        db = _db([_result(scalar=config), _result(scalar=config), _result(rowcount=1), _result()])
+        with patch.object(svc, "delete_points_from_qdrant", AsyncMock()):
+            await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+
+        stmt = db.execute.await_args_list[2].args[0]
+        compiled = " ".join(
+            str(
+                stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+            ).split()
+        )
+        assert compiled.startswith("UPDATE memories SET embedding_status='pending'")
+        outer, _, inner = compiled.partition(" FROM (SELECT memories.id AS id FROM memories ")
+        assert inner, compiled  # the locking subquery reads memories itself
+        assert "embedding_error=NULL" in outer and "embedding_retry_count=0" in outer
+        assert inner.endswith(
+            "ORDER BY memories.id FOR NO KEY UPDATE NOWAIT) AS locked WHERE memories.id = locked.id"
+        )
+        assert "memories.context_id = " in inner and "memories.deleted_at IS NULL" in inner
+        for predicate in (
+            "memories.embedding_status != 'success'",
+            "memories.created_at >= '2026-09-10 12:00:00'",
+            "memories.updated_at >= '2026-09-10 12:00:00'",
+            "memories.embedding_attempted_at >= '2026-09-10 12:00:00'",
+        ):
+            assert predicate in inner
+        # NOWAIT, never SKIP LOCKED: a skipped row would stay on the old route.
+        assert "SKIP LOCKED" not in compiled
+        assert "FOR UPDATE" not in compiled
+
+    @pytest.mark.asyncio
+    async def test_busy_rows_refuse_the_switch_and_roll_back(self):
+        db, error = self._db_failing_requeue("55P03")
+        with pytest.raises(EmbeddingSwitchBusyError) as refused:
+            await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+
+        assert str(refused.value) == (
+            "Another transaction holds memories this switch must re-queue; "
+            "the context route was not changed."
+        )
+        assert refused.value.__cause__ is error
+        db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
+        assert db.execute.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_other_db_errors_on_requeue_propagate_after_rollback(self):
+        db, error = self._db_failing_requeue("40001")
+        with pytest.raises(DBAPIError) as raised:
+            await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+
+        assert raised.value is error
+        assert not isinstance(raised.value, EmbeddingSwitchBusyError)
+        db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
 
 
 # ----------------------------------------------------------------------- rollback
