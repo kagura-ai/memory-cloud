@@ -361,6 +361,17 @@ async def test_a_session_lookup_failure_on_get_is_a_jsonrpc_error(app):
 
 
 @pytest.mark.asyncio
+async def test_a_session_lookup_failure_on_delete_is_a_jsonrpc_error(app):
+    """#2074: DELETE checks the named session with the same answer as GET and
+    POST when the lookup fails."""
+    app.sessions.lookup_fails_with = ConnectionError("redis at 10.0.0.9:6379 refused")
+    send = await app.call(None, headers={b"mcp-session-id": SESSION_ID}, method="DELETE")
+
+    _assert_jsonrpc_failure(send, request_id=None, status=503, cause="service_unavailable")
+    assert "10.0.0.9" not in json.dumps(send.body)
+
+
+@pytest.mark.asyncio
 async def test_a_timeout_uses_the_legacy_timeout_code(app):
     app.sessions.lookup_fails_with = TimeoutError()
     send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": SESSION_ID})

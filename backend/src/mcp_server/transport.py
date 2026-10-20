@@ -1057,7 +1057,13 @@ async def _end_session(
             },
         )
         return
-    lookup, _session = await manager.get_owned_session(session_id, user_id, workspace_id)
+    try:
+        lookup, _session = await manager.get_owned_session(session_id, user_id, workspace_id)
+    except Exception as e:
+        # #1742/#2074: same answer as a failed session lookup on POST and GET.
+        logger.error(f"MCP DELETE /mcp session lookup failed: {e}", exc_info=True)
+        await _send_transport_failure(send, e, body=None, era="legacy")
+        return
     if lookup != "owned":
         logger.info(f"MCP DELETE /mcp: no session {session_id} for user={user_id} ({lookup})")
         await _send_session_not_found(send, session_id)
