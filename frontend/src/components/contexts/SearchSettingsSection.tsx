@@ -938,7 +938,7 @@ export function SearchSettingsSection({
         )}
 
         {/* Content chunk vectors (#2104) — only with a backend that
-            reports them (#2015) */}
+            reports them, including content_chunks_can_change (#2015, #2119) */}
         {chunksShown && (
           <Card>
             <CardHeader>

@@ -162,6 +162,8 @@ export interface ContextSearchConfig {
   embedding_dimensions?: number;
   // #2015 / #2091: content chunk vectors. Optional throughout — a backend
   // predating them omits every field, and the settings card is then hidden.
+  // The card also needs `content_chunks_can_change`, which a backend between
+  // #2042 and #2091 does not send (#2119).
   // `content_chunks_enabled` is the STORED flag: never write
   // `content_chunks_effective` back into it (that would turn the flag off and
   // remove the chunk vectors).
