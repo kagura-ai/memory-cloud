@@ -29,9 +29,11 @@ facts that differ from general knowledge, and those are the rows to keep. For
 a counting or listing query every row that is one of the things counted stays.
 When two rows answer the same question differently it prefers the newer one
 (the ``updated_at`` or else the ``created_at`` day in the row's header), and
-keeps both when unsure. The ``selector-v2`` rule ("about what the query asks")
-kept conversational pages whole; ``selector-v3`` keeps "helps answer" and adds
-the store-is-true sentence.
+keeps both when unsure. ``selector-v2`` replaced the #2144 "helps answer the
+query" rule with "about what the query asks", which kept conversational pages
+whole; ``selector-v3`` restores the #2144 rule and adds the store-is-true
+sentence, which is what stops the judge reading "helps answer" as "gives the
+answer I believe is correct".
 
 Bounds (C3, C4): at most ``LLM_SELECTOR_MAX_ROWS`` rows are sent (later rows
 are kept unchanged); over ``LLM_SELECTOR_MAX_PROMPT_CHARS`` of summaries and

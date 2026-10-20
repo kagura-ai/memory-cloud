@@ -958,24 +958,22 @@ class TestRunSelector:
 # Regression fixture: the 11 pages whose stored answer the v1 prompt lost (#2171)
 # ---------------------------------------------------------------------------
 
-# Verbatim public benchmark data (MemoryAgentBench FactConsolidation): each
-# record is a selector-off recall page (``rows``: summary / content), the page
-# positions of the rows holding the stored counterfactual fact
-# (``answer_rows``) and that fact's text (``stored_answer``). These tests pin
-# the server side — every row reaches the prompt, and a selection that keeps
-# the answer rows keeps the stored answer verbatim. Whether the model keeps
-# them is the prompt wording's job; no real LLM is called here.
+# Copied unchanged from the owner's eval rig: memories an ingest agent wrote
+# from the public MemoryAgentBench FactConsolidation sessions, as selector-off
+# recall pages (``rows``: summary / content). ``stored_answer`` is the
+# benchmark's counterfactual fact and ``answer_rows`` the page positions whose
+# text contains it — a substring match, not a label for the correct selection
+# (no26 row 7 and no80 row 2 carry the answer text for another subject; in
+# no34 and no7 the ingest wrote the fact into a note that calls it false).
+# These tests pin the server side — every row reaches the prompt, and a
+# selection that keeps the answer rows keeps that text verbatim. Whether the
+# model keeps them is the prompt wording's job; no real LLM is called here.
 FAILURES_MC2171 = json.loads(
     (Path(__file__).parent.parent / "fixtures/recall_selector/failures_mc2171.json").read_text(
         encoding="utf-8"
     )
 )
 FAILURE_IDS = [record["task_id"] for record in FAILURES_MC2171]
-
-
-def _flat(text: str) -> str:
-    """Text as :func:`rs._prompt_text` lays it out: whitespace runs collapsed."""
-    return " ".join(text.split())
 
 
 def _fixture_page(record: dict[str, Any]) -> list[MemoryResponse]:
@@ -1017,12 +1015,15 @@ class TestFailuresMc2171Fixture:
         rows = rs.rows_for(_fixture_page(record), 10)
         assert len(rows) == len(record["rows"])  # all 10 fit under the row cap
         prompt = rs.build_prompt(record["query"], rows)
-        assert f"Query: {_flat(record['query'])}" in prompt
+        assert f"Query: {rs._prompt_text(record['query'], rs.QUERY_PROMPT_CHARS)}" in prompt
         for row, stored in zip(rows, record["rows"], strict=True):
-            assert f"{row.header}\nsummary: {_flat(stored['summary'])}" in prompt
+            assert (
+                f"{row.header}\nsummary: {rs._prompt_text(stored['summary'], rs.SUMMARY_PROMPT_CHARS)}"
+                in prompt
+            )
             content = stored["content"]
             for n, (s, e) in enumerate(row.segments):
-                assert f"[{n}] {_flat(content[s:e])}" in prompt
+                assert f"[{n}] {rs._prompt_text(content[s:e])}" in prompt
             assert "".join(content[s:e] for s, e in row.segments) == content
         assert record["stored_answer"] in prompt
         system = " ".join(rs.SELECTOR_SYSTEM.split())
@@ -1054,7 +1055,7 @@ class TestFailuresMc2171Fixture:
         assert result.report.applied is True
         kwargs = llm.complete_json.await_args.kwargs
         assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
-        assert record["query"] in kwargs["prompt"]
+        assert rs._prompt_text(record["query"], rs.QUERY_PROMPT_CHARS) in kwargs["prompt"]
         kept = {r.memory_id: r for r in result.responses}
         assert list(kept) == [page[i].memory_id for i in sorted(answer_rows)]
         for i in answer_rows:
@@ -1089,8 +1090,10 @@ class TestFailuresMc2171Fixture:
         for i in record["answer_rows"]:
             free = _answer_free_segments(record, i)
             if free and len(free) < len(_segments_of(record, i)):
-                cut[i] = free
-            items.append({"i": i, "relevant": True, "segments": free})
+                # One segment: adjacent answer-free segments could merge into a
+                # span the stored answer crosses.
+                cut[i] = free[:1]
+            items.append({"i": i, "relevant": True, "segments": cut.get(i, free)})
         result, _, _ = await _run(page, llm=_llm({"rows": items}), query=record["query"])
         assert result.report.applied is True
         assert result.report.dropped == 0  # unlisted rows are kept unchanged
