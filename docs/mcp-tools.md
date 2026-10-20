@@ -788,18 +788,18 @@ What the log can and cannot show:
 
 Always verify before deleting: show the memory's summary, warn when `importance > 0.8`, and get explicit approval. For bulk deletion: `recall()` to find candidates → review the list with the user → confirm → one `forget(memory_ids=[...])` with the approved ids; query mode (top-k matches of a query) is for cleanup where that review is not needed. A target that was already deleted, has a wrong ID, or belongs to someone else is skipped silently — `deleted_count` is 0 — so check the ID with `recall()`. Deletion is soft; retention is bounded by the deployment's cleanup window (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), and the memory's graph edges are cleaned up with it.
 
-`forget(memory_ids=[...])` ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)) takes 1-50 distinct memory UUIDs and cannot be combined with `memory_id` or `query` (`invalid_argument`, as are an empty list, more than 50 ids, a duplicate or an entry that is not a UUID). Each id is forgotten exactly as `forget(memory_id=...)` would forget it — same permission check, same search-point and edge cleanup, same revision log and session — and is committed on its own, so an id that fails is rolled back alone and the others stay deleted. The reply is the single form's plus one row per id, in request order:
+`forget(memory_ids=[...])` ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)) takes 1-50 distinct memory UUIDs and cannot be combined with `memory_id` or `query` (`invalid_argument`, as are an empty list, more than 50 ids, a duplicate or an entry that is not a UUID). Each id is forgotten exactly as `forget(memory_id=...)` would forget it — same permission check, same search-point and edge cleanup, same revision log and session — and is committed on its own, so an id that fails is rolled back alone and the others stay deleted (an id whose failure came after its commit is reported `deleted`). More than 50 ids take several calls. The reply is the single form's plus one row per id, in request order:
 
 ```json
 {"status": "partial", "deleted_count": 1, "memory_ids": ["<a>"],
  "results": [{"memory_id": "<a>", "status": "deleted"},
              {"memory_id": "<b>", "status": "skipped"},
-             {"memory_id": "<c>", "status": "error", "error": "permission_denied", "message": "..."}],
+             {"memory_id": "<c>", "status": "error", "error": "internal_error", "message": "...", "correlation_id": "..."}],
  "count": 3, "succeeded": 1, "skipped": 1, "failed": 1,
  "session_id": "...", "context_id": "...", "context_name": "..."}
 ```
 
-`skipped` is the single form's `deleted_count: 0` — not found, not yours or already gone, one word for all three. `status` is `partial` when any id is `error` (a server failure carries a `correlation_id`), else `success`. There is no batch form of `reference`.
+`skipped` is the single form's `deleted_count: 0` — not found, not yours or already gone, one word for all three. A memory you may not delete is `skipped`, as in the single form; `error` is a failure of the call for that id (a server failure carries a `correlation_id`). `status` is `partial` when any id is `error`, else `success`; when every id is `error` the reply is the error envelope `batch_failed` with the same fields. If the database session itself fails, the remaining ids are `error` / `not_attempted`. There is no batch form of `reference`.
 
 ### `explore`
 
@@ -885,7 +885,7 @@ Weights run from 0.0 to 3.0; the default 1.0 is a full-confidence manual edge, s
 
 **Calling `create_edge` on an existing pair** ([#1321](https://github.com/kagura-ai/memory-cloud/issues/1321)). The (source, target) pair is unique per user, so the outcome is deterministic. An existing auto edge (origin `hebbian` / `semantic`) takes your values → `operation: "updated"` plus a `previous` pre-image; a hebbian edge is promoted to origin `declared`, a semantic edge keeps origin `semantic`. An existing declared edge with identical values is left alone → `operation: "unchanged"`, safe to retry. An existing declared edge with different values is rejected with `edge_exists`, because declared links are provenance — use `update_edge`, or pass `overwrite=true` to re-assert.
 
-`update_edge` leaves an omitted `weight` unchanged (there is no default), so a type-only update is `update_edge(..., edge_type=...)`. `delete_edge` is a hard delete; if the memories are still co-accessed, Hebbian learning may recreate a `neural_association` edge. A typical cleanup is `explore()` → `list_edges()` → `delete_edge()`.
+`update_edge` leaves an omitted `weight` unchanged (there is no default), so a type-only update is `update_edge(..., edge_type=...)`. `delete_edge` is a hard delete; if the memories are still co-accessed, Hebbian learning may recreate a `neural_association` edge. A typical cleanup is `explore()` → `list_edges(min_weight=0)` → `delete_edge()`.
 
 `list_edges` hides edges lighter than `min_weight`, 0.05 by default ([#2127](https://github.com/kagura-ai/memory-cloud/issues/2127)) — the same floor as `explore`. Hebbian `neural_association` edges between memories that were only recalled together sit around 0.01 and would otherwise fill the reply; pass `min_weight=0` to list every edge. The reply carries the `min_weight` it applied, so an empty `edges` with that value says where to look.
 

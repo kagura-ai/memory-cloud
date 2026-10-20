@@ -25,7 +25,7 @@ def _context():
 
 
 @contextlib.contextmanager
-def _patched(service, context=None):
+def _patched(service, context=None, forgotten=False):
     db = AsyncMock()
 
     async def mock_get_db():
@@ -42,8 +42,12 @@ def _patched(service, context=None):
         patch("mcp_server.tools.memory._log_tool_usage", new=log),
         patch("mcp_server.tools.memory._touch_context_last_used", new=touch),
         patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
+        patch(
+            "mcp_server.tools.memory._forgotten_by",
+            new=AsyncMock(return_value=forgotten),
+        ) as forgotten_by,
     ):
-        yield SimpleNamespace(db=db, log=log, touch=touch)
+        yield SimpleNamespace(db=db, log=log, touch=touch, forgotten_by=forgotten_by)
 
 
 def _forgetter(outcomes: dict[UUID, object]):
@@ -61,9 +65,11 @@ def _forgetter(outcomes: dict[UUID, object]):
     return service
 
 
-async def _call(args, service=None, context=None):
+async def _call(args, service=None, context=None, forgotten=False, db_setup=None):
     service = service or _forgetter({})
-    with _patched(service, context) as mocks:
+    with _patched(service, context, forgotten) as mocks:
+        if db_setup:
+            db_setup(mocks.db)
         result = await handle_forget(
             {"context_id": str(uuid4()), **args}, user_id="u1", workspace_id=None
         )
@@ -202,12 +208,71 @@ async def test_usage_logged_and_context_touched_once_per_call():
 
 
 @pytest.mark.asyncio
-async def test_every_id_failing_logs_a_server_error():
-    a = uuid4()
-    body, _, mocks = await _call({"memory_ids": [str(a)]}, _forgetter({a: RuntimeError("x")}))
-    assert body["status"] == "partial"
-    assert body["failed"] == 1
+async def test_every_id_failing_is_an_error_envelope_with_the_rows():
+    a, b = uuid4(), uuid4()
+    body, _, mocks = await _call(
+        {"memory_ids": [str(a), str(b)]},
+        _forgetter({a: RuntimeError("x"), b: RuntimeError("y")}),
+    )
+    assert body["status"] == "error"
+    assert body["error"] == "batch_failed"
+    assert body["failed"] == 2 and body["deleted_count"] == 0
+    assert [r["status"] for r in body["results"]] == ["error", "error"]
     assert mocks.log.await_args.args[4] == 500
+
+
+@pytest.mark.asyncio
+async def test_every_id_refused_logs_the_refusal_class():
+    a = uuid4()
+    _, _, mocks = await _call({"memory_ids": [str(a)]}, _forgetter({a: AuthorizationError("no")}))
+    assert mocks.log.await_args.args[4] == 403
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_commit_reports_the_id_deleted():
+    """The service commits before its audit write; a timeout there left the row deleted."""
+    a, b = uuid4(), uuid4()
+    body, _, mocks = await _call(
+        {"memory_ids": [str(a), str(b)]},
+        _forgetter({a: TimeoutError(), b: 1}),
+        forgotten=True,
+    )
+    assert body["status"] == "success"
+    assert [r["status"] for r in body["results"]] == ["deleted", "deleted"]
+    assert body["memory_ids"] == [str(a), str(b)]
+    assert mocks.forgotten_by.await_args.args[1:3] == (a, "u1")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rollback_stops_the_loop_and_keeps_the_rows():
+    a, b, c = uuid4(), uuid4(), uuid4()
+
+    def broken_rollback(db):
+        db.rollback.side_effect = RuntimeError("connection lost")
+
+    body, service, mocks = await _call(
+        {"memory_ids": [str(a), str(b), str(c)]},
+        _forgetter({a: 1, b: RuntimeError("boom"), c: 1}),
+        db_setup=broken_rollback,
+    )
+    assert body["status"] == "partial"
+    assert [r["status"] for r in body["results"]] == ["deleted", "error", "error"]
+    assert body["results"][2]["error"] == "not_attempted"
+    assert body["memory_ids"] == [str(a)]
+    assert service.forget.await_count == 2
+    # The session is unusable: no usage row, touch or commit on it.
+    mocks.log.assert_not_awaited()
+    mocks.db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_memory_id_and_query_count_as_absent():
+    a = uuid4()
+    body, _, _ = await _call(
+        {"memory_ids": [str(a)], "memory_id": "", "query": "", "k": 10}, _forgetter({a: 1})
+    )
+    assert body["status"] == "success"
+    assert body["deleted_count"] == 1
 
 
 @pytest.mark.asyncio

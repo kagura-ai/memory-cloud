@@ -490,7 +490,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "returns results: [{memory_id, status: deleted|skipped|error, error?, "
         "message?}] in request order, with count, succeeded, skipped and failed; each "
         "id is committed on its own, so a failed id leaves the others deleted and "
-        "status is partial. To replace a fact rather than erase it, use "
+        "status is partial (error batch_failed, with the rows, when every id "
+        "failed). To replace a fact rather than erase it, use "
         "remember(supersedes=...)."
     ),
     # ----------------------------------------------------------------- explore

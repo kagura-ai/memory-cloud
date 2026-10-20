@@ -105,7 +105,7 @@ Ask for an action per item number. Anything not named stays as it is.
 | unpin | `update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")` |
 | delete | `forget(memory_ids=[...], context_id=...)`, one call for all |
 
-If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the default core listing and callable once the MCP URL carries `?profile=full` (or `?tools=…`).
+If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the default core listing and callable once the MCP URL carries `?profile=full` (or `?tools=…`); `describe_tools` confirms they exist.
 
 ### 5. Apply
 
@@ -119,11 +119,11 @@ Before each delete:
 2. For a time memory, call `reference(memory_id=..., context_id=..., fields=[])` once to read its `importance` (`recall_upcoming` does not return it). If `importance` is above 0.8, warn and ask again for that item.
 3. Call `list_edges(memory_id=..., context_id=..., edge_types=["supersedes"], min_weight=0)`. If an edge has this memory as `source_id`, warn: the delete removes that edge, and the older memory (`target_id`) comes back into default recall. Ask whether to delete that one too.
 
-Then `forget(memory_ids=[...], context_id=...)` with the ids still picked (max 50).
+Then `forget(memory_ids=[...], context_id=...)` with the ids still picked, 50 per call.
 
 To keep the outcome of a finished follow-up, save it first with `remember(context_id=..., type="note", summary=..., content=...)`, then delete the time memory. There is no "mark done": a time memory leaves `recall_upcoming` only when it is forgotten.
 
-`forget` is a soft delete: recoverable until the deployment's cleanup window passes (default 30 days); its graph edges are removed. Each id gets a `results` row; a `skipped` one deleted nothing, an `error` one says why. Report both; do not retry with a query.
+`forget` is a soft delete: recoverable until the deployment's cleanup window passes (default 30 days); its graph edges are removed. A `skipped` or `error` row in `results` deleted nothing: report it, do not retry with a query.
 
 ### 6. Report
 

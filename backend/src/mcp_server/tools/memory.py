@@ -42,7 +42,7 @@ from services.memory_service import (
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
-from utils.datetime import to_utc_iso
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -1545,7 +1545,9 @@ _FORGET_ROW_ERROR = "error"
 
 def _parse_forget_ids(args: dict[str, Any]) -> tuple[list[UUID], list[TextContent] | None]:
     """The validated ``memory_ids`` of a batch forget, or an ``invalid_argument``."""
-    if args.get("memory_id") is not None or args.get("query") is not None:
+    # Falsy counts as absent, as in the single form (some clients send every
+    # declared parameter, empty).
+    if args.get("memory_id") or args.get("query"):
         return [], _error_response(
             "invalid_argument",
             "Supply exactly ONE of memory_id, memory_ids or query.",
@@ -1578,6 +1580,62 @@ def _parse_forget_ids(args: dict[str, Any]) -> tuple[list[UUID], list[TextConten
         seen.add(memory_uuid)
         ids.append(memory_uuid)
     return ids, None
+
+
+def _forget_error_row(memory_uuid: UUID, failure: Any) -> dict[str, Any]:
+    """The row of an id whose forget raised: the canonical error / message."""
+    row: dict[str, Any] = {
+        "memory_id": str(memory_uuid),
+        "status": _FORGET_ROW_ERROR,
+        "error": failure.error,
+        "message": failure.message,
+    }
+    if "correlation_id" in failure.fields:
+        row["correlation_id"] = failure.fields["correlation_id"]
+    return row
+
+
+def _forget_not_attempted(memory_uuid: UUID) -> dict[str, Any]:
+    """The row of an id left untried after the database session failed."""
+    return {
+        "memory_id": str(memory_uuid),
+        "status": _FORGET_ROW_ERROR,
+        "error": "not_attempted",
+        "message": "Not attempted: the database session failed on an earlier id. Retry it.",
+    }
+
+
+async def _forgotten_by(db: Any, memory_uuid: UUID, user_id: str, since: Any) -> bool:
+    """Whether ``user_id`` soft-deleted the memory at or after ``since``."""
+    from sqlalchemy import select
+
+    from models.memory import Memory
+
+    row = (
+        await db.execute(
+            select(Memory.deleted_at, Memory.deleted_by).where(Memory.id == memory_uuid)
+        )
+    ).one_or_none()
+    return bool(
+        row is not None
+        and row.deleted_at is not None
+        and row.deleted_by == user_id
+        and row.deleted_at >= since
+    )
+
+
+_FORGET_REFUSALS = {"permission_denied": 403, "not_found": 404, "validation_error": 422}
+
+
+def _forget_usage_status(results: list[dict[str, Any]]) -> int:
+    """The status the usage log records: 200 unless every id failed, then the
+    refusal class they share (as the single forget would log it), else 500."""
+    errors = {r.get("error") for r in results if r["status"] == _FORGET_ROW_ERROR}
+    if len(errors) == 0 or any(r["status"] != _FORGET_ROW_ERROR for r in results):
+        return 200
+    if len(errors) == 1 and (code := next(iter(errors))) in _FORGET_REFUSALS:
+        return _FORGET_REFUSALS[code]
+    return 500
 
 
 async def _handle_forget_many(
@@ -1632,7 +1690,12 @@ async def _handle_forget_many(
 
             service = MemoryService(db)
             results: list[dict[str, Any]] = []
+            session_ok = True
             for memory_uuid in memory_ids:
+                if not session_ok:
+                    results.append(_forget_not_attempted(memory_uuid))
+                    continue
+                attempt_start = utcnow()
                 try:
                     result = await execute_with_timeout(
                         service.forget(
@@ -1644,17 +1707,21 @@ async def _handle_forget_many(
                         operation_name="forget",
                     )
                 except Exception as exc:
-                    await db.rollback()
                     failure = describe_tool_exception("forget", exc)
-                    row: dict[str, Any] = {
-                        "memory_id": str(memory_uuid),
-                        "status": _FORGET_ROW_ERROR,
-                        "error": failure.error,
-                        "message": failure.message,
-                    }
-                    if "correlation_id" in failure.fields:
-                        row["correlation_id"] = failure.fields["correlation_id"]
-                    results.append(row)
+                    try:
+                        await db.rollback()
+                        # The service commits before its audit write, so a
+                        # failure after that commit left the memory deleted.
+                        committed = await _forgotten_by(db, memory_uuid, user_id, attempt_start)
+                    except Exception:
+                        logger.warning("forget_batch_session_failed", exc_info=True)
+                        session_ok = False
+                        committed = False
+                    results.append(
+                        {"memory_id": str(memory_uuid), "status": "deleted"}
+                        if committed
+                        else _forget_error_row(memory_uuid, failure)
+                    )
                     continue
                 results.append(
                     {
@@ -1667,36 +1734,39 @@ async def _handle_forget_many(
             skipped = sum(1 for r in results if r["status"] == "skipped")
             failed = len(results) - len(deleted) - skipped
 
-            await _log_tool_usage(
-                db,
-                user_id,
-                "forget",
-                start_time,
-                500 if failed == len(results) else 200,
-                current_context_id,
-                workspace_id,
-            )
-            if touch_target is not None:
-                await _touch_context_last_used(db, touch_target)
-            await db.commit()
+            if session_ok:
+                await _log_tool_usage(
+                    db,
+                    user_id,
+                    "forget",
+                    start_time,
+                    _forget_usage_status(results),
+                    current_context_id,
+                    workspace_id,
+                )
+                if touch_target is not None:
+                    await _touch_context_last_used(db, touch_target)
+                await db.commit()
 
+            body = {
+                "deleted_count": len(deleted),
+                "memory_ids": deleted,
+                "results": results,
+                "count": len(results),
+                "succeeded": len(deleted),
+                "skipped": skipped,
+                "failed": failed,
+                **_session_response_field(),  # #2044
+                **context_fields,
+            }
+            if failed == len(results):
+                # As remember_batch: nothing done and every id failed is an
+                # error envelope (isError), still with the rows.
+                return _error_response("batch_failed", "No id was deleted; see results.", **body)
             return [
                 TextContent(
                     type="text",
-                    text=_dumps(
-                        {
-                            "status": "partial" if failed else "success",
-                            "deleted_count": len(deleted),
-                            "memory_ids": deleted,
-                            "results": results,
-                            "count": len(results),
-                            "succeeded": len(deleted),
-                            "skipped": skipped,
-                            "failed": failed,
-                            **_session_response_field(),  # #2044
-                            **context_fields,
-                        }
-                    ),
+                    text=_dumps({"status": "partial" if failed else "success", **body}),
                 )
             ]
         except _ContextNotFoundError as e:
