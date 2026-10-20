@@ -4,6 +4,21 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.118.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.118.0) — 2026-10-20
+
+Dependency refresh and the credential default-context follow-ups: the frontend moves to Next.js 16.4 with the open Dependabot advisories cleared, the Credentials page reads key defaults from one list and creates a key with its default in one call, the OAuth consent and token forms ignore file parts, and a bulk forget never outlasts one forget timeout.
+
+### Changed
+- **Member key responses carry the default context** ([#2188](https://github.com/kagura-ai/memory-cloud/issues/2188)): the member-credentials key list and create responses add `default_context_id`, `default_context_name` (`null` when none is set or the viewer cannot read the context) and `agent_id`; a key you mint for yourself accepts `default_context_id` (`404` `Context not found` and nothing created when unreadable, `422` for a public-bound key, `400` on the owner-provisioned path). The Credentials page drops its second key fetch, creates a key with its default in one call, keeps the create dialog open on an error, and hides the default-context control for agent-bound keys.
+- **`forget(memory_ids=[...])` shares one time budget** ([#2191](https://github.com/kagura-ai/memory-cloud/issues/2191)): the ids of one call share the `forget` timeout (`MCP_TIMEOUT_FORGET`, default 15 s) instead of each getting their own; an id is not started when too little of the budget is left, and the rest come back as `error` / `not_attempted` to resend.
+
+### Fixed
+- **OAuth consent and token forms ignore file parts** ([#2190](https://github.com/kagura-ai/memory-cloud/issues/2190)): a multipart file part named like an OAuth field (`scope`, `state`, `code`, …) is dropped instead of reaching Authlib and ending in `server_error`; once a code is issued, a failure in a later step (consent default, new-app notice, loopback page) is logged and the client still gets its code. The generic authorize `server_error` redirect now sends a fixed `error_description` instead of the exception text.
+
+### Notes
+- **Dependencies** ([#2193](https://github.com/kagura-ai/memory-cloud/issues/2193)): `next` 16.2.6 → 16.4.2 (with `sharp` 0.35.5 and `postcss` 8.5.23), `eslint-config-next` 15 → 16, `vitest` 4.1.12, npm transitives refreshed within semver; backend `oauthlib` 3.3.1 → 4.0.0 (transitive, Google sign-in helper only). Two advisories without a usable patch were dismissed with reasons (`braces`, build tooling only; `postcss-selector-parser` 6.1.5 carries the backported fix).
+- **API:** `MemberAPIKeyResponse` gains `default_context_id`, `default_context_name`, `agent_id`; `CreateAPIKeyRequest` (member route) accepts `default_context_id`. No new routes, no migration, no new environment variables. MCP tool count unchanged (72).
+
 ## [v0.117.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.117.0) — 2026-10-20
 
 Client connection defaults and maintenance ergonomics: a default context can now live on the credential (API key or OAuth app), a loopback OAuth sign-in shows its callback URL instead of losing it, linked accounts can undo each other's sessions, and bulk forget takes a list of ids.
