@@ -1983,7 +1983,7 @@ stage; REST `/api/v1/memory/recall`, share keys, agent bootstrap and
 | `PLAN_<KEY>_MAX_LLM_SELECTOR_CONTEXTS` | tier value | Per-tier override of `max_llm_selector_contexts` (`PLAN_FREE_…`, `PLAN_BASIC_…`, `PLAN_PRO_…`, `PLAN_PROMAX_…`). Read only where `LLM_SELECTOR_REQUIRE_PLAN` is on; 0 on a tier without the `llm_selector` feature whatever the number. |
 | `LLM_SELECTOR_TIMEOUT_SECONDS` | `8.0` | Time limit of one selector call; past it the recall returns its unselected page. |
 | `LLM_SELECTOR_MAX_ROWS` | `10` | Rows of a recall page sent to the selector; rows after them are returned unchanged. |
-| `LLM_SELECTOR_MAX_PROMPT_CHARS` | `24000` | Characters of summaries and content one call may send; a larger page is returned unselected. |
+| `LLM_SELECTOR_MAX_PROMPT_CHARS` | `24000` | Characters of row headers, summaries and content one call may send; a larger page is returned unselected. |
 | `LLM_SELECTOR_MAX_CALLS_PER_DAY` | `2000` | Selector calls per workspace per UTC day, a counter separate from `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (recalls must not starve the judge); past it recalls return their unselected page. |
 
 With the gate on, a context whose workspace plan lacks the feature, or that
@@ -2003,10 +2003,14 @@ false`, metadata-only, and a nullable timestamp); no row is turned on.
 `full` content rule have run) on a single-context MCP recall whose flag is
 effective, with at least one result carrying content, not under
 `include_superseded=true` and not on a degraded search. The model receives the
-query, each sent row's summary and its attached content split into numbered
-segments — no memory ids, scores, tags or sources; every string passes the
-control-token neutraliser and sits between the untrusted-content markers — and
-answers with row and segment indices only. The server validates each answer
+query, each sent row's rank, creation date (day only), summary and its attached
+content split into numbered segments — no memory ids, scores, tags or sources;
+every string passes the control-token neutraliser and sits between the
+untrusted-content markers — and answers with row and segment indices only. The
+selector judges topical relevance, not truth (#2171): a row about what the
+query asks is kept even when its stored fact contradicts the model's general
+knowledge, and when two rows answer the same question differently it prefers
+the newer one, keeping both when unsure. The server validates each answer
 item on its own, drops the rows marked irrelevant (their ids are listed in
 `selector.dropped_memory_ids`, at most 20) and rebuilds a kept row's content by
 slicing the stored text at the chosen segments, joined with `" … "`, with

@@ -11,6 +11,7 @@ row run on the database.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -265,7 +266,7 @@ async def test_defaulted_full_never_sends_connector_content(db_session, quiet_wr
 
     prompt = complete_json.await_args.kwargs["prompt"]
     assert "CONNECTOR-BODY-7d1e" not in prompt
-    assert "Row 0 (summary only)" in prompt
+    assert re.search(r"Row 0 \(rank 1, created \d{4}-\d{2}-\d{2}, summary only\)", prompt)
     assert "[0] The deploy pipeline" in prompt
     assert response.results[0].content is None
 

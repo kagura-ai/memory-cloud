@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,6 +31,7 @@ def _response(
     content: str | None = None,
     *,
     memory_id: UUID | None = None,
+    created_at: datetime | None = None,
 ) -> MemoryResponse:
     sliced, next_offset = content_slice(content) if content else (None, None)
     return MemoryResponse(
@@ -40,7 +41,7 @@ def _response(
         type="note",
         importance=0.5,
         scope="persistent",
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        created_at=created_at or datetime(2026, 1, 1, tzinfo=UTC),
         client="test",
         tags=[],
         context=None,
@@ -141,7 +142,11 @@ class TestBuildPrompt:
     def test_rows_in_page_order_summary_only_marked(self) -> None:
         page = [_response("first", SENTENCES), _response("second"), _response("third", "Short.")]
         prompt = rs.build_prompt("q", rs.rows_for(page, 10))
-        assert prompt.index("Row 0") < prompt.index("Row 1 (summary only)") < prompt.index("Row 2")
+        assert (
+            prompt.index("Row 0 (rank 1, created 2026-01-01)")
+            < prompt.index("Row 1 (rank 2, created 2026-01-01, summary only)")
+            < prompt.index("Row 2 (rank 3, created 2026-01-01)")
+        )
         assert "[0] The deploy pipeline" in prompt
         assert "[3] A failed health check" in prompt
 
@@ -183,6 +188,132 @@ class TestBuildPrompt:
         rows = rs.rows_for(page, 3)
         assert [row.i for row in rows] == [0, 1, 2]
         assert "Row 3" not in rs.build_prompt("q", rows)
+
+
+# ---------------------------------------------------------------------------
+# The store is the authority (#2171)
+# ---------------------------------------------------------------------------
+
+# Counterfactual rows (MemoryAgentBench FactConsolidation shape): stored facts
+# that contradict general knowledge are exactly what a memory store must keep.
+COUNTERFACTUAL = (
+    "Notes from the geography quiz prep session held last week. "
+    "In this set, the capital of Romania is Rajanpur. "
+    "Bucharest is mentioned in older atlases, but this set uses its own answers."
+)
+
+
+class TestStoreIsAuthority:
+    def test_the_relevance_rule_is_topical_not_truth(self) -> None:
+        system = rs.SELECTOR_SYSTEM
+        assert "relevant=true when the row is about what the query asks" in system
+        assert "whether or not it agrees with general knowledge" in system
+        assert "Never judge a row by whether you believe it is true." in system
+        assert "may hold facts that differ from what you know" in system
+        # The #2144 wording the judge read as "gives the correct answer" is gone.
+        assert "helps answer the query" not in system
+
+    def test_the_segment_rule_keeps_the_stored_answer(self) -> None:
+        assert (
+            "list the index of every segment that states the stored answer, even when "
+            "it contradicts general knowledge" in " ".join(rs.SELECTOR_SYSTEM.split())
+        )
+
+    def test_the_conflict_rule_prefers_newer_and_keeps_both_when_unsure(self) -> None:
+        system = " ".join(rs.SELECTOR_SYSTEM.split())
+        assert "Rows are in rank order, each with its creation date." in system
+        assert "prefer the newer one; when unsure, keep both." in system
+
+    def test_the_output_contract_is_unchanged(self) -> None:
+        assert (
+            '{"rows":[{"i":<row index>,"relevant":<true|false>,"segments":[<segment indices>]}]}'
+            in rs.SELECTOR_SYSTEM
+        )
+        assert rs.INJECTION_RESISTANCE_DIRECTIVE in rs.SELECTOR_SYSTEM
+
+    def test_the_prompt_revision_moved_past_v1(self) -> None:
+        assert rs.PROMPT_REVISION == "selector-v2"
+
+    def test_a_counterfactual_row_is_sent_verbatim_with_its_header(self) -> None:
+        page = [_response("Capital of Romania (quiz set)", COUNTERFACTUAL)]
+        prompt = rs.build_prompt("What is the capital of Romania?", rs.rows_for(page, 10))
+        assert "Query: What is the capital of Romania?" in prompt
+        assert "Row 0 (rank 1, created 2026-01-01)" in prompt
+        assert "[1] In this set, the capital of Romania is Rajanpur." in prompt
+
+    def test_an_older_newer_pair_carries_rank_and_date(self) -> None:
+        older = _response(
+            "Team lead",
+            "The team lead of the platform group is Alice Example.",
+            created_at=datetime(2025, 3, 4, 23, 30, tzinfo=UTC),
+        )
+        newer = _response(
+            "Team lead (update)",
+            "The team lead of the platform group is now Bob Example.",
+            created_at=datetime(2026, 9, 30, 8, 0),  # naive: stored UTC
+        )
+        prompt = rs.build_prompt("Who leads the platform group?", rs.rows_for([older, newer], 10))
+        assert "Row 0 (rank 1, created 2025-03-04)" in prompt
+        assert "Row 1 (rank 2, created 2026-09-30)" in prompt
+        # Day only: no time of day, and still no ids.
+        assert "23:30" not in prompt and "08:00" not in prompt
+        assert str(older.memory_id) not in prompt and str(newer.memory_id) not in prompt
+
+    def test_an_aware_non_utc_date_is_converted_to_utc(self) -> None:
+        jst = timezone(timedelta(hours=9))
+        assert rs.created_date(datetime(2026, 1, 2, 3, 0, tzinfo=jst)) == "2026-01-01"
+        assert rs.created_date(datetime(2026, 1, 2, 3, 0)) == "2026-01-02"
+
+    @pytest.mark.asyncio
+    async def test_a_relevant_counterfactual_row_is_kept_with_its_span(self) -> None:
+        stored = _response("Capital of Romania (quiz set)", COUNTERFACTUAL)
+        general = _response("Bucharest", "Bucharest is the largest city in Romania by far.")
+        segments = rs.segment_content(COUNTERFACTUAL)
+        answer_index = next(
+            n for n, (s, e) in enumerate(segments) if "Rajanpur" in COUNTERFACTUAL[s:e]
+        )
+        llm = _llm(
+            {
+                "rows": [
+                    {"i": 0, "relevant": True, "segments": [answer_index]},
+                    {"i": 1, "relevant": False},
+                ]
+            }
+        )
+        result, llm, ledger = await _run([stored, general], llm=llm)
+        assert result.report.applied is True
+        assert result.report.dropped_memory_ids == [general.memory_id]
+        [kept] = result.responses
+        assert kept.memory_id == stored.memory_id
+        assert kept.content == "In this set, the capital of Romania is Rajanpur."
+        assert kept.spans is not None and len(kept.spans) == 1
+        span = kept.spans[0]
+        assert (
+            COUNTERFACTUAL[span.start : span.end]
+            == "In this set, the capital of Romania is Rajanpur."
+        )
+        kwargs = llm.complete_json.await_args.kwargs
+        assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
+        assert "Rajanpur" in kwargs["prompt"]
+        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v2"
+
+    @pytest.mark.asyncio
+    async def test_the_row_headers_count_against_the_prompt_budget(self) -> None:
+        page = [_response("s", SENTENCES), _response("summary-only row")]
+        body = len("s") + len(SENTENCES) + len("summary-only row")
+        headers = len(rs.row_header(0, "2026-01-01", summary_only=False)) + len(
+            rs.row_header(1, "2026-01-01", summary_only=True)
+        )
+        llm = _llm({"rows": [{"i": 0, "relevant": True}]})
+        at_limit, _, _ = await _run(
+            page, llm=llm, settings=_settings(llm_selector_max_prompt_chars=body + headers)
+        )
+        assert at_limit.report.applied is True
+        over, llm2, _ = await _run(
+            page, llm=_llm(), settings=_settings(llm_selector_max_prompt_chars=body + headers - 1)
+        )
+        assert over.report.reason == "too_large"
+        llm2.complete_json.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -1141,8 +1141,8 @@ class Settings(BaseSettings):
         default=24000,
         ge=1,
         description=(
-            "Characters of summaries and content the LLM selector may send in one call "
-            "(#2144); a larger page is returned unselected"
+            "Characters of row headers, summaries and content the LLM selector may send "
+            "in one call (#2144); a larger page is returned unselected"
         ),
     )
     llm_selector_max_calls_per_day: int = Field(
