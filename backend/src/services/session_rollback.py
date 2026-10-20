@@ -1407,6 +1407,7 @@ async def _share_lock_rows(db: AsyncSession, ids: list[UUID]) -> dict[UUID, Any]
             Memory.type,
             Memory.details,
             Memory.updated_at,
+            Memory.summary_embedding_id,
         )
         .where(Memory.id.in_(ids), Memory.deleted_at.is_(None))
         .order_by(Memory.id)
@@ -1435,9 +1436,14 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
         for sync in group:
             if rows is not None and sync.memory_id not in rows:
                 continue  # forgotten or purged since: its payload is not read
-            updates, delete_keys = _sync_patch(
-                sync, rows.get(sync.memory_id) if rows is not None else None
-            )
+            row = rows.get(sync.memory_id) if rows is not None else None
+            if row is not None and (row.summary_embedding_id or row.id) != sync.target:
+                # #2100: the row names another point since the restore (the
+                # indexer moved it to a newer version): that point is not the
+                # one the restore resolved, and its payload is the indexer's.
+                logger.info("session_rollback_payload_point_moved", memory_id=str(sync.memory_id))
+                continue
+            updates, delete_keys = _sync_patch(sync, row)
             if not (updates or delete_keys):
                 continue
             try:

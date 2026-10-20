@@ -309,6 +309,46 @@ class TestSessionRollbackRestoresTheRowsOwnPoint:
         assert delete_keys == []
 
 
+class TestRollbackApplyChecksThePointAgain:
+    @staticmethod
+    async def _apply(row_point: object) -> AsyncMock:
+        from types import SimpleNamespace
+
+        from services import session_rollback as sr
+
+        memory_id = uuid4()
+        sync = sr.PayloadSync(
+            memory_id, "coll", ("tags",), {"tags": ["a"]}, (), False, point_id=_RESOURCE_POINT
+        )
+        row = SimpleNamespace(
+            id=memory_id,
+            tags=["a"],
+            importance=0.5,
+            type="resource_data",
+            details=None,
+            updated_at=None,
+            summary_embedding_id=row_point,
+        )
+        with (
+            patch.object(sr, "_share_lock_rows", AsyncMock(return_value={memory_id: row})),
+            patch.object(sr, "_end_transaction", AsyncMock()),
+            patch("db.qdrant.update_memory_payload_in_qdrant", new_callable=AsyncMock) as write,
+        ):
+            await sr._apply_payload_syncs([sync], MagicMock())
+        return write
+
+    async def test_the_resolved_point_is_patched(self):
+        write = await self._apply(_RESOURCE_POINT)
+
+        assert write.await_args.kwargs["memory_id"] == _RESOURCE_POINT
+        assert write.await_args.kwargs["payload_updates"] == {"tags": ["a"]}
+
+    async def test_a_point_moved_since_the_restore_is_left_alone(self):
+        write = await self._apply(resource_point_id("reports", "doc-1", 3))
+
+        write.assert_not_awaited()
+
+
 def test_scope_is_not_editable_by_update_or_patch():
     """``scope`` is not a metadata edit, so the sync never writes it."""
     assert "scope" not in UpdateMemoryRequest.model_fields
