@@ -173,6 +173,19 @@ async def test_patch_refuses_a_bound_key_with_422(over):
 
 
 @pytest.mark.asyncio
+async def test_patch_refuses_a_connector_key_with_422():
+    key = _key(name=f"connector:{uuid.uuid4()}", workspace_id=WORKSPACE_ID)
+    db = _db(key)
+    with _readable("proj"), pytest.raises(MemoryCloudException) as exc:
+        await update_api_key(
+            key_id=PID, data=APIKeyUpdate(default_context_id=CONTEXT_ID), user=USER, db=db
+        )
+
+    assert exc.value.status_code == 422
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_patch_refuses_a_revoked_key():
     key = _key(revoked_at=utcnow())
     with pytest.raises(MemoryCloudException) as exc:
@@ -322,3 +335,41 @@ async def test_create_key_refuses_a_default_on_a_bound_key():
             agent_id=uuid.uuid4(),
             default_context_id=CONTEXT_ID,
         )
+
+
+@pytest.mark.asyncio
+async def test_member_regenerate_keeps_the_default_context():
+    """The workspace-key regenerate path carries the default like /config does."""
+    from api.routes import member_credentials as mc
+
+    old_key = SimpleNamespace(
+        id=7,
+        public_id="akey_" + "7" * 22,
+        name="ws-key",
+        revoked_at=None,
+        default_context_id=CONTEXT_ID,
+    )
+    new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old_key))
+    )
+    db.commit = AsyncMock()
+    mgr = MagicMock()
+    mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
+    with (
+        patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
+        patch("api.routes.member_credentials.MemberCredentialsService"),
+        patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
+        patch("api.routes.member_credentials.schedule_security_notification"),
+    ):
+        await mc.regenerate_api_key(
+            WORKSPACE_ID,
+            "member-1",
+            SimpleNamespace(client=None, headers={}),
+            BackgroundTasks(),
+            {"user_id": "member-1", "sub": "m"},
+            db,
+        )
+
+    assert mgr.create_key.await_args.kwargs["default_context_id"] == CONTEXT_ID

@@ -526,6 +526,8 @@ async def regenerate_api_key(
         user_id=user_id,
         workspace_id=workspace_id,
         auto_hide_minutes=10,
+        # #2129: the MCP default is a setting of the key, not of its secret.
+        default_context_id=old_key.default_context_id,
     )
 
     await db.commit()

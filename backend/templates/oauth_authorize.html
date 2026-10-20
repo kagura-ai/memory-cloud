@@ -270,6 +270,9 @@ button:focus-visible {
 <div class="default-context">
 <label for="default-context">{{ messages.default_context_label }}</label>
 <select id="default-context" name="default_context" form="approve-form">
+{% if selected_default_context == "keep" %}
+<option value="keep" selected>{{ messages.default_context_keep }}</option>
+{% endif %}
 <option value=""{% if not selected_default_context %} selected{% endif %}>{{ messages.default_context_none }}</option>
 {% for group in context_groups %}
 <optgroup label="{{ group.workspace }}">

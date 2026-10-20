@@ -17,7 +17,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
-from auth.connector_keys import reject_reserved_key_name
+from auth.connector_keys import connector_id_from_key_name, reject_reserved_key_name
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -441,7 +441,8 @@ async def update_api_key(
         NotFoundException: The key is not the caller's, or the context is not
             readable (404).
         BadRequestError: The key is revoked (400).
-        ValidationError: The key is public-bound or agent-bound (422).
+        ValidationError: The key is public-bound, agent-bound or a connector's
+            shared key (422).
     """
     user_id = get_user_id(user)
     target_key = (
@@ -464,6 +465,17 @@ async def update_api_key(
         raise ValidationError(
             "A public-bound or agent-bound key cannot have a default context; "
             "an agent key uses its agent's default binding",
+            field="default_context_id",
+        )
+    # A connector's shared key never applies one on MCP (its owner is not the
+    # person behind the connector), so it cannot be set either.
+    if (
+        data.default_context_id is not None
+        and target_key.workspace_id is not None
+        and connector_id_from_key_name(target_key.name) is not None
+    ):
+        raise ValidationError(
+            "A connector key cannot have a default context",
             field="default_context_id",
         )
 

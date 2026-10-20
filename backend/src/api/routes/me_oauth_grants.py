@@ -7,8 +7,10 @@ client without ``context_id`` runs in it (``?context=`` on the URL wins).
 ``PUT .../{client_id}/default-context`` sets it, ``DELETE`` clears it; the
 consent page offers the same choice when the app is authorized.
 
-Only the caller's own grants are visible or changeable, and a grant that is
-not the caller's answers the same 404 as one that does not exist.
+Session-only, like API key management: an API key or another app's OAuth
+token must not list the user's apps or re-point another app's default. Only
+the caller's own grants are visible or changeable, and a grant that is not the
+caller's answers the same 404 as one that does not exist.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser
+from auth.dependencies import SessionUser
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.credential_default_context import (
@@ -90,15 +92,14 @@ async def _response(
 
 
 async def _own_grant(db: AsyncSession, user_id: str, client_id: str) -> GrantSummary:
-    for grant in await list_grants(db, user_id=user_id):
-        if grant.client_id == client_id:
-            return grant
+    for grant in await list_grants(db, user_id=user_id, client_id=client_id):
+        return grant
     raise NotFoundException("OAuth grant")
 
 
 @router.get("/grants", response_model=list[OAuthGrantResponse])
 async def list_oauth_grants(
-    user: APIKeyOrSessionUser,
+    user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> list[OAuthGrantResponse]:
     """List the OAuth apps the caller has authorized, newest issuance first."""
@@ -113,7 +114,7 @@ async def list_oauth_grants(
 async def set_oauth_grant_default_context(
     client_id: str,
     data: OAuthGrantDefaultContextUpdate,
-    user: APIKeyOrSessionUser,
+    user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> OAuthGrantResponse:
     """Set (or, with ``null``, clear) the MCP default context of one grant.
@@ -166,7 +167,7 @@ async def set_oauth_grant_default_context(
 )
 async def clear_oauth_grant_default_context(
     client_id: str,
-    user: APIKeyOrSessionUser,
+    user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Clear the MCP default context of one grant.

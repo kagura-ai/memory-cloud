@@ -88,14 +88,28 @@ async def _client(db, name: str = "Desktop App") -> str:
     return client_id
 
 
-def _token(client_id: str, user: str, scope: str, *, revoked=False, age_minutes=0):
+def _token(
+    client_id: str,
+    user: str,
+    scope: str,
+    *,
+    revoked=False,
+    age_minutes=0,
+    refresh=False,
+    access_revoked=False,
+    refresh_revoked=False,
+):
+    now = utcnow()
     return OAuth2Token(
         client_id=client_id,
         user_id=user,
         access_token=uuid4().hex,
+        refresh_token=uuid4().hex if refresh else None,
         scope=scope,
         revoked=revoked,
-        issued_at=utcnow() - timedelta(minutes=age_minutes),
+        issued_at=now - timedelta(minutes=age_minutes),
+        access_token_revoked_at=now if access_revoked else None,
+        refresh_token_revoked_at=now if refresh_revoked else None,
     )
 
 
@@ -179,6 +193,12 @@ async def test_list_grants_groups_live_tokens_and_keeps_settings_rows(db_session
             _token(newer, user, "memory:read memory:write", age_minutes=2),
             _token(older, user, "memory:read", age_minutes=30),
             _token(gone, user, "memory:read", revoked=True),
+            # Rotated / RFC 7009-revoked: both stamps set, ``revoked`` left False.
+            _token(
+                gone, user, "memory:admin", refresh=True, access_revoked=True, refresh_revoked=True
+            ),
+            # A revoked access token whose refresh token still works is live.
+            _token(older, user, "memory:write", refresh=True, access_revoked=True, age_minutes=40),
             _token(other_users, "someone-else", "memory:read"),
         ]
     )
@@ -199,8 +219,13 @@ async def test_list_grants_groups_live_tokens_and_keeps_settings_rows(db_session
     assert first.scopes == ["memory:read", "memory:write"]
     assert first.default_context_id is None
     assert second.default_context_id == ctx["a2"].id
+    assert second.scopes == ["memory:read", "memory:write"]
     assert third.scopes == [] and third.last_issued_at is None
     assert third.default_context_id == ctx["a1"].id
+    # The one-client form answers that client only.
+    (only,) = await list_grants(db_session, user_id=user, client_id=older)
+    assert only.client_id == older
+    assert await list_grants(db_session, user_id=user, client_id=other_users) == []
 
 
 @pytest.mark.asyncio

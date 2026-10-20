@@ -1803,6 +1803,10 @@ def _consent_permission_keys(scope: str) -> list[str]:
     return [key for name, key in _CONSENT_PERMISSION_KEYS.items() if name in granted]
 
 
+# The picker value that leaves the stored default as it is (#2129).
+CONSENT_KEEP_DEFAULT = "keep"
+
+
 async def _consent_default_context_choices(
     user_id: str | None, client_id: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -1839,8 +1843,14 @@ async def _consent_default_context_choices(
             groups.append({"workspace": option.workspace_name, "contexts": []})
         groups[-1]["contexts"].append({"id": str(option.context_id), "name": option.name})
     listed = {str(option.context_id) for option in options}
-    selected = str(stored) if stored is not None and str(stored) in listed else ""
-    return groups, selected
+    if stored is None:
+        return groups, ""
+    if str(stored) in listed:
+        return groups, str(stored)
+    # A stored default the picker does not list (past the cap, or no longer
+    # listable) is kept unless the user picks something else: the template
+    # shows a "keep" entry, which the POST ignores.
+    return groups, CONSENT_KEEP_DEFAULT
 
 
 async def _save_consent_default_context(
@@ -1854,7 +1864,13 @@ async def _save_consent_default_context(
     UUID, unreadable — is ignored at debug level. Never interrupts the
     authorization: a failure here is logged and the flow continues.
     """
-    if not isinstance(user_id, str) or not user_id or not client_id or raw is None:
+    if (
+        not isinstance(user_id, str)
+        or not user_id
+        or not client_id
+        or raw is None
+        or raw.strip() == CONSENT_KEEP_DEFAULT
+    ):
         return
     from db.base import get_db
     from services.credential_default_context import (
@@ -1931,13 +1947,9 @@ async def oauth_authorize_get(
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
 
-    # #2129: the optional default-context picker (async session, fails open).
-    context_groups, selected_default_context = await _consent_default_context_choices(
-        user.user_id, client_id
-    )
-
-    # #1831: sync session work runs off the event loop (see _run_sync).
-    def _sync():
+    # #1831: sync session work runs off the event loop (see _run_sync). Returns
+    # an error response, or the consent page's template values.
+    def _sync() -> Response | dict[str, Any]:
         db_session = get_sync_session()
         try:
             client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
@@ -1997,37 +2009,40 @@ async def oauth_authorize_get(
 
             query_string = urlencode(query_params)
 
-            # Use Jinja2 template (Issue #52, #221 i18n).
-            # Modern Starlette TemplateResponse takes ``request`` as the first
-            # positional argument; the legacy form
-            # ``TemplateResponse(name, context_with_request)`` causes
-            # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
-            # because Starlette interprets the dict as the template name.
-            return templates.TemplateResponse(
-                request,
-                "oauth_authorize.html",
-                {
-                    "client_name": client.client_name,
-                    "user_email": user.email,
-                    "query_string": query_string,
-                    "locale": locale,
-                    "messages": messages,
-                    "permission_keys": _consent_permission_keys(granted_scope),
-                    # #1741: name where the user is sent next, and warn when the
-                    # client can only redirect to this computer (its name is then
-                    # self-asserted and unverifiable).
-                    "redirect_host": redirect_uri_display_host(redirect_uri),
-                    "loopback_only": bool(client.redirect_uris)
-                    and all(is_loopback_redirect_uri(uri) for uri in client.redirect_uris),
-                    # #2129: the app's MCP default context (grouped by workspace).
-                    "context_groups": context_groups,
-                    "selected_default_context": selected_default_context,
-                },
-            )
+            return {
+                "client_name": client.client_name,
+                "user_email": user.email,
+                "query_string": query_string,
+                "locale": locale,
+                "messages": messages,
+                "permission_keys": _consent_permission_keys(granted_scope),
+                # #1741: name where the user is sent next, and warn when the
+                # client can only redirect to this computer (its name is then
+                # self-asserted and unverifiable).
+                "redirect_host": redirect_uri_display_host(redirect_uri),
+                "loopback_only": bool(client.redirect_uris)
+                and all(is_loopback_redirect_uri(uri) for uri in client.redirect_uris),
+            }
         finally:
             db_session.close()
 
-    return await _run_sync(_sync)
+    page = await _run_sync(_sync)
+    if isinstance(page, Response):
+        return page
+
+    # #2129: the optional default-context picker, read only for a request that
+    # passed validation (async session, fails open to no picker).
+    (
+        page["context_groups"],
+        page["selected_default_context"],
+    ) = await _consent_default_context_choices(user.user_id, client_id)
+    # Use Jinja2 template (Issue #52, #221 i18n).
+    # Modern Starlette TemplateResponse takes ``request`` as the first
+    # positional argument; the legacy form
+    # ``TemplateResponse(name, context_with_request)`` causes
+    # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
+    # because Starlette interprets the dict as the template name.
+    return templates.TemplateResponse(request, "oauth_authorize.html", page)
 
 
 # #1831: the sync bodies of the OAuth routes run here, not on asyncio's default
@@ -2189,12 +2204,6 @@ async def oauth_authorize_post(
             status_code=303,  # See Other: POST→GET redirect
         )
 
-    # #2129: the default context picked on the consent page, stored before the
-    # code is issued so the app's first MCP call already sees it.
-    await _save_consent_default_context(
-        user.user_id, client_id, request.state.form_data.get("default_context")
-    )
-
     # Decided before the grant writes its authorization code (Issue #1752).
     new_authorization = await _run_sync(
         partial(_consent_is_new, client_id, user.user_id, request.query_params.get("scope"))
@@ -2209,6 +2218,14 @@ async def oauth_authorize_post(
         # Use 303 See Other to convert POST to GET redirect
         # Claude.ai callback expects GET, not POST
         if hasattr(response, "location") and response.location:
+            if _grant_issued(response.location):
+                # #2129: the default context picked on the consent page, stored
+                # once the code is issued (a refused request changes nothing)
+                # and before the client is sent back, so its first MCP call
+                # already sees it.
+                await _save_consent_default_context(
+                    user.user_id, client_id, request.state.form_data.get("default_context")
+                )
             if new_authorization and user.user_id and _grant_issued(response.location):
                 schedule_security_notification(
                     background_tasks,

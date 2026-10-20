@@ -93,6 +93,13 @@ def test_the_stored_choice_is_preselected():
     assert '<option value="">No default</option>' in html
 
 
+def test_a_stored_default_the_picker_does_not_list_is_kept_by_default():
+    _, html = _render(GROUPS, selected="keep")
+
+    assert '<option value="keep" selected>Keep the current default</option>' in html
+    assert '<option value="">No default</option>' in html
+
+
 def test_without_contexts_the_page_has_no_picker():
     status, html = _render([])
 
@@ -104,19 +111,26 @@ def test_the_picker_strings_exist_in_both_locales():
     from utils.oauth_messages import OAUTH_MESSAGES
 
     for locale in ("en", "ja"):
-        for key in ("default_context_label", "default_context_none", "default_context_hint"):
+        for key in (
+            "default_context_label",
+            "default_context_none",
+            "default_context_keep",
+            "default_context_hint",
+        ):
             assert OAUTH_MESSAGES[locale][key]
 
 
 # ------------------------------------------------------------------ POST
 
 
-def _post(form: dict[str, str]) -> tuple[int, AsyncMock]:
+def _post(
+    form: dict[str, str], location: str = "https://app.example/cb?code=abc&state=s"
+) -> tuple[int, AsyncMock]:
     fake_user = MagicMock(email="test@example.com", user_id="user-1")
     fake_client = MagicMock(client_name="App", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=True)
     save = AsyncMock()
-    redirect = SimpleNamespace(location="https://app.example/cb?code=abc&state=s")
+    redirect = SimpleNamespace(location=location)
     with (
         patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
         patch("api.routes.oauth.get_sync_session") as mock_sess,
@@ -137,11 +151,45 @@ def _post(form: dict[str, str]) -> tuple[int, AsyncMock]:
     return response.status_code, save
 
 
-def test_approve_passes_the_picked_context_before_the_code_is_issued():
+def test_approve_stores_the_picked_context_once_the_code_is_issued():
     status, save = _post({"confirm": "yes", "default_context": str(CTX_A)})
 
     assert status == 303
     save.assert_awaited_once_with("user-1", "test", str(CTX_A))
+
+
+def test_a_refused_request_stores_nothing():
+    """Authlib answered with an error redirect: no grant, no setting change."""
+    _, save = _post(
+        {"confirm": "yes", "default_context": ""},
+        location="https://app.example/cb?error=invalid_request&state=s",
+    )
+
+    save.assert_not_awaited()
+
+
+def test_the_picker_is_not_read_for_a_request_that_fails_validation():
+    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_client = MagicMock(client_name="App", scope="memory:read")
+    fake_client.check_redirect_uri = MagicMock(return_value=False)
+    choices = AsyncMock(return_value=([], ""))
+    with (
+        patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+        patch("api.routes.oauth.get_sync_session") as mock_sess,
+        patch("api.routes.oauth._consent_default_context_choices", new=choices),
+    ):
+        db = MagicMock()
+        db.query.return_value.filter_by.return_value.first.return_value = fake_client
+        mock_sess.return_value = db
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                "/api/v1/oauth/authorize",
+                params={"client_id": "test", "redirect_uri": "https://evil.example/cb"},
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 400
+    choices.assert_not_awaited()
 
 
 def test_deny_stores_nothing():
@@ -196,8 +244,8 @@ async def test_an_empty_value_clears():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [None, "my-project"])
-async def test_an_absent_or_malformed_value_is_ignored(raw):
+@pytest.mark.parametrize("raw", [None, "my-project", "keep"])
+async def test_an_absent_malformed_or_keep_value_is_ignored(raw):
     with _save_env(SimpleNamespace(name="alpha")) as env:
         await oauth_routes._save_consent_default_context("user-1", "client-1", raw)
 
@@ -270,7 +318,7 @@ async def test_a_stored_choice_no_longer_listed_is_not_selected():
             new=AsyncMock(return_value=CTX_B),
         ),
     ):
-        assert await oauth_routes._consent_default_context_choices("u", "c") == ([], "")
+        assert await oauth_routes._consent_default_context_choices("u", "c") == ([], "keep")
 
 
 @pytest.mark.asyncio

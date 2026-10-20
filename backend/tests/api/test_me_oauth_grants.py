@@ -25,7 +25,6 @@ from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 
 USER = {"user_id": "user-1", "email": "u@example.com", "role": "user"}
-KEY_USER = {**USER, "api_key_workspace_id": uuid.uuid4()}
 CONTEXT_ID = uuid.uuid4()
 MODULE = "api.routes.me_oauth_grants"
 
@@ -54,16 +53,15 @@ async def test_list_returns_the_grants_with_readable_names():
         patch(f"{MODULE}.list_grants", new=AsyncMock(return_value=grants)) as listed,
         patch(f"{MODULE}.readable_context_name", new=names),
     ):
-        response = await list_oauth_grants(user=KEY_USER, db=_db())
+        response = await list_oauth_grants(user=USER, db=_db())
 
     assert listed.await_args.kwargs == {"user_id": "user-1"}
     assert [r.client_id for r in response] == ["client-1", "client-2"]
     assert response[0].default_context_name == "proj-alpha"
     assert response[1].default_context_name is None
     assert response[0].scopes == ["memory:read", "memory:write"]
-    # Named in the caller's key scope; only the grant with a default is read.
+    # Only the grant with a default is read.
     names.assert_awaited_once()
-    assert names.await_args.kwargs["key_workspace_id"] == KEY_USER["api_key_workspace_id"]
 
 
 @pytest.mark.asyncio
@@ -121,8 +119,9 @@ async def test_put_with_an_unreadable_context_is_a_uniform_404():
 async def test_a_grant_the_caller_does_not_hold_is_404(method):
     db = _db()
     setter = AsyncMock()
+    listed = AsyncMock(return_value=[])  # no grant of this caller for that client
     with (
-        patch(f"{MODULE}.list_grants", new=AsyncMock(return_value=[_grant()])),
+        patch(f"{MODULE}.list_grants", new=listed),
         patch(f"{MODULE}.set_grant_default_context", new=setter),
         pytest.raises(MemoryCloudException) as exc,
     ):
@@ -138,6 +137,7 @@ async def test_a_grant_the_caller_does_not_hold_is_404(method):
 
     assert exc.value.status_code == 404
     assert exc.value.message == "OAuth grant not found"
+    assert listed.await_args.kwargs == {"user_id": "user-1", "client_id": "someone-elses"}
     setter.assert_not_awaited()
 
 
@@ -171,6 +171,23 @@ async def test_put_null_and_delete_clear_without_a_read():
         setter.assert_awaited_once_with(db, user_id="user-1", client_id="client-1", context_id=None)
         reader.assert_not_awaited()
         db.commit.assert_awaited_once()
+
+
+def test_the_routes_are_session_only():
+    """An API key or another app's bearer token cannot manage app grants."""
+    import inspect
+
+    from auth.dependencies import SessionUser
+
+    for route in (
+        list_oauth_grants,
+        set_oauth_grant_default_context,
+        clear_oauth_grant_default_context,
+    ):
+        assert inspect.signature(route).parameters["user"].annotation in (
+            SessionUser,
+            "SessionUser",
+        )
 
 
 def test_the_routes_are_registered_under_api_v1_me_oauth():

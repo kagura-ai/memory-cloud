@@ -559,7 +559,11 @@ class TestBoundPublicKeyCreate:
         from api.routes import member_credentials as mc
 
         old_key = SimpleNamespace(
-            id=7, public_id="akey_" + "7" * 22, name="ws-key", revoked_at=None
+            id=7,
+            public_id="akey_" + "7" * 22,
+            name="ws-key",
+            revoked_at=None,
+            default_context_id=None,
         )
         new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
         db = MagicMock()

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
@@ -193,14 +193,35 @@ class GrantSummary:
     last_issued_at: datetime | None
 
 
-async def list_grants(db: AsyncSession, *, user_id: str) -> list[GrantSummary]:
+async def list_grants(
+    db: AsyncSession, *, user_id: str, client_id: str | None = None
+) -> list[GrantSummary]:
     """The user's OAuth grants: clients with a live token, plus settings rows.
 
-    A live token is one not revoked. ``scopes`` is the union of the live
-    tokens' scopes; ``last_issued_at`` the newest live issuance. A client with
-    a settings row but no live token is listed too (no scopes, no issuance),
-    so its default can still be cleared. Newest first.
+    A live token is one whose access token or refresh token is still usable:
+    not ``revoked``, and either the access token is not revoked or it carries
+    a refresh token that is not (refresh rotation and RFC 7009 revocation set
+    the per-token ``*_revoked_at`` stamps, not ``revoked``). ``scopes`` is the
+    union of the live tokens' scopes; ``last_issued_at`` the newest live
+    issuance. A client with a settings row but no live token is listed too
+    (no scopes, no issuance), so its default can still be cleared. Newest
+    first. ``client_id`` narrows the answer to that one client.
     """
+    live_filter = [
+        OAuth2Token.user_id == user_id,
+        OAuth2Token.revoked.is_(False),
+        or_(
+            OAuth2Token.access_token_revoked_at.is_(None),
+            and_(
+                OAuth2Token.refresh_token.is_not(None),
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+            ),
+        ),
+    ]
+    settings_filter = [OAuthGrantSetting.user_id == user_id]
+    if client_id is not None:
+        live_filter.append(OAuth2Token.client_id == client_id)
+        settings_filter.append(OAuthGrantSetting.client_id == client_id)
     live = (
         await db.execute(
             select(
@@ -208,7 +229,7 @@ async def list_grants(db: AsyncSession, *, user_id: str) -> list[GrantSummary]:
                 func.max(OAuth2Token.issued_at),
                 func.array_agg(func.distinct(OAuth2Token.scope)),
             )
-            .where(OAuth2Token.user_id == user_id, OAuth2Token.revoked.is_(False))
+            .where(*live_filter)
             .group_by(OAuth2Token.client_id)
         )
     ).all()
@@ -216,15 +237,15 @@ async def list_grants(db: AsyncSession, *, user_id: str) -> list[GrantSummary]:
         (
             await db.execute(
                 select(OAuthGrantSetting.client_id, OAuthGrantSetting.default_context_id).where(
-                    OAuthGrantSetting.user_id == user_id
+                    *settings_filter
                 )
             )
         ).all()
     )
     issued: dict[str, tuple[datetime | None, list[str]]] = {}
-    for client_id, last_issued_at, scope_values in live:
+    for granted_client, last_issued_at, scope_values in live:
         scopes = sorted({s for value in scope_values or [] if value for s in value.split()})
-        issued[client_id] = (last_issued_at, scopes)
+        issued[granted_client] = (last_issued_at, scopes)
     client_ids = set(issued) | set(settings)
     if not client_ids:
         return []
@@ -239,14 +260,14 @@ async def list_grants(db: AsyncSession, *, user_id: str) -> list[GrantSummary]:
     )
     grants = [
         GrantSummary(
-            client_id=client_id,
-            client_name=names.get(client_id, client_id),
-            scopes=issued.get(client_id, (None, []))[1],
-            default_context_id=settings.get(client_id),
-            last_issued_at=issued.get(client_id, (None, []))[0],
+            client_id=cid,
+            client_name=names.get(cid, cid),
+            scopes=issued.get(cid, (None, []))[1],
+            default_context_id=settings.get(cid),
+            last_issued_at=issued.get(cid, (None, []))[0],
         )
-        for client_id in client_ids
-        if client_id in names
+        for cid in client_ids
+        if cid in names
     ]
     # Newest issuance first; grants without a live token last, by client id.
     grants.sort(key=lambda g: g.client_id)

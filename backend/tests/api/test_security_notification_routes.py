@@ -218,7 +218,13 @@ class TestMemberCredentialRoutes:
     async def test_admin_regenerate_names_the_admin(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
         monkeypatch.setattr(mc, "MemberCredentialsService", MagicMock())
-        old = SimpleNamespace(id=7, public_id="akey_" + "7" * 22, name="ws-key", revoked_at=None)
+        old = SimpleNamespace(
+            id=7,
+            public_id="akey_" + "7" * 22,
+            name="ws-key",
+            revoked_at=None,
+            default_context_id=None,
+        )
         db = MagicMock()
         db.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old))
@@ -242,7 +248,13 @@ class TestMemberCredentialRoutes:
     async def test_self_regenerate_has_no_actor(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
         monkeypatch.setattr(mc, "MemberCredentialsService", MagicMock())
-        old = SimpleNamespace(id=7, public_id="akey_" + "7" * 22, name="mine", revoked_at=None)
+        old = SimpleNamespace(
+            id=7,
+            public_id="akey_" + "7" * 22,
+            name="mine",
+            revoked_at=None,
+            default_context_id=None,
+        )
         db = MagicMock()
         db.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old))
