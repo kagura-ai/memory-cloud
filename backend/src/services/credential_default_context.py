@@ -103,6 +103,7 @@ class ContextOption:
     context_id: UUID
     name: str
     workspace_name: str
+    workspace_id: UUID
 
 
 async def readable_context_options(
@@ -135,7 +136,7 @@ async def readable_context_options(
         except (AuthorizationError, FeatureNotAvailableError, NotFoundException):
             continue
         for context in sorted(contexts, key=lambda c: (c.name or "").lower()):
-            options.append(ContextOption(context.id, context.name, workspace_name))
+            options.append(ContextOption(context.id, context.name, workspace_name, workspace_id))
             if len(options) >= limit:
                 return options
     return options

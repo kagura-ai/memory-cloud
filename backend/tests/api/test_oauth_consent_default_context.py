@@ -314,10 +314,13 @@ async def test_a_failure_never_interrupts_the_authorization():
 async def test_the_choices_group_by_workspace_and_keep_a_listed_selection():
     from services.credential_default_context import ContextOption
 
+    team, personal, other_personal = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     options = [
-        ContextOption(CTX_A, "alpha", "Team"),
-        ContextOption(CTX_B, "beta", "Team"),
-        ContextOption(uuid.uuid4(), "gamma", "Personal"),
+        ContextOption(CTX_A, "alpha", "Team", team),
+        ContextOption(CTX_B, "beta", "Team", team),
+        ContextOption(uuid.uuid4(), "gamma", "Personal", personal),
+        # A second workspace with the same display name stays its own group.
+        ContextOption(uuid.uuid4(), "delta", "Personal", other_personal),
     ]
 
     async def get_db():
@@ -336,8 +339,9 @@ async def test_the_choices_group_by_workspace_and_keep_a_listed_selection():
     ):
         groups, selected = await oauth_routes._consent_default_context_choices("u", "c")
 
-    assert [g["workspace"] for g in groups] == ["Team", "Personal"]
+    assert [g["workspace"] for g in groups] == ["Team", "Personal", "Personal"]
     assert [c["name"] for c in groups[0]["contexts"]] == ["alpha", "beta"]
+    assert [c["name"] for c in groups[2]["contexts"]] == ["delta"]
     assert selected == str(CTX_B)
 
 

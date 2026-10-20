@@ -1838,8 +1838,12 @@ async def _consent_default_context_choices(
         logger.warning("oauth_consent_default_context_unavailable", error_type=type(e).__name__)
         return [], ""
     groups: list[dict[str, Any]] = []
+    group_workspace_id: UUID | None = None
     for option in options:
-        if not groups or groups[-1]["workspace"] != option.workspace_name:
+        # Grouped by workspace id, labelled by name: two workspaces sharing a
+        # display name stay two groups.
+        if not groups or group_workspace_id != option.workspace_id:
+            group_workspace_id = option.workspace_id
             groups.append({"workspace": option.workspace_name, "contexts": []})
         groups[-1]["contexts"].append({"id": str(option.context_id), "name": option.name})
     listed = {str(option.context_id) for option in options}
