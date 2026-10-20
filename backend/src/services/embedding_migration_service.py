@@ -56,7 +56,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, func, or_, select, update
@@ -202,6 +202,22 @@ class SwitchResult:
     The route has already committed in this case. The orphan-vector sweep is
     the bounded recovery path for the deferred deletes once writers are idle.
     """
+    requeue_since: datetime | None = None
+    """The re-queue boundary actually used (naive UTC), ``None`` for a pure
+    routing flip (#2098)."""
+
+
+@dataclass(frozen=True)
+class RollbackBoundary:
+    """Where :func:`rollback_context_embedding` re-queues from (#2098)."""
+
+    since: datetime
+    """Naive UTC, the convention of the ``memories`` timestamps."""
+    source: Literal["explicit", "switch_time", "config_updated_at"]
+    """``explicit``: the caller's ``requeue_since``; ``switch_time``: the
+    ``embedding_switched_at`` the last switch recorded; ``config_updated_at``:
+    the fallback for a context switched before that column existed (NULL) —
+    any later search-config edit moved it past the switch."""
 
 
 async def list_migratable_context_ids(
@@ -1009,6 +1025,9 @@ async def switch_context_embedding(
     and reported in :attr:`SwitchResult.prune_pending`.
     With ``None`` this is a pure routing flip. An aware ``requeue_since`` is
     compared as naive UTC, the convention of the ``memories`` timestamps.
+    Every route change — pure flips and rollbacks included — records its time
+    in ``ContextSearchConfig.embedding_switched_at`` in the same transaction
+    (#2098), the default boundary of a later :func:`rollback_context_embedding`.
 
     A worker that claimed a row before the flip resolved the old routing;
     ``process_pending_embedding`` only marks ``success`` while it still owns
@@ -1044,12 +1063,18 @@ async def switch_context_embedding(
             context_id=context_id,
             embedding_model=model,
             embedding_dimensions=dimensions,
+            embedding_switched_at=func.clock_timestamp(),
             **search_config_defaults(get_settings()),
         )
         db.add(config)
     else:
         config.embedding_model = model
         config.embedding_dimensions = dimensions
+        # #2098: the instant the route row is written — clock_timestamp(), not
+        # now() (transaction start, which precedes the point-writer wait and,
+        # in an --all run, may be an older autobegun transaction). Committed
+        # with the route and the re-queue; --rollback-to re-queues from it.
+        config.embedding_switched_at = func.clock_timestamp()
 
     requeued = 0
     if requeue_since is not None:
@@ -1146,7 +1171,53 @@ async def switch_context_embedding(
         requeued=requeued,
         stale_removed=stale_removed,
         prune_pending=prune_pending,
+        requeue_since=requeue_since,
     )
+
+
+async def resolve_rollback_boundary(
+    db: AsyncSession, context_id: UUID, requeue_since: datetime | None
+) -> RollbackBoundary:
+    """The re-queue boundary of a rollback of ``context_id`` (#2098).
+
+    An explicit ``requeue_since`` wins. Otherwise the switch time the last
+    switch recorded (``ContextSearchConfig.embedding_switched_at``); a context
+    switched before that column existed has NULL there, and the search
+    config's ``updated_at`` is used instead — which any later search-setting
+    edit moved past the switch — with a ``context_embedding_rollback_boundary_fallback``
+    warning. Shared by :func:`rollback_context_embedding` and the migration
+    CLI, which prints the boundary before it asks for confirmation.
+
+    Raises:
+        ValidationError: no explicit ``requeue_since`` and no config row (no
+            switch was ever recorded).
+    """
+    if requeue_since is not None:
+        return RollbackBoundary(to_naive_utc(requeue_since), "explicit")
+    row = (
+        await db.execute(
+            select(ContextSearchConfig.embedding_switched_at, ContextSearchConfig.updated_at).where(
+                ContextSearchConfig.context_id == context_id
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        raise ValidationError(
+            f"Context {context_id} has no recorded switch time; pass the time of "
+            "the switch being undone as requeue_since (--requeue-since)"
+        )
+    switched_at, updated_at = row
+    # Both are aware TIMESTAMP WITH TIME ZONE; the re-queue compares naive UTC
+    # (the ``memories`` convention, #1525).
+    if switched_at is not None:
+        return RollbackBoundary(to_naive_utc(switched_at), "switch_time")
+    logger.warning(
+        "context_embedding_rollback_boundary_fallback",
+        context_id=str(context_id),
+        boundary=updated_at.isoformat(),
+        reason="switched_before_embedding_switched_at",
+    )
+    return RollbackBoundary(to_naive_utc(updated_at), "config_updated_at")
 
 
 async def rollback_context_embedding(
@@ -1162,12 +1233,13 @@ async def rollback_context_embedding(
     A bare routing flip is not a rollback: after A -> B, memories created,
     updated or forgotten on B exist only in B's collection, so flipping to A
     would make them unsearchable, stale, or resurrect them. This re-queues
-    the delta since the switch — by default the ``updated_at`` of the
-    ``ContextSearchConfig`` row, which the switch stamped — and refuses when
-    ``model``'s collection does not exist (nothing to serve from). Any later
-    search-config change stamps that row too, which moves the default past
-    the switch and leaves out what was written in between: pass the switch
-    time as ``requeue_since`` when the config was edited since.
+    the delta since the switch — by default the switch time the switch
+    recorded (``ContextSearchConfig.embedding_switched_at``, #2098), see
+    :func:`resolve_rollback_boundary` — and refuses when ``model``'s
+    collection does not exist (nothing to serve from). A context switched
+    before that column existed has none; the default then falls back to the
+    row's ``updated_at``, which any later search-config edit moved past the
+    switch: pass the switch time as ``requeue_since`` in that case.
 
     The re-queue and the removal of forgotten points are
     :func:`switch_context_embedding`'s, so resource-ingested rows are handled
@@ -1187,20 +1259,7 @@ async def rollback_context_embedding(
     if current_model == model:
         raise ValidationError(f"Context {context_id} already routes to {model!r}")
 
-    if requeue_since is None:
-        result = await db.execute(
-            select(ContextSearchConfig.updated_at).where(
-                ContextSearchConfig.context_id == context_id
-            )
-        )
-        # An aware TIMESTAMP WITH TIME ZONE: switch_context_embedding takes it
-        # to the naive UTC of the ``memories`` timestamps (#1525).
-        requeue_since = result.scalar_one_or_none()
-        if requeue_since is None:
-            raise ValidationError(
-                f"Context {context_id} has no recorded switch time; pass the time of "
-                "the switch being undone as requeue_since (--requeue-since)"
-            )
+    boundary = await resolve_rollback_boundary(db, context_id, requeue_since)
 
     collection = get_collection_name(model, dimensions)
     if not await get_qdrant_client().collection_exists(collection):
@@ -1210,7 +1269,7 @@ async def rollback_context_embedding(
         )
 
     return await switch_context_embedding(
-        db, context_id, model, dimensions, requeue_since=requeue_since
+        db, context_id, model, dimensions, requeue_since=boundary.since
     )
 
 

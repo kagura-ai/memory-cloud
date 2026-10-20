@@ -1,6 +1,7 @@
 """#1525: ``--rollback-to`` without ``--requeue-since`` on a real database.
 
-The default re-queue boundary is ``ContextSearchConfig.updated_at``, an
+The default re-queue boundary is ``ContextSearchConfig.embedding_switched_at``
+(#2098; ``updated_at`` for a row switched before that column existed), an
 aware ``TIMESTAMP WITH TIME ZONE``, while the columns it is compared with
 (``Memory.created_at`` / ``updated_at`` / ``embedding_attempted_at`` /
 ``deleted_at``) are naive UTC. asyncpg refuses an aware value bound against a
@@ -16,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.config import ContextSearchConfig
@@ -56,6 +57,22 @@ async def _scope(db, owner: str) -> Context:
     return ctx
 
 
+async def _switched_at(db, context_id):
+    return (
+        await db.execute(
+            select(ContextSearchConfig.embedding_switched_at).where(
+                ContextSearchConfig.context_id == context_id
+            )
+        )
+    ).scalar_one()
+
+
+def _collection_exists():
+    client = MagicMock()
+    client.collection_exists = AsyncMock(return_value=True)
+    return patch.object(svc, "get_qdrant_client", return_value=client)
+
+
 def _memory(owner: str, ctx: Context, **values) -> Memory:
     return Memory(
         id=uuid4(),
@@ -78,13 +95,9 @@ async def test_rollback_defaults_to_the_recorded_switch_time(db_session):
     ctx = await _scope(db_session, owner)
     await db_session.commit()
 
-    # The switch being undone: a pure routing flip stamps the config row.
+    # The switch being undone: a pure routing flip records its switch time.
     await svc.switch_context_embedding(db_session, ctx.id, TARGET, TARGET_DIMENSIONS)
-    switched_at = (
-        await db_session.execute(
-            select(ContextSearchConfig.updated_at).where(ContextSearchConfig.context_id == ctx.id)
-        )
-    ).scalar_one()
+    switched_at = await _switched_at(db_session, ctx.id)
     assert switched_at.tzinfo is not None  # the aware column this guards against
     switched_naive = switched_at.astimezone(UTC).replace(tzinfo=None)
 
@@ -152,3 +165,86 @@ async def test_switch_accepts_an_aware_requeue_since(db_session):
         )
 
     assert result.requeued == 1
+
+
+@pytest.mark.asyncio
+async def test_rollback_ignores_a_later_search_config_edit(db_session):
+    """#2098: a search-setting edit after the switch moves ``updated_at``; the
+    default boundary stays the recorded switch time, so what was written in
+    between is re-queued (``updated_at`` as the boundary skipped it)."""
+    owner = f"rb-user-{uuid4().hex[:8]}"
+    ctx = await _scope(db_session, owner)
+    await db_session.commit()
+
+    await svc.switch_context_embedding(db_session, ctx.id, TARGET, TARGET_DIMENSIONS)
+    switched_at = await _switched_at(db_session, ctx.id)
+    assert switched_at is not None
+    switched_naive = switched_at.astimezone(UTC).replace(tzinfo=None)
+    # A deterministic stand-in for a later settings edit (onupdate=now()).
+    await db_session.execute(
+        update(ContextSearchConfig)
+        .where(ContextSearchConfig.context_id == ctx.id)
+        .values(updated_at=text("now() + interval '1 day'"))
+    )
+    written_between = _memory(
+        owner,
+        ctx,
+        created_at=switched_naive + timedelta(hours=1),
+        embedding_attempted_at=switched_naive + timedelta(hours=1),
+    )
+    db_session.add(written_between)
+    await db_session.commit()
+
+    with (
+        _collection_exists(),
+        patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        patch.object(svc, "delete_chunk_points", AsyncMock()),
+    ):
+        result = await svc.rollback_context_embedding(db_session, ctx.id, SOURCE)
+
+    assert result.requeue_since == switched_naive
+    assert result.requeued == 1
+    status = (
+        await db_session.execute(
+            select(Memory.embedding_status).where(Memory.id == written_between.id)
+        )
+    ).scalar_one()
+    assert status == "pending"
+    # The rollback is a switch too: it records its own time.
+    rolled_back_at = await _switched_at(db_session, ctx.id)
+    assert rolled_back_at is not None and rolled_back_at >= switched_at
+
+
+@pytest.mark.asyncio
+async def test_rollback_falls_back_for_a_pre_upgrade_row(db_session):
+    """#2098: a row switched before ``embedding_switched_at`` existed (NULL)
+    falls back to ``updated_at`` and says so."""
+    owner = f"rb-user-{uuid4().hex[:8]}"
+    ctx = await _scope(db_session, owner)
+    await db_session.commit()
+
+    await svc.switch_context_embedding(db_session, ctx.id, TARGET, TARGET_DIMENSIONS)
+    await db_session.execute(
+        update(ContextSearchConfig)
+        .where(ContextSearchConfig.context_id == ctx.id)
+        .values(embedding_switched_at=None)
+    )
+    await db_session.commit()
+    updated_at = (
+        await db_session.execute(
+            select(ContextSearchConfig.updated_at).where(ContextSearchConfig.context_id == ctx.id)
+        )
+    ).scalar_one()
+    updated_naive = updated_at.astimezone(UTC).replace(tzinfo=None)
+
+    boundary = await svc.resolve_rollback_boundary(db_session, ctx.id, None)
+    assert boundary == svc.RollbackBoundary(updated_naive, "config_updated_at")
+
+    with (
+        _collection_exists(),
+        patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        patch.object(svc, "delete_chunk_points", AsyncMock()),
+    ):
+        result = await svc.rollback_context_embedding(db_session, ctx.id, SOURCE)
+
+    assert result.requeue_since == updated_naive

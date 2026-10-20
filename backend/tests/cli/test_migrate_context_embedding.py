@@ -8,6 +8,8 @@ what the command prints about resource-ingested memories it could not rebuild.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +28,7 @@ from services.embedding_migration_service import (  # noqa: E402
     ChunkRebuildResult,
     MigrationPlan,
     ReembedResult,
+    RollbackBoundary,
     SwitchResult,
     VerifyResult,
 )
@@ -432,3 +435,80 @@ def test_requeue_since_without_an_offset_is_taken_as_utc():
         ["--to", _MODEL, "--context", str(uuid4()), "--requeue-since", "2026-10-18T09:00:00"]
     )
     assert args.requeue_since == datetime(2026, 10, 18, 9, 0, 0)
+
+
+# ---------------------------------------------------------------- --rollback-to (#2098)
+
+_ROLLBACK_TO = "text-embedding-3-small"
+_SWITCH_TIME = datetime(2026, 10, 1, 12, 30, 0)
+
+
+async def _rollback(argv: list[str], boundary, capsys, *, answer: str = "y"):
+    """Run ``--rollback-to`` without ``--yes``; returns (code, stdout at the
+    prompt, rollback mock, resolve mock)."""
+    context_id = uuid4()
+    args = cli._parse(["--rollback-to", _ROLLBACK_TO, "--context", str(context_id), *argv])
+    rolled = SwitchResult(_MODEL, 2560, _ROLLBACK_TO, 512, requeued=2)
+    at_prompt: list[str] = []
+
+    def _input(prompt: str) -> str:
+        at_prompt.append(capsys.readouterr().out)
+        return answer
+
+    resolve = AsyncMock(return_value=boundary)
+    rollback = AsyncMock(return_value=rolled)
+    with (
+        patch.object(cli, "resolve_rollback_boundary", resolve),
+        patch.object(cli, "rollback_context_embedding", rollback),
+        patch("builtins.input", _input),
+    ):
+        code = await cli._one_context(MagicMock(), context_id, args)
+    return code, at_prompt, rollback, resolve
+
+
+@pytest.mark.asyncio
+async def test_rollback_prints_the_recorded_switch_time_before_asking(capsys):
+    code, at_prompt, rollback, resolve = await _rollback(
+        [], RollbackBoundary(_SWITCH_TIME, "switch_time"), capsys
+    )
+    assert code == 0
+    assert at_prompt == [
+        f"  re-queue since {_SWITCH_TIME.isoformat()} (the recorded switch time)\n"
+    ]
+    assert resolve.await_args.args[2] is None
+    assert rollback.await_args.kwargs["requeue_since"] == _SWITCH_TIME
+
+
+@pytest.mark.asyncio
+async def test_rollback_warns_when_only_updated_at_is_recorded(capsys):
+    code, at_prompt, rollback, _ = await _rollback(
+        [], RollbackBoundary(_SWITCH_TIME, "config_updated_at"), capsys, answer="n"
+    )
+    assert code == 0
+    assert len(at_prompt) == 1
+    assert "WARNING: no recorded switch time" in at_prompt[0]
+    assert _SWITCH_TIME.isoformat() in at_prompt[0]
+    assert "--requeue-since <switch time>" in at_prompt[0]
+    rollback.assert_not_awaited()  # declined after reading the warning
+    assert "skipped" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_rollback_passes_an_explicit_requeue_since_through(capsys):
+    explicit = datetime(2026, 9, 30, 0, 0, 0)
+    code, at_prompt, rollback, resolve = await _rollback(
+        ["--requeue-since", explicit.isoformat()],
+        RollbackBoundary(explicit, "explicit"),
+        capsys,
+    )
+    assert code == 0
+    assert at_prompt == [f"  re-queue since {explicit.isoformat()} (--requeue-since)\n"]
+    assert resolve.await_args.args[2] == explicit
+    assert rollback.await_args.kwargs["requeue_since"] == explicit
+
+
+def test_requeue_since_help_names_the_recorded_switch_time():
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
+        cli._parse(["--help"])
+    assert "embedding_switched_at" in out.getvalue()

@@ -9,11 +9,12 @@ the rows the bulk pass could not have seen.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.sql.functions import FunctionElement
 
 from services import embedding_migration_service as svc
 from services.embedding_migration_service import MigrationPlan
@@ -55,6 +56,18 @@ def _result(*, scalar=None, scalars=None, rowcount=0):
     )
     result.rowcount = rowcount
     return result
+
+
+def _row_result(row):
+    """A result whose ``.one_or_none()`` returns ``row`` (a tuple or ``None``)."""
+    result = MagicMock()
+    result.one_or_none = MagicMock(return_value=row)
+    return result
+
+
+def _is_clock_timestamp(value) -> bool:
+    """#2098: the switch stamps the DB's statement time, not now() or Python's."""
+    return isinstance(value, FunctionElement) and value.name == "clock_timestamp"
 
 
 def _rows_result(rows):
@@ -780,6 +793,9 @@ class TestSwitch:
         added = db.add.call_args.args[0]
         assert added.context_id == context_id
         assert (added.embedding_model, added.embedding_dimensions) == (QWEN, 2560)
+        # #2098: a legacy context's row is created with the switch time.
+        assert _is_clock_timestamp(added.embedding_switched_at)
+        assert result.requeue_since == since
         # #1572: the materialised row carries the deployment default, exactly
         # like the lazy create_or_get() on the recall path would.
         assert (added.use_rerank, added.reranker_provider, added.reranker_model) == (
@@ -951,8 +967,11 @@ class TestSwitch:
         result = await svc.switch_context_embedding(db, uuid4(), QWEN, 2560)
 
         assert (config.embedding_model, config.embedding_dimensions) == (QWEN, 2560)
+        # #2098: a pure flip records its switch time too.
+        assert _is_clock_timestamp(config.embedding_switched_at)
         db.add.assert_not_called()
         assert result.requeued == 0
+        assert result.requeue_since is None
         assert db.execute.await_count == 2  # no UPDATE without requeue_since
         db.commit.assert_awaited_once()
 
@@ -964,7 +983,37 @@ class TestSwitch:
             result = await svc.switch_context_embedding(db, uuid4(), SMALL, 512)
         assert (result.previous_model, result.model) == (QWEN, SMALL)
         assert (config.embedding_model, config.embedding_dimensions) == (SMALL, 512)
+        assert _is_clock_timestamp(config.embedding_switched_at)
         delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_switch_stamps_embedding_switched_at(self):
+        # #2098: the existing-row branch, with a re-queue: the stamp is set on
+        # the route row before the re-queue UPDATE, so both commit together.
+        config = _config(SMALL, 512)
+        since = datetime(2026, 9, 10, 14, 0, 0, tzinfo=UTC)
+        stamped_before_requeue: list[bool] = []
+
+        async def execute(stmt, *args, **kwargs):
+            if len(db.execute.await_args_list) == 3:
+                stamped_before_requeue.append(_is_clock_timestamp(config.embedding_switched_at))
+                db.commit.assert_not_awaited()
+                return _result(rowcount=2)
+            if len(db.execute.await_args_list) <= 2:
+                return _result(scalar=config)
+            return _result(scalars=[])
+
+        db = _db([])
+        db.execute = AsyncMock(side_effect=execute)
+        with patch.object(svc, "delete_points_from_qdrant", AsyncMock()):
+            result = await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=since
+            )
+
+        assert stamped_before_requeue == [True]
+        assert _is_clock_timestamp(config.embedding_switched_at)
+        # The boundary actually used, as naive UTC.
+        assert result.requeue_since == datetime(2026, 9, 10, 14, 0, 0)
 
 
 # ----------------------------------------------------------------------- rollback
@@ -993,8 +1042,8 @@ class TestRollback:
 
     @pytest.mark.asyncio
     async def test_refuses_when_the_collection_to_route_back_to_is_gone(self):
-        switched_at = datetime(2026, 9, 10, 12, 0, 0)
-        db = _db([_result(scalar=_config(QWEN, 2560)), _result(scalar=switched_at)])
+        switched_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+        db = _db([_result(scalar=_config(QWEN, 2560)), _row_result((switched_at, switched_at))])
         client = MagicMock()
         client.collection_exists = AsyncMock(return_value=False)
         with (
@@ -1010,7 +1059,7 @@ class TestRollback:
     async def test_refuses_without_a_recorded_switch_time(self):
         # Legacy context with no config row: nothing stamped the switch, so
         # the operator must say what to re-queue from.
-        db = _db([_result(scalar=None), _result(scalar=None)])
+        db = _db([_result(scalar=None), _row_result(None)])
         with (
             patch.object(svc, "switch_context_embedding", AsyncMock()) as switch,
             pytest.raises(ValidationError, match="requeue_since"),
@@ -1021,8 +1070,8 @@ class TestRollback:
     @pytest.mark.asyncio
     async def test_requeues_from_the_switch_time_the_config_row_recorded(self):
         context_id = uuid4()
-        switched_at = datetime(2026, 9, 10, 12, 0, 0)
-        db = _db([_result(scalar=_config(QWEN, 2560)), _result(scalar=switched_at)])
+        switched_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+        db = _db([_result(scalar=_config(QWEN, 2560)), _row_result((switched_at, switched_at))])
         client = MagicMock()
         client.collection_exists = AsyncMock(return_value=True)
         expected = svc.SwitchResult(QWEN, 2560, SMALL, 512, requeued=3)
@@ -1033,8 +1082,59 @@ class TestRollback:
             ) as switch,
         ):
             result = await svc.rollback_context_embedding(db, context_id, SMALL)
-        switch.assert_awaited_once_with(db, context_id, SMALL, 512, requeue_since=switched_at)
+        switch.assert_awaited_once_with(
+            db, context_id, SMALL, 512, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+        )
         assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_rollback_prefers_embedding_switched_at_over_updated_at(self):
+        # #2098: a search-setting edit after the switch moved updated_at; the
+        # recorded switch time still marks where the delta starts.
+        context_id = uuid4()
+        switched_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+        edited_at = datetime(2026, 9, 12, 8, 0, 0, tzinfo=UTC)
+        db = _db([_result(scalar=_config(QWEN, 2560)), _row_result((switched_at, edited_at))])
+        client = MagicMock()
+        client.collection_exists = AsyncMock(return_value=True)
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(svc, "switch_context_embedding", AsyncMock()) as switch,
+            patch.object(svc, "logger") as log,
+        ):
+            await svc.rollback_context_embedding(db, context_id, SMALL)
+        assert switch.await_args.kwargs["requeue_since"] == datetime(2026, 9, 10, 12, 0, 0)
+        log.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rollback_falls_back_to_updated_at_and_flags_it(self):
+        # #2098: a context switched before embedding_switched_at existed has
+        # NULL there; the boundary falls back to updated_at, with a warning.
+        context_id = uuid4()
+        updated_at = datetime(2026, 9, 10, 21, 0, 0, tzinfo=UTC)
+        db = _db([_row_result((None, updated_at))])
+        with patch.object(svc, "logger") as log:
+            boundary = await svc.resolve_rollback_boundary(db, context_id, None)
+        assert boundary == svc.RollbackBoundary(
+            datetime(2026, 9, 10, 21, 0, 0), "config_updated_at"
+        )
+        log.warning.assert_called_once()
+        assert log.warning.call_args.args == ("context_embedding_rollback_boundary_fallback",)
+        assert log.warning.call_args.kwargs["context_id"] == str(context_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_rollback_boundary_names_its_source(self):
+        context_id = uuid4()
+        switched_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+        db = _db([_row_result((switched_at, switched_at))])
+        assert await svc.resolve_rollback_boundary(db, context_id, None) == svc.RollbackBoundary(
+            datetime(2026, 9, 10, 12, 0, 0), "switch_time"
+        )
+
+        explicit = await svc.resolve_rollback_boundary(
+            _db([]), context_id, datetime(2026, 9, 9, 9, 0, 0, tzinfo=UTC)
+        )
+        assert explicit == svc.RollbackBoundary(datetime(2026, 9, 9, 9, 0, 0), "explicit")
 
     @pytest.mark.asyncio
     async def test_an_explicit_requeue_since_skips_the_config_lookup(self):
