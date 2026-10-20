@@ -2299,7 +2299,8 @@ async def oauth_authorize_post(
         # Use 303 See Other to convert POST to GET redirect
         # Claude.ai callback expects GET, not POST
         if hasattr(response, "location") and response.location:
-            if _grant_issued(response.location):
+            issued = _grant_issued(response.location)
+            if issued:
                 # #2129: the default context picked on the consent page, stored
                 # once the code is issued (a refused request changes nothing)
                 # and before the client is sent back, so its first MCP call
@@ -2307,7 +2308,7 @@ async def oauth_authorize_post(
                 await _save_consent_default_context(
                     user.user_id, client_id, request.state.form_data.get("default_context")
                 )
-            if new_authorization and user.user_id and _grant_issued(response.location):
+            if new_authorization and user.user_id and issued:
                 schedule_security_notification(
                     background_tasks,
                     user_id=user.user_id,
@@ -2318,11 +2319,7 @@ async def oauth_authorize_post(
             # #2155: a loopback client may sit behind NAT or SSH where the
             # browser cannot reach it, so the callback URL is shown on a page
             # instead of being lost in a failed redirect.
-            if (
-                redirect_uri
-                and is_loopback_redirect_uri(redirect_uri)
-                and _grant_issued(response.location)
-            ):
+            if redirect_uri and is_loopback_redirect_uri(redirect_uri) and issued:
                 interstitial = await _run_sync(
                     partial(
                         _render_loopback_interstitial,
