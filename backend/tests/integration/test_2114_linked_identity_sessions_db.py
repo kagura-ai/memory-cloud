@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from auth.agent_scope import AgentScope, set_agent_scope
@@ -304,3 +304,51 @@ async def test_records_both_subs_kept_from_before_the_link_resolve_to_the_caller
         assert plan["rollback_id"] == records[sub]
     done = await _rollback(w, w.b, session_id="SX", dry_run=False)
     assert done["status"] == "rolled_back" and done["rollback_id"] == records[w.b]
+
+
+async def test_an_omitted_until_continues_and_closes_the_linked_unfinished_window(
+    linked: Linked,
+) -> None:
+    """A finished window record of A and an unfinished one of B for the same
+    window, both from before the link: A's call without until continues B's
+    record (the one ``unfinished_window_until`` named) and closes it, instead
+    of landing on A's finished record forever."""
+    w = linked
+    since = (utcnow() - timedelta(minutes=10)).replace(microsecond=0)
+    until = since + timedelta(minutes=5)
+    a1 = await w.write(w.a, None)
+    await w.session.execute(
+        update(MemoryRevision)
+        .where(MemoryRevision.memory_id == a1)
+        .values(at=since + timedelta(seconds=10))
+    )
+    records = {}
+    for sub, status in ((w.a, "completed"), (w.b, "in_progress")):
+        row = MemorySessionRollback(
+            workspace_id=w.workspace_id,
+            context_id=w.context_id,
+            session_id=None,
+            principal_user_id=sub,
+            requested_by=sub,
+            window_since=since,
+            window_until=until,
+            status=status,
+            summary={},
+        )
+        w.session.add(row)
+        await w.session.flush()
+        records[sub] = row.id
+    # A's only write in the window was already handled by A's record.
+    await w.session.execute(
+        update(MemoryRevision).where(MemoryRevision.memory_id == a1).values(undone_by=records[w.a])
+    )
+    await w.session.commit()
+
+    first = await _rollback(w, w.a, since=to_utc_iso(since), dry_run=False)
+    assert first["status"] == "rolled_back", first
+    assert first["rollback_id"] == records[w.b]
+    assert first["rollback_status"] == "completed"
+    closed = await w.session.scalar(
+        select(MemorySessionRollback.status).where(MemorySessionRollback.id == records[w.b])
+    )
+    assert closed == "completed"
