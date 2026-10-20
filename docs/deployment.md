@@ -1957,8 +1957,16 @@ backfill, and skips a context already at its limit. When the walk reaches the en
 moved it meanwhile (the next pass then starts over). A context that stays
 inactive keeps its stamp. Turning the flag off or on clears it (on re-queues
 every long memory anyway). Logged as `content_chunks_gap_recorded`,
-`content_chunks_gap_requeued` and `content_chunks_gap_closed`. Until a memory
-is re-queued, its summary point still finds it.
+`content_chunks_gap_requeued` and `content_chunks_gap_closed`. With the vector
+store down, each tick logs up to 5 `content_chunks_gap_reconcile_failed`
+warnings (one per picked context, with `error_class`) and one
+`content_chunks_gap_reconcile_done` with `failed=5` (fewer when fewer contexts
+are stamped); the stamps are kept and the next tick retries, so a steady stream
+of them every minute means the vector store is unreachable. A stamp that could
+not be written logs `content_chunks_gap_stamp_failed` (warning), a failed seed
+`content_chunks_gap_seed_failed` (error, every tick until it succeeds) and a
+tick that fails as a whole `content_chunks_gap_reconcile_tick_failed` (error).
+Until a memory is re-queued, its summary point still finds it.
 
 Gaps made before this version were never recorded. With the gate on, the
 scheduler leader stamps every context with the flag on once, on the

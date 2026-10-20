@@ -211,12 +211,12 @@ async def reconcile_content_chunk_gaps() -> None:
                 _SeedState.done = True
             except Exception as e:
                 await db.rollback()
-                logger.error("content_chunk_gap_seed_failed", error=str(e), exc_info=True)
+                logger.error("content_chunks_gap_seed_failed", error=str(e), exc_info=True)
         try:
             result = await reconcile(db)
             if result.scanned or result.cleared or result.failed:
                 logger.info(
-                    "content_chunk_gap_reconcile_done",
+                    "content_chunks_gap_reconcile_done",
                     stamped=result.stamped,
                     active=result.active,
                     scanned=result.scanned,
@@ -227,7 +227,7 @@ async def reconcile_content_chunk_gaps() -> None:
                 )
         except Exception as e:
             await db.rollback()
-            logger.error("content_chunk_gap_reconcile_failed", error=str(e), exc_info=True)
+            logger.error("content_chunks_gap_reconcile_tick_failed", error=str(e), exc_info=True)
 
 
 def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
@@ -247,4 +247,4 @@ def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
         name="Reconcile Content Chunk Gaps",
         replace_existing=True,
     )
-    logger.info("scheduled_content_chunk_gap_task", interval_seconds=60)
+    logger.info("scheduled_content_chunks_gap_task", interval_seconds=60)
