@@ -1919,7 +1919,8 @@ the backfill and the embedding migration's chunk rebuild write none. The
 contexts that stay active are the earliest-enabled ones
 (`context_search_configs.content_chunks_enabled_at`, then the context id), so
 the choice over the cap is deterministic. A downgrade purges nothing; an
-upgrade makes the kept points active again with no backfill. The admin plan
+upgrade makes the kept points active again (and re-queues what is missing,
+below). The admin plan
 change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) lists the contexts
 that go inactive (`content_chunks_deactivated`, also logged as
 `content_chunks_deactivated_by_plan`). The search-config response says why a
@@ -1929,20 +1930,42 @@ restore, last under the cap: past the cap it is inactive (the restore is not
 refused), and `content_chunks_in_use` can then read above
 `content_chunks_limit` until the owner turns chunks off in some context.
 
-One gap: nothing is re-queued when a context becomes active again. A memory
-written while its context was inactive has no chunk points, a memory whose
-content was edited then has lost them (they would hold the old text), and an
-embedding model migration run then writes none into the new collection. Such
-memories are still found through their summary point, and get chunks on their
-next content edit or re-embed; points of unchanged memories are kept.
+**Re-queue when a context becomes active again**
+([#2107](https://github.com/kagura-ai/memory-cloud/issues/2107)). An inactive
+context writes no chunks: a memory written then has none, and a memory whose
+content was edited then loses its old ones (they would hold the old text). An
+embedding model `--switch` serves the context from a collection that may lack
+its chunks (none were rebuilt while it was inactive), or hold the chunks of a
+text edited between `--reembed` and the switch. Each of these stamps
+`context_search_configs.content_chunks_gap_at`: the write, a merge into such a
+context, and — with the gate on — every `--switch` of a context with the flag
+on, active or not. The stamp is written at most twice a minute per context,
+on its own transaction. A scheduler job beside the embedding sweep (every 60 s,
+leader only, no setting) reconciles the stamped contexts that are active now,
+whatever made them active: an upgrade, another context turning chunks off or
+being deleted, a larger cap. Ten minutes after a context's last stamp (so a
+long transaction that made the gap, such as a Sleep run, has committed) it
+walks the context's memories, 1,000 per tick and up to 5 contexts per tick
+(going round all stamped contexts, so ones that stay inactive hold nobody
+back), reads the first chunk point of the long ones in the collection the
+context is served from, and re-queues to `pending` only the memories with no
+chunk point or with chunks of another text; the embedding sweep rebuilds them
+at its usual pace. A tick re-queues at most enough to bring the context's
+long memories waiting for the sweep to 100 and the deployment's memories
+waiting for the sweep to 200, so new memories are not queued behind the
+backfill, and skips a context already at its limit. When the walk reaches the end it clears the stamp, unless a new gap
+moved it meanwhile (the next pass then starts over). A context that stays
+inactive keeps its stamp. Turning the flag off or on clears it (on re-queues
+every long memory anyway). Logged as `content_chunks_gap_recorded`,
+`content_chunks_gap_requeued` and `content_chunks_gap_closed`. Until a memory
+is re-queued, its summary point still finds it.
 
-A second gap, when an embedding migration is in flight: if a context goes
-inactive after `--reembed` wrote its chunk points into the target collection
-and before `--switch`, an edit to a long memory then drops its old chunk
-points in the current collection only, and the switch keeps the target's (the
-context keeps its points while inactive). Those points hold the text from
-before the edit and are read again once an upgrade makes the context active,
-until the memory's next content edit or re-embed.
+The upgrade to this version stamps every context with the flag on, gate on or
+off, since earlier gaps were never recorded: each gets one pass once active.
+The pass reads Qdrant points and re-queues only memories without current
+chunks — which also catches long memories that never got chunks for another
+reason (for example written before turning the flag on started re-queuing
+existing memories, v0.112.0), at the embedding cost of those re-embeds.
 
 **Before turning the gate on** on a deployment where contexts already have the
 flag on, list the contexts it would make inactive (no write; plan names and
