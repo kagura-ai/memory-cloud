@@ -770,6 +770,13 @@ class PayloadSync:
     updates: dict[str, Any]
     delete_keys: tuple[str, ...]
     cascade_chunks: bool
+    # The point patched: the memory's own id, or a resource-indexer row's
+    # point (#2100, ``metadata_patch_target``).
+    point_id: UUID | None = None
+
+    @property
+    def target(self) -> UUID:
+        return self.point_id if self.point_id is not None else self.memory_id
 
 
 @dataclass
@@ -1099,12 +1106,24 @@ class _Executor:
         review F1). The collection and the chunk cascade are read now, while
         the session is in its transaction.
         """
-        from services.memory_service import metadata_payload_patch
+        from services.memory_service import metadata_patch_target, metadata_payload_patch
 
         updates, delete_keys = metadata_payload_patch(
             _payload_request(memory, changed), None, memory.details
         )
         if not (updates or delete_keys):
+            return
+        # #2100: the row's own point, as update / PATCH patch it — a
+        # resource-indexer row's is the indexer's, a shared one is left alone.
+        target = await metadata_patch_target(
+            self.db,
+            memory.id,
+            memory.point_id,
+            # Issue #78: date-range filters read the payload's updated_at.
+            {**updates, "updated_at": to_utc_iso(memory.updated_at)},
+            delete_keys,
+        )
+        if target is None:
             return
         if self._payload_target is None:
             from services.content_chunk_writer import chunk_cascade_needed
@@ -1119,10 +1138,10 @@ class _Executor:
                 memory_id=memory.id,
                 collection=collection,
                 fields=tuple(sorted(changed)),
-                # Issue #78: date-range filters read the payload's updated_at.
-                updates={**updates, "updated_at": to_utc_iso(memory.updated_at)},
-                delete_keys=tuple(delete_keys),
-                cascade_chunks=cascade,
+                updates=target.updates,
+                delete_keys=tuple(target.delete_keys),
+                cascade_chunks=cascade and target.own_point,
+                point_id=target.point_id,
             )
         )
 
@@ -1131,12 +1150,16 @@ def _sync_patch(sync: PayloadSync, row: Any | None) -> tuple[dict[str, Any], lis
     """``sync``'s patch, rebuilt from ``row`` (the row now) when there is one."""
     if row is None:
         return sync.updates, list(sync.delete_keys)
-    from services.memory_service import metadata_payload_patch
+    from services.memory_service import metadata_payload_patch, resource_point_patch
 
     updates, delete_keys = metadata_payload_patch(
         _payload_request(row, set(sync.fields)), None, row.details
     )
-    return {**updates, "updated_at": to_utc_iso(row.updated_at)}, delete_keys
+    updates = {**updates, "updated_at": to_utc_iso(row.updated_at)}
+    if sync.target != sync.memory_id:
+        # #2100: an indexer point is not given every key.
+        return resource_point_patch(updates, delete_keys)
+    return updates, delete_keys
 
 
 def _payload_request(memory: Any, changed: set[str]) -> Any:
@@ -1415,9 +1438,11 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
             updates, delete_keys = _sync_patch(
                 sync, rows.get(sync.memory_id) if rows is not None else None
             )
+            if not (updates or delete_keys):
+                continue
             try:
                 await update_memory_payload_in_qdrant(
-                    memory_id=sync.memory_id,
+                    memory_id=sync.target,
                     payload_updates=updates,
                     collection_name=sync.collection,
                     delete_keys=delete_keys or None,

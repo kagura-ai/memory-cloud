@@ -741,8 +741,10 @@ def _restored_memory() -> Any:
 
     from utils.datetime import utcnow
 
+    memory_id = uuid.uuid4()
     return SimpleNamespace(
-        id=uuid.uuid4(),
+        id=memory_id,
+        point_id=memory_id,  # an API-written row's point is its own id (#2100)
         summary="s",
         context_summary=None,
         content="c",

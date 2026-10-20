@@ -5,7 +5,10 @@ A resource-indexer row's point is ``Memory.point_id`` (the document version's
 uuid5), so the merge goes there, by the rule ``forget`` and the Sleep paths use
 (#2065, ``unshared_point_id``). A point another live row names too is left
 alone. The merge writes only the keys a metadata edit changes; the indexer's
-own payload fields are never sent. The vector store and the session are faked.
+own payload fields — its event-time ``updated_at`` among them — are never sent,
+nor is importance, which the Sleep paths keep off the indexer point (#2065).
+Session rollback restores a resource row's payload by the same rule. The
+vector store and the session are faked.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ _INDEXER_KEYS = {
     "facets",
     "sortable",
     "metadata",
+    "updated_at",
     "indexed_at",
     "memory_id",
     "point_id_source",
@@ -141,8 +145,17 @@ class TestUpdateSyncsTheRowsOwnPoint:
 
         assert write.await_args.kwargs["memory_id"] == memory.id
         assert write.await_args.kwargs["cascade_chunks"] is True
+        # Its own point gets the whole patch, the edit time included.
+        assert set(write.await_args.kwargs["payload_updates"]) == {"importance", "updated_at"}
         # Its own point needs no "is it shared?" lookup.
         service.db.execute.assert_not_awaited()
+
+    async def test_an_importance_only_edit_of_a_resource_row_writes_nothing(self):
+        memory = _indexer_row()
+
+        write, _ = await _update(memory, UpdateMemoryRequest(memory_id=memory.id, importance=0.9))
+
+        write.assert_not_awaited()
 
     async def test_a_point_another_live_row_names_is_left_alone(self):
         memory = _indexer_row()
@@ -166,7 +179,8 @@ class TestUpdateSyncsTheRowsOwnPoint:
         write, _ = await _update(memory, request)
 
         updates = write.await_args.kwargs["payload_updates"]
-        assert set(updates) == {"tags", "importance", "type", "location", "updated_at"}
+        # importance and updated_at stay the indexer's (RESOURCE_POINT_SKIPPED_KEYS).
+        assert set(updates) == {"tags", "type", "location"}
         assert updates["tags"] == ["q3"]
         assert not set(updates) & _INDEXER_KEYS
         assert write.await_args.kwargs["delete_keys"] is None
@@ -207,7 +221,7 @@ class TestPatchSyncsTheRowsOwnPoint:
         write, _ = await _patch(memory, request)
 
         updates = write.await_args.kwargs["payload_updates"]
-        assert set(updates) == {"tags", "importance", "type", "updated_at"}
+        assert set(updates) == {"tags", "type"}
         assert not set(updates) & _INDEXER_KEYS
         # The details carry no location: the geo key is cleared, nothing else.
         assert write.await_args.kwargs["delete_keys"] == ["location"]
@@ -225,6 +239,74 @@ class TestPatchSyncsTheRowsOwnPoint:
             )
 
         write.assert_not_awaited()
+
+
+class TestSessionRollbackRestoresTheRowsOwnPoint:
+    @staticmethod
+    def _executor(db: MagicMock):
+        from services import session_rollback as sr
+
+        executor = sr._Executor.__new__(sr._Executor)
+        executor.db = db
+        executor.scope = MagicMock(context_id=uuid4())
+        executor._payload_target = None
+        executor._item_syncs = []
+        executor._collection = AsyncMock(return_value="coll")  # type: ignore[method-assign]
+        return executor
+
+    async def _queue(self, memory: Memory, *, shared: bool = False) -> list:
+        from utils.datetime import utcnow
+
+        memory.updated_at = utcnow()
+        executor = self._executor(_db(shared=shared))
+        with patch(
+            "services.content_chunk_writer.chunk_cascade_needed", new=AsyncMock(return_value=True)
+        ):
+            await executor._queue_payload_sync(memory, {"tags", "importance", "type"})
+        return executor._item_syncs
+
+    async def test_a_resource_rows_restore_targets_its_documents_point(self):
+        memory = _indexer_row()
+        memory.tags = ["orig"]
+
+        (sync,) = await self._queue(memory)
+
+        assert sync.memory_id == memory.id
+        assert sync.target == _RESOURCE_POINT
+        assert sync.cascade_chunks is False
+        assert set(sync.updates) == {"tags", "type"}
+
+    async def test_an_api_rows_restore_still_targets_its_own_id(self):
+        memory = _api_row()
+        memory.tags = ["orig"]
+
+        (sync,) = await self._queue(memory)
+
+        assert sync.target == memory.id
+        assert sync.cascade_chunks is True
+        assert set(sync.updates) == {"tags", "importance", "type", "updated_at"}
+
+    async def test_a_shared_point_is_not_queued(self):
+        memory = _indexer_row()
+        memory.tags = ["orig"]
+
+        assert await self._queue(memory, shared=True) == []
+
+    def test_the_reread_patch_of_a_resource_point_drops_the_skipped_keys(self):
+        from services import session_rollback as sr
+        from utils.datetime import utcnow
+
+        memory = _indexer_row()
+        memory.tags = ["orig"]
+        memory.updated_at = utcnow()
+        sync = sr.PayloadSync(
+            memory.id, "coll", ("importance", "tags"), {}, (), False, point_id=_RESOURCE_POINT
+        )
+
+        updates, delete_keys = sr._sync_patch(sync, memory)
+
+        assert updates == {"tags": ["orig"]}
+        assert delete_keys == []
 
 
 def test_scope_is_not_editable_by_update_or_patch():
