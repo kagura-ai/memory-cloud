@@ -26,6 +26,7 @@ import contextlib
 import contextvars
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import re
@@ -1837,15 +1838,17 @@ async def _consent_default_context_choices(
     except Exception as e:  # noqa: BLE001 - the picker is optional; consent is not
         logger.warning("oauth_consent_default_context_unavailable", error_type=type(e).__name__)
         return [], ""
+    # Grouped by workspace id, labelled by name: two workspaces sharing a
+    # display name stay two groups.
     groups: list[dict[str, Any]] = []
-    group_workspace_id: UUID | None = None
-    for option in options:
-        # Grouped by workspace id, labelled by name: two workspaces sharing a
-        # display name stay two groups.
-        if not groups or group_workspace_id != option.workspace_id:
-            group_workspace_id = option.workspace_id
-            groups.append({"workspace": option.workspace_name, "contexts": []})
-        groups[-1]["contexts"].append({"id": str(option.context_id), "name": option.name})
+    for _, members in itertools.groupby(options, key=lambda option: option.workspace_id):
+        group = list(members)
+        groups.append(
+            {
+                "workspace": group[0].workspace_name,
+                "contexts": [{"id": str(o.context_id), "name": o.name} for o in group],
+            }
+        )
     listed = {str(option.context_id) for option in options}
     if stored is None:
         return groups, ""

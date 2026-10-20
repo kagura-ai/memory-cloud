@@ -124,12 +124,16 @@ def test_the_picker_strings_exist_in_both_locales():
 
 
 def _post(
-    form: dict[str, str], location: str = "https://app.example/cb?code=abc&state=s"
+    form: dict[str, str],
+    location: str = "https://app.example/cb?code=abc&state=s",
+    *,
+    files: dict | None = None,
+    save: AsyncMock | None = None,
 ) -> tuple[int, AsyncMock]:
     fake_user = MagicMock(email="test@example.com", user_id="user-1")
     fake_client = MagicMock(client_name="App", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=True)
-    save = AsyncMock()
+    save = save or AsyncMock()
     redirect = SimpleNamespace(location=location)
     with (
         patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
@@ -146,6 +150,7 @@ def _post(
                 "/api/v1/oauth/authorize",
                 params={"client_id": "test", "redirect_uri": "https://app.example/cb"},
                 data=form,
+                files=files,
                 follow_redirects=False,
             )
     return response.status_code, save
@@ -153,38 +158,29 @@ def _post(
 
 def test_a_file_part_named_default_context_never_interrupts_the_approve():
     """A multipart *file* part named ``default_context`` reaches the helper as
-    an ``UploadFile``: the approve completes and nothing is stored."""
+    an ``UploadFile``: the approve completes (303 to the client, not an
+    ``error=server_error`` redirect) and nothing is stored."""
     from starlette.datastructures import UploadFile
 
-    fake_user = MagicMock(email="test@example.com", user_id="user-1")
-    fake_client = MagicMock(client_name="App", scope="memory:read")
-    fake_client.check_redirect_uri = MagicMock(return_value=True)
-    redirect = SimpleNamespace(location="https://app.example/cb?code=abc&state=s")
-    save = AsyncMock(wraps=oauth_routes._save_consent_default_context)
-    setter = AsyncMock()
-    with (
-        patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
-        patch("api.routes.oauth.get_sync_session") as mock_sess,
-        patch("api.routes.oauth._consent_is_new", return_value=False),
-        patch("api.routes.oauth._run_oauth_sync", return_value=redirect),
-        patch("api.routes.oauth._save_consent_default_context", new=save),
-        patch("services.credential_default_context.set_grant_default_context", new=setter),
-    ):
-        db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.return_value = fake_client
-        mock_sess.return_value = db
-        with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.post(
-                "/api/v1/oauth/authorize",
-                params={"client_id": "test", "redirect_uri": "https://app.example/cb"},
-                data={"confirm": "yes"},
-                files={"default_context": ("ctx.txt", str(CTX_A).encode(), "text/plain")},
-                follow_redirects=False,
-            )
+    real_save = oauth_routes._save_consent_default_context
+    returned: list[bool] = []
 
-    assert response.status_code == 303
-    assert response.headers["location"] == redirect.location
+    async def save_and_record(*args: object) -> None:
+        await real_save(*args)  # an exception here would end in error=server_error
+        returned.append(True)
+
+    save = AsyncMock(side_effect=save_and_record)
+    setter = AsyncMock()
+    with patch("services.credential_default_context.set_grant_default_context", new=setter):
+        status, _ = _post(
+            {"confirm": "yes"},
+            files={"default_context": ("ctx.txt", str(CTX_A).encode(), "text/plain")},
+            save=save,
+        )
+
+    assert status == 303
     assert isinstance(save.await_args.args[2], UploadFile)
+    assert returned == [True]
     setter.assert_not_awaited()
 
 
