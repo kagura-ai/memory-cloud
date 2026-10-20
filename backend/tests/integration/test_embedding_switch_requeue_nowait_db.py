@@ -41,6 +41,9 @@ TIMEOUT = 10
 POLL_SECONDS = 0.05
 _ROW_REFUSAL = r"^Another transaction holds memories .*; the context route was not changed\.$"
 
+# A regression makes the switch wait on the row again: fail, do not hang.
+pytestmark = pytest.mark.timeout(60)
+
 _LOCK_ROW = text("SELECT id FROM memories WHERE id = :id FOR UPDATE")
 _KEY_SHARE_ROW = text("SELECT id FROM memories WHERE id = :id FOR KEY SHARE")
 _SHARED_POINT_WRITER_LOCK = text(
@@ -127,6 +130,8 @@ async def seeded(async_engine: AsyncEngine) -> AsyncIterator[_Seeded]:
         yield _Seeded(maker, context_id, memory_id, written_at - timedelta(hours=1))
     finally:
         async with maker() as cleanup:
+            # A switch left waiting by a regression must not stall the cleanup.
+            await cleanup.execute(text("SELECT set_config('lock_timeout', '10000ms', true)"))
             await cleanup.execute(delete(Memory).where(Memory.id == memory_id))
             await cleanup.execute(
                 delete(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
@@ -245,9 +250,11 @@ async def test_switch_refuses_instead_of_deadlocking_with_a_session_rollback(
         await _assert_untouched(seeded)
     finally:
         holder_queued.set()
-        await holder.close()  # releases the row (and any lock) first
         await _cancel(switch_task)
+        # The shared request runs on the holder's connection: settle it before
+        # closing that session, or the close fails and hides the real failure.
         await _cancel(shared_task)
+        await holder.close()
 
 
 @pytest.mark.usefixtures("_no_vector_store")
@@ -262,12 +269,13 @@ async def test_switch_refuses_when_an_ordinary_writer_holds_a_row(seeded: _Seede
         with pytest.raises(EmbeddingSwitchBusyError, match=_ROW_REFUSAL):
             await asyncio.wait_for(switch_task, TIMEOUT)
         await _assert_untouched(seeded)
-        # The holder's transaction was never disturbed.
-        await holder.execute(_SHARED_POINT_WRITER_LOCK)
+        # The holder's transaction was never disturbed, and the switch let go
+        # of the point-writer lock.
+        await asyncio.wait_for(holder.execute(_SHARED_POINT_WRITER_LOCK), TIMEOUT)
         await holder.rollback()
     finally:
-        await holder.close()
         await _cancel(switch_task)
+        await holder.close()
 
 
 @pytest.mark.usefixtures("_no_vector_store")

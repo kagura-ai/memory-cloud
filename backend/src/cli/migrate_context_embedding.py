@@ -227,7 +227,12 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             )
         except EmbeddingSwitchBusyError as exc:
             remedy = _busy_rollback_remedy(args.rollback_to, args.requeue_since)
-            print(f"  NOT rolled back: {exc} {remedy}.")
+            line = f"  NOT rolled back: {exc} {remedy}."
+            if args.context is None:
+                # Over --all / --workspace, the contexts already rolled back
+                # would each be refused as "already routes to" on a rerun.
+                line += f" Retry it for this context only (--context {context_id})."
+            print(line)
             return 1
         since = result.requeue_since or boundary.since
         print(

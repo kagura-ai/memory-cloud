@@ -666,3 +666,26 @@ async def test_a_busy_context_in_an_all_run_names_itself_in_a_timed_retry(capsys
         "2026-10-01T00:00:00 once the current write finishes (no full re-embed). "
         f"Retry it for this context only (--context {context_id}).\n"
     ) in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_a_busy_rollback_in_an_all_run_names_its_context(capsys):
+    context_id = uuid4()
+    args = cli._parse(["--rollback-to", _ROLLBACK_TO, "--all", "--yes"])
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    with (
+        patch.object(cli, "check_rollback_target", AsyncMock(return_value=512)),
+        patch.object(
+            cli,
+            "resolve_rollback_boundary",
+            AsyncMock(return_value=RollbackBoundary(_SWITCH_TIME, "switch_time")),
+        ),
+        patch.object(cli, "rollback_context_embedding", _busy()),
+    ):
+        code = await cli._one_context(db, context_id, args)
+    assert code == 1
+    assert (
+        f"  NOT rolled back: {_WRITERS_BUSY} Retry --rollback-to {_ROLLBACK_TO} once the "
+        f"current write finishes. Retry it for this context only (--context {context_id}).\n"
+    ) in capsys.readouterr().out
