@@ -86,7 +86,7 @@ from models.auth import Context
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from repositories.config_repository import search_config_defaults
-from services.content_chunk_policy import content_chunks_status
+from services.content_chunk_policy import content_chunks_gated, content_chunks_status
 from services.content_chunk_writer import content_chunks_enabled, rebuild_content_chunks
 from services.context_routing import (
     resolve_context_embedding,
@@ -1096,6 +1096,20 @@ async def switch_context_embedding(
         # this write it would fall below the boundary. An earlier boundary
         # only re-queues more (an extra re-embed), never less.
         config.embedding_switched_at = func.now()
+        # #2107: the context's chunks are read from the new collection from
+        # this commit on, and it may lack them — none were rebuilt there while
+        # the context was inactive (plan, cap), or an edit then left the
+        # chunks of the old text. A gap stamp makes the reconciler check every
+        # long row there (only the rows without current chunks are re-queued)
+        # once the context is active. Without the plan gate a context is
+        # never inactive, and the switch is refused while chunks are missing.
+        if (
+            config.content_chunks_enabled is True
+            and chunk_points_supported()
+            and content_chunks_gated()
+        ):
+            config.content_chunks_gap_at = func.clock_timestamp()
+            config.content_chunks_gap_cursor = None
 
     requeued = 0
     if requeue_since is not None:

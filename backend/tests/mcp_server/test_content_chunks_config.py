@@ -504,6 +504,6 @@ async def test_no_backfill_on_a_store_without_chunk_points():
 
     db = AsyncMock()
     repo = ContextSearchConfigRepository(db)
-    with patch("db.qdrant.chunk_points_supported", return_value=False):
+    with patch("services.content_chunk_gaps.chunk_points_supported", return_value=False):
         assert await repo._queue_content_chunk_backfill(uuid4()) == 0
     db.execute.assert_not_awaited()

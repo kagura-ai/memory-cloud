@@ -492,8 +492,13 @@ async def test_an_inactive_chunk_target_keeps_merged_memories_embedded():
         m.content = "x" * 5000
         return m
 
-    with patch(
-        "services.content_chunk_policy.content_chunks_effective", AsyncMock(return_value=False)
+    with (
+        patch(
+            "services.content_chunk_policy.content_chunks_effective",
+            AsyncMock(return_value=False),
+        ),
+        # #2107: it stamps a gap instead (test_an_inactive_chunk_target_stamps_a_gap).
+        patch("services.content_chunk_gaps.record_content_chunk_gap", AsyncMock()),
     ):
         _, rows, _, _ = await _run_merge([long_memory], target_chunks=True)
     assert rows[0].embedding_status == "success"
@@ -508,3 +513,56 @@ async def test_a_target_without_chunks_keeps_merged_memories_embedded():
 
     _, rows, _, _ = await _run_merge([long_memory])
     assert rows[0].embedding_status == "success"
+
+
+def _long_memory(u, c):
+    m = _source_memory(u, c)
+    m.content = "x" * 5000
+    return m
+
+
+@pytest.mark.asyncio
+async def test_an_inactive_chunk_target_stamps_a_gap():
+    """#2107: the merged long memories get chunks once the target is active again."""
+    with (
+        patch(
+            "services.content_chunk_policy.content_chunks_effective",
+            AsyncMock(return_value=False),
+        ),
+        patch("db.qdrant.chunk_points_supported", return_value=True),
+        patch(
+            "services.content_chunk_gaps.record_content_chunk_gap", AsyncMock(return_value=True)
+        ) as gap,
+    ):
+        _, rows, _, target_id = await _run_merge([_long_memory], target_chunks=True)
+    assert rows[0].embedding_status == "success"
+    gap.assert_awaited_once()
+    assert gap.await_args.args[1] == target_id
+    assert gap.await_args.kwargs == {"reason": "merge"}
+
+
+@pytest.mark.asyncio
+async def test_no_gap_without_long_memories_or_without_chunks():
+    with (
+        patch(
+            "services.content_chunk_policy.content_chunks_effective",
+            AsyncMock(return_value=False),
+        ),
+        patch("db.qdrant.chunk_points_supported", return_value=True),
+        patch(
+            "services.content_chunk_gaps.record_content_chunk_gap", AsyncMock(return_value=True)
+        ) as gap,
+    ):
+        await _run_merge([_source_memory], target_chunks=True)
+        await _run_merge([_long_memory])
+    gap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_active_chunk_target_requeues_and_stamps_no_gap():
+    with patch(
+        "services.content_chunk_gaps.record_content_chunk_gap", AsyncMock(return_value=True)
+    ) as gap:
+        _, rows, _, _ = await _run_merge([_long_memory], target_chunks=True)
+    assert rows[0].embedding_status == "pending"
+    gap.assert_not_awaited()

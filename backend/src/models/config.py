@@ -167,6 +167,21 @@ class ContextSearchConfig(Base):
         TIMESTAMP(timezone=True), nullable=True
     )
 
+    # Issue #2107: a content chunk gap, stamped where one is made — a write
+    # that kept no chunks because the context's chunks were inactive (plan,
+    # cap), a merge into such a context, an embedding switch — and cleared by
+    # the reconciler (services.content_chunk_gaps) once the context is active
+    # and its rows without current chunks are re-queued. NULL: nothing to do.
+    content_chunks_gap_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    # Issue #2107: the reconciler's keyset cursor (memory id) through the
+    # context's rows for the gap stamped at content_chunks_gap_at; a new stamp
+    # resets it, so the scan starts over.
+    content_chunks_gap_cursor: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+
     # Issue #2144: the recall LLM selector opt-in. When true (and allowed by
     # the plan where the deployment gates it, services.llm_selector_policy),
     # an MCP recall may send the page's summaries and attached content to the
@@ -223,6 +238,12 @@ class ContextSearchConfig(Base):
         CheckConstraint(
             "routing_mode IN ('off', 'log_only', 'active')",
             name="routing_mode_check",
+        ),
+        # Issue #2107: the reconciler reads only the contexts with a gap.
+        Index(
+            "ix_context_search_configs_chunk_gap",
+            "content_chunks_gap_at",
+            postgresql_where=text("content_chunks_gap_at IS NOT NULL"),
         ),
     )
 

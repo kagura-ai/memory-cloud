@@ -1268,24 +1268,47 @@ async def chunk_points_content_hash(
     """The ``content_hash`` the memory's first chunk point carries (#2103).
 
     ``None`` when the memory has no chunk point 0 (or it carries no hash) or
-    on a non-Qdrant store. One point retrieve, payload field only.
+    on a non-Qdrant store. One point retrieve, payload field only
+    (:func:`chunk_points_content_hashes` for one memory).
     """
-    if _active_store() is not None:
-        return None
+    hashes = await chunk_points_content_hashes([memory_id], collection_name)
+    return hashes.get(str(memory_id))
+
+
+async def chunk_points_content_hashes(
+    memory_ids: Sequence[UUID | str],
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> dict[str, str | None]:
+    """The ``content_hash`` of each memory's first chunk point, in one retrieve (#2107).
+
+    Keyed by ``str(memory_id)``: a memory with no chunk point 0 is absent, one
+    whose point carries no hash (written before the hash existed) maps to
+    ``None``. Empty on a non-Qdrant store or for no ids. Payload field only.
+
+    Raises:
+        QdrantError: the retrieve failed.
+    """
+    if _active_store() is not None or not memory_ids:
+        return {}
+    by_point = {chunk_point_id(memory_id, 0): str(memory_id) for memory_id in memory_ids}
     client = get_qdrant_client()
     try:
         points = await client.retrieve(
             collection_name=collection_name,
-            ids=[chunk_point_id(memory_id, 0)],
+            ids=list(by_point),
             with_payload=["content_hash"],
             with_vectors=False,
         )
     except Exception as e:
         raise QdrantError(f"Failed to read content chunks: {e}") from e
-    if not points:
-        return None
-    value = (points[0].payload or {}).get("content_hash")
-    return value if isinstance(value, str) else None
+    out: dict[str, str | None] = {}
+    for point in points:
+        memory_id = by_point.get(str(point.id))
+        if memory_id is None:
+            continue
+        value = (point.payload or {}).get("content_hash")
+        out[memory_id] = value if isinstance(value, str) else None
+    return out
 
 
 async def delete_chunk_points_from(

@@ -23,12 +23,12 @@ Two predicates, deliberately:
 A plan that drops the feature, or a cap that shrinks, never changes the
 stored flag and never purges points: the earliest-enabled contexts stay
 active, the rest go inactive, and an upgrade makes them active again with
-the points they kept. Nothing is re-queued when a context becomes active
-again: a memory written while it was inactive has no chunk points, one whose
-content was edited then lost them (they would hold the old text), and an
-embedding migration run then wrote none into the new collection. Their
-summary points still find them; their chunks come with the next content
-edit or re-embed.
+the points they kept. What an inactive context could not write — a memory
+written then has no chunk points, one whose content was edited then lost
+them (they would hold the old text), an embedding switch serves a collection
+that may lack them — is stamped as a gap where it happens and re-queued once
+the context is active again (#2107, ``services.content_chunk_gaps``); until
+then their summary points still find them.
 
 Nothing here is cached across requests (#2061): a cached "off" would hide a
 concurrent enable. With the gate off every function answers from the flag and

@@ -1204,14 +1204,14 @@ class ContextService:
         # embedding sweep rebuilds them with their chunk points — only while
         # its chunks are active (#2103 / #2080: store and plan included).
         from services.content_chunk_policy import content_chunks_effective
+        from utils.content_chunks import split_content
 
-        if (
-            tgt_cfg is not None
-            and getattr(tgt_cfg, "content_chunks_enabled", False) is True
-            and await content_chunks_effective(self.db, target_context_id, stored=True)
+        target_chunks_stored = (
+            tgt_cfg is not None and getattr(tgt_cfg, "content_chunks_enabled", False) is True
+        )
+        if target_chunks_stored and await content_chunks_effective(
+            self.db, target_context_id, stored=True
         ):
-            from utils.content_chunks import split_content
-
             requeued = 0
             for row in rows_by_new_id.values():
                 if row.embedding_status == "success" and split_content(row.content):
@@ -1223,6 +1223,18 @@ class ContextService:
                     target_context_id=str(target_context_id),
                     memories=requeued,
                 )
+        elif target_chunks_stored and any(
+            row.embedding_status == "success" and split_content(row.content)
+            for row in rows_by_new_id.values()
+        ):
+            # #2107: an inactive target (plan, cap) gets no chunks now; the
+            # gap is stamped, and the reconciler re-queues these memories
+            # once the target's chunks are active again.
+            from db.qdrant import chunk_points_supported
+            from services.content_chunk_gaps import record_content_chunk_gap
+
+            if chunk_points_supported():
+                await record_content_chunk_gap(self.db, target_context_id, reason="merge")
 
         # #1497: never remove the source unless every LIVE row reached the target.
         #

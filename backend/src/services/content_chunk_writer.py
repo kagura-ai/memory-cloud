@@ -14,7 +14,10 @@ and callers on such a context can skip the chunk cascade.
   written, and a write whose content changed deletes the memory's chunk
   points, which would hold the old text (points of the unchanged content are
   kept). Payload syncs and metadata cascades still reach the points the
-  context keeps, so they are current when it becomes active again.
+  context keeps, so they are current when it becomes active again. A long
+  memory left without current chunks stamps a gap on the context (#2107),
+  and the reconciler re-queues it once the context is active again
+  (``services.content_chunk_gaps``).
 - Flag on: the chunks are replaced in place (#2061). The chunks of the
   current content are upserted over the old ones (chunk ids are
   deterministic per index), then the old chunks past the new count are
@@ -79,6 +82,7 @@ from db.qdrant import (
     upsert_chunk_points,
 )
 from models.memory import Memory
+from services.content_chunk_gaps import record_content_chunk_gap
 from services.content_chunk_policy import content_chunks_status, content_chunks_stored
 from utils.content_chunks import (
     build_chunk_payload,
@@ -117,7 +121,9 @@ async def _chunk_flags(db: AsyncSession, context_id: Any) -> tuple[bool, bool]:
     return True, (await content_chunks_status(db, context_id, stored=True)).effective
 
 
-async def _drop_inactive_chunks(memory: Memory, content: str | None, collection_name: str) -> None:
+async def _drop_inactive_chunks(
+    db: AsyncSession, memory: Memory, content: str | None, collection_name: str
+) -> None:
     """Delete the memory's stale chunk points on a context whose chunks are inactive (#2103).
 
     No new chunks are written there, so points split from an older content
@@ -127,15 +133,23 @@ async def _drop_inactive_chunks(memory: Memory, content: str | None, collection_
     migration switch or a restore) are kept, so they are still there when
     the context is active again. Best effort: a failure is logged (error
     class only).
+
+    A long memory left without current chunks is a gap (#2107): it is stamped
+    on the context, so the reconciler re-queues the memory once the context is
+    active again (``services.content_chunk_gaps``).
     """
+    long_enough = False
     try:
-        if split_content(content) and await chunk_points_content_hash(
+        long_enough = bool(split_content(content))
+        if long_enough and await chunk_points_content_hash(
             memory.id, collection_name
         ) == content_hash(content):
             return
         await delete_chunk_points([memory.id], collection_name)
     except Exception as e:  # noqa: BLE001 — best effort, logged
         _log_failure(memory, collection_name, e)
+    if long_enough:
+        await record_content_chunk_gap(db, memory.context_id, reason="inactive_write")
 
 
 async def chunk_cascade_needed(db: AsyncSession, context_id: Any) -> bool:
@@ -407,7 +421,7 @@ async def write_content_chunks(
         return 0
     if not chunks_enabled:
         if chunks_stored:
-            await _drop_inactive_chunks(memory, content, collection_name)
+            await _drop_inactive_chunks(db, memory, content, collection_name)
         return 0
     if await _superseded_before_write(db, memory, content, claim):
         return 0
@@ -451,7 +465,7 @@ async def write_content_chunks(
         stored_now, active_now = await _chunk_flags(db, memory.context_id)
         if not active_now:
             if stored_now:
-                await _drop_inactive_chunks(memory, content, collection_name)
+                await _drop_inactive_chunks(db, memory, content, collection_name)
                 logger.info("content_chunks_skipped_plan", memory_id=str(memory.id))
             else:
                 logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))

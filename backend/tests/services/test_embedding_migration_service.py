@@ -769,6 +769,31 @@ class TestSwitch:
         db.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("stored", "gated"), [(True, True), (False, True), (True, False)])
+    async def test_a_switch_stamps_a_chunk_gap_when_the_flag_is_stored_on(self, stored, gated):
+        """#2107: the new collection may lack the context's chunks (rebuilt
+        none while inactive, or chunks of an older text): the reconciler checks
+        them once the context is active. Stamped in the route's transaction,
+        only where the plan gate can make a context inactive."""
+        config = _config(SMALL, 512)
+        config.content_chunks_enabled = stored
+        config.content_chunks_gap_at = "untouched"
+        config.content_chunks_gap_cursor = "untouched"
+        db = _db([_result(scalar=config), _result(scalar=config)])
+        with (
+            patch.object(svc, "chunk_points_supported", return_value=True),
+            patch.object(svc, "content_chunks_gated", return_value=gated),
+        ):
+            await svc.switch_context_embedding(db, uuid4(), QWEN, 2560)
+        if stored and gated:
+            assert "clock_timestamp" in str(config.content_chunks_gap_at)
+            assert config.content_chunks_gap_cursor is None
+        else:
+            assert config.content_chunks_gap_at == "untouched"
+            assert config.content_chunks_gap_cursor == "untouched"
+        db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_dimension_mismatch_is_refused(self):
         with pytest.raises(ValidationError):
             await svc.switch_context_embedding(_db([]), uuid4(), QWEN, 512)

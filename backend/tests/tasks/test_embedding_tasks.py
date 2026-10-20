@@ -12,7 +12,11 @@ from uuid import uuid4
 
 import pytest
 
-from tasks.embedding_tasks import schedule_embedding_tasks, sweep_pending_embeddings
+from tasks.embedding_tasks import (
+    reconcile_content_chunk_gaps,
+    schedule_embedding_tasks,
+    sweep_pending_embeddings,
+)
 from tests.tasks.conftest import mock_get_db_factory
 
 
@@ -21,14 +25,47 @@ class TestScheduleEmbeddingTasks:
         scheduler = MagicMock()
         schedule_embedding_tasks(scheduler)
 
-        scheduler.add_job.assert_called_once()
-        call = scheduler.add_job.call_args
+        assert scheduler.add_job.call_count == 2
+        call = scheduler.add_job.call_args_list[0]
         assert call.kwargs["id"] == "sweep_pending_embeddings"
         assert call.kwargs["name"] == "Sweep Pending Embeddings"
         assert call.kwargs["replace_existing"] is True
         # IntervalTrigger(seconds=30)
         trigger = call.kwargs["trigger"]
         assert trigger.interval.total_seconds() == 30
+
+    def test_registers_the_chunk_gap_reconciler(self):
+        """#2107: the gap reconciler runs beside the sweep, every 60 s, no env knob."""
+        scheduler = MagicMock()
+        schedule_embedding_tasks(scheduler)
+
+        call = scheduler.add_job.call_args_list[1]
+        assert call.args[0] is reconcile_content_chunk_gaps
+        assert call.kwargs["id"] == "reconcile_content_chunk_gaps"
+        assert call.kwargs["replace_existing"] is True
+        assert call.kwargs["trigger"].interval.total_seconds() == 60
+
+
+class TestReconcileContentChunkGapsTask:
+    @pytest.mark.asyncio
+    async def test_runs_one_tick_and_swallows_a_failure(self):
+        from services.content_chunk_gaps import GapReconcileResult
+
+        db = MagicMock()
+        tick = AsyncMock(return_value=GapReconcileResult(scanned=3, requeued=1))
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            patch("services.content_chunk_gaps.reconcile_content_chunk_gaps", tick),
+        ):
+            await reconcile_content_chunk_gaps()
+        tick.assert_awaited_once_with(db)
+
+        tick = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            patch("services.content_chunk_gaps.reconcile_content_chunk_gaps", tick),
+        ):
+            await reconcile_content_chunk_gaps()  # logged, not raised
 
 
 class TestSweepPendingEmbeddings:

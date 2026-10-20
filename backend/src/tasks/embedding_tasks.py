@@ -177,8 +177,38 @@ async def sweep_pending_embeddings() -> None:
             logger.error("sweep_pending_embeddings_failed", error=str(e), exc_info=True)
 
 
+async def reconcile_content_chunk_gaps() -> None:
+    """Re-queue the memories a context's inactive chunks left without them (#2107).
+
+    One tick of ``services.content_chunk_gaps.reconcile_content_chunk_gaps``:
+    contexts with a gap stamp whose chunks are active again get a page of
+    their long rows checked against their chunk points, and the rows without
+    current chunks go back to the embedding sweep. Logged only when it did
+    something; a failure is logged and the next tick retries.
+    """
+    from db.base import get_db
+    from services.content_chunk_gaps import reconcile_content_chunk_gaps as reconcile
+
+    async for db in get_db():
+        try:
+            result = await reconcile(db)
+            if result.scanned or result.cleared or result.failed:
+                logger.info(
+                    "content_chunk_gap_reconcile_done",
+                    stamped=result.stamped,
+                    active=result.active,
+                    scanned=result.scanned,
+                    requeued=result.requeued,
+                    cleared=result.cleared,
+                    deferred=result.deferred,
+                    failed=result.failed,
+                )
+        except Exception as e:
+            logger.error("content_chunk_gap_reconcile_failed", error=str(e), exc_info=True)
+
+
 def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
-    """Register embedding sweep task."""
+    """Register the embedding sweep and the content chunk gap reconciler."""
     scheduler.add_job(
         sweep_pending_embeddings,
         trigger=IntervalTrigger(seconds=30),
@@ -187,3 +217,11 @@ def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("scheduled_embedding_sweep_task", interval_seconds=30)
+    scheduler.add_job(
+        reconcile_content_chunk_gaps,
+        trigger=IntervalTrigger(seconds=60),
+        id="reconcile_content_chunk_gaps",
+        name="Reconcile Content Chunk Gaps",
+        replace_existing=True,
+    )
+    logger.info("scheduled_content_chunk_gap_task", interval_seconds=60)

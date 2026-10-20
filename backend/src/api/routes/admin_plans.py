@@ -565,8 +565,9 @@ async def update_workspace_plan(
         # Issue #2103: the contexts whose content chunk vectors go inactive
         # under the new plan (it lacks the feature, or its cap is lower).
         # Reported only: the stored flag and the chunk points are kept, so a
-        # later upgrade makes them active again with no backfill. Empty where
-        # CONTENT_CHUNKS_REQUIRE_PLAN is off.
+        # later upgrade makes them active again; what they could not write
+        # meanwhile is re-queued then (#2107, services.content_chunk_gaps).
+        # Empty where CONTENT_CHUNKS_REQUIRE_PLAN is off.
         from services.content_chunk_policy import contexts_losing_content_chunks
 
         chunks_deactivated = await contexts_losing_content_chunks(

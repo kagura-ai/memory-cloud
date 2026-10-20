@@ -1323,3 +1323,66 @@ async def test_an_inactive_context_drops_chunks_of_content_now_too_short(inactiv
         )
     _kept_hash.assert_not_awaited()
     delete.assert_awaited_once_with([memory.id], "c")
+
+
+# ---------------------------------------------------------------------------
+# #2107: a long memory left without current chunks stamps a gap
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gap():
+    with patch.object(writer, "record_content_chunk_gap", AsyncMock(return_value=True)) as g:
+        yield g
+
+
+async def _write_inactive(memory, db=None):
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+    ):
+        return await writer.write_content_chunks(
+            db or _db(True), memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+
+
+async def test_an_inactive_write_of_a_long_memory_stamps_a_gap(inactive, gap):
+    db = _db(True)
+    memory = _memory(LONG)
+    await _write_inactive(memory, db)
+    gap.assert_awaited_once_with(db, memory.context_id, reason="inactive_write")
+
+
+async def test_kept_chunks_of_unchanged_content_stamp_no_gap(inactive, gap, _kept_hash):
+    from utils.content_chunks import content_hash
+
+    _kept_hash.return_value = content_hash(LONG)
+    await _write_inactive(_memory(LONG))
+    gap.assert_not_awaited()
+
+
+async def test_a_short_memory_stamps_no_gap(inactive, gap):
+    await _write_inactive(_memory("short"))
+    gap.assert_not_awaited()
+
+
+async def test_a_failed_hash_read_still_stamps_the_gap(inactive, gap, _kept_hash):
+    _kept_hash.side_effect = RuntimeError("qdrant down")
+    await _write_inactive(_memory(LONG))
+    gap.assert_awaited_once()
+
+
+async def test_an_active_write_stamps_no_gap(gap):
+    memory = _memory(LONG)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+        patch.object(writer, "_superseded_before_write", AsyncMock(return_value=False)),
+        patch.object(writer, "_check_superseded", AsyncMock(return_value=False)),
+        patch.object(writer, "_chunk_flags", AsyncMock(return_value=(True, True))),
+    ):
+        n = await writer.write_content_chunks(
+            MagicMock(), memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n > 0
+    gap.assert_not_awaited()

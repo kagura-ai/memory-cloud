@@ -9,7 +9,7 @@ from datetime import datetime  # noqa: TC003 - runtime annotation in upsert()
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -259,6 +259,10 @@ class ContextSearchConfigRepository:
             # and a request that waited on the cap's lock behind an earlier
             # enable would otherwise rank before it.
             config.content_chunks_enabled_at = func.clock_timestamp() if chunks_now_on else None
+            # #2107: a gap stamp is moot either way — on re-queues every long
+            # row (below), off purges the chunks.
+            config.content_chunks_gap_at = None
+            config.content_chunks_gap_cursor = None
             try:
                 await self._purge_chunk_points(context_id, config)
                 if chunks_now_on:
@@ -299,39 +303,17 @@ class ContextSearchConfigRepository:
     async def _queue_content_chunk_backfill(self, context_id: UUID) -> int:
         """Re-queue the context's existing long memories for chunking (#2015 D4).
 
-        One UPDATE, in the caller's transaction: every live ``success`` row of
-        the context whose content is long enough to split goes back to
-        ``pending``, and the embedding sweep rebuilds it — summary point and
-        chunk points — under the usual claim and retry. The row keeps its
-        summary point meanwhile, so it stays searchable. Only ``success`` rows:
-        a ``processing`` row is a run in flight (it writes its chunks itself
-        now that the flag is on), ``pending`` / ``failed`` rows are picked up
-        anyway. Neither ``embedding_attempted_at`` (the pipeline's clock) nor
-        ``updated_at`` (an edit's cue) is written. Resource rows
-        (``resource_id``) are left out: they never get chunks.
+        ``services.content_chunk_gaps.queue_content_chunk_backfill`` over the
+        whole context, in the caller's transaction: every live long ``success``
+        row that is not a resource row goes back to ``pending`` for the
+        embedding sweep, which rebuilds its summary and chunk points.
 
         Returns:
             How many rows were queued (0 on a store without chunk points).
         """
-        from db.qdrant import chunk_points_supported
-        from models.memory import Memory
-        from utils.content_chunks import CONTENT_CHUNK_MIN_CONTENT_CHARS
+        from services.content_chunk_gaps import queue_content_chunk_backfill
 
-        if not chunk_points_supported():
-            return 0
-        result = await self.db.execute(
-            update(Memory)
-            .where(
-                Memory.context_id == context_id,
-                Memory.deleted_at.is_(None),
-                Memory.embedding_status == "success",
-                func.char_length(Memory.content) >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
-                Memory.resource_id.is_(None),
-            )
-            .values(embedding_status="pending")
-            .execution_options(synchronize_session=False)
-        )
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await queue_content_chunk_backfill(self.db, context_id)
 
     async def content_chunk_backfill_pending(self, context_id: UUID) -> int:
         """How many of the context's long memories still wait for their chunks.
@@ -340,21 +322,9 @@ class ContextSearchConfigRepository:
         queued and the sweep has not drained, plus new writes in flight
         (#2015 D4). Served on the search-config response for the UI.
         """
-        from models.memory import Memory
-        from utils.content_chunks import CONTENT_CHUNK_MIN_CONTENT_CHARS
+        from services.content_chunk_gaps import count_long_rows_waiting
 
-        result = await self.db.execute(
-            select(func.count())
-            .select_from(Memory)
-            .where(
-                Memory.context_id == context_id,
-                Memory.deleted_at.is_(None),
-                Memory.embedding_status != "success",
-                func.char_length(Memory.content) >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
-                Memory.resource_id.is_(None),
-            )
-        )
-        return int(result.scalar_one() or 0)
+        return await count_long_rows_waiting(self.db, context_id, include_failed=True)
 
     async def _purge_chunk_points(self, context_id: UUID, config: ContextSearchConfig) -> None:
         """Delete every content chunk point of a context (#2015), in every collection.

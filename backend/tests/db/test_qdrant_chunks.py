@@ -342,7 +342,9 @@ async def test_chunk_points_content_hash_reads_chunk_zeros_payload(mock_client):
     from utils.content_chunks import chunk_point_id
 
     memory_id = uuid4()
-    mock_client.retrieve.return_value = [SimpleNamespace(payload={"content_hash": "h1"})]
+    mock_client.retrieve.return_value = [
+        SimpleNamespace(id=chunk_point_id(memory_id, 0), payload={"content_hash": "h1"})
+    ]
     assert await chunk_points_content_hash(memory_id, "coll") == "h1"
     kwargs = mock_client.retrieve.await_args.kwargs
     assert kwargs["collection_name"] == "coll"
@@ -354,3 +356,24 @@ async def test_chunk_points_content_hash_reads_chunk_zeros_payload(mock_client):
     mock_client.retrieve.side_effect = RuntimeError("down")
     with pytest.raises(QdrantError):
         await chunk_points_content_hash(memory_id, "coll")
+
+
+async def test_chunk_points_content_hashes_maps_each_memory(mock_client):
+    """#2107: one retrieve for a page; absent = no chunk 0, None = no hash."""
+    from db.qdrant import chunk_points_content_hashes
+    from utils.content_chunks import chunk_point_id
+
+    hashed, unhashed, missing = uuid4(), uuid4(), uuid4()
+    mock_client.retrieve.return_value = [
+        SimpleNamespace(id=chunk_point_id(hashed, 0), payload={"content_hash": "h"}),
+        SimpleNamespace(id=chunk_point_id(unhashed, 0), payload={}),
+    ]
+    out = await chunk_points_content_hashes([hashed, unhashed, missing], "coll")
+    assert out == {str(hashed): "h", str(unhashed): None}
+    kwargs = mock_client.retrieve.await_args.kwargs
+    assert kwargs["ids"] == [chunk_point_id(m, 0) for m in (hashed, unhashed, missing)]
+    assert kwargs["with_payload"] == ["content_hash"]
+
+    mock_client.retrieve.reset_mock()
+    assert await chunk_points_content_hashes([], "coll") == {}
+    mock_client.retrieve.assert_not_awaited()
