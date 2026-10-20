@@ -178,3 +178,56 @@ def test_revision_values_carry_the_provenance_and_writer():
         provenance=WriteProvenance(AGENT, "s"),
     )
     assert (values["agent_id"], values["session_id"], values["writer"]) == (AGENT, "s", "rollback")
+
+
+# ----------------------------------------------------- #2114 linked identities
+
+
+def test_a_principal_defaults_to_its_own_sub():
+    assert SessionPrincipal("u1", None).actor_user_ids == frozenset({"u1"})
+    assert SessionPrincipal("u1", None, frozenset({"u1"})) == SessionPrincipal("u1", None)
+    with pytest.raises(ValueError, match="include"):
+        SessionPrincipal("u1", None, frozenset({"u2"}))
+
+
+def test_principal_predicate_is_equality_for_one_sub_and_in_for_a_set():
+    from sqlalchemy.dialects import postgresql
+
+    from services.write_provenance import principal_predicate
+
+    def sql(principal: SessionPrincipal) -> str:
+        clause = principal_predicate(
+            MemoryRevision.actor_user_id, MemoryRevision.agent_id, principal
+        )
+        return str(
+            clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+
+    one = sql(SessionPrincipal("u1", None))
+    assert "memory_revisions.actor_user_id = 'u1'" in one and " IN " not in one
+    several = sql(SessionPrincipal("u2", AGENT, frozenset({"u2", "u1"})))
+    assert "memory_revisions.actor_user_id IN ('u1', 'u2')" in several
+    assert f"memory_revisions.agent_id = '{AGENT}'" in several
+
+
+@pytest.mark.asyncio
+async def test_caller_principal_linked_resolves_the_link_set():
+    from unittest.mock import AsyncMock, patch
+
+    from services.write_provenance import caller_principal_linked
+
+    db = MagicMock()
+    alone = AsyncMock(return_value=frozenset({"u1"}))
+    with patch("services.identity_link_service.linked_user_ids", alone):
+        assert await caller_principal_linked(db, "u1") == SessionPrincipal("u1", None)
+    alone.assert_awaited_once_with(db, "u1")
+
+    linked = AsyncMock(return_value=frozenset({"u1", "u2"}))
+    set_agent_scope(AgentScope(agent_id=AGENT, enforcement_mode="enforce"))
+    with patch("services.identity_link_service.linked_user_ids", linked):
+        principal = await caller_principal_linked(db, "u1")
+    # The own sub stays the stamped one; the agent never widens.
+    assert principal == SessionPrincipal("u1", AGENT, frozenset({"u1", "u2"}))
+    assert principal.canonical_user_id == "u1"
+    # Write provenance stays the raw sub.
+    assert caller_principal("u1").actor_user_ids == frozenset({"u1"})

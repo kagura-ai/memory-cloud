@@ -57,8 +57,8 @@ _SESSION_ID_HELP = (
     "OTel baggage of the request, else the MCP session id (Mcp-Session-Id)."
 )
 _NOT_FOUND_HELP = (
-    "Only your own sessions are visible (the same user and the same agent "
-    "credential that wrote them); a context owner may name any session in the "
+    "Only your own sessions are visible (the same user, or an account linked to "
+    "it, and the same agent credential that wrote them); a context owner may name any session in the "
     "context. changes_since(context_id, since, session_id) lists what a session wrote."
 )
 _MODE_HELP = (
@@ -66,7 +66,8 @@ _MODE_HELP = (
     "your own writes in a time window."
 )
 _NO_WRITES_HELP = (
-    "Only your own writes count: the same user and the same credential — an agent "
+    "Only your own writes count: the same user (or an account linked to it) and the "
+    "same credential — an agent "
     "key's writes are not your user credential's, and two clients on one user "
     "credential share them. changes_since(context_id, since, by_me=true) lists what "
     "you wrote and when."
@@ -223,7 +224,7 @@ async def handle_rollback_session(
         lock_window_principal,
         rollback_session,
     )
-    from services.write_provenance import caller_principal
+    from services.write_provenance import caller_principal_linked
 
     parsed = _parse_args(args)
     if isinstance(parsed, list):
@@ -262,12 +263,13 @@ async def handle_rollback_session(
                 scope = SessionScope(
                     context_id=context_id,
                     session_id=session_id,
-                    principal=addressable_principal(user_id, role),
+                    principal=await addressable_principal(db, user_id, role),
                 )
             else:
                 # #2121: always the caller's own principal — the owner
-                # override is session-mode only.
-                principal = caller_principal(user_id)
+                # override is session-mode only. #2114: an account linked
+                # to the caller's counts as the caller's own.
+                principal = await caller_principal_linked(db, user_id)
                 if not dry_run:
                     # Resolve an omitted until under the principal's window
                     # lock, so concurrent first calls share one record.

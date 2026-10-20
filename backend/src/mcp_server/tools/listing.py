@@ -278,17 +278,20 @@ async def handle_changes_since(
             owner = user_id if context.is_private else None
             if session_id is not None or by_me:
                 from services.session_rollback import addressable_principal, context_role
-                from services.write_provenance import caller_principal
+                from services.write_provenance import caller_principal_linked
 
                 # #2044: the caller's own session (same sub, same agent
                 # credential); a context owner may name any. Another
                 # principal's session id lists nothing, like an unused one.
                 # #2121: by_me is always the caller's own principal, also for
                 # an owner (with session_id it narrows that session to them).
+                # #2114: a sub linked to the caller's counts as the caller's.
                 principal = (
-                    caller_principal(user_id)
+                    await caller_principal_linked(db, user_id)
                     if by_me
-                    else addressable_principal(user_id, await context_role(db, user_id, context_id))
+                    else await addressable_principal(
+                        db, user_id, await context_role(db, user_id, context_id)
+                    )
                 )
                 lane = changes_in_session(
                     db,

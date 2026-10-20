@@ -907,3 +907,75 @@ async def test_finish_applies_payload_syncs_and_survives_a_failure():
     assert [c["memory_id"] for c in calls] == [first, second]
     assert calls[0]["delete_keys"] == ["location"] and calls[1]["delete_keys"] is None
     assert calls[1]["collection_name"] == "coll" and calls[1]["cascade_chunks"] is False
+
+
+# ----------------------------------------------------- #2114 linked identities
+
+
+LINKED = frozenset({"u1", "u2"})
+
+
+def _linked(own: str = "u1", agent: uuid.UUID | None = None) -> sr.SessionPrincipal:
+    return sr.SessionPrincipal(own, agent, LINKED)
+
+
+def test_a_linked_principal_addresses_every_sub_of_its_set():
+    from sqlalchemy import and_
+
+    session = _sql(and_(*sr._api_event_predicates(sr.SessionScope(uuid.uuid4(), "s", _linked()))))
+    assert "memory_revisions.actor_user_id IN ('u1', 'u2')" in session
+    assert "memory_revisions.agent_id IS NULL" in session
+    window = _sql(and_(*sr._api_event_predicates(_window(_linked()))))
+    assert "memory_revisions.actor_user_id IN ('u1', 'u2')" in window
+    # The agent part never widens.
+    agent = uuid.uuid4()
+    bound = _sql(and_(*sr._api_event_predicates(_window(_linked(agent=agent)))))
+    assert "memory_revisions.actor_user_id IN ('u1', 'u2')" in bound
+    assert f"memory_revisions.agent_id = '{agent}'" in bound
+
+
+def test_a_linked_principals_foreign_predicate_is_not_in_the_set():
+    window = _sql(sr._foreign_predicate(_window(_linked())))
+    assert "memory_revisions.actor_user_id NOT IN ('u1', 'u2')" in window
+    session = _sql(sr._foreign_predicate(sr.SessionScope(uuid.uuid4(), "s", _linked())))
+    assert "memory_revisions.actor_user_id NOT IN ('u1', 'u2')" in session
+
+
+def test_a_linked_principal_reads_the_records_of_its_set():
+    from sqlalchemy import and_
+
+    target = _sql(and_(*sr._target_predicates(_window(_linked()))))
+    assert "memory_session_rollbacks.principal_user_id IN ('u1', 'u2')" in target
+    record = _sql(and_(*sr._record_principal_predicates(uuid.uuid4(), _linked())))
+    assert "memory_session_rollbacks.principal_user_id IN ('u1', 'u2')" in record
+    owner = _sql(and_(*sr._record_principal_predicates(uuid.uuid4(), None)))
+    assert "memory_session_rollbacks.principal_user_id IS NULL" in owner
+
+
+def test_linked_callers_share_one_window_lock():
+    ctx = uuid.uuid4()
+    agent = uuid.uuid4()
+    assert sr._window_lock_key(ctx, _linked("u1")) == sr._window_lock_key(ctx, _linked("u2"))
+    assert sr._window_lock_key(ctx, _linked("u2")) == f"session_rollback:{ctx}:principal:u1:-"
+    # Another agent of the same set is another lock.
+    assert sr._window_lock_key(ctx, _linked("u2", agent)) != sr._window_lock_key(ctx, _linked("u2"))
+    # Unlinked: the own sub, as before.
+    assert sr._window_lock_key(ctx, sr.SessionPrincipal("u2", None)).endswith(":principal:u2:-")
+
+
+@pytest.mark.asyncio
+async def test_addressable_principal_widens_to_the_link_set_but_not_for_an_owner():
+    from auth.agent_scope import AgentScope, set_agent_scope
+    from auth.workspace_roles import ContextRole
+
+    linked = AsyncMock(return_value=LINKED)
+    with patch("services.identity_link_service.linked_user_ids", linked):
+        assert await sr.addressable_principal(MagicMock(), "u1", ContextRole.OWNER) is None
+        assert await sr.addressable_principal(MagicMock(), "u1", ContextRole.EDITOR) == _linked()
+        agent = uuid.uuid4()
+        set_agent_scope(AgentScope(agent_id=agent, enforcement_mode="enforce"))
+        try:
+            owner_agent = await sr.addressable_principal(MagicMock(), "u1", ContextRole.OWNER)
+        finally:
+            set_agent_scope(None)
+    assert owner_agent == _linked(agent=agent)

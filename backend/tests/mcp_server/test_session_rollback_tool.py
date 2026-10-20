@@ -39,6 +39,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         "result": sr.RollbackResult(dry_run=True, items=[], events=0, remaining=0),
         "unfinished_until": None,
         "db_now": datetime.now(UTC).replace(tzinfo=None),
+        "linked": frozenset(),
     }
     defaults.update(patches)
     service = AsyncMock(side_effect=defaults["result"])
@@ -62,6 +63,10 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         ) as unfinished,
         patch.object(tool, "_window_now", AsyncMock(return_value=defaults["db_now"])),
         patch.object(sr, "lock_window_principal", AsyncMock()) as window_lock,
+        patch(
+            "services.identity_link_service.linked_user_ids",
+            AsyncMock(side_effect=lambda _db, uid: frozenset({uid, *defaults["linked"]})),
+        ) as linked,
     ):
         (block,) = await tool.handle_rollback_session(
             {"context_id": str(CTX), **args}, "caller", WS
@@ -70,6 +75,7 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         db.service = service
         db.unfinished = unfinished
         db.window_lock = window_lock
+        db.linked = linked
     return json.loads(block.text), db
 
 
@@ -463,3 +469,53 @@ def test_a_window_wider_than_the_cap_is_refused_by_the_scope_too():
             since=since,
             until=since + sr.MAX_ROLLBACK_WINDOW + timedelta(microseconds=1),
         )
+
+
+# ----------------------------------------------------- #2114 linked identities
+
+
+@pytest.mark.asyncio
+async def test_a_linked_identitys_session_is_addressed_once_per_call():
+    _, db = await _call({"session_id": "s"}, linked=frozenset({"other"}))
+    principal = db.service.await_args.kwargs["scope"].principal
+    assert principal == sr.SessionPrincipal("caller", None, frozenset({"caller", "other"}))
+    db.linked.assert_awaited_once()
+
+    # An owner with a user credential keeps the every-principal scope.
+    _, db = await _call({"session_id": "s"}, role=ContextRole.OWNER, linked=frozenset({"other"}))
+    assert db.service.await_args.kwargs["scope"].principal is None
+
+
+@pytest.mark.asyncio
+async def test_an_agent_credential_never_widens_past_its_agent():
+    agent = uuid.uuid4()
+    set_agent_scope(AgentScope(agent_id=agent, enforcement_mode="enforce"))
+    try:
+        _, db = await _call(
+            {"session_id": "s"}, role=ContextRole.OWNER, linked=frozenset({"other"})
+        )
+    finally:
+        set_agent_scope(None)
+    principal = db.service.await_args.kwargs["scope"].principal
+    assert principal == sr.SessionPrincipal("caller", agent, frozenset({"caller", "other"}))
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_session_is_not_found_also_for_a_linked_caller():
+    payload, _ = await _call(
+        {"session_id": "theirs"}, result=sr.SessionNotFoundError(), linked=frozenset({"other"})
+    )
+    assert payload["error"] == "session_not_found"
+    # Uniform refusal: nothing names the link set or another identity.
+    assert "rollback" not in payload and "other" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_a_window_covers_the_link_set_under_one_lock():
+    since = datetime.now(UTC) - timedelta(hours=1)
+    _, db = await _call({"since": to_utc_iso(since), "dry_run": False}, linked=frozenset({"other"}))
+    principal = db.service.await_args.kwargs["scope"].principal
+    assert principal.actor_user_ids == frozenset({"caller", "other"})
+    assert db.window_lock.await_args.args[2] == principal
+    assert db.unfinished.await_args.args[2] == principal
+    db.linked.assert_awaited_once()

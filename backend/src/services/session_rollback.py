@@ -66,7 +66,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select, text, update
+from sqlalchemy import exists, func, not_, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -99,7 +99,8 @@ from services.memory_versions import (
 from services.write_provenance import (
     SessionPrincipal,
     WriteProvenance,
-    caller_principal,
+    actor_predicate,
+    caller_principal_linked,
     current_provenance,
     principal_predicate,
 )
@@ -252,19 +253,22 @@ async def context_role(db: AsyncSession, user_id: str, context_id: UUID) -> Cont
     return role
 
 
-def addressable_principal(user_id: str, role: ContextRole | None) -> SessionPrincipal | None:
+async def addressable_principal(
+    db: AsyncSession, user_id: str, role: ContextRole | None
+) -> SessionPrincipal | None:
     """The principal whose sessions this caller may address; None = every one.
 
     A context OWNER (workspace owner/admin included) may name any session in
     the context. Everyone else — and every agent credential, owner or not, so
     an agent can only ever reach its own agent's sessions — addresses only
-    the sessions written with its own sub and its own credential's agent.
+    the sessions written with its own sub, or an account linked to it
+    (#2114), and its own credential's agent (``caller_principal_linked``).
     """
     from auth.agent_scope import get_agent_scope
 
     if role == ContextRole.OWNER and get_agent_scope() is None:
         return None
-    return caller_principal(user_id)
+    return await caller_principal_linked(db, user_id)
 
 
 def _scope_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
@@ -315,7 +319,7 @@ def _foreign_predicate(scope: SessionScope) -> ColumnElement[bool]:
     if scope.window:
         assert scope.principal is not None
         return or_(
-            MemoryRevision.actor_user_id != scope.principal.actor_user_id,
+            not_(actor_predicate(MemoryRevision.actor_user_id, scope.principal)),
             MemoryRevision.agent_id.is_distinct_from(scope.principal.agent_id),
             MemoryRevision.writer != REVISION_WRITER_API,
             MemoryRevision.at < scope.since,
@@ -326,7 +330,7 @@ def _foreign_predicate(scope: SessionScope) -> ColumnElement[bool]:
         MemoryRevision.writer != REVISION_WRITER_API,
     ]
     if scope.principal is not None:
-        parts.append(MemoryRevision.actor_user_id != scope.principal.actor_user_id)
+        parts.append(not_(actor_predicate(MemoryRevision.actor_user_id, scope.principal)))
         parts.append(MemoryRevision.agent_id.is_distinct_from(scope.principal.agent_id))
     return or_(*parts)
 
@@ -334,11 +338,15 @@ def _foreign_predicate(scope: SessionScope) -> ColumnElement[bool]:
 def _record_principal_predicates(
     context_id: UUID, principal: SessionPrincipal | None
 ) -> list[ColumnElement[bool]]:
+    """The rollback records of the principal: any sub of its link set (#2114).
+
+    A linked identity sees and continues the other's unfinished rollback.
+    """
     return [
         MemorySessionRollback.context_id == context_id,
         MemorySessionRollback.principal_user_id.is_(None)
         if principal is None
-        else MemorySessionRollback.principal_user_id == principal.actor_user_id,
+        else actor_predicate(MemorySessionRollback.principal_user_id, principal),
         MemorySessionRollback.agent_id.is_(None)
         if principal is None or principal.agent_id is None
         else MemorySessionRollback.agent_id == principal.agent_id,
@@ -346,7 +354,11 @@ def _record_principal_predicates(
 
 
 def _target_predicates(scope: SessionScope) -> list[ColumnElement[bool]]:
-    """The ``memory_session_rollbacks`` row of this scope (its unique key)."""
+    """The ``memory_session_rollbacks`` rows of this scope.
+
+    One row per sub of the principal's link set at most (the unique key is
+    per sub): ``_target_record`` picks one.
+    """
     preds = _record_principal_predicates(scope.context_id, scope.principal)
     if scope.window:
         return [
@@ -815,8 +827,14 @@ def _empty_summary() -> dict[str, Any]:
 
 
 def _window_lock_key(context_id: UUID, principal: SessionPrincipal) -> str:
+    """The window lock of a principal: one per link set and agent (#2114).
+
+    Keyed by the set's canonical (smallest) sub, so two linked callers rolling
+    back the same window serialize on one lock instead of both planning the
+    same events.
+    """
     agent = principal.agent_id or "-"
-    return f"session_rollback:{context_id}:principal:{principal.actor_user_id}:{agent}"
+    return f"session_rollback:{context_id}:principal:{principal.canonical_user_id}:{agent}"
 
 
 def _lock_key(scope: SessionScope) -> str:
@@ -1204,6 +1222,30 @@ def _add_totals(totals: dict[str, Any], summary: dict[str, Any]) -> dict[str, An
     return merged
 
 
+async def _target_record(
+    db: AsyncSession, scope: SessionScope, *, lock: bool
+) -> MemorySessionRollback | None:
+    """The scope's rollback record, or None.
+
+    Linked subs (#2114) may each hold a record of the same scope from before
+    they were linked. An unfinished one comes first — the record
+    ``unfinished_window_until`` continued, which this call then closes —
+    then the caller's own sub's, then the oldest. The others' handled events
+    stay handled (``undone_by``).
+    """
+    stmt = select(MemorySessionRollback).where(*_target_predicates(scope))
+    if scope.principal is not None and len(scope.principal.actor_user_ids) > 1:
+        stmt = stmt.order_by(
+            MemorySessionRollback.status.in_(sorted(_FINAL_STATUSES)),
+            MemorySessionRollback.principal_user_id != scope.principal.actor_user_id,
+            MemorySessionRollback.id,
+        )
+    stmt = stmt.limit(1)
+    if lock:
+        stmt = stmt.with_for_update()
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def rollback_session(
     db: AsyncSession,
     *,
@@ -1218,8 +1260,8 @@ async def rollback_session(
     """Plan (``dry_run``) or execute the next batch of one session's rollback.
 
     The caller has authorized the context (editor) and built ``scope`` with
-    ``addressable_principal`` (session mode) or ``caller_principal`` (window
-    mode). Nothing is committed here: the caller commits,
+    ``addressable_principal`` (session mode) or ``caller_principal_linked``
+    (window mode). Nothing is committed here: the caller commits,
     then runs ``finish(result)``. With ``time_budget`` (seconds, from the
     start of this call) no further item is started once it is spent; the rest
     is left for the next call (``remaining``).
@@ -1236,10 +1278,7 @@ async def rollback_session(
     if not dry_run:
         await _lock_scope(db, scope)
     exists = await _scope_exists(db, scope)
-    record_stmt = select(MemorySessionRollback).where(*_target_predicates(scope))
-    if not dry_run:
-        record_stmt = record_stmt.with_for_update()
-    record = (await db.execute(record_stmt)).scalar_one_or_none()
+    record = await _target_record(db, scope, lock=not dry_run)
     if not exists and not (scope.window and record is not None):
         raise NoWritesInWindowError if scope.window else SessionNotFoundError
     # A window record whose events are all gone (purged memories cascade

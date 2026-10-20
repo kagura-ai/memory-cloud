@@ -172,7 +172,9 @@ def test_changes_since_schema_offers_by_me():
     assert "by_me" in tool["description"]
 
 
-async def _by_me_call(args: dict, role: object) -> tuple[dict, object]:
+async def _by_me_call(
+    args: dict, role: object, linked: frozenset[str] = frozenset()
+) -> tuple[dict, object]:
     import uuid
     from collections.abc import AsyncIterator
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -199,6 +201,10 @@ async def _by_me_call(args: dict, role: object) -> tuple[dict, object]:
             AsyncMock(return_value=ChangePage(changes=[], next_cursor=None)),
         ),
         patch("services.session_rollback.context_role", AsyncMock(return_value=role)),
+        patch(
+            "services.identity_link_service.linked_user_ids",
+            AsyncMock(side_effect=lambda _db, uid: frozenset({uid, *linked})),
+        ),
     ):
         (block,) = await listing.handle_changes_since(
             {"context_id": CTX, "since": _SINCE, **args}, "caller", None
@@ -289,3 +295,19 @@ def test_bound_reserves_room_for_the_flags_and_the_cursor():
         assert len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))) <= max_chars, (
             max_chars
         )
+
+
+@pytest.mark.asyncio
+async def test_session_lane_counts_a_linked_identity_as_the_caller():
+    """#2114: by_me and a named session cover the caller's link set."""
+    from auth.workspace_roles import ContextRole
+    from services.write_provenance import SessionPrincipal
+
+    expected = SessionPrincipal("caller", None, frozenset({"caller", "other"}))
+    _, lane = await _by_me_call({"by_me": True}, ContextRole.OWNER, frozenset({"other"}))
+    assert lane.await_args.kwargs["principal"] == expected
+    _, lane = await _by_me_call({"session_id": "s1"}, ContextRole.EDITOR, frozenset({"other"}))
+    assert lane.await_args.kwargs["principal"] == expected
+    # The owner override (user credential) is unchanged.
+    _, lane = await _by_me_call({"session_id": "s1"}, ContextRole.OWNER, frozenset({"other"}))
+    assert lane.await_args.kwargs["principal"] is None
