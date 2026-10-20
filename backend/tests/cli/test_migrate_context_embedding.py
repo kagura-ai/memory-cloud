@@ -81,7 +81,13 @@ async def _run(
         ),
         patch.object(cli, "switch_context_embedding", switch or AsyncMock(return_value=_SWITCHED)),
     ):
-        return await cli._one_context(db or MagicMock(), context_id, args)
+        return await cli._one_context(db or _db(), context_id, args)
+
+
+def _db() -> MagicMock:
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    return db
 
 
 _SWITCHED = SwitchResult(
@@ -427,7 +433,7 @@ async def test_a_busy_context_does_not_stop_an_all_run(capsys):
     args = cli._parse(["--to", _MODEL, "--all", "--switch", "--yes"])
 
     async def db_sessions():
-        yield MagicMock()
+        yield _db()
 
     plans = {first: _plan(first), second: _plan(second)}
     switch = AsyncMock(side_effect=[EmbeddingSwitchBusyError(_ROWS_BUSY), _SWITCHED])
@@ -482,6 +488,35 @@ async def test_run_with_complete_chunks_switches_without_a_rebuild(capsys):
     assert code == 0
     rebuild.assert_not_awaited()
     switch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argv", [["--verify", "--switch"], ["--run"]])
+async def test_the_read_transaction_ends_before_the_switch_prompt(argv, capsys):
+    """Verify's read transaction is ended before the prompt can wait, so the
+    switch's embedding_switched_at = now() is not verify's first read."""
+    events: list[str] = []
+    db = _db()
+    db.rollback.side_effect = lambda: events.append("rollback")
+
+    def _input(prompt: str) -> str:
+        events.append("prompt")
+        return "y"
+
+    async def _switch(*args, **kwargs) -> SwitchResult:
+        events.append("switch")
+        return _SWITCHED
+
+    with patch("builtins.input", _input):
+        code = await _run(
+            argv,
+            reembed=_reembed([]),
+            verify=_chunks_complete(),
+            switch=AsyncMock(side_effect=_switch),
+            db=db,
+        )
+    assert code == 0
+    assert events == ["rollback", "prompt", "switch"]
 
 
 def test_requeue_since_with_an_offset_is_parsed_as_naive_utc():
@@ -659,7 +694,7 @@ async def test_a_busy_context_in_an_all_run_names_itself_in_a_timed_retry(capsys
         patch.object(cli, "verify_context_migration", AsyncMock(return_value=_chunks_complete())),
         patch.object(cli, "switch_context_embedding", _busy()),
     ):
-        code = await cli._one_context(MagicMock(), context_id, args)
+        code = await cli._one_context(_db(), context_id, args)
     assert code == 1
     assert (
         f"  NOT switched: {_WRITERS_BUSY} Retry with --verify --switch --requeue-since "

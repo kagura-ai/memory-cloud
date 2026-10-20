@@ -361,6 +361,11 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                     "routing only if you pass --requeue-since"
                 )
             requeue_since = args.requeue_since
+        # End the plan / verify read transaction, as the rollback path does:
+        # the prompt below may wait for minutes, and the switch stamps
+        # embedding_switched_at with now() (= its transaction's start), which
+        # must not be verify's first read.
+        await db.rollback()
         if not switch_confirmed and not _confirm(
             f"Switch {context_id} to {plan.target_model}?", args.yes
         ):
