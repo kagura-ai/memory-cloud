@@ -2018,6 +2018,77 @@ def _consent_is_new(client_id: str | None, user_id: str | None, scope: str | Non
             session.close()
 
 
+# #2155: the interstitial carries a live authorization code. It must not be
+# cached, framed, indexed or leak through a Referer, and it runs no script.
+_LOOPBACK_INTERSTITIAL_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex",
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    ),
+}
+
+
+def _render_loopback_interstitial(
+    request: Request,
+    client_id: str | None,
+    user_email: str | None,
+    location: str,
+) -> HTMLResponse | None:
+    """Render the page that shows a loopback client's callback URL (#2155).
+
+    A native client (Claude Code, Cursor, …) listens on ``localhost``. When
+    the browser runs in another network namespace (WSL2 NAT, SSH, a second
+    device) the 303 to that listener ends in a connection error and the code
+    is lost. This page shows the full callback URL with a link that performs
+    the redirect, so the user can paste the URL into the client instead.
+
+    Runs in the OAuth worker pool (one sync session). The code is in
+    ``location`` and goes nowhere but the response body: nothing here logs it.
+
+    Args:
+        request: FastAPI request, used by Starlette's ``TemplateResponse``.
+        client_id: The approved client's ``client_id``.
+        user_email: Email of the approving user, for the locale lookup.
+        location: The callback URL Authlib built (code and state included).
+
+    Returns:
+        The interstitial (200), or ``None`` when the client row cannot be
+        read; the caller then falls back to the plain 303.
+    """
+    db_session = get_sync_session()
+    try:
+        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+        if client is None:
+            return None
+        locale = _resolve_oauth_locale(request, db_session, user_email)
+        client_name = client.client_name or client_id or ""
+    except Exception as e:
+        logger.warning(
+            "oauth_authorize_loopback_interstitial_failed: "
+            f"client_id={client_id!r}, error={type(e).__name__}"
+        )
+        return None
+    finally:
+        db_session.close()
+
+    logger.debug(f"oauth_authorize_loopback_interstitial: client_id={client_id!r}")
+    return templates.TemplateResponse(
+        request,
+        "oauth_authorize_loopback.html",
+        {
+            "messages": get_oauth_messages(locale),
+            "locale": locale,
+            "client_name": client_name,
+            "location": location,
+        },
+        headers=_LOOPBACK_INTERSTITIAL_HEADERS,
+    )
+
+
 def _grant_issued(location: str) -> bool:
     """Whether an authorization redirect carries a code (not an error)."""
     params = dict(parse_qsl(urlsplit(location).query))
@@ -2117,6 +2188,25 @@ async def oauth_authorize_post(
                     request=request,
                     client_id=client_id,
                 )
+            # #2155: a loopback client may sit behind NAT or SSH where the
+            # browser cannot reach it, so the callback URL is shown on a page
+            # instead of being lost in a failed redirect.
+            if (
+                redirect_uri
+                and is_loopback_redirect_uri(redirect_uri)
+                and _grant_issued(response.location)
+            ):
+                interstitial = await _run_sync(
+                    partial(
+                        _render_loopback_interstitial,
+                        request,
+                        client_id,
+                        user.email,
+                        response.location,
+                    )
+                )
+                if interstitial is not None:
+                    return interstitial
             return RedirectResponse(response.location, status_code=303)
 
         # No location - should not happen in normal flow

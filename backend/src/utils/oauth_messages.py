@@ -4,6 +4,7 @@ Issue #221: Internationalization support for OAuth authorization page.
 Issue #218: Error page messages for invalid redirect_uri pre-check.
 Issue #1686: Error page messages for an authorization request refused before consent.
 Issue #1741: Redirect host notice and loopback-only warning on the consent page.
+Issue #2155: Loopback interstitial (callback URL shown after approval).
 Supports English and Japanese.
 """
 
@@ -56,6 +57,21 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "send the app's developer the error below."
         ),
         "error_code_label": "Error",
+        "loopback_page_title": "Return to the app",
+        "loopback_heading": "Return to {client}",
+        "loopback_body": (
+            "{client} is waiting for this sign-in on this computer. If the "
+            "button does not open it, paste the URL below into {client}."
+        ),
+        "loopback_continue": "Continue to {client}",
+        "loopback_url_label": "Callback URL",
+        "loopback_what_to_do": (
+            "If the button ends on a connection error (common with WSL2, SSH or "
+            "a remote machine), copy the whole URL above, or the address of the "
+            "error page, and paste it where {client} asks for it. In Claude "
+            "Code, the /mcp sign-in screen asks for it. The URL works once and "
+            "only for a few minutes; do not share it."
+        ),
     },
     "ja": {
         "title": "認可リクエスト",
@@ -106,6 +122,21 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "下のエラーをアプリの開発者に伝えてください。"
         ),
         "error_code_label": "エラー",
+        "loopback_page_title": "アプリに戻る",
+        "loopback_heading": "{client} に戻る",
+        "loopback_body": (
+            "{client} はこのコンピューター上でサインインを待っています。"
+            "ボタンで開かない場合は、下の URL を {client} に貼り付けてください。"
+        ),
+        "loopback_continue": "{client} に進む",
+        "loopback_url_label": "コールバック URL",
+        "loopback_what_to_do": (
+            "ボタンを押して接続エラーになった場合 (WSL2、SSH、リモートマシンで"
+            "よく起きます) は、上の URL 全体、またはエラーページのアドレスを"
+            "コピーし、{client} が求める場所に貼り付けてください。Claude Code では"
+            " /mcp のサインイン画面が URL を求めます。この URL は一度だけ、"
+            "数分間しか使えません。他の人に共有しないでください。"
+        ),
     },
 }
 
