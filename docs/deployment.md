@@ -2003,14 +2003,15 @@ false`, metadata-only, and a nullable timestamp); no row is turned on.
 `full` content rule have run) on a single-context MCP recall whose flag is
 effective, with at least one result carrying content, not under
 `include_superseded=true` and not on a degraded search. The model receives the
-query, each sent row's rank, creation date (day only), summary and its attached
-content split into numbered segments — no memory ids, scores, tags or sources;
-every string passes the control-token neutraliser and sits between the
-untrusted-content markers — and answers with row and segment indices only. The
-selector judges topical relevance, not truth (#2171): a row about what the
-query asks is kept even when its stored fact contradicts the model's general
-knowledge, and when two rows answer the same question differently it prefers
-the newer one, keeping both when unsure. The server validates each answer
+query, each sent row in rank order with the UTC day it was last written
+(`updated_at`, else `created_at`), its summary and its attached content split
+into numbered segments — no memory ids, scores, tags or sources; every string
+passes the control-token neutraliser and sits between the untrusted-content
+markers — and answers with row and segment indices only. The selector judges
+topical relevance, not truth (#2171): a row about what the query asks is kept
+even when its stored fact contradicts the model's general knowledge, and when
+two rows answer the same question differently it prefers the newer one,
+keeping both when the days match or it is unsure. The server validates each answer
 item on its own, drops the rows marked irrelevant (their ids are listed in
 `selector.dropped_memory_ids`, at most 20) and rebuilds a kept row's content by
 slicing the stored text at the chosen segments, joined with `" … "`, with

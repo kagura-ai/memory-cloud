@@ -32,6 +32,7 @@ def _response(
     *,
     memory_id: UUID | None = None,
     created_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> MemoryResponse:
     sliced, next_offset = content_slice(content) if content else (None, None)
     return MemoryResponse(
@@ -42,6 +43,7 @@ def _response(
         importance=0.5,
         scope="persistent",
         created_at=created_at or datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=updated_at,
         client="test",
         tags=[],
         context=None,
@@ -143,9 +145,9 @@ class TestBuildPrompt:
         page = [_response("first", SENTENCES), _response("second"), _response("third", "Short.")]
         prompt = rs.build_prompt("q", rs.rows_for(page, 10))
         assert (
-            prompt.index("Row 0 (rank 1, created 2026-01-01)")
-            < prompt.index("Row 1 (rank 2, created 2026-01-01, summary only)")
-            < prompt.index("Row 2 (rank 3, created 2026-01-01)")
+            prompt.index("Row 0 (written 2026-01-01)")
+            < prompt.index("Row 1 (written 2026-01-01, summary only)")
+            < prompt.index("Row 2 (written 2026-01-01)")
         )
         assert "[0] The deploy pipeline" in prompt
         assert "[3] A failed health check" in prompt
@@ -221,8 +223,10 @@ class TestStoreIsAuthority:
 
     def test_the_conflict_rule_prefers_newer_and_keeps_both_when_unsure(self) -> None:
         system = " ".join(rs.SELECTOR_SYSTEM.split())
-        assert "Rows are in rank order, each with its creation date." in system
-        assert "prefer the newer one; when unsure, keep both." in system
+        assert "Rows are in rank order, Row 0 the best match;" in system
+        assert "each Row line gives the date the row was last written" in system
+        assert "(ignore dates inside row text for this)" in system
+        assert "prefer the newer one; when the dates match or you are unsure, keep both." in system
 
     def test_the_output_contract_is_unchanged(self) -> None:
         assert (
@@ -238,10 +242,10 @@ class TestStoreIsAuthority:
         page = [_response("Capital of Romania (quiz set)", COUNTERFACTUAL)]
         prompt = rs.build_prompt("What is the capital of Romania?", rs.rows_for(page, 10))
         assert "Query: What is the capital of Romania?" in prompt
-        assert "Row 0 (rank 1, created 2026-01-01)" in prompt
+        assert "Row 0 (written 2026-01-01)" in prompt
         assert "[1] In this set, the capital of Romania is Rajanpur." in prompt
 
-    def test_an_older_newer_pair_carries_rank_and_date(self) -> None:
+    def test_an_older_newer_pair_carries_order_and_date(self) -> None:
         older = _response(
             "Team lead",
             "The team lead of the platform group is Alice Example.",
@@ -253,16 +257,39 @@ class TestStoreIsAuthority:
             created_at=datetime(2026, 9, 30, 8, 0),  # naive: stored UTC
         )
         prompt = rs.build_prompt("Who leads the platform group?", rs.rows_for([older, newer], 10))
-        assert "Row 0 (rank 1, created 2025-03-04)" in prompt
-        assert "Row 1 (rank 2, created 2026-09-30)" in prompt
+        assert prompt.index("Row 0 (written 2025-03-04)") < prompt.index(
+            "Row 1 (written 2026-09-30)"
+        )
+        # No second per-row number the model could answer with instead of i.
+        assert "rank 1" not in prompt and "rank 2" not in prompt
         # Day only: no time of day, and still no ids.
         assert "23:30" not in prompt and "08:00" not in prompt
         assert str(older.memory_id) not in prompt and str(newer.memory_id) not in prompt
 
     def test_an_aware_non_utc_date_is_converted_to_utc(self) -> None:
         jst = timezone(timedelta(hours=9))
-        assert rs.created_date(datetime(2026, 1, 2, 3, 0, tzinfo=jst)) == "2026-01-01"
-        assert rs.created_date(datetime(2026, 1, 2, 3, 0)) == "2026-01-02"
+        aware = _response(created_at=datetime(2026, 1, 2, 3, 0, tzinfo=jst))
+        naive = _response(created_at=datetime(2026, 1, 2, 3, 0))
+        assert rs.row_header(0, aware) == "Row 0 (written 2026-01-01, summary only)"
+        assert rs.row_header(0, naive) == "Row 0 (written 2026-01-02, summary only)"
+
+    def test_an_edited_row_is_dated_by_its_last_change(self) -> None:
+        """Review: a fact changed in place must not look older than a stale row."""
+        edited = _response(
+            "Team lead",
+            "The team lead of the platform group is now Bob Example.",
+            created_at=datetime(2025, 3, 4, tzinfo=UTC),
+            updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+        stale = _response(
+            "Team lead (copy)",
+            "The team lead of the platform group is Alice Example.",
+            created_at=datetime(2026, 1, 15, tzinfo=UTC),
+        )
+        prompt = rs.build_prompt("Who leads the platform group?", rs.rows_for([edited, stale], 10))
+        assert "Row 0 (written 2026-10-01)" in prompt
+        assert "Row 1 (written 2026-01-15)" in prompt
+        assert "2025-03-04" not in prompt
 
     @pytest.mark.asyncio
     async def test_a_relevant_counterfactual_row_is_kept_with_its_span(self) -> None:
@@ -301,8 +328,9 @@ class TestStoreIsAuthority:
     async def test_the_row_headers_count_against_the_prompt_budget(self) -> None:
         page = [_response("s", SENTENCES), _response("summary-only row")]
         body = len("s") + len(SENTENCES) + len("summary-only row")
-        headers = len(rs.row_header(0, "2026-01-01", summary_only=False)) + len(
-            rs.row_header(1, "2026-01-01", summary_only=True)
+        headers = len(rs.row_header(0, page[0])) + len(rs.row_header(1, page[1]))
+        assert headers == len("Row 0 (written 2026-01-01)") + len(
+            "Row 1 (written 2026-01-01, summary only)"
         )
         llm = _llm({"rows": [{"i": 0, "relevant": True}]})
         at_limit, _, _ = await _run(
