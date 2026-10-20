@@ -76,8 +76,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "explicit id: a context you cannot use fails context_not_found with "
         "context_source: 'url', and a value that is not a UUID fails "
         "invalid_context_id_format. Tools that change a context itself (delete_context, "
-        "update_context) never use it: name that context. An agent-bound key without "
-        "?context= defaults to its default (or only) binding. list_contexts(name_contains=) "
+        "update_context) never use it: name that context. Without ?context=, a default "
+        "set on the API key or on the app's OAuth grant (Credentials & Integrations, or "
+        "the consent page) applies, with context_source: 'credential'; an agent-bound key "
+        "defaults to its default (or only) binding. Precedence: context_id > ?context= > "
+        "the key or app default > the agent binding. list_contexts(name_contains=) "
         "reaches another context; pass its id as context_id."
     ),
     "guardrails": (

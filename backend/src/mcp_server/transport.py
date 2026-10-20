@@ -492,7 +492,7 @@ async def _read_default_context_name(
     key_workspace_id: "UUID | None",
     timeout_ms: int,
 ) -> str | None:
-    """The name of the ``?context=`` default if the caller can read it, else ``None``.
+    """The name of the connection default if the caller can read it, else ``None``.
 
     Read through the chokepoint the read tools use
     (``resolve_context_for_workspace_read``), so a deny — unknown, other
@@ -541,30 +541,40 @@ async def _instructions_base(
     ``default_context_instructions`` when ``?context=<uuid>`` names a context
     the caller can read, else ``SERVER_INSTRUCTIONS_BASE``. ``private`` is
     ``True`` whenever ``?context=`` is present in any form — the answer
-    depends on the caller — and the database is opened only for a UUID. An
-    agent-bound key's default binding fills tool arguments
+    depends on the caller — and the database is opened only for a UUID.
+    #2129: without ``?context=``, the credential's own default (a user API
+    key's or the OAuth grant's) is named the same way, through the same read,
+    and the result is ``private`` too: two keys of one user with different
+    defaults get different texts, so no shared cache may hold one for the
+    other. An agent-bound key's default binding fills tool arguments
     (``tools._default_context``) but does not change this text: its handshake
     keeps the reads #1621 pins. Fails open to the base text, like the digest,
     and shares the digest's ``deadline``: the handshake waits at most one
     ``mcp_guardrail_digest_timeout_ms`` for both reads together.
     """
     from mcp_server.tools._default_context import select_default_context
+    from mcp_server.tools._helpers import get_mcp_credential_default_context
 
     selection = select_default_context(query_string)
     if selection.mode == "none":
-        return SERVER_INSTRUCTIONS_BASE, False
-    if selection.mode == "invalid" or selection.context_id is None:
+        credential_default = get_mcp_credential_default_context()
+        if credential_default is None:
+            return SERVER_INSTRUCTIONS_BASE, False
+        context_id, source = credential_default, "credential"
+    elif selection.mode == "invalid" or selection.context_id is None:
         logger.info(
             "mcp_context_param_invalid: len=%d parsed=False era=%s", selection.raw_length, era
         )
         return SERVER_INSTRUCTIONS_BASE, True
+    else:
+        context_id, source = selection.context_id, "url"
 
     settings = get_settings()
     try:
         async with asyncio.timeout_at(deadline):
             name = await _read_default_context_name(
                 user_id=user_id,
-                context_id=selection.context_id,
+                context_id=context_id,
                 key_workspace_id=key_workspace_id,
                 timeout_ms=settings.mcp_guardrail_digest_timeout_ms,
             )
@@ -576,9 +586,10 @@ async def _instructions_base(
     if name is None:
         return SERVER_INSTRUCTIONS_BASE, True
     logger.info(
-        "mcp_default_context_instructions_served: context_id=%s era=%s source=url",
-        str(selection.context_id),
+        "mcp_default_context_instructions_served: context_id=%s era=%s source=%s",
+        str(context_id),
         era,
+        source,
     )
     return default_context_instructions(name), True
 
@@ -616,7 +627,9 @@ async def build_instructions(
     (``_instructions_base``); ``private`` is then ``True`` as well. Without
     ``?guardrails=``, a ``?context=<uuid>`` default is also the digest's
     context (as if ``?guardrails=<uuid>`` were given), so the text never names
-    one context and digests another. Both reads share one budget.
+    one context and digests another. #2129: with neither parameter, the
+    credential's own default plays that part, ahead of the last-used
+    fallback. Both reads share one budget.
 
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
@@ -627,6 +640,7 @@ async def build_instructions(
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
     from mcp_server.tools._default_context import select_default_context
+    from mcp_server.tools._helpers import get_mcp_credential_default_context
     from services.guardrail_digest import (
         GuardrailSelection,
         render_instructions,
@@ -650,6 +664,12 @@ async def build_instructions(
         # #2125: without ?guardrails=, the digest follows the ?context= default,
         # so the instructions never name one context and digest another.
         selection = GuardrailSelection("explicit", default_selection.context_id)
+    elif selection.mode == "binding" and default_selection.mode == "none":
+        # #2129: likewise the credential's own default, before the last-used
+        # fallback (a connector key and an agent-bound key never carry one).
+        credential_default = get_mcp_credential_default_context()
+        if credential_default is not None:
+            selection = GuardrailSelection("explicit", credential_default)
     scope = get_agent_scope()
     user_fallback = (
         selection.mode == "binding"

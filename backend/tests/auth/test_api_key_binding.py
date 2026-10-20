@@ -305,6 +305,7 @@ class TestVerifyKeyTimingSafeComparison:
             workspace_id=None,
             bound_context_id=None,
             agent_id=None,  # #1275: unbound key (pre-P0-2 shape)
+            default_context_id=None,  # #2129
             key_prefix="kagura_test",
             key_hash=key_hash,
             revoked_at=None,
@@ -352,6 +353,7 @@ class TestVerifyKeyLastUsedThrottle:
             workspace_id=None,
             bound_context_id=None,
             agent_id=None,  # #1275: unbound key (pre-P0-2 shape)
+            default_context_id=None,  # #2129
             key_prefix="kagura_test",
             # Must match sha256_hex of the key passed in _verify() so the
             # #964 constant-time gate accepts the row and the throttle path runs.

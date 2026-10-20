@@ -87,6 +87,7 @@ def _key_record(name: str, *, workspace_id: UUID | None = WORKSPACE_ID) -> Simpl
         workspace_id=workspace_id,
         bound_context_id=None,
         agent_id=None,
+        default_context_id=None,  # #2129
         key_prefix="kagura_c",
         key_hash=sha256_hex(API_KEY),
         revoked_at=None,

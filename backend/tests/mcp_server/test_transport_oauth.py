@@ -469,7 +469,10 @@ async def test_the_client_scope_is_read_only_when_the_token_names_no_memory_scop
     grant = await mcp_auth._verify_oauth2_token("tok")
 
     assert grant.user_id == "u-1"
-    assert bool(queries) is looked_up
+    # #2129: the grant's default-context lookup runs on every token; only the
+    # client-scope read depends on the stored scope.
+    client_queries = [q for q in queries if "oauth_clients" in str(q)]
+    assert bool(client_queries) is looked_up
     assert grant.client_scope == ("memory:read" if looked_up else None)
 
 

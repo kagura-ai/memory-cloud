@@ -129,6 +129,28 @@ def get_mcp_default_context_selection() -> "DefaultContextSelection | None":
     return _mcp_default_context_selection.get()
 
 
+# #2129: the default context bound to the request's credential — a user API
+# key's ``default_context_id`` or the OAuth grant's (``oauth_grant_settings``).
+# Set by the auth step (``mcp_server.auth.authenticate_mcp_request``) from the
+# row it already read for the key, or from one indexed lookup for a bearer;
+# reset to ``None`` first on every request, so a session cookie, a connector
+# key or an agent-bound key never carries one. Below ``?context=`` in the
+# dispatcher's precedence (``tools._default_context``).
+_mcp_credential_default_context: ContextVar["UUID | None"] = ContextVar(
+    "mcp_credential_default_context", default=None
+)
+
+
+def set_mcp_credential_default_context(context_id: "UUID | None") -> None:
+    """Store the default context bound to the request's credential (#2129)."""
+    _mcp_credential_default_context.set(context_id)
+
+
+def get_mcp_credential_default_context() -> "UUID | None":
+    """Read the credential's default context; ``None`` = the credential has none."""
+    return _mcp_credential_default_context.get()
+
+
 # ============================================================================
 # Timeout
 # ============================================================================

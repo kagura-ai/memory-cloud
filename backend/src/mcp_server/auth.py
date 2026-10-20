@@ -52,6 +52,8 @@ class OAuthGrant:
     client_scope: str | None = None
     # True when that read failed: the token then grants no ``memory:*`` scope.
     client_scope_unavailable: bool = False
+    # #2129: the grant's MCP default context (``oauth_grant_settings``).
+    default_context_id: "UUID | None" = None
 
 
 # The OAuth scopes of the current request's access token; ``None`` when the
@@ -185,10 +187,13 @@ async def authenticate_mcp_request(
     # agent-bound. Defense in depth against a stale scope in reused contexts.
     # #1686: the OAuth scopes likewise; only the OAuth2 branch sets them.
     from auth.agent_scope import set_agent_scope
+    from mcp_server.tools._helpers import set_mcp_credential_default_context
 
     set_agent_scope(None)
     _mcp_oauth_scopes.set(None)
     _mcp_connector_credential.set(False)
+    # #2129: only a user API key or an OAuth grant carries one (set below).
+    set_mcp_credential_default_context(None)
 
     # Try session cookie first (Issue #155: Claude Web UI support)
     # Issue #245: context_id is no longer returned from auth (now required in tool args)
@@ -265,6 +270,7 @@ async def authenticate_mcp_request(
                 client_scope_unavailable=grant.client_scope_unavailable,
             )
         )
+        set_mcp_credential_default_context(grant.default_context_id)
         logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
         # Issue #245: context_id is now required in tool args, not from auth
         return (grant.user_id, None, None)
@@ -316,6 +322,13 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         workspace_id = result.workspace_id
         context_id = None  # Issue #245: context_id is now in tool args
         _mcp_connector_credential.set(result.is_connector_key)
+        # #2129: the key's default context, read from the row verify already
+        # loaded. A connector's shared key never carries one: its owner is not
+        # the person on the other end.
+        if not result.is_connector_key:
+            from mcp_server.tools._helpers import set_mcp_credential_default_context
+
+            set_mcp_credential_default_context(result.default_context_id)
         logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
         return (user_id, context_id, workspace_id)
     logger.debug("API key invalid")
@@ -358,8 +371,34 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
                 resource=token.resource,
                 client_scope=client_scope,
                 client_scope_unavailable=client_scope_unavailable,
+                default_context_id=await _grant_default_context(token.user_id, token.client_id, db),
             )
     return None
+
+
+async def _grant_default_context(user_id: str, client_id: str, db: "AsyncSession") -> "UUID | None":
+    """The MCP default context of the user's grant to ``client_id`` (#2129).
+
+    One primary-key lookup of ``oauth_grant_settings``, per request (not
+    cached: a change in Settings applies to the next call). A failed read is
+    "no default" — the token itself verified, and a missing default only
+    means the call needs an explicit ``context_id``.
+    """
+    from sqlalchemy import select
+
+    from models.auth import OAuthGrantSetting
+
+    try:
+        result = await db.execute(
+            select(OAuthGrantSetting.default_context_id).where(
+                OAuthGrantSetting.user_id == user_id,
+                OAuthGrantSetting.client_id == client_id,
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - fail closed to "no default"
+        logger.warning(f"MCP OAuth grant default lookup failed: {type(e).__name__}")
+        return None
+    return result.scalar_one_or_none()
 
 
 async def _registered_client_scope(client_id: str, db: "AsyncSession") -> str | None:

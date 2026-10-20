@@ -7,6 +7,12 @@ tool called without ``context_id`` then runs as if the caller had passed it.
 An agent-bound key whose URL names no context falls back to the agent's
 default (or sole) binding.
 
+#2129: a user API key and an OAuth grant can carry a default of their own
+(``api_keys.default_context_id``, ``oauth_grant_settings``), set in
+Credentials & Integrations or on the consent page. The auth step stores it per
+request (``_helpers.set_mcp_credential_default_context``); it sits below the
+URL and above the agent binding (an agent-bound key never has one).
+
 The default only fills an argument the caller could have sent. The
 dispatcher (``execute_tool_call``) writes it into ``args["context_id"]``
 before the capacity gate, the pre-dispatch check and the handler, so the
@@ -74,7 +80,7 @@ def select_default_context(query_string: bytes | str | None) -> DefaultContextSe
         return DefaultContextSelection("invalid", raw_length=len(value))
 
 
-ContextSource = Literal["url", "binding"]
+ContextSource = Literal["url", "credential", "binding"]
 
 
 @dataclass(frozen=True)
@@ -90,10 +96,13 @@ async def resolve_default_context(
 ) -> DefaultContext | None:
     """The connection default for this request, or ``None``.
 
-    ``url`` → its UUID (no I/O). No ``?context=`` and an agent-bound key →
-    the agent's default binding, or its sole binding (one query). Anything
-    else → no default, and the call fails ``context_id_required`` as before.
-    The caller handles ``invalid`` before asking.
+    ``url`` → its UUID (no I/O). No ``?context=`` and a credential default
+    (a user API key's or the OAuth grant's, #2129) → that UUID (no I/O; the
+    auth step read it). Neither, and an agent-bound key → the agent's default
+    binding, or its sole binding (one query). Anything else → no default, and
+    the call fails ``context_id_required`` as before. The caller handles
+    ``invalid`` before asking; an invalid URL value never falls through to
+    the credential default.
 
     An agent with no binding and one with several but no default are
     indistinguishable here (no existence oracle, RFC-0002 F2), and a database
@@ -103,6 +112,11 @@ async def resolve_default_context(
         return DefaultContext(selection.context_id, "url")
     if selection is not None and selection.mode != "none":
         return None
+    from mcp_server.tools._helpers import get_mcp_credential_default_context
+
+    credential_default = get_mcp_credential_default_context()
+    if credential_default is not None:
+        return DefaultContext(credential_default, "credential")
     from auth.agent_scope import get_agent_scope
 
     scope = get_agent_scope()

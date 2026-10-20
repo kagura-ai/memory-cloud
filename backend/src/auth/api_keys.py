@@ -65,6 +65,10 @@ class VerifiedKey(NamedTuple):
             on a workspace-scoped key). Its owner is not the person on the
             other end of the connector, so the MCP handshake withholds the
             owner's last-used guardrail digest from it.
+        default_context_id: #2129: the key's MCP default context
+            (``api_keys.default_context_id``), read from the same row — no
+            extra query. ``None`` when unset; never set on a public-bound or
+            agent-bound key (CHECK constraints).
     """
 
     id: int
@@ -75,6 +79,7 @@ class VerifiedKey(NamedTuple):
     agent_id: UUID | None = None
     agent_enforcement_mode: str | None = None
     is_connector_key: bool = False
+    default_context_id: UUID | None = None
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
@@ -131,6 +136,7 @@ class APIKeyManager:
         bound_context_id: UUID | None = None,
         auto_hide_minutes: int = 10,
         agent_id: UUID | None = None,
+        default_context_id: UUID | None = None,
     ) -> tuple[str, APIKey]:
         """Create a new API key.
 
@@ -163,6 +169,9 @@ class APIKeyManager:
                 express this cross-table invariant in a CHECK, so it is
                 enforced here and re-asserted defensively at verify. Mutually
                 exclusive with ``bound_context_id``.
+            default_context_id: #2129: the key's MCP default context. Stored
+                as given — the caller checks the user can read it. Mutually
+                exclusive with ``bound_context_id`` and ``agent_id``.
 
         Returns:
             ``(plaintext_key, new_api_key_row)`` — the plaintext is only ever
@@ -179,6 +188,14 @@ class APIKeyManager:
             raise ValueError(
                 "workspace_id and bound_context_id are mutually exclusive — "
                 "a key cannot be both workspace-scoped and public-bound"
+            )
+
+        # #2129: mirrors ck_api_keys_default_not_bound / _not_agent.
+        if default_context_id is not None and (
+            bound_context_id is not None or agent_id is not None
+        ):
+            raise ValueError(
+                "default_context_id cannot be set on a public-bound or agent-bound key"
             )
 
         # Issue #1275: agent-bound mint gates. Fail-closed at mint so an
@@ -283,6 +300,7 @@ class APIKeyManager:
             workspace_id=workspace_id,  # Issue #169
             bound_context_id=bound_context_id,  # Issue #626
             agent_id=agent_id,  # Issue #1275
+            default_context_id=default_context_id,  # Issue #2129
             expires_at=expires_at,
             visibility_expires_at=visibility_expires_at,  # Migration 034
             plaintext_encrypted=plaintext_encrypted,  # Migration 035
@@ -439,6 +457,7 @@ class APIKeyManager:
             agent_id=key_record.agent_id,
             agent_enforcement_mode=agent_enforcement_mode,
             is_connector_key=is_connector_key,
+            default_context_id=key_record.default_context_id,
         )
 
     async def list_keys(

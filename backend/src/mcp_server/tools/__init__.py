@@ -211,7 +211,8 @@ def _with_manual_help(tool_name: str, result: list[TextContent]) -> list[TextCon
 
 _CONTEXT_ID_REQUIRED_HELP = (
     "Pass context_id, or set a default for this connection with ?context=<uuid> on the "
-    "MCP URL. list_contexts() lists the contexts you can access."
+    "MCP URL (or on the API key or app under Credentials & Integrations). "
+    "list_contexts() lists the contexts you can access."
 )
 _URL_CONTEXT_INVALID_MESSAGE = (
     "Invalid context_id format in the MCP URL's ?context= parameter. "
@@ -222,6 +223,10 @@ _DEFAULT_CONTEXT_DENIED_HELP = {
     "url": (
         "The connection default names a context you cannot use; fix ?context= on the "
         "MCP URL or pass context_id explicitly."
+    ),
+    "credential": (
+        "The default context set on this API key or for this app is not readable; clear or "
+        "change it under Credentials & Integrations, or pass context_id explicitly."
     ),
     "binding": (
         "The agent's default binding names a context you cannot use; pass context_id explicitly."
@@ -245,8 +250,9 @@ async def _apply_default_context(
     """Fill a missing ``context_id`` from the connection default (#2125).
 
     Returns ``(args, context_source, refusal)``. Precedence: an explicit
-    ``context_id`` > ``context_ids`` (recall) > ``?context=`` > the agent's
-    default or sole binding (agent-bound keys) > none. The
+    ``context_id`` > ``context_ids`` (recall) > ``?context=`` > the
+    credential's default (a user API key's or the OAuth grant's, #2129) > the
+    agent's default or sole binding (agent-bound keys) > none. The
     default is written into the arguments and nothing else: the capacity
     gate, the pre-dispatch check and the handler's own resolver then see
     exactly what an explicit call would send, so authorization cannot differ.

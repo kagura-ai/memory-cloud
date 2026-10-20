@@ -190,6 +190,8 @@ class TestVerifyOauth2Token:
     async def test_valid_token_returns_the_grant(self):
         """An active token row -> its user_id, scope and resource (audience)."""
         db = AsyncMock()
+        # #2129: the grant's default-context lookup finds no settings row.
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
         row = MagicMock(user_id="oauth-uid", scope="memory:read", resource="https://x/mcp")
         with (
             patch("db.base.get_db", new=_mock_get_db(db)),

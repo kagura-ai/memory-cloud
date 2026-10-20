@@ -36,6 +36,7 @@ def _key_record(**overrides):
         "workspace_id": WORKSPACE_ID,
         "bound_context_id": None,
         "agent_id": AGENT_ID,
+        "default_context_id": None,  # #2129
         "revoked_at": None,
         "expires_at": None,
         "last_used_at": None,
