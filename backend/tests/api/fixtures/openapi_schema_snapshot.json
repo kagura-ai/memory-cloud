@@ -3,6 +3,17 @@
     "schemas": {
       "APIKeyCreate": {
         "properties": {
+          "default_context_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "expires_days": {
             "anyOf": [
               {
@@ -30,6 +41,8 @@
         "properties": {
           "api_key": {},
           "created_at": {},
+          "default_context_id": {},
+          "default_context_name": {},
           "expires_at": {},
           "id": {},
           "key_prefix": {},
@@ -53,6 +66,8 @@
       "APIKeyResponse": {
         "properties": {
           "created_at": {},
+          "default_context_id": {},
+          "default_context_name": {},
           "expires_at": {},
           "id": {},
           "key_prefix": {},
@@ -96,6 +111,25 @@
           "period_end",
           "period_start",
           "total_requests"
+        ],
+        "type": "object"
+      },
+      "APIKeyUpdate": {
+        "properties": {
+          "default_context_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "default_context_id"
         ],
         "type": "object"
       },
@@ -6477,6 +6511,40 @@
           "name",
           "scopes",
           "token_url"
+        ],
+        "type": "object"
+      },
+      "OAuthGrantDefaultContextUpdate": {
+        "properties": {
+          "default_context_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "default_context_id"
+        ],
+        "type": "object"
+      },
+      "OAuthGrantResponse": {
+        "properties": {
+          "client_id": {},
+          "client_name": {},
+          "default_context_id": {},
+          "default_context_name": {},
+          "last_issued_at": {},
+          "scopes": {}
+        },
+        "required": [
+          "client_id",
+          "client_name"
         ],
         "type": "object"
       },
@@ -16688,6 +16756,68 @@
         "tags": [
           "api-keys"
         ]
+      },
+      "patch": {
+        "operationId": "update_api_key_api_v1_config_api_keys__key_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/APIKeyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIKeyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "api-keys"
+        ]
       }
     },
     "/api/v1/config/api-keys/{key_id}/regenerate": {
@@ -21458,6 +21588,160 @@
         "tags": [
           "account-erasure",
           "account-linking"
+        ]
+      }
+    },
+    "/api/v1/me/oauth/grants": {
+      "get": {
+        "operationId": "list_oauth_grants_api_v1_me_oauth_grants_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OAuthGrantResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "me-oauth"
+        ]
+      }
+    },
+    "/api/v1/me/oauth/grants/{client_id}/default-context": {
+      "delete": {
+        "operationId": "clear_oauth_grant_default_context_api_v1_me_oauth_grants__client_id__default_context_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "me-oauth"
+        ]
+      },
+      "put": {
+        "operationId": "set_oauth_grant_default_context_api_v1_me_oauth_grants__client_id__default_context_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthGrantDefaultContextUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthGrantResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "me-oauth"
         ]
       }
     },

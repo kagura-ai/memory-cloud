@@ -4,6 +4,7 @@ Issue #221: Internationalization support for OAuth authorization page.
 Issue #218: Error page messages for invalid redirect_uri pre-check.
 Issue #1686: Error page messages for an authorization request refused before consent.
 Issue #1741: Redirect host notice and loopback-only warning on the consent page.
+Issue #2129: Default-context picker on the consent page.
 Supports English and Japanese.
 """
 
@@ -22,6 +23,12 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "address), so its name has not been verified. Approve only if you "
             "just started this sign-in from an app on this computer, such as "
             "a command-line tool. Otherwise, cancel."
+        ),
+        "default_context_label": "Default context for this app",
+        "default_context_none": "No default",
+        "default_context_hint": (
+            "Tools this app calls without naming a context use this one. "
+            "You can change it later under Credentials & Integrations."
         ),
         "permissions": {
             "read": "Read your memories",
@@ -72,6 +79,12 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "このコンピューター上のアプリ (コマンドラインツールなど) から"
             "今サインインを始めた場合にのみ許可してください。そうでなければ"
             "キャンセルしてください。"
+        ),
+        "default_context_label": "このアプリの既定のコンテキスト",
+        "default_context_none": "既定なし",
+        "default_context_hint": (
+            "このアプリがコンテキストを指定せずに呼び出すツールは、ここで選んだ"
+            "コンテキストを使います。あとから「認証情報・連携」で変更できます。"
         ),
         "permissions": {
             "read": "メモリーの読み取り",

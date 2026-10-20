@@ -97,6 +97,31 @@ h1 {
     font-weight: 700;
     margin-bottom: 4px;
 }
+.default-context {
+    margin-bottom: 24px;
+    font-size: 14px;
+    color: #4a5568;
+}
+.default-context label {
+    display: block;
+    font-weight: 600;
+    color: var(--kagura-ink);
+    margin-bottom: 6px;
+}
+.default-context select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e0;
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+    color: var(--kagura-ink);
+}
+.default-context .hint {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #718096;
+}
 .user-info {
     text-align: center;
     color: #718096;
@@ -241,6 +266,22 @@ button:focus-visible {
 <div>{{ messages.loopback_warning_body }}</div>
 </div>
 {% endif %}
+{% if context_groups %}
+<div class="default-context">
+<label for="default-context">{{ messages.default_context_label }}</label>
+<select id="default-context" name="default_context" form="approve-form">
+<option value=""{% if not selected_default_context %} selected{% endif %}>{{ messages.default_context_none }}</option>
+{% for group in context_groups %}
+<optgroup label="{{ group.workspace }}">
+{% for context in group.contexts %}
+<option value="{{ context.id }}"{% if context.id == selected_default_context %} selected{% endif %}>{{ context.name }}</option>
+{% endfor %}
+</optgroup>
+{% endfor %}
+</select>
+<div class="hint">{{ messages.default_context_hint }}</div>
+</div>
+{% endif %}
 <div class="user-info">
 {{ messages.signing_in_as }} <strong>{{ user_email }}</strong>
 </div>
@@ -249,7 +290,7 @@ button:focus-visible {
 <input type="hidden" name="confirm" value="no">
 <button type="submit" class="deny"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>{{ messages.cancel }}</button>
 </form>
-<form method="POST" action="/api/v1/oauth/authorize?{{ query_string }}">
+<form id="approve-form" method="POST" action="/api/v1/oauth/authorize?{{ query_string }}">
 <input type="hidden" name="confirm" value="yes">
 <button type="submit" class="approve"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M20 6L9 17l-5-5"/></svg>{{ messages.authorize }}</button>
 </form>

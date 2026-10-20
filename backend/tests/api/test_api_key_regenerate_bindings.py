@@ -47,6 +47,7 @@ def _old_key(**over) -> SimpleNamespace:
         "revoked_at": None,
         "agent_id": None,
         "bound_context_id": None,
+        "default_context_id": None,  # #2129
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -63,6 +64,7 @@ def _new_key() -> SimpleNamespace:
         last_used_at=None,
         revoked_at=None,
         expires_at=None,
+        default_context_id=None,  # #2129
     )
 
 

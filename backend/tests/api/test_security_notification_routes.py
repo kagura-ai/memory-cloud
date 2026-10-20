@@ -84,6 +84,7 @@ def _new_key(name: str = "deploy") -> SimpleNamespace:
         expires_at=None,
         visibility_expires_at=utcnow(),
         bound_context_id=None,
+        default_context_id=None,  # #2129
     )
 
 
@@ -151,6 +152,7 @@ class TestApiKeyRoutes:
             revoked_at=None,
             agent_id=None,
             bound_context_id=None,
+            default_context_id=None,  # #2129
         )
         db = MagicMock()
         db.execute = AsyncMock(

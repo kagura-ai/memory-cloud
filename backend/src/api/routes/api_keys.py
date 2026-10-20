@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Literal
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
@@ -21,12 +22,14 @@ from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import APIKey
+from services.credential_default_context import readable_context, readable_context_name
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
 )
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
+from utils.exceptions import BadRequestError, NotFoundException, ValidationError
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
 
@@ -79,6 +82,25 @@ class APIKeyCreate(BaseModel):
         ),
     )
 
+    # #2129: the key's MCP default context. Must be a context the user can
+    # read now; 404 otherwise (uniform, like every context read).
+    default_context_id: UUID | None = Field(
+        None,
+        description=(
+            "MCP default context of the key: a context-scoped tool called without "
+            "context_id runs in it (?context= on the URL wins). Omit for none."
+        ),
+    )
+
+
+class APIKeyUpdate(BaseModel):
+    """Request model for ``PATCH /config/api-keys/{key_id}`` (#2129)."""
+
+    default_context_id: UUID | None = Field(
+        ...,
+        description="The key's MCP default context; null clears it.",
+    )
+
 
 class DailyStats(BaseModel):
     """Daily usage statistics."""
@@ -112,6 +134,16 @@ class APIKeyResponse(TZAwareBaseModel):
     revoked_at: datetime | None = Field(None, description="Revocation timestamp")
     expires_at: datetime | None = Field(None, description="Expiration timestamp")
     status: Literal["active", "revoked", "expired"] = Field(..., description="Current status")
+    default_context_id: UUID | None = Field(
+        None, description="The key's MCP default context (#2129); null when none."
+    )
+    default_context_name: str | None = Field(
+        None,
+        description=(
+            "Name of the default context; null when none is set or the context is "
+            "no longer readable by the key's owner."
+        ),
+    )
 
     model_config = {"from_attributes": True}
 
@@ -152,11 +184,13 @@ def _determine_status(
     return "active"
 
 
-def _format_key_response(key: APIKey) -> APIKeyResponse:
+def _format_key_response(key: APIKey, default_context_name: str | None = None) -> APIKeyResponse:
     """Format APIKey object into APIKeyResponse.
 
     Args:
         key: APIKey ORM object
+        default_context_name: The readable name of ``key.default_context_id``
+            (``_default_context_names``), ``None`` when unset or unreadable.
 
     Returns:
         Formatted APIKeyResponse model
@@ -173,7 +207,32 @@ def _format_key_response(key: APIKey) -> APIKeyResponse:
         revoked_at=key.revoked_at,
         expires_at=key.expires_at,
         status=status,
+        default_context_id=key.default_context_id,
+        default_context_name=default_context_name,
     )
+
+
+async def _default_context_names(
+    db: AsyncSession, user_id: str, keys: list[APIKey]
+) -> dict[int, str | None]:
+    """``{key.id: name}`` for the keys with a default context (#2129).
+
+    Each name is read through the read resolver in the key's own workspace
+    scope, so a default the owner can no longer read shows no name. One read
+    per distinct ``(context, key workspace)`` pair.
+    """
+    seen: dict[tuple[UUID, UUID | None], str | None] = {}
+    names: dict[int, str | None] = {}
+    for key in keys:
+        if key.default_context_id is None:
+            continue
+        pair = (key.default_context_id, key.workspace_id)
+        if pair not in seen:
+            seen[pair] = await readable_context_name(
+                db, user_id=user_id, context_id=pair[0], key_workspace_id=pair[1]
+            )
+        names[key.id] = seen[pair]
+    return names
 
 
 # ============================================================================
@@ -198,7 +257,8 @@ async def list_api_keys(
         keys = await manager.list_keys(
             user_id=user_id,
         )
-        return [_format_key_response(key) for key in keys]
+        names = await _default_context_names(manager.db, user_id, keys)
+        return [_format_key_response(key, names.get(key.id)) for key in keys]
     except Exception as e:
         logger.error(f"Failed to list API keys: {e}")
         raise HTTPException(
@@ -221,8 +281,19 @@ async def create_api_key(
     Issue #1752: the owner is emailed a security notice once the key is
     committed (the key's name only, never its value).
     """
+    user_id = get_user_id(user)
+    # #2129: the default must be readable by the user now. This route mints
+    # global keys (no workspace scope), so membership alone decides.
+    default_context_name: str | None = None
+    if data.default_context_id is not None:
+        context = await readable_context(
+            manager.db, user_id=user_id, context_id=data.default_context_id
+        )
+        if context is None:
+            raise NotFoundException("Context")
+        default_context_name = context.name
+
     try:
-        user_id = get_user_id(user)
         # Issue #246: current_context_id removed
         # current_context_id = user.get("current_context_id")
 
@@ -230,6 +301,7 @@ async def create_api_key(
             name=data.name,
             user_id=user_id,
             expires_days=data.expires_days,
+            default_context_id=data.default_context_id,
         )
         # Commit here rather than in get_db's teardown so the notice is only
         # scheduled for a key that exists.
@@ -242,7 +314,7 @@ async def create_api_key(
             key_name=created_key.name,
         )
 
-        response_data = _format_key_response(created_key)
+        response_data = _format_key_response(created_key, default_context_name)
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=api_key)
 
     except ValueError as e:
@@ -348,6 +420,76 @@ async def revoke_api_key(
         ) from e
 
 
+@router.patch("/{key_id}", response_model=APIKeyResponse)
+async def update_api_key(
+    key_id: APIKeyPublicId,
+    data: APIKeyUpdate,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> APIKeyResponse:
+    """Set or clear the key's MCP default context (#2129).
+
+    The only field this route changes. A context-scoped MCP tool called with
+    this key and without ``context_id`` runs in the default (``?context=``
+    on the URL wins). The context must be readable by the key's owner now,
+    within the key's workspace scope; otherwise 404 ``Context not found``
+    (the same answer for a context that does not exist). Public-bound and
+    agent-bound keys cannot carry one (422): an agent key's default is its
+    agent's default binding.
+
+    Raises:
+        NotFoundException: The key is not the caller's, or the context is not
+            readable (404).
+        BadRequestError: The key is revoked (400).
+        ValidationError: The key is public-bound or agent-bound (422).
+    """
+    user_id = get_user_id(user)
+    target_key = (
+        await db.execute(
+            select(APIKey).where(
+                and_(
+                    APIKey.public_id == key_id,
+                    APIKey.user_id == user_id,  # Security: verify ownership
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if target_key is None:
+        raise NotFoundException("API key")
+    if target_key.revoked_at is not None:
+        raise BadRequestError("Cannot change a revoked key", error_code="KEY-REVOKED")
+    if data.default_context_id is not None and (
+        target_key.bound_context_id is not None or target_key.agent_id is not None
+    ):
+        raise ValidationError(
+            "A public-bound or agent-bound key cannot have a default context; "
+            "an agent key uses its agent's default binding",
+            field="default_context_id",
+        )
+
+    default_context_name: str | None = None
+    if data.default_context_id is not None:
+        context = await readable_context(
+            db,
+            user_id=user_id,
+            context_id=data.default_context_id,
+            key_workspace_id=target_key.workspace_id,
+        )
+        if context is None:
+            raise NotFoundException("Context")
+        default_context_name = context.name
+
+    target_key.default_context_id = data.default_context_id
+    await db.commit()
+    logger.info(
+        "api_key_default_context_changed",
+        public_id=key_id,
+        user_id=user_id,
+        default_context_set=data.default_context_id is not None,
+    )
+    return _format_key_response(target_key, default_context_name)
+
+
 @router.post("/{key_id}/regenerate", response_model=APIKeyCreateResponse)
 async def regenerate_api_key(
     key_id: APIKeyPublicId,
@@ -400,6 +542,8 @@ async def regenerate_api_key(
         key_expires_at = old_key.expires_at
         key_agent_id = old_key.agent_id
         key_bound_context_id = old_key.bound_context_id
+        # #2129: the MCP default is a setting of the key, not of its secret.
+        key_default_context_id = old_key.default_context_id
 
         # Carry the remaining lifetime forward. A key that had no expiry (or
         # whose expiry already passed) leaves expires_days=None so the new key
@@ -431,6 +575,7 @@ async def regenerate_api_key(
             workspace_id=key_workspace_id,
             bound_context_id=key_bound_context_id,
             agent_id=key_agent_id,
+            default_context_id=key_default_context_id,
         )
 
         await db.commit()
@@ -451,7 +596,8 @@ async def regenerate_api_key(
             user_id=user_id,
         )
 
-        response_data = _format_key_response(new_key)
+        names = await _default_context_names(db, user_id, [new_key])
+        response_data = _format_key_response(new_key, names.get(new_key.id))
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=new_api_key)
 
     except ValueError as e:

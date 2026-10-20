@@ -786,6 +786,7 @@ from api.routes import (  # noqa: E402
     mcp,
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
     me_oauth,  # Issue #515: manual IdP refresh endpoint
+    me_oauth_grants,  # Issue #2129: authorized OAuth apps and their default context
     me_terms,  # Issue #1665: terms-of-service re-acceptance
     member_credentials,
     memory,
@@ -825,6 +826,9 @@ app.include_router(me_account.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)
 app.include_router(me_oauth.router, prefix="/api/v1")
+
+# Authorized OAuth apps and their MCP default context (Issue #2129)
+app.include_router(me_oauth_grants.router, prefix="/api/v1")
 
 # Terms-of-service re-acceptance (Issue #1665)
 app.include_router(me_terms.router, prefix="/api/v1")
