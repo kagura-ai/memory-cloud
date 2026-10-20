@@ -1220,8 +1220,9 @@ async def resolve_rollback_boundary(
     switched before that column existed — or never switched by the
     migration — has NULL there, and the search config's ``updated_at`` is
     used instead — which any later search-setting edit moved past the
-    switch — with a ``context_embedding_rollback_boundary_fallback`` warning. Shared by :func:`rollback_context_embedding` and the migration
-    CLI, which prints the boundary before it asks for confirmation.
+    switch — with a ``context_embedding_rollback_boundary_fallback`` warning.
+    Shared by :func:`rollback_context_embedding` and the migration CLI, which
+    prints the boundary before it asks for confirmation.
 
     Raises:
         ValidationError: no explicit ``requeue_since`` and no config row (no
