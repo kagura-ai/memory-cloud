@@ -343,7 +343,8 @@ async def get_workspace_owner_check(
     entitlement read, which 404s on it: the billing service treats a literal
     404 as "this route is not deployed" and then falls back to its own session,
     so an existing-but-deleted workspace must fail closed with ``false``
-    instead. A workspace with no owner pointer also answers ``false``.
+    instead. A workspace with no owner pointer also answers ``false``. A row
+    that is gone entirely (hard-deleted) answers 404 by the agreed contract.
 
     Raises:
         ValidationError: ``workspace_id`` is not a UUID or ``sub`` is blank (422).
@@ -367,7 +368,9 @@ async def get_workspace_owner_check(
 
     owner_user_id, deleted_at = row
     is_owner = deleted_at is None and owner_user_id is not None and owner_user_id == sub
-    # ``sub`` is a user identifier: never logged.
+    # ``sub`` is a user identifier: never written to application logs. (It rides
+    # in the query string by the caller's contract, so a server access log that
+    # records query strings would still see it — that is a deployment setting.)
     logger.debug("internal_billing_owner_check", workspace_id=workspace_id, is_owner=is_owner)
     return WorkspaceOwnerView(workspace_id=workspace_id, sub=sub, is_owner=is_owner)
 

@@ -3,7 +3,8 @@
 ``GET /internal/workspaces/{workspace_id}/owner?sub=...`` — TestClient + mocked
 DB, mirroring ``test_internal_billing_plan.py``. Pins the real service-token
 auth (503/401), input validation (422), 404 only for a missing row, the
-soft-deleted → ``is_owner: false`` rule, and that ``sub`` is never logged.
+soft-deleted → ``is_owner: false`` rule, and that ``sub`` never reaches the
+application logs (a server access log is a deployment setting, out of scope).
 """
 
 from __future__ import annotations
