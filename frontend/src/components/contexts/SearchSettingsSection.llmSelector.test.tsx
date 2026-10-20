@@ -37,6 +37,9 @@ vi.mock("next-intl", () => ({
     t.rich = (k, values) => (values?.link ? values.link(k) : k);
     return t;
   },
+  useFormatter: () => ({
+    list: (items: Iterable<string>) => Array.from(items).join(", "),
+  }),
   useLocale: () => "en",
 }));
 
@@ -205,7 +208,7 @@ describe("LLM selector card — presence", () => {
 describe("LLM selector card — enabling", () => {
   it("asks first, saying what is sent where and that results are cut, and saves on confirm", async () => {
     await renderWith(SELECTOR_OFF);
-    mockGetConfig.mockResolvedValue(SELECTOR_ON);
+    mockUpdateConfig.mockResolvedValue(SELECTOR_ON);
     fireEvent.click(selectorSwitch());
 
     expect(screen.getByText("llmSelector.enableConfirmTitle")).toBeTruthy();
@@ -215,7 +218,7 @@ describe("LLM selector card — enabling", () => {
     expect(mockUpdateConfig).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
     // #2159: one PUT, the stored required fields plus the flag; no bar.
     expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
     expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
@@ -234,10 +237,10 @@ describe("LLM selector card — enabling", () => {
     fireEvent.change(screen.getByLabelText("semanticWeightLabel"), {
       target: { value: "0.8" },
     });
-    mockGetConfig.mockResolvedValue(SELECTOR_ON);
+    mockUpdateConfig.mockResolvedValue(SELECTOR_ON);
     fireEvent.click(selectorSwitch());
     fireEvent.click(screen.getByText("llmSelector.confirmEnable"));
-    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
     expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
     expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
       ...STORED_FIELDS,
@@ -350,7 +353,7 @@ describe("LLM selector card — cap without counts", () => {
 describe("LLM selector card — disabling", () => {
   it("saves at once without a dialog and sends false", async () => {
     await renderWith(SELECTOR_ON);
-    mockGetConfig.mockResolvedValue(SELECTOR_OFF);
+    mockUpdateConfig.mockResolvedValue(SELECTOR_OFF);
     fireEvent.click(selectorSwitch());
     expect(screen.queryByText("llmSelector.enableConfirmTitle")).toBeNull();
     await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));

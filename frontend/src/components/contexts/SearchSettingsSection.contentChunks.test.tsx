@@ -37,6 +37,9 @@ vi.mock("next-intl", () => ({
     t.rich = (k, values) => (values?.link ? values.link(k) : k);
     return t;
   },
+  useFormatter: () => ({
+    list: (items: Iterable<string>) => Array.from(items).join(", "),
+  }),
   useLocale: () => "en",
 }));
 
@@ -206,7 +209,7 @@ describe("content chunk card — presence", () => {
 describe("content chunk card — enabling", () => {
   it("asks first, naming the embedding provider, and saves on confirm", async () => {
     await renderWith(CHUNKS_OFF);
-    mockGetConfig.mockResolvedValue(CHUNKS_ON);
+    mockUpdateConfig.mockResolvedValue(CHUNKS_ON);
     fireEvent.click(chunkSwitch());
 
     expect(screen.getByText("contentChunks.enableConfirmTitle")).toBeTruthy();
@@ -222,7 +225,7 @@ describe("content chunk card — enabling", () => {
     expect(mockUpdateConfig).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
     // #2159: one PUT, the stored required fields plus the flag; no bar.
     expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
     expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
@@ -241,10 +244,10 @@ describe("content chunk card — enabling", () => {
     fireEvent.change(screen.getByLabelText("fetchFactorLabel"), {
       target: { value: "5" },
     });
-    mockGetConfig.mockResolvedValue(CHUNKS_ON);
+    mockUpdateConfig.mockResolvedValue(CHUNKS_ON);
     fireEvent.click(chunkSwitch());
     fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
-    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
     expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
     expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
       ...STORED_FIELDS,
@@ -256,6 +259,28 @@ describe("content chunk card — enabling", () => {
     expect(
       (screen.getByLabelText("fetchFactorLabel") as HTMLInputElement).value,
     ).toBe("5");
+  });
+
+  it("writes back the stored values as they are now, not as first loaded", async () => {
+    await renderWith(CHUNKS_OFF);
+    // Changed elsewhere (another tab, MCP) after this page loaded.
+    mockGetConfig.mockResolvedValue({
+      ...CHUNKS_OFF,
+      semantic_weight: 0.8,
+      bm25_weight: 0.2,
+      use_rerank: true,
+    });
+    mockUpdateConfig.mockResolvedValue(CHUNKS_ON);
+    fireEvent.click(chunkSwitch());
+    fireEvent.click(screen.getByText("contentChunks.confirmEnable"));
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1));
+    expect(mockUpdateConfig.mock.calls[0][1]).toEqual({
+      ...STORED_FIELDS,
+      semantic_weight: 0.8,
+      bm25_weight: 0.2,
+      use_rerank: true,
+      content_chunks_enabled: true,
+    });
   });
 
   it("adds the reranker sentence when reranking is on", async () => {
@@ -289,7 +314,7 @@ describe("content chunk card — enabling", () => {
     );
     expect(chunkSwitch().getAttribute("aria-checked")).toBe("false");
     expect(mockUpdateConfig).not.toHaveBeenCalled();
-    expect(saveBar()).toBeNull()
+    expect(saveBar()).toBeNull();
   });
 
   it("does not send the flag when only another setting changed", async () => {
@@ -371,7 +396,7 @@ describe("content chunk card — enabling", () => {
 describe("content chunk card — disabling", () => {
   it("asks first, saying the chunk vectors are removed, and saves on confirm", async () => {
     await renderWith(CHUNKS_ON);
-    mockGetConfig.mockResolvedValue(CHUNKS_OFF);
+    mockUpdateConfig.mockResolvedValue(CHUNKS_OFF);
     fireEvent.click(chunkSwitch());
     expect(screen.getByText("contentChunks.disableConfirmTitle")).toBeTruthy();
     expect(screen.getByText("contentChunks.disableConfirmBody")).toBeTruthy();
@@ -475,7 +500,7 @@ describe("content chunk card — backfill progress", () => {
 
   it("re-reads the queue after the switch saves", async () => {
     await renderWith(CHUNKS_OFF);
-    mockGetConfig.mockResolvedValue({
+    mockUpdateConfig.mockResolvedValue({
       ...CHUNKS_ON,
       content_chunks_backfill_pending: 7,
     });

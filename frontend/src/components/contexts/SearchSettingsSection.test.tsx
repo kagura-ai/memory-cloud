@@ -53,6 +53,9 @@ vi.mock("next-intl", () => ({
     t.rich = (k, values) => (values?.link ? values.link(k) : k);
     return t;
   },
+  useFormatter: () => ({
+    list: (items: Iterable<string>) => Array.from(items).join(", "),
+  }),
   useLocale: () => "en",
 }));
 
@@ -386,9 +389,7 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
 
     // The notice and its whole explanation survive — only the CTA does not.
     expect(await screen.findByText(NOTICE_TITLE)).toBeInTheDocument();
-    expect(
-      screen.getByText(/^plan\.description\(plan=M,/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/^plan\.description\(plan=M,/)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: NOTICE_CTA }),
     ).not.toBeInTheDocument();
@@ -460,12 +461,8 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     setFree("owner");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
-    expect(
-      await screen.findByText(/^plan\.titleNoTier\(/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/^plan\.descriptionNoTier\(/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/^plan\.titleNoTier\(/)).toBeInTheDocument();
+    expect(screen.getByText(/^plan\.descriptionNoTier\(/)).toBeInTheDocument();
     // No tier is named anywhere in the notice.
     expect(screen.queryByText(/[(,]plan=/)).toBeNull();
     expect(
@@ -608,9 +605,9 @@ describe("SearchSettingsSection reranker — the whole gate truth table (#1645)"
       // The notice only once both inputs have answered and the tier lacks it.
       expect(screen.queryByText(NOTICE_TITLE) !== null).toBe(refused);
       // Its CTA: the owner, on a deployment whose Plan page is known on.
-      expect(
-        screen.queryByRole("button", { name: NOTICE_CTA }) !== null,
-      ).toBe(refused && role === "owner" && i === "on, plan_page on");
+      expect(screen.queryByRole("button", { name: NOTICE_CTA }) !== null).toBe(
+        refused && role === "owner" && i === "on, plan_page on",
+      );
     },
   );
 });
@@ -637,9 +634,9 @@ describe("SearchSettingsSection save bar (#2159)", () => {
     // One badge per dirty card, next to its title.
     const badges = screen.getAllByText("unsavedBadge");
     expect(badges).toHaveLength(2);
-    expect(
-      screen.getByText("hybridSearchWeights").contains(badges[0]),
-    ).toBe(true);
+    expect(screen.getByText("hybridSearchWeights").contains(badges[0])).toBe(
+      true,
+    );
     expect(screen.getByText("rerankerConfig").contains(badges[1])).toBe(true);
 
     // Sticky inside the section, not a viewport-fixed overlay.
@@ -650,9 +647,8 @@ describe("SearchSettingsSection save bar (#2159)", () => {
     expect(el.className).not.toContain("bottom-14");
     // After the last card, so it is also last in the focus order.
     expect(
-      screen
-        .getByText("embeddingConfig")
-        .compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING,
+      screen.getByText("embeddingConfig").compareDocumentPosition(el) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -665,6 +661,26 @@ describe("SearchSettingsSection save bar (#2159)", () => {
     fireEvent.change(input, { target: { value: "3" } });
     expect(bar()).toBeNull();
     expect(screen.queryByText("unsavedBadge")).toBeNull();
+  });
+
+  it("a weight typed back to a stored value with three decimals is not unsaved", async () => {
+    mockGetConfig.mockResolvedValue({
+      context_id: "ctx-1",
+      semantic_weight: 0.333,
+      bm25_weight: 0.667,
+      fetch_factor: 3,
+      use_rerank: false,
+      reranker_provider: "voyage",
+      reranker_model: "rerank-2",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    });
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    const input = await screen.findByLabelText("semanticWeightLabel");
+    fireEvent.change(input, { target: { value: "0.5" } });
+    expect(bar()).not.toBeNull();
+    fireEvent.change(input, { target: { value: "0.333" } });
+    expect(bar()).toBeNull();
   });
 
   it("discard re-reads the config and drops the staged edits", async () => {

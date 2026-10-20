@@ -12,7 +12,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useLocale, useTranslations } from "next-intl";
+import { useFormatter, useTranslations } from "next-intl";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -136,7 +136,7 @@ export function SearchSettingsSection({
 }: SearchSettingsSectionProps) {
   const t = useTranslations("searchSettings");
   const tCommon = useTranslations("common");
-  const locale = useLocale();
+  const format = useFormatter();
 
   const [config, setConfig] = useState<ContextSearchConfig | null>(null);
   const [editedConfig, setEditedConfig] = useState<StagedEdits>({});
@@ -186,13 +186,21 @@ export function SearchSettingsSection({
   const rerank = useFeatureGate("reranking");
   const rerankingDisabledByDeployment = rerank.state === "deployment";
   // #2159: only a value that differs from the stored one is unsaved, so
-  // typing a field back to its saved value clears the bar.
-  const dirtyFields: StagedField[] = config
-    ? STAGED_FIELDS.filter(
-        (key) =>
-          editedConfig[key] !== undefined && editedConfig[key] !== config[key],
-      )
-    : [];
+  // typing a field back to its saved value clears the bar. Numbers compare
+  // with a tolerance, and the BM25 weight follows the semantic weight it is
+  // derived from (it is rounded to two places, a stored 0.667 is not).
+  const differs = (key: StagedField): boolean => {
+    if (!config) return false;
+    const edited = editedConfig[key];
+    if (edited === undefined) return false;
+    const stored = config[key];
+    return typeof edited === "number" && typeof stored === "number"
+      ? Math.abs(edited - stored) > 1e-6
+      : edited !== stored;
+  };
+  const dirtyFields: StagedField[] = STAGED_FIELDS.filter((key) =>
+    key === "bm25_weight" ? differs("semantic_weight") : differs(key),
+  );
   const isDirty = dirtyFields.length > 0;
 
   const providerLabel = (provider: string) =>
@@ -304,7 +312,16 @@ export function SearchSettingsSection({
     } finally {
       setSaving(false);
     }
-  }, [contextId, config, isDirty, editedConfig, t, tCommon, toast, refreshConfig]);
+  }, [
+    contextId,
+    config,
+    isDirty,
+    editedConfig,
+    t,
+    tCommon,
+    toast,
+    refreshConfig,
+  ]);
 
   /**
    * #2159: a confirmed switch change is saved at once, on its own.
@@ -313,23 +330,28 @@ export function SearchSettingsSection({
    * at their STORED values from `config` — never the staged edits, which
    * would otherwise be saved by a click that did not ask for it — plus the
    * one changed flag. Sending a stored value is a no-op on the server. The
-   * staged edits stay staged; the config is re-read so the card shows the
-   * saved flag and its `*_effective`.
+   * staged edits stay staged.
    */
   const saveToggle = async (field: ToggleField, value: boolean) => {
     if (!contextId || !config) return;
     setPendingToggle({ field, value });
     try {
+      // Read the stored values right before writing them back, so a change
+      // made elsewhere since this page loaded (another tab, MCP) is not
+      // undone by this click.
+      const stored = await getContextSearchConfig(contextId);
       const body: ContextSearchConfigUpdate = {
-        semantic_weight: config.semantic_weight,
-        bm25_weight: config.bm25_weight,
-        fetch_factor: config.fetch_factor,
-        use_rerank: config.use_rerank,
-        reranker_provider: config.reranker_provider,
-        reranker_model: config.reranker_model,
+        semantic_weight: stored.semantic_weight,
+        bm25_weight: stored.bm25_weight,
+        fetch_factor: stored.fetch_factor,
+        use_rerank: stored.use_rerank,
+        reranker_provider: stored.reranker_provider,
+        reranker_model: stored.reranker_model,
         [field]: value,
       };
-      await updateContextSearchConfig(contextId, body);
+      // The PUT answers with the whole config (effective state, backfill
+      // queue), so the card shows the saved state without another read.
+      setConfig(await updateContextSearchConfig(contextId, body));
       toast({ title: tCommon("success"), description: t("configSaved") });
     } catch (err: unknown) {
       toast({
@@ -337,15 +359,14 @@ export function SearchSettingsSection({
         description: err instanceof Error ? err.message : t("errorSave"),
         variant: "destructive",
       });
-    }
-    // Re-read either way: after a save for the effective state and the
-    // backfill queue, after a refusal (403 FEAT-001 plan / 429 QUOTA-001 cap
-    // / 403 AUTH-101 role) for the reason the card shows. The staged edits
-    // are kept.
-    try {
-      setConfig(await getContextSearchConfig(contextId));
-    } catch {
-      // Silent: the stored flag still shows; a failed save was toasted above.
+      // Re-read for the reason the card shows after a refusal (403 FEAT-001
+      // plan / 429 QUOTA-001 cap / 403 AUTH-101 role). The staged edits are
+      // kept.
+      try {
+        setConfig(await getContextSearchConfig(contextId));
+      } catch {
+        // Silent: the stored flag still shows; the failure was toasted above.
+      }
     } finally {
       setPendingToggle(null);
     }
@@ -1225,10 +1246,10 @@ export function SearchSettingsSection({
                 {cannotSave
                   ? t("providerUnavailableCannotSave")
                   : t("unsavedFields", {
-                      fields: new Intl.ListFormat(locale, {
+                      fields: format.list(dirtyNames, {
                         style: "short",
                         type: "unit",
-                      }).format(dirtyNames),
+                      }),
                     })}
               </p>
               <div className="flex items-center gap-2">
@@ -1236,7 +1257,7 @@ export function SearchSettingsSection({
                   variant="outline"
                   size="sm"
                   onClick={refreshConfig}
-                  disabled={saving}
+                  disabled={saving || toggleSaving}
                 >
                   {t("discardChanges")}
                 </Button>
@@ -1328,7 +1349,6 @@ export function SearchSettingsSection({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
     </>
   );
 }
