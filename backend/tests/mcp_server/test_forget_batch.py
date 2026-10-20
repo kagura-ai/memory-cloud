@@ -301,6 +301,17 @@ async def test_budget_spent_marks_the_remaining_ids_not_attempted():
 
 
 @pytest.mark.asyncio
+async def test_an_id_is_not_started_on_a_sliver_of_the_budget():
+    """Too little left to finish: untried, rather than cancelled mid-forget."""
+    a, b = uuid4(), uuid4()
+    with _budget(15), _clock(0, 1, 14.5):
+        body, service, _ = await _call({"memory_ids": [str(a), str(b)]}, _forgetter({a: 1, b: 1}))
+    assert [r["status"] for r in body["results"]] == ["deleted", "error"]
+    assert body["results"][1]["error"] == "not_attempted"
+    assert service.forget.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_each_wait_is_bounded_by_the_remaining_budget():
     from mcp_server.tools import memory
 

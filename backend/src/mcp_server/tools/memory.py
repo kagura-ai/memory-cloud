@@ -1550,6 +1550,11 @@ _FORGET_NOT_ATTEMPTED_SESSION = (
 _FORGET_NOT_ATTEMPTED_BUDGET = (
     "Not attempted: the call's time budget was spent on earlier ids. Retry it in a new call."
 )
+# The least of the budget an id must still have to be tried: an id started
+# with a sliver left would be cancelled mid-forget, after its search point is
+# removed but before its commit. A tenth of the budget, at most 1 s.
+_FORGET_MIN_SLICE_FRACTION = 0.1
+_FORGET_MIN_SLICE_MAX = 1.0
 # The batch deadline's clock. Tests patch this alias, never ``time.monotonic``
 # itself (the event loop reads that).
 _monotonic = time.monotonic
@@ -1666,7 +1671,8 @@ async def _handle_forget_many(
     #2191: the call has one time budget, the ``forget`` timeout
     (``MCP_TIMEOUT_FORGET``), measured on a monotonic clock from just before
     the first id. Each id waits at most what is left of it, and once it is
-    spent every remaining id is ``not_attempted`` without being tried, so the
+    spent — or too little is left for an id to finish (``min_slice``) — every
+    remaining id is ``not_attempted`` without being tried, so the
     loop never outlasts one ``forget`` timeout however many ids stall (the
     usage row, touch and commit after it are the single form's own tail).
     An id cancelled at the deadline takes the ordinary exception path: rolled
@@ -1717,7 +1723,9 @@ async def _handle_forget_many(
             results: list[dict[str, Any]] = []
             session_ok = True
             budget_left = True
-            deadline = _monotonic() + get_tool_timeout("forget")
+            budget = get_tool_timeout("forget")
+            min_slice = min(_FORGET_MIN_SLICE_MAX, budget * _FORGET_MIN_SLICE_FRACTION)
+            deadline = _monotonic() + budget
             for memory_uuid in memory_ids:
                 if not session_ok:
                     results.append(
@@ -1725,7 +1733,7 @@ async def _handle_forget_many(
                     )
                     continue
                 remaining = deadline - _monotonic() if budget_left else 0.0
-                if remaining <= 0:
+                if remaining < min_slice:
                     budget_left = False
                     results.append(_forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_BUDGET))
                     continue
