@@ -474,12 +474,19 @@ async def type_changes_above(
 ) -> list[tuple[int, str | None]]:
     """The ``updated`` events from ``lowest_version`` up that name ``type`` (#2169).
 
-    Each pair is the event's version and the type the memory had just below
-    it — ``prior.type``, or None where erasure marked the type unavailable
-    (never today: erasure marks only ``details``). Only the type is
-    projected, never another overwritten value. An index range read on
-    ``idx_memory_revisions_memory``; type changes are rare, so it is
-    normally empty.
+    Only the type is projected, never another overwritten value. An index
+    range read on ``idx_memory_revisions_memory``; type changes are rare, so
+    it is normally empty.
+
+    Args:
+        db: The read's session.
+        memory_id: The memory whose log is read.
+        lowest_version: The lowest event version to read.
+
+    Returns:
+        ``(version, type)`` per event: the type the memory had just below the
+        event — ``prior.type``, or None where erasure marked the type
+        unavailable (never today: erasure marks only ``details``).
     """
     prior = MemoryRevision.prior
     result = await db.execute(

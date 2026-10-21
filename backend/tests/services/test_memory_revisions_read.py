@@ -866,6 +866,26 @@ class TestListRevisionsBindingFilter:
         assert [r.changed_fields for r in page.revisions] == [["summary"], [], []]
         assert _gated_types(perm) == ["note"]
 
+    @pytest.mark.asyncio
+    async def test_a_type_change_newer_than_the_live_row_read_is_not_typed_with_it(
+        self,
+    ) -> None:
+        # The live row was read at version 3 ("note"); a concurrent edit then
+        # made it a "decision" (event 4, prior type "note") before the page was
+        # read. The live type read is stale for version 4, so event 4 cannot be
+        # judged and names no field; the older events keep the usual rule.
+        memory, service, perm = _type_changed_list_service({"note"})
+        rows = [
+            _log_row(id=13, version=4, prior={"type": "note"}),
+            *TYPE_CHANGED_PAGE,
+        ]
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, _ = await _type_filtered_list(
+                service, memory, rows=rows, changes=[(4, "note"), (2, "decision")]
+            )
+        assert [r.changed_fields for r in page.revisions] == [[], ["summary"], [], []]
+        assert _gated_types(perm) == ["note", "decision"]
+
 
 class TestListRevisionsRealBindingGate:
     """#2169 through the real PermissionService and AgentBindingService, as

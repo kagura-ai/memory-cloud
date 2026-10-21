@@ -2917,7 +2917,11 @@ class MemoryService:
         changes = await type_changes_above(self.db, memory.id, min(edits))
         if not changes:
             return set()
-        types = types_at_versions(memory.type, changes, {v for k in edits for v in (k - 1, k)})
+        # A type change above the version read means the live row changed
+        # after it was read: from the newest such change up the type is
+        # unknown, so those versions read as unavailable (denied).
+        live_type = None if any(v > memory.version for v, _ in changes) else memory.type
+        types = types_at_versions(live_type, changes, {v for k in edits for v in (k - 1, k)})
         verdicts: dict[str | None, bool] = {memory.type: True, None: False}
 
         async def readable(memory_type: str | None) -> bool:
