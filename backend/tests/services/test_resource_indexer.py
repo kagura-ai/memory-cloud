@@ -1111,6 +1111,10 @@ class TestBuildResourcePointRowMetadata:
         assert point.payload["context_summary"] == "edited"
         assert point.payload["location"] == {"lat": 1.5, "lon": 2.5}
 
+    def test_context_summary_is_normalized_like_the_memory_point(self):
+        point, _, _ = _point(context_summary="ｶﾀｶﾅ ①")
+        assert point.payload["context_summary"] == "カタカナ 1"
+
     def test_no_metadata_keeps_the_create_shape(self):
         point, _, _ = _point()
         assert not {"tags", "type", "context_summary", "location"} & set(point.payload)

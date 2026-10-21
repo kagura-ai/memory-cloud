@@ -47,6 +47,7 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_resource_sparse_vector
+from utils.text import normalize_for_search
 
 logger = get_logger(__name__)
 
@@ -428,7 +429,10 @@ def build_resource_point(
     if memory_type is not None:
         row_metadata["type"] = memory_type
     if context_summary is not None:
-        row_metadata["context_summary"] = context_summary
+        # Normalized like every other writer of this payload key (the memory
+        # point build and the metadata patch), so its form never depends on
+        # which path wrote the point last.
+        row_metadata["context_summary"] = normalize_for_search(context_summary)
     if location is not None:
         row_metadata["location"] = dict(location)
 
