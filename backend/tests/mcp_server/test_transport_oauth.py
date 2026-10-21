@@ -137,7 +137,8 @@ class _Sessions:
 @pytest.fixture
 def app(monkeypatch):
     """``mcp_asgi_app`` whose Bearer token resolves to ``app.grant`` (an OAuth
-    grant) or, when ``app.api_key`` is set, to an API key."""
+    grant) or, when ``app.api_key`` is set, to an API key — a ``kagura_`` token
+    then, since each token shape is looked up in its own store (#1994)."""
     state = SimpleNamespace(
         grant=OAuthGrant("user-1", "memory:read memory:write", f"{ORIGIN}/mcp"),
         api_key=False,
@@ -171,9 +172,11 @@ def app(monkeypatch):
         headers: dict[bytes, bytes] | None = None,
         path: str = "/mcp/",
         method: str = "POST",
-        token: str | None = "opaque-oauth-token",
+        token: str | None = "",
         scope_extra: dict | None = None,
     ) -> _Recorder:
+        if token == "":  # default: the token shape of the credential the state names
+            token = "kagura_test-api-key" if state.api_key else "opaque-oauth-token"
         request_headers = dict(headers or {})
         if token is not None:
             request_headers[b"authorization"] = f"Bearer {token}".encode()
@@ -310,6 +313,43 @@ async def test_an_unknown_expired_or_revoked_token_is_invalid_token(app):
 
 
 @pytest.mark.asyncio
+async def test_a_miss_in_either_credential_store_is_the_same_401_on_the_wire(app):
+    """#1994: an unknown ``kagura_`` key and an unknown OAuth token are each
+    looked up in their own store only, and answer byte-identically."""
+    app.grant = None
+    app.api_key = False
+    key_miss = await app.call(_rpc("initialize"), token="kagura_unknown-api-key")
+    oauth_miss = await app.call(_rpc("initialize"), token="unknown-oauth-token")
+
+    assert key_miss.status == oauth_miss.status == 401
+    assert key_miss.headers == oauth_miss.headers
+    assert key_miss.body == oauth_miss.body
+    assert key_miss.challenge["error"] == "invalid_token"
+    assert key_miss.body["error_description"] == "Invalid or expired Bearer token"
+
+
+@pytest.mark.asyncio
+async def test_each_token_shape_is_looked_up_in_one_store_on_the_wire(app, monkeypatch):
+    """#1994: an OAuth request never touches the API-key store and vice versa."""
+    looked_up: list[tuple[str, str]] = []
+
+    async def verify_api_key(token):
+        looked_up.append(("api_key", token))
+        return ("user-1", None, None)
+
+    async def verify_oauth2_token(token):
+        looked_up.append(("oauth", token))
+        return app.grant
+
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", verify_api_key)
+    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", verify_oauth2_token)
+
+    assert (await app.call(_rpc("initialize"), token="opaque-oauth-token")).status == 200
+    assert (await app.call(_rpc("initialize"), token="kagura_api-key")).status == 200
+    assert looked_up == [("oauth", "opaque-oauth-token"), ("api_key", "kagura_api-key")]
+
+
+@pytest.mark.asyncio
 async def test_a_malformed_authorization_header_stays_invalid_request(app):
     send = await app.call(_rpc("initialize"), headers={b"authorization": b"Basic abc"}, token=None)
 
@@ -364,6 +404,7 @@ async def test_the_bearer_scheme_is_case_insensitive_and_whitespace_is_trimmed(m
         ("bearer \t ", "empty"),
         ("Bearer to k", "whitespace"),
         ("Bearer tok extra", "whitespace"),
+        ("Bearer kagura_key extra", "whitespace"),
     ],
 )
 async def test_an_empty_or_split_bearer_token_is_malformed(monkeypatch, header, reason):

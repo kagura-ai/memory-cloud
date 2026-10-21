@@ -11,7 +11,8 @@ Every reachable branch is targeted deliberately:
 - non-``Bearer`` header -> AuthenticationError
 - API-key success / None / internal-exception (graceful None)
 - OAuth2 success / None
-- both verifiers fail -> AuthenticationError
+- routing by token shape (#1994): ``kagura_*`` -> API-key store only,
+  anything else -> OAuth store only; a miss in either is the same 401
 - cookie parsing edge cases (no cookie, bad data, missing/non-str user_id,
   UnicodeDecodeError, generic exception, "sub" fallback).
 
@@ -41,7 +42,7 @@ from mcp_server.auth import (
     _verify_session_cookie,
     authenticate_mcp_request,
 )
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, InvalidTokenError
 
 # The session cookie name the module looks for. Built by concatenation so the
 # test source contains no long opaque-token-looking literal.
@@ -119,7 +120,7 @@ class TestAuthenticateMcpRequestApiKey:
             "auth.dependencies.verify_api_key",
             new=AsyncMock(return_value=_verified_key("u-1", ws)),
         ):
-            result = await authenticate_mcp_request("Bearer key_validkey")
+            result = await authenticate_mcp_request("Bearer kagura_validkey")
         assert result == ("u-1", None, ws)
 
     async def test_api_key_success_bytes_header(self):
@@ -128,24 +129,27 @@ class TestAuthenticateMcpRequestApiKey:
             "auth.dependencies.verify_api_key",
             new=AsyncMock(return_value=_verified_key("u-bytes", None)),
         ):
-            result = await authenticate_mcp_request(b"Bearer key_bytes")
+            result = await authenticate_mcp_request(b"Bearer kagura_bytes")
         assert result == ("u-bytes", None, None)
 
-    async def test_invalid_key_falls_to_oauth_then_fails(self):
-        """API key None AND OAuth None -> AuthenticationError (invalid/expired)."""
+    async def test_an_invalid_kagura_key_is_401_without_an_oauth_lookup(self):
+        """#1994: a ``kagura_`` key the key store does not know -> InvalidTokenError;
+        the OAuth store is never consulted."""
+        oauth = AsyncMock(return_value=None)
         with (
             patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=None)),
-            patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=None)),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
         ):
-            with pytest.raises(AuthenticationError, match="Invalid or expired"):
-                await authenticate_mcp_request("Bearer key_bogus")
+            with pytest.raises(InvalidTokenError, match="Invalid or expired"):
+                await authenticate_mcp_request("Bearer kagura_bogus")
+        oauth.assert_not_awaited()
 
 
 class TestAuthenticateMcpRequestOAuth2:
-    """OAuth2 Bearer token branch (key verification returns None first)."""
+    """OAuth2 Bearer token branch: any token without the ``kagura_`` prefix."""
 
     async def test_oauth2_success_returns_user_only(self):
-        """API key None, OAuth valid -> (user_id, None, None)."""
+        """OAuth valid -> (user_id, None, None)."""
         with (
             patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=None)),
             patch(
@@ -155,6 +159,152 @@ class TestAuthenticateMcpRequestOAuth2:
         ):
             result = await authenticate_mcp_request("Bearer opaque_oauth_token")
         assert result == ("oauth-user", None, None)
+
+
+_OAUTH_TOKEN = "Zx9" + "opaque-oauth-access-token"
+_KAGURA_KEY = "kagura_" + "plain-api-key-body"
+_GRANT = OAuthGrant("oauth-user", "memory:read memory:write", None)
+
+
+class TestBearerTokenRouting:
+    """#1994: each Bearer token is looked up in the one store its shape names.
+
+    ``kagura_*`` -> the API-key store only; anything else -> the OAuth token
+    store only (``auth.oauth2_bearer.is_oauth_bearer_token``, as on REST). A
+    miss in either store is the same 401.
+    """
+
+    async def test_an_oauth_token_never_reaches_the_api_key_store(self):
+        api_key = AsyncMock(return_value=("key-user", None, None))
+        oauth = AsyncMock(return_value=_GRANT)
+        with (
+            patch("mcp_server.auth._verify_api_key", new=api_key),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
+        ):
+            result = await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}")
+        assert result == ("oauth-user", None, None)
+        api_key.assert_not_awaited()
+        oauth.assert_awaited_once_with(_OAUTH_TOKEN)
+
+    async def test_an_unknown_oauth_token_is_401_without_an_api_key_lookup(self):
+        api_key = AsyncMock(return_value=("key-user", None, None))
+        oauth = AsyncMock(return_value=None)
+        with (
+            patch("mcp_server.auth._verify_api_key", new=api_key),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
+        ):
+            with pytest.raises(InvalidTokenError, match="Invalid or expired Bearer token"):
+                await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}")
+        api_key.assert_not_awaited()
+        oauth.assert_awaited_once_with(_OAUTH_TOKEN)
+
+    async def test_a_kagura_key_never_reaches_the_oauth_store(self):
+        from mcp_server.auth import get_mcp_connector_credential
+        from mcp_server.tools._helpers import get_mcp_credential_default_context
+
+        default_ctx = uuid4()
+        key = VerifiedKey(
+            id=1,
+            user_id="key-user",
+            workspace_id=None,
+            bound_context_id=None,
+            default_context_id=default_ctx,
+        )
+        oauth = AsyncMock(return_value=_GRANT)
+        with (
+            patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=key)),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
+        ):
+            result = await authenticate_mcp_request(f"Bearer {_KAGURA_KEY}")
+        assert result == ("key-user", None, None)
+        assert get_mcp_connector_credential() is False
+        assert get_mcp_credential_default_context() == default_ctx
+        oauth.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            _KAGURA_KEY,
+            # Share keys and resource tokens carry the kagura_ prefix too: they
+            # stay on the API-key side, where they are structurally unknown.
+            "kagura_sk_" + "share-key-body",
+            "kagura_resource_" + "resource-token-body",
+        ],
+    )
+    async def test_an_unknown_kagura_shaped_token_is_401_without_an_oauth_lookup(self, token):
+        verify = AsyncMock(return_value=None)
+        oauth = AsyncMock(return_value=_GRANT)
+        with (
+            patch("auth.dependencies.verify_api_key", new=verify),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
+        ):
+            with pytest.raises(InvalidTokenError, match="Invalid or expired Bearer token"):
+                await authenticate_mcp_request(f"Bearer {token}")
+        verify.assert_awaited_once_with(token)
+        oauth.assert_not_awaited()
+
+    async def test_a_miss_in_either_store_is_the_same_error(self):
+        with (
+            patch("mcp_server.auth._verify_api_key", new=AsyncMock(return_value=None)),
+            patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=None)),
+        ):
+            with pytest.raises(InvalidTokenError) as key_miss:
+                await authenticate_mcp_request(f"Bearer {_KAGURA_KEY}")
+            with pytest.raises(InvalidTokenError) as oauth_miss:
+                await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}")
+        assert type(key_miss.value) is type(oauth_miss.value)
+        assert str(key_miss.value) == str(oauth_miss.value)
+        assert key_miss.value.error_code == oauth_miss.value.error_code
+
+    async def test_a_failing_api_key_store_does_not_affect_an_oauth_token(self):
+        """#1742 / #1994: the other store's pool timeout cannot 503 the request."""
+        with (
+            patch("mcp_server.auth._verify_api_key", new=AsyncMock(side_effect=TimeoutError())),
+            patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=_GRANT)),
+        ):
+            assert await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}") == (
+                "oauth-user",
+                None,
+                None,
+            )
+
+    async def test_a_failing_oauth_store_does_not_affect_a_kagura_key(self):
+        with (
+            patch(
+                "mcp_server.auth._verify_api_key",
+                new=AsyncMock(return_value=("key-user", None, None)),
+            ),
+            patch(
+                "mcp_server.auth._verify_oauth2_token",
+                new=AsyncMock(side_effect=TimeoutError()),
+            ),
+        ):
+            assert await authenticate_mcp_request(f"Bearer {_KAGURA_KEY}") == (
+                "key-user",
+                None,
+                None,
+            )
+
+    async def test_a_failing_lookup_in_the_named_store_still_raises(self):
+        """#1742 is unchanged: the store the token names failing is a 503, not a 401."""
+        with (
+            patch("mcp_server.auth._verify_api_key", new=AsyncMock(side_effect=TimeoutError())),
+            patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=_GRANT)),
+        ):
+            with pytest.raises(TimeoutError):
+                await authenticate_mcp_request(f"Bearer {_KAGURA_KEY}")
+        with (
+            patch(
+                "mcp_server.auth._verify_api_key",
+                new=AsyncMock(return_value=("key-user", None, None)),
+            ),
+            patch(
+                "mcp_server.auth._verify_oauth2_token",
+                new=AsyncMock(side_effect=TimeoutError()),
+            ),
+        ):
+            with pytest.raises(TimeoutError):
+                await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}")
 
 
 class TestVerifyApiKey:
@@ -315,7 +465,7 @@ class TestConnectorCredentialFlag:
             id=1, user_id="u-c", workspace_id=ws, bound_context_id=None, is_connector_key=True
         )
         with patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=key)):
-            assert await authenticate_mcp_request("Bearer key_connector") == ("u-c", None, ws)
+            assert await authenticate_mcp_request("Bearer kagura_connector") == ("u-c", None, ws)
         assert get_mcp_connector_credential() is True
 
     async def test_an_ordinary_key_and_a_session_cookie_reset_the_flag(self):
@@ -326,7 +476,7 @@ class TestConnectorCredentialFlag:
             "auth.dependencies.verify_api_key",
             new=AsyncMock(return_value=_verified_key("u-1", None)),
         ):
-            await authenticate_mcp_request("Bearer key_plain")
+            await authenticate_mcp_request("Bearer kagura_plain")
         assert get_mcp_connector_credential() is False
 
         set_mcp_connector_credential(True)

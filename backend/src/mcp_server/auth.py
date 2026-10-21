@@ -5,6 +5,10 @@ Provides unified authentication for MCP over HTTP/SSE:
 - API Key Bearer tokens (from Claude Code, etc.)
 - Session cookies (from Web UI)
 
+A Bearer token is looked up in the one credential store its shape names
+(#1994, as REST does): a ``kagura_`` token in ``api_keys``, any other in
+``oauth_tokens`` (``auth.oauth2_bearer.is_oauth_bearer_token``).
+
 Authentication is always required. No anonymous access is allowed.
 
 OAuth2 access tokens (#1686): a token bound to an RFC 8707 resource must be
@@ -154,10 +158,14 @@ async def authenticate_mcp_request(
     2. OAuth2 Bearer tokens
     3. Session cookies (OAuth2 Web login)
 
-    Authentication Priority:
-        1. API Key Bearer token (from api_keys table) - returns context_id/workspace_id if scoped
-        2. OAuth2 Bearer token (from oauth_tokens table) - returns None for context_id/workspace_id
-        3. Session cookie (from Redis) - returns user's current context_id
+    Credential selection:
+        - Session cookie (from Redis): only when there is no Authorization header
+        - Bearer token, by shape (#1994, the same rule as REST): a ``kagura_``
+          token is looked up in the api_keys table only (returns workspace_id
+          if scoped), any other token in the oauth_tokens table only (returns
+          None for context_id/workspace_id). No fallthrough either way: a miss
+          in either store is the same ``InvalidTokenError``, and a failed
+          lookup in one store never affects a token of the other shape.
 
     Args:
         authorization_header: Authorization header value (e.g., "Bearer xyz...")
@@ -187,6 +195,7 @@ async def authenticate_mcp_request(
     # agent-bound. Defense in depth against a stale scope in reused contexts.
     # #1686: the OAuth scopes likewise; only the OAuth2 branch sets them.
     from auth.agent_scope import set_agent_scope
+    from auth.oauth2_bearer import is_oauth_bearer_token
     from mcp_server.tools._helpers import set_mcp_credential_default_context
 
     set_agent_scope(None)
@@ -236,46 +245,48 @@ async def authenticate_mcp_request(
     # logged token[:20], leaking ~13 chars of entropy past the kagura_ prefix.
     logger.debug(f"MCP auth attempt: token={token[:8]}...")
 
-    # Try API Key authentication
-    result = await _verify_api_key(token)
-    if result:
-        user_id, context_id, workspace_id = result
-        logger.debug(
-            "MCP auth success: method=api_key, user=%s, context=%s, workspace=%s",
-            user_id,
-            context_id,
-            workspace_id,
-        )
-        return result
+    # #1994: look the token up in the one store its shape names — never both.
+    if is_oauth_bearer_token(token):
+        # OAuth2 access token (Issue #33)
+        grant = await _verify_oauth2_token(token)
+        if grant:
+            # #1686: RFC 8707 audience — any form of this server's MCP resource
+            # (``/mcp``, ``/mcp/w/<id>``, default port, host case; query ignored).
+            # A token issued without ``resource`` carries no audience and is accepted.
+            if grant.resource and not is_same_mcp_resource(grant.resource):
+                logger.warning(
+                    f"MCP auth failed: method=oauth2, audience {grant.resource[:200]!r} "
+                    f"is not this server's MCP resource, token={token[:8]}..."
+                )
+                raise InvalidTokenError(
+                    "The access token was issued for a different resource. "
+                    "Re-authorize this server to get a token for it."
+                )
+            _mcp_oauth_scopes.set(
+                granted_scopes(
+                    grant.scope,
+                    grant.client_scope,
+                    client_scope_unavailable=grant.client_scope_unavailable,
+                )
+            )
+            set_mcp_credential_default_context(grant.default_context_id)
+            logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
+            # Issue #245: context_id is now required in tool args, not from auth
+            return (grant.user_id, None, None)
+    else:
+        # API key (``kagura_`` prefix)
+        result = await _verify_api_key(token)
+        if result:
+            user_id, context_id, workspace_id = result
+            logger.debug(
+                "MCP auth success: method=api_key, user=%s, context=%s, workspace=%s",
+                user_id,
+                context_id,
+                workspace_id,
+            )
+            return result
 
-    # Try OAuth2 token verification (Issue #33)
-    grant = await _verify_oauth2_token(token)
-    if grant:
-        # #1686: RFC 8707 audience — any form of this server's MCP resource
-        # (``/mcp``, ``/mcp/w/<id>``, default port, host case; query ignored).
-        # A token issued without ``resource`` carries no audience and is accepted.
-        if grant.resource and not is_same_mcp_resource(grant.resource):
-            logger.warning(
-                f"MCP auth failed: method=oauth2, audience {grant.resource[:200]!r} "
-                f"is not this server's MCP resource, token={token[:8]}..."
-            )
-            raise InvalidTokenError(
-                "The access token was issued for a different resource. "
-                "Re-authorize this server to get a token for it."
-            )
-        _mcp_oauth_scopes.set(
-            granted_scopes(
-                grant.scope,
-                grant.client_scope,
-                client_scope_unavailable=grant.client_scope_unavailable,
-            )
-        )
-        set_mcp_credential_default_context(grant.default_context_id)
-        logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
-        # Issue #245: context_id is now required in tool args, not from auth
-        return (grant.user_id, None, None)
-
-    # Authentication failed
+    # Authentication failed: one message for a miss in either store (#1994)
     logger.warning(f"MCP auth failed: token={token[:8]}...")
     raise InvalidTokenError("Invalid or expired Bearer token")
 
@@ -340,7 +351,8 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
 
     Uses the verifier REST shares (``auth.oauth2_bearer``), reading the
     token's scope and RFC 8707 ``resource`` as well: the caller checks the
-    audience and records the scopes for the ``tools/call`` scope check. MCP's
+    audience and records the scopes for the ``tools/call`` scope check. Only
+    called for a token without the ``kagura_`` prefix (#1994). MCP's
     transport entry point has no FastAPI-injected session, so this shim opens
     its own short-lived async session — symmetric with ``_verify_api_key``
     above, which also calls a session-managing wrapper.

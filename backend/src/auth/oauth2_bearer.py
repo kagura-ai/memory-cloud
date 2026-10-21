@@ -83,8 +83,10 @@ async def verify_oauth_bearer_token(
 def is_oauth_bearer_token(token: str) -> bool:
     """Distinguish OAuth Bearer tokens from kagura API keys by prefix.
 
-    Cheap prefix check used to skip the API-key DB lookup for OAuth
-    tokens. Kagura API keys start with ``"kagura_"``; OAuth tokens
+    Cheap prefix check that routes a Bearer token to one credential store
+    on both REST (``get_user_from_api_key_or_session``) and MCP
+    (``mcp_server.auth.authenticate_mcp_request``, #1994): an OAuth token
+    never pays the API-key DB lookup, and vice versa. Kagura API keys start with ``"kagura_"``; OAuth tokens
     issued by ``oauth2_server`` are 43-char ``secrets.token_urlsafe(32)``
     strings, which never collide with that prefix.
     """
