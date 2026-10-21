@@ -76,12 +76,22 @@ def downgrade() -> None:
     ``prior``, and a NOT VALID CHECK is enforced on every UPDATE, so a leftover
     ``erasure`` row under the old CHECK would make a later account erasure
     fail. Deleting the rows would rewrite memories' history instead. The
-    downgrade therefore stops before any change, naming the count; an operator
+    downgrade therefore refuses, naming the count, and changes nothing; an operator
     who must go back decides what those rows become first.
 
-    The probe runs before the ALTER, so a row written between the probe and
-    the ALTER fails the ALTER's VALIDATE below rather than slipping through.
+    The ALTER runs first: its ACCESS EXCLUSIVE lock keeps any writer out
+    while the probe reads, and a refusal rolls it back with the rest of the
+    upgrade transaction (nothing has committed yet). Once it commits, the NOT
+    VALID CHECK rejects new ``erasure`` rows, so the VALIDATE that follows
+    cannot fail on a row written in between.
     """
+    op.execute(
+        sa.text(
+            "ALTER TABLE memory_revisions "
+            "DROP CONSTRAINT IF EXISTS valid_revision_writer, "
+            f"ADD CONSTRAINT valid_revision_writer CHECK ({_OLD_CHECK}) NOT VALID"
+        )
+    )
     leftover = (
         op.get_bind()
         .execute(sa.text("SELECT count(*) FROM memory_revisions WHERE writer = 'erasure'"))
@@ -95,11 +105,4 @@ def downgrade() -> None:
             "allow them. Stay on f12_2244_rev_writer_erasure, or decide what those "
             "rows become before downgrading."
         )
-    op.execute(
-        sa.text(
-            "ALTER TABLE memory_revisions "
-            "DROP CONSTRAINT IF EXISTS valid_revision_writer, "
-            f"ADD CONSTRAINT valid_revision_writer CHECK ({_OLD_CHECK}) NOT VALID"
-        )
-    )
     _validate()
