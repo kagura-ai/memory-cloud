@@ -43,7 +43,10 @@ os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_D
 # Test-only fallbacks for OAuth/encryption secrets so the integration suite
 # runs hermetically when ``.env.local`` was not sourced. ``setdefault`` is
 # intentional — when the operator already exports real values (e.g. they
-# sourced ``.env.local``), preserve those.
+# sourced ``.env.local``), preserve those. ``get_encryptor`` reads the key from
+# the cached settings (#2239), so this value applies only when the settings are
+# first built after this conftest runs (``make test-integration``); in a mixed
+# run an earlier directory may already have cached another key.
 os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
 
 # If a sibling test directory (e.g. ``tests/api/``) was collected before

@@ -81,6 +81,15 @@ _PRODUCTION_SECRET_MIN_LEN = 32
 _PRODUCTION_SECRET_LENGTH_EXEMPT: frozenset[str] = frozenset({"audit_pseudo_salt"})
 
 
+def is_placeholder_secret(value: str) -> bool:
+    """Whether ``value`` is a shipped, public placeholder secret (#2225).
+
+    Case-insensitive, ignoring surrounding blanks; empty counts.
+    """
+    folded = value.strip().lower()
+    return folded in _DEV_SECRET_PLACEHOLDERS or folded.startswith(_DEV_SECRET_PREFIXES)
+
+
 def _validate_handoff_base_url(value: str) -> str:
     """Validate/normalize the optional billing handoff base URL (#1118).
 
@@ -551,10 +560,7 @@ class Settings(BaseSettings):
         refused: list[str] = []
         for field, env in _PRODUCTION_SECRET_FIELDS.items():
             value = str(getattr(self, field)).strip()
-            folded = value.lower()
-            is_placeholder = folded in _DEV_SECRET_PLACEHOLDERS or folded.startswith(
-                _DEV_SECRET_PREFIXES
-            )
+            is_placeholder = is_placeholder_secret(value)
             too_short = (
                 field not in _PRODUCTION_SECRET_LENGTH_EXEMPT
                 and len(value) < _PRODUCTION_SECRET_MIN_LEN

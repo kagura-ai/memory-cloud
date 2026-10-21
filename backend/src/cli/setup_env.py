@@ -122,12 +122,14 @@ def setup_env():
         if not _is_placeholder(env.get(key, "")):
             print(f"✓ {key} already set")
         else:
-            replaced = replaced or key in env
+            # Missing counts too: the API then ran on the built-in default.
+            replaced = True
             _set_env_value(key, _generate_secret())
             print(f"✓ {key} generated and saved")
     if existed and replaced:
-        print("  ⚠ A placeholder in the existing .env.local was replaced. If this install")
-        print("    already holds data, read 'Production secrets' in docs/deployment.md.")
+        print("  ⚠ A missing or placeholder secret in the existing .env.local was generated.")
+        print("    If this install already holds data, read 'Production secrets' in")
+        print("    docs/deployment.md.")
 
     # 3. OPENAI_API_KEY (optional — check env var, .env.local, then prompt)
     import os

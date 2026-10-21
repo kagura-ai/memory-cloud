@@ -25,7 +25,7 @@ import logging
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from config.settings import Settings, get_settings
+from config.settings import get_settings, is_placeholder_secret
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +155,9 @@ def get_encryptor() -> APIKeyEncryption:
 
     Uses ``Settings.api_key_secret`` (``API_KEY_SECRET``), so the key is the
     one the production secret guard checked (#2239). Outside production an
-    unset ``API_KEY_SECRET`` falls back to the public development default,
-    with a warning; production refuses that default when the settings load.
+    unset ``API_KEY_SECRET`` falls back to the public development default; that
+    or any shipped placeholder logs a warning. Production refuses them when the
+    settings load.
 
     Returns:
         APIKeyEncryption instance
@@ -175,10 +176,10 @@ def get_encryptor() -> APIKeyEncryption:
         if not secret.strip():
             msg = "API_KEY_SECRET is empty. Required for API key encryption."
             raise ValueError(msg)
-        if secret == Settings.model_fields["api_key_secret"].default:
+        if is_placeholder_secret(secret):
             # Once per process: the singleton is built once.
             logger.warning(
-                "API_KEY_SECRET is the public development default; stored provider "
+                "API_KEY_SECRET is a public development default; stored provider "
                 "keys and connector secrets are encrypted with a key anyone can read. "
                 "Set a private value (python -m src.cli.setup_env, or openssl rand -hex 32)."
             )

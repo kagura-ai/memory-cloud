@@ -106,8 +106,11 @@ class TestGetEncryptor:
             get_encryptor()
         assert "development default" not in caplog.text
 
-    def test_development_default_warns_once(self, monkeypatch, caplog):
-        default = Settings.model_fields["api_key_secret"].default
+    @pytest.mark.parametrize(
+        "default",
+        [Settings.model_fields["api_key_secret"].default, "change-me-api-key-secret"],
+    )
+    def test_development_default_warns_once(self, monkeypatch, caplog, default):
         monkeypatch.setattr(get_settings(), "api_key_secret", default)
         monkeypatch.setattr(enc_module, "_encryptor", None)
         with caplog.at_level(logging.WARNING, logger="utils.encryption"):

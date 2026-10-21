@@ -214,7 +214,9 @@ run_migrations() {
     # CREATE INDEX CONCURRENTLY) may already have applied.
     dc run --rm --no-deps -T "$svc" alembic upgrade head \
         || error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
-       Check \`alembic current\` and any INVALID indexes before re-running."
+       If the output above names refused secrets (ENVIRONMENT=production), set them
+       in the env file and re-run; otherwise check \`alembic current\` and any
+       INVALID indexes before re-running."
 }
 
 # Abort a registry-mode rollback that has nothing to roll back TO.

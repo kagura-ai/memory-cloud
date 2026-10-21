@@ -11,8 +11,9 @@ Each test seeds a unique ``uuid4()`` context_id, so the Redis bucket keys
 ``public_bound_key:{key_id}:minute``) never collide across tests — no
 ``flushdb`` and no order coupling.
 
-``API_KEY_SECRET`` is set deterministically by the integration ``conftest.py``
-(``setdefault`` to an ephemeral test secret); no per-test monkeypatch needed.
+``API_KEY_SECRET`` comes from the cached settings, which the integration
+``conftest.py`` seeds (``setdefault`` to an ephemeral test secret) when it runs
+first; the tests only need encrypt and decrypt to agree in-process.
 """
 
 from __future__ import annotations

@@ -93,7 +93,7 @@ def test_private_values_are_kept_and_placeholders_replaced(project, capsys) -> N
     assert "kagura-erasure-v1" in backups[0].read_text(encoding="utf-8")
     out = capsys.readouterr().out
     assert "✓ API_KEY_SECRET already set" in out
-    assert "placeholder in the existing .env.local was replaced" in out
+    assert "placeholder secret in the existing .env.local was generated" in out
 
 
 def test_rerun_changes_nothing(project, capsys) -> None:
@@ -107,7 +107,18 @@ def test_rerun_changes_nothing(project, capsys) -> None:
     out = capsys.readouterr().out
     for key in _KEYS:
         assert f"✓ {key} already set" in out
-    assert "was replaced" not in out
+    assert "was generated." not in out
+
+
+def test_a_secret_missing_from_an_existing_file_warns(project, capsys) -> None:
+    # An older .env.local without the AUDIT_* lines: the API ran on the defaults.
+    (project / ".env.local").write_text(f"API_KEY_SECRET={'p' * 40}\n", encoding="utf-8")
+
+    setup_env.setup_env()
+
+    env = _env(project)
+    assert not setup_env._is_placeholder(env["AUDIT_HMAC_KEY"])
+    assert "placeholder secret in the existing .env.local was generated" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

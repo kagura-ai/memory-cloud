@@ -346,8 +346,11 @@ before serving with a pydantic `ValidationError` whose message names the
 refused variables (never their values); look for it in
 `docker compose logs api`. `alembic upgrade` (so `deploy.sh` stops at its
 migration step, before traffic moves) and the admin CLIs (`create_admin`,
-`reset_password`, `delete_admin`, `seed_e2e_admin` and the one-shot maintenance
-commands) are refused the same way, before they touch the database.
+`reset_password`, `delete_admin`, `seed_e2e_admin`) are refused the same way,
+before they touch the database. The one-shot maintenance commands
+(`restore_context`, `sweep_orphan_vectors`, ...) load the settings when they
+open their database session and stop there, with the same message in a
+traceback.
 Development, test and staging are not checked.
 `ENVIRONMENT=development` is not a free way around it: it also drops the
 `Secure` flag on session cookies.
