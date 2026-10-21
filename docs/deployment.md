@@ -1668,6 +1668,47 @@ unless `--include-past-window` is given. Until then such a context can still
 be restored with its files; run the plan, read the warning, and keep the
 backups' retention in mind before `--apply --include-past-window`.
 
+### Erasures run before v0.123.0 — Issue #2243
+
+**Run this once after upgrading to v0.123.0** if any account was erased on
+v0.113.0 through v0.120.x. An erasure on those versions could leave the erased
+member's `details` on memories other members authored: in the revision log
+(the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0)
+and as the memory's live value where they made the newest `details` edit
+(#2244, fixed in v0.123.0, so an erasure on v0.121.x or v0.122.x can have left
+this one too). Erasures before v0.113.0 had no revision log, and erasures from
+v0.123.0 on do all of this as they run. Plan first, then apply:
+
+```bash
+# inside the API container / venv, from backend/
+python -m src.cli.reprocess_erasures --all                # dry run: one line per erasure with changes, writes nothing
+python -m src.cli.reprocess_erasures --all --apply --yes  # write; --request <uuid> narrows the run to one erasure
+```
+
+The command reads the completed erasure requests and uses the pseudonym each
+one stores; it never derives one (no salt, no plaintext needed). A request
+completed before v0.58.1 still stores the raw account id: it is skipped and
+listed as `not pseudonymized` (it predates the revision log anyway). For each
+request, in one transaction:
+
+1. where the erased member wrote the live `details` of a memory someone else
+   authored, the last value someone else wrote is put back — a new version
+   with one revision row (`writer: erasure`, details unavailable), and the
+   memory's vector payload (`location`) is patched before the commit;
+2. their `details` are removed from every revision prior that still holds
+   them. On memories they authored (scrubbed by the erasure), only revision
+   rows that existed when the erasure completed are touched — what other
+   members wrote there since stays as it is.
+
+A request that changed gets one `account_erasure_reprocess` audit row (counts
+and the request id, under the pseudonyms of its `account_erasure` row).
+The dry run writes nothing and makes no vector-store call, and its report
+prints request ids and counts, never values. A second `--apply` changes
+nothing. The vector store must be reachable: a payload failure rolls that
+request back and stops the run with exit code 1; the requests before it stay
+done and a re-run picks up the rest. A restored memory whose embedding had not
+succeeded is re-queued instead of patched, and the sweep re-embeds it.
+
 ### Restoring a deleted context — Issue #1804
 
 Deleting a context soft-deletes it and its memories, and removes their points.
