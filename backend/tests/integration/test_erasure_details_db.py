@@ -14,12 +14,13 @@ revision row; the vector payload's ``location`` follows before the commit.
    ``location`` cleared from the payload;
 4. a tombstone is restored in Postgres with no payload call;
 5. a payload failure raises and leaves Postgres as it was after the
-   rollback; a row not embedded yet is skipped instead;
+   rollback; a row not embedded yet is re-queued instead of patched;
 6. every row outside the subject's scope is byte-identical afterwards, the
    subject's own memory gets no ``erasure`` row, and a memory someone else
    edited after the subject is not restored;
-7. a re-run by pseudonym (#2243) and a dry run change nothing; a live value
-   already equal to the target is not rewritten.
+7. a re-run by pseudonym (#2243) and a dry run change nothing — a strip by
+   pseudonym does not take the erasure row for the subject's edit; a live
+   value already equal to the target is not rewritten.
 
 The vector store is stubbed. Every seeded row goes with its workspace.
 Not executed in the local unit run — needs the DB container.
@@ -42,8 +43,10 @@ from models.memory import Memory, MemoryRevision
 from services.account_erasure_service import AccountErasureService
 from services.erasure_details import (
     RestoreReport,
+    StripCounts,
     lock_subject_memories,
     restore_editor_details,
+    strip_subject_details,
 )
 from services.memory_versions import load_version
 from utils.datetime import utcnow
@@ -369,19 +372,57 @@ async def test_a_payload_failure_raises_and_postgres_rolls_back(
         assert (await _live(session, memory_id)).details == SUBJECTS
 
 
-async def test_a_row_not_embedded_yet_is_skipped_on_a_payload_failure(
-    async_engine: AsyncEngine, world: dict[str, Any]
+@pytest.mark.parametrize("status", ["pending", "processing", "failed"])
+async def test_a_row_not_embedded_yet_is_requeued(
+    async_engine: AsyncEngine, world: dict[str, Any], status: str
 ) -> None:
-    """Its point may not exist; its next embed writes the payload from the
-    restored row. The erasure must not fail on it."""
+    """Its point may not exist, and a run in flight may already have read the
+    subject's details: no patch, the row goes back to ``pending`` with a fresh
+    retry budget, so the next embed writes the payload from the restored row
+    (a run in flight loses its claim on the status)."""
     subject, author = world["subject"], world["author"]
-    memory = _memory(world, author, SUBJECTS, 2, embedding_status="failed")
+    memory = _memory(world, author, SUBJECTS, 2, embedding_status=status)
+    memory.embedding_retry_count = 3
+    memory.embedding_error = "earlier failure" if status == "failed" else None
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
-        with patch(_QDRANT, AsyncMock(side_effect=QdrantError("no such point"))):
+        sync = AsyncMock()
+        with patch(_QDRANT, sync):
             _, report = await _erase_memories(session, subject)
-        assert (report.restored, report.payload_synced, report.payload_skipped) == (1, 0, 1)
-        assert (await _live(session, memory.id)).details == AUTHORS
+        assert report == RestoreReport(restored=1, embedding_requeued=1, memory_ids=[memory.id])
+        live = await _live(session, memory.id)
+        assert live.details == AUTHORS
+        assert (live.embedding_status, live.embedding_error, live.embedding_retry_count) == (
+            "pending",
+            None,
+            0,
+        )
+    sync.assert_not_awaited()
+
+
+async def test_a_strip_by_pseudonym_keeps_a_later_value_over_an_erasure_row(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2243 contract: the erasure row carries the pseudonym as actor but put
+    back the author's value. A later details edit's prior holds that value,
+    so a re-run of the strip by pseudonym must not take it for the subject's."""
+    subject, author, third = world["subject"], world["author"], world["third"]
+    memory = _memory(world, author, SUBJECTS, 2)
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        with patch(_QDRANT, AsyncMock()):
+            pseudonym, _ = await _erase_memories(session, subject)
+        # a member edits details after the erasure: the prior is the author's
+        session.add(_edit(world, memory, 4, third, {"details": AUTHORS}))
+        await session.commit()
+
+        assert await strip_subject_details(session, pseudonym) == StripCounts(0, 0)
+        await session.commit()
+        assert await _log(session, memory.id) == [
+            (memory.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
+            (memory.id, 3, "erasure", pseudonym, {"erased": ["details"]}, None),
+            (memory.id, 4, "api", third, {"details": AUTHORS}, None),
+        ]
 
 
 async def test_rows_outside_the_subjects_scope_are_untouched(

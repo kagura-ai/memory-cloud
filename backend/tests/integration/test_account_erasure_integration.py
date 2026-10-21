@@ -360,6 +360,7 @@ class TestEditorDetailsRestore:
         assert postgres["details_restored"] == 1
         assert postgres["details_restored_unavailable"] == 0
         assert postgres["details_payload_skipped"] == 0
+        assert postgres["details_embedding_requeued"] == 0
         assert postgres["revision_details_stripped"] == 0
         assert await self._state(db_session, edited_by_target) == (
             {"by": "author"},

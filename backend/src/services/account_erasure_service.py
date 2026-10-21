@@ -1316,6 +1316,7 @@ class AccountErasureService:
         counts["details_restored"] = restore.restored
         counts["details_restored_unavailable"] = restore.unavailable
         counts["details_payload_skipped"] = restore.payload_skipped
+        counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id))
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)

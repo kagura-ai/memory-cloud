@@ -64,7 +64,6 @@ from models.memory import (
 from services.memory_versions import PRIOR_ERASED_KEY, PRIOR_SCRUBBED_KEY, record_revision
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import QdrantError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -145,6 +144,9 @@ def strip_predicate(
         .where(
             theirs.memory_id == row.memory_id,
             theirs.actor_user_id == subject,
+            # an ``erasure`` row (#2244) carries the pseudonym as its actor but
+            # put back another member's value: not the subject's details
+            theirs.writer != REVISION_WRITER_ERASURE,
             revision_edited_details(theirs),
             theirs.version < row.version,
             ~select(between.id)
@@ -394,9 +396,11 @@ class RestoreReport:
             to go back to was removed by an earlier erasure.
         payload_synced: Vector points whose payload was patched.
         payload_skipped: Restored memories whose point was left as it is: a
-            tombstone, a point another live row shares, or a point a row still
-            being embedded may not have yet (its next embed writes the payload
-            from the restored row). Always 0 on a dry run.
+            tombstone, or a point another live row shares. Always 0 on a dry
+            run.
+        embedding_requeued: Restored memories whose embedding had not
+            succeeded, re-queued so the next embed writes the payload from the
+            restored row. Always 0 on a dry run.
         memory_ids: The restored memories, in id order.
     """
 
@@ -404,6 +408,7 @@ class RestoreReport:
     unavailable: int = 0
     payload_synced: int = 0
     payload_skipped: int = 0
+    embedding_requeued: int = 0
     memory_ids: list[UUID] = field(default_factory=list)
 
 
@@ -514,19 +519,24 @@ async def _details_edits(db: AsyncSession, subject: str) -> list[DetailsEdit]:
 async def _sync_details_payload(
     db: AsyncSession, memories: Sequence[Memory], report: RestoreReport
 ) -> None:
-    """Patch the ``location`` payload of the restored memories' points.
+    """Bring the restored memories' points in line with the restored ``details``.
 
-    Inside the caller's transaction, before its commit, and a vector-store
+    A row whose embedding succeeded gets its ``location`` payload patched
+    inside the caller's transaction, before its commit, and a vector-store
     error propagates (``update_memory``'s convention): a completed erasure
     must not leave the subject's coordinates on another author's point, and
     an erasure that fails here rolls Postgres back and is re-run whole (the
     patch converges). The point, the keys and the chunk cascade follow
     ``MemoryService._sync_metadata_payload`` (``metadata_patch_target``).
 
-    A tombstone is skipped (its point is gone or going, as ``forget`` leaves
-    it). A row whose embedding has not succeeded may have no point yet: its
-    next embed builds the payload from the restored row, so a failed patch
-    there is logged and skipped rather than failing the erasure.
+    A row whose embedding has not succeeded (``pending`` / ``processing`` /
+    ``failed``) may have no point yet, and a run in flight may already have
+    read the subject's ``details``: it is re-queued instead (``pending``, a
+    fresh retry budget — the embedding switch's re-queue). A run in flight
+    then loses its claim when it tries to stamp ``success``, and the sweep
+    re-embeds from the restored row, whose payload replaces whatever the
+    earlier run wrote. A tombstone is skipped (its point is gone or going,
+    as ``forget`` leaves it), as is a point another live row shares.
     """
     from services.content_chunk_writer import chunk_cascade_needed
     from services.context_routing import resolve_collection_name
@@ -540,6 +550,12 @@ async def _sync_details_payload(
     for memory in memories:
         if memory.deleted_at is not None or memory.context_id is None:
             report.payload_skipped += 1
+            continue
+        if memory.embedding_status != "success":
+            memory.embedding_status = "pending"
+            memory.embedding_error = None
+            memory.embedding_retry_count = 0
+            report.embedding_requeued += 1
             continue
         updates, delete_keys = metadata_payload_patch(
             restore_payload_request(memory, {"details"}), None, memory.details
@@ -556,25 +572,15 @@ async def _sync_details_payload(
                 await chunk_cascade_needed(db, memory.context_id),
             )
         collection, cascade = routes[memory.context_id]
-        try:
-            await update_memory_payload_in_qdrant(
-                memory_id=target.point_id,
-                payload_updates=target.updates,
-                collection_name=collection,
-                delete_keys=target.delete_keys or None,
-                cascade_chunks=cascade and target.own_point,
-            )
-        except QdrantError:
-            if memory.embedding_status == "success":
-                raise
-            logger.warning(
-                "erasure_details_payload_skipped",
-                memory_id=str(memory.id),
-                embedding_status=memory.embedding_status,
-            )
-            report.payload_skipped += 1
-            continue
+        await update_memory_payload_in_qdrant(
+            memory_id=target.point_id,
+            payload_updates=target.updates,
+            collection_name=collection,
+            delete_keys=target.delete_keys or None,
+            cascade_chunks=cascade and target.own_point,
+        )
         report.payload_synced += 1
+    await db.flush()
 
 
 async def restore_editor_details(

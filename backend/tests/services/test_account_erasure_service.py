@@ -1096,7 +1096,13 @@ class TestRestoreEditorDetailsWiring:
         order: list[str] = []
         restore_details.side_effect = lambda *a, **k: (
             order.append("restore"),
-            RestoreReport(restored=2, unavailable=1, payload_synced=1, payload_skipped=2),
+            RestoreReport(
+                restored=2,
+                unavailable=1,
+                payload_synced=1,
+                payload_skipped=2,
+                embedding_requeued=3,
+            ),
         )[1]
         svc = _service()
         svc._count_and_delete = AsyncMock(return_value=0)
@@ -1126,6 +1132,7 @@ class TestRestoreEditorDetailsWiring:
         assert counts["details_restored"] == 2
         assert counts["details_restored_unavailable"] == 1
         assert counts["details_payload_skipped"] == 2
+        assert counts["details_embedding_requeued"] == 3
         assert counts["memory_revisions_pseudonymized"] == 4
         assert counts["revision_details_stripped"] == 3
 
