@@ -2,7 +2,7 @@
 
 Exercises the singleton factory, cache helpers, rate-limit counters,
 co-activation read/write/clear, the SCAN-and-delete GDPR helper, and the
-deprecated close path. External Redis I/O is replaced with
+close path. External Redis I/O is replaced with
 ``fakeredis.aioredis.FakeRedis`` (no network), and a small failing-client
 double drives every reachable exception branch.
 
@@ -222,14 +222,14 @@ class TestGetRedisClient:
 
 
 class TestCloseRedis:
-    """Deprecated close_redis path."""
+    """close_redis path (#1995: ``aclose()``, not the deprecated ``close()``)."""
 
     async def test_close_closes_and_clears_singleton(self, monkeypatch):
-        """close_redis awaits .close() and resets the singleton to None."""
+        """close_redis awaits .aclose() and resets the singleton to None."""
         closed = {"called": False}
 
         class _Closeable:
-            async def close(self):
+            async def aclose(self):
                 closed["called"] = True
 
         monkeypatch.setattr(redis_mod, "_redis_client", _Closeable())
