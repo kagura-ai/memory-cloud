@@ -1012,3 +1012,91 @@ class TestLabelClustersSiblingCancellation:
             )
 
         assert cancelled.get(1) is True, "sibling task was not cancelled"
+
+
+# --------------------------------------------------------------------------- #
+# #2088 — finished labels are handed back when labeling is aborted
+# --------------------------------------------------------------------------- #
+class TestLabelClustersCollectedOnAbort:
+    @pytest.mark.asyncio
+    async def test_cancel_mid_gather_collects_finished_labels(self, monkeypatch) -> None:
+        """Cancelling the run task mid-gather: the clusters that finished are
+        appended to ``collected`` (their calls were billed), the in-flight
+        ones are absent, and CancelledError still propagates."""
+        import asyncio
+
+        finished = asyncio.Event()
+
+        async def fake_label_one(*, cluster_index, **kwargs):
+            if cluster_index != 1:
+                await asyncio.sleep(30)
+            label = ClusterLabel(
+                cluster_index=cluster_index,
+                label=f"c{cluster_index}",
+                description="",
+                label_confidence=0.5,
+                representative_memory_ids=[],
+                breakdown=None,
+            )
+            finished.set()
+            return label
+
+        monkeypatch.setattr(labeler, "_label_one_cluster", fake_label_one)
+
+        collected: list[ClusterLabel] = []
+        task = asyncio.create_task(
+            label_clusters(
+                cluster_labels=np.array([0, 1, 2]),
+                centroids=np.zeros((3, 4)),
+                embeddings=np.ones((3, 4)),
+                memories=[_mem(), _mem(), _mem()],
+                user_id="u1",
+                workspace_id="ws",
+                context_id="ctx",
+                collected=collected,
+            )
+        )
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert [cl.cluster_index for cl in collected] == [1]
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_collects_finished_labels(self, monkeypatch) -> None:
+        """A task raising aborts labeling too; finished labels are kept and
+        the raising / cancelled tasks contribute nothing."""
+        import asyncio
+
+        async def fake_label_one(*, cluster_index, **kwargs):
+            if cluster_index == 0:
+                await asyncio.sleep(0.05)
+                raise RuntimeError("boom")
+            if cluster_index == 2:
+                await asyncio.sleep(30)
+            return ClusterLabel(
+                cluster_index=cluster_index,
+                label="ok",
+                description="",
+                label_confidence=0.5,
+                representative_memory_ids=[],
+                breakdown=None,
+            )
+
+        monkeypatch.setattr(labeler, "_label_one_cluster", fake_label_one)
+
+        collected: list[ClusterLabel] = []
+        with pytest.raises(RuntimeError, match="boom"):
+            await label_clusters(
+                cluster_labels=np.array([0, 1, 2]),
+                centroids=np.zeros((3, 4)),
+                embeddings=np.ones((3, 4)),
+                memories=[_mem(), _mem(), _mem()],
+                user_id="u1",
+                workspace_id="ws",
+                context_id="ctx",
+                collected=collected,
+            )
+
+        assert [cl.cluster_index for cl in collected] == [1]

@@ -50,6 +50,7 @@ import umap  # noqa: F401
 from sklearn.cluster import KMeans  # noqa: F401
 from sklearn.metrics import silhouette_score  # noqa: F401
 from sqlalchemy import and_, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +61,7 @@ from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
 from services.analysis.clusterer import cluster_high_dim
+from services.analysis.labeler import ClusterLabel
 from services.analysis.llm_lane import AnalysisLane, lane_for_run, pinned_pricing_id
 from services.analysis.preview import DEFAULT_MODEL_ID, DEFAULT_PROVIDER, estimate_cost
 from services.analysis.projector import project_to_2d
@@ -67,6 +69,7 @@ from services.analysis.reporter import (
     PersistInputs,
     persist_failure,
     persist_results,
+    persist_spend_report,
 )
 from services.analysis.vector_pull import (
     EmbeddingMismatchError,
@@ -123,6 +126,23 @@ class AnalysisParams:
 # fires loud at startup rather than at the first INSERT. ``paid_by``
 # comes from the lane since #1569 (``services/analysis/llm_lane.py``).
 _STATUS_RUNNING = "running"
+_STATUS_CANCELLED = "cancelled"
+assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
+
+
+def _row_id(analysis: MemoryAnalysis) -> str:
+    """The run row's id, read without a lazy load.
+
+    After a rollback every persistent instance is expired, and touching
+    ``analysis.id`` on an expired instance would lazy-load it — which
+    raises ``MissingGreenlet`` under ``AsyncSession`` and, inside an
+    ``except`` block, replaces the error being handled (#2088). The
+    identity key survives expiry.
+    """
+    identity = sa_inspect(analysis).identity
+    return str(identity[0]) if identity else "unknown"
+
+
 assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES, (
     f"_STATUS_RUNNING out of sync with MEMORY_ANALYSIS_STATUSES: {MEMORY_ANALYSIS_STATUSES}"
 )
@@ -519,6 +539,13 @@ class AnalysisOrchestrator:
 
         params_jsonb = dict(analysis.params or {})
 
+        # #2088: the labels produced so far, kept outside the try so a
+        # failed or cancelled run can still record the spend they billed.
+        # ``collected`` is filled by ``label_clusters`` only when labeling
+        # itself is aborted; ``cluster_label_results`` once it returned.
+        cluster_label_results: list[ClusterLabel] | None = None
+        collected: list[ClusterLabel] = []
+
         try:
             # Normalize tz-aware ISO strings to NAIVE UTC so the filter
             # binds cleanly against ``Memory.created_at`` (TIMESTAMP WITHOUT
@@ -613,6 +640,7 @@ class AnalysisOrchestrator:
                 context_id=str(analysis.context_id),
                 locale=label_locale,
                 lane=lane,
+                collected=collected,
             )
 
             # Stage [J] — atomic persist. The transaction here wraps
@@ -661,6 +689,14 @@ class AnalysisOrchestrator:
                 n_clusters=cluster_result.n_clusters,
             )
 
+        except asyncio.CancelledError:
+            # #1241 soft-cancel: the DELETE handler committed
+            # status='cancelled', then cancelled this task. CancelledError
+            # is a BaseException, so the ``except Exception`` below never
+            # sees it. #2088: record the spend of the clusters labeled so
+            # far, then ALWAYS re-raise.
+            await self._persist_cancel_spend(analysis, cluster_label_results or collected)
+            raise
         except EmbeddingMismatchError as e:
             # ValidationError subclass — surface as 422 by the API layer.
             await self._mark_failed(analysis, str(e))
@@ -668,15 +704,90 @@ class AnalysisOrchestrator:
         except Exception as e:  # noqa: BLE001
             logger.error(
                 "analysis_run_failed",
-                analysis_id=str(analysis.id),
+                analysis_id=str(analysis_id),
                 error=str(e),
                 exc_info=True,
             )
-            await self._mark_failed(analysis, str(e))
+            await self._mark_failed(
+                analysis,
+                str(e),
+                cluster_results=cluster_label_results or collected or None,
+            )
             raise
 
-    async def _mark_failed(self, analysis: MemoryAnalysis, error_message: str) -> None:
+    async def _persist_cancel_spend(
+        self,
+        analysis: MemoryAnalysis,
+        cluster_results: list[ClusterLabel],
+    ) -> None:
+        """Record the spend of a run whose task was cancelled (#2088).
+
+        Writes nothing when labeling never produced a label (the cancel hit
+        an earlier stage, or every call was still in flight). Calls in
+        flight at the cancel are lost: the provider may bill them, but no
+        usage came back.
+
+        The spend is recorded only when the row is ``cancelled`` — the
+        status the DELETE handler commits before it cancels the task. A
+        cancel from anywhere else (e.g. worker shutdown) leaves the row at
+        ``running``, and recording spend for a run that never reached a
+        terminal state is what ``persist_failure``'s same-transaction write
+        avoids. The row's status and ``cancellation_reason`` belong to the
+        DELETE handler; only ``cost_actual_cents`` is written.
+
+        Never raises: any error is logged and swallowed so the caller's
+        ``CancelledError`` re-raise always runs. A second cancel during the
+        write (shutdown) aborts it — acceptable, the write is best-effort.
+        """
+        if not cluster_results:
+            return
+        try:
+            await self.db.rollback()
+            await self.db.refresh(analysis, with_for_update=True)
+            if analysis.status != _STATUS_CANCELLED:
+                logger.warning(
+                    "analysis_cancel_spend_skipped_not_cancelled",
+                    analysis_id=str(analysis.id),
+                    status=analysis.status,
+                )
+                await self.db.rollback()
+                return
+            await persist_spend_report(
+                self.db,
+                analysis=analysis,
+                cluster_results=cluster_results,
+                status="cancelled",
+                error_message=analysis.cancellation_reason or "cancelled",
+            )
+            await self.db.commit()
+        except Exception:
+            # Includes ObjectDeletedError / InvalidRequestError when a
+            # workspace or context hard-delete CASCADEd the row away.
+            logger.warning(
+                "analysis_cancel_spend_persist_failed",
+                analysis_id=_row_id(analysis),
+                exc_info=True,
+            )
+            try:
+                await self.db.rollback()
+            except Exception:
+                logger.warning(
+                    "analysis_cancel_spend_rollback_error",
+                    analysis_id=_row_id(analysis),
+                    exc_info=True,
+                )
+
+    async def _mark_failed(
+        self,
+        analysis: MemoryAnalysis,
+        error_message: str,
+        *,
+        cluster_results: list[ClusterLabel] | None = None,
+    ) -> None:
         """Persist the failed status in its own commit boundary.
+
+        ``cluster_results`` (#2088) are the labels produced before the
+        failure; ``persist_failure`` records their spend in the same commit.
 
         The compute-stage transaction has already rolled back via
         ``persist_results``' caller-managed try/except. We commit the
@@ -697,11 +808,16 @@ class AnalysisOrchestrator:
         except Exception:
             logger.warning(
                 "analysis_mark_failed_rollback_error",
-                analysis_id=str(analysis.id),
+                analysis_id=_row_id(analysis),
                 exc_info=True,
             )
         try:
-            await persist_failure(self.db, analysis=analysis, error_message=error_message)
+            await persist_failure(
+                self.db,
+                analysis=analysis,
+                error_message=error_message,
+                cluster_results=cluster_results,
+            )
             await self.db.commit()
         except Exception:
             await self.db.rollback()
