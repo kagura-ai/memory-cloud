@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
@@ -272,3 +272,128 @@ class TestIntrospectionAuthentication:
         _revoke(api, {"token": "rt-c"}, _basic(CONFIDENTIAL, CONFIDENTIAL_SECRET))
         response = _introspect(api, {"token": "at-c"}, _basic(CONFIDENTIAL, CONFIDENTIAL_SECRET))
         assert response.json() == {"active": False}
+
+
+# ---------------------------------------------------------------------------
+# Form body bound (#2207)
+# ---------------------------------------------------------------------------
+
+_FORM_LIMIT = 16384
+_ENDPOINTS = ["/api/v1/oauth/revoke", "/api/v1/oauth/introspect"]
+_FORM_HEADERS = {"content-type": "application/x-www-form-urlencoded"}
+
+
+def _assert_too_large(response: Any) -> None:
+    assert response.status_code == 413, response.text
+    assert set(response.json()) == {"error", "error_description"}
+    assert response.json()["error"] == "invalid_request"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def _oversized(fields: dict[str, str]) -> bytes:
+    return urlencode(fields).encode() + b"&pad=" + b"x" * _FORM_LIMIT
+
+
+class TestFormBodyBound:
+    """A revocation or introspection body over 16 KiB is refused before it is
+    parsed and before the client is authenticated (#2207)."""
+
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    @pytest.mark.parametrize("chunked", [False, True], ids=["content-length", "chunked"])
+    def test_body_over_the_limit_is_invalid_request_413(
+        self, api: TestClient, path: str, chunked: bool
+    ) -> None:
+        body = _oversized({"token": "at-c"})
+        # An iterator makes httpx send the body chunked, without Content-Length.
+        content = iter([body[:4096], body[4096:]]) if chunked else body
+        response = api.post(
+            path,
+            content=content,
+            headers={**_FORM_HEADERS, **_basic(CONFIDENTIAL, CONFIDENTIAL_SECRET)},
+        )
+        _assert_too_large(response)
+
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    def test_bound_runs_before_client_authentication(self, api: TestClient, path: str) -> None:
+        # No credentials at all: 413, not 401 invalid_client.
+        response = api.post(path, content=_oversized({"token": "at-c"}), headers=_FORM_HEADERS)
+        _assert_too_large(response)
+
+    def test_oversized_revocation_with_valid_credentials_revokes_nothing(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        response = api.post(
+            "/api/v1/oauth/revoke",
+            content=_oversized(
+                {"token": "at-c", "client_id": CONFIDENTIAL, "client_secret": CONFIDENTIAL_SECRET}
+            ),
+            headers=_FORM_HEADERS,
+        )
+        _assert_too_large(response)
+        assert not _stored(db_factory, "c").is_revoked()
+
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    def test_oversized_multipart_token_part_is_413(self, api: TestClient, path: str) -> None:
+        response = api.post(
+            path,
+            files={"token": ("token.txt", b"x" * 32768, "text/plain")},
+            headers=_basic(CONFIDENTIAL, CONFIDENTIAL_SECRET),
+        )
+        _assert_too_large(response)
+
+    def test_revocation_body_at_the_limit_is_answered(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        prefix = urlencode({"token": "at-a", "client_id": PUBLIC_A}).encode() + b"&pad="
+        body = prefix + b"x" * (_FORM_LIMIT - len(prefix))
+        assert len(body) == _FORM_LIMIT
+        response = api.post("/api/v1/oauth/revoke", content=body, headers=_FORM_HEADERS)
+        assert response.status_code == 200, response.text
+        assert _stored(db_factory, "a").is_revoked()
+
+    def test_introspection_body_at_the_limit_is_answered(self, api: TestClient) -> None:
+        prefix = urlencode({"token": "at-c"}).encode() + b"&pad="
+        body = prefix + b"x" * (_FORM_LIMIT - len(prefix))
+        assert len(body) == _FORM_LIMIT
+        response = api.post(
+            "/api/v1/oauth/introspect",
+            content=body,
+            headers={**_FORM_HEADERS, **_basic(CONFIDENTIAL, CONFIDENTIAL_SECRET)},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["active"] is True
+
+
+class TestMissingToken:
+    """An absent or empty ``token`` is an RFC 6749 ``invalid_request`` (#2207)."""
+
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    def test_missing_token_is_invalid_request_400(self, api: TestClient, path: str) -> None:
+        response = api.post(
+            path,
+            data={"client_id": CONFIDENTIAL, "client_secret": CONFIDENTIAL_SECRET},
+        )
+        assert response.status_code == 400, response.text
+        assert set(response.json()) == {"error", "error_description"}
+        assert response.json()["error"] == "invalid_request"
+        assert response.headers["cache-control"] == "no-store"
+
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    def test_empty_token_is_invalid_request_400(self, api: TestClient, path: str) -> None:
+        # FastAPI's ``Form(...)`` treated ``token=`` as missing (422); it stays
+        # an error, now in the RFC 6749 shape.
+        response = api.post(
+            path,
+            data={"token": "", "client_id": CONFIDENTIAL, "client_secret": CONFIDENTIAL_SECRET},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_request"
+
+    def test_repeated_token_last_value_wins(self, api: TestClient, db_factory) -> None:
+        response = api.post(
+            "/api/v1/oauth/revoke",
+            content=urlencode([("token", "at-b"), ("token", "at-a"), ("client_id", PUBLIC_A)]),
+            headers=_FORM_HEADERS,
+        )
+        assert response.status_code == 200
+        assert _stored(db_factory, "a").is_revoked()

@@ -34,6 +34,7 @@ import secrets
 import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -54,7 +55,6 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
-    Form,
     HTTPException,
     Query,
     Request,
@@ -147,7 +147,8 @@ async def preload_form(request: Request) -> Request:
     operation. Our own forms never send one; a dropped part counts as absent,
     which gives Authlib's own error at ``/token``. The consent POST
     ``/authorize`` reads only its own fields from the form; Authlib gets the
-    query string there (#2199).
+    query string there (#2199). ``/revoke`` and ``/introspect`` read their
+    fields from ``form_data`` (#2207).
 
     The body is read bounded before it is parsed (#2200): a body over
     ``_OAUTH_FORM_MAX_BODY_BYTES`` raises ``_DeviceAuthorizationRequestError``
@@ -202,10 +203,11 @@ _DEVICE_FLOW_RATE_WINDOW_SECONDS = 60
 # (#1671).
 _DEVICE_AUTHORIZE_MAX_BODY_BYTES = 4096
 
-# The form bodies /token and the consent POST /authorize read through
-# ``preload_form`` (#2200). The largest legitimate one is a /token request
-# carrying a long percent-encoded redirect_uri, a PKCE verifier and a few
-# ``resource`` URLs, about 8 KiB; the consent form is under 1 KiB.
+# The form bodies /token, the consent POST /authorize (#2200), /revoke and
+# /introspect (#2207) read through ``preload_form``. The largest legitimate one
+# is a /token request carrying a long percent-encoded redirect_uri, a PKCE
+# verifier and a few ``resource`` URLs, about 8 KiB; the consent form, a
+# revocation and an introspection request are under 1 KiB plus the token.
 _OAUTH_FORM_MAX_BODY_BYTES = 16384
 
 
@@ -3465,29 +3467,98 @@ def _authenticate_endpoint_client(
     return client
 
 
+# Revocation and introspection read their form through ``preload_form``, so
+# the body is bounded before it is parsed (#2207). FastAPI's ``Form()`` would
+# read it unbounded before any dependency runs; the documented request body
+# is restated here instead.
+_FORM_TOO_LARGE_DESCRIPTION = f"Form body over {_OAUTH_FORM_MAX_BODY_BYTES} bytes (invalid_request)"
+_FORM_CLIENT_ID_SCHEMA = {
+    "type": "string",
+    "description": "Client identifier (client_secret_post; or use HTTP Basic)",
+}
+_FORM_CLIENT_SECRET_SCHEMA = {
+    "type": "string",
+    "description": "Client secret (client_secret_post; or use HTTP Basic)",
+}
+
+
+def _form_request_body(properties: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """OpenAPI ``requestBody`` for a urlencoded form whose ``token`` is required."""
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/x-www-form-urlencoded": {
+                    "schema": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": ["token"],
+                    }
+                }
+            },
+        }
+    }
+
+
+@dataclass(frozen=True)
+class _TokenEndpointForm:
+    token: str
+    client_id: str | None
+    client_secret: str | None
+    token_type_hint: str | None
+
+
+async def _read_token_endpoint_form(request: Request) -> _TokenEndpointForm | JSONResponse:
+    """Read the /revoke or /introspect form bounded (#2207).
+
+    A body over the limit is ``413`` and a client disconnect ``400``, both
+    ``invalid_request``; a missing or empty ``token`` is ``400
+    invalid_request`` (``Form(...)`` answered both with a 422). A repeated
+    field keeps its last value, as ``Form()`` did.
+    """
+    try:
+        await preload_form(request)
+    except _DeviceAuthorizationRequestError as e:
+        return _oauth_form_refused(request, e)
+    form_data: dict[str, str] = request.state.form_data
+    token = form_data.get("token")
+    if not token:
+        return rfc6749_error_response(error="invalid_request", description="Missing 'token'.")
+    return _TokenEndpointForm(
+        token=token,
+        client_id=form_data.get("client_id"),
+        client_secret=form_data.get("client_secret"),
+        token_type_hint=form_data.get("token_type_hint"),
+    )
+
+
 @router.post(
     "/introspect",
     response_model=TokenIntrospectionResponse,
     response_model_exclude_none=True,
     responses={
-        400: {"description": "Two client authentication methods in one request"},
+        400: {
+            "description": (
+                "Missing ``token``, two client authentication methods in one request, "
+                "or a client disconnect mid-body (``invalid_request``)"
+            )
+        },
         401: {
             "description": (
                 "Missing or invalid client credentials, or a public client (``invalid_client``)"
             )
         },
+        413: {"description": _FORM_TOO_LARGE_DESCRIPTION},
     },
+    openapi_extra=_form_request_body(
+        {
+            "token": {"type": "string", "description": "Access token to introspect"},
+            "client_id": _FORM_CLIENT_ID_SCHEMA,
+            "client_secret": _FORM_CLIENT_SECRET_SCHEMA,
+        }
+    ),
 )
-async def introspect_token(
-    request: Request,
-    token: str = Form(..., description="Access token to introspect"),
-    client_id: str | None = Form(
-        None, description="Client identifier (client_secret_post; or use HTTP Basic)"
-    ),
-    client_secret: str | None = Form(
-        None, description="Client secret (client_secret_post; or use HTTP Basic)"
-    ),
-) -> TokenIntrospectionResponse | JSONResponse:
+async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSONResponse:
     """Token Introspection endpoint (RFC 7662).
 
     Issue #157: MCP SDK compliance - Token Introspection.
@@ -3499,11 +3570,14 @@ async def introspect_token(
     about its own tokens only: a token issued to another client, like an
     unknown, expired or revoked one, is ``{"active": false}``.
 
+    The form body (``token``, and ``client_id`` + ``client_secret`` for
+    ``client_secret_post``) is read bounded before it is parsed and before
+    the client is authenticated (#2207): over ``_OAUTH_FORM_MAX_BODY_BYTES``
+    is ``413 invalid_request``; a missing or empty ``token`` is
+    ``400 invalid_request``.
+
     Args:
-        request: FastAPI request (Authorization header, caller IP logging)
-        token: Access token to introspect
-        client_id: Caller's client_id for ``client_secret_post``
-        client_secret: Caller's secret for ``client_secret_post``
+        request: FastAPI request (form body, Authorization header, caller IP)
 
     Returns:
         Token metadata if active and issued to the caller, else
@@ -3520,6 +3594,11 @@ async def introspect_token(
     Spec: RFC 7662 - OAuth 2.0 Token Introspection
     """
     from sqlalchemy.exc import SQLAlchemyError
+
+    form = await _read_token_endpoint_form(request)
+    if isinstance(form, JSONResponse):
+        return form
+    token, client_id, client_secret = form.token, form.client_id, form.client_secret
 
     caller_ip = request.client.host if request.client else "unknown"
     token_prefix = token[:8] + "..." if token else "(empty)"
@@ -3587,21 +3666,28 @@ async def introspect_token(
     "/revoke",
     response_model=None,
     responses={
-        400: {"description": "Two client authentication methods in one request"},
+        400: {
+            "description": (
+                "Missing ``token``, two client authentication methods in one request, "
+                "or a client disconnect mid-body (``invalid_request``)"
+            )
+        },
         401: {"description": "Missing client_id, unknown client, or bad secret"},
+        413: {"description": _FORM_TOO_LARGE_DESCRIPTION},
     },
+    openapi_extra=_form_request_body(
+        {
+            "token": {"type": "string"},
+            "token_type_hint": {"type": "string"},
+            "client_id": {
+                "type": "string",
+                "description": "Client identifier (public clients, client_secret_post)",
+            },
+            "client_secret": _FORM_CLIENT_SECRET_SCHEMA,
+        }
+    ),
 )
-async def oauth_revoke(
-    request: Request,
-    token: str = Form(...),
-    token_type_hint: str | None = Form(None),
-    client_id: str | None = Form(
-        None, description="Client identifier (public clients, client_secret_post)"
-    ),
-    client_secret: str | None = Form(
-        None, description="Client secret (client_secret_post; or use HTTP Basic)"
-    ),
-) -> dict[str, str] | JSONResponse:
+async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
     """Revoke an access or refresh token (RFC 7009).
 
     The caller identifies itself (#1741, RFC 7009 §2.1): a public client by
@@ -3609,7 +3695,17 @@ async def oauth_revoke(
     the form. A token issued to another client is left alone and answered
     like an unknown token, ``200`` (§2.2). Revoking a refresh token also
     revokes the access token issued with it.
+
+    The form body is read bounded before it is parsed and before the client
+    is authenticated (#2207): over ``_OAUTH_FORM_MAX_BODY_BYTES`` is
+    ``413 invalid_request``; a missing or empty ``token`` is
+    ``400 invalid_request``.
     """
+    form = await _read_token_endpoint_form(request)
+    if isinstance(form, JSONResponse):
+        return form
+    token, client_id, client_secret = form.token, form.client_id, form.client_secret
+    token_type_hint = form.token_type_hint
 
     # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
