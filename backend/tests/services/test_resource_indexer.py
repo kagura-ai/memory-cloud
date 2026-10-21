@@ -1070,3 +1070,146 @@ class TestResyncOfForgottenDoc:
         assert tombstone.deleted_at is not None
         # Now the doc is known: a second re-sync would be free.
         assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == {"doc_1"}
+
+
+def _projected() -> dict:
+    return {"fulltext_content": "Title: hello", "facets": {}, "sortable": {}, "metadata": {}}
+
+
+def _point(**row_metadata):
+    from services.resource_indexer import build_resource_point
+
+    context = _make_context()
+    memory_id = uuid4()
+    point = build_resource_point(
+        context=context,
+        resource_id="res_test",
+        doc_id="doc_1",
+        version=1,
+        content="Title: hello",
+        projected=_projected(),
+        embedding=[0.1] * 512,
+        updated_at=datetime(2026, 4, 15, tzinfo=UTC),
+        memory_id=memory_id,
+        **row_metadata,
+    )
+    return point, context, memory_id
+
+
+class TestBuildResourcePointRowMetadata:
+    """#2160: the point carries the owning row's editable metadata when given."""
+
+    def test_all_four_keys_land_in_the_payload(self):
+        point, _, _ = _point(
+            tags=["a", "b"],
+            memory_type="fact",
+            context_summary="edited",
+            location={"lat": 1.5, "lon": 2.5},
+        )
+        assert point.payload["tags"] == ["a", "b"]
+        assert point.payload["type"] == "fact"
+        assert point.payload["context_summary"] == "edited"
+        assert point.payload["location"] == {"lat": 1.5, "lon": 2.5}
+
+    def test_no_metadata_keeps_the_create_shape(self):
+        point, _, _ = _point()
+        assert not {"tags", "type", "context_summary", "location"} & set(point.payload)
+
+    def test_metadata_never_shadows_identity_keys(self):
+        # Only the editable keys exist as arguments, and they are merged under
+        # the indexer keys: the identity keys are the context's and the row's.
+        point, context, memory_id = _point(tags=["x"], memory_type="fact")
+        assert point.payload["context_id"] == str(context.id)
+        assert point.payload["workspace_id"] == str(context.workspace_id)
+        assert point.payload["memory_id"] == str(memory_id)
+
+
+class TestApplyUpsertRowMetadata:
+    """#2160: a same-version re-index writes the row's post-update metadata."""
+
+    @staticmethod
+    def _indexer(existing_memory):
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        return indexer
+
+    @staticmethod
+    def _existing():
+        existing = MagicMock()
+        existing.id = uuid4()
+        existing.tags = ["a"]
+        existing.type = "fact"
+        existing.context_summary = "an edit the re-index overwrites"
+        # A stale pre-update value of the generated columns: never the source.
+        existing.location_lat = 10.0
+        existing.location_lon = 20.0
+        existing.details = {}
+        return existing
+
+    async def _upsert(self, indexer, event):
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+        return indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_carries_tags_type_and_new_context_summary(self):
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert payload["tags"] == ["a"]
+        assert payload["type"] == "fact"
+        assert payload["context_summary"] == existing.context_summary == "Title: hello"
+        # The new details carry no location, so neither does the point, even
+        # though the stale columns still hold one.
+        assert "location" not in payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_location_comes_from_the_new_details(self):
+        """The location follows the details the row is left with. A worker
+        cannot supply one (#1331 strips it from the lineage), so the re-indexed
+        row loses its coordinate in PG and the point must not keep it either,
+        however the stale generated columns read."""
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = {"memory_details": {"location": {"lat": 35, "lon": 139.5}}}
+
+        payload = await self._upsert(indexer, event)
+
+        assert "location" not in existing.details
+        assert "location" not in payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_truncates_context_summary_like_the_row(self):
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+        event.payload = {"title": "x" * 3000, "price": 1}
+
+        payload = await self._upsert(indexer, event)
+
+        assert len(payload["context_summary"]) == 2000
+        assert payload["context_summary"].endswith("...")
+        assert payload["context_summary"] == existing.context_summary
+
+    @pytest.mark.asyncio
+    async def test_create_branch_point_has_no_row_metadata(self):
+        indexer = self._indexer(None)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert not {"tags", "type", "context_summary", "location"} & set(payload)
+        memory = indexer.db.add.call_args.args[0]
+        assert memory.type == "resource_data"
+        assert memory.tags == []

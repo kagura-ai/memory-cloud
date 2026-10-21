@@ -378,6 +378,10 @@ def build_resource_point(
     embedding: list[float],
     updated_at: datetime,
     memory_id: UUID,
+    tags: list[str] | None = None,
+    memory_type: str | None = None,
+    context_summary: str | None = None,
+    location: dict[str, float] | None = None,
 ) -> PointStruct:
     """Build the point of one resource document version.
 
@@ -395,6 +399,13 @@ def build_resource_point(
         embedding: Dense vector of ``content``.
         updated_at: When the document version was ingested.
         memory_id: The Memory row that owns the point.
+        tags / memory_type / context_summary / location: The owning row's
+            editable metadata (#2160), so a rebuilt or re-indexed point
+            agrees with the row and recall's ``tags`` / ``type`` / geo
+            filters match it. ``None`` omits the key: a fresh create passes
+            none, so its point keeps the indexer-only shape. They are merged
+            under the indexer's keys, so they can never shadow the
+            identity or isolation keys.
     """
     # Issue #335: sparse BM25 vector from the same text as the dense
     # embedding, so resource points participate in hybrid search instead of
@@ -409,11 +420,23 @@ def build_resource_point(
             indices=sparse_indices, values=sparse_values
         )
 
+    row_metadata: dict[str, Any] = {}
+    if tags is not None:
+        row_metadata["tags"] = list(tags)
+    if memory_type is not None:
+        row_metadata["type"] = memory_type
+    if context_summary is not None:
+        row_metadata["context_summary"] = context_summary
+    if location is not None:
+        row_metadata["location"] = dict(location)
+
     # Qdrant requires a UUID or integer point id, not a string.
     return PointStruct(
         id=str(resource_point_id(resource_id, doc_id, version)),
         vector=point_vector,
         payload={
+            # The row's metadata first: the indexer keys below win on a clash.
+            **row_metadata,
             "workspace_id": str(context.workspace_id),  # 3-level isolation
             "context_id": str(context.id),  # 3-level isolation
             "user_id": str(context.created_by),  # 3-level isolation
@@ -1000,6 +1023,45 @@ class ResourceIndexer:
         existing_memory = existing_memory_query.scalar_one_or_none()
         memory_id = existing_memory.id if existing_memory else uuid4()
 
+        # The row's values as this upsert leaves them, computed once for both
+        # the row and the point. P2-10: safe truncation with ellipsis.
+        context_summary = content[:1997] + "..." if len(content) > 2000 else content
+        # #896: worker lineage keys first, indexer lifecycle keys layered on
+        # top. The two sets are orthogonal (worker: connector_id / platform /
+        # team_id / channel_id / thread_ts / source_message_ids; indexer:
+        # resource_id / doc_id / version / indexed_at), so neither clobbers the
+        # other — the spread order just makes the indexer's lifecycle identity
+        # authoritative.
+        new_details: dict[str, Any] = {
+            **opaque_details,
+            "resource_id": event.resource_id,
+            "doc_id": event.doc_id,
+            "version": event.version,
+            # Bugfix: Keep timezone for ISO string
+            "indexed_at": to_utc_iso(utcnow()),
+        }
+
+        # #2160: a re-index of the same version updates a live row in place,
+        # so the point carries that row's metadata as it will be after this
+        # update: its tags and type are kept, its context_summary and details
+        # are replaced below. The location comes from the NEW details, not
+        # ``location_lat/lon``: those generated columns still hold the
+        # pre-update value until the flush round-trips them (the lineage
+        # strips a worker ``location`` today, #1331, so this is None and the
+        # point drops a coordinate the row is losing too). A fresh create
+        # passes none, so its point keeps the indexer-only shape.
+        row_metadata: dict[str, Any] = {}
+        if existing_memory is not None:
+            # Local import: memory_service imports this module.
+            from services.memory_service import location_payload_from_details
+
+            row_metadata = {
+                "tags": list(existing_memory.tags or []),
+                "memory_type": existing_memory.type,
+                "context_summary": context_summary,
+                "location": location_payload_from_details(new_details),
+            }
+
         point = build_resource_point(
             context=context,
             resource_id=event.resource_id,
@@ -1010,6 +1072,7 @@ class ResourceIndexer:
             embedding=embedding,
             updated_at=event.created_at,
             memory_id=memory_id,
+            **row_metadata,
         )
 
         # 4. Upsert to Qdrant (per-context collection, see #334). The point is
@@ -1066,30 +1129,13 @@ class ResourceIndexer:
                 # backfilled to 'manual' (pre-#887) or any stale value is
                 # restamped 'connector' so provenance reflects the ingest path.
                 existing_memory.source_type = SOURCE_TYPE_CONNECTOR
-                # P2-10: Safe truncation with ellipsis for context_summary
-                if len(content) > 2000:
-                    existing_memory.context_summary = content[:1997] + "..."
-                else:
-                    existing_memory.context_summary = content
+                existing_memory.context_summary = context_summary
                 existing_memory.content = json.dumps(event.payload, ensure_ascii=False)
                 # P0-2: Fix - use 'is not None' to allow importance=0.0
                 existing_memory.importance = (
                     event.importance if event.importance is not None else 0.6
                 )
-                # #896: worker lineage keys first, indexer lifecycle keys layered
-                # on top. The two sets are orthogonal (worker: connector_id /
-                # platform / team_id / channel_id / thread_ts / source_message_ids;
-                # indexer: resource_id / doc_id / version / indexed_at), so neither
-                # clobbers the other — the spread order just makes the indexer's
-                # lifecycle identity authoritative.
-                existing_memory.details = {
-                    **opaque_details,
-                    "resource_id": event.resource_id,
-                    "doc_id": event.doc_id,
-                    "version": event.version,
-                    # Bugfix: Keep timezone for ISO string
-                    "indexed_at": to_utc_iso(utcnow()),
-                }
+                existing_memory.details = new_details
                 # Always assign (mirrors the create branch) — re-indexing a doc
                 # whose event carries no lineage must clear a stale source_uri,
                 # not leave it matching spurious source_uri_prefix queries.
@@ -1113,8 +1159,6 @@ class ResourceIndexer:
                 # Create new memory
                 # P1-5: Truncate summary to 500 chars (database limit)
                 summary = f"[{event.resource_id}] {event.doc_id} v{event.version}"
-                # P2-10: Safe truncation with ellipsis for context_summary
-                context_summary = content[:1997] + "..." if len(content) > 2000 else content
                 memory = Memory(
                     id=memory_id,
                     user_id=str(context.created_by),
@@ -1123,16 +1167,7 @@ class ResourceIndexer:
                     summary=summary[:500],
                     context_summary=context_summary,
                     content=json.dumps(event.payload, ensure_ascii=False),
-                    # #896: worker lineage keys first, indexer lifecycle keys on
-                    # top (orthogonal sets — see the update branch comment).
-                    details={
-                        **opaque_details,
-                        "resource_id": event.resource_id,
-                        "doc_id": event.doc_id,
-                        "version": event.version,
-                        # Bugfix: Keep timezone for ISO string
-                        "indexed_at": to_utc_iso(utcnow()),
-                    },
+                    details=new_details,
                     # #896: source_uri from worker lineage (slack://…) so
                     # source_uri_prefix queries (find_by_channel) work; NULL for
                     # non-worker resources (legacy behavior).
@@ -1244,7 +1279,8 @@ class ResourceIndexer:
         event payload), so the point is rebuilt the way ``_apply_upsert`` built
         it: the payload projected through the resource's latest schema, the
         projected text embedded, and ``build_resource_point`` under the id the
-        row already names (``Memory.point_id``). The row itself is not touched.
+        row already names (``Memory.point_id``), carrying the row's tags, type,
+        context_summary and location (#2160). The row itself is not touched.
 
         The row is the source, as it is for recall's hydration: a row whose
         content was edited into another JSON object is rebuilt from what it
@@ -1339,6 +1375,17 @@ class ResourceIndexer:
             embedding=embedding,
             updated_at=ingested_at or memory.updated_at or memory.created_at or utcnow(),
             memory_id=memory.id,
+            # #2160: the row's editable metadata, so a rebuilt point agrees
+            # with the row it is rebuilt from. The location comes from the
+            # PG-validated generated columns (see location_payload_from_details).
+            tags=list(memory.tags or []),
+            memory_type=memory.type,
+            context_summary=memory.context_summary,
+            location=(
+                {"lat": float(memory.location_lat), "lon": float(memory.location_lon)}
+                if memory.location_lat is not None and memory.location_lon is not None
+                else None
+            ),
         )
         try:
             await self.qdrant_client.upsert(
