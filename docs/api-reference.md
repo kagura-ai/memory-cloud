@@ -1098,8 +1098,9 @@ authorization code grant and PKCE:
 4. `POST /api/v1/oauth/token` with `grant_type=refresh_token` issues a new
    pair and revokes the old one.
 
-**Body size.** `POST /api/v1/oauth/token` and the consent
-`POST /api/v1/oauth/authorize` refuse a form body over 16384 bytes, before it
+**Body size.** `POST /api/v1/oauth/token`, the consent
+`POST /api/v1/oauth/authorize`, `POST /api/v1/oauth/revoke` and
+`POST /api/v1/oauth/introspect` refuse a form body over 16384 bytes, before it
 is parsed, with `413` `invalid_request` (RFC 6749 JSON, `Cache-Control:
 no-store`); the consent POST answers it without a redirect.
 
@@ -1219,6 +1220,11 @@ form `client_secret`, or with a form `client_id` naming another client, gets
 `400` `invalid_request`. Revoking a
 refresh token also revokes the access token issued with it; revoking an
 access token leaves its refresh token usable.
+
+A form body over 16384 bytes gets `413` `invalid_request` on both endpoints,
+before it is parsed and before the client is authenticated. A missing or
+empty `token` gets `400` `invalid_request` (RFC 6749 JSON, `Cache-Control:
+no-store`); before #2207 it was a `422` validation error.
 
 ---
 
