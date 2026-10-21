@@ -189,6 +189,10 @@ def _memory_row(memory_id):
     memory.id = memory_id
     memory.user_id = "u1"
     memory.summary = "s"
+    # #2092: the run digests summary + content before it embeds; NULL = the
+    # row was never embedded under the digest column (a first embed).
+    memory.content = "c"
+    memory.embedded_text_digest = None
     memory.workspace_id = uuid4()
     memory.context_id = uuid4()
     result = MagicMock()
