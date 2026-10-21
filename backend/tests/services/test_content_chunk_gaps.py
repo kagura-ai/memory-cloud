@@ -142,6 +142,22 @@ async def test_the_backfill_with_ids_keeps_the_d4_fences(qdrant):
     assert "updated_at" not in sql.split("SET", 1)[1].split("WHERE", 1)[0]
 
 
+async def test_only_the_enable_moves_rows_in_flight(qdrant):
+    """#2095: the reconciler's backfill stays success-only (its flag is on);
+    ``include_in_flight`` adds ``processing`` rows for the enable."""
+    db = _db()
+    await gaps.queue_content_chunk_backfill(db, uuid4(), memory_ids=_ids(2))
+    await gaps.queue_content_chunk_backfill(db, uuid4(), include_in_flight=True)
+    reconciler, enable = (
+        str(
+            c.args[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        ).split(" WHERE ", 1)[1]
+        for c in db.execute.await_args_list
+    )
+    assert "'processing'" not in reconciler
+    assert "embedding_status IN ('success', 'processing')" in enable
+
+
 async def test_the_backfill_with_no_ids_writes_nothing(qdrant):
     db = _db()
     assert await gaps.queue_content_chunk_backfill(db, uuid4(), memory_ids=[]) == 0

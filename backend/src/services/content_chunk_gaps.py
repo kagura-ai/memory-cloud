@@ -124,7 +124,11 @@ def _long_plain_live(context_id: Any) -> list[Any]:
 
 
 async def queue_content_chunk_backfill(
-    db: AsyncSession, context_id: UUID, *, memory_ids: Sequence[UUID] | None = None
+    db: AsyncSession,
+    context_id: UUID,
+    *,
+    memory_ids: Sequence[UUID] | None = None,
+    include_in_flight: bool = False,
 ) -> int:
     """Re-queue the context's long ``success`` memories for chunking (#2015 D4, #2107).
 
@@ -133,11 +137,19 @@ async def queue_content_chunk_backfill(
     context whose content is long enough to split — or, with ``memory_ids``,
     those of them — goes back to ``pending``, and the embedding sweep rebuilds
     it (summary point and chunk points) under the usual claim and retry. The
-    row keeps its summary point meanwhile, so it stays searchable. Only
-    ``success`` rows: a ``processing`` row is a run in flight, ``pending`` /
-    ``failed`` rows are picked up anyway. Neither ``embedding_attempted_at``
-    (the pipeline's clock) nor ``updated_at`` (an edit's cue) is written.
-    Resource rows (``resource_id``) never get chunks and are left out.
+    row keeps its summary point meanwhile, so it stays searchable. ``pending``
+    / ``failed`` rows are picked up anyway and are left alone. Neither
+    ``embedding_attempted_at`` (the pipeline's clock) nor ``updated_at`` (an
+    edit's cue) is written. Resource rows (``resource_id``) never get chunks
+    and are left out.
+
+    ``include_in_flight`` (#2095): move ``processing`` rows too. The enable
+    passes it: a run in flight read the chunk flag before the enable
+    committed, so it writes no chunks and would stamp ``success`` without
+    them. Moving its row to ``pending`` fences that run off (its renewal, its
+    chunk checks and its outcome writes all match on ``processing``), and the
+    sweep embeds the row again with the flag on. No retry budget is spent.
+    The gap reconciler (``memory_ids``) leaves it off: its flag was already on.
 
     Returns:
         How many rows were queued (0 on a store without chunk points or for
@@ -145,7 +157,12 @@ async def queue_content_chunk_backfill(
     """
     if not chunk_points_supported() or (memory_ids is not None and not memory_ids):
         return 0
-    conditions = [*_long_plain_live(context_id), Memory.embedding_status == "success"]
+    status = (
+        Memory.embedding_status.in_(("success", "processing"))
+        if include_in_flight
+        else Memory.embedding_status == "success"
+    )
+    conditions = [*_long_plain_live(context_id), status]
     if memory_ids is not None:
         conditions.append(Memory.id.in_(list(memory_ids)))
     locked = (

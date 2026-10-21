@@ -306,14 +306,17 @@ class ContextSearchConfigRepository:
         ``services.content_chunk_gaps.queue_content_chunk_backfill`` over the
         whole context, in the caller's transaction: every live long ``success``
         row that is not a resource row goes back to ``pending`` for the
-        embedding sweep, which rebuilds its summary and chunk points.
+        embedding sweep, which rebuilds its summary and chunk points. So does
+        every such ``processing`` row (#2095): its run read the flag before
+        this enable committed and would stamp ``success`` with no chunks, and
+        the re-queue fences that run off.
 
         Returns:
             How many rows were queued (0 on a store without chunk points).
         """
         from services.content_chunk_gaps import queue_content_chunk_backfill
 
-        return await queue_content_chunk_backfill(self.db, context_id)
+        return await queue_content_chunk_backfill(self.db, context_id, include_in_flight=True)
 
     async def content_chunk_backfill_pending(self, context_id: UUID) -> int:
         """How many of the context's long memories still wait for their chunks.

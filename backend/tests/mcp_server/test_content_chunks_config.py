@@ -473,7 +473,8 @@ async def test_a_failed_backfill_keeps_the_flag_off():
 
 @pytest.mark.asyncio
 async def test_the_backfill_statement_requeues_only_long_live_success_rows():
-    """The predicate (the DB test runs it on real rows): never processing rows,
+    """The predicate (the DB test runs it on real rows): ``success`` and, since
+    #2095, ``processing`` rows (a run in flight read the flag before the enable);
     never the pipeline clock or updated_at, never resource rows."""
     from unittest.mock import MagicMock, patch
 
@@ -492,7 +493,7 @@ async def test_the_backfill_statement_requeues_only_long_live_success_rows():
     set_clause = sql.split(" WHERE ")[0]
     assert "embedding_attempted_at" not in set_clause and "updated_at" not in set_clause
     where = sql.split(" WHERE ")[1]
-    assert "memories.embedding_status = 'success'" in where
+    assert "memories.embedding_status IN ('success', 'processing')" in where
     assert "memories.deleted_at IS NULL" in where
     assert f"char_length(memories.content) >= {CONTENT_CHUNK_MIN_CONTENT_CHARS}" in where
     assert "memories.resource_id IS NULL" in where
