@@ -1686,12 +1686,14 @@ python -m src.cli.reprocess_erasures --all --apply --yes  # write; --request <uu
 ```
 
 The command reads the completed erasure requests and uses the pseudonym each
-one stores; it never derives one (no salt, no plaintext needed). A request
-completed before v0.58.1 still stores the raw account id: it is skipped and
-listed as `not pseudonymized` (it predates the revision log anyway). A value
-another erased member wrote is never put back: where it is the one to go
-back to, the `details` become empty instead. For each request, in one
-transaction:
+one stores; it never derives one (no salt, no plaintext needed). Two kinds of
+completed request still store the raw account id, and both are skipped and
+listed (the id itself is never printed): one the erasure sweep marked
+complete without running it because the user row was already gone (`never
+ran`), and one finalized before v0.58.1 (`stores the account id`, which
+predates the revision log anyway). A value another erased member wrote is
+never put back: where it is the one to go back to, the `details` become empty
+instead. For each request, in one transaction:
 
 1. where the erased member wrote the live `details` of a memory someone else
    authored, the last value someone else wrote is put back — a new version
@@ -1712,8 +1714,24 @@ apply report and the audit rows list it, and a plan afterwards shows 0. A
 second `--apply` changes nothing. The vector store must be reachable: a
 payload failure rolls that request back and stops the run with exit code 1;
 the requests before it stay done (each is logged to stderr as
-`erasure_reprocessed` and has its audit row) and a re-run picks up the rest. A restored memory whose embedding had not
-succeeded is re-queued instead of patched, and the sweep re-embeds it.
+`erasure_reprocessed` and has its audit row) and a re-run picks up the rest.
+A restored memory whose embedding had not succeeded is re-queued instead of
+patched, and the sweep re-embeds it.
+
+Two changes reach erasures that run from v0.123.0 on, too:
+
+- **A session rollback the erased member requested no longer counts as their
+  `details` edit.** The rollback put back someone else's value, so the prior
+  of the next edit over it stays (earlier versions stripped it). The value of
+  a session the rollback undid is attributed to whoever wrote it, the same
+  way.
+- **A value a member erased earlier is never put back.** Until this command
+  has run, a revision prior may still hold such a value (the #2235 leftover).
+  When a new erasure would go back to it, the memory's `details` become empty
+  instead, and the leftover stays in that prior until the command's run for
+  the earlier member strips it. Run the command soon after the upgrade, before
+  relying on the revision history of memories that members erased on
+  v0.113.0 through v0.120.x had edited.
 
 ### Restoring a deleted context — Issue #1804
 
