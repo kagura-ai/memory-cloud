@@ -1107,8 +1107,14 @@ no-store`); the consent POST answers it without a redirect.
 its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
 subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
-`[::1]` URI and the `client_name` names a supported client. A registration
-with any other entry is refused with `invalid_client_metadata`.
+`[::1]` URI and the `client_name` names a supported client, or (Gemini) it is
+`https://oauth-redirect.googleusercontent.com` or
+`https://oauth-redirect-sandbox.googleusercontent.com` exactly — no userinfo,
+port, trailing dot or case variant, no subdomain — with the path
+`/r/user_bound_custom-mcp-<one segment>` (unreserved characters only, no
+query, fragment or params). A registration with any other entry is refused
+with `invalid_client_metadata`. Redirect URIs are stored as sent and compared
+exactly at `/authorize` and `/token`.
 Registrations are limited to 5 per minute per client address (`429`
 `invalid_request` over it). `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`
 (comma-separated CIDR ranges, empty by default) exempts callers in those
