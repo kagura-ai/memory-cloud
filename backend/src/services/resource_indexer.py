@@ -361,6 +361,41 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     return point_id
 
 
+# The ``Memory.source`` and ``Memory.type`` of a row the indexer creates.
+INDEXER_SOURCE = "resource_ingest"
+RESOURCE_MEMORY_TYPE = "resource_data"
+
+
+def _keeps_user_edits(memory: Memory, new_details: dict[str, Any], context_summary: str) -> str:
+    """Carry a row's user-authored values over a same-version re-index (#2218).
+
+    Puts the row's ``details.location`` into ``new_details`` and returns the
+    ``context_summary`` the row and its point keep.
+
+    - ``details.location`` is always kept. Its only writer is a user or agent
+      edit (``_apply_location``): the indexer strips ``location`` from worker
+      lineage (#1331), so a location on the row is user-authored by
+      construction. Copied as stored; it was validated when written.
+    - ``context_summary`` is kept when the row was edited since the indexer
+      wrote it (``version > 1``: only an API edit or a rollback bumps it,
+      #2043) or was not written by the indexer (a ``remember(external_id)``
+      row matched by natural key, #2164), unless it is empty. Otherwise the
+      indexer's ``context_summary`` (the new truncation) is returned.
+
+    Accepted edges: an edit of another versioned field (importance, tags)
+    also keeps the old truncation, which on the same version differs from
+    the new one only if the schema's fulltext projection changed since; the
+    row's ``content`` and the point's text are refreshed either way.
+    """
+    location = (memory.details or {}).get("location")
+    if location is not None:
+        new_details["location"] = location
+    user_authored = memory.version > 1 or memory.source != INDEXER_SOURCE
+    if user_authored and memory.context_summary:
+        return memory.context_summary
+    return context_summary
+
+
 def resource_document_text(projected: dict[str, Any], doc_id: str) -> str:
     """The text a resource document is embedded and BM25-indexed by.
 
@@ -403,12 +438,12 @@ def build_resource_point(
         updated_at: When the document version was ingested.
         memory_id: The Memory row that owns the point.
         tags / memory_type / context_summary / location: The owning row's
-            editable metadata (#2160), so a rebuilt or re-indexed point
-            agrees with the row and recall's ``tags`` / ``type`` / geo
-            filters match it. ``None`` omits the key: a fresh create passes
-            none, so its point keeps the indexer-only shape. They are merged
-            under the indexer's keys, so they can never shadow the
-            identity or isolation keys.
+            editable metadata (#2160, #2218), so an indexed, re-indexed or
+            rebuilt point agrees with the row and recall's ``tags`` /
+            ``type`` / geo filters match it. ``None`` omits the key (a row
+            without a location has none). They are merged under the
+            indexer's keys, so they can never shadow the identity or
+            isolation keys.
     """
     # Issue #335: sparse BM25 vector from the same text as the dense
     # embedding, so resource points participate in hybrid search instead of
@@ -1070,26 +1105,30 @@ class ResourceIndexer:
             "indexed_at": to_utc_iso(utcnow()),
         }
 
-        # #2160: a re-index of the same version updates a live row in place,
-        # so the point carries that row's metadata as it will be after this
-        # update: its tags and type are kept, its context_summary and details
-        # are replaced below. The location comes from the NEW details, not
-        # ``location_lat/lon``: those generated columns still hold the
-        # pre-update value until the flush round-trips them (the lineage
-        # strips a worker ``location`` today, #1331, so this is None and the
-        # point drops a coordinate the row is losing too). A fresh create
-        # passes none, so its point keeps the indexer-only shape.
-        row_metadata: dict[str, Any] = {}
+        # #2160 / #2218: the point carries the row's metadata as this upsert
+        # leaves it, on both branches, so recall's ``tags`` / ``type`` / geo
+        # filters match a fresh point the same way as a re-indexed or rebuilt
+        # one. A create writes the indexer's defaults. A re-index of the same
+        # version keeps the row's tags and type, and what the user edited
+        # (``_keeps_user_edits``).
         if existing_memory is not None:
-            # Local import: memory_service imports this module.
-            from services.memory_service import location_payload_from_details
+            tags = list(existing_memory.tags or [])
+            memory_type = existing_memory.type
+            context_summary = _keeps_user_edits(existing_memory, new_details, context_summary)
+        else:
+            tags, memory_type = [], RESOURCE_MEMORY_TYPE
+        # Local import: memory_service imports this module.
+        from services.memory_service import location_payload_from_details
 
-            row_metadata = {
-                "tags": list(existing_memory.tags or []),
-                "memory_type": existing_memory.type,
-                "context_summary": context_summary,
-                "location": location_payload_from_details(new_details),
-            }
+        # The location comes from the details the row is left with, not
+        # ``location_lat/lon``: those generated columns still hold the
+        # pre-update value until the flush round-trips them.
+        row_metadata: dict[str, Any] = {
+            "tags": tags,
+            "memory_type": memory_type,
+            "context_summary": context_summary,
+            "location": location_payload_from_details(new_details),
+        }
 
         point = build_resource_point(
             context=context,
@@ -1208,16 +1247,16 @@ class ResourceIndexer:
                     # source_uri_prefix queries (find_by_channel) work; NULL for
                     # non-worker resources (legacy behavior).
                     source_uri=lineage_source_uri,
-                    type="resource_data",
+                    type=memory_type,
                     # P0-2: Fix - use 'is not None' to allow importance=0.0
                     importance=event.importance if event.importance is not None else 0.6,
                     scope="working",
-                    source="resource_ingest",  # Issue #262: Track provenance
+                    source=INDEXER_SOURCE,  # Issue #262: Track provenance
                     # Issue #887: server-stamped provenance — connector/external
                     # ingestion is 'connector', never client-set. (Trust is
                     # authoritative at the context level; this is provenance.)
                     source_type=SOURCE_TYPE_CONNECTOR,
-                    tags=[],
+                    tags=tags,
                     context={"context_id": str(context.id)},
                     client="resource_indexer",
                     # Bugfix: Use UUID format for summary_embedding_id

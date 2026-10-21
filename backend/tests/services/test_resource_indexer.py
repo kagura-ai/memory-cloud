@@ -18,6 +18,7 @@ from models.memory import Memory
 from services.context_routing import resolve_context_routing
 from services.resource_indexer import ResourceIndexer
 from utils.datetime import utcnow
+from utils.text import normalize_for_search
 
 
 def _savepoint() -> AsyncMock:
@@ -38,6 +39,16 @@ def _mock_db(db: AsyncMock | None = None) -> AsyncMock:
     db = db if db is not None else AsyncMock()
     db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
     return db
+
+
+def _indexed_row() -> MagicMock:
+    """A live row the indexer wrote and nobody edited since (``version == 1``)."""
+    row = MagicMock()
+    row.id = uuid4()
+    row.version = 1
+    row.source = "resource_ingest"
+    row.details = {}
+    return row
 
 
 def _make_event() -> MagicMock:
@@ -162,9 +173,7 @@ class TestResourceIndexerNamedVectorUpsert:
     async def test_apply_upsert_point_carries_the_existing_rows_memory_id(self, indexer, mock_db):
         """#1829: on a re-index the payload memory_id is the row's id, not a
         fresh uuid4() written before the row was looked up (#1808)."""
-        existing = MagicMock()
-        existing.id = uuid4()
-        existing.details = {}
+        existing = _indexed_row()
         lookup = MagicMock()
         lookup.scalar_one_or_none.return_value = existing
         old_versions = MagicMock()
@@ -354,7 +363,7 @@ class TestResourceIndexerNamedVectorUpsert:
     async def test_apply_upsert_update_path_projects_lineage(self):
         """#896: the UPDATE (re-index) branch also projects worker lineage onto
         the existing memory's details + source_uri."""
-        existing_memory = MagicMock()
+        existing_memory = _indexed_row()
         db = self._db_with_existing(existing_memory)
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(db)
@@ -379,7 +388,7 @@ class TestResourceIndexerNamedVectorUpsert:
         """#896 (haiku review): re-indexing a doc whose event carries NO lineage
         must CLEAR a previously-set source_uri, not leave it stale (symmetry with
         the create branch)."""
-        existing_memory = MagicMock()
+        existing_memory = _indexed_row()
         existing_memory.source_uri = "slack://old/stale/uri"  # from a prior index
         db = self._db_with_existing(existing_memory)
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
@@ -1162,15 +1171,13 @@ class TestApplyUpsertRowMetadata:
 
     @staticmethod
     def _existing():
-        existing = MagicMock()
-        existing.id = uuid4()
+        existing = _indexed_row()
         existing.tags = ["a"]
         existing.type = "fact"
-        existing.context_summary = "an edit the re-index overwrites"
+        existing.context_summary = "the indexer's old text"
         # A stale pre-update value of the generated columns: never the source.
         existing.location_lat = 10.0
         existing.location_lon = 20.0
-        existing.details = {}
         return existing
 
     async def _upsert(self, indexer, event):
@@ -1180,7 +1187,7 @@ class TestApplyUpsertRowMetadata:
         return indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
 
     @pytest.mark.asyncio
-    async def test_update_branch_carries_tags_type_and_new_context_summary(self):
+    async def test_update_branch_rewrites_an_unedited_context_summary(self):
         existing = self._existing()
         indexer = self._indexer(existing)
         event = _make_event()
@@ -1226,17 +1233,100 @@ class TestApplyUpsertRowMetadata:
         assert payload["context_summary"] == existing.context_summary
 
     @pytest.mark.asyncio
-    async def test_create_branch_point_has_no_row_metadata(self):
+    async def test_update_branch_keeps_an_edited_context_summary(self):
+        """#2218: an API edit bumped ``version``; the re-index keeps the text."""
+        existing = self._existing()
+        existing.version = 2
+        existing.context_summary = "What the user wrote"
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert existing.context_summary == "What the user wrote"
+        assert payload["context_summary"] == normalize_for_search("What the user wrote")
+
+    @pytest.mark.asyncio
+    async def test_update_branch_keeps_a_remembered_rows_context_summary(self):
+        """#2218: a ``remember(external_id)`` row (#2164) was never the indexer's."""
+        existing = self._existing()
+        existing.source = "mcp_remember"
+        existing.context_summary = "A remembered summary"
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert existing.context_summary == "A remembered summary"
+        assert payload["context_summary"] == normalize_for_search("A remembered summary")
+
+    @pytest.mark.asyncio
+    async def test_update_branch_falls_back_when_the_kept_summary_is_empty(self):
+        existing = self._existing()
+        existing.version = 2
+        existing.context_summary = None
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert existing.context_summary == "Title: hello"
+        assert payload["context_summary"] == "Title: hello"
+
+    @pytest.mark.asyncio
+    async def test_update_branch_keeps_details_location_in_the_row_and_the_point(self):
+        """#2218: only a user writes ``details.location``; a re-index keeps it."""
+        existing = self._existing()
+        existing.details = {
+            "resource_id": "res_test",
+            "location": {"lat": 35.5, "lon": 139.25},
+            "other": 1,
+        }
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert existing.details["location"] == {"lat": 35.5, "lon": 139.25}
+        assert "other" not in existing.details
+        assert existing.details["resource_id"] == "res_test"
+        assert payload["location"] == {"lat": 35.5, "lon": 139.25}
+
+    @pytest.mark.asyncio
+    async def test_update_branch_keeps_the_rows_location_over_a_worker_supplied_one(self):
+        existing = self._existing()
+        existing.details = {"location": {"lat": 1.0, "lon": 2.0}}
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = {"memory_details": {"location": {"lat": 35, "lon": 139.5}}}
+
+        payload = await self._upsert(indexer, event)
+
+        assert existing.details["location"] == {"lat": 1.0, "lon": 2.0}
+        assert payload["location"] == {"lat": 1.0, "lon": 2.0}
+
+    @pytest.mark.asyncio
+    async def test_create_branch_point_carries_the_rows_defaults(self):
+        """#2218: a fresh point matches ``type`` / ``tags`` filters like a
+        re-indexed or rebuilt one."""
         indexer = self._indexer(None)
         event = _make_event()
         event.event_metadata = None
 
         payload = await self._upsert(indexer, event)
 
-        assert not {"tags", "type", "context_summary", "location"} & set(payload)
         memory = indexer.db.add.call_args.args[0]
         assert memory.type == "resource_data"
         assert memory.tags == []
+        assert memory.source == "resource_ingest"
+        assert payload["type"] == memory.type
+        assert payload["tags"] == memory.tags
+        assert payload["context_summary"] == normalize_for_search(memory.context_summary)
+        assert "location" not in payload
 
 
 class TestRepointedRowDropsItsStrayPoints:
@@ -1255,11 +1345,9 @@ class TestRepointedRowDropsItsStrayPoints:
         event.event_metadata = None
         # Naive, like ResourceEvent.created_at: the run computes lag against utcnow().
         event.created_at = utcnow()
-        existing = MagicMock()
-        existing.id = uuid4()
+        existing = _indexed_row()
         existing.tags = []
         existing.type = "fact"
-        existing.details = {}
         doc_point = resource_point_id(event.resource_id, event.doc_id, event.version)
         existing.summary_embedding_id = {"own": existing.id, "uuid5": doc_point}.get(
             previous_point, previous_point
@@ -1665,3 +1753,88 @@ class TestFailedEventDoesNotPoisonTheBatch:
             assert state.last_offset == doc_2_event
         finally:
             await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
+
+
+class TestSameVersionReindexKeepsEdits:
+    """#2218, against the real DB: a replayed event of the same version keeps
+    what a user edited on the row (``context_summary``, ``details.location``)
+    and the point follows the row."""
+
+    LOCATION = {"lat": 35.5, "lon": 139.25}
+
+    async def _index_then_replay(self, db_session, *, edit: bool):
+        from models.resource import IndexerState
+        from services.memory_versions import record_edit, versioned_snapshot
+
+        ws_id, ctx_id, resource_pk, slug, owner = await _seed_indexed_resource(
+            db_session, [{"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}]
+        )
+        self.cleanup = (ws_id, ctx_id, resource_pk)
+        indexer, embedder = _db_indexer(db_session)
+        metrics = await _db_process(indexer, embedder, slug, ctx_id)
+        assert metrics.errors == 0, metrics.reason
+
+        row = (
+            await db_session.execute(select(Memory).where(Memory.context_id == ctx_id))
+        ).scalar_one()
+        row_id = row.id
+        first_indexed_at = row.details["indexed_at"]
+        if edit:
+            # The edit the API makes (update_memory): versioned, logged.
+            before = versioned_snapshot(row)
+            row.context_summary = "what the user wrote"
+            row.details = {**row.details, "location": dict(self.LOCATION)}
+            row.updated_at = utcnow()
+            assert record_edit(db_session, row, before, actor_user_id=owner)
+            await db_session.commit()
+            await db_session.refresh(row)
+            assert row.version == 2
+            assert row.location_lat == 35.5
+
+        # Replay: an offset reset re-applies the same version's event.
+        state = (
+            await db_session.execute(select(IndexerState).where(IndexerState.context_id == ctx_id))
+        ).scalar_one()
+        state.last_offset = 0
+        await db_session.commit()
+        indexer, embedder = _db_indexer(db_session)
+        metrics = await _db_process(indexer, embedder, slug, ctx_id)
+        assert metrics.errors == 0, metrics.reason
+        assert metrics.applied_upserts == 1
+
+        db_session.expire_all()
+        row = await db_session.get(Memory, row_id)
+        payload = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
+        return row, payload, first_indexed_at
+
+    @pytest.mark.asyncio
+    async def test_an_edited_row_keeps_its_summary_and_location(self, db_session):
+        self.cleanup = None
+        try:
+            row, payload, first_indexed_at = await self._index_then_replay(db_session, edit=True)
+
+            assert row.context_summary == "what the user wrote"
+            assert row.details["location"] == self.LOCATION
+            assert row.details["indexed_at"] >= first_indexed_at
+            assert (row.location_lat, row.location_lon) == (35.5, 139.25)
+            assert payload["context_summary"] == normalize_for_search("what the user wrote")
+            assert payload["location"] == self.LOCATION
+            assert payload["type"] == "resource_data"
+        finally:
+            if self.cleanup:
+                await _drop_indexed_resource(db_session, *self.cleanup)
+
+    @pytest.mark.asyncio
+    async def test_an_unedited_row_takes_the_new_text(self, db_session):
+        self.cleanup = None
+        try:
+            row, payload, _ = await self._index_then_replay(db_session, edit=False)
+
+            assert row.version == 1
+            assert row.context_summary == "title: Report"
+            assert "location" not in row.details
+            assert payload["context_summary"] == normalize_for_search("title: Report")
+            assert "location" not in payload
+        finally:
+            if self.cleanup:
+                await _drop_indexed_resource(db_session, *self.cleanup)

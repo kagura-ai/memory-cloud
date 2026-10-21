@@ -506,6 +506,7 @@ class TestRepointedRememberRowAgainstRealStores:
         from services.orphan_vector_sweep import _classify
         from services.resource_indexer import ResourceIndexer, resource_point_id
         from utils.datetime import utcnow
+        from utils.text import normalize_for_search
 
         client = AsyncQdrantClient(url=_qdrant_url(), timeout=5)
         try:
@@ -556,6 +557,8 @@ class TestRepointedRememberRowAgainstRealStores:
                 workspace_id=workspace.id,
                 context_id=context.id,
                 summary="a remembered external document",
+                # #2218: a remembered row's context_summary is the user's.
+                context_summary="A user's summary",
                 content='{"title": "Quarterly report"}',
                 details={"resource_id": slug, "doc_id": "doc_1", "version": 1},
                 type="fact",
@@ -625,11 +628,13 @@ class TestRepointedRememberRowAgainstRealStores:
             assert payload["memory_id"] == str(row_id)
             assert payload["tags"] == ["finance"]
             assert payload["type"] == "fact"
+            assert payload["context_summary"] == normalize_for_search("A user's summary")
 
             db_session.expire_all()
             refreshed = await db_session.get(Memory, row_id)
             assert refreshed is not None
             assert str(refreshed.summary_embedding_id) == doc_point
+            assert refreshed.context_summary == "A user's summary"
             # A cutoff ahead of every write: the sweep would remove any point
             # it judged an orphan, and it judges none.
             refs = [_point_ref(p) for p in points]
