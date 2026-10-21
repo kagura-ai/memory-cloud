@@ -1213,3 +1213,142 @@ class TestApplyUpsertRowMetadata:
         memory = indexer.db.add.call_args.args[0]
         assert memory.type == "resource_data"
         assert memory.tags == []
+
+
+class TestRepointedRowDropsItsStrayPoints:
+    """#2164: a row re-pointed onto its document's point loses its chunk points
+    and its own-id point, after the batch commits and never on rollback."""
+
+    COLLECTION = "kagura_memories"
+
+    def _run(self, previous_point, *, commit_error=None):
+        """process_incremental over one same-version re-index of a row that
+        named ``previous_point`` (``"own"`` = the row id, ``"uuid5"`` = the
+        document's point)."""
+        from services.resource_indexer import resource_point_id
+
+        event = _make_event()
+        event.event_metadata = None
+        # Naive, like ResourceEvent.created_at: the run computes lag against utcnow().
+        event.created_at = utcnow()
+        existing = MagicMock()
+        existing.id = uuid4()
+        existing.tags = []
+        existing.type = "fact"
+        existing.details = {}
+        doc_point = resource_point_id(event.resource_id, event.doc_id, event.version)
+        existing.summary_embedding_id = {"own": existing.id, "uuid5": doc_point}.get(
+            previous_point, previous_point
+        )
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(existing)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        indexer._get_or_create_state = AsyncMock(return_value=state)
+        indexer._fetch_events = AsyncMock(return_value=[event])
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=_make_context())
+        indexer._existing_resource_doc_ids = AsyncMock(return_value={event.doc_id})
+        indexer._plan_suspended = AsyncMock(return_value=False)
+
+        order: list[str] = []
+        db.commit = AsyncMock(
+            side_effect=commit_error or (lambda: order.append("commit")),
+        )
+        db.rollback = AsyncMock()
+        chunks = AsyncMock(side_effect=lambda *a, **k: order.append("chunks"))
+        points = AsyncMock(side_effect=lambda *a, **k: order.append("points"))
+        return indexer, existing, chunks, points, order
+
+    async def _process(self, indexer, chunks, points):
+        routing = AsyncMock(return_value=(self.COLLECTION, indexer.embedding_service))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_lookup.resolve_resource_pk", AsyncMock(return_value=1)),
+            patch("services.resource_indexer.delete_chunk_points", chunks),
+            patch("services.resource_indexer.delete_points_from_qdrant", points),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            metrics = await indexer.process_incremental("res_test", uuid4())
+        return metrics, log
+
+    @pytest.mark.asyncio
+    async def test_own_id_previous_point_drops_chunks_and_point_after_commit(self):
+        indexer, existing, chunks, points, order = self._run("own")
+
+        metrics, log = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 0
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_awaited_once_with([str(existing.id)], self.COLLECTION)
+        assert order == ["commit", "chunks", "points"]
+        assert indexer._repointed == []
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert "resource_repoint_points_dropped" in events
+
+    @pytest.mark.asyncio
+    async def test_already_owned_point_deletes_nothing(self):
+        indexer, _, chunks, points, _ = self._run("uuid5")
+
+        await self._process(indexer, chunks, points)
+
+        chunks.assert_not_awaited()
+        points.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_previous_point_drops_chunks_and_own_id(self):
+        indexer, existing, chunks, points, _ = self._run(None)
+
+        await self._process(indexer, chunks, points)
+
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_awaited_once_with([str(existing.id)], self.COLLECTION)
+
+    @pytest.mark.asyncio
+    async def test_another_previous_point_is_kept(self):
+        other = uuid4()
+        indexer, existing, chunks, points, _ = self._run(other)
+
+        _, log = await self._process(indexer, chunks, points)
+
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_not_awaited()
+        kept = [
+            c
+            for c in log.info.call_args_list
+            if c.args[0] == "resource_repoint_previous_point_kept"
+        ]
+        assert kept and kept[0].kwargs["point_id"] == str(other)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_delete_is_logged_and_the_run_completes(self):
+        indexer, existing, _, points, _ = self._run("own")
+        chunks = AsyncMock(side_effect=RuntimeError("qdrant down"))
+
+        metrics, log = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 0
+        points.assert_not_awaited()
+        warned = [
+            c for c in log.warning.call_args_list if c.args[0] == "resource_repoint_cleanup_failed"
+        ]
+        assert warned[0].kwargs == {
+            "memory_id": str(existing.id),
+            "collection": self.COLLECTION,
+            "error_class": "RuntimeError",
+        }
+        assert indexer._repointed == []
+
+    @pytest.mark.asyncio
+    async def test_a_rolled_back_batch_deletes_nothing(self):
+        indexer, _, chunks, points, _ = self._run("own", commit_error=RuntimeError("commit failed"))
+
+        metrics, _ = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 1
+        indexer.db.rollback.assert_awaited_once()
+        chunks.assert_not_awaited()
+        points.assert_not_awaited()
+        assert indexer._repointed == []

@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
+    delete_chunk_points,
+    delete_points_from_qdrant,
     get_qdrant_client,
 )
 from models.auth import Context, Workspace
@@ -520,6 +522,10 @@ class ResourceIndexer:
         self.db = db
         self.embedding_service = EmbeddingService(db)
         self.qdrant_client = get_qdrant_client()
+        # #2164: rows the running batch re-pointed onto their document's
+        # point, as (memory_id, previous point id, collection). Drained after
+        # the batch commits, cleared when it rolls back.
+        self._repointed: list[tuple[UUID, UUID | None, str]] = []
 
     async def process_incremental(
         self,
@@ -539,6 +545,7 @@ class ResourceIndexer:
         """
         start_time = utcnow()
         metrics = IndexerMetrics()
+        self._repointed = []
 
         try:
             # 1. Resolve context first so workspace_id is available for
@@ -725,6 +732,8 @@ class ResourceIndexer:
             state.last_run_at = utcnow()
             state.metrics = metrics.to_dict()
             await self.db.commit()
+            # #2164: only now that the re-points are durable.
+            await self._drop_repointed_points()
 
             # 8. Calculate duration
             metrics.duration_ms = int((utcnow() - start_time).total_seconds() * 1000)
@@ -739,6 +748,9 @@ class ResourceIndexer:
             return metrics
 
         except Exception as e:
+            # #2164: a rolled-back re-point leaves the row naming its old
+            # point, so that point and its chunks must stay.
+            self._repointed = []
             await self.db.rollback()
             logger.error(
                 "indexer_run_failed",
@@ -1143,10 +1155,16 @@ class ResourceIndexer:
                 # Bugfix: Remove timezone for DB compatibility
                 existing_memory.updated_at = utcnow()
                 existing_memory.embedding_status = "success"
+                # #2164: the point the row named before this update. A
+                # ``remember(external_id, details={doc_id, version})`` row matched
+                # by natural key names its own id and may carry content chunks.
+                previous_point = existing_memory.summary_embedding_id
                 # Bugfix: Use UUID format for summary_embedding_id
                 existing_memory.summary_embedding_id = point_id_uuid
 
                 await self.db.flush()
+                if previous_point != point_id_uuid:
+                    self._repointed.append((existing_memory.id, previous_point, collection_name))
 
                 logger.info(
                     "resource_memory_updated",
@@ -1262,6 +1280,46 @@ class ResourceIndexer:
             )
             # Re-raise to trigger transaction rollback
             raise
+
+    async def _drop_repointed_points(self) -> None:
+        """Delete the stray points of the rows this batch re-pointed (#2164).
+
+        Runs after the batch commit, never on rollback: deleting first and then
+        rolling back would leave a live row naming its own id with no point and
+        no chunks, which only the event retry restores. A row now owns its
+        document's point, so its content chunks (``chunk_of`` = row id) and a
+        previous point under its own id are strays. Any other previous id (the
+        point of another natural key) may be another row's, so it is kept for
+        the orphan sweep. Best effort: a failure is logged and the next entry
+        goes on; a crash before the drain leaves strays the sweep removes.
+        """
+        repointed, self._repointed = self._repointed, []
+        for memory_id, previous_point, collection in repointed:
+            try:
+                await delete_chunk_points([memory_id], collection)
+                if previous_point is None or previous_point == memory_id:
+                    # A row-id point belongs to that row alone.
+                    await delete_points_from_qdrant([str(memory_id)], collection)
+                else:
+                    logger.info(
+                        "resource_repoint_previous_point_kept",
+                        memory_id=str(memory_id),
+                        point_id=str(previous_point),
+                        collection=collection,
+                    )
+            except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+                logger.warning(
+                    "resource_repoint_cleanup_failed",
+                    memory_id=str(memory_id),
+                    collection=collection,
+                    error_class=type(e).__name__,
+                )
+                continue
+            logger.info(
+                "resource_repoint_points_dropped",
+                memory_id=str(memory_id),
+                collection=collection,
+            )
 
     async def rebuild_point(
         self,
