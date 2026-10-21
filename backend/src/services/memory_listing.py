@@ -20,6 +20,7 @@ import base64
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import ColumnElement
 
+from db.qdrant import any_tag_spellings, widened_tag_groups
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import (
     EDGE_TYPE_SUPERSEDES,
@@ -298,6 +300,87 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
                 Memory.tags.contains(arr) if tags_match == "all" else Memory.tags.overlap(arr)
             )
     return out
+
+
+# The single-value row filters recall's Qdrant builder matches exactly
+# (``MatchValue``) and its hydration post-filter compares with ``==``.
+_RECALL_SINGLE_VALUE_FILTERS = ("type", "scope", "source_type")
+# Mirrors ``db.qdrant._MAX_FILTER_TAGS``: recall matches at most 50 tags.
+_RECALL_MAX_TAGS = 50
+
+
+def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnElement[bool]]:
+    """SQL predicates for the row filters a recall applied, for a row read outside the search.
+
+    #2027: a supersede suggestion names another memory and carries its
+    summary, so it must not bring back a row the recall's filters kept out.
+    This projects the recall's *effective* filters (after the ``tags_normalize``
+    widening) onto what :func:`compile_memory_filters` understands and
+    delegates to it, reading them the way recall's Qdrant builder and its
+    hydration post-filter do:
+
+    - ``type``, ``scope``, ``source_type``: a string (the builder matches one
+      value); ``source_uri_prefix``: a non-empty string.
+    - ``importance``: the ``gte``/``lte``/``gt``/``lt`` numbers of a dict; a
+      non-dict or an empty one is ignored, as the builder ignores it.
+    - ``tags``: the non-empty strings of a list, the first 50, with
+      ``tags_match``. A widened filter (``TAG_GROUPS_FILTER_KEY``) under
+      ``all`` needs one spelling per group; under ``any`` the union of the
+      groups. ``tags_normalize`` is not applied again: the widening already
+      happened.
+
+    Not applied: ``trust_tier`` (the resolver's ``trusted_only`` covers it),
+    ``analysis_cluster`` (a pool membership, not a row property), ``near`` /
+    ``within`` / ``score_threshold`` / ``client`` (query shape), and the time
+    windows — a target is older than its source by construction, so
+    ``created_after`` would drop almost every suggestion.
+
+    Never raises on a filter recall tolerated: a value recall could not have
+    applied is ignored here rather than refused.
+
+    Args:
+        filters: The filter dict recall searched with, or None.
+
+    Returns:
+        Predicates on ``Memory`` to AND together; empty when nothing applies.
+    """
+    if not filters:
+        return []
+    projected: dict[str, Any] = {}
+    for key in _RECALL_SINGLE_VALUE_FILTERS:
+        value = filters.get(key)
+        if isinstance(value, str):
+            projected[key] = value
+    prefix = filters.get("source_uri_prefix")
+    if isinstance(prefix, str) and prefix:
+        projected["source_uri_prefix"] = prefix
+    importance = filters.get("importance")
+    if isinstance(importance, dict):
+        bounds = {
+            op: bound
+            for op, bound in importance.items()
+            if op in _IMPORTANCE_OPS
+            and isinstance(bound, (int, float))
+            and not isinstance(bound, bool)
+        }
+        if bounds:
+            projected["importance"] = bounds
+    group_predicates: list[ColumnElement[bool]] = []
+    tags = filters.get("tags")
+    tags_match = filters.get("tags_match", "any")
+    if isinstance(tags, list) and tags_match in ("any", "all"):
+        valid = [t for t in tags if isinstance(t, str) and t][:_RECALL_MAX_TAGS]
+        groups = widened_tag_groups(dict(filters)) if valid else None
+        if groups is not None and tags_match == "all":
+            group_predicates = [
+                Memory.tags.overlap(cast(group, Memory.tags.type)) for group in groups
+            ]
+        elif groups is not None:
+            projected["tags"] = any_tag_spellings(groups)
+        elif valid:
+            projected["tags"] = valid
+            projected["tags_match"] = tags_match
+    return compile_memory_filters(projected) + group_predicates
 
 
 @dataclass(frozen=True)
