@@ -291,7 +291,7 @@ class DynamicClientRegistrationRequest(BaseModel):
     """Dynamic Client Registration (DCR) request for MCP clients.
 
     Simplified schema for MCP client OAuth registration (ChatGPT, Claude,
-    Cursor, and loopback-only native clients such as Codex CLI).
+    Cursor, Gemini, and loopback-only native clients such as Codex CLI).
     MCP clients use this for automatic registration.
     """
 
@@ -606,7 +606,7 @@ async def create_oauth2_client(
             plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
             visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
 
-            # Migration 036: Provider from request (claude, chatgpt, custom)
+            # Migration 036: Provider from request (claude, chatgpt, cursor, gemini, custom)
             provider = data.provider
 
             # Create OAuth2Client (Migration 034: workspace-scoped)
@@ -713,21 +713,29 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # query or fragment. The URI is stored exactly as sent and compared exactly at
 # /authorize and /token — never as a ``/r/*`` wildcard, which would match
 # every other binding on the redirector.
-_PROVIDER_EXACT_REDIRECTS: dict[str, tuple[frozenset[str], str]] = {
+# Hosts are an ordered tuple (not a frozenset) so the match order is fixed.
+_PROVIDER_EXACT_REDIRECTS: dict[str, tuple[tuple[str, ...], str]] = {
     "gemini": (
-        frozenset(
-            {
-                "oauth-redirect.googleusercontent.com",
-                "oauth-redirect-sandbox.googleusercontent.com",
-            }
+        (
+            "oauth-redirect.googleusercontent.com",
+            "oauth-redirect-sandbox.googleusercontent.com",
         ),
         "/r/user_bound_custom-mcp-",
     ),
 }
 
-# Characters allowed in the trailing segment of an exact-redirect provider,
-# raw and after percent-decoding: RFC 3986 ``unreserved``. Anything else —
-# ``/ \ * ; ? # %`` and friends — refuses the URI.
+# ``(base, provider)`` pairs, ``base`` = ``https://<host><prefix>``, built once.
+_EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
+    (f"https://{host}{prefix}", provider)
+    for provider, (hosts, prefix) in _PROVIDER_EXACT_REDIRECTS.items()
+    for host in hosts
+)
+
+# Characters allowed in the trailing segment of an exact-redirect provider:
+# RFC 3986 ``unreserved``, written as is or percent-encoded (``%2D`` = ``-``),
+# and still unreserved once decoded. Anything else (``/ \ * ; ? #``, a bare
+# ``%``, or an encoding of a reserved character such as ``%2F``) refuses the
+# URI. ``.`` alone and any ``..`` are refused too (``is_single_path_segment``).
 _EXACT_REDIRECT_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]+")
 _EXACT_REDIRECT_RAW_SEGMENT_RE = re.compile(r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+")
 
@@ -809,19 +817,14 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     Returns:
         The provider name, or None when no exact-redirect provider matches.
     """
-    for provider, (hosts, prefix) in _PROVIDER_EXACT_REDIRECTS.items():
-        for host in hosts:
-            base = f"https://{host}{prefix}"
-            if not redirect_uri.startswith(base):
-                continue
-            raw_segment = redirect_uri[len(base) :]
-            if not _EXACT_REDIRECT_RAW_SEGMENT_RE.fullmatch(raw_segment):
-                return None
-            segment = unquote(raw_segment)
-            if not _EXACT_REDIRECT_SEGMENT_RE.fullmatch(segment):
-                return None
-            if not is_single_path_segment(segment):
-                return None
+    for base, provider in _EXACT_REDIRECT_BASES:
+        if not redirect_uri.startswith(base):
+            continue
+        raw_segment = redirect_uri[len(base) :]
+        if not _EXACT_REDIRECT_RAW_SEGMENT_RE.fullmatch(raw_segment):
+            continue
+        segment = unquote(raw_segment)
+        if _EXACT_REDIRECT_SEGMENT_RE.fullmatch(segment) and is_single_path_segment(segment):
             return provider
     return None
 
@@ -1023,8 +1026,10 @@ async def dynamic_client_registration(
                 "Native CLIs (RFC 8252) must use http://localhost, "
                 "http://127.0.0.1, or http://[::1] with a recognized "
                 f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)}). "
-                "Gemini must use an https redirect on Google's OAuth "
-                "redirect hosts."
+                "Gemini must use https://oauth-redirect.googleusercontent.com "
+                "or https://oauth-redirect-sandbox.googleusercontent.com with "
+                "the path /r/user_bound_custom-mcp-<one segment> and no query "
+                "or fragment."
             ),
         )
 

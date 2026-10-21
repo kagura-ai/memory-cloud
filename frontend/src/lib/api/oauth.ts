@@ -30,7 +30,7 @@ export interface OAuth2Client {
   response_types: string[];
   scope: string;
   token_endpoint_auth_method: string;
-  provider: string;  // Migration 036: claude, chatgpt, custom
+  provider: string;  // Migration 036: claude, chatgpt, cursor, gemini, custom (DCR also codex, hermes, openclaw)
   created_at: string;
   // Migration 034-035: Zero-knowledge visibility
   plaintext_secret: string | null;  // Only if visible + owner
@@ -45,7 +45,7 @@ export interface OAuth2ClientWithSecret extends OAuth2Client {
 export interface OAuth2ClientCreateRequest {
   client_name: string;
   redirect_uris: string[];
-  provider?: string;  // Migration 036: claude, chatgpt, custom (default: custom)
+  provider?: string;  // Migration 036: claude, chatgpt, cursor, gemini, custom (default: custom)
   grant_types?: string[];
   response_types?: string[];
   scope?: string;

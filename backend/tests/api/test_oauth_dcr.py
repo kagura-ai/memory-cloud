@@ -1023,6 +1023,7 @@ class TestDcrEndpointGemini:
         assert body["error"] == "invalid_client_metadata"
         assert "gemini" in body["error_description"]
         assert "Gemini" in body["error_description"]
+        assert _GEMINI_PREFIX in body["error_description"]
         fake_session.add.assert_not_called()
         rejected = [
             c for c in fake_logger.warning.call_args_list if c.args[0] == "dcr_provider_rejected"
