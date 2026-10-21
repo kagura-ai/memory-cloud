@@ -8009,7 +8009,7 @@ _SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 _KNN_SEED_NO_CONSUMER_REPORTED: set[tuple[str, int]] = set()
 
 
-async def _source_text_moved(db: AsyncSession, memory: Memory) -> bool:
+async def _source_text_moved(db: AsyncSession, memory: Memory, embedded: str | None = None) -> bool:
     """Re-read ``memory``'s text and candidate column; True when the text moved.
 
     #2059: the embedding task loaded ``memory`` before embedding it and the
@@ -8020,10 +8020,15 @@ async def _source_text_moved(db: AsyncSession, memory: Memory) -> bool:
     run owns the column: this run's result is about text that no longer
     exists. The column is re-read in the same round trip so the caller can
     re-check a dismissal or an accept committed meanwhile.
+
+    ``embedded`` is the fingerprint of the text this run embedded, taken
+    before any earlier re-read in the same run refreshed ``memory`` (#2085).
+    Without it the fingerprint comes from ``memory`` as it stands now.
     """
     from services.supersede_verify import text_fingerprint
 
-    embedded = text_fingerprint(memory.summary, memory.content)
+    if embedded is None:
+        embedded = text_fingerprint(memory.summary, memory.content)
     await db.refresh(memory, attribute_names=["supersede_candidate", "summary", "content"])
     return text_fingerprint(memory.summary, memory.content) != embedded
 
@@ -8468,10 +8473,15 @@ async def _create_knn_seed_edges(
     from neural.calibration import resolve_knn_threshold
     from neural.config import NeuralMemoryConfig
     from repositories.neural_edge import NeuralEdgeRepository
+    from services.supersede_verify import text_fingerprint
 
     global _SUPERSEDE_SUGGEST_LAST_SEEN
 
     try:
+        # #2085: the text this run embedded. The supersede detection below can
+        # refresh ``memory`` from the row, so the seed fence compares against
+        # this value rather than a fingerprint taken after that refresh.
+        embedded_fingerprint = text_fingerprint(memory.summary, memory.content)
         config = await NeuralMemoryConfig.from_db(db)
 
         # #2010: two consumers share the neighbour query below — the seed edges
@@ -8692,6 +8702,14 @@ async def _create_knn_seed_edges(
                 candidates=len(candidates),
                 threshold=threshold,
             )
+            return
+
+        # #2085: an edit committed after this run's success write starts its
+        # own run, which finds no edges and seeds from the new text — unless
+        # this run seeds first: the guard above then keeps the stale edges for
+        # good. Re-read the text and leave the seeding to the newer run.
+        if await _source_text_moved(db, memory, embedded_fingerprint):
+            logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
             return
 
         edges_created = 0
