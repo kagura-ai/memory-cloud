@@ -263,6 +263,158 @@ class TestAdminForceEraseHappyPath:
         assert target_user_id not in metadata_repr
 
 
+# ---------------------------------------------------------------------------
+# #2244: the erased member's details on another author's memory
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def edited_by_target(db_session: AsyncSession, erasure_scenario):
+    """A memory the other member authored in the surviving (transferred)
+    workspace, whose newest details edit is the target's."""
+    from models.auth import Context
+    from models.memory import Memory, MemoryRevision
+
+    other = erasure_scenario["other_user_id"]
+    target = erasure_scenario["target_user_id"]
+    context = Context(
+        id=uuid4(),
+        workspace_id=erasure_scenario["workspace_id"],
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=other,
+    )
+    db_session.add(context)
+    await db_session.flush()
+    memory = Memory(
+        id=uuid4(),
+        user_id=other,
+        workspace_id=erasure_scenario["workspace_id"],
+        context_id=context.id,
+        summary="the other member's memory",
+        content="body",
+        type="note",
+        client="test",
+        details={"by": "target", "location": {"lat": 35.0, "lon": 139.0}},
+        version=2,
+        embedding_status="success",
+    )
+    db_session.add(memory)
+    await db_session.flush()
+    db_session.add(
+        MemoryRevision(
+            memory_id=memory.id,
+            context_id=context.id,
+            version=2,
+            kind="updated",
+            writer="api",
+            actor_user_id=target,
+            prior={"details": {"by": "author"}},
+        )
+    )
+    await db_session.commit()
+    return memory.id
+
+
+class TestEditorDetailsRestore:
+    """#2244 through the whole ``_execute`` pipeline."""
+
+    @staticmethod
+    async def _state(db_session: AsyncSession, memory_id) -> tuple:
+        from models.memory import Memory, MemoryRevision
+
+        memory = (
+            await db_session.execute(
+                select(Memory)
+                .where(Memory.id == memory_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        writers = (
+            (
+                await db_session.execute(
+                    select(MemoryRevision.writer)
+                    .where(MemoryRevision.memory_id == memory_id)
+                    .order_by(MemoryRevision.version)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return memory.details, memory.version, list(writers)
+
+    @pytest.mark.asyncio
+    async def test_completed_erasure_restores_and_counts(
+        self, db_session: AsyncSession, erasure_scenario, edited_by_target, patched_external_stores
+    ):
+        sync = AsyncMock()
+        with patch("services.erasure_details.update_memory_payload_in_qdrant", sync):
+            request = await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=erasure_scenario["target_user_id"],
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2244)",
+            )
+
+        assert request.status == STATUS_COMPLETE
+        postgres = request.deleted_data_summary["postgres"]
+        assert postgres["details_restored"] == 1
+        assert postgres["details_restored_unavailable"] == 0
+        assert postgres["details_payload_skipped"] == 0
+        assert postgres["revision_details_stripped"] == 0
+        assert await self._state(db_session, edited_by_target) == (
+            {"by": "author"},
+            3,
+            ["api", "erasure"],
+        )
+        sync.assert_awaited_once()
+        assert sync.await_args.kwargs["delete_keys"] == ["location"]
+
+    @pytest.mark.asyncio
+    async def test_payload_failure_fails_the_erasure_and_changes_nothing(
+        self, db_session: AsyncSession, erasure_scenario, edited_by_target, patched_external_stores
+    ):
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import QdrantError
+
+        before = await self._state(db_session, edited_by_target)
+        with (
+            patch(
+                "services.erasure_details.update_memory_payload_in_qdrant",
+                AsyncMock(side_effect=QdrantError("vector store down")),
+            ),
+            pytest.raises(QdrantError),
+        ):
+            await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=erasure_scenario["target_user_id"],
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2244)",
+            )
+
+        request = (
+            await db_session.execute(
+                select(ErasureRequest)
+                .where(ErasureRequest.user_id == erasure_scenario["target_user_id"])
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert request.status == STATUS_FAILED
+        # the user and their edit are still there; the author's memory still
+        # holds the target's value, with no erasure row
+        assert before == (
+            {"by": "target", "location": {"lat": 35.0, "lon": 139.0}},
+            2,
+            ["api"],
+        )
+        assert await self._state(db_session, edited_by_target) == before
+        user = (
+            await db_session.execute(
+                select(User).where(User.user_id == erasure_scenario["target_user_id"])
+            )
+        ).scalar_one_or_none()
+        assert user is not None
+
+
 class TestPartialUniqueIndexRace:
     """uq_erasure_one_active_per_user must reject a second active row."""
 

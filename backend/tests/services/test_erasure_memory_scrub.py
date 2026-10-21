@@ -86,9 +86,10 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     service.db = db
 
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        count = await service._erase_memory_revisions("google-oauth2|erased")
+        counts = await service._erase_memory_revisions("google-oauth2|erased")
 
-    assert count == 3
+    # #2244: the strip's rowcount reaches the erasure summary too
+    assert counts == {"memory_revisions_pseudonymized": 3, "revision_details_stripped": 3}
     lock, strip, scrub, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
     # #2242 review: the subject's memories are locked first, in id order, so
     # no edit adds to their logs and no rollback / erasure deadlocks on them

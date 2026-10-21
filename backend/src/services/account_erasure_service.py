@@ -84,6 +84,7 @@ from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     lock_subject_memories,
     pseudonymize_revision_actor,
+    restore_editor_details,
     strip_subject_details,
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
@@ -800,6 +801,11 @@ class AccountErasureService:
         is ephemeral and re-creatable from cookies if anything goes wrong.
         """
         summary: dict[str, Any] = {}
+        # Read before any failure: the handlers below roll back first, which
+        # expires ``request``, and an async session cannot lazy-load the
+        # expired id back (MissingGreenlet) — the row would never be marked
+        # failed (#2244: a vector-store failure inside the Postgres step).
+        request_id = request.id
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
@@ -875,7 +881,7 @@ class AccountErasureService:
             await self.db.rollback()
             await self.db.execute(
                 update(ErasureRequest)
-                .where(ErasureRequest.id == request.id)
+                .where(ErasureRequest.id == request_id)
                 .values(
                     status=STATUS_FAILED,
                     failure_reason=(
@@ -912,7 +918,7 @@ class AccountErasureService:
             await self.db.rollback()
             await self.db.execute(
                 update(ErasureRequest)
-                .where(ErasureRequest.id == request.id)
+                .where(ErasureRequest.id == request_id)
                 .values(
                     status=STATUS_FAILED,
                     failure_reason=(
@@ -928,7 +934,7 @@ class AccountErasureService:
         except Exception as exc:
             logger.error(
                 "erasure_execute_failed",
-                request_id=str(request.id),
+                request_id=str(request_id),
                 user_id=target.user_id,
                 error=str(exc),
                 exc_info=True,
@@ -938,7 +944,7 @@ class AccountErasureService:
             # the just-rolled-back ORM state.
             await self.db.execute(
                 update(ErasureRequest)
-                .where(ErasureRequest.id == request.id)
+                .where(ErasureRequest.id == request_id)
                 .values(
                     status=STATUS_FAILED,
                     failure_reason=str(exc)[:1000],
@@ -1299,8 +1305,19 @@ class AccountErasureService:
         # the memories / memory_revisions UPDATEs below, so edits, session
         # rollbacks and other erasures queue on them instead of deadlocking.
         await lock_subject_memories(self.db, user_id)
+        # #2244: where the subject wrote the live details of a memory another
+        # member authored, put back the last value someone else wrote. FIRST
+        # among the memory steps: it finds the subject's edits by the raw
+        # actor (pseudonymized below) and writes its own revision row under
+        # the pseudonym, which the strip and the pseudonymize step never
+        # match. Patches the vector payload before the commit; a failure
+        # fails the erasure with Postgres rolled back.
+        restore = await restore_editor_details(self.db, user_id, actor=self._pseudonym(user_id))
+        counts["details_restored"] = restore.restored
+        counts["details_restored_unavailable"] = restore.unavailable
+        counts["details_payload_skipped"] = restore.payload_skipped
         counts.update(await self._erase_session_provenance(user_id))
-        counts["memory_revisions_pseudonymized"] = await self._erase_memory_revisions(user_id)
+        counts.update(await self._erase_memory_revisions(user_id))
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
         # #1365 review sweep: neural graph edges, analysis runs, retrieval
@@ -1507,7 +1524,7 @@ class AccountErasureService:
             + (requester.rowcount or 0),
         }
 
-    async def _erase_memory_revisions(self, user_id: str) -> int:
+    async def _erase_memory_revisions(self, user_id: str) -> dict[str, int]:
         """Scrub the erased subject out of ``memory_revisions`` (#2043).
 
         Two steps of ``services.erasure_details``, in this order:
@@ -1524,7 +1541,9 @@ class AccountErasureService:
         to the subject's memories and locks its rows in id order (#2242).
 
         Returns:
-            How many revision rows were pseudonymized.
+            ``memory_revisions_pseudonymized`` (the subject's own events) and
+            ``revision_details_stripped`` (priors whose ``details`` was
+            removed) for the erasure summary.
         """
         stripped = await strip_subject_details(self.db, user_id)
         pseudonymized = await pseudonymize_revision_actor(
@@ -1535,7 +1554,10 @@ class AccountErasureService:
             details_stripped=stripped.details_stripped,
             scrub_marked=stripped.scrub_marked,
         )
-        return pseudonymized
+        return {
+            "memory_revisions_pseudonymized": pseudonymized,
+            "revision_details_stripped": stripped.details_stripped,
+        }
 
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).

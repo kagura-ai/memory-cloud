@@ -61,6 +61,21 @@ def hand_over():
 
 
 @pytest.fixture(autouse=True)
+def restore_details():
+    """#2244: the Postgres sweep puts back the details the subject wrote on
+    other authors' memories — queries (and a vector-store patch) the mocked
+    sessions in this module do not script. The real step is covered in
+    ``tests/integration/test_erasure_details_db.py``."""
+    from services.erasure_details import RestoreReport
+
+    with patch(
+        "services.account_erasure_service.restore_editor_details",
+        new=AsyncMock(return_value=RestoreReport()),
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
 def owned_contracts():
     """#1940: no owned workspace under a billing contract unless a test sets
     ``owned_contracts.return_value``. The query itself is covered in
@@ -1067,6 +1082,52 @@ class TestDeletePostgresSweep:
         assert any(c.args[1] is WorkerAppIdentity.created_by for c in calls)
         assert any(c.args[1] is WorkerAppIdentity.updated_by for c in calls)
         assert all(c.args[2] == target.user_id for c in calls)
+
+
+class TestRestoreEditorDetailsWiring:
+    """#2244: the restore runs first among the memory steps, by the raw sub,
+    with the pseudonym as the new rows' actor, and its counts reach the
+    erasure summary."""
+
+    @pytest.mark.asyncio
+    async def test_restore_runs_before_the_revision_scrub_and_is_counted(self, restore_details):
+        from services.erasure_details import RestoreReport
+
+        order: list[str] = []
+        restore_details.side_effect = lambda *a, **k: (
+            order.append("restore"),
+            RestoreReport(restored=2, unavailable=1, payload_synced=1, payload_skipped=2),
+        )[1]
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+
+        async def _provenance(_user_id):
+            order.append("provenance")
+            return {"memory_sessions_scrubbed": 0, "session_rollbacks_pseudonymized": 0}
+
+        async def _revisions(_user_id):
+            order.append("revisions")
+            return {"memory_revisions_pseudonymized": 4, "revision_details_stripped": 3}
+
+        svc._erase_session_provenance = AsyncMock(side_effect=_provenance)
+        svc._erase_memory_revisions = AsyncMock(side_effect=_revisions)
+        target = _user(user_id="raw-sub")
+
+        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+            counts = await svc._delete_postgres(target)
+            pseudonym = svc._pseudonym("raw-sub")
+
+        assert order == ["restore", "provenance", "revisions"]
+        restore_details.assert_awaited_once_with(svc.db, "raw-sub", actor=pseudonym)
+        assert pseudonym != "raw-sub"
+        assert counts["details_restored"] == 2
+        assert counts["details_restored_unavailable"] == 1
+        assert counts["details_payload_skipped"] == 2
+        assert counts["memory_revisions_pseudonymized"] == 4
+        assert counts["revision_details_stripped"] == 3
 
 
 class TestMemoryAccessEventsErasure:

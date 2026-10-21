@@ -323,10 +323,11 @@ async def test_erasure_scrubs_the_revision_log(
         service = AccountErasureService.__new__(AccountErasureService)
         service.db = session
         with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-            count = await service._erase_memory_revisions(subject)
+            counts = await service._erase_memory_revisions(subject)
             pseudonym = service._pseudonym(subject)
         await session.commit()
-        assert count == 1
+        # the subject's memory: both events' priors lose their details
+        assert counts == {"memory_revisions_pseudonymized": 1, "revision_details_stripped": 2}
 
         rows = (
             await session.execute(
@@ -716,7 +717,7 @@ async def test_revision_updates_lock_in_id_order(
             assert held is not None
             assert getattr(held.orig, "sqlstate", None) == "55P03"  # lock_not_available
             # nothing the subject did themselves: no row to pseudonymize
-            assert pseudonymized == 0
+            assert pseudonymized["memory_revisions_pseudonymized"] == 0
             assert await _log(probe, authored) == [
                 (authored, 2, other, {"erased": ["details"], "scrubbed": ["details"]}),
                 (authored, 3, other, {"erased": ["details"], "scrubbed": ["details"]}),
