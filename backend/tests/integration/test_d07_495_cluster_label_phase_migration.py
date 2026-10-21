@@ -97,10 +97,12 @@ def test_d07_round_trip_check() -> None:
             assert "'cluster_labeling'" in _phase_check(conn)
             assert _phase_check_validated(conn) is True
     finally:
+        # Delete first: ``sleep_reports`` exists at every revision this test
+        # visits, so the seeded row goes even if the upgrade to head fails.
         try:
-            _upgrade_to("head")
             with engine.connect() as conn:
                 conn.execute(text("DELETE FROM sleep_reports WHERE id = :id"), {"id": report_id})
                 conn.commit()
+            _upgrade_to("head")
         finally:
             engine.dispose()

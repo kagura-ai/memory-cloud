@@ -15,7 +15,7 @@ a97 / b03 audits, every downgrade's leftover check) land in the script in
 order and find no rows. No database is used.
 
 That recorder is what lets the reads run here; a real ``alembic --sql`` run
-has none. ``test_offline_support_is_upgrade_only`` pins which revisions need a
+has none. ``test_offline_runs_only_without_reads`` pins which revisions need a
 live connection (``_NEEDS_LIVE_CONNECTION``).
 
 ``test_every_validate_sits_in_an_autocommit_block`` walks every revision's AST.
@@ -60,17 +60,18 @@ _CASES = [
 ]
 
 # Runs that read the database before they finish, so a real ``alembic --sql``
-# run cannot carry them: the a97 / b03 upgrade audits, e84's INVALID-index
-# probe, and every downgrade's leftover probe.
+# run cannot carry them, with the result accessor that first fails on the mock
+# bind's None: the a97 / b03 upgrade audits, e84's INVALID-index probe, and
+# every downgrade's leftover probe.
 _NEEDS_LIVE_CONNECTION = {
-    ("a97_resources_entity", "upgrade"),
-    ("b03_396_neural_edges_ws_ctx_not_null", "upgrade"),
-    ("d07_495_cluster_label_phase", "downgrade"),
-    ("e74_1401_mae_explore", "downgrade"),
-    ("e84_1619_tool_guardrails", "upgrade"),
-    ("e84_1619_tool_guardrails", "downgrade"),
-    ("e98_2007_mae_list_changes_since", "downgrade"),
-    ("f00_2019_llm_log_supersede", "downgrade"),
+    ("a97_resources_entity", "upgrade"): "fetchall",
+    ("b03_396_neural_edges_ws_ctx_not_null", "upgrade"): "rowcount",
+    ("d07_495_cluster_label_phase", "downgrade"): "first",
+    ("e74_1401_mae_explore", "downgrade"): "first",
+    ("e84_1619_tool_guardrails", "upgrade"): "first",
+    ("e84_1619_tool_guardrails", "downgrade"): "first",
+    ("e98_2007_mae_list_changes_since", "downgrade"): "first",
+    ("f00_2019_llm_log_supersede", "downgrade"): "first",
 }
 
 _ADD_NOT_VALID = re.compile(r"ADD CONSTRAINT (\w+)\b.*\bNOT VALID;$")
@@ -170,21 +171,23 @@ def _literal_text(node: ast.AST) -> str | None:
 
 def _validate_sites(tree: ast.AST) -> list[tuple[int, bool]]:
     """``(lineno, inside an autocommit block)`` for every VALIDATE literal
-    passed to a call. Docstrings and comments are not call arguments."""
+    that is not a docstring: call arguments, assigned values, returns. A
+    docstring (or any bare string statement) is an ``ast.Expr`` whose value
+    is the literal; comments are not in the AST at all."""
     sites: list[tuple[int, bool]] = []
 
-    def visit(node: ast.AST, in_block: bool, in_call: bool) -> None:
+    def visit(node: ast.AST, in_block: bool, parent: ast.AST | None) -> None:
         if isinstance(node, ast.With) and any(_is_autocommit_block(i) for i in node.items):
             in_block = True
         text = _literal_text(node)
         if text is not None:
-            if in_call and _PHRASE in text:
+            if _PHRASE in text and not isinstance(parent, ast.Expr):
                 sites.append((getattr(node, "lineno", 0), in_block))
             return
         for child in ast.iter_child_nodes(node):
-            visit(child, in_block, in_call or isinstance(node, ast.Call))
+            visit(child, in_block, node)
 
-    visit(tree, False, False)
+    visit(tree, False, None)
     return sites
 
 
@@ -201,10 +204,11 @@ def test_every_validate_sits_in_an_autocommit_block():
     ``with op.get_context().autocommit_block():`` — the ``_validate()`` helper
     form passes because its literal sits inside the ``with``.
 
-    Known false negative: a VALIDATE held in a module constant
-    (``_DDL = "... VALIDATE ..."``) and executed inside a block is reported as
-    outside, because its literal is at module level. No migration does that;
-    write the literal inside the block instead.
+    A VALIDATE held in a variable counts where the literal is written: inside
+    the ``with`` it passes, outside it is an offender. So a module constant
+    (``_DDL = "... VALIDATE ..."``) executed inside a block is reported as
+    outside (a known false positive, the safe direction). No migration does
+    that; write the literal inside the block instead.
     """
     sites = _all_validate_sites()
     offenders = {
@@ -233,7 +237,7 @@ def test_the_validate_walker_finds_the_known_sites():
 
 
 @pytest.mark.parametrize(("revision", "direction"), _CASES)
-def test_offline_support_is_upgrade_only(revision, direction):
+def test_offline_runs_only_without_reads(revision, direction):
     """What the ``_validate()`` docstrings claim for a real ``alembic --sql`` run:
     no recorder, so a read of the database fails on the mock bind."""
     module = importlib.import_module(revision)
@@ -242,10 +246,12 @@ def test_offline_support_is_upgrade_only(revision, direction):
         opts={"as_sql": True, "output_buffer": io.StringIO(), "transactional_ddl": True},
     )
     with Operations.context(ctx):
-        if (revision, direction) not in _NEEDS_LIVE_CONNECTION:
+        accessor = _NEEDS_LIVE_CONNECTION.get((revision, direction))
+        if accessor is None:
             getattr(module, direction)()
         else:
-            # The mock connection returns None for a read; the result accessor
-            # (``.first()`` / ``.fetchall()`` / ``.rowcount``) then fails.
-            with pytest.raises(AttributeError, match="'NoneType' object has no attribute"):
+            # The mock connection returns None for a read; its accessor fails.
+            with pytest.raises(
+                AttributeError, match=f"'NoneType' object has no attribute '{accessor}'"
+            ):
                 getattr(module, direction)()

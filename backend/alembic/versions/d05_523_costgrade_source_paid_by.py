@@ -31,8 +31,9 @@ upgrade in one transaction, so a VALIDATE in that transaction would scan
 ``sleep_reports`` under the ALTER's ACCESS EXCLUSIVE lock until commit; the
 block commits the column and NOT VALID adds first, and VALIDATE then holds
 only SHARE UPDATE EXCLUSIVE (reads and writes continue). That commit point is
-why every step is re-runnable: the columns use ``if_not_exists``, each CHECK
-add drops a leftover first, and the index uses ``if_not_exists``.
+why the steps before it are re-runnable: the columns use ``if_not_exists`` and
+each CHECK add drops a leftover first. The index after the block is built in
+the transaction that stamps d05, so a failure rolls both back.
 
 A composite index ``idx_sleep_reports_workspace_source_started`` on
 ``(workspace_id, source, started_at DESC)`` supports the #472 cost
@@ -129,7 +130,6 @@ def upgrade() -> None:
         "idx_sleep_reports_workspace_source_started",
         "sleep_reports",
         ["workspace_id", "source", sa.text("started_at DESC")],
-        if_not_exists=True,
     )
 
 
