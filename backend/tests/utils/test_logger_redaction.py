@@ -166,9 +166,9 @@ def test_json_path_orders_redaction_after_format_exc_info(monkeypatch):
     from unittest.mock import patch
 
     monkeypatch.setenv("LOG_COLORIZE", "false")
-    with patch.object(structlog, "configure") as configure:
+    with preserved_structlog_config(), patch.object(structlog, "configure") as configure:
         setup_logger(enable_colors=False)
-    processors = configure.call_args.kwargs["processors"]
+        processors = list(configure.call_args.kwargs["processors"])
     assert redact_pg_detail in processors
     assert processors.index(redact_pg_detail) > processors.index(
         structlog.processors.format_exc_info

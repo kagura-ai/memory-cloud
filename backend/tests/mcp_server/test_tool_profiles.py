@@ -16,7 +16,7 @@ import json
 import pytest
 import structlog
 
-from mcp_server.tools import _profiles, get_tool_definitions
+from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._profiles import (
     CORE_TOOLS,
     MAX_TOOL_NAMES,
@@ -47,15 +47,12 @@ def _names(query: bytes | str | None) -> list[str]:
 
 
 @pytest.fixture
-def logs(monkeypatch):
+def logs():
     """The selector's log events, whatever ran earlier in the process.
 
-    ``capture_logs`` reaches the current structlog configuration only. The
-    module's logger caches itself on first use, and ``setup_logger()`` runs
-    again when ``api.main`` is imported, so a logger cached in between would
-    keep writing past the capture. A fresh proxy per test cannot be stale.
+    A repeat ``setup_logger()`` (an ``api.main`` import) keeps the processor
+    list that cached loggers hold, so ``capture_logs`` reaches them (#2167).
     """
-    monkeypatch.setattr(_profiles, "logger", structlog.get_logger(_profiles.__name__))
     with structlog.testing.capture_logs() as captured:
         yield captured
 

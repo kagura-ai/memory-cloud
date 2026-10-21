@@ -16,6 +16,12 @@ import structlog
 
 @contextmanager
 def preserved_structlog_config() -> Iterator[None]:
+    """Restore the structlog configuration on exit, keeping the list instance.
+
+    Yields:
+        None. On exit the processor list gets its old contents back and the
+        other settings are configured again.
+    """
     saved = structlog.get_config()
     processors = saved["processors"]
     saved_processors = list(processors)

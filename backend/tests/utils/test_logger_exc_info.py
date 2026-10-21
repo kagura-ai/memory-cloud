@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import structlog
 
+from tests.structlog_state import preserved_structlog_config
 from utils.logger import setup_logger
 
 
@@ -19,9 +20,11 @@ def _captured_processors(enable_colors: bool, monkeypatch):
     # branch so the test is deterministic regardless of the environment
     # (CI commonly sets LOG_COLORIZE=false).
     monkeypatch.setenv("LOG_COLORIZE", "true" if enable_colors else "false")
-    with patch.object(structlog, "configure") as configure:
+    # setup_logger() edits the live processor list before calling configure
+    # (#2167): copy what it passed, then restore the list in place.
+    with preserved_structlog_config(), patch.object(structlog, "configure") as configure:
         setup_logger(enable_colors=enable_colors)
-    return configure.call_args.kwargs["processors"]
+        return list(configure.call_args.kwargs["processors"])
 
 
 def test_json_path_renders_exc_info(monkeypatch):

@@ -10,7 +10,9 @@ write past the capture: ``tests/tasks`` run as a directory lost the
 """
 
 import json
+import logging
 import uuid
+from collections.abc import Iterator
 
 import pytest
 import structlog
@@ -20,13 +22,21 @@ from utils.logger import setup_logger
 
 
 @pytest.fixture
-def _structlog_restored():
+def _structlog_restored() -> Iterator[None]:
+    # setup_logger() also sets the root level and wraps root-handler formatters.
+    root = logging.getLogger()
+    saved_level, saved_handlers = root.level, root.handlers[:]
+    saved_formatters = [handler.formatter for handler in saved_handlers]
     with preserved_structlog_config():
         yield
+    root.setLevel(saved_level)
+    root.handlers[:] = saved_handlers
+    for handler, formatter in zip(saved_handlers, saved_formatters, strict=True):
+        handler.setFormatter(formatter)
 
 
 @pytest.mark.usefixtures("_structlog_restored")
-def test_capture_logs_reaches_a_logger_cached_before_a_repeat_setup(capsys):
+def test_capture_logs_reaches_a_logger_cached_before_a_repeat_setup() -> None:
     logger = structlog.get_logger(f"t2167-{uuid.uuid4().hex}")
     logger.info("warm")  # caches the bound logger against the current processors
 
@@ -39,7 +49,7 @@ def test_capture_logs_reaches_a_logger_cached_before_a_repeat_setup(capsys):
 
 
 @pytest.mark.usefixtures("_structlog_restored")
-def test_a_repeat_setup_keeps_the_processor_list_instance():
+def test_a_repeat_setup_keeps_the_processor_list_instance() -> None:
     before = structlog.get_config()["processors"]
 
     setup_logger(enable_colors=False)
@@ -48,7 +58,9 @@ def test_a_repeat_setup_keeps_the_processor_list_instance():
 
 
 @pytest.mark.usefixtures("_structlog_restored")
-def test_a_repeat_setup_switches_the_chain_of_cached_loggers(monkeypatch, capsys):
+def test_a_repeat_setup_switches_the_chain_of_cached_loggers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     # The chain follows the new call (console -> JSON here). Level and output
     # stream do not: structlog freezes those per logger on first use.
     monkeypatch.setenv("LOG_COLORIZE", "true")
@@ -64,7 +76,8 @@ def test_a_repeat_setup_switches_the_chain_of_cached_loggers(monkeypatch, capsys
     assert json.loads(line)["event"] == "as_json"
 
 
-def test_preserved_structlog_config_restores_contents_in_place():
+@pytest.mark.usefixtures("_structlog_restored")
+def test_preserved_structlog_config_restores_contents_in_place() -> None:
     processors = structlog.get_config()["processors"]
     original = list(processors)
 

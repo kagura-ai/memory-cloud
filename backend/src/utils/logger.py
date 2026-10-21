@@ -213,10 +213,10 @@ def setup_logger(
         processors.append(redact_pg_detail)
         processors.append(structlog.processors.JSONRenderer())
 
-    if structlog.is_configured():
-        # #2167: keep the list identity, the way capture_logs() does — cached
-        # loggers hold this list, and a new list would strand them.
-        current = structlog.get_config()["processors"]
+    # #2167: keep the list identity, the way capture_logs() does — cached
+    # loggers hold this list, and a new list would strand them.
+    current = structlog.get_config()["processors"]
+    if isinstance(current, list):
         current[:] = processors
         processors = current
 
