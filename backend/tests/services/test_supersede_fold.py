@@ -85,7 +85,9 @@ def _pool(*rows):
     return search_results, memories
 
 
-async def _fold(svc, search_results, memories, *, include_superseded=False, shadow_map=None):
+async def _fold(
+    svc, search_results, memories, *, include_superseded=False, shadow_map=None, resolved=None
+):
     return await svc._apply_supersede_fold(
         search_results,
         memories,
@@ -93,6 +95,20 @@ async def _fold(svc, search_results, memories, *, include_superseded=False, shad
         user_id="u",
         trusted_only=False,
         shadow_map=shadow_map,
+        resolved=resolved,
+    )
+
+
+async def _page(svc, search_results, memories, fold_map, resolved=None):
+    return await svc._recall_build_responses(
+        RecallRequest(query="q", k=5),
+        search_results,
+        memories,
+        shadow_map={},
+        contradiction_map={},
+        user_id="u",
+        fold_map=fold_map,
+        resolved_candidates=resolved,
     )
 
 
@@ -324,7 +340,8 @@ class TestPage:
         v1, v2, v3, candidates = _chain()
         search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
         svc = _service(candidates)
-        fold_map = await _fold(svc, search_results, memories)
+        resolved: dict = {}  # as recall() hands it to both (#2131)
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
 
         responses = await svc._recall_build_responses(
             RecallRequest(query="q", k=5),
@@ -334,6 +351,7 @@ class TestPage:
             contradiction_map={},
             user_id="u",
             fold_map=fold_map,
+            resolved_candidates=resolved,
         )
 
         assert len(responses) == 1
@@ -342,10 +360,11 @@ class TestPage:
         assert head.score == 0.9
         assert head.folded.count == 2
         assert head.folded.memory_ids == [v2.id, v1.id]
-        # The head keeps its own accept affordance (the page's own lookup).
+        # The head keeps its own accept affordance — from the fold's lookup,
+        # which the page reuses rather than resolving v3 again (#2131).
         assert head.supersede_candidate.memory_id == v2.id
-        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
-        assert set(page_lookup) == {str(v3.id)}
+        svc._resolve_supersede_candidates.assert_awaited_once()
+        assert set(svc._resolve_supersede_candidates.await_args.args[0]) == {v2.id, v3.id}
 
     async def test_projection_renders_folded_and_omits_it_when_absent(self):
         v1, v2, v3, candidates = _chain()
@@ -366,6 +385,149 @@ class TestPage:
             head, plain = (recall_result_item(r, verbosity) for r in responses)
             assert head["folded"] == {"count": 2, "memory_ids": [str(v2.id), str(v1.id)]}
             assert "folded" not in plain
+
+
+@pytest.mark.asyncio
+class TestResolveOnce:
+    """#2131: a judge-on recall resolves each candidate once — the page reuses
+    the fold's answer and queries only the rows the fold did not resolve."""
+
+    async def test_page_reuses_the_folds_resolution(self):
+        v1, v2, v3, candidates = _chain()
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        svc = _service(candidates)
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        responses = await _page(svc, search_results, memories, fold_map, resolved)
+
+        svc._resolve_supersede_candidates.assert_awaited_once()
+        assert resolved == {v3.id: candidates[v3.id], v2.id: candidates[v2.id]}
+        assert responses[0].supersede_candidate == candidates[v3.id]
+
+    async def test_page_resolves_only_the_rows_the_fold_did_not(self):
+        v1, v2, v3, candidates = _chain()
+        other, target = _mem(5), _mem(6)
+        other.supersede_candidate = {"memory_id": str(target.id), "similarity": 0.9}
+        other_hint = _cand(target, verified=None)
+        search_results, memories = _pool((v1, 0.9), (other, 0.85), (v2, 0.8), (v3, 0.7))
+        svc = _service(candidates)
+        svc._resolve_supersede_candidates.side_effect = [candidates, {other.id: other_hint}]
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        responses = await _page(svc, search_results, memories, fold_map, resolved)
+
+        assert svc._resolve_supersede_candidates.await_count == 2
+        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
+        assert set(page_lookup) == {str(other.id)}
+        hints = {r.memory_id: r.supersede_candidate for r in responses}
+        assert hints == {v3.id: candidates[v3.id], other.id: other_hint}
+
+    async def test_a_judged_row_whose_hint_was_dropped_is_not_resolved_again(self):
+        """The resolver dropped v3's hint (parallel, stale, target gone): the
+        sink records that, so the page neither asks again nor ships one."""
+        v1, v2 = _mem(1), _mem(0)
+        _judged(v2, v1)
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8))
+        svc = _service({})
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        responses = await _page(svc, search_results, memories, fold_map, resolved)
+
+        assert fold_map == {}
+        assert resolved == {v2.id: None}
+        # Only v1 (no stored candidate, so no query) goes to the page lookup.
+        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
+        assert set(page_lookup) == {str(v1.id)}
+        assert [r.supersede_candidate for r in responses] == [None, None]
+
+    async def test_a_fold_that_fails_open_leaves_the_page_to_resolve(self):
+        v1, v2, v3, candidates = _chain()
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        svc = _service(candidates)
+        svc._resolve_supersede_candidates.side_effect = [RuntimeError("boom"), candidates]
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        responses = await _page(svc, search_results, memories, fold_map, resolved)
+
+        assert fold_map == {} and resolved == {}
+        assert svc._resolve_supersede_candidates.await_count == 2
+        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
+        assert set(page_lookup) == {str(v1.id), str(v2.id), str(v3.id)}
+        assert len(responses) == 3
+
+    async def test_judge_off_is_still_one_page_query(self):
+        v1, v2 = _mem(1), _mem(0)
+        v2.supersede_candidate = {"memory_id": str(v1.id), "similarity": 0.9}
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8))
+        svc = _service({v2.id: _cand(v1, verified=None)})
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        await _page(svc, search_results, memories, fold_map, resolved)
+
+        assert resolved == {}
+        svc._resolve_supersede_candidates.assert_awaited_once()
+        page_lookup = svc._resolve_supersede_candidates.await_args.args[0]
+        assert set(page_lookup) == {str(v1.id), str(v2.id)}
+
+    async def test_recall_hands_the_folds_resolution_to_the_page(self):
+        v1, v2, v3, candidates = _chain()
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        service = MemoryService(db=AsyncMock())
+        captured: dict = {}
+
+        async def fold(*_args, resolved, **_kwargs):
+            resolved[v3.id] = candidates[v3.id]
+            captured["fold"] = resolved
+            return {}
+
+        service._apply_supersede_fold = fold
+        build = await _run_recall(service, search_results, memories, candidates)
+
+        assert build.await_args.kwargs["resolved_candidates"] is captured["fold"]
+        assert captured["fold"] == {v3.id: candidates[v3.id]}
+
+
+async def _run_recall(service, search_results, memories, candidates):
+    """Drive recall() with every lane but the fold stubbed; returns the
+    page-builder mock."""
+    ctx, ws = uuid4(), uuid4()
+    request = RecallRequest(query="q", k=5)
+    plan = SimpleNamespace(
+        request=request,
+        effective_workspace_id=ws,
+        is_shared_context_read=False,
+        neural_enabled=False,
+        search_config=None,
+        search_context_id=str(ctx),
+    )
+    service._recall_check_agent_bindings = AsyncMock()
+    service._recall_prepare = AsyncMock(return_value=plan)
+    service._recall_resolve_cluster_filter = AsyncMock(return_value=None)
+    service.search_service = MagicMock()
+    service.search_service.hybrid_search = AsyncMock(return_value=search_results)
+    service._recall_hydrate_memories = AsyncMock(return_value=memories)
+    service._recall_filter_rows_by_binding = AsyncMock(side_effect=lambda _r, m, **_k: (m, 0))
+    service._apply_supersede_shadowing = AsyncMock(return_value=({}, {}))
+    service._resolve_supersede_candidates = AsyncMock(return_value=candidates)
+    service._maybe_reinforce_rerank = AsyncMock()
+    service._maybe_graph_boost = AsyncMock()
+    build = AsyncMock(return_value=[])
+    service._recall_build_responses = build
+    service._recall_record_access = AsyncMock()
+    service._recall_finalize = AsyncMock(return_value="response")
+    await service.recall(
+        request,
+        "u",
+        current_context_id=ctx,
+        current_workspace_id=ws,
+        capacity_gate=False,
+    )
+    return build
 
 
 @pytest.mark.asyncio

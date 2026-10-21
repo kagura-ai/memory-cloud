@@ -111,6 +111,7 @@ from services.recall_timings import RecallTimings
 from services.reranker_service import RERANK_UNSCORED_KEY
 from services.search_service import SearchService
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
+from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -235,11 +236,6 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
             error=str(exc),
             exc_info=exc,
         )
-
-
-# #2123: the keys that place a row in the recall pool. A folded group's head
-# takes them from the group's best-ranked row, whose place it takes.
-_FOLD_RANK_KEYS = ("score", "hybrid_score", "rerank_score", RERANK_UNSCORED_KEY)
 
 
 def _is_trusted_recall(request: RecallRequest) -> bool:
@@ -3826,6 +3822,7 @@ class MemoryService:
         user_id: str,
         trusted_only: bool,
         shadow_map: Mapping[UUID, UUID] | None = None,
+        resolved: dict[UUID, SupersedeCandidate | None] | None = None,
     ) -> dict[UUID, list[UUID]]:
         """#2123: fold judge-verified older versions of a fact under the newer one.
 
@@ -3841,8 +3838,10 @@ class MemoryService:
 
         1. Only pool memories whose stored candidate carries a ``supersedes``
            verdict are resolved (one batched query; none at all on a
-           deployment without the judge). The page builder resolves the
-           shipped page's hints itself, as before.
+           deployment without the judge). With ``resolved`` (#2131) the
+           answer for every judged id — ``None`` where no hint survives — is
+           written there, so the page builder resolves only the shipped rows
+           the fold did not.
         2. A verified candidate is a directed link newer → older. A pool row
            reachable from another pool row along links is folded; links are
            followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
@@ -3867,7 +3866,8 @@ class MemoryService:
         ``include_superseded=True`` folds nothing (audit reads, and
         ``forget(query=)``, must see every version). Rows in a link cycle with
         no head outside it stay unfolded. Fail-open: an error leaves the pool
-        untouched.
+        untouched. The grouping lives in :mod:`services.supersede_fold`
+        (#2131); this shell keeps the resolver call and the fail-open.
 
         Returns:
             Head id → folded member ids, newest first.
@@ -3875,154 +3875,27 @@ class MemoryService:
         if include_superseded:
             return {}
         try:
-            from services.supersede_verify import VERDICT_SUPERSEDES, stored_verification
-
-            def judged_supersedes(memory: Memory) -> bool:
-                verification = stored_verification(memory.supersede_candidate)
-                return verification is not None and (
-                    verification.get("verdict") == VERDICT_SUPERSEDES
-                )
-
-            pool: dict[UUID, Memory] = {}
-            for search_result in search_results:
-                memory = memories.get(search_result["id"])
-                if memory is not None:
-                    pool.setdefault(memory.id, memory)
-            # Shadowed versions (hydrated, removed by shadowing): link nodes,
-            # never rows. All of them, so a chain of accepted edges
-            # (v4→v3→v2, v2 verified→v1) still reaches v1.
-            bridges: dict[UUID, Memory] = {}
-            for memory in memories.values():
-                if shadow_map and memory.id in shadow_map and memory.id not in pool:
-                    bridges.setdefault(memory.id, memory)
-            nodes = {**pool, **bridges}
-            judged = {mid: m for mid, m in nodes.items() if judged_supersedes(m)}
-            if len(pool) < 2 or not judged:
+            nodes = fold_nodes(search_results, memories, shadow_map)
+            if len(nodes.pool) < 2 or not nodes.judged:
                 return {}
             candidates = await self._resolve_supersede_candidates(
-                judged,
+                nodes.judged,
                 user_id=user_id,
                 operation="recall",
                 trusted_only=trusted_only,
             )
-            links: dict[UUID, set[UUID]] = {}
-            for dst, src in (shadow_map or {}).items():
-                if dst in bridges and src in nodes:
-                    links.setdefault(src, set()).add(dst)
-            for source_id, candidate in candidates.items():
-                if candidate.verified is True and candidate.memory_id in nodes:
-                    if candidate.memory_id != source_id:
-                        links.setdefault(source_id, set()).add(candidate.memory_id)
+            if resolved is not None:
+                # #2131: every judged id, None where no hint survives, so the
+                # page builder skips them all rather than asking again.
+                for memory_id in nodes.judged:
+                    resolved[memory_id] = candidates.get(memory_id)
+            links = fold_links(nodes, candidates, shadow_map)
             if not links:
                 return {}
-            return self._fold_linked_versions(search_results, memories, pool, links)
+            return fold_linked_versions(search_results, memories, nodes.pool, links)
         except Exception as e:
             logger.warning("supersede_fold_failed", error=str(e))
             return {}
-
-    @staticmethod
-    def _fold_linked_versions(
-        search_results: list[dict],
-        memories: dict,
-        pool: dict[UUID, Memory],
-        links: Mapping[UUID, set[UUID]],
-    ) -> dict[UUID, list[UUID]]:
-        """The grouping half of :meth:`_apply_supersede_fold` (#2123).
-
-        ``links`` maps a memory to the older memories a verdict or an edge
-        says it supersedes; nodes outside ``pool`` only carry links. Computes
-        everything before touching ``search_results``, which is replaced in
-        one assignment at the end, so a failure part-way leaves the pool as
-        it was.
-        """
-
-        def reachable(start: UUID) -> set[UUID]:
-            seen: set[UUID] = set()
-            stack = list(links.get(start, ()))
-            while stack:
-                node = stack.pop()
-                if node in seen:
-                    continue
-                seen.add(node)
-                stack.extend(links.get(node, ()))
-            return seen
-
-        reach = {memory_id: reachable(memory_id) - {memory_id} for memory_id in pool}
-        reached_by: dict[UUID, list[UUID]] = {}
-        for source_id, targets in reach.items():
-            for target_id in targets:
-                if target_id in pool:
-                    reached_by.setdefault(target_id, []).append(source_id)
-        heads = {memory_id for memory_id in pool if memory_id not in reached_by}
-
-        def newest_key(memory_id: UUID) -> tuple[float, str]:
-            created_at = pool[memory_id].created_at
-            return (
-                created_at.timestamp() if created_at is not None else float("-inf"),
-                str(memory_id),
-            )
-
-        head_of: dict[UUID, UUID] = {}
-        for folded_id, sources in reached_by.items():
-            owners = [source for source in sources if source in heads]
-            if owners:  # none: a cycle with no head outside it stays unfolded
-                head_of[folded_id] = max(owners, key=newest_key)
-        if not head_of:
-            return {}
-        fold_map: dict[UUID, list[UUID]] = {}
-        for folded_id, head in head_of.items():
-            fold_map.setdefault(head, []).append(folded_id)
-        for head, members in fold_map.items():
-            members.sort(key=newest_key, reverse=True)
-            head_of[head] = head
-
-        rows_of: dict[UUID, list[dict]] = {}
-        for search_result in search_results:
-            memory = memories.get(search_result["id"])
-            if memory is not None and memory.id in head_of:
-                rows_of.setdefault(head_of[memory.id], []).append(search_result)
-
-        folded_results: list[dict] = []
-        emitted: set[UUID] = set()
-        for search_result in search_results:
-            memory = memories.get(search_result["id"])
-            head = head_of.get(memory.id) if memory is not None else None
-            if head is None:
-                folded_results.append(search_result)
-                continue
-            if head in emitted:
-                continue
-            emitted.add(head)
-            rows = rows_of[head]
-            # The head takes the place — and the ranking scores — of the
-            # group's best-ranked row (this one): in a ranked pool that is
-            # the group maximum, on the same scale as its neighbours (a
-            # reranked pool can mix scored and unscored rows).
-            head_row = dict(next(r for r in rows if memories[r["id"]].id == head))
-            for key in _FOLD_RANK_KEYS:
-                if key in search_result:
-                    head_row[key] = search_result[key]
-                else:
-                    head_row.pop(key, None)
-            # The raw cosine is not a ranking key; confidence reads its
-            # maximum for absence detection, which must not drop with a fold.
-            raw = [
-                r["semantic_score_raw"]
-                for r in rows
-                if isinstance(r.get("semantic_score_raw"), (int, float))
-            ]
-            if raw:
-                head_row["semantic_score_raw"] = max(raw)
-            folded_results.append(head_row)
-
-        before = len(search_results)
-        search_results[:] = folded_results
-        logger.info(
-            "supersede_fold_applied",
-            folded=before - len(search_results),
-            groups=len(fold_map),
-        )
-        return fold_map
 
     async def _resolve_supersede_candidates(
         self,
@@ -5155,6 +5028,7 @@ class MemoryService:
         user_id: str,
         fold_map: Mapping[UUID, list[UUID]] | None = None,
         content_trusted_only: bool = False,
+        resolved_candidates: Mapping[UUID, SupersedeCandidate | None] | None = None,
     ) -> list[MemoryResponse]:
         """Build the page that ships: supersede hints and response rows.
 
@@ -5171,6 +5045,8 @@ class MemoryService:
             fold_map: #2123 head id → folded older versions, newest first.
             content_trusted_only: #2124 only trusted rows (a trusted context,
                 not connector-ingested) may carry content.
+            resolved_candidates: #2131 the fold's resolution (memory id →
+                surviving hint or ``None``); those rows are not resolved again.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5180,14 +5056,26 @@ class MemoryService:
         # page that ships — one batched query, run AFTER the top-k slice +
         # rerank so discarded candidates cost nothing (empty/fast when none
         # carry one).
+        # #2131: rows the fold already resolved (same caller, same operation,
+        # same trust filter) reuse its answer; only the rest are queried.
         page = search_results[: request.k]
         page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
-        supersede_candidates = await self._resolve_supersede_candidates(
-            page_memories,
-            user_id=user_id,
-            operation="recall",
-            trusted_only=_is_trusted_recall(request),
-        )
+        resolved = resolved_candidates or {}
+        pending = {pid: m for pid, m in page_memories.items() if m.id not in resolved}
+        supersede_candidates: dict[UUID, SupersedeCandidate] = {
+            m.id: candidate
+            for m in page_memories.values()
+            if (candidate := resolved.get(m.id)) is not None
+        }
+        if pending:
+            supersede_candidates.update(
+                await self._resolve_supersede_candidates(
+                    pending,
+                    user_id=user_id,
+                    operation="recall",
+                    trusted_only=_is_trusted_recall(request),
+                )
+            )
         fold_map = fold_map or {}
         # #2124: the first ``full`` eligible shipped rows carry their content (a
         # folded group's content is its head's — the head is the row that
@@ -6270,6 +6158,9 @@ class MemoryService:
         # #2123: judge-verified older versions of a fact without an edge fold
         # under the newer one — same altitude as shadowing, so the re-rank,
         # the selection plan and the top-k slice see the folded pool.
+        # #2131: the fold's resolver answer, handed to the page builder so a
+        # judged row is not resolved twice.
+        resolved_candidates: dict[UUID, SupersedeCandidate | None] = {}
         fold_map = await self._apply_supersede_fold(
             search_results,
             memories,
@@ -6277,6 +6168,7 @@ class MemoryService:
             user_id=user_id,
             trusted_only=_is_trusted_recall(request),
             shadow_map=shadow_map,
+            resolved=resolved_candidates,
         )
 
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
@@ -6328,6 +6220,7 @@ class MemoryService:
                 user_id=user_id,
                 fold_map=fold_map,
                 content_trusted_only=content_trusted_only,
+                resolved_candidates=resolved_candidates,
             )
 
         # #2144: the opt-in LLM selector over the page that would ship — after
