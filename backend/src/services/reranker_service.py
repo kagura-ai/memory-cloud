@@ -744,11 +744,12 @@ class SelfHostedReranker(RerankerProvider):
             )
         # Scored documents by score, then the unscored ones with
         # relevance_score None in input (= hybrid) order: RerankerService keeps
-        # those after the scored ones, in hybrid order with their hybrid_score
-        # floored under the lowest scored one (#2084)
-        # (stamped RERANK_UNSCORED_KEY so the later re-sorts keep them there,
-        # #2062), instead of a 0.0 that would sink them. Whether the scores
-        # rank at all is RerankerService's shared guard.
+        # those after the scored ones, in hybrid order (stamped
+        # RERANK_UNSCORED_KEY so the later re-sorts keep them there, #2062),
+        # rather than ranking them by a 0.0 that would sink them below scored
+        # ones; their score is then scaled under the lowest scored one
+        # (#2084). Whether the scores rank at all is RerankerService's shared
+        # guard.
         scored = sorted(
             (
                 {"index": i, "relevance_score": o}
@@ -1187,14 +1188,22 @@ def _floor_unscored_scores(unscored: list[dict[str, Any]], floor: float) -> None
     supersede fold) reads ``hybrid_score``, so it is rewritten here, once:
     scaled proportionally under ``floor`` (the lowest scored relevance), so
     the top unscored row ties with it at most and the hybrid ratios among
-    the unscored rows are kept. A missing, None or negative hybrid score
-    counts as 0; when none is positive every unscored row reports 0.0.
-    Mutates the candidates in place.
+    the unscored rows are kept. Like the readers, a row without
+    ``hybrid_score`` (semantic or keyword search) is scaled from its
+    ``score``; a missing or negative value counts as 0, and when none is
+    positive every unscored row reports 0.0. Mutates the candidates in place.
     """
-    hybrids = [max(float(c.get("hybrid_score") or 0.0), 0.0) for c in unscored]
+    hybrids = []
+    for c in unscored:
+        base = c.get("hybrid_score")
+        if base is None:
+            base = c.get("score")
+        hybrids.append(max(float(base or 0.0), 0.0))
     top = max(hybrids)
     for candidate, hybrid in zip(unscored, hybrids, strict=True):
-        candidate["hybrid_score"] = floor * hybrid / top if top > 0 else 0.0
+        # hybrid / top first, so the top row is floor exactly; min() guards
+        # any other rounding above floor.
+        candidate["hybrid_score"] = min(floor, floor * (hybrid / top)) if top > 0 else 0.0
 
 
 class RerankerService:

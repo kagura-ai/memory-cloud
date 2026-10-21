@@ -535,7 +535,7 @@ class TestNoSignalGuard:
         assert [c["id"] for c in out] == ["m2", "m0", "m1", "m3"]
         assert [c["hybrid_score"] for c in out[2:]] == [0.0, 0.0]
 
-    async def test_missing_or_zero_hybrid_scores_floor_to_zero(self, monkeypatch):
+    async def test_missing_or_zero_scores_floor_to_zero(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.4, None, 0.9, None])
         cands = _cands(4)
         cands[1]["hybrid_score"] = None
@@ -543,6 +543,27 @@ class TestNoSignalGuard:
         out = await service.rerank("q", cands, "u", k=4)
         assert [c["id"] for c in out] == ["m2", "m0", "m1", "m3"]
         assert [c["hybrid_score"] for c in out[2:]] == [0.0, 0.0]
+
+    async def test_semantic_rows_without_hybrid_score_scale_from_score(self, monkeypatch):
+        """Semantic / keyword search rows carry only ``score``: the floor reads
+        it the way every recall reader does."""
+        service, _ = _service_with(monkeypatch, [0.4, None, 0.9, None])
+        cands = [
+            {"id": f"m{i}", "score": s, "payload": {"summary": f"s{i}"}}
+            for i, s in enumerate([0.9, 0.8, 0.7, 0.4])
+        ]
+        out = await service.rerank("q", cands, "u", k=4)
+        assert [c["id"] for c in out] == ["m2", "m0", "m1", "m3"]
+        assert [c["hybrid_score"] for c in out[2:]] == pytest.approx([0.4, 0.2])
+
+    async def test_the_top_unscored_row_never_rounds_above_the_floor(self, monkeypatch):
+        floor, top = 0.9223826941162387, 1.118214577369006
+        service, _ = _service_with(monkeypatch, [floor, None, 0.95])
+        cands = _cands(3)
+        cands[1]["hybrid_score"] = top
+        out = await service.rerank("q", cands, "u", k=3)
+        assert out[2]["hybrid_score"] <= floor
+        assert out[2]["hybrid_score"] == floor
 
     async def test_a_negative_hybrid_score_counts_as_zero(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.4, None, 0.9, None])
@@ -589,8 +610,12 @@ class TestNoSignalGuard:
 
     async def test_all_scored_zero_beside_unscored_is_still_a_failure(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.0, 0.0, None, 0.0, 0.0])
+        cands = _cands(5)
         with pytest.raises(RerankNotDiscriminatingError):
-            await service.rerank("q", _cands(5), "u", k=5)
+            await service.rerank("q", cands, "u", k=5)
+        # The guard raises before the mapping: nothing is stamped or floored.
+        assert [c["hybrid_score"] for c in cands] == pytest.approx([0.9, 0.8, 0.7, 0.6, 0.5])
+        assert all(RERANK_UNSCORED_KEY not in c and "rerank_score" not in c for c in cands)
 
     async def test_a_single_candidate_is_unchanged(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.0])
