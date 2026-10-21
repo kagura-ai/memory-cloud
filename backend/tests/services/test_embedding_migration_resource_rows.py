@@ -265,11 +265,15 @@ async def test_mixed_context_through_reembed_verify_and_switch(db_session, seed,
         assert point.payload["doc_id"] == doc_id
         assert point.payload["version"] == 2
         assert point.payload["memory_id"] == str(memory_id)
-        # The indexed point, but for the model and the write time.
+        # The indexed point, but for the model and the write time, plus the
+        # row's editable metadata the rebuild carries (#2160).
         original = source_points[str(point_ids[doc_id])]
-        assert {k: v for k, v in point.payload.items() if k != "indexed_at"} == {
-            k: v for k, v in original.payload.items() if k != "indexed_at"
+        row_keys = {"indexed_at", "tags", "type", "context_summary"}
+        assert {k: v for k, v in point.payload.items() if k not in row_keys} == {
+            k: v for k, v in original.payload.items() if k not in row_keys
         }
+        assert point.payload["type"] == "resource_data"
+        assert point.payload["tags"] == []
         # No label vector under the row id.
         assert str(memory_id) not in target
     # The labels were never embedded; the API-written memory still is, by summary.

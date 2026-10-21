@@ -500,11 +500,16 @@ async def test_restored_resource_rows_get_the_indexers_point_back(db_session, se
         assert rebuilt.id != str(memory_id)
         assert rebuilt.vector == original.vector
         # ``indexed_at`` is each point's own write time (#1869): the rebuilt
-        # point is written later than the original, everything else is equal.
+        # point is written later than the original, everything else is equal,
+        # plus the row's editable metadata the rebuild carries over (#2160).
         assert rebuilt.payload["indexed_at"] >= original.payload["indexed_at"]
-        assert {k: v for k, v in rebuilt.payload.items() if k != "indexed_at"} == {
-            k: v for k, v in original.payload.items() if k != "indexed_at"
+        row_keys = {"indexed_at", "tags", "type", "context_summary"}
+        assert {k: v for k, v in rebuilt.payload.items() if k not in row_keys} == {
+            k: v for k, v in original.payload.items() if k not in row_keys
         }
+        assert rebuilt.payload["type"] == "resource_data"
+        assert rebuilt.payload["tags"] == []
+        assert "location" not in rebuilt.payload
         assert rebuilt.payload["content"] == f"Title: {_DOCS[doc_id]['title']}"
         assert rebuilt.payload["facets"] == {"category": _DOCS[doc_id]["category"]}
         assert rebuilt.payload["sortable"] == {"price": _DOCS[doc_id]["price"]}
@@ -839,6 +844,47 @@ async def test_rebuild_point_reports_the_embedding_usage_when_asked(db_session, 
     assert service.embed_with_usage.await_args.kwargs["text"] == indexed["doc_1"].payload["content"]
     rebuilt = client.upsert.await_args.kwargs["points"][0]
     assert rebuilt.id == str(point_id) == indexed["doc_1"].id
+
+
+@pytest.mark.asyncio
+async def test_rebuild_point_carries_the_rows_edited_metadata(db_session, seed):
+    """#2160: a rebuilt point carries the row's tags, type, context_summary and
+    location (read from the generated columns), so recall's filters match it."""
+    context, _ = await _index_resource(db_session, seed)
+    rows = await _memories(db_session, context.id)
+    edited = next(m for m in rows.values() if m.resource_doc_id == "doc_1")
+    plain = next(m for m in rows.values() if m.resource_doc_id == "doc_2")
+    edited.tags = ["finance", "q3"]
+    edited.type = "report"
+    edited.context_summary = "Edited summary"
+    edited.details = {**(edited.details or {}), "location": {"lat": 35.5, "lon": 139.25}}
+    await db_session.commit()
+    await db_session.refresh(edited)
+    assert edited.location_lat == 35.5
+
+    client = AsyncMock()
+    with patch("services.resource_indexer.get_qdrant_client", return_value=client):
+        indexer = ResourceIndexer(db_session)
+    service = AsyncMock()
+    service.embed = AsyncMock(return_value=[0.5] * 512)
+
+    await indexer.rebuild_point(
+        edited, collection_name="kagura_memories", embedding_service=service
+    )
+    payload = client.upsert.await_args.kwargs["points"][0].payload
+    assert payload["tags"] == ["finance", "q3"]
+    assert payload["type"] == "report"
+    assert payload["context_summary"] == "Edited summary"
+    assert payload["location"] == {"lat": 35.5, "lon": 139.25}
+    # The identity keys are still the indexer's.
+    assert payload["memory_id"] == str(edited.id)
+    assert payload["context_id"] == str(context.id)
+
+    await indexer.rebuild_point(plain, collection_name="kagura_memories", embedding_service=service)
+    payload = client.upsert.await_args.kwargs["points"][0].payload
+    assert "location" not in payload
+    assert payload["type"] == "resource_data"
+    assert payload["tags"] == []
 
 
 @pytest.mark.asyncio

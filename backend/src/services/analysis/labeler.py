@@ -375,6 +375,7 @@ async def label_clusters(
     concurrency: int = _LLM_CONCURRENCY,
     locale: str = "en",
     lane: AnalysisLane | None = None,
+    collected: list[ClusterLabel] | None = None,
 ) -> list[ClusterLabel]:
     """Label every cluster in parallel (semaphore-bounded).
 
@@ -392,6 +393,12 @@ async def label_clusters(
         concurrency: Max in-flight LLM calls.
         lane: #1569 provider / chain / credential route of the run
             (``AnalysisLane``); ``None`` = the strict BYOK lane.
+        collected: #2088 out-parameter. When labeling is aborted (the run
+            task is cancelled, or a task raises), it is extended with the
+            labels of the clusters that had already finished, so the caller
+            can still record the spend they billed. Calls in flight at the
+            abort are cancelled mid-request; the provider may bill them but
+            no usage comes back, so that spend is not recoverable.
 
     Returns:
         ``list[ClusterLabel]`` ordered by ``cluster_index``.
@@ -446,6 +453,15 @@ async def label_clusters(
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if collected is not None:
+            # #2088: hand back the clusters that finished before the abort —
+            # their LLM calls were billed and must still be accounted.
+            collected.extend(
+                t.result()
+                for t in tasks
+                if t.done() and not t.cancelled() and t.exception() is None
+            )
+            collected.sort(key=lambda r: r.cluster_index)
         raise
     results.sort(key=lambda r: r.cluster_index)
 

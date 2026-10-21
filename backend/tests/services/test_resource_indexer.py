@@ -1070,3 +1070,289 @@ class TestResyncOfForgottenDoc:
         assert tombstone.deleted_at is not None
         # Now the doc is known: a second re-sync would be free.
         assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == {"doc_1"}
+
+
+def _projected() -> dict:
+    return {"fulltext_content": "Title: hello", "facets": {}, "sortable": {}, "metadata": {}}
+
+
+def _point(**row_metadata):
+    from services.resource_indexer import build_resource_point
+
+    context = _make_context()
+    memory_id = uuid4()
+    point = build_resource_point(
+        context=context,
+        resource_id="res_test",
+        doc_id="doc_1",
+        version=1,
+        content="Title: hello",
+        projected=_projected(),
+        embedding=[0.1] * 512,
+        updated_at=datetime(2026, 4, 15, tzinfo=UTC),
+        memory_id=memory_id,
+        **row_metadata,
+    )
+    return point, context, memory_id
+
+
+class TestBuildResourcePointRowMetadata:
+    """#2160: the point carries the owning row's editable metadata when given."""
+
+    def test_all_four_keys_land_in_the_payload(self):
+        point, _, _ = _point(
+            tags=["a", "b"],
+            memory_type="fact",
+            context_summary="edited",
+            location={"lat": 1.5, "lon": 2.5},
+        )
+        assert point.payload["tags"] == ["a", "b"]
+        assert point.payload["type"] == "fact"
+        assert point.payload["context_summary"] == "edited"
+        assert point.payload["location"] == {"lat": 1.5, "lon": 2.5}
+
+    def test_context_summary_is_normalized_like_the_memory_point(self):
+        point, _, _ = _point(context_summary="ｶﾀｶﾅ ①")
+        assert point.payload["context_summary"] == "カタカナ 1"
+
+    def test_no_metadata_keeps_the_create_shape(self):
+        point, _, _ = _point()
+        assert not {"tags", "type", "context_summary", "location"} & set(point.payload)
+
+    def test_metadata_never_shadows_identity_keys(self):
+        # Only the editable keys exist as arguments, and they are merged under
+        # the indexer keys: the identity keys are the context's and the row's.
+        point, context, memory_id = _point(tags=["x"], memory_type="fact")
+        assert point.payload["context_id"] == str(context.id)
+        assert point.payload["workspace_id"] == str(context.workspace_id)
+        assert point.payload["memory_id"] == str(memory_id)
+
+
+class TestApplyUpsertRowMetadata:
+    """#2160: a same-version re-index writes the row's post-update metadata."""
+
+    @staticmethod
+    def _indexer(existing_memory):
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        return indexer
+
+    @staticmethod
+    def _existing():
+        existing = MagicMock()
+        existing.id = uuid4()
+        existing.tags = ["a"]
+        existing.type = "fact"
+        existing.context_summary = "an edit the re-index overwrites"
+        # A stale pre-update value of the generated columns: never the source.
+        existing.location_lat = 10.0
+        existing.location_lon = 20.0
+        existing.details = {}
+        return existing
+
+    async def _upsert(self, indexer, event):
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+        return indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_carries_tags_type_and_new_context_summary(self):
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert payload["tags"] == ["a"]
+        assert payload["type"] == "fact"
+        assert payload["context_summary"] == existing.context_summary == "Title: hello"
+        # The new details carry no location, so neither does the point, even
+        # though the stale columns still hold one.
+        assert "location" not in payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_location_comes_from_the_new_details(self):
+        """The location follows the details the row is left with. A worker
+        cannot supply one (#1331 strips it from the lineage), so the re-indexed
+        row loses its coordinate in PG and the point must not keep it either,
+        however the stale generated columns read."""
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = {"memory_details": {"location": {"lat": 35, "lon": 139.5}}}
+
+        payload = await self._upsert(indexer, event)
+
+        assert "location" not in existing.details
+        assert "location" not in payload
+
+    @pytest.mark.asyncio
+    async def test_update_branch_truncates_context_summary_like_the_row(self):
+        existing = self._existing()
+        indexer = self._indexer(existing)
+        event = _make_event()
+        event.event_metadata = None
+        event.payload = {"title": "x" * 3000, "price": 1}
+
+        payload = await self._upsert(indexer, event)
+
+        assert len(payload["context_summary"]) == 2000
+        assert payload["context_summary"].endswith("...")
+        assert payload["context_summary"] == existing.context_summary
+
+    @pytest.mark.asyncio
+    async def test_create_branch_point_has_no_row_metadata(self):
+        indexer = self._indexer(None)
+        event = _make_event()
+        event.event_metadata = None
+
+        payload = await self._upsert(indexer, event)
+
+        assert not {"tags", "type", "context_summary", "location"} & set(payload)
+        memory = indexer.db.add.call_args.args[0]
+        assert memory.type == "resource_data"
+        assert memory.tags == []
+
+
+class TestRepointedRowDropsItsStrayPoints:
+    """#2164: a row re-pointed onto its document's point loses its chunk points
+    and its own-id point, after the batch commits and never on rollback."""
+
+    COLLECTION = "kagura_memories"
+
+    def _run(self, previous_point, *, commit_error=None):
+        """process_incremental over one same-version re-index of a row that
+        named ``previous_point`` (``"own"`` = the row id, ``"uuid5"`` = the
+        document's point)."""
+        from services.resource_indexer import resource_point_id
+
+        event = _make_event()
+        event.event_metadata = None
+        # Naive, like ResourceEvent.created_at: the run computes lag against utcnow().
+        event.created_at = utcnow()
+        existing = MagicMock()
+        existing.id = uuid4()
+        existing.tags = []
+        existing.type = "fact"
+        existing.details = {}
+        doc_point = resource_point_id(event.resource_id, event.doc_id, event.version)
+        existing.summary_embedding_id = {"own": existing.id, "uuid5": doc_point}.get(
+            previous_point, previous_point
+        )
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(existing)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        indexer._get_or_create_state = AsyncMock(return_value=state)
+        indexer._fetch_events = AsyncMock(return_value=[event])
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=_make_context())
+        indexer._existing_resource_doc_ids = AsyncMock(return_value={event.doc_id})
+        indexer._plan_suspended = AsyncMock(return_value=False)
+
+        order: list[str] = []
+        db.commit = AsyncMock(
+            side_effect=commit_error or (lambda: order.append("commit")),
+        )
+        db.rollback = AsyncMock()
+        chunks = AsyncMock(side_effect=lambda *a, **k: order.append("chunks"))
+        points = AsyncMock(side_effect=lambda *a, **k: order.append("points"))
+        return indexer, existing, chunks, points, order
+
+    async def _process(self, indexer, chunks, points):
+        routing = AsyncMock(return_value=(self.COLLECTION, indexer.embedding_service))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_lookup.resolve_resource_pk", AsyncMock(return_value=1)),
+            patch("services.resource_indexer.delete_chunk_points", chunks),
+            patch("services.resource_indexer.delete_points_from_qdrant", points),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            metrics = await indexer.process_incremental("res_test", uuid4())
+        return metrics, log
+
+    @pytest.mark.asyncio
+    async def test_own_id_previous_point_drops_chunks_and_point_after_commit(self):
+        indexer, existing, chunks, points, order = self._run("own")
+
+        metrics, log = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 0
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_awaited_once_with([str(existing.id)], self.COLLECTION)
+        assert order == ["commit", "chunks", "points"]
+        assert indexer._repointed == []
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert "resource_repoint_points_dropped" in events
+
+    @pytest.mark.asyncio
+    async def test_already_owned_point_deletes_nothing(self):
+        indexer, _, chunks, points, _ = self._run("uuid5")
+
+        await self._process(indexer, chunks, points)
+
+        chunks.assert_not_awaited()
+        points.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_previous_point_drops_chunks_and_own_id(self):
+        indexer, existing, chunks, points, _ = self._run(None)
+
+        await self._process(indexer, chunks, points)
+
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_awaited_once_with([str(existing.id)], self.COLLECTION)
+
+    @pytest.mark.asyncio
+    async def test_another_previous_point_is_kept(self):
+        other = uuid4()
+        indexer, existing, chunks, points, _ = self._run(other)
+
+        _, log = await self._process(indexer, chunks, points)
+
+        chunks.assert_awaited_once_with([existing.id], self.COLLECTION)
+        points.assert_not_awaited()
+        kept = [
+            c
+            for c in log.info.call_args_list
+            if c.args[0] == "resource_repoint_previous_point_kept"
+        ]
+        assert kept and kept[0].kwargs["point_id"] == str(other)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_delete_is_logged_and_the_run_completes(self):
+        indexer, existing, _, points, _ = self._run("own")
+        chunks = AsyncMock(side_effect=RuntimeError("qdrant down"))
+
+        metrics, log = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 0
+        points.assert_not_awaited()
+        warned = [
+            c for c in log.warning.call_args_list if c.args[0] == "resource_repoint_cleanup_failed"
+        ]
+        assert warned[0].kwargs == {
+            "memory_id": str(existing.id),
+            "collection": self.COLLECTION,
+            "error_class": "RuntimeError",
+        }
+        assert indexer._repointed == []
+
+    @pytest.mark.asyncio
+    async def test_a_rolled_back_batch_deletes_nothing(self):
+        indexer, _, chunks, points, _ = self._run("own", commit_error=RuntimeError("commit failed"))
+
+        metrics, _ = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 1
+        indexer.db.rollback.assert_awaited_once()
+        chunks.assert_not_awaited()
+        points.assert_not_awaited()
+        assert indexer._repointed == []

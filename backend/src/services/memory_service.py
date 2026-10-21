@@ -254,9 +254,10 @@ def _rerank_sort_key(result: dict, adjusted: float) -> tuple[bool, float]:
     """Sort key for a bounded re-rank over (possibly) reranked results (#2062).
 
     A candidate the reranker could not score (``RERANK_UNSCORED_KEY``, stamped
-    by RerankerService) keeps its hybrid_score, which is on another scale than the
-    scored candidates' rerank score. Sorted descending, it stays after every
-    scored candidate and only moves among the unscored ones. Without a rerank
+    by RerankerService) has its hybrid_score floored below the scored ones
+    (#2084), but a reinforce or graph-boost factor could still lift it over a
+    scored one. Sorted descending, it stays after every scored candidate and
+    only moves among the unscored ones. Without a rerank
     nothing is stamped and the order is the adjusted score's alone.
     """
     return (not result.get(RERANK_UNSCORED_KEY, False), adjusted)
@@ -4369,8 +4370,9 @@ class MemoryService:
 
             # Sort and stamp ONLY the top-k slice; items past the slice keep
             # their original order (they are outside the experiment). A
-            # candidate the reranker could not score stays after the scored
-            # ones (#2062, see _rerank_sort_key).
+            # candidate the reranker could not score is floored below the
+            # scored ones and stays after them (#2062, #2084, see
+            # _rerank_sort_key).
             order_before = [x for x in (_sid(r) for r in scoped) if x is not None]
             scoped.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             for r in scoped:
@@ -4508,8 +4510,9 @@ class MemoryService:
                 r["_rerank_factor"] = factors.get(sid, 1.0) if sid is not None else 1.0
 
             order_before = [s for s in (_sid(r) for r in search_results) if s is not None]
-            # A candidate the reranker could not score stays after the
-            # scored ones (#2062, see _rerank_sort_key).
+            # A candidate the reranker could not score is floored below the
+            # scored ones and stays after them (#2062, #2084, see
+            # _rerank_sort_key).
             search_results.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             order_after = [s for s in (_sid(r) for r in search_results) if s is not None]
 
@@ -5562,6 +5565,8 @@ class MemoryService:
                 continue
             mid = str(memory.id)
             embedding = search_result.get("embedding", [])
+            # A candidate the reranker could not score is kept, at its
+            # floored hybrid_score: at most the weakest scored row (#2084).
             score_map[mid] = search_result.get("hybrid_score", search_result["score"])
             nodes_dict[mid] = NeuralMemoryNode(
                 id=mid,
@@ -8009,7 +8014,7 @@ _SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 _KNN_SEED_NO_CONSUMER_REPORTED: set[tuple[str, int]] = set()
 
 
-async def _source_text_moved(db: AsyncSession, memory: Memory) -> bool:
+async def _source_text_moved(db: AsyncSession, memory: Memory, embedded: str | None = None) -> bool:
     """Re-read ``memory``'s text and candidate column; True when the text moved.
 
     #2059: the embedding task loaded ``memory`` before embedding it and the
@@ -8020,10 +8025,15 @@ async def _source_text_moved(db: AsyncSession, memory: Memory) -> bool:
     run owns the column: this run's result is about text that no longer
     exists. The column is re-read in the same round trip so the caller can
     re-check a dismissal or an accept committed meanwhile.
+
+    ``embedded`` is the fingerprint of the text this run embedded, taken
+    before any earlier re-read in the same run refreshed ``memory`` (#2085).
+    Without it the fingerprint comes from ``memory`` as it stands now.
     """
     from services.supersede_verify import text_fingerprint
 
-    embedded = text_fingerprint(memory.summary, memory.content)
+    if embedded is None:
+        embedded = text_fingerprint(memory.summary, memory.content)
     await db.refresh(memory, attribute_names=["supersede_candidate", "summary", "content"])
     return text_fingerprint(memory.summary, memory.content) != embedded
 
@@ -8468,10 +8478,15 @@ async def _create_knn_seed_edges(
     from neural.calibration import resolve_knn_threshold
     from neural.config import NeuralMemoryConfig
     from repositories.neural_edge import NeuralEdgeRepository
+    from services.supersede_verify import text_fingerprint
 
     global _SUPERSEDE_SUGGEST_LAST_SEEN
 
     try:
+        # #2085: the text this run embedded. The supersede detection below can
+        # refresh ``memory`` from the row, so the seed fence compares against
+        # this value rather than a fingerprint taken after that refresh.
+        embedded_fingerprint = text_fingerprint(memory.summary, memory.content)
         config = await NeuralMemoryConfig.from_db(db)
 
         # #2010: two consumers share the neighbour query below — the seed edges
@@ -8738,6 +8753,16 @@ async def _create_knn_seed_edges(
                 )
 
         if edges_created > 0:
+            # #2085: an edit committed after this run's success write starts
+            # its own run, which finds no edges and seeds from the new text —
+            # unless this run commits first: the guard above then keeps the
+            # stale edges for good. The inserts are still uncommitted, so
+            # re-read the text right before the commit and, when it moved,
+            # drop them and leave the seeding to the newer run.
+            if await _source_text_moved(db, memory, embedded_fingerprint):
+                await db.rollback()
+                logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
+                return
             await db.commit()
             avg_similarity = sum(similarities) / len(similarities)
             logger.info(

@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -45,7 +45,7 @@ from models.analysis import (
     MemoryAnalysisAssignment,
     MemoryAnalysisCluster,
 )
-from models.sleep import SLEEP_REPORT_SOURCES
+from models.sleep import SLEEP_REPORT_SOURCES, SleepReport
 from services.analysis.labeler import (
     MAX_CLUSTER_FAILURE_RATIO,
     ClusterLabel,
@@ -82,6 +82,10 @@ assert _STATUS_SUCCEEDED in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_FAILED in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
 assert _SOURCE_ANALYSIS in SLEEP_REPORT_SOURCES
+# ``sleep_reports.status`` values the #2088 spend report of a non-successful
+# run is finalized with (the CHECK in models/sleep.py allows both).
+_REPORT_STATUS_FAILED: Final = "failed"
+_REPORT_STATUS_CANCELLED: Final = "cancelled"
 
 # sleep_report_llm_usage.phase value for analysis runs. The DB CHECK
 # constraint added by the d07_495 migration must list this exact
@@ -322,6 +326,15 @@ async def persist_results(
             analysis_id=str(analysis.id),
             cancellation_reason=analysis.cancellation_reason,
         )
+        # #2088: the labels are in hand — their calls were billed. Record
+        # the spend (no cluster rows); the orchestrator commits.
+        await persist_spend_report(
+            db,
+            analysis=analysis,
+            cluster_results=cluster_results,
+            status=_REPORT_STATUS_CANCELLED,
+            error_message=analysis.cancellation_reason or "cancelled",
+        )
         return
 
     n_clusters = len(cluster_results)
@@ -435,45 +448,30 @@ async def persist_results(
     analysis.quality = quality
     analysis.cost_actual_cents = cost_actual_cents
 
-    # 5. Sibling sleep_reports row for cost-grade observability.
-    #    create_report flushes the row at status='running'; we
-    #    immediately complete it with the labeler's PhaseResult so
-    #    the per-(provider, model) breakdown lands in
-    #    sleep_report_llm_usage with phase='cluster_labeling'.
-    #    ``paid_by`` mirrors the run row: 'byok' on the BYOK lane, 'platform'
-    #    on the managed lane (#1569) — ``create_report`` validates the value.
-    sleep_reporter = SleepReporter(db)
-    sleep_report = await sleep_reporter.create_report(
+    # 5. Sibling sleep_reports row for cost-grade observability: the
+    #    per-(provider, model) breakdown lands in sleep_report_llm_usage
+    #    with phase='cluster_labeling'.
+    await _write_cost_report(
+        db,
+        analysis=analysis,
         user_id=user_id,
         workspace_id=workspace_id,
         context_id=context_id,
-        source=_SOURCE_ANALYSIS,
-        paid_by=analysis.paid_by,
-    )
-
-    phase_result = PhaseResult(
-        phase_name=_PHASE_CLUSTER_LABELING,
+        breakdowns=breakdowns,
+        totals=totals,
         success=True,
-        llm_calls_used=totals.calls,
-        tokens_used=(
-            totals.input_tokens
-            + totals.output_tokens
-            + totals.cached_input_tokens
-            + totals.cache_write_tokens
-        ),
+        error=None,
         memories_processed=len(memories),
         details={
             "n_clusters": n_clusters,
-            "labeling_failures": quality["labeling_failures"],
+            "labeling_failures": labeling_failures,
         },
-        llm_breakdown=breakdowns,
         # #1183: a cluster whose every fallback model raised (ClusterLabel.failed)
         # is a judge failure — without this the sibling row always grades
         # 'completed' even when labeling failed for ALL clusters, reproducing
         # the exact masking bug #1183 closes for the Sleep phases.
-        llm_call_failures=quality["labeling_failures"],
+        llm_call_failures=labeling_failures,
     )
-    await sleep_reporter.complete_report(sleep_report, [phase_result])
 
     logger.info(
         "analysis_persist_complete",
@@ -485,11 +483,179 @@ async def persist_results(
     )
 
 
+async def _write_cost_report(
+    db: AsyncSession,
+    *,
+    analysis: MemoryAnalysis,
+    user_id: str,
+    workspace_id: str,
+    context_id: str,
+    breakdowns: list[LLMCallBreakdown],
+    totals: _CostTotals,
+    success: bool,
+    error: str | None,
+    memories_processed: int,
+    details: dict[str, Any],
+    llm_call_failures: int,
+) -> SleepReport:
+    """Write the run's ``source='analysis'`` cost report (one writer, #2088).
+
+    ``create_report`` flushes the row at status='running';
+    ``complete_report`` then writes one ``sleep_report_llm_usage`` row per
+    breakdown with phase='cluster_labeling' and grades the status by judge
+    health. ``paid_by`` mirrors the run row: 'byok' on the BYOK lane,
+    'platform' on the managed lane (#1569) — ``create_report`` validates it.
+    Shared by the success path and ``persist_spend_report`` so the two never
+    drift in what a report records.
+    """
+    sleep_reporter = SleepReporter(db)
+    sleep_report = await sleep_reporter.create_report(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        context_id=context_id,
+        source=_SOURCE_ANALYSIS,
+        paid_by=analysis.paid_by,
+    )
+    phase_result = PhaseResult(
+        phase_name=_PHASE_CLUSTER_LABELING,
+        success=success,
+        error=error,
+        llm_calls_used=totals.calls,
+        tokens_used=(
+            totals.input_tokens
+            + totals.output_tokens
+            + totals.cached_input_tokens
+            + totals.cache_write_tokens
+        ),
+        memories_processed=memories_processed,
+        details=details,
+        llm_breakdown=breakdowns,
+        llm_call_failures=llm_call_failures,
+    )
+    await sleep_reporter.complete_report(sleep_report, [phase_result])
+    return sleep_report
+
+
+async def persist_spend_report(
+    db: AsyncSession,
+    *,
+    analysis: MemoryAnalysis,
+    cluster_results: list[ClusterLabel],
+    status: Literal["failed", "cancelled"],
+    error_message: str,
+) -> None:
+    """Record the LLM spend of a run that did not succeed (#2088).
+
+    A failed or cancelled run billed every labeling call it made, but
+    before #2088 only ``persist_results``' success path wrote the cost:
+    the run row kept ``cost_actual_cents = NULL`` and no ``sleep_reports``
+    row reached the cost aggregation. This writes the same cost telemetry
+    as the success path — ``analysis.cost_actual_cents`` plus a
+    ``source='analysis'`` report with its ``cluster_labeling`` usage rows —
+    and no cluster or assignment rows.
+
+    Only ``cost_actual_cents`` is touched on the run row; its status,
+    ``error`` and ``cancellation_reason`` stay with the caller (or the
+    DELETE handler for a cancel). Nothing is written when the labels carry
+    no breakdown (no LLM call was billed), or when the run row already has
+    a ``cost_actual_cents`` — the spend was recorded by an earlier writer
+    (e.g. the cancel guard committed, then the task cancel arrived). That
+    guard needs a priced run; an unpriced run (cost ``NULL``) racing two
+    writers can get a second report.
+
+    The caller holds the row lock (it has just refreshed ``analysis`` with
+    ``with_for_update``) and owns the transaction. The writes run in a
+    SAVEPOINT and this function never raises an ``Exception``: a failing
+    spend write is logged and rolled back alone, so it can never undo the
+    caller's status write or strand the run at ``running``.
+
+    Args:
+        db: Session inside the caller's transaction.
+        analysis: The run row, freshly refreshed under the caller's lock.
+        cluster_results: Labels of the clusters labeled so far — the full
+            list, or the ones that finished before an abort.
+        status: The report's final status.
+        error_message: Why the run did not succeed (the compute error, or
+            the cancellation reason).
+    """
+    run_id = str(analysis.id)
+    breakdowns, totals = _aggregate_breakdown_totals(cluster_results)
+    if not breakdowns:
+        return
+    if analysis.cost_actual_cents is not None:
+        logger.info(
+            "analysis_spend_report_already_recorded",
+            analysis_id=run_id,
+            status=status,
+        )
+        return
+
+    labeling_failures = sum(1 for cl in cluster_results if cl.failed)
+    prefix = "analysis_failed" if status == _REPORT_STATUS_FAILED else "analysis_cancelled"
+    report_error = f"{prefix}: {error_message}"[:_ERROR_FIELD_MAX_CHARS]
+    cost_actual_cents = _compute_actual_cost_cents(totals, dict(analysis.model_snapshot or {}))
+
+    try:
+        async with db.begin_nested():
+            analysis.cost_actual_cents = cost_actual_cents
+            sleep_report = await _write_cost_report(
+                db,
+                analysis=analysis,
+                user_id=analysis.triggered_by,
+                workspace_id=str(analysis.workspace_id),
+                context_id=str(analysis.context_id),
+                breakdowns=breakdowns,
+                totals=totals,
+                success=False,
+                error=report_error,
+                memories_processed=0,
+                details={
+                    "n_clusters": len(cluster_results),
+                    "labeling_failures": labeling_failures,
+                    "n_labeled": sum(1 for cl in cluster_results if not cl.failed and not cl.empty),
+                },
+                llm_call_failures=labeling_failures,
+            )
+            # ``complete_report`` grades by judge health only: a cancelled
+            # run with good labels would read 'completed', a threshold
+            # failure with some successes 'degraded'. The run did not
+            # succeed — say so.
+            sleep_report.status = status
+            sleep_report.error_message = report_error
+            report_id = str(sleep_report.id)
+    except Exception:
+        # The SAVEPOINT rolled back (and expired ``analysis``): the caller's
+        # own writes stand. Use only the values captured above.
+        logger.warning(
+            "analysis_spend_report_persist_failed",
+            analysis_id=run_id,
+            status=status,
+            exc_info=True,
+        )
+        return
+
+    logger.info(
+        "analysis_spend_report_persisted",
+        analysis_id=run_id,
+        report_id=report_id,
+        status=status,
+        cost_actual_cents=cost_actual_cents,
+        calls=totals.calls,
+        tokens=(
+            totals.input_tokens
+            + totals.output_tokens
+            + totals.cached_input_tokens
+            + totals.cache_write_tokens
+        ),
+    )
+
+
 async def persist_failure(
     db: AsyncSession,
     *,
     analysis: MemoryAnalysis,
     error_message: str,
+    cluster_results: list[ClusterLabel] | None = None,
 ) -> None:
     """Mark the run as failed without writing cluster/assignment rows.
 
@@ -499,6 +665,13 @@ async def persist_failure(
     orchestrator commits this status update separately so
     ``status='failed'`` is observable to the API caller polling
     the run row.
+
+    ``cluster_results`` (#2088) are the labels produced before the
+    failure — all of them for a threshold failure, the finished ones for an
+    aborted labeling. When given, their spend is recorded in the same
+    transaction as the status flip (``persist_spend_report``, in a
+    SAVEPOINT that cannot undo the flip), as a ``failed`` report — or
+    ``cancelled`` when a concurrent cancel won.
     """
     truncated_error = error_message[:_ERROR_FIELD_MAX_CHARS]
     # Same cancellation-overwrite guard as ``persist_results`` — refresh
@@ -510,21 +683,38 @@ async def persist_failure(
     # can no longer be overwritten (same protocol as ``persist_results``
     # and the DELETE handler).
     await db.refresh(analysis, with_for_update=True)
-    if analysis.status == _STATUS_CANCELLED:
+    run_id = str(analysis.id)
+    cancelled = analysis.status == _STATUS_CANCELLED
+    if cancelled:
         logger.info(
             "analysis_persist_failure_skipped_due_to_cancel",
-            analysis_id=str(analysis.id),
+            analysis_id=run_id,
             cancellation_reason=analysis.cancellation_reason,
             compute_error=truncated_error,
         )
+        spend_status = _REPORT_STATUS_CANCELLED
+        spend_reason = analysis.cancellation_reason or _STATUS_CANCELLED
+    else:
+        analysis.status = _STATUS_FAILED
+        analysis.finished_at = utcnow()
+        analysis.error = truncated_error
+        # Explicit flush makes the failure status observable BEFORE the
+        # surrounding ``async with db.begin()`` block commits — useful for
+        # tests that introspect the row inside the same transaction.
+        await db.flush()
+        spend_status = _REPORT_STATUS_FAILED
+        spend_reason = truncated_error
+
+    if cluster_results:
+        await persist_spend_report(
+            db,
+            analysis=analysis,
+            cluster_results=cluster_results,
+            status=spend_status,
+            error_message=spend_reason,
+        )
+    if cancelled:
         return
-    analysis.status = _STATUS_FAILED
-    analysis.finished_at = utcnow()
-    analysis.error = truncated_error
-    # Explicit flush makes the failure status observable BEFORE the
-    # surrounding ``async with db.begin()`` block commits — useful for
-    # tests that introspect the row inside the same transaction.
-    await db.flush()
     # Log the SAME truncated value, not the unbounded original — an
     # upstream exception with a large embedded payload (e.g. dumped
     # response body, stack trace) would otherwise produce log lines
@@ -532,6 +722,6 @@ async def persist_failure(
     # what's actually persisted.
     logger.error(
         "analysis_persist_failure",
-        analysis_id=str(analysis.id),
+        analysis_id=run_id,
         error=truncated_error,
     )

@@ -2504,3 +2504,145 @@ class TestLlmModeClearsStaleCandidates:
         assert "supersede_candidate_skipped_unjudged_low_similarity" not in events
         assert memory.supersede_candidate["similarity"] == 0.85
         assert "verification" not in memory.supersede_candidate
+
+
+class TestKnnSeedEditFence:
+    """#2085: an edit committed after this run's success write and before its
+    edges commit must not get seed edges from the earlier text. The
+    already-seeded guard would keep them for good: the edit's own run then
+    skips seeding. The re-read runs after the inserts, right before the
+    commit, so an edit that lands during the insert loop is caught too."""
+
+    @staticmethod
+    async def _seed(memory, db, hits, *, config, repo):
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=hits)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=repo),
+            patch("services.supersede_verify.judge_pair", new=AsyncMock()),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+        return [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+
+    @staticmethod
+    def _hits(memory, *scores):
+        return [{"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []}] + [
+            {"id": str(uuid4()), "score": s, "payload": {}, "embedding": []} for s in scores
+        ]
+
+    @staticmethod
+    def _edit_lands(db, *, field="summary"):
+        """The row holds the edited text from the first re-read on."""
+
+        async def refresh(obj, attribute_names=None):
+            setattr(obj, field, "B_v2: a different subject")
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["summary", "content"])
+    async def test_text_moved_before_the_commit_drops_the_seeds(self, field):
+        """A content-only edit skips too (#2069 parity: the fingerprint covers
+        summary and content although the vector comes from the summary)."""
+        memory = _make_memory()
+        db = _make_db()
+        self._edit_lands(db, field=field)
+        repo = _make_edge_repo()
+
+        events = await self._seed(
+            memory, db, self._hits(memory, 0.7, 0.6), config=_make_config(suggest=False), repo=repo
+        )
+
+        # The inserts ran inside the outer transaction; the fence rolls them back.
+        assert repo.create_edge_if_absent.await_count == 2
+        db.commit.assert_not_called()
+        db.rollback.assert_awaited_once()
+        assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {"summary", "content"}
+        assert "knn_seed_skipped_source_edited" in events
+        assert "knn_seed_edges_created" not in events
+
+    @pytest.mark.asyncio
+    async def test_the_fence_reads_after_the_inserts(self):
+        """An edit that lands during the insert loop is still caught: the
+        re-read follows the last insert and precedes the commit."""
+        memory = _make_memory()
+        db = _make_db()
+        order: list[str] = []
+        repo = _make_edge_repo()
+
+        async def insert(**_kwargs):
+            order.append("insert")
+            return MagicMock()
+
+        async def refresh(obj, attribute_names=None):
+            order.append("refresh")
+
+        async def commit():
+            order.append("commit")
+
+        repo.create_edge_if_absent = AsyncMock(side_effect=insert)
+        db.refresh = AsyncMock(side_effect=refresh)
+        db.commit = AsyncMock(side_effect=commit)
+
+        await self._seed(
+            memory, db, self._hits(memory, 0.7, 0.6), config=_make_config(suggest=False), repo=repo
+        )
+
+        assert order == ["insert", "insert", "refresh", "commit"]
+
+    @pytest.mark.asyncio
+    async def test_a_detection_reread_does_not_hide_the_edit(self):
+        """The trap: the supersede detection already refreshed ``memory`` to
+        the new text. A fingerprint taken after that refresh would compare the
+        new text with itself, so the fence uses the one taken at entry."""
+        memory = _make_memory()
+        db = _make_db()
+        self._edit_lands(db)
+        repo = _make_edge_repo()
+
+        events = await self._seed(
+            memory, db, self._hits(memory, 0.93, 0.7), config=_make_config(), repo=repo
+        )
+
+        assert db.refresh.await_count == 2  # the detection's re-read, then the fence's
+        assert "supersede_candidate_skipped_source_edited" in events
+        assert memory.summary == "B_v2: a different subject"
+        db.commit.assert_not_called()
+        assert "knn_seed_skipped_source_edited" in events
+
+    @pytest.mark.asyncio
+    async def test_unchanged_text_seeds_as_before(self):
+        memory = _make_memory()
+        db = _make_db()
+        repo = _make_edge_repo()
+
+        events = await self._seed(
+            memory, db, self._hits(memory, 0.7, 0.6), config=_make_config(suggest=False), repo=repo
+        )
+
+        db.refresh.assert_awaited_once()
+        assert repo.create_edge_if_absent.await_count == 2
+        db.commit.assert_awaited_once()
+        assert "knn_seed_skipped_source_edited" not in events
+        assert "knn_seed_edges_created" in events
+
+    @pytest.mark.asyncio
+    async def test_no_neighbours_spends_no_reread(self):
+        """Nothing inserted: the fence does not add a round trip."""
+        memory = _make_memory()
+        db = _make_db()
+        repo = _make_edge_repo()
+
+        await self._seed(
+            memory, db, self._hits(memory, 0.1), config=_make_config(suggest=False), repo=repo
+        )
+
+        db.refresh.assert_not_awaited()
+        repo.create_edge_if_absent.assert_not_awaited()

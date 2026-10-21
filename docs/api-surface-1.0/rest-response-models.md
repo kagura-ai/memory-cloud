@@ -330,7 +330,7 @@ Notes:
 - `finished_at: datetime | None` — required
 - `input_count: int` — required
 - `cost_estimated_cents: int | None` — required (`null` when the run is unpriced or the deployment disables cost display — #1571 `ENABLE_COST_DISPLAY=false`; the key is always present)
-- `cost_actual_cents: int | None` — required (same `null` conditions as `cost_estimated_cents`)
+- `cost_actual_cents: int | None` — required (same `null` conditions as `cost_estimated_cents`; a `failed` or `cancelled` run carries the spend of the clusters labeled before it stopped — calls in flight at a cancel are not counted — and is `null` when no labeling call was billed, #2088)
 - `error: str | None` — required
 - `cancellation_reason: str | None` — required
 

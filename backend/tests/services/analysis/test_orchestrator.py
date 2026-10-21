@@ -729,7 +729,7 @@ class TestMarkFailed:
             await service._mark_failed(analysis, "it broke")
 
         mock_persist.assert_awaited_once_with(
-            db_session, analysis=analysis, error_message="it broke"
+            db_session, analysis=analysis, error_message="it broke", cluster_results=None
         )
 
     @pytest.mark.asyncio
@@ -1135,3 +1135,327 @@ class TestRunLabelingThresholdContract:
         await db_session.refresh(analysis)
         assert analysis.status == "failed"
         assert "MAX_CLUSTER_FAILURE_RATIO" in (analysis.error or "")
+
+
+# ---------------------------------------------------------------------------
+# #2088: the spend of a failed or cancelled run is recorded
+# ---------------------------------------------------------------------------
+
+
+def _billed_label(cluster_index: int, *, failed: bool = False):
+    """A ClusterLabel carrying billed usage (calls=0 for a failed chain)."""
+    from services.analysis.labeler import ClusterLabel
+    from services.sleep.reporter import LLMCallBreakdown
+
+    usage = LLMCallBreakdown(
+        provider="openai",
+        model="gpt-5-nano",
+        input_tokens=500_000,
+        output_tokens=0,
+        cached_input_tokens=0,
+        calls=0 if failed else 1,
+    )
+    return ClusterLabel(
+        cluster_index=cluster_index,
+        label="(unlabeled)" if failed else f"c{cluster_index}",
+        description="",
+        label_confidence=0.0 if failed else 0.9,
+        representative_memory_ids=[],
+        breakdown=None if failed else usage,
+        failed=failed,
+        prior_breakdowns=(usage,) if failed else (),
+    )
+
+
+# Contexts seeded by the #2088 spend tests. Those tests COMMIT (the code
+# under test commits), so their sleep_reports rows would outlive the test and
+# leak into suites that assume an empty table (cost aggregation) — the class
+# fixture below deletes them.
+_SPEND_CONTEXTS: list = []
+
+
+async def _seed_spend_run(db_session):
+    ws_id = uuid4()
+    ctx_id = uuid4()
+    _SPEND_CONTEXTS.append(ctx_id)
+    await _seed_workspace_context(db_session, ws_id, ctx_id)
+    pricing = await _seed_pricing(db_session)
+    analysis = MemoryAnalysis(
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        triggered_by="u1",
+        model_id=pricing.id,
+        model_snapshot={
+            "model": "gpt-5-nano",
+            "rates": {"input_tokens": 1.0, "output_tokens": 2.0},
+        },
+        embedding_model="em",
+        params={},
+        input_count=0,
+        status="running",
+        paid_by="byok",
+    )
+    db_session.add(analysis)
+    await db_session.commit()
+    return analysis
+
+
+def _compute_patches(label_clusters_mock):
+    fake_pull = MagicMock()
+    fake_pull.memories = [MagicMock(), MagicMock()]
+    fake_pull.embeddings = [[0.1]]
+    fake_pull.embedding_model = "test-model"
+    return (
+        patch(
+            "services.analysis.orchestrator.pull_memories_with_vectors",
+            new=AsyncMock(return_value=fake_pull),
+        ),
+        patch(
+            "services.analysis.orchestrator.cluster_high_dim",
+            return_value=MagicMock(
+                labels=[0, 1],
+                centroids=[],
+                n_clusters=2,
+                silhouette=0.0,
+                size_variance=0.0,
+                outlier_ratio=0.0,
+            ),
+        ),
+        patch("services.analysis.orchestrator.project_to_2d", return_value=[]),
+        patch(
+            "services.analysis.orchestrator.estimate_cost",
+            return_value=MagicMock(estimated_cost_cents=42),
+        ),
+        patch(
+            "services.analysis.orchestrator.analysis_labeler.label_clusters",
+            new=label_clusters_mock,
+        ),
+    )
+
+
+async def _analysis_reports(db_session, analysis):
+    from models.sleep import SleepReport
+
+    return (
+        (
+            await db_session.execute(
+                select(SleepReport).where(
+                    SleepReport.context_id == analysis.context_id,
+                    SleepReport.source == "analysis",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+class TestRunRecordsSpendOfUnsuccessfulRun:
+    @pytest_asyncio.fixture(autouse=True)
+    async def _cleanup_committed_rows(self, db_session):
+        from sqlalchemy import delete
+
+        from models.sleep import SleepReport
+
+        yield
+        await db_session.rollback()
+        ids = list(_SPEND_CONTEXTS)
+        _SPEND_CONTEXTS.clear()
+        if ids:
+            await db_session.execute(delete(SleepReport).where(SleepReport.context_id.in_(ids)))
+            await db_session.execute(
+                delete(MemoryAnalysis).where(MemoryAnalysis.context_id.in_(ids))
+            )
+            await db_session.commit()
+
+    @pytest.mark.asyncio
+    async def test_threshold_failure_records_failed_spend_report(self, db_session) -> None:
+        """A run whose labeling breached the threshold lands 'failed' WITH
+        cost_actual_cents and a failed source='analysis' report (#2088)."""
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+        labels = [_billed_label(0, failed=True), _billed_label(1, failed=True)]
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(return_value=labels))
+        with p1, p2, p3, p4, p5:
+            with pytest.raises(ClusterLabelingThresholdExceeded):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "failed"
+        # 1M input tokens @ $1/M = $1.00.
+        assert analysis.cost_actual_cents == 100
+        reports = await _analysis_reports(db_session, analysis)
+        assert len(reports) == 1
+        assert reports[0].status == "failed"
+        assert (reports[0].error_message or "").startswith("analysis_failed: ")
+
+    @pytest.mark.asyncio
+    async def test_cancel_mid_labeling_records_cancelled_spend_and_reraises(
+        self, db_session
+    ) -> None:
+        """The DELETE soft-cancel commits 'cancelled' then cancels the task:
+        the finished clusters' spend is committed, CancelledError propagates."""
+        import asyncio
+
+        from sqlalchemy import update
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+
+        async def _cancelled_labeling(**kwargs):
+            kwargs["collected"].append(_billed_label(0))
+            await db_session.execute(
+                update(MemoryAnalysis)
+                .where(MemoryAnalysis.id == analysis.id)
+                .values(status="cancelled", cancellation_reason="user")
+            )
+            await db_session.commit()
+            raise asyncio.CancelledError
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(side_effect=_cancelled_labeling))
+        with p1, p2, p3, p4, p5:
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "cancelled"
+        assert analysis.cancellation_reason == "user"
+        # One finished cluster: 0.5M input tokens @ $1/M = $0.50.
+        assert analysis.cost_actual_cents == 50
+        reports = await _analysis_reports(db_session, analysis)
+        assert len(reports) == 1
+        assert reports[0].status == "cancelled"
+        assert reports[0].error_message == "analysis_cancelled: user"
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_labeling_writes_nothing(self, db_session) -> None:
+        """Condition (c): no label produced → no write, CancelledError re-raised."""
+        import asyncio
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(side_effect=asyncio.CancelledError))
+        with p1, p2, p3, p4, p5:
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.rollback()
+        await db_session.refresh(analysis)
+        assert analysis.cost_actual_cents is None
+        assert await _analysis_reports(db_session, analysis) == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_of_a_running_row_writes_nothing(self, db_session) -> None:
+        """A cancel that is not the DELETE soft-cancel (row still 'running',
+        e.g. worker shutdown) records no spend for a non-terminal run."""
+        import asyncio
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+
+        async def _shutdown_cancel(**kwargs):
+            kwargs["collected"].append(_billed_label(0))
+            raise asyncio.CancelledError
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(side_effect=_shutdown_cancel))
+        with p1, p2, p3, p4, p5:
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "running"
+        assert analysis.cost_actual_cents is None
+        assert await _analysis_reports(db_session, analysis) == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_spend_write_error_is_swallowed_and_cancel_reraised(
+        self, db_session
+    ) -> None:
+        """A failing spend write never replaces the CancelledError."""
+        import asyncio
+
+        from sqlalchemy import update
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+
+        async def _cancelled_labeling(**kwargs):
+            kwargs["collected"].append(_billed_label(0))
+            await db_session.execute(
+                update(MemoryAnalysis)
+                .where(MemoryAnalysis.id == analysis.id)
+                .values(status="cancelled", cancellation_reason="user")
+            )
+            await db_session.commit()
+            raise asyncio.CancelledError
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(side_effect=_cancelled_labeling))
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            p5,
+            patch(
+                "services.analysis.orchestrator.persist_spend_report",
+                new=AsyncMock(side_effect=RuntimeError("db gone")),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "cancelled"
+        assert analysis.cost_actual_cents is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_marking_failed_records_cancelled_spend(self, db_session) -> None:
+        """Threshold failure vs soft-cancel race: the cancel lands while the
+        failure is being recorded — the spend goes through the cancel path."""
+        import asyncio
+
+        from sqlalchemy import update
+
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+        labels = [_billed_label(0, failed=True), _billed_label(1, failed=True)]
+
+        async def _cancel_during_failure(*args, **kwargs):
+            await db_session.execute(
+                update(MemoryAnalysis)
+                .where(MemoryAnalysis.id == analysis.id)
+                .values(status="cancelled", cancellation_reason="user")
+            )
+            await db_session.commit()
+            raise asyncio.CancelledError
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(return_value=labels))
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            p5,
+            patch(
+                "services.analysis.orchestrator.persist_results",
+                new=AsyncMock(side_effect=ClusterLabelingThresholdExceeded("2/2")),
+            ),
+            patch(
+                "services.analysis.orchestrator.persist_failure",
+                new=AsyncMock(side_effect=_cancel_during_failure),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "cancelled"
+        assert analysis.cost_actual_cents == 100
+        reports = await _analysis_reports(db_session, analysis)
+        assert [r.status for r in reports] == ["cancelled"]

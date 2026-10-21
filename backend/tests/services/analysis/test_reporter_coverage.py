@@ -46,6 +46,7 @@ from services.analysis.reporter import (
     _index_members_by_cluster,
     persist_failure,
     persist_results,
+    persist_spend_report,
 )
 from services.analysis.vector_pull import MemoryRecord
 from services.sleep.reporter import LLMCallBreakdown
@@ -1255,3 +1256,318 @@ class TestLabelingFailureThresholdEmptyClusters:
                 workspace_id=str(fixture_workspace_id),
                 context_id=str(fixture_context_id),
             )
+
+
+# ===========================================================================
+# #2088 — the spend of a failed or cancelled run is recorded
+# ===========================================================================
+
+
+def _failed_chain_label(cluster_index: int) -> ClusterLabel:
+    """A cluster whose whole chain failed: billed attempts, calls=0 (#2060)."""
+    return _cluster_label(
+        cluster_index=cluster_index,
+        label="(unlabeled)",
+        label_confidence=0.0,
+        failed=True,
+        breakdown=None,
+        prior_breakdowns=(
+            _breakdown(input_tokens=400_000, calls=0),
+            _breakdown(input_tokens=100_000, calls=0, provider="anthropic", model="claude-haiku"),
+        ),
+    )
+
+
+async def _analysis_reports(db_session, context_id: UUID) -> list[SleepReport]:
+    return list(
+        (
+            await db_session.execute(
+                select(SleepReport).where(
+                    SleepReport.context_id == context_id, SleepReport.source == "analysis"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _usage_rows(db_session, report_id) -> list[SleepReportLLMUsage]:
+    return list(
+        (
+            await db_session.execute(
+                select(SleepReportLLMUsage).where(SleepReportLLMUsage.report_id == report_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _cluster_rows(db_session, analysis_id) -> list[MemoryAnalysisCluster]:
+    return list(
+        (
+            await db_session.execute(
+                select(MemoryAnalysisCluster).where(
+                    MemoryAnalysisCluster.analysis_id == analysis_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+class TestSpendOfUnsuccessfulRun:
+    """#2088: failed / cancelled runs keep the cost of the calls they billed."""
+
+    async def test_threshold_failure_records_failed_report_with_prior_breakdowns(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """persist_failure(cluster_results=...) after a threshold breach:
+        run failed with cost, one failed report, usage per (provider, model)
+        including prior_breakdowns, no cluster or assignment rows."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        labels = [
+            _failed_chain_label(0),
+            _failed_chain_label(1),
+            _cluster_label(cluster_index=2, breakdown=_breakdown(output_tokens=500_000, calls=1)),
+        ]
+        await persist_failure(
+            db_session,
+            analysis=analysis,
+            error_message="Cluster labeling failed for 2/3 labelable clusters",
+            cluster_results=labels,
+        )
+        await db_session.flush()
+
+        assert analysis.status == "failed"
+        # input 1.0M @ $1/M = $1.00 + output 0.5M @ $2/M = $1.00 → 200 cents.
+        assert analysis.cost_actual_cents == 200
+        reports = await _analysis_reports(db_session, fixture_context_id)
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.status == "failed"
+        assert report.paid_by == "byok"
+        assert report.user_id == "rep_user"
+        assert report.error_message.startswith("analysis_failed: Cluster labeling failed")
+        # The legacy roll-ups agree with the breakdown (no divergence warning):
+        # only the winning call counted, the failed attempts carry calls=0.
+        assert report.llm_calls_made == 1
+        assert report.llm_tokens_used == 1_500_000
+        assert report.llm_call_failures == 2
+        usage = await _usage_rows(db_session, report.id)
+        assert len(usage) == 5
+        assert all(u.phase == "cluster_labeling" for u in usage)
+        assert {(u.provider, u.model) for u in usage} == {
+            ("openai", "gpt-5-nano"),
+            ("anthropic", "claude-haiku"),
+        }
+        assert sum(u.calls for u in usage) == 1
+        assert await _cluster_rows(db_session, analysis.id) == []
+
+    async def test_persist_results_on_cancelled_row_records_cancelled_report(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """The #1241 cancel guard keeps the labels' spend: status stays
+        cancelled, a cancelled report carries the cost, no cluster rows."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            status="cancelled",
+            cancellation_reason="user",
+        )
+        mem = await _make_db_memory(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        inputs = PersistInputs(
+            analysis=analysis,
+            memories=[
+                MemoryRecord(
+                    id=mem.id,
+                    type="note",
+                    summary="m",
+                    tags=[],
+                    importance=0.5,
+                    created_at=datetime(2026, 1, 1),
+                )
+            ],
+            embeddings=np.zeros((1, 4)),
+            cluster_labels=np.array([0]),
+            coords_2d=np.array([[0.0, 0.0]]),
+            cluster_results=[
+                _cluster_label(
+                    cluster_index=0, breakdown=_breakdown(input_tokens=1_000_000, calls=1)
+                )
+            ],
+            silhouette=0.0,
+            size_variance=0.0,
+            outlier_ratio=0.0,
+            window_from=None,
+            window_to=None,
+        )
+        await persist_results(
+            db_session,
+            inputs=inputs,
+            user_id="rep_user",
+            workspace_id=str(fixture_workspace_id),
+            context_id=str(fixture_context_id),
+        )
+        await db_session.flush()
+
+        assert analysis.status == "cancelled"
+        assert analysis.cancellation_reason == "user"
+        assert analysis.finished_at is None
+        assert analysis.cost_actual_cents == 100
+        reports = await _analysis_reports(db_session, fixture_context_id)
+        assert len(reports) == 1
+        # complete_report alone would grade a clean labeling 'completed'.
+        assert reports[0].status == "cancelled"
+        assert reports[0].error_message == "analysis_cancelled: user"
+        assert len(await _usage_rows(db_session, reports[0].id)) == 1
+        assert await _cluster_rows(db_session, analysis.id) == []
+
+    async def test_persist_failure_cancel_branch_records_cancelled_report(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """Threshold raised after a concurrent cancel: the row stays
+        cancelled and the spend lands as a cancelled report."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            status="cancelled",
+            cancellation_reason="context_deleted",
+        )
+        await persist_failure(
+            db_session,
+            analysis=analysis,
+            error_message="threshold",
+            cluster_results=[_failed_chain_label(0)],
+        )
+        await db_session.flush()
+
+        assert analysis.status == "cancelled"
+        assert analysis.error is None
+        assert analysis.cost_actual_cents == 50
+        reports = await _analysis_reports(db_session, fixture_context_id)
+        assert len(reports) == 1
+        assert reports[0].status == "cancelled"
+        assert reports[0].error_message == "analysis_cancelled: context_deleted"
+
+    async def test_no_breakdowns_writes_no_report(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """Nothing was billed (empty / unbilled labels) → no report, cost stays NULL."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        await persist_failure(
+            db_session,
+            analysis=analysis,
+            error_message="boom",
+            cluster_results=[_cluster_label(cluster_index=0, failed=True, breakdown=None)],
+        )
+        await db_session.flush()
+
+        assert analysis.status == "failed"
+        assert analysis.cost_actual_cents is None
+        assert await _analysis_reports(db_session, fixture_context_id) == []
+
+    async def test_unpriced_snapshot_keeps_usage_rows_and_null_cost(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """#1570 unknown price: cost_actual_cents NULL, usage rows still written."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            model_snapshot={"model": "unpriced", "rates": {}},
+        )
+        await persist_spend_report(
+            db_session,
+            analysis=analysis,
+            cluster_results=[_cluster_label(cluster_index=0, breakdown=_breakdown(calls=1))],
+            status="failed",
+            error_message="x" * 20000,
+        )
+        await db_session.flush()
+
+        assert analysis.cost_actual_cents is None
+        # The run row's status is the caller's, not persist_spend_report's.
+        assert analysis.status == "running"
+        reports = await _analysis_reports(db_session, fixture_context_id)
+        assert len(reports) == 1
+        assert reports[0].status == "failed"
+        assert len(reports[0].error_message) == 8000
+        assert len(await _usage_rows(db_session, reports[0].id)) == 1
+
+    async def test_failing_spend_write_never_undoes_the_failed_status(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing, monkeypatch
+    ):
+        """The spend write runs in a SAVEPOINT and never raises: if it fails,
+        the 'failed' flip stands (the run is never stranded at 'running')."""
+        from services.analysis import reporter
+
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("usage insert failed")
+
+        monkeypatch.setattr(reporter, "_write_cost_report", _boom)
+        await persist_failure(
+            db_session,
+            analysis=analysis,
+            error_message="threshold",
+            cluster_results=[_failed_chain_label(0)],
+        )
+        await db_session.flush()
+        await db_session.refresh(analysis)
+
+        assert analysis.status == "failed"
+        assert analysis.error == "threshold"
+        assert analysis.cost_actual_cents is None
+        assert await _analysis_reports(db_session, fixture_context_id) == []
+
+    async def test_already_recorded_spend_is_not_written_twice(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """A second writer (cancel arriving after the guard's report
+        committed) finds cost_actual_cents set and writes nothing."""
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            status="cancelled",
+            cancellation_reason="user",
+        )
+        labels = [_cluster_label(cluster_index=0, breakdown=_breakdown(input_tokens=10, calls=1))]
+        for _ in range(2):
+            await persist_spend_report(
+                db_session,
+                analysis=analysis,
+                cluster_results=labels,
+                status="cancelled",
+                error_message="user",
+            )
+        await db_session.flush()
+
+        assert len(await _analysis_reports(db_session, fixture_context_id)) == 1
