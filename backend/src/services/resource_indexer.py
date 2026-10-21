@@ -366,11 +366,14 @@ INDEXER_SOURCE = "resource_ingest"
 RESOURCE_MEMORY_TYPE = "resource_data"
 
 
-def _keeps_user_edits(memory: Memory, new_details: dict[str, Any], context_summary: str) -> str:
+def _keeps_user_edits(
+    memory: Memory, new_details: dict[str, Any], context_summary: str
+) -> tuple[dict[str, Any], str]:
     """Carry a row's user-authored values over a same-version re-index (#2218).
 
-    Puts the row's ``details.location`` into ``new_details`` and returns the
-    ``context_summary`` the row and its point keep.
+    Returns the details and the ``context_summary`` the row and its point
+    keep: a copy of ``new_details`` with the row's ``details.location``, and
+    the row's or the indexer's ``context_summary``.
 
     - ``details.location`` is always kept. Its only writer is a user or agent
       edit (``_apply_location``): the indexer strips ``location`` from worker
@@ -387,13 +390,14 @@ def _keeps_user_edits(memory: Memory, new_details: dict[str, Any], context_summa
     the new one only if the schema's fulltext projection changed since; the
     row's ``content`` and the point's text are refreshed either way.
     """
+    details = dict(new_details)
     location = (memory.details or {}).get("location")
     if location is not None:
-        new_details["location"] = location
+        details["location"] = location
     user_authored = memory.version > 1 or memory.source != INDEXER_SOURCE
     if user_authored and memory.context_summary:
-        return memory.context_summary
-    return context_summary
+        return details, memory.context_summary
+    return details, context_summary
 
 
 def resource_document_text(projected: dict[str, Any], doc_id: str) -> str:
@@ -1114,7 +1118,9 @@ class ResourceIndexer:
         if existing_memory is not None:
             tags = list(existing_memory.tags or [])
             memory_type = existing_memory.type
-            context_summary = _keeps_user_edits(existing_memory, new_details, context_summary)
+            new_details, context_summary = _keeps_user_edits(
+                existing_memory, new_details, context_summary
+            )
         else:
             tags, memory_type = [], RESOURCE_MEMORY_TYPE
         # Local import: memory_service imports this module.
@@ -1182,8 +1188,10 @@ class ResourceIndexer:
         # (``process_incremental``). If a Memory operation fails, only this
         # event's row changes roll back; the Qdrant point written above stays.
         # This is acceptable because:
-        # 1. Qdrant upsert is idempotent (same point_id), so a retry of the
-        #    event rewrites the same point
+        # 1. Qdrant upsert is idempotent (same point_id): a re-sent or
+        #    replayed event rewrites the same point. A failed event is not
+        #    retried when a later event of the batch succeeds (the offset
+        #    moves past it).
         # 2. A point left without a row is swept once its ``indexed_at`` is
         #    older than the sweep's grace period: the sweep judges resource
         #    points by their row (#1829).
@@ -1283,7 +1291,11 @@ class ResourceIndexer:
             # failed flush deactivates the savepoint it ran in: swallowing the
             # error inside the event's savepoint would fail the event's release
             # (and lose the row written above) instead of being non-blocking.
+            # The old points are deleted only once the row deletes are
+            # flushed: a failed flush rolls the rows back, and they must keep
+            # their points.
             try:
+                old_points: list[str] = []
                 async with self.db.begin_nested():
                     old_memories_result = await self.db.execute(
                         select(Memory).where(
@@ -1302,24 +1314,26 @@ class ResourceIndexer:
                             old_point_str = (
                                 f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
                             )
-                            old_point_uuid = uuid5(NAMESPACE_DNS, old_point_str)
-                            try:
-                                await self.qdrant_client.delete(
-                                    collection_name=collection_name,
-                                    points_selector=[str(old_point_uuid)],
-                                )
-                            except Exception:
-                                pass  # Qdrant point may already be gone
+                            old_points.append(str(uuid5(NAMESPACE_DNS, old_point_str)))
                             await self.db.delete(old_mem)
 
                         await self.db.flush()
-                        logger.info(
-                            "old_versions_cleaned",
-                            resource_id=event.resource_id,
-                            doc_id=event.doc_id,
-                            current_version=event.version,
-                            cleaned_count=len(old_memories),
+                for old_point in old_points:
+                    try:
+                        await self.qdrant_client.delete(
+                            collection_name=collection_name,
+                            points_selector=[old_point],
                         )
+                    except Exception:
+                        pass  # Qdrant point may already be gone
+                if old_points:
+                    logger.info(
+                        "old_versions_cleaned",
+                        resource_id=event.resource_id,
+                        doc_id=event.doc_id,
+                        current_version=event.version,
+                        cleaned_count=len(old_points),
+                    )
             except Exception as cleanup_err:
                 # Non-blocking: cleanup failure should not block upsert
                 logger.warning(

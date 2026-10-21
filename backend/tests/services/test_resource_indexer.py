@@ -1596,7 +1596,15 @@ class TestProcessIncrementalSavepoints:
         old_versions.scalars.return_value.all.return_value = [old]
         db.execute.side_effect = [existing, old_versions]
         db.add = MagicMock()
-        db.delete = AsyncMock(side_effect=RuntimeError("cleanup flush failed"))
+        flushes = 0
+
+        async def _flush():
+            nonlocal flushes
+            flushes += 1
+            if flushes == 2:  # the row's flush passes, the cleanup's fails
+                raise RuntimeError("cleanup flush failed")
+
+        db.flush = AsyncMock(side_effect=_flush)
         cleanup = _savepoint()
         db.begin_nested = MagicMock(return_value=cleanup)
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
@@ -1616,6 +1624,43 @@ class TestProcessIncrementalSavepoints:
         db.add.assert_called_once()
         warned = [c.args[0] for c in log.warning.call_args_list]
         assert "old_version_cleanup_failed" in warned
+        # The old row was rolled back, so it keeps its point.
+        indexer.qdrant_client.delete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_old_points_are_deleted_only_after_the_rows_flush(self):
+        from services.resource_indexer import resource_point_id
+
+        old = MagicMock()
+        old.resource_version = 0
+        order: list[str] = []
+        db = AsyncMock()
+        existing = MagicMock()
+        existing.scalar_one_or_none.return_value = None
+        old_versions = MagicMock()
+        old_versions.scalars.return_value.all.return_value = [old]
+        db.execute.side_effect = [existing, old_versions]
+        db.add = MagicMock()
+        db.flush = AsyncMock(side_effect=lambda: order.append("flush"))
+        db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
+        qdrant = AsyncMock()
+        qdrant.delete = AsyncMock(side_effect=lambda **_k: order.append("qdrant_delete"))
+        with patch("services.resource_indexer.get_qdrant_client", return_value=qdrant):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _make_event()
+        event.event_metadata = None
+
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), self.COLLECTION, indexer.embedding_service
+        )
+
+        # Row flush, cleanup flush, then the old point.
+        assert order == ["flush", "flush", "qdrant_delete"]
+        assert qdrant.delete.await_args.kwargs["points_selector"] == [
+            str(resource_point_id(event.resource_id, event.doc_id, 0))
+        ]
 
 
 async def _seed_indexed_resource(db_session, events: list[dict]):
