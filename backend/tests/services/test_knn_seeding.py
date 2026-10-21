@@ -2564,7 +2564,12 @@ class TestKnnSeedEditFence:
         assert repo.create_edge_if_absent.await_count == 2
         db.commit.assert_not_called()
         db.rollback.assert_awaited_once()
-        assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {"summary", "content"}
+        fence, reload = db.refresh.await_args_list
+        assert set(fence.kwargs["attribute_names"]) >= {"summary", "content"}
+        # The rollback expired ``memory``; the full reload keeps it usable for
+        # the tag seeding the caller runs next (a lazy load there would raise
+        # MissingGreenlet).
+        assert "attribute_names" not in reload.kwargs
         assert "knn_seed_skipped_source_edited" in events
         assert "knn_seed_edges_created" not in events
 
@@ -2611,7 +2616,8 @@ class TestKnnSeedEditFence:
             memory, db, self._hits(memory, 0.93, 0.7), config=_make_config(), repo=repo
         )
 
-        assert db.refresh.await_count == 2  # the detection's re-read, then the fence's
+        # The detection's re-read, the fence's, then the reload after the rollback.
+        assert db.refresh.await_count == 3
         assert "supersede_candidate_skipped_source_edited" in events
         assert memory.summary == "B_v2: a different subject"
         db.commit.assert_not_called()
@@ -2646,3 +2652,36 @@ class TestKnnSeedEditFence:
 
         db.refresh.assert_not_awaited()
         repo.create_edge_if_absent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_seeding_failure_reloads_the_memory_after_its_rollback(self):
+        """The best-effort handler's rollback expires ``memory`` as well; the
+        caller's tag seeding reads it next, so it is reloaded (#2085)."""
+        memory = _make_memory()
+        db = _make_db()
+        order: list[str] = []
+        db.rollback = AsyncMock(side_effect=lambda: order.append("rollback"))
+        db.refresh = AsyncMock(side_effect=lambda *_a, **_k: order.append("refresh"))
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(suggest=False)),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(side_effect=RuntimeError("qdrant down")),
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        assert order == ["rollback", "refresh"]
+        assert "attribute_names" not in db.refresh.await_args.kwargs
+        assert [c.args[0] for c in mock_logger.warning.call_args_list] == ["knn_seeding_failed"]

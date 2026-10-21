@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -8431,6 +8433,44 @@ async def _detect_supersede_candidate(
         )
 
 
+def _memory_log_id(memory: Memory) -> str:
+    """``memory``'s id for a log line, read without a lazy load.
+
+    A root rollback expires every instance in the session; touching
+    ``memory.id`` on an expired instance lazy-loads it, which raises
+    ``MissingGreenlet`` under ``AsyncSession`` — inside an ``except`` block
+    that replaces the error being handled. The identity key survives expiry
+    (the #2088 ``_row_id`` pattern). A transient instance (or a test double)
+    has no identity key and is not expired, so its attribute is safe.
+    """
+    try:
+        identity = sa_inspect(memory).identity
+    except NoInspectionAvailable:
+        identity = None
+    if identity:
+        return str(identity[0])
+    return str(memory.id)
+
+
+async def _reload_after_rollback(db: AsyncSession, memory: Memory) -> None:
+    """Load ``memory`` again after a rollback expired it (#2085).
+
+    The embedding run hands the same instance to the tag co-occurrence seeding
+    after the k-NN seeding; on an expired instance its first attribute read
+    would be a lazy load (``MissingGreenlet``). Best-effort: when the reload
+    fails (the row is gone, the session is broken) the next step's own
+    best-effort handler takes over.
+    """
+    try:
+        await db.refresh(memory)
+    except Exception as exc:
+        logger.debug(
+            "knn_seed_reload_after_rollback_failed",
+            memory_id=_memory_log_id(memory),
+            error=str(exc),
+        )
+
+
 async def _create_knn_seed_edges(
     db: AsyncSession,
     memory: Memory,
@@ -8557,9 +8597,12 @@ async def _create_knn_seed_edges(
                 except Exception as rb_exc:
                     logger.warning(
                         "knn_seed_bootstrap_rollback_failed",
-                        memory_id=str(memory.id),
+                        memory_id=_memory_log_id(memory),
                         error=str(rb_exc),
                     )
+                else:
+                    # The detection below reads ``memory`` (#2085).
+                    await _reload_after_rollback(db, memory)
             # #2006 visibility rule: below D3 (a fresh deployment or a small
             # context) a missing calibration row is the expected state, and
             # resolve_knn_threshold already logs it at DEBUG to avoid alert
@@ -8761,6 +8804,9 @@ async def _create_knn_seed_edges(
             # drop them and leave the seeding to the newer run.
             if await _source_text_moved(db, memory, embedded_fingerprint):
                 await db.rollback()
+                # The rollback expired ``memory``; the caller's tag seeding
+                # reads it next.
+                await _reload_after_rollback(db, memory)
                 logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
                 return
             await db.commit()
@@ -8784,12 +8830,14 @@ async def _create_knn_seed_edges(
         except Exception as rollback_err:
             logger.debug(
                 "knn_seeding_rollback_failed",
-                memory_id=str(memory.id),
+                memory_id=_memory_log_id(memory),
                 error=str(rollback_err),
             )
+        else:
+            await _reload_after_rollback(db, memory)
         logger.warning(
             "knn_seeding_failed",
-            memory_id=str(memory.id),
+            memory_id=_memory_log_id(memory),
             error=str(e),
         )
 
@@ -9067,12 +9115,12 @@ async def _create_tag_cooccurrence_seed_edges(
         except Exception as rollback_err:
             logger.debug(
                 "tag_cooccurrence_rollback_failed",
-                memory_id=str(memory.id),
+                memory_id=_memory_log_id(memory),
                 error=str(rollback_err),
             )
         logger.warning(
             "tag_cooccurrence_seeding_failed",
-            memory_id=str(memory.id),
+            memory_id=_memory_log_id(memory),
             error=str(e),
         )
 
