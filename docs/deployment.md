@@ -1157,6 +1157,7 @@ counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
 | `supersede_fold_applied` | INFO | recall-side (#2123): judge-verified older versions were folded under the newest one (`folded` rows removed, in `groups` groups) |
 | `supersede_fold_failed` | WARNING | recall-side: the fold could not be computed, so the recall returned without folding |
 | `supersede_candidate_skipped_unjudged_low_similarity` | INFO | with the judge on, a neighbour between `SUPERSEDE_SUGGEST_THRESHOLD_LLM` and 0.85 got no `supersedes` / `parallel` verdict (no provider, the daily cap, a failure, or `unclear`), so nothing was stored (#2123). Many of these during an ingest usually mean the daily cap |
+| `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge, store or clear ran; the stored candidate is left as it is |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
 
@@ -1195,7 +1196,7 @@ missing from that table.
 |---|---|---|
 | `knn_seed_edges_created` | INFO | seed edges were written (`edges_created`, `avg_similarity`) |
 | `knn_seed_uncalibrated_embedder` | WARNING | the D3 bootstrap gate is crossed but the embedder has no `knn_seed` calibration row, so seed edges are off and supersede detection still runs. Logged once per process per (model, dimensions) |
-| `knn_seed_skip_no_consumer` | INFO once, then DEBUG | seeding is on but has no threshold, and suggestions are off, so the ingest reads no neighbours at all. INFO on the first ingest per (model, dimensions) in each process, DEBUG after that |
+| `knn_seed_skip_no_consumer` | INFO once, then DEBUG | seeding is on but has no threshold, and suggestions are off, so the ingest reads no neighbours at all. INFO on the first ingest per (model, dimensions) in each process, DEBUG after that. With `reason=mechanical_reembed` (#2092) it is DEBUG only and does not use up the INFO line: suggestions are on but this re-embed's text is unchanged |
 | `knn_seed_skip_no_threshold` | DEBUG | no seed edges on this ingest (seeding is off, or there is no calibrated threshold). Supersede detection still ran |
 | `knn_seed_disabled_no_calibration` | DEBUG | the threshold resolver found no calibration row. Below D3 this is the normal state of a new deployment or a small context |
 | `knn_seed_skip_already_seeded` / `knn_seed_no_neighbors` | DEBUG | a re-embed of a memory that already has edges, or no neighbour above the threshold |
