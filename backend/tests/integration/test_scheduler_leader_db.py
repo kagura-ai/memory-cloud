@@ -1,7 +1,8 @@
 """The scheduler leader against the real Postgres (#1988).
 
-The integration job runs every ``TestClient(app)`` lifespan with
-``SCHEDULER_LEADER_ENABLED=false``, so the leader's real ``engine.connect()``,
+Every pytest process runs its ``TestClient(app)`` lifespans with
+``SCHEDULER_LEADER_ENABLED=false`` (root ``tests/conftest.py``, #2180), so no
+lifespan exercises the leader; its real ``engine.connect()``,
 advisory-lock and release path is pinned here instead, with the scheduler
 itself stubbed (no cron job runs).
 """

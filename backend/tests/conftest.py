@@ -36,17 +36,20 @@ _PREV_SCHEDULER_LEADER_ENABLED = os.environ.get("SCHEDULER_LEADER_ENABLED")
 os.environ.setdefault("DB_NULL_POOL", "true")
 os.environ.setdefault("SCHEDULER_LEADER_ENABLED", "false")
 
-# ``get_settings()`` caches one ``Settings`` per process. Nothing under ``src``
-# is normally imported before this conftest, but a plugin could have built it
-# already; set the two fields on that instance rather than discarding it, since
-# ``api.main`` binds ``settings = get_settings()`` at import.
-_cached_settings = getattr(sys.modules.get("config.settings"), "_settings", None)
-if _cached_settings is not None:
-    from pydantic import TypeAdapter
-
-    _as_bool = TypeAdapter(bool).validate_python  # the same truthy set pydantic-settings reads
-    _cached_settings.db_null_pool = _as_bool(os.environ["DB_NULL_POOL"])
-    _cached_settings.scheduler_leader_enabled = _as_bool(os.environ["SCHEDULER_LEADER_ENABLED"])
+# The two values above only take effect if this conftest runs before
+# ``get_settings()`` caches its ``Settings`` and before ``db.base`` builds an
+# engine. That holds today (this is the first module to import anything under
+# ``src``). If a future plugin or import breaks it, fail loudly: patching the
+# cached settings would still leave an already-built pooled engine in place.
+if getattr(sys.modules.get("config.settings"), "_settings", None) is not None or any(
+    getattr(sys.modules.get("db.base"), name, None) is not None
+    for name in ("engine", "sync_engine")
+):
+    raise RuntimeError(
+        "tests/conftest.py must run before config.settings is cached or a db.base "
+        "engine is built; otherwise DB_NULL_POOL / SCHEDULER_LEADER_ENABLED do not "
+        "apply (#1988, #2180)"
+    )
 
 from models.auth import Base as AuthBase  # noqa: E402
 from models.memory import Base as MemoryBase  # noqa: E402
@@ -81,8 +84,10 @@ def _restore_test_process_env_after_session() -> Generator[None, None, None]:
     """Restore ``DB_NULL_POOL`` / ``SCHEDULER_LEADER_ENABLED`` at session end.
 
     The defaults above are set at conftest *import* time because that is when
-    they must take effect; this is best-effort cleanup so an embedding process
-    that outlives the session does not keep a leaked override.
+    they must take effect. This puts back only the environment variables, so a
+    child process started after the session does not inherit the override.
+    The cached ``Settings`` and the ``db.base`` engines built during the
+    session keep the test values.
     """
     yield
     for name, prev in (
