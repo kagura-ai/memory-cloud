@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -8431,6 +8433,48 @@ async def _detect_supersede_candidate(
         )
 
 
+class _SeedEdgesDropped(Exception):
+    """Raised inside the seed-edge SAVEPOINT to roll it back (#2085)."""
+
+
+def _memory_log_id(memory: Memory) -> str:
+    """``memory``'s id for a log line, read without a lazy load.
+
+    A root rollback expires every instance in the session; touching
+    ``memory.id`` on an expired instance lazy-loads it, which raises
+    ``MissingGreenlet`` under ``AsyncSession`` — inside an ``except`` block
+    that replaces the error being handled. The identity key survives expiry
+    (the #2088 ``_row_id`` pattern). A transient instance (or a test double)
+    has no identity key and is not expired, so its attribute is safe.
+    """
+    try:
+        identity = sa_inspect(memory).identity
+    except NoInspectionAvailable:
+        identity = None
+    if identity:
+        return str(identity[0])
+    return str(memory.id)
+
+
+async def _reload_after_rollback(db: AsyncSession, memory: Memory) -> None:
+    """Load ``memory`` again after a rollback expired it (#2085).
+
+    The embedding run hands the same instance to the tag co-occurrence seeding
+    after the k-NN seeding; on an expired instance its first attribute read
+    would be a lazy load (``MissingGreenlet``). Best-effort: when the reload
+    fails (the row is gone, the session is broken) the next step's own
+    best-effort handler takes over.
+    """
+    try:
+        await db.refresh(memory)
+    except Exception as exc:
+        logger.debug(
+            "knn_seed_reload_after_rollback_failed",
+            memory_id=_memory_log_id(memory),
+            error=str(exc),
+        )
+
+
 async def _create_knn_seed_edges(
     db: AsyncSession,
     memory: Memory,
@@ -8534,32 +8578,28 @@ async def _create_knn_seed_edges(
             try:
                 from tasks.neural_calibration import maybe_trigger_bootstrap
 
-                gate_crossed = await maybe_trigger_bootstrap(
-                    db=db,
-                    model_name=model_name,
-                    dimensions=len(vector),
-                )
+                # #2006: the supersede detection below keeps using this
+                # session, so a DB error swallowed here must not leave it in
+                # an aborted transaction ("current transaction is aborted").
+                # A SAVEPOINT clears it without a root rollback, which would
+                # expire ``memory`` and make the detection's edit check
+                # compare the re-read text with itself (#2085).
+                async with db.begin_nested():
+                    gate_crossed = await maybe_trigger_bootstrap(
+                        db=db,
+                        model_name=model_name,
+                        dimensions=len(vector),
+                    )
             except Exception as exc:
                 # Bootstrap is best-effort. A failure here must not block
                 # memory creation — log and move on; the next remember()
                 # will retry the trigger.
                 logger.warning(
                     "knn_seed_bootstrap_trigger_failed",
-                    memory_id=str(memory.id),
+                    memory_id=_memory_log_id(memory),
                     model=model_name,
                     error=str(exc),
                 )
-                # #2006: the supersede detection below keeps using this
-                # session, so a DB error swallowed here must not leave it in
-                # an aborted transaction ("current transaction is aborted").
-                try:
-                    await db.rollback()
-                except Exception as rb_exc:
-                    logger.warning(
-                        "knn_seed_bootstrap_rollback_failed",
-                        memory_id=str(memory.id),
-                        error=str(rb_exc),
-                    )
             # #2006 visibility rule: below D3 (a fresh deployment or a small
             # context) a missing calibration row is the expected state, and
             # resolve_knn_threshold already logs it at DEBUG to avoid alert
@@ -8712,57 +8752,66 @@ async def _create_knn_seed_edges(
         edges_created = 0
         similarities: list[float] = []
 
-        for neighbor in seed_neighbors:
-            try:
-                neighbor_id = UUID(str(neighbor["id"]))
-                neighbor_score = float(neighbor["score"])
-            except (ValueError, TypeError, KeyError):
-                continue
+        # #2085: the inserts run inside one SAVEPOINT so the edit fence below
+        # can drop them without a root rollback, which would expire
+        # ``memory`` for the caller's tag seeding (a lazy load under
+        # AsyncSession raises MissingGreenlet).
+        try:
+            async with db.begin_nested():
+                for neighbor in seed_neighbors:
+                    try:
+                        neighbor_id = UUID(str(neighbor["id"]))
+                        neighbor_score = float(neighbor["score"])
+                    except (ValueError, TypeError, KeyError):
+                        continue
 
-            # SAVEPOINT per edge: if one insert raises a DB error (e.g.,
-            # IntegrityError, connection issue), the inner transaction is
-            # rolled back without poisoning the outer session, so subsequent
-            # inserts and the final commit still succeed.
-            try:
-                async with db.begin_nested():
-                    # Issue #741: edge_type='semantic_similarity' deprecated;
-                    # discriminator moved to origin='semantic'.
-                    edge = await edge_repo.create_edge_if_absent(
-                        user_id=memory.user_id,
-                        src_id=memory.id,
-                        dst_id=neighbor_id,
-                        edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
-                        weight=config.knn_seed_weight,
-                        confidence=neighbor_score,
-                        workspace_id=workspace_id_str,
-                        context_id=context_id_str,
-                        origin=EDGE_ORIGIN_SEMANTIC,
-                    )
-                # edge is None when ON CONFLICT DO NOTHING fired — existing
-                # edge was preserved (TOCTOU-safe against concurrent Hebbian
-                # writes). Count only actually-created seed edges.
-                if edge is not None:
-                    edges_created += 1
-                    similarities.append(neighbor_score)
-            except Exception as edge_err:
-                logger.warning(
-                    "knn_seed_edge_failed",
-                    memory_id=memory_id_str,
-                    neighbor_id=str(neighbor.get("id", "?")),
-                    error=str(edge_err),
-                )
+                    # SAVEPOINT per edge: if one insert raises a DB error (e.g.,
+                    # IntegrityError, connection issue), the inner transaction is
+                    # rolled back without poisoning the outer session, so subsequent
+                    # inserts and the final commit still succeed.
+                    try:
+                        async with db.begin_nested():
+                            # Issue #741: edge_type='semantic_similarity' deprecated;
+                            # discriminator moved to origin='semantic'.
+                            edge = await edge_repo.create_edge_if_absent(
+                                user_id=memory.user_id,
+                                src_id=memory.id,
+                                dst_id=neighbor_id,
+                                edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
+                                weight=config.knn_seed_weight,
+                                confidence=neighbor_score,
+                                workspace_id=workspace_id_str,
+                                context_id=context_id_str,
+                                origin=EDGE_ORIGIN_SEMANTIC,
+                            )
+                        # edge is None when ON CONFLICT DO NOTHING fired — existing
+                        # edge was preserved (TOCTOU-safe against concurrent Hebbian
+                        # writes). Count only actually-created seed edges.
+                        if edge is not None:
+                            edges_created += 1
+                            similarities.append(neighbor_score)
+                    except Exception as edge_err:
+                        logger.warning(
+                            "knn_seed_edge_failed",
+                            memory_id=memory_id_str,
+                            neighbor_id=str(neighbor.get("id", "?")),
+                            error=str(edge_err),
+                        )
+
+                # #2085: an edit committed after this run's success write
+                # starts its own run, which finds no edges and seeds from the
+                # new text — unless this run commits first: the guard above
+                # then keeps the stale edges for good. The inserts are still
+                # uncommitted, so re-read the text right before the commit
+                # and, when it moved, drop them and leave the seeding to the
+                # newer run.
+                if edges_created > 0 and await _source_text_moved(db, memory, embedded_fingerprint):
+                    raise _SeedEdgesDropped
+        except _SeedEdgesDropped:
+            logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
+            return
 
         if edges_created > 0:
-            # #2085: an edit committed after this run's success write starts
-            # its own run, which finds no edges and seeds from the new text —
-            # unless this run commits first: the guard above then keeps the
-            # stale edges for good. The inserts are still uncommitted, so
-            # re-read the text right before the commit and, when it moved,
-            # drop them and leave the seeding to the newer run.
-            if await _source_text_moved(db, memory, embedded_fingerprint):
-                await db.rollback()
-                logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
-                return
             await db.commit()
             avg_similarity = sum(similarities) / len(similarities)
             logger.info(
@@ -8784,12 +8833,14 @@ async def _create_knn_seed_edges(
         except Exception as rollback_err:
             logger.debug(
                 "knn_seeding_rollback_failed",
-                memory_id=str(memory.id),
+                memory_id=_memory_log_id(memory),
                 error=str(rollback_err),
             )
+        else:
+            await _reload_after_rollback(db, memory)
         logger.warning(
             "knn_seeding_failed",
-            memory_id=str(memory.id),
+            memory_id=_memory_log_id(memory),
             error=str(e),
         )
 
@@ -9067,12 +9118,14 @@ async def _create_tag_cooccurrence_seed_edges(
         except Exception as rollback_err:
             logger.debug(
                 "tag_cooccurrence_rollback_failed",
-                memory_id=str(memory.id),
+                memory_id=_memory_log_id(memory),
                 error=str(rollback_err),
             )
+        else:
+            await _reload_after_rollback(db, memory)
         logger.warning(
             "tag_cooccurrence_seeding_failed",
-            memory_id=str(memory.id),
+            memory_id=_memory_log_id(memory),
             error=str(e),
         )
 

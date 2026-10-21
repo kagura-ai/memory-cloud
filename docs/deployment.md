@@ -1146,8 +1146,10 @@ missing from that table.
 | `knn_seed_skip_no_threshold` | DEBUG | no seed edges on this ingest (seeding is off, or there is no calibrated threshold). Supersede detection still ran |
 | `knn_seed_disabled_no_calibration` | DEBUG | the threshold resolver found no calibration row. Below D3 this is the normal state of a new deployment or a small context |
 | `knn_seed_skip_already_seeded` / `knn_seed_no_neighbors` | DEBUG | a re-embed of a memory that already has edges, or no neighbour above the threshold |
-| `knn_seed_edge_failed` / `knn_seed_bootstrap_trigger_failed` / `knn_seed_bootstrap_rollback_failed` / `knn_seeding_failed` | WARNING | best-effort failures. The memory itself is stored |
+| `knn_seed_skipped_source_edited` | INFO | the memory was edited after this embedding run wrote its vector and before it committed its seed edges, so the edges were dropped; the edit's own run seeds from the new text |
+| `knn_seed_edge_failed` / `knn_seed_bootstrap_trigger_failed` / `knn_seeding_failed` | WARNING | best-effort failures. The memory itself is stored |
 | `knn_seeding_rollback_failed` | DEBUG | the rollback after `knn_seeding_failed` failed too. The original error is the WARNING line |
+| `knn_seed_reload_after_rollback_failed` | DEBUG | after the rollback that follows `knn_seeding_failed` or `tag_cooccurrence_seeding_failed`, the memory could not be loaded again (typically it was deleted meanwhile). A tag co-occurrence seeding that follows then logs its own best-effort failure |
 | `knn_seed_lazy_ttl_enqueue_no_loop` / `knn_seed_lazy_ttl_enqueue_unavailable` | DEBUG | an expired calibration row could not queue its recalibration (no running event loop, or the task module is not available). The expired threshold is still used, and the scheduled recalibration catches up |
 
 `knn_seed_skip_no_threshold` and `knn_seed_disabled_no_calibration` stay at
@@ -1661,7 +1663,11 @@ would to a re-index.
   vector of its label. It is final after the first attempt (retrying cannot
   help until one of the two steps below is taken) and is logged once as
   `embedding_resource_unrebuildable`, a warning, not as
-  `embedding_budget_exhausted`. The dry run and the restore both warn with the
+  `embedding_budget_exhausted` (the error for a memory that used up its
+  retries; with `reason=claim_expired` its runs kept outliving their claim,
+  for example a slow embedder on a very long content, and it ends `failed`
+  with `embedding_error` `claim_expired: …` until the admin retry below resets
+  it). The dry run and the restore both warn with the
   number of memories whose resource has no schema. Two ways to make such a
   memory searchable again:
   - publish the resource's schema again, then reset the failed memories with
