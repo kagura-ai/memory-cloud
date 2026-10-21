@@ -351,6 +351,28 @@ class TestB03NeuralEdgesBackfillMigration:
             assert len(rows) == 1
             assert str(rows[0].workspace_id) == ws_id
             assert str(rows[0].context_id) == ctx_id
+            # The CHECK was VALIDATEd in its autocommit block (#2079) and
+            # SET NOT NULL used it as proof on both columns.
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT convalidated FROM pg_constraint "
+                        "WHERE conname = 'ck_neural_memory_edges_ws_ctx_not_null'"
+                    )
+                ).scalar_one()
+                is True
+            )
+            nullable = conn.execute(
+                text(
+                    "SELECT column_name, is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'neural_memory_edges' "
+                    "AND column_name IN ('workspace_id', 'context_id')"
+                )
+            ).fetchall()
+            assert {(r.column_name, r.is_nullable) for r in nullable} == {
+                ("workspace_id", "NO"),
+                ("context_id", "NO"),
+            }
         engine.dispose()
 
     def test_null_edge_with_both_endpoints_null_is_orphan_deleted(self):

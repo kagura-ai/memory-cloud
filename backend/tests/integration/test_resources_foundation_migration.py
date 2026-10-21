@@ -263,6 +263,16 @@ class TestA97ResourcesMigration:
                     "and be VALID after a97 upgrade"
                 )
 
+                # The NOT VALID FK was VALIDATEd in Step 10's autocommit
+                # block, not left convalidated = false (#2079).
+                fk_validated = conn.execute(
+                    text(
+                        "SELECT convalidated FROM pg_constraint "
+                        "WHERE conname = 'fk_resource_events_resource_pk'"
+                    )
+                ).scalar_one()
+                assert fk_validated is True
+
                 # The partial UNIQUE permits the revival pattern.
                 event_count = conn.execute(
                     text(
