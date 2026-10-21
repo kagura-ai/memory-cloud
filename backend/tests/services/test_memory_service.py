@@ -370,32 +370,47 @@ class TestRecordAdoption:
         service = MemoryService(MagicMock())
         memory_id = uuid4()
         stats_db = MagicMock(commit=AsyncMock())
-        repo = MagicMock(update_access_stats=AsyncMock())
+        repo = MagicMock(bulk_update_access_stats=AsyncMock(return_value={memory_id: object()}))
         with (
             patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
             patch("services.memory_service.MemoryRepository", return_value=repo) as repo_cls,
         ):
-            await service.record_adoption(memory_id)
+            assert await service.record_adoption(memory_id) is True
         repo_cls.assert_called_once_with(stats_db)
-        repo.update_access_stats.assert_awaited_once_with(
-            memory_id, client="api", count_as_adoption=True
+        repo.bulk_update_access_stats.assert_awaited_once_with(
+            [memory_id], "api", count_as_adoption=True
         )
         stats_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_record_adoption_of_a_skipped_row_is_false(self):
+        """A row another transaction holds is skipped (SKIP LOCKED): not landed."""
+        service = MemoryService(MagicMock())
+        stats_db = MagicMock(commit=AsyncMock())
+        repo = MagicMock(bulk_update_access_stats=AsyncMock(return_value={}))
+        with (
+            patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
+            patch("services.memory_service.MemoryRepository", return_value=repo),
+        ):
+            assert await service.record_adoption(uuid4()) is False
 
     @pytest.mark.asyncio
     async def test_record_adoption_failure_is_logged_not_raised(self):
         service = MemoryService(MagicMock())
         stats_db = MagicMock(commit=AsyncMock())
-        repo = MagicMock(update_access_stats=AsyncMock(side_effect=RuntimeError("db down")))
+        repo = MagicMock(
+            bulk_update_access_stats=AsyncMock(side_effect=RuntimeError("postgresql://u:pw@h/db"))
+        )
         with (
             patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
             patch("services.memory_service.MemoryRepository", return_value=repo),
             patch("services.memory_service.logger") as log,
         ):
-            await service.record_adoption(uuid4())
+            assert await service.record_adoption(uuid4()) is False
         stats_db.commit.assert_not_awaited()
-        log.warning.assert_called_once()
-        assert log.warning.call_args.args[0] == "access_stats_update_failed"
+        log.warning.assert_called_once_with(
+            "access_stats_update_failed", error_type="RuntimeError", memory_count=1
+        )
 
 
 class TestReferenceWithLinks:

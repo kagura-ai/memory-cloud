@@ -100,7 +100,16 @@ def _response(
     )
 
 
-async def _call(args: dict, *, service_result=None, service_error=None, resolver=None, mark=None):
+async def _call(
+    args: dict,
+    *,
+    service_result=None,
+    service_error=None,
+    resolver=None,
+    mark=None,
+    adoption_lands=True,
+    db=None,
+):
     """Run handle_reference with the service mocked; return (text, service mock).
 
     ``mark`` replaces the #2139 once-per-session read marker (default: an
@@ -108,12 +117,13 @@ async def _call(args: dict, *, service_result=None, service_error=None, resolver
     """
     svc = MagicMock(
         reference=AsyncMock(return_value=service_result, side_effect=service_error),
-        record_adoption=AsyncMock(),
+        record_adoption=AsyncMock(return_value=adoption_lands),
     )
     svc.mark = mark if mark is not None else AsyncMock(return_value=True)
+    svc.unmark = AsyncMock()
 
     async def gen():
-        yield AsyncMock()
+        yield db if db is not None else AsyncMock()
 
     full_args = {"memory_id": str(MEM_ID), "context_id": str(CTX_ID), **args}
     with ExitStack() as stack:
@@ -127,6 +137,7 @@ async def _call(args: dict, *, service_result=None, service_error=None, resolver
         stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
         stack.enter_context(patch("services.memory_service.MemoryService", return_value=svc))
         stack.enter_context(patch("mcp_server.tools.memory.mark_first_read", new=svc.mark))
+        stack.enter_context(patch("mcp_server.tools.memory.unmark_read", new=svc.unmark))
         result = await handle_reference(args=full_args, user_id="u", workspace_id=uuid4())
     assert len(result) == 1
     return result[0].text, svc
@@ -703,6 +714,42 @@ async def test_a_continuation_that_is_the_sessions_first_read_records_one_adopti
         user_id="u", agent_id=session.agent_id, session_id="run-2139", memory_id=MEM_ID
     )
     svc.record_adoption.assert_awaited_once_with(MEM_ID)
+
+
+@pytest.mark.asyncio
+async def test_the_adoption_is_recorded_after_the_request_commits(session):
+    order = []
+    db = AsyncMock()
+    db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+    mark = AsyncMock(side_effect=lambda **_: order.append("mark") or True)
+    await _call(
+        {"content_offset": 1500},
+        service_result=_response(content=_big_text(60_000)),
+        mark=mark,
+        db=db,
+    )
+    assert order == ["commit", "mark"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_continuation_whose_bump_did_not_land_is_unmarked(session):
+    _, svc = await _call(
+        {"content_offset": 1500},
+        service_result=_response(content=_big_text(60_000)),
+        adoption_lands=False,
+    )
+    svc.record_adoption.assert_awaited_once_with(MEM_ID)
+    svc.unmark.assert_awaited_once_with(
+        user_id="u", agent_id=session.agent_id, session_id="run-2139", memory_id=MEM_ID
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_landed_first_continuation_keeps_its_mark(session):
+    _, svc = await _call(
+        {"content_offset": 1500}, service_result=_response(content=_big_text(60_000))
+    )
+    svc.unmark.assert_not_awaited()
 
 
 @pytest.mark.asyncio

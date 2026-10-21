@@ -5392,7 +5392,7 @@ class MemoryService:
             accessed_by_clients=list(stats.accessed_by_clients or []),
         )
 
-    async def record_adoption(self, memory_id: UUID) -> None:
+    async def record_adoption(self, memory_id: UUID) -> bool:
         """Count one adoption (#1046) of a memory whose read was already checked.
 
         Issue #2139: the MCP reference handler calls this for a continuation
@@ -5400,25 +5400,30 @@ class MemoryService:
         was built. Same bump as an offset-less ``reference()`` (access_count,
         reference_count, last_used_at), in an isolated session so its row lock
         and any failure stay out of the request transaction. Best-effort: a
-        failure is logged as ``access_stats_update_failed`` and never raised.
+        failure is logged as ``access_stats_update_failed`` (``error_type``
+        only — a driver error's text can carry the DSN) and never raised.
 
         Args:
             memory_id: The memory read.
+
+        Returns:
+            True when the bump landed; False when the row was skipped (locked
+            by another transaction, deleted) or the write failed.
         """
         try:
             async with self._isolated_session() as stats_db:
-                await MemoryRepository(stats_db).update_access_stats(
-                    memory_id, client="api", count_as_adoption=True
+                updated = await MemoryRepository(stats_db).bulk_update_access_stats(
+                    [memory_id], "api", count_as_adoption=True
                 )
                 await stats_db.commit()
         except Exception as exc:  # noqa: BLE001 — the page is delivered; never fail it
             logger.warning(
                 "access_stats_update_failed",
-                error=str(exc),
                 error_type=type(exc).__name__,
                 memory_count=1,
-                exc_info=True,
             )
+            return False
+        return memory_id in updated
 
     async def _recall_record_access(
         self,

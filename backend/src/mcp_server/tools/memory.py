@@ -37,7 +37,7 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
-from mcp_server.tools._reference_adoption import mark_first_read
+from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
     DEDUPE_SUGGEST,
@@ -2157,8 +2157,10 @@ async def _record_session_read(
     result's cut content). An offset-less read was already counted by
     ``service.reference``; marking it keeps a later continuation in the same
     session from counting again. Without a session id nothing is marked and a
-    continuation is not counted. Runs only after the page was built, so a
-    refused or past-the-end page leaves no mark.
+    continuation is not counted. Runs only after the page was built and the
+    request committed, so a refused or past-the-end page leaves no mark. When
+    a first continuation's bump does not land (row locked, database error),
+    the mark is removed so a later page of the session can count instead.
 
     Args:
         service: The request's MemoryService.
@@ -2177,8 +2179,13 @@ async def _record_session_read(
         session_id=provenance.session_id,
         memory_id=memory_id,
     )
-    if continuation and first:
-        await service.record_adoption(memory_id)
+    if continuation and first and not await service.record_adoption(memory_id):
+        await unmark_read(
+            user_id=user_id,
+            agent_id=provenance.agent_id,
+            session_id=provenance.session_id,
+            memory_id=memory_id,
+        )
 
 
 async def handle_reference(
@@ -2328,11 +2335,6 @@ async def handle_reference(
                 return e.to_response()
             text = _dumps({"status": "success", "memory": bounded})
 
-            if not result.historical and (record_access or view.page_field is not None):
-                await _record_session_read(
-                    service, user_id, request.memory_id, continuation=not record_access
-                )
-
             await _log_tool_usage(
                 db, user_id, "reference", start_time, 200, current_context_id, workspace_id
             )
@@ -2340,6 +2342,16 @@ async def handle_reference(
             # commit time; the memory_not_found return above never touches).
             await _touch_context_last_used(db, current_context)
             await db.commit()
+
+            # #2139: after the request commit, so neither the Redis call nor
+            # the isolated stats write runs while this transaction is open.
+            if not result.historical and (record_access or view.page_field is not None):
+                await _record_session_read(
+                    service,
+                    user_id,
+                    request.memory_id,
+                    continuation=view.page_field is not None,
+                )
 
             return [TextContent(type="text", text=text)]
         except _ContextNotFoundError as e:

@@ -57,3 +57,20 @@ async def mark_first_read(
         logger.warning("reference_adoption_mark_failed", error_type=type(exc).__name__)
         return False
     return bool(created)
+
+
+async def unmark_read(
+    *, user_id: str, agent_id: UUID | None, session_id: str, memory_id: UUID
+) -> None:
+    """Remove the session's mark for ``memory_id`` (its adoption did not land).
+
+    Best-effort like :func:`mark_first_read`: a Redis error is logged
+    (``error_type`` only) and the mark expires with its TTL. Never raises.
+    """
+    key = reference_read_key(
+        user_id=user_id, agent_id=agent_id, session_id=session_id, memory_id=memory_id
+    )
+    try:
+        await get_redis_client().delete(key)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never fails a read
+        logger.warning("reference_adoption_unmark_failed", error_type=type(exc).__name__)

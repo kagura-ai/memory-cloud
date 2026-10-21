@@ -11,6 +11,7 @@ from mcp_server.tools._reference_adoption import (
     REFERENCE_ADOPTION_SESSION_TTL_SECONDS,
     mark_first_read,
     reference_read_key,
+    unmark_read,
 )
 
 MEM = uuid4()
@@ -86,3 +87,24 @@ async def test_an_unavailable_client_is_false():
             await mark_first_read(user_id="u", agent_id=None, session_id="s", memory_id=MEM)
             is False
         )
+
+
+@pytest.mark.asyncio
+async def test_unmark_deletes_the_same_key():
+    client = MagicMock(delete=AsyncMock(return_value=1))
+    with patch("mcp_server.tools._reference_adoption.get_redis_client", return_value=client):
+        await unmark_read(user_id="sub-1", agent_id=AGENT, session_id="run.1", memory_id=MEM)
+    client.delete.assert_awaited_once_with(f"reference_read:sub-1:{AGENT}:run.1:{MEM}")
+
+
+@pytest.mark.asyncio
+async def test_an_unmark_failure_is_logged_not_raised():
+    client = MagicMock(delete=AsyncMock(side_effect=ConnectionError("redis://:pw@h")))
+    with (
+        patch("mcp_server.tools._reference_adoption.get_redis_client", return_value=client),
+        patch("mcp_server.tools._reference_adoption.logger") as log,
+    ):
+        await unmark_read(user_id="u", agent_id=None, session_id="s", memory_id=MEM)
+    log.warning.assert_called_once_with(
+        "reference_adoption_unmark_failed", error_type="ConnectionError"
+    )
