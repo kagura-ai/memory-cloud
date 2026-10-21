@@ -27,6 +27,8 @@ def _edit(
     erased: bool = False,
     writer: str = "api",
     row_id: int | None = None,
+    undone_by: int | None = None,
+    restored_from: int | None = None,
 ) -> DetailsEdit:
     return DetailsEdit(
         memory_id=memory_id,
@@ -36,7 +38,21 @@ def _edit(
         writer=writer,
         details=None if erased else details,
         erased=erased,
+        undone_by=undone_by,
+        restored_from=restored_from,
     )
+
+
+def _erasure(memory_id: UUID, version: int, actor: str, restored_from: int) -> DetailsEdit:
+    """The row ``restore_editor_details`` writes."""
+    return _edit(
+        memory_id, version, actor, erased=True, writer="erasure", restored_from=restored_from
+    )
+
+
+def _rollback(memory_id: UUID, version: int, actor: str, undid: object) -> DetailsEdit:
+    """A session rollback's put-back row: its prior is the value it undid."""
+    return _edit(memory_id, version, actor, undid, writer="rollback")
 
 
 def test_latest_edit_by_the_subject_goes_back_to_the_previous_writers_value() -> None:
@@ -104,28 +120,30 @@ def test_an_erased_prior_gives_null_and_unavailable() -> None:
 
 def test_an_erasure_row_on_top_is_not_the_subjects_writing() -> None:
     """Idempotency of a re-run by pseudonym (#2243): the erasure row carries
-    the pseudonym as actor; with ``writer='erasure'`` it ends the run. The
-    same row written as ``api`` would be the subject's edit — that is why
-    the writer value exists."""
+    the pseudonym as actor and reverted the run from ``restored_from`` up;
+    the value it put back was written below that run. The same row written
+    as ``api`` would be the subject's edit — that is why the writer value
+    exists."""
     m = uuid4()
     rows = [
-        _edit(m, 2, PSEUDONYM, {"by": "author"}),
-        _edit(m, 3, PSEUDONYM, erased=True, writer="erasure"),
+        _edit(m, 2, AUTHOR, {"by": "creation"}),
+        _edit(m, 3, PSEUDONYM, {"by": "author"}),
+        _erasure(m, 4, PSEUDONYM, restored_from=3),
     ]
     assert restore_targets(rows, PSEUDONYM) == []
-    as_api = [rows[0], _edit(m, 3, PSEUDONYM, erased=True, writer="api")]
+    as_api = [*rows[:2], _edit(m, 4, PSEUDONYM, erased=True, writer="api")]
     assert restore_targets(as_api, PSEUDONYM) == [
-        RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=2)
+        RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=3)
     ]
 
 
 def test_an_erasure_row_below_ends_the_run() -> None:
-    """An earlier erasure restored another member's value; the subject's edit
-    on top of it goes back to that value."""
+    """An earlier erasure put back the author's value; the subject's edit on
+    top of it goes back to that value."""
     m = uuid4()
     rows = [
         _edit(m, 2, PSEUDONYM, {"by": "author"}),
-        _edit(m, 3, PSEUDONYM, erased=True, writer="erasure"),
+        _erasure(m, 3, PSEUDONYM, restored_from=2),
         _edit(m, 4, SUBJECT, {"by": "author"}),
     ]
     assert restore_targets(rows, SUBJECT) == [
@@ -133,16 +151,75 @@ def test_an_erasure_row_below_ends_the_run() -> None:
     ]
 
 
-def test_a_rollback_the_subject_requested_counts_as_their_write() -> None:
+def test_a_second_erasure_finds_the_value_the_first_one_put_back() -> None:
+    """Review M2: A authors (dA); V edits (dV); U edits (dU). U's erasure puts
+    dV back with ``restored_from=3``. V's erasure must see that dV is V's and
+    put dA back; a re-run by either pseudonym afterwards finds nothing."""
+    m = uuid4()
+    p_u, p_v = "u" * 64, "v" * 64
+    rows = [
+        _edit(m, 2, "member-v", {"by": "author"}),
+        _edit(m, 3, p_u, {"by": "v"}),
+        _erasure(m, 4, p_u, restored_from=3),
+    ]
+    assert restore_targets(rows, "member-v") == [
+        RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=2)
+    ]
+    after = [_edit(m, 2, p_v, {"by": "author"}), *rows[1:], _erasure(m, 5, p_v, restored_from=2)]
+    assert restore_targets(after, p_v) == []
+    assert restore_targets(after, p_u) == []
+
+
+def test_the_subjects_rollback_of_another_session_is_not_their_writing() -> None:
+    """Review M1: T's session edits A's memory, the owner U rolls it back.
+    The live value is A's again; nothing of U's is on the memory, and the
+    rolled-back value must not come back."""
     m = uuid4()
     rows = [
-        _edit(m, 2, AUTHOR, {"by": "creation"}),
-        _edit(m, 3, SUBJECT, {"by": "author"}),
-        _edit(m, 4, SUBJECT, {"by": "subject"}, writer="rollback"),
+        _edit(m, 2, OTHER, {"by": "author"}, undone_by=7),
+        _rollback(m, 3, SUBJECT, {"by": "other"}),
+    ]
+    assert restore_targets(rows, SUBJECT) == []
+
+
+def test_a_rollback_over_the_subjects_value_leaves_the_subject_as_the_writer() -> None:
+    """Review M1 variants: U edits (dU over dA), T's session edits over it and
+    is rolled back — by U or by the author. dU is live and U's: dA comes back,
+    not T's rolled-back value."""
+    m = uuid4()
+    for requester in (SUBJECT, AUTHOR):
+        rows = [
+            _edit(m, 2, SUBJECT, {"by": "author"}),
+            _edit(m, 3, OTHER, {"by": "subject"}, undone_by=7),
+            _edit(m, 4, OTHER, {"by": "other-1"}, undone_by=7),
+            _rollback(m, 5, requester, {"by": "other-2"}),
+        ]
+        assert restore_targets(rows, SUBJECT) == [
+            RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=2)
+        ], requester
+
+
+def test_a_rollback_block_ends_at_another_rollbacks_mark() -> None:
+    """Events a rollback skipped carry another rollback's id: they are not in
+    the block the put-back row reverted."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, SUBJECT, {"by": "author"}, undone_by=5),
+        _edit(m, 3, OTHER, {"by": "subject"}, undone_by=7),
+        _rollback(m, 4, AUTHOR, {"by": "other"}),
     ]
     (target,) = restore_targets(rows, SUBJECT)
-    assert target.details == {"by": "author"}
-    assert target.from_version == 3
+    assert (target.details, target.from_version) == ({"by": "author"}, 2)
+
+
+def test_a_rollback_with_nothing_marked_below_drops_only_itself() -> None:
+    m = uuid4()
+    rows = [
+        _edit(m, 2, SUBJECT, {"by": "author"}),
+        _rollback(m, 3, AUTHOR, {"by": "subject"}),
+    ]
+    (target,) = restore_targets(rows, SUBJECT)
+    assert target.from_version == 2
 
 
 def test_same_version_rows_order_by_id() -> None:
