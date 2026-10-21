@@ -105,7 +105,17 @@ def _edit(
     )
 
 
-def _request(user_id: str, *, status: str = "complete", minutes: int = 0) -> ErasureRequest:
+def _request(
+    user_id: str,
+    *,
+    status: str = "complete",
+    minutes: int = 0,
+    summary: dict[str, Any] | None = None,
+) -> ErasureRequest:
+    """A request row; a ``complete`` one as ``_finalize`` leaves it unless
+    ``summary`` says otherwise."""
+    if summary is None and status == "complete":
+        summary = {"postgres": {"memories_scrubbed": 0}}
     return ErasureRequest(
         id=uuid.uuid4(),
         user_id=user_id,
@@ -115,6 +125,7 @@ def _request(user_id: str, *, status: str = "complete", minutes: int = 0) -> Era
         reason_code="other",
         status=status,
         completed_at=COMPLETED_AT + timedelta(minutes=minutes) if status == "complete" else None,
+        deleted_data_summary=summary,
     )
 
 
@@ -127,6 +138,9 @@ async def world(async_engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
     ws, ctx = uuid.uuid4(), uuid.uuid4()
     twin_ws, twin_ctx = uuid.uuid4(), uuid.uuid4()
     twin_p = _pseudonym()  # look-alike actor, never erased
+    # a raw sub an IdP issued as 64 hex, whose request the sweep marked
+    # complete without running (the user row was already gone): never a subject
+    absent_sub = _pseudonym()
 
     live = _memory(ws, ctx, author, SUBJECTS, 3)
     leftover = _memory(ws, ctx, author, {"by": "fourth"}, 3)
@@ -134,7 +148,8 @@ async def world(async_engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
     rolled = _memory(ws, ctx, author, {"by": "fourth"}, 4)
     twin_live = _memory(twin_ws, twin_ctx, author, SUBJECTS, 3)
     twin_leftover = _memory(twin_ws, twin_ctx, author, THIRDS, 3)
-    memories = [live, leftover, own, rolled, twin_live, twin_leftover]
+    absent_edited = _memory(ws, ctx, author, SUBJECTS, 3)
+    memories = [live, leftover, own, rolled, twin_live, twin_leftover, absent_edited]
     edits = [
         _edit(live, 2, author, {"details": CREATION}),
         _edit(live, 3, p, {"details": AUTHORS}),
@@ -151,12 +166,15 @@ async def world(async_engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
         _edit(twin_live, 3, twin_p, {"details": AUTHORS}),
         _edit(twin_leftover, 2, twin_p, {"details": AUTHORS}),
         _edit(twin_leftover, 3, fourth, {"details": SUBJECTS}),
+        _edit(absent_edited, 2, author, {"details": CREATION}),
+        _edit(absent_edited, 3, absent_sub, {"details": AUTHORS}),
     ]
     request = _request(p, minutes=1)
     raw_sub = _request(f"google-oauth2|{tag}")  # before v0.58.1: never pseudonymized
     nothing = _request(_pseudonym(), minutes=2)  # its pseudonym has no rows
+    absent = _request(absent_sub, summary={"note": "user_row_already_absent"})
     ignored = [_request(twin_p, status="failed"), _request(_pseudonym(), status="cancelled")]
-    requests = [request, raw_sub, nothing, *ignored]
+    requests = [request, raw_sub, nothing, absent, *ignored]
     erasure_audit = AuditLog(
         user_email="e" * 64,
         user_id=p,
@@ -186,6 +204,7 @@ async def world(async_engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
             "fourth": fourth,
             "request": request,
             "raw_sub": raw_sub,
+            "absent": absent,
             "nothing": nothing,
             "live": live,
             "leftover": leftover,
@@ -383,10 +402,34 @@ async def test_all_skips_a_raw_sub_and_lists_only_requests_with_changes(
 
     assert code == 0
     out = capsys.readouterr().out
-    assert f"skipped  {world['raw_sub'].id}  not pseudonymized" in out
+    assert f"skipped  {world['raw_sub'].id}  stores the account id: finalized before" in out
+    assert f"skipped  {world['absent'].id}  never ran: marked complete" in out
     assert str(world["nothing"].id) not in out  # no rows: 0 changes, not listed
     # the raw sub itself is never printed
     assert world["raw_sub"].user_id not in out
+    assert world["absent"].user_id not in out
+
+
+async def test_a_request_the_sweep_never_ran_is_never_a_subject(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review S2: its ``user_id`` is a raw sub that has the pseudonym's shape.
+    Using it would write an ``erasure`` row and an audit row under a raw
+    identifier on an account no erasure processed: skipped, nothing written."""
+    async with _maker(async_engine)() as session:
+        before = await _snapshots(session, [])
+
+    code, sync = await _run(
+        async_engine, ["--request", str(world["absent"].id), "--apply", "--yes"]
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 completed erasure(s): would change 0, skipped 1" in out
+    assert world["absent"].user_id not in out
+    sync.assert_not_awaited()
+    async with _maker(async_engine)() as session:
+        assert await _snapshots(session, []) == before
 
 
 async def test_request_narrows_and_an_unknown_request_is_an_error(

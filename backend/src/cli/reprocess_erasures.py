@@ -26,9 +26,10 @@ Per completed erasure request, one transaction:
 
 A request that changed gets one ``account_erasure_reprocess`` audit row
 (counts only). The command reads the pseudonym stored on the request and
-never derives one; a request that still stores a raw account id (completed
-before v0.58.1, so before the revision log of v0.113.0) is skipped and
-counted. A value another erased member wrote is never put back. Running it
+never derives one. A request that still stores the raw account id is
+skipped and counted: one the sweep marked complete without running it (the
+user row was already gone), and one finalized before v0.58.1 (before the
+revision log of v0.113.0 anyway). A value another erased member wrote is never put back. Running it
 again changes nothing. The dry run writes and locks nothing and makes no
 vector-store call; it prints request ids and counts, never values. It
 previews each request on its own: where two erased members edited the same
@@ -46,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -61,9 +61,14 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from models.auth import AuditLog  # noqa: E402
 from models.erasure import STATUS_COMPLETE, ErasureRequest  # noqa: E402
-from services.erasure_details import restore_editor_details, strip_subject_details  # noqa: E402
+from services.erasure_details import (  # noqa: E402
+    completed_pseudonyms,
+    finalized_erasure,
+    is_pseudonym,
+    restore_editor_details,
+    strip_subject_details,
+)
 from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
-from utils.hashing import SHA256_HEX_PATTERN  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -72,10 +77,10 @@ AUDIT_ACTION = "account_erasure_reprocess"
 # The erasure's own audit row: its user_email is the email pseudonym.
 ERASURE_AUDIT_ACTION = "account_erasure"
 TOOL = "cli.reprocess_erasures"
-SKIPPED_NOT_PSEUDONYMIZED = "not pseudonymized (completed before v0.58.1)"
+# Both keep the raw account id in ``user_id``, which is never used or printed.
+SKIPPED_NOT_RUN = "never ran: marked complete because the user row was already gone"
+SKIPPED_NOT_PSEUDONYMIZED = "stores the account id: finalized before v0.58.1"
 SKIPPED_NO_COMPLETION_TIME = "no completion time"
-
-_PSEUDONYM = re.compile(SHA256_HEX_PATTERN)
 
 
 @dataclass
@@ -228,29 +233,31 @@ async def reprocess_erasures(
         QdrantError: A payload patch failed; that request was rolled back.
     """
     stmt = (
-        select(ErasureRequest.id, ErasureRequest.user_id, ErasureRequest.completed_at)
+        select(
+            ErasureRequest.id,
+            ErasureRequest.user_id,
+            ErasureRequest.completed_at,
+            finalized_erasure().label("finalized"),
+        )
         .where(ErasureRequest.status == STATUS_COMPLETE)
         .order_by(ErasureRequest.completed_at, ErasureRequest.id)
     )
     if request_id is not None:
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
-    erased = frozenset(
-        user_id
-        for user_id in (
-            await db.execute(
-                select(ErasureRequest.user_id).where(ErasureRequest.status == STATUS_COMPLETE)
-            )
-        ).scalars()
-        if _PSEUDONYM.fullmatch(user_id)
-    )
+    erased = await completed_pseudonyms(db)
     await db.rollback()
     if request_id is not None and not requests:
         raise LookupError(f"{request_id} is not a completed erasure request")
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
     for request in requests:
-        if not _PSEUDONYM.fullmatch(request.user_id):
+        # Both checks before the user_id is used as a subject: only a row
+        # an erasure run finalized stores the pseudonym (``finalized_erasure``).
+        if not request.finalized:
+            result.skipped.append((request.id, SKIPPED_NOT_RUN))
+            continue
+        if not is_pseudonym(request.user_id):
             result.skipped.append((request.id, SKIPPED_NOT_PSEUDONYMIZED))
             continue
         if request.completed_at is None:

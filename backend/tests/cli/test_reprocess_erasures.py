@@ -71,7 +71,7 @@ class TestReprocessErasuresCommand:
         out = capsys.readouterr().out
         row = next(line for line in out.splitlines() if line.startswith(str(REQUEST_ID)))
         assert row.split()[1:] == ["2026-08-01T12:00:00Z", "2", "1", "3", "4"]
-        assert f"skipped  {SKIPPED_ID}  not pseudonymized" in out
+        assert f"skipped  {SKIPPED_ID}  stores the account id" in out
         assert "2 completed erasure(s): would change 1, skipped 1" in out
         assert "dry run — pass --apply to write" in out
 
