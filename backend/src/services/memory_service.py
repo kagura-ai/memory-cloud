@@ -9193,6 +9193,52 @@ def embedding_retry_eligible_clause(now: datetime):
     )
 
 
+def embedding_reclaim_eligible_clause(stale_cutoff: datetime):
+    """SQLAlchemy clause: a stale ``processing`` row a new run may reclaim (#2095).
+
+    Stale means the claim stamp (``embedding_attempted_at``) is older than
+    ``stale_cutoff``: the run crashed, or it hung past its renewal limit. A
+    reclaim spends one unit of retry budget (the claim's CASE counts it), so
+    the clause also requires budget left. Without that bound, a run that
+    always outlives its claim would be reclaimed forever and never fail.
+
+    ``embedding_reclaim_exhausted_clause`` is the complement on the budget
+    side: the sweep moves those rows to ``failed``.
+
+    Shared by the sweep prefilter (``tasks/embedding_tasks.py``) and the atomic
+    claim in ``process_pending_embedding`` so the two gates cannot drift.
+    """
+    from sqlalchemy import and_
+
+    from config.constants import MAX_EMBEDDING_RETRIES
+    from models.memory import Memory
+
+    return and_(
+        Memory.embedding_status == "processing",
+        embedding_clock_before(stale_cutoff),
+        Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
+    )
+
+
+def embedding_reclaim_exhausted_clause(stale_cutoff: datetime):
+    """SQLAlchemy clause: a stale ``processing`` row with no retry budget left (#2095).
+
+    Nothing can claim it (``embedding_reclaim_eligible_clause`` needs budget),
+    so the sweep fails it. It must use the same ``stale_cutoff`` as the claim,
+    or a live run would be failed while it still holds its claim.
+    """
+    from sqlalchemy import and_
+
+    from config.constants import MAX_EMBEDDING_RETRIES
+    from models.memory import Memory
+
+    return and_(
+        Memory.embedding_status == "processing",
+        embedding_clock_before(stale_cutoff),
+        Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES,
+    )
+
+
 def embedding_clock_before(cutoff: datetime):
     """``embedding_attempted_at`` older than ``cutoff`` — NULL counts as older.
 
@@ -9404,7 +9450,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
     from datetime import timedelta
 
-    from sqlalchemy import and_, case, or_, select, update
+    from sqlalchemy import case, or_, select, update
 
     from db.base import get_db
     from models.memory import Memory
@@ -9434,8 +9480,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # #979: a `failed` row is also eligible for auto-retry once its
             # backoff has elapsed and it still has retry budget. The shared
             # clause keeps this gate byte-identical to the sweep prefilter. The
-            # counter is incremented only when we claim a `failed` row (CASE
-            # below), so the initial pending->processing claim spends no budget.
+            # counter is incremented when we claim a `failed` row or reclaim a
+            # stale `processing` one (#2095, CASE below), so the initial
+            # pending->processing claim spends no budget.
             result = await db.execute(
                 update(Memory)
                 .where(
@@ -9443,10 +9490,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     Memory.deleted_at.is_(None),
                     or_(
                         Memory.embedding_status == "pending",
-                        and_(
-                            Memory.embedding_status == "processing",
-                            embedding_clock_before(stale_cutoff),
-                        ),
+                        # #2095: bounded by the retry budget, shared with the
+                        # sweep prefilter.
+                        embedding_reclaim_eligible_clause(stale_cutoff),
                         embedding_retry_eligible_clause(now),
                     ),
                 )
@@ -9454,12 +9500,15 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     embedding_status="processing",
                     # #1852: the pipeline's own clock; updated_at is an edit's.
                     embedding_attempted_at=now,
-                    # Count only retries of a previously-failed row. The CASE
-                    # reads the pre-UPDATE status, so pending/stale-processing
-                    # claims leave the counter untouched.
+                    # Count retries of a previously-failed row and reclaims of
+                    # a stale processing row (#2095: a run that outlives its
+                    # claim every time must end). The CASE reads the
+                    # pre-UPDATE status, so a pending claim leaves the counter
+                    # untouched. Success resets it, so the budget is per
+                    # failure episode.
                     embedding_retry_count=case(
                         (
-                            Memory.embedding_status == "failed",
+                            Memory.embedding_status.in_(("failed", "processing")),
                             Memory.embedding_retry_count + 1,
                         ),
                         else_=Memory.embedding_retry_count,
