@@ -10,7 +10,12 @@ from __future__ import annotations
 import random
 from uuid import UUID, uuid4
 
-from services.erasure_details import DetailsEdit, RestoreTarget, restore_targets
+from services.erasure_details import (
+    DetailsEdit,
+    RestoreTarget,
+    held_details_ids,
+    restore_targets,
+)
 
 SUBJECT = "erased-sub"
 AUTHOR = "the-author"
@@ -254,3 +259,80 @@ def test_targets_come_in_memory_id_order() -> None:
     ids = [uuid4() for _ in range(5)]
     rows = [_edit(m, 2, SUBJECT, {"m": str(m)}) for m in ids]
     assert [t.memory_id for t in restore_targets(rows, SUBJECT)] == sorted(ids)
+
+
+# ---------------------------------------------------------------------------
+# #2243 (review B3): which priors hold a value the subject wrote
+# ---------------------------------------------------------------------------
+
+
+def test_the_next_details_edit_after_the_subjects_holds_their_value() -> None:
+    m = uuid4()
+    rows = [
+        _edit(m, 2, SUBJECT, {"by": "author"}),
+        _edit(m, 3, OTHER, {"by": "subject"}),
+        _edit(m, 4, AUTHOR, {"by": "other"}),
+    ]
+    assert held_details_ids(rows, SUBJECT) == [30]
+
+
+def test_a_rollback_the_subject_requested_holds_no_value_of_theirs() -> None:
+    """B3: OTHER's session edit was rolled back by the subject; the rollback
+    put the author's value back, so the next edit's prior is the author's —
+    and the rollback's own prior is OTHER's undone value."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, OTHER, {"by": "author"}, undone_by=1),
+        _rollback(m, 3, SUBJECT, {"by": "other"}),
+        _edit(m, 4, AUTHOR, {"by": "author"}),
+    ]
+    assert held_details_ids(rows, SUBJECT) == []
+
+
+def test_a_rollback_over_the_subjects_value_leaves_their_value_held() -> None:
+    """The subject wrote, OTHER's session wrote over it, the author rolled
+    the session back: the subject's value is live again, so both the undone
+    edit's prior and the next edit's prior hold it."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, SUBJECT, {"by": "creation"}),
+        _edit(m, 3, OTHER, {"by": "subject"}, undone_by=1),
+        _rollback(m, 4, AUTHOR, {"by": "other"}),
+        _edit(m, 5, AUTHOR, {"by": "subject"}),
+    ]
+    assert held_details_ids(rows, SUBJECT) == [30, 50]
+
+
+def test_the_value_an_erasure_row_put_back_belongs_to_the_edit_below_its_block() -> None:
+    """Review M2's chain for the strip: OTHER wrote, U wrote over it, U's
+    erasure put OTHER's value back, AUTHOR edited over that. OTHER's later
+    erasure must strip AUTHOR's prior (OTHER's value) — and U's row, whose
+    prior is OTHER's value too. A re-run by U's pseudonym holds nothing."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, OTHER, {"by": "creation"}),
+        _edit(m, 3, PSEUDONYM, {"by": "other"}),
+        _erasure(m, 4, PSEUDONYM, restored_from=3),
+        _edit(m, 5, AUTHOR, {"by": "other"}),
+    ]
+    assert held_details_ids(rows, OTHER) == [30, 50]
+    assert held_details_ids(rows, PSEUDONYM) == []
+
+
+def test_a_prior_over_the_creation_value_is_never_held() -> None:
+    m = uuid4()
+    rows = [_edit(m, 2, SUBJECT, {"by": "creation"})]
+    assert held_details_ids(rows, SUBJECT) == []
+
+
+def test_held_ids_ignore_input_order_and_other_memories() -> None:
+    a, b = uuid4(), uuid4()
+    rows = [
+        _edit(a, 2, SUBJECT, {"by": "creation"}, row_id=5),
+        _edit(a, 3, OTHER, {"by": "subject"}, row_id=9),
+        _edit(b, 2, OTHER, {"by": "creation"}, row_id=6),
+        _edit(b, 3, AUTHOR, {"by": "other"}, row_id=7),
+    ]
+    for _ in range(5):
+        random.shuffle(rows)
+        assert held_details_ids(rows, SUBJECT) == [9]

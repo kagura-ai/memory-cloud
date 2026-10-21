@@ -680,3 +680,41 @@ async def test_a_second_erasure_finds_the_value_the_first_one_put_back(
         await session.commit()
         assert await _log(session, memory.id) == log
     sync.assert_not_awaited()
+
+
+async def test_a_value_the_subjects_rollback_put_back_keeps_its_prior(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """Review B3 (#2243): T's session edited the author's details and the
+    subject (the context owner) rolled it back, putting the author's value
+    back; a fourth member then edited over it. That edit's prior is the
+    author's value, not the subject's — the strip keeps it, during erasure
+    and on a re-run by pseudonym. The rollback's own prior (T's undone value)
+    stays too."""
+    subject, author = world["subject"], world["author"]
+    third, fourth = world["third"], world["fourth"]
+    memory = _memory(world, author, {"by": "fourth"}, 4)
+    undone = _edit(world, memory, 2, third, {"details": AUTHORS}, "sess-t")
+    undone.undone_by = 1
+    rollback = _edit(world, memory, 3, subject, {"details": SUBJECTS_2})
+    rollback.writer = "rollback"
+    later = _edit(world, memory, 4, fourth, {"details": AUTHORS}, "sess-4")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [undone, rollback, later])
+        sync = AsyncMock()
+        with patch(_QDRANT, sync):
+            pseudonym, report = await _erase_memories(session, subject)
+        assert report == RestoreReport()
+        assert await _log(session, memory.id) == [
+            (memory.id, 2, "api", third, {"details": AUTHORS}, "sess-t"),
+            (memory.id, 3, "rollback", pseudonym, {"details": SUBJECTS_2}, None),
+            # the author's value the rollback put back: kept
+            (memory.id, 4, "api", fourth, {"details": AUTHORS}, "sess-4"),
+        ]
+        live = await _live(session, memory.id)
+        assert (live.details, live.version) == ({"by": "fourth"}, 4)
+        assert (await load_version(session, live, 3)).values["details"] == AUTHORS
+
+        assert await strip_subject_details(session, pseudonym) == StripCounts(0, 0)
+        await session.commit()
+    sync.assert_not_awaited()

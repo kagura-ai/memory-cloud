@@ -68,10 +68,15 @@ def restore_details():
     ``tests/integration/test_erasure_details_db.py``."""
     from services.erasure_details import RestoreReport
 
-    with patch(
-        "services.account_erasure_service.restore_editor_details",
-        new=AsyncMock(return_value=RestoreReport()),
-    ) as mock:
+    # #2243: the strip reads the subject's details edits too (the provenance
+    # walk); the walk itself is covered in ``tests/services/test_erasure_details.py``
+    with (
+        patch(
+            "services.account_erasure_service.restore_editor_details",
+            new=AsyncMock(return_value=RestoreReport()),
+        ) as mock,
+        patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])),
+    ):
         yield mock
 
 
