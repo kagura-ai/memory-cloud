@@ -33,23 +33,12 @@ _DEFAULT_TEST_DB_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhos
 # captures the original value (if any) so the session-scoped fixture below
 # can restore it on exit.
 _PREV_DATABASE_URL = os.environ.get("DATABASE_URL")
-_PREV_DB_NULL_POOL = os.environ.get("DB_NULL_POOL")
-_PREV_SCHEDULER_LEADER_ENABLED = os.environ.get("SCHEDULER_LEADER_ENABLED")
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB_URL)
 
-# #1988: this process runs several event loops against one process-global
-# engine — pytest-asyncio's session loop for the async tests and one anyio
-# portal loop per ``TestClient(app)`` lifespan. asyncpg connections are bound
-# to the loop that opened them, so a pooled connection checked in from one
-# loop and checked out on another is terminated on checkout (``pool_pre_ping``)
-# from the wrong loop, which once stalled a lifespan for the whole
-# ``--timeout``. ``DB_NULL_POOL`` gives the engines a ``NullPool`` so no
-# connection outlives its checkout; ``SCHEDULER_LEADER_ENABLED=false`` keeps
-# each lifespan from holding the leader's dedicated connection for its whole
-# life and from running cron jobs inside pytest. ``setdefault`` lets an
-# operator override either for a targeted run.
-os.environ.setdefault("DB_NULL_POOL", "true")
-os.environ.setdefault("SCHEDULER_LEADER_ENABLED", "false")
+# The #1988 test-process defaults (``DB_NULL_POOL=true``,
+# ``SCHEDULER_LEADER_ENABLED=false``) are set by the root ``tests/conftest.py``
+# for every test directory (#2180), before anything under ``src`` is imported,
+# and restored there at session end.
 
 # Test-only fallbacks for OAuth/encryption secrets so the integration suite
 # runs hermetically when ``.env.local`` was not sourced. ``setdefault`` is
@@ -124,19 +113,6 @@ def _reset_db_base_state() -> None:
 if "config.database" in sys.modules:
     importlib.reload(sys.modules["config.database"])
 
-# ``get_settings()`` caches one ``Settings`` per process; a sibling directory
-# collected first may already have built it without the env set above. Set
-# the two fields on that instance rather than discarding it: ``api.main``
-# binds ``settings = get_settings()`` at import, and a second instance would
-# split the singleton for tests that patch it.
-_cached_settings = getattr(sys.modules.get("config.settings"), "_settings", None)
-if _cached_settings is not None:
-    from pydantic import TypeAdapter
-
-    _as_bool = TypeAdapter(bool).validate_python  # the same truthy set pydantic-settings reads
-    _cached_settings.db_null_pool = _as_bool(os.environ["DB_NULL_POOL"])
-    _cached_settings.scheduler_leader_enabled = _as_bool(os.environ["SCHEDULER_LEADER_ENABLED"])
-
 _reset_db_base_state()
 
 
@@ -150,14 +126,6 @@ def _restore_database_url_after_session() -> Generator[None, None, None]:
     inherit the env do not see a leaked override.
     """
     yield
-    for name, prev in (
-        ("DB_NULL_POOL", _PREV_DB_NULL_POOL),
-        ("SCHEDULER_LEADER_ENABLED", _PREV_SCHEDULER_LEADER_ENABLED),
-    ):
-        if prev is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = prev
     if _PREV_DATABASE_URL is None:
         os.environ.pop("DATABASE_URL", None)
     else:

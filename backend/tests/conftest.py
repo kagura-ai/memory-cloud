@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures for Kagura Memory Cloud tests."""
 
 import os
-from collections.abc import AsyncGenerator
+import sys
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import NoReturn
 
@@ -15,18 +16,53 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
-from models.auth import Base as AuthBase
-from models.memory import Base as MemoryBase
+# #1988 / #2180: a pytest process runs several event loops against the
+# process-global ``db.base`` engines: pytest-asyncio's session loop for the
+# async tests, one anyio portal loop per ``with TestClient(app)`` lifespan, and
+# a short-lived portal loop per request on a ``TestClient(app)`` used without
+# ``with``. asyncpg connections are bound to the loop that opened them, so a
+# pooled connection checked in on one loop and checked out (``pool_pre_ping``)
+# or disposed on another is terminated from the wrong loop
+# (``Exception terminating connection``), which has stalled a lifespan shutdown
+# for the whole ``--timeout``. ``DB_NULL_POOL`` gives the engines a ``NullPool``
+# so no connection outlives its checkout; ``SCHEDULER_LEADER_ENABLED=false``
+# keeps each lifespan from holding the leader's dedicated connection for its
+# whole life and from running cron jobs inside pytest. Set here, before any
+# ``src`` import, so every test directory gets them (they used to apply only
+# under ``tests/integration``). ``setdefault`` lets an operator override either
+# for a targeted run; the session fixture below restores the previous values.
+_PREV_DB_NULL_POOL = os.environ.get("DB_NULL_POOL")
+_PREV_SCHEDULER_LEADER_ENABLED = os.environ.get("SCHEDULER_LEADER_ENABLED")
+os.environ.setdefault("DB_NULL_POOL", "true")
+os.environ.setdefault("SCHEDULER_LEADER_ENABLED", "false")
+
+# The two values above only take effect if this conftest runs before
+# ``get_settings()`` caches its ``Settings`` and before ``db.base`` builds an
+# engine. That holds today (this is the first module to import anything under
+# ``src``). If a future plugin or import breaks it, fail loudly: patching the
+# cached settings would still leave an already-built pooled engine in place.
+if getattr(sys.modules.get("config.settings"), "_settings", None) is not None or any(
+    getattr(sys.modules.get("db.base"), name, None) is not None
+    for name in ("engine", "sync_engine")
+):
+    raise RuntimeError(
+        "tests/conftest.py must run before config.settings is cached or a db.base "
+        "engine is built; otherwise DB_NULL_POOL / SCHEDULER_LEADER_ENABLED do not "
+        "apply (#1988, #2180)"
+    )
+
+from models.auth import Base as AuthBase  # noqa: E402
+from models.memory import Base as MemoryBase  # noqa: E402
 
 # Issue #471: import the cost-grade pricing model so its table is
 # registered with the shared declarative ``Base.metadata`` and gets
 # created by ``create_all`` below. Sleep models are picked up
 # transitively via service imports today; importing explicitly here
 # keeps the test setup robust to future import-graph changes.
-import models.llm_pricing  # noqa: F401  isort: skip
-import models.llm_call_log  # noqa: F401  isort: skip  # Issue #474: comprehensive LLM call ledger
-import models.sleep  # noqa: F401  isort: skip
-import models.analysis  # noqa: F401  isort: skip  # Issue #494: Memory Broadlistening tables
+import models.llm_pricing  # noqa: E402, F401  isort: skip
+import models.llm_call_log  # noqa: E402, F401  isort: skip  # Issue #474: comprehensive LLM call ledger
+import models.sleep  # noqa: E402, F401  isort: skip
+import models.analysis  # noqa: E402, F401  isort: skip  # Issue #494: Memory Broadlistening tables
 
 # Configure structlog the same way api/main.py does at app startup so
 # logger.info("event", key=value) calls inside route modules work in
@@ -41,6 +77,27 @@ import models.analysis  # noqa: F401  isort: skip  # Issue #494: Memory Broadlis
 from utils.logger import setup_logger as _setup_logger  # noqa: E402
 
 _setup_logger()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _restore_test_process_env_after_session() -> Generator[None, None, None]:
+    """Restore ``DB_NULL_POOL`` / ``SCHEDULER_LEADER_ENABLED`` at session end.
+
+    The defaults above are set at conftest *import* time because that is when
+    they must take effect. This puts back only the environment variables, so a
+    child process started after the session does not inherit the override.
+    The cached ``Settings`` and the ``db.base`` engines built during the
+    session keep the test values.
+    """
+    yield
+    for name, prev in (
+        ("DB_NULL_POOL", _PREV_DB_NULL_POOL),
+        ("SCHEDULER_LEADER_ENABLED", _PREV_SCHEDULER_LEADER_ENABLED),
+    ):
+        if prev is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prev
 
 
 @pytest.fixture(autouse=True)
