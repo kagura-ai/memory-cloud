@@ -183,7 +183,6 @@ docker compose up -d
 | 設定 | 必須 | 説明 |
 |------|------|------|
 | `API_KEY_SECRET` | **必須** | API キー暗号化用 secret (自動生成) |
-| `JWT_SECRET` | **必須** | JWT トークン用 secret (自動生成) |
 | `OPENAI_API_KEY` | **必須**\* | 埋め込み用 OpenAI API キー |
 | `SELF_HOSTED_BASE_URL` | 任意 | セルフホストバックエンド URL (既定: `http://localhost:11434`) |
 | `EMBEDDING_PROVIDER` | 任意 | `openai` (既定) または `self_hosted` |

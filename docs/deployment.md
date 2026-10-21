@@ -330,14 +330,13 @@ group on the host).
 
 With `ENVIRONMENT=production` (hard-coded in
 `terraform/single-server/docker-compose.prod.yml`), `Settings` refuses to load
-while any of these four is still a shipped placeholder — the built-in default,
+while any of these three is still a shipped placeholder — the built-in default,
 or the `change-me-…` / `kagura-erasure-v1` value from `.env.example` or
 `terraform/single-server/.env.prod.example`:
 
 | Variable | Used for | Minimum length |
 |---|---|---|
 | `API_KEY_SECRET` | Fernet encryption of stored provider keys and connector secrets | 32 |
-| `JWT_SECRET` | JWT signing secret | 32 |
 | `AUDIT_HMAC_KEY` | Keyed hashes in audit rows, known-device cookies, consent CSRF token, secret-store audit chain | 32 |
 | `AUDIT_PSEUDO_SALT` | Erasure pseudonyms (`sha256(salt + identifier)`) | none (placeholder check only) |
 
@@ -354,7 +353,7 @@ Development, test and staging are not checked.
 `Secure` flag on session cookies.
 
 **Rotate only what is still a default.** A placeholder must go; a private value
-is left alone — except a private `API_KEY_SECRET`, `JWT_SECRET` or
+is left alone — except a private `API_KEY_SECRET` or
 `AUDIT_HMAC_KEY` shorter than 32 characters, which is refused too. Replacing
 any value that is already private has side effects:
 

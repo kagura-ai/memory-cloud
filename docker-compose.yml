@@ -118,9 +118,7 @@ services:
       GOOGLE_REDIRECT_URI: http://localhost:8080/api/v1/auth/google/callback
 
       # Security — values from .env.local (via env_file above)
-      # API_KEY_SECRET, JWT_SECRET are read from .env.local
-      JWT_ALGORITHM: "HS256"
-      JWT_EXPIRE_MINUTES: "60"
+      # API_KEY_SECRET, AUDIT_HMAC_KEY, AUDIT_PSEUDO_SALT are read from .env.local
 
       # API Settings
       API_HOST: 0.0.0.0

@@ -45,7 +45,6 @@ os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_D
 # intentional — when the operator already exports real values (e.g. they
 # sourced ``.env.local``), preserve those.
 os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
-os.environ.setdefault("JWT_SECRET", "integration-test-jwt-secret-not-for-prod")
 
 # If a sibling test directory (e.g. ``tests/api/``) was collected before
 # ``tests/integration/`` and already imported ``config.database``, the

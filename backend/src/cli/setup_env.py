@@ -106,15 +106,7 @@ def setup_env():
         _set_env_value("API_KEY_SECRET", secret)
         print("\n✓ API_KEY_SECRET generated and saved")
 
-    # 3. JWT_SECRET
-    if env.get("JWT_SECRET") and env["JWT_SECRET"] != "change-me-jwt-secret":
-        print("✓ JWT_SECRET already set")
-    else:
-        secret = _generate_secret()
-        _set_env_value("JWT_SECRET", secret)
-        print("✓ JWT_SECRET generated and saved")
-
-    # 4. OPENAI_API_KEY (optional — check env var, .env.local, then prompt)
+    # 3. OPENAI_API_KEY (optional — check env var, .env.local, then prompt)
     import os
 
     existing_key = env.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -136,7 +128,7 @@ def setup_env():
         else:
             print("  → Skipped (self-hosted or manual setup later)")
 
-    # 5. Self-hosted backend detection — re-read env to pick up any changes.
+    # 4. Self-hosted backend detection — re-read env to pick up any changes.
     # Probes the OpenAI-compatible /v1/models endpoint (Ollama, vLLM).
     env = _read_env_file(_env_local)
     has_openai = bool(env.get("OPENAI_API_KEY"))

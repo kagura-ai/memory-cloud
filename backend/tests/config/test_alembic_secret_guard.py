@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[2]
-_SECRETS = ("API_KEY_SECRET", "JWT_SECRET", "AUDIT_HMAC_KEY", "AUDIT_PSEUDO_SALT")
+_SECRETS = ("API_KEY_SECRET", "AUDIT_HMAC_KEY", "AUDIT_PSEUDO_SALT")
 
 
 def _alembic_current(**overrides: str) -> subprocess.CompletedProcess[str]:
@@ -42,7 +42,6 @@ def _alembic_current(**overrides: str) -> subprocess.CompletedProcess[str]:
 def test_alembic_refuses_a_placeholder_secret_in_production() -> None:
     result = _alembic_current(
         API_KEY_SECRET="change-me-api-key-secret",
-        JWT_SECRET=secrets.token_hex(32),
         AUDIT_HMAC_KEY=secrets.token_hex(32),
         AUDIT_PSEUDO_SALT=secrets.token_hex(16),
     )
@@ -57,7 +56,6 @@ def test_alembic_refuses_a_placeholder_secret_in_production() -> None:
 def test_alembic_with_private_secrets_gets_past_the_guard() -> None:
     result = _alembic_current(
         API_KEY_SECRET=secrets.token_hex(32),
-        JWT_SECRET=secrets.token_hex(32),
         AUDIT_HMAC_KEY=secrets.token_hex(32),
         AUDIT_PSEUDO_SALT=secrets.token_hex(16),
     )

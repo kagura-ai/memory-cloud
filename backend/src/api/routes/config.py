@@ -172,7 +172,6 @@ def get_visible_categories(user: dict) -> dict[str, list[str]]:
 def get_sensitive_keys() -> set[str]:
     """Get list of sensitive configuration keys."""
     return {
-        "JWT_SECRET_KEY",
         "GOOGLE_CLIENT_SECRET",
         "POSTGRES_PASSWORD",
         "QDRANT_API_KEY",

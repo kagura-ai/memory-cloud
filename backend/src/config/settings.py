@@ -60,14 +60,13 @@ MANAGED_LLM_PLATFORM_KEY_ENV: dict[str, str] = {
 }
 
 
-# Issue #2225: the four server secrets whose shipped values are public. Under
+# Issue #2225: the server secrets whose shipped values are public. Under
 # ENVIRONMENT=production ``Settings`` refuses any of them while it is still a
 # placeholder: the defaults below, the ``change-me-...`` strings in
 # ``.env.example`` / ``terraform/single-server/.env.prod.example`` and the
 # ``cli/setup_env.py`` placeholders. Values are never echoed, only env names.
 _PRODUCTION_SECRET_FIELDS: dict[str, str] = {
     "api_key_secret": "API_KEY_SECRET",
-    "jwt_secret": "JWT_SECRET",
     "audit_hmac_key": "AUDIT_HMAC_KEY",
     "audit_pseudo_salt": "AUDIT_PSEUDO_SALT",
 }
@@ -519,11 +518,6 @@ class Settings(BaseSettings):
         ),
         description="Comma-separated Slack bot scopes requested at install",
     )
-    jwt_secret: str = Field(
-        default="dev-secret-change-in-production", description="JWT signing secret (32+ bytes)"
-    )
-    jwt_algorithm: str = Field(default="HS256", description="JWT algorithm")
-    jwt_expire_minutes: int = Field(default=60, description="JWT expiration (minutes)")
     audit_pseudo_salt: str = Field(
         default="kagura-erasure-v1",
         description="Per-deployment salt for audit_logs pseudonymization on account erasure (override in production)",

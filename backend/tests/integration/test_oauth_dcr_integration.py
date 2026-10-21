@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-# ``DATABASE_URL``/``API_KEY_SECRET``/``JWT_SECRET`` are steered at
+# ``DATABASE_URL``/``API_KEY_SECRET`` are steered at
 # ``TEST_DATABASE_URL`` (and test-only fallbacks) by
 # ``backend/tests/integration/conftest.py`` at conftest-import time —
 # that runs before any test module is collected, so by the time this

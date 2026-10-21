@@ -1,6 +1,6 @@
 """ENVIRONMENT=production refuses development-default secrets (#2225).
 
-The four server secrets ship with public placeholder values: the ``Settings``
+The server secrets ship with public placeholder values: the ``Settings``
 defaults, and a different ``change-me-...`` family in ``.env.example`` /
 ``terraform/single-server/.env.prod.example``. Under production every one of
 them is refused at ``Settings()`` construction, which runs at import time of
@@ -16,7 +16,6 @@ from config.settings import _PRODUCTION_SECRET_FIELDS, Settings
 
 _FIELDS: dict[str, str] = {
     "api_key_secret": "API_KEY_SECRET",
-    "jwt_secret": "JWT_SECRET",
     "audit_hmac_key": "AUDIT_HMAC_KEY",
     "audit_pseudo_salt": "AUDIT_PSEUDO_SALT",
 }
@@ -26,10 +25,6 @@ _PLACEHOLDERS: dict[str, tuple[str, ...]] = {
     "api_key_secret": (
         "dev-secret-change-in-production",  # settings.py default
         "change-me-api-key-secret",  # .env.example / .env.prod.example / setup_env
-    ),
-    "jwt_secret": (
-        "dev-secret-change-in-production",
-        "change-me-jwt-secret",
     ),
     "audit_hmac_key": (
         "dev-audit-hmac-change-in-production",
@@ -104,7 +99,7 @@ def test_production_names_every_refused_variable_in_one_error():
             assert value not in message
 
 
-@pytest.mark.parametrize("field", ["api_key_secret", "jwt_secret", "audit_hmac_key"])
+@pytest.mark.parametrize("field", ["api_key_secret", "audit_hmac_key"])
 def test_production_refuses_a_key_shorter_than_32_characters(field):
     short = "x" * 31
     values = _private_secrets() | {field: short}
@@ -113,7 +108,7 @@ def test_production_refuses_a_key_shorter_than_32_characters(field):
     assert short not in str(exc.value)
 
 
-@pytest.mark.parametrize("field", ["api_key_secret", "jwt_secret", "audit_hmac_key"])
+@pytest.mark.parametrize("field", ["api_key_secret", "audit_hmac_key"])
 def test_production_accepts_a_key_of_exactly_32_characters(field):
     values = _private_secrets() | {field: secrets.token_hex(16)}
     assert len(values[field]) == 32
