@@ -5072,7 +5072,7 @@ class MemoryService:
                 surviving hint or ``None``); those rows are not resolved again.
             filters: #2027 the row filters the recall searched with (after the
                 ``tags_normalize`` widening); a suggestion's target is held to
-                them. ``None`` reads ``request.filters``.
+                them. ``None`` applies no row filter, as in the fold.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5100,7 +5100,7 @@ class MemoryService:
                     user_id=user_id,
                     operation="recall",
                     trusted_only=_is_trusted_recall(request),
-                    filters=request.filters if filters is None else filters,
+                    filters=filters,
                 )
             )
         fold_map = fold_map or {}

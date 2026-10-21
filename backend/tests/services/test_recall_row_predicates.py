@@ -68,15 +68,24 @@ class TestProjection:
         # recall's Qdrant builder matches one value; a list never got that far.
         assert recall_row_predicates({"type": ["a", "b"], "scope": 3, "source_type": None}) == []
         assert recall_row_predicates({"source_uri_prefix": ""}) == []
+        # Hydration skips an empty source_type (``if stype``): unset, not "".
+        assert recall_row_predicates({"source_type": ""}) == []
 
     def test_importance_takes_known_ops_only_and_ignores_a_non_dict(self):
         _same(
-            recall_row_predicates({"importance": {"gte": 0.5, "eq": 0.7, "lte": True}}),
+            recall_row_predicates({"importance": {"gte": 0.5, "eq": 0.7, "lt": None}}),
             compile_memory_filters({"importance": {"gte": 0.5}}),
         )
         assert recall_row_predicates({"importance": 0.5}) == []
         assert recall_row_predicates({"importance": {}}) == []
         assert recall_row_predicates({"importance": {"gte": "high"}}) == []
+
+    def test_importance_bounds_are_read_as_recalls_range_reads_them(self):
+        # Qdrant's Range coerces a numeric string and a bool; so does this.
+        _same(
+            recall_row_predicates({"importance": {"gte": "0.7", "lte": True}}),
+            compile_memory_filters({"importance": {"gte": 0.7, "lte": 1.0}}),
+        )
 
     def test_tags_drop_non_strings_and_cap_at_fifty(self):
         tags = [1, "", None, *(f"t{i}" for i in range(60))]

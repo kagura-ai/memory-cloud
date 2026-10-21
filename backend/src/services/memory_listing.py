@@ -26,12 +26,13 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from qdrant_client.models import Range
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select, tuple_, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import ColumnElement
 
-from db.qdrant import any_tag_spellings, widened_tag_groups
+from db.qdrant import _MAX_FILTER_TAGS, any_tag_spellings, widened_tag_groups
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import (
     EDGE_TYPE_SUPERSEDES,
@@ -305,8 +306,6 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
 # The single-value row filters recall's Qdrant builder matches exactly
 # (``MatchValue``) and its hydration post-filter compares with ``==``.
 _RECALL_SINGLE_VALUE_FILTERS = ("type", "scope", "source_type")
-# Mirrors ``db.qdrant._MAX_FILTER_TAGS``: recall matches at most 50 tags.
-_RECALL_MAX_TAGS = 50
 
 
 def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnElement[bool]]:
@@ -320,9 +319,11 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
     hydration post-filter do:
 
     - ``type``, ``scope``, ``source_type``: a string (the builder matches one
-      value); ``source_uri_prefix``: a non-empty string.
-    - ``importance``: the ``gte``/``lte``/``gt``/``lt`` numbers of a dict; a
-      non-dict or an empty one is ignored, as the builder ignores it.
+      value; an empty ``source_type`` is unset, as hydration reads it);
+      ``source_uri_prefix``: a non-empty string.
+    - ``importance``: the ``gte``/``lte``/``gt``/``lt`` bounds of a dict, read
+      as the builder's ``Range`` reads them; a non-dict or an empty one is
+      ignored, as the builder ignores it.
     - ``tags``: the non-empty strings of a list, the first 50, with
       ``tags_match``. A widened filter (``TAG_GROUPS_FILTER_KEY``) under
       ``all`` needs one spelling per group; under ``any`` the union of the
@@ -349,27 +350,32 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
     projected: dict[str, Any] = {}
     for key in _RECALL_SINGLE_VALUE_FILTERS:
         value = filters.get(key)
-        if isinstance(value, str):
+        # The hydration post-filter skips an empty source_type (``if stype``);
+        # Qdrant matches an empty type / scope, and so does this.
+        if isinstance(value, str) and (value or key != "source_type"):
             projected[key] = value
     prefix = filters.get("source_uri_prefix")
     if isinstance(prefix, str) and prefix:
         projected["source_uri_prefix"] = prefix
     importance = filters.get("importance")
     if isinstance(importance, dict):
-        bounds = {
-            op: bound
-            for op, bound in importance.items()
-            if op in _IMPORTANCE_OPS
-            and isinstance(bound, (int, float))
-            and not isinstance(bound, bool)
-        }
-        if bounds:
-            projected["importance"] = bounds
+        # Read the bounds as recall's ``Range`` does (lax floats: "0.7" and
+        # True count, None is no bound); bounds it refused never got here.
+        try:
+            parsed = Range(**{op: v for op, v in importance.items() if op in _IMPORTANCE_OPS})
+        except (ValueError, TypeError):
+            parsed = None
+        if parsed is not None:
+            bounds = {
+                op: bound for op in _IMPORTANCE_OPS if (bound := getattr(parsed, op)) is not None
+            }
+            if bounds:
+                projected["importance"] = bounds
     group_predicates: list[ColumnElement[bool]] = []
     tags = filters.get("tags")
     tags_match = filters.get("tags_match", "any")
     if isinstance(tags, list) and tags_match in ("any", "all"):
-        valid = [t for t in tags if isinstance(t, str) and t][:_RECALL_MAX_TAGS]
+        valid = [t for t in tags if isinstance(t, str) and t][:_MAX_FILTER_TAGS]
         groups = widened_tag_groups(dict(filters)) if valid else None
         if groups is not None and tags_match == "all":
             group_predicates = [

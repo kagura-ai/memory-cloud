@@ -162,7 +162,9 @@ class TestThreading:
 
         assert service._resolve_supersede_candidates.await_args.kwargs["filters"] == widened
 
-    async def test_page_defaults_to_the_request_filters(self):
+    async def test_page_without_filters_applies_none(self):
+        # Same default as the fold: None is no row filter, never the raw
+        # request.filters (un-widened, possibly carrying internal keys).
         source = _source(uuid.uuid4())
         service = MemoryService(MagicMock())
         service._resolve_supersede_candidates = AsyncMock(return_value={})
@@ -177,9 +179,7 @@ class TestThreading:
             user_id="u",
         )
 
-        assert service._resolve_supersede_candidates.await_args.kwargs["filters"] == {
-            "type": "note"
-        }
+        assert service._resolve_supersede_candidates.await_args.kwargs["filters"] is None
 
     async def test_fold_hands_the_filters_to_the_resolver(self):
         older = _source(uuid.uuid4(), age_days=1)
