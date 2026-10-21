@@ -134,6 +134,11 @@ class _Sessions:
         self._sessions.pop(session_id, None)
 
 
+# ``app.call``'s default token: one of the shape of the credential the state
+# names (#1994: each shape is looked up in its own store).
+_STATE_TOKEN = object()
+
+
 @pytest.fixture
 def app(monkeypatch):
     """``mcp_asgi_app`` whose Bearer token resolves to ``app.grant`` (an OAuth
@@ -172,10 +177,10 @@ def app(monkeypatch):
         headers: dict[bytes, bytes] | None = None,
         path: str = "/mcp/",
         method: str = "POST",
-        token: str | None = "",
+        token: str | None | object = _STATE_TOKEN,
         scope_extra: dict | None = None,
     ) -> _Recorder:
-        if token == "":  # default: the token shape of the credential the state names
+        if token is _STATE_TOKEN:
             token = "kagura_test-api-key" if state.api_key else "opaque-oauth-token"
         request_headers = dict(headers or {})
         if token is not None:
@@ -244,7 +249,7 @@ async def test_the_mcp_resource_is_what_the_well_known_document_publishes():
 )
 async def test_a_token_for_this_resource_or_without_one_is_accepted(monkeypatch, resource):
     grant = OAuthGrant("user-1", "memory:read", resource)
-    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", _unreachable)
     monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", _returning(grant))
 
     assert await authenticate_mcp_request("Bearer tok") == ("user-1", None, None)
@@ -266,7 +271,7 @@ async def test_a_token_for_this_resource_or_without_one_is_accepted(monkeypatch,
 )
 async def test_a_token_for_another_resource_is_an_invalid_token(monkeypatch, resource):
     grant = OAuthGrant("user-1", "memory:read memory:write", resource)
-    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", _unreachable)
     monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", _returning(grant))
 
     with pytest.raises(InvalidTokenError, match="different resource"):
@@ -313,13 +318,25 @@ async def test_an_unknown_expired_or_revoked_token_is_invalid_token(app):
 
 
 @pytest.mark.asyncio
-async def test_a_miss_in_either_credential_store_is_the_same_401_on_the_wire(app):
+async def test_a_miss_in_either_credential_store_is_the_same_401_on_the_wire(app, monkeypatch):
     """#1994: an unknown ``kagura_`` key and an unknown OAuth token are each
     looked up in their own store only, and answer byte-identically."""
-    app.grant = None
-    app.api_key = False
+    looked_up: list[tuple[str, str]] = []
+
+    async def no_api_key(token):
+        looked_up.append(("api_key", token))
+        return None
+
+    async def no_grant(token):
+        looked_up.append(("oauth", token))
+        return None
+
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", no_api_key)
+    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", no_grant)
     key_miss = await app.call(_rpc("initialize"), token="kagura_unknown-api-key")
     oauth_miss = await app.call(_rpc("initialize"), token="unknown-oauth-token")
+
+    assert looked_up == [("api_key", "kagura_unknown-api-key"), ("oauth", "unknown-oauth-token")]
 
     assert key_miss.status == oauth_miss.status == 401
     assert key_miss.headers == oauth_miss.headers
@@ -387,7 +404,7 @@ async def test_the_bearer_scheme_is_case_insensitive_and_whitespace_is_trimmed(m
         seen.append(token)
         return OAuthGrant("user-1", "memory:read", None)
 
-    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", _unreachable)
     monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", verify)
 
     assert await authenticate_mcp_request(header) == ("user-1", None, None)
@@ -607,7 +624,7 @@ async def test_api_keys_carry_no_oauth_scope(monkeypatch):
     monkeypatch.setattr(
         mcp_auth, "_verify_oauth2_token", _returning(OAuthGrant("u", "memory:read", None))
     )
-    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", _unreachable)
     await authenticate_mcp_request("Bearer oauth")
     assert get_mcp_oauth_scopes() == {"memory:read"}
 
@@ -1161,6 +1178,11 @@ async def test_debug_logging_never_records_credential_values(app, caplog):
 
 async def _none(*_args, **_kwargs):
     return None
+
+
+async def _unreachable(*_args, **_kwargs):
+    """A credential store the token's shape does not name (#1994)."""
+    raise AssertionError("looked up in the store its shape does not name")
 
 
 def _returning(value):

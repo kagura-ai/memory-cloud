@@ -149,9 +149,12 @@ class TestAuthenticateMcpRequestOAuth2:
     """OAuth2 Bearer token branch: any token without the ``kagura_`` prefix."""
 
     async def test_oauth2_success_returns_user_only(self):
-        """OAuth valid -> (user_id, None, None)."""
+        """OAuth valid -> (user_id, None, None); the key store is never read."""
         with (
-            patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=None)),
+            patch(
+                "auth.dependencies.verify_api_key",
+                new=AsyncMock(side_effect=AssertionError("API-key lookup for an OAuth token")),
+            ),
             patch(
                 "mcp_server.auth._verify_oauth2_token",
                 new=AsyncMock(return_value=OAuthGrant("oauth-user", "memory:read", None)),
@@ -224,9 +227,9 @@ class TestBearerTokenRouting:
     @pytest.mark.parametrize(
         "token",
         [
-            _KAGURA_KEY,
             # Share keys and resource tokens carry the kagura_ prefix too: they
             # stay on the API-key side, where they are structurally unknown.
+            # (A plain unknown kagura_ key: TestAuthenticateMcpRequestApiKey.)
             "kagura_sk_" + "share-key-body",
             "kagura_resource_" + "resource-token-body",
         ],
@@ -244,14 +247,19 @@ class TestBearerTokenRouting:
         oauth.assert_not_awaited()
 
     async def test_a_miss_in_either_store_is_the_same_error(self):
+        """Each miss is a lookup in its own store only, and both raise alike."""
+        api_key = AsyncMock(return_value=None)
+        oauth = AsyncMock(return_value=None)
         with (
-            patch("mcp_server.auth._verify_api_key", new=AsyncMock(return_value=None)),
-            patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=None)),
+            patch("mcp_server.auth._verify_api_key", new=api_key),
+            patch("mcp_server.auth._verify_oauth2_token", new=oauth),
         ):
             with pytest.raises(InvalidTokenError) as key_miss:
                 await authenticate_mcp_request(f"Bearer {_KAGURA_KEY}")
             with pytest.raises(InvalidTokenError) as oauth_miss:
                 await authenticate_mcp_request(f"Bearer {_OAUTH_TOKEN}")
+        api_key.assert_awaited_once_with(_KAGURA_KEY)
+        oauth.assert_awaited_once_with(_OAUTH_TOKEN)
         assert type(key_miss.value) is type(oauth_miss.value)
         assert str(key_miss.value) == str(oauth_miss.value)
         assert key_miss.value.error_code == oauth_miss.value.error_code

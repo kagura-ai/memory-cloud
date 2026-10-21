@@ -174,7 +174,8 @@ async def authenticate_mcp_request(
     Returns:
         (user_id, context_id, workspace_id) tuple
         - For workspace-scoped keys: context_id=None, workspace_id=<UUID>
-        - For session/OAuth2: context_id=<UUID>, workspace_id=None
+        - For other keys, session and OAuth2: context_id=None, workspace_id=None
+          (Issue #245: the context comes from the tool arguments)
 
     Raises:
         MissingCredentialsError: If the request carries no credentials
@@ -186,7 +187,7 @@ async def authenticate_mcp_request(
             answers 503, not 401.
 
     Example:
-        >>> user_id, context_id, workspace_id = await authenticate_mcp_request("Bearer api_key_...")
+        >>> user_id, context_id, workspace_id = await authenticate_mcp_request("Bearer kagura_...")
         >>> # Returns: ("user_12345", None, UUID("...")) for workspace-scoped API key
     """
     # Issue #1275: reset the per-request agent scope BEFORE any auth branch —
