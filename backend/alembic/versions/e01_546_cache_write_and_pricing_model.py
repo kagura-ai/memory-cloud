@@ -14,6 +14,13 @@ Phase 3 of Issue #546 adds two cost-grade schema corrections:
 Both columns are ``NOT NULL`` with ``server_default`` so existing rows
 are backfilled without a table rewrite on PostgreSQL >= 11.
 
+The ``valid_llm_pricing_model`` CHECK is added ``NOT VALID`` and VALIDATEd
+inside ``autocommit_block()`` (#2079, the #2073 form): ``alembic/env.py`` runs
+an upgrade in one transaction, so a VALIDATE in that transaction would scan
+under the ALTER's ACCESS EXCLUSIVE lock until commit. The block commits the
+column and NOT VALID adds first, so both columns use ``if_not_exists`` and the
+CHECK add drops a leftover first: a re-run after that commit gets past them.
+
 Revision ID: e01_546_cache_write_pricing
 Revises: d08_536_device_code_grant
 """
@@ -39,6 +46,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("0"),
         ),
+        if_not_exists=True,
     )
 
     # 2. pricing_model on llm_pricing
@@ -50,17 +58,21 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'per_token'"),
         ),
+        if_not_exists=True,
     )
 
     # 3. CHECK constraint on llm_pricing.pricing_model
     op.execute(
         sa.text(
             "ALTER TABLE llm_pricing "
+            "DROP CONSTRAINT IF EXISTS valid_llm_pricing_model, "
             "ADD CONSTRAINT valid_llm_pricing_model "
             "CHECK (pricing_model IN ('per_token', 'subscription', 'hybrid')) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE llm_pricing VALIDATE CONSTRAINT valid_llm_pricing_model"))
+    # VALIDATE after the add commits (see the module docstring).
+    with op.get_context().autocommit_block():
+        op.execute(sa.text("ALTER TABLE llm_pricing VALIDATE CONSTRAINT valid_llm_pricing_model"))
 
 
 def downgrade() -> None:

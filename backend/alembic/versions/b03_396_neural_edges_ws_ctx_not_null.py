@@ -22,13 +22,23 @@ This migration finishes the job from 062:
    skipped entirely by the ``IS NULL`` guard in the WHERE.
 2. Delete truly orphan rows (no recoverable workspace/context on either
    endpoint) with a structured audit log capturing count + sample IDs.
-3. Enforce ``NOT NULL`` using the zero-downtime ``NOT VALID`` → ``VALIDATE``
-   → ``SET NOT NULL`` pattern (same shape a97_resources_entity uses for FKs
-   on the high-write ``resource_events`` table): a CHECK constraint added
-   ``NOT VALID`` skips the synchronous full-table scan during ``ALTER``,
-   a ``VALIDATE CONSTRAINT`` proof under ``SHARE UPDATE EXCLUSIVE``
-   afterwards, and finally ``SET NOT NULL`` which PG 12+ fast-paths since
-   the CHECK is valid proof the column has no NULLs.
+3. Enforce ``NOT NULL`` using the ``NOT VALID`` → ``VALIDATE`` → ``SET NOT
+   NULL`` pattern (same shape a97_resources_entity uses for its FK on the
+   high-write ``resource_events`` table): a CHECK constraint added ``NOT
+   VALID`` skips the synchronous full-table scan during ``ALTER``, a
+   ``VALIDATE CONSTRAINT`` proof afterwards, and finally ``SET NOT NULL``
+   which PG 12+ fast-paths since the CHECK is valid proof the column has no
+   NULLs.
+
+``alembic/env.py`` runs an upgrade in one transaction, so a VALIDATE in that
+transaction would scan ``neural_memory_edges`` under the ALTER's ACCESS
+EXCLUSIVE lock until commit, blocking Hebbian writes and recall reads (#2079,
+the #2073 form). VALIDATE therefore runs inside ``autocommit_block()``: Steps
+1-3a commit first, and VALIDATE holds only SHARE UPDATE EXCLUSIVE. That commit
+point makes Steps 1-3a re-runnable after a failure later in the upgrade: the
+backfill and the orphan delete only touch rows that are still NULL, and the
+CHECK is added as ``DROP CONSTRAINT IF EXISTS ..., ADD ... NOT VALID``. Does
+not run offline (``--sql``): Steps 1-2 read the table.
 
 The CHECK constraint is kept after ``SET NOT NULL`` as belt-and-braces
 alongside the sibling commit's write-path ``_validate_edge_context_invariant``
@@ -162,17 +172,23 @@ def upgrade() -> None:
 
     # Step 3a: add CHECK constraint NOT VALID. Skips synchronous scan; new
     # writes are checked immediately, only pre-existing rows need the
-    # subsequent VALIDATE pass.
+    # subsequent VALIDATE pass. DROP IF EXISTS + ADD in one ALTER so a re-run
+    # after the commit below gets past it.
     op.execute(
         sa.text(
             f"ALTER TABLE neural_memory_edges "
+            f"DROP CONSTRAINT IF EXISTS {_CHECK_CONSTRAINT}, "
             f"ADD CONSTRAINT {_CHECK_CONSTRAINT} "
             "CHECK (workspace_id IS NOT NULL AND context_id IS NOT NULL) NOT VALID"
         )
     )
 
-    # Step 3b: VALIDATE under SHARE UPDATE EXCLUSIVE (does not block reads/writes).
-    op.execute(sa.text(f"ALTER TABLE neural_memory_edges VALIDATE CONSTRAINT {_CHECK_CONSTRAINT}"))
+    # Step 3b: VALIDATE after Steps 1-3a commit (see the module docstring), so
+    # the scan holds SHARE UPDATE EXCLUSIVE only (does not block reads/writes).
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text(f"ALTER TABLE neural_memory_edges VALIDATE CONSTRAINT {_CHECK_CONSTRAINT}")
+        )
 
     # Step 3c: SET NOT NULL — PG 12+ uses the validated CHECK as proof that
     # the column has no NULLs, skipping the synchronous full-table scan.

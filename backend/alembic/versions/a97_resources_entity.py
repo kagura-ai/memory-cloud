@@ -48,10 +48,16 @@ dropped once every writer has switched over (tracked under epic #321).
 Restart semantics after a mid-migration failure
 -----------------------------------------------
 ``autocommit_block`` commits the preceding transactional DDL (table
-creation, column adds, backfills, FKs, plain UNIQUE indexes) before
-entering the ``CREATE INDEX CONCURRENTLY`` section. If the concurrent
-build itself fails (disk, cancellation, duplicate rows inserted after
-Step 10's duplicate audit), the earlier DDL is already persisted:
+creation, column adds, backfills, FKs — including ``resource_events``' FK
+added ``NOT VALID`` — plain UNIQUE indexes) before entering Step 10's
+autocommit section, which VALIDATEs that FK and then runs the ``CREATE
+INDEX CONCURRENTLY`` builds. ``alembic/env.py`` runs an upgrade in one
+transaction, so a VALIDATE in that transaction would scan ``resource_events``
+under the ALTER's ACCESS EXCLUSIVE lock until commit (#2079, the #2073 form);
+in the block it holds SHARE UPDATE EXCLUSIVE on ``resource_events`` and ROW
+SHARE on ``resources`` only. If the VALIDATE or a concurrent build fails
+(disk, cancellation, duplicate rows inserted after Step 10's duplicate
+audit), the earlier DDL is already persisted:
 
 - the ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` guard on retry is
   safe because the INVALID-index detection above it drops the broken
@@ -90,14 +96,16 @@ Step order inside ``upgrade()``:
     4. ADD COLUMN ``resource_pk`` nullable on four satellite tables
     5. Backfill ``resource_pk`` via JOIN on ``resources.resource_id``
        (kept nullable — see "PHASE 1 OF 2" above)
-    6. Add FK + index on ``resource_pk`` per table
+    6. Add FK + index on ``resource_pk`` per table (``resource_events``'
+       FK is added ``NOT VALID`` and VALIDATEd in Step 10's block)
     7. ADD COLUMN ``resource_tokens.workspace_id`` nullable
     8. Backfill ``workspace_id`` from ``resources.workspace_id`` via
        the just-populated ``resource_pk``
     9. Add FK + index on ``resource_tokens.workspace_id``
     10. Create three partial UNIQUE indexes
         (``resource_events`` goes through CREATE INDEX CONCURRENTLY
-        because it is the high-write satellite table)
+        because it is the high-write satellite table); the autocommit
+        block first VALIDATEs ``resource_events``' FK
 """
 
 import sqlalchemy as sa
@@ -299,7 +307,8 @@ def upgrade() -> None:
             # FK with NOT VALID so ADD CONSTRAINT skips the synchronous
             # table scan (avoids an ACCESS EXCLUSIVE lock that would
             # stall ingest for the scan duration). VALIDATE CONSTRAINT
-            # runs below under SHARE UPDATE EXCLUSIVE, which does not
+            # runs in Step 10's autocommit block, after this transaction
+            # commits, under SHARE UPDATE EXCLUSIVE, which does not
             # block reads/writes. Future inserts are checked as they
             # happen, so the FK is enforced from the moment it is added
             # — only the one-time validation of pre-existing rows is
@@ -312,12 +321,6 @@ def upgrade() -> None:
                     "REFERENCES resources (id) "
                     "ON DELETE CASCADE "
                     "NOT VALID"
-                )
-            )
-            op.execute(
-                sa.text(
-                    f"ALTER TABLE {table} "  # noqa: S608
-                    f"VALIDATE CONSTRAINT fk_{table}_resource_pk"
                 )
             )
             # The non-unique ix_resource_events_resource_pk index is
@@ -467,6 +470,14 @@ def upgrade() -> None:
     }
 
     with op.get_context().autocommit_block():
+        # Constraints first, then the concurrent indexes (the e84 order):
+        # the FK added NOT VALID in Step 4-6 committed with the block's
+        # entry, so this scan runs without the ALTER's ACCESS EXCLUSIVE lock.
+        op.execute(
+            sa.text(
+                "ALTER TABLE resource_events VALIDATE CONSTRAINT fk_resource_events_resource_pk"
+            )
+        )
         for name in concurrent_indexes:
             if name in invalid_names:
                 op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))

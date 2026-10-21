@@ -18,12 +18,16 @@ CONSTRAINT ..., ADD CONSTRAINT ... NOT VALID`` statement so the
 catalog mutation is atomic — there is no window where the table has
 no phase CHECK. The follow-up ``VALIDATE CONSTRAINT`` is necessarily
 a separate statement (Postgres does not allow combining VALIDATE
-with other actions in the same ALTER TABLE), but it runs under
-SHARE UPDATE EXCLUSIVE rather than ACCESS EXCLUSIVE so production
-reads/writes continue during the validation scan. Existing rows
-already satisfy the new (broader) CHECK by definition, so VALIDATE
-is effectively a no-op scan. Mirrors the zero-downtime ``NOT VALID``
-+ ``VALIDATE CONSTRAINT`` pattern from ``d05_523``.
+with other actions in the same ALTER TABLE). Existing rows already
+satisfy the new (broader) CHECK by definition, so VALIDATE only scans.
+
+``alembic/env.py`` runs an upgrade in one transaction, so a VALIDATE in
+that transaction would scan ``sleep_report_llm_usage`` under the ALTER's
+ACCESS EXCLUSIVE lock until commit (#2079, the #2073 form). VALIDATE
+therefore runs inside ``autocommit_block()``: the NOT VALID add commits
+first, and VALIDATE then holds only SHARE UPDATE EXCLUSIVE (reads and
+writes continue). The add is ``DROP CONSTRAINT IF EXISTS ..., ADD``, so a
+re-run after that commit gets past it.
 
 Revision ID: d07_495_cluster_label_phase
 Revises: d06_494_memory_analyses
@@ -55,12 +59,31 @@ _NEW_CHECK = (
 )
 
 
+def _validate() -> None:
+    """VALIDATE outside the ALTER's transaction (#2079).
+
+    ``autocommit_block()`` commits the preceding transaction, releasing the
+    NOT VALID add's ACCESS EXCLUSIVE lock, so the scan runs under SHARE UPDATE
+    EXCLUSIVE only. Offline (``--sql``) it emits ``COMMIT;`` / ``BEGIN;`` —
+    for the upgrade only: the downgrade's leftover probe reads the table, so
+    it needs a live connection.
+    """
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text(
+                "ALTER TABLE sleep_report_llm_usage "
+                "VALIDATE CONSTRAINT valid_sleep_report_llm_usage_phase"
+            )
+        )
+
+
 def upgrade() -> None:
     """Drop the old CHECK and add the broader one as NOT VALID + VALIDATE.
 
     DROP + ADD are combined in one ALTER TABLE so the catalog mutation
     is atomic (no window where the table has no phase CHECK). VALIDATE
-    must be a separate statement per Postgres semantics.
+    must be a separate statement per Postgres semantics, and runs after
+    that ALTER commits (see the module docstring).
     """
     op.execute(
         sa.text(
@@ -70,19 +93,22 @@ def upgrade() -> None:
             f"CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
-    op.execute(
-        sa.text(
-            "ALTER TABLE sleep_report_llm_usage "
-            "VALIDATE CONSTRAINT valid_sleep_report_llm_usage_phase"
-        )
-    )
+    _validate()
 
 
 def downgrade() -> None:
-    """Restore the original CHECK (rejects 'cluster_labeling').
+    """Restore the original CHECK (rejects 'cluster_labeling'), keeping the rows.
 
-    Symmetric to ``upgrade``: DROP + ADD are atomic, VALIDATE is
-    separate.
+    Symmetric to ``upgrade``: DROP + ADD are atomic, VALIDATE is separate.
+    ``sleep_report_llm_usage`` is a cost ledger, so ``cluster_labeling`` rows
+    are never deleted here (the f00_2019 form). The previous CHECK is
+    restored ``NOT VALID`` — enforced on every new INSERT / UPDATE, and a
+    downgraded server never writes this phase — and is VALIDATEd only when
+    no such row exists. The check runs while the ALTER's lock is held and,
+    once that commits, the NOT VALID CHECK rejects new such rows, so the
+    VALIDATE that follows cannot fail on a row written in between. With rows
+    present the constraint stays ``convalidated = false``; re-running the
+    upgrade validates it again.
     """
     op.execute(
         sa.text(
@@ -92,9 +118,12 @@ def downgrade() -> None:
             f"CHECK ({_OLD_CHECK}) NOT VALID"
         )
     )
-    op.execute(
-        sa.text(
-            "ALTER TABLE sleep_report_llm_usage "
-            "VALIDATE CONSTRAINT valid_sleep_report_llm_usage_phase"
+    leftover = (
+        op.get_bind()
+        .execute(
+            sa.text("SELECT 1 FROM sleep_report_llm_usage WHERE phase = 'cluster_labeling' LIMIT 1")
         )
+        .first()
     )
+    if leftover is None:
+        _validate()

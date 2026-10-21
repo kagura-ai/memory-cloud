@@ -24,11 +24,15 @@ DB-level CHECK constraints enforce the enum sets:
     paid_by IN ('platform', 'byok')
 
 The constraints are added via raw ``op.execute(sa.text(...))`` calls of
-``ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`` followed by
-``ALTER TABLE ... VALIDATE CONSTRAINT ...`` — the zero-downtime two-step
-that mirrors the ``b03_396_neural_edges_ws_ctx_not_null`` precedent so
-the validation scan runs under SHARE UPDATE EXCLUSIVE rather than
-ACCESS EXCLUSIVE on populated tables.
+``ALTER TABLE ... DROP CONSTRAINT IF EXISTS ..., ADD CONSTRAINT ... NOT
+VALID`` followed by ``ALTER TABLE ... VALIDATE CONSTRAINT ...`` inside
+``autocommit_block()`` (#2079, the #2073 form). ``alembic/env.py`` runs an
+upgrade in one transaction, so a VALIDATE in that transaction would scan
+``sleep_reports`` under the ALTER's ACCESS EXCLUSIVE lock until commit; the
+block commits the column and NOT VALID adds first, and VALIDATE then holds
+only SHARE UPDATE EXCLUSIVE (reads and writes continue). That commit point is
+why every step is re-runnable: the columns use ``if_not_exists``, each CHECK
+add drops a leftover first, and the index uses ``if_not_exists``.
 
 A composite index ``idx_sleep_reports_workspace_source_started`` on
 ``(workspace_id, source, started_at DESC)`` supports the #472 cost
@@ -74,6 +78,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'sleep'"),
         ),
+        if_not_exists=True,
     )
     op.add_column(
         "sleep_reports",
@@ -83,30 +88,39 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'platform'"),
         ),
+        if_not_exists=True,
     )
 
-    # 2. CHECK constraints — zero-downtime two-step (matches `b03_396`
-    # precedent). ADD CONSTRAINT NOT VALID skips the synchronous full-table
-    # scan and only checks new writes; VALIDATE CONSTRAINT then proves
-    # historic rows under SHARE UPDATE EXCLUSIVE (does not block
+    # 2. CHECK constraints — two-step. ADD CONSTRAINT NOT VALID skips the
+    # synchronous full-table scan and only checks new writes; VALIDATE
+    # CONSTRAINT then proves historic rows, after the adds commit (see the
+    # module docstring), under SHARE UPDATE EXCLUSIVE (does not block
     # reads/writes). Existing rows already satisfy both constraints because
     # the server_default in step 1 wrote 'sleep' / 'platform'.
     op.execute(
         sa.text(
             "ALTER TABLE sleep_reports "
+            "DROP CONSTRAINT IF EXISTS valid_sleep_report_source, "
             "ADD CONSTRAINT valid_sleep_report_source "
             "CHECK (source IN ('sleep', 'analysis')) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE sleep_reports VALIDATE CONSTRAINT valid_sleep_report_source"))
     op.execute(
         sa.text(
             "ALTER TABLE sleep_reports "
+            "DROP CONSTRAINT IF EXISTS valid_sleep_report_paid_by, "
             "ADD CONSTRAINT valid_sleep_report_paid_by "
             "CHECK (paid_by IN ('platform', 'byok')) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE sleep_reports VALIDATE CONSTRAINT valid_sleep_report_paid_by"))
+    # One commit point for both scans.
+    with op.get_context().autocommit_block():
+        op.execute(
+            sa.text("ALTER TABLE sleep_reports VALIDATE CONSTRAINT valid_sleep_report_source")
+        )
+        op.execute(
+            sa.text("ALTER TABLE sleep_reports VALIDATE CONSTRAINT valid_sleep_report_paid_by")
+        )
 
     # 3. Composite index for #472 aggregation queries. ``sa.text`` is used
     # for the DESC sort because op.create_index does not accept ORM
@@ -115,6 +129,7 @@ def upgrade() -> None:
         "idx_sleep_reports_workspace_source_started",
         "sleep_reports",
         ["workspace_id", "source", sa.text("started_at DESC")],
+        if_not_exists=True,
     )
 
 
