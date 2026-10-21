@@ -383,7 +383,7 @@ A memory's revision log, newest first ([#2043](https://github.com/kagura-ai/memo
 }
 ```
 
-`kind` is `created`, `updated`, `forgotten` or `restored`; `changed_fields` names the fields an `updated` event changed. No member identity is returned: `by_you` marks events you (or an account linked to you) wrote, and only those carry `agent_id` / `session_id`. Read a version's text with `POST /reference` and `version`. Permission is the same as `reference`; `404` for no such memory, no access, or a forgotten memory; `422` for a `limit` out of range or a malformed `cursor`.
+`kind` is `created`, `updated`, `forgotten` or `restored`; `changed_fields` names the fields an `updated` event changed, and is empty when you may not read the version before or after the edit (`POST /reference` with that `version` answers `404`, as under a binding's memory-type filter). No member identity is returned: `by_you` marks events you (or an account linked to you) wrote, and only those carry `agent_id` / `session_id`. Read a version's text with `POST /reference` and `version`. Permission is the same as `reference`; `404` for no such memory, no access, or a forgotten memory; `422` for a `limit` out of range or a malformed `cursor`.
 
 ---
 
