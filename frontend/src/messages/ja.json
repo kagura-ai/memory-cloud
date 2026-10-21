@@ -1932,6 +1932,7 @@
       "claude": "Claude",
       "chatgpt": "ChatGPT",
       "cursor": "Cursor",
+      "gemini": "Gemini",
       "other": "その他"
     },
     "legacyPresetNote": "このアプリは不要になりました。コネクタを再接続すると自動登録されます。使っていなければ削除してください。",

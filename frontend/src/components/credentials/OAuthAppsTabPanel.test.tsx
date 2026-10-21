@@ -109,6 +109,11 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
         provider: "cursor",
       }),
       makeClient({
+        client_id: "oauth_gemini",
+        client_name: "My Gemini app",
+        provider: "gemini",
+      }),
+      makeClient({
         client_id: "oauth_future",
         client_name: "Future app",
         provider: "some_new_client",
@@ -120,11 +125,13 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
     // Both stay listed, so their owner can still delete them.
     expect(await screen.findByText("My Cursor app")).toBeInTheDocument();
     expect(screen.getByText("Future app")).toBeInTheDocument();
-    expect(screen.getAllByText("legacyPresetNote")).toHaveLength(2);
+    expect(screen.getAllByText("legacyPresetNote")).toHaveLength(3);
     expect(screen.getByText("legacyProvider.cursor")).toBeInTheDocument();
+    expect(screen.getByText("legacyProvider.gemini")).toBeInTheDocument();
     // A provider this client does not know reads "Other", never the raw value.
     expect(screen.getByText("legacyProvider.other")).toBeInTheDocument();
     expect(screen.queryByText("cursor")).not.toBeInTheDocument();
+    expect(screen.queryByText("gemini")).not.toBeInTheDocument();
     expect(screen.queryByText("some_new_client")).not.toBeInTheDocument();
   });
 

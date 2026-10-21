@@ -57,7 +57,7 @@ const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
  * Brand names go through next-intl like the rest of the UI; a value this
  * client does not know reads "Other" instead of leaking the raw string.
  */
-const LEGACY_PROVIDERS: readonly string[] = ["claude", "chatgpt", "cursor"];
+const LEGACY_PROVIDERS: readonly string[] = ["claude", "chatgpt", "cursor", "gemini"];
 
 /** The `legacyProvider.*` message key for an app's `provider` value. */
 function legacyProviderKey(provider: string): string {

@@ -1932,6 +1932,7 @@
       "claude": "Claude",
       "chatgpt": "ChatGPT",
       "cursor": "Cursor",
+      "gemini": "Gemini",
       "other": "Other"
     },
     "legacyPresetNote": "This app is no longer needed: reconnecting the connector registers it automatically. Delete it when you no longer use it.",
