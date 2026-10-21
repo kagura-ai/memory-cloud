@@ -1083,7 +1083,14 @@ authorization code grant and PKCE:
    the host the user is sent to after approving (with its port for a loopback
    redirect), and warns when every registered `redirect_uri` of the client is
    a loopback URI, since such a client's name cannot be verified.
-2. Approving redirects to `redirect_uri` with `code` and `state`.
+2. Approving redirects to `redirect_uri` with `code` and `state`. The consent
+   page posts its form to `POST /api/v1/oauth/authorize` with the
+   authorization request in the query string; the form sends only `confirm`,
+   `default_context` and `csrf_token`, a token bound to the browser session.
+   The OAuth parameters are read from the query only (form fields of the same
+   name are ignored), and a missing or wrong `csrf_token` (for approving or
+   denying) gets an error page (`400`, `invalid_request`) without a redirect
+   or a stored code ([#2199](https://github.com/kagura-ai/memory-cloud/issues/2199)).
 3. `POST /api/v1/oauth/token` with `grant_type=authorization_code`, `code`,
    `redirect_uri`, `client_id`, `code_verifier` and `resource`.
 4. `POST /api/v1/oauth/token` with `grant_type=refresh_token` issues a new
