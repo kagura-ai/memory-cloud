@@ -11,6 +11,7 @@ unattributed entry instead of being dropped, and notes are structured
 """
 
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.memory import Memory
+from models.sleep import SleepReport
 from services.identity_link_service import linked_user_ids
 from services.memory_health_service import (
     _READ_TOOLS,
@@ -1065,3 +1067,46 @@ class TestLinkedAccountScopeRespectsMembership:
             assert resolved.await_count == 2
             await svc.build_context_report(a, None)
             assert resolved.await_count == 3
+
+
+class TestAnalysisReportsDoNotGradeSleep:
+    """#2088: failed / cancelled Memory Analysis runs now write
+    ``source='analysis'`` cost rows to ``sleep_reports``. Only Sleep runs
+    grade consolidation — a failed analysis must not read as a failed Sleep."""
+
+    @pytest.mark.asyncio
+    async def test_failed_analysis_report_is_not_latest_sleep_failed(self, db_session) -> None:
+        user = _uid("u")
+        ws = await _workspace(db_session, user)
+        ctx = await _private_context(db_session, ws, user)
+        await _memory(db_session, user, ws, ctx)
+        db_session.add(
+            SleepReport(
+                user_id=user,
+                workspace_id=ws,
+                context_id=ctx,
+                status="completed",
+                source="sleep",
+                paid_by="platform",
+                started_at=utcnow() - timedelta(hours=2),
+            )
+        )
+        db_session.add(
+            SleepReport(
+                user_id=user,
+                workspace_id=ws,
+                context_id=ctx,
+                status="failed",
+                source="analysis",
+                paid_by="byok",
+                started_at=utcnow(),
+                error_message="analysis_failed: provider down",
+            )
+        )
+        await db_session.flush()
+
+        report = await MemoryHealthService(db_session).build_context_report(user, ctx)
+
+        consolidation = report["sections"]["consolidation"]
+        assert "latest_sleep_failed" not in _codes(consolidation)
+        assert consolidation["status"] == STATUS_OK

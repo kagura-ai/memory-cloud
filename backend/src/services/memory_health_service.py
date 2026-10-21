@@ -56,7 +56,7 @@ from models.auth import (
 )
 from models.config import ContextSearchConfig
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
-from models.sleep import SleepReport
+from models.sleep import SLEEP_REPORT_SOURCES, SleepReport
 from repositories.neural_edge import one_row_per_pair
 from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso, utcnow
@@ -77,6 +77,12 @@ _REPORT_WINDOW = 20
 # in sparse contexts from resurfacing as eternal WARNs under per-context
 # scoping (the Phase-1 account-wide window had already aged them out).
 _WINDOW_LOOKBACK_DAYS = 180
+# Only Sleep runs grade consolidation health. ``sleep_reports`` also holds the
+# ``source='analysis'`` cost rows of Memory Analysis runs (#495), which since
+# #2088 include failed / cancelled runs — a provider outage that fails one
+# analysis must not flip the context's Sleep health to FAIL.
+_SOURCE_SLEEP = "sleep"
+assert _SOURCE_SLEEP in SLEEP_REPORT_SOURCES
 # Soft-deleted merge losers older than this warn (retention likely wanted).
 _BACKLOG_WARN_DAYS = 90
 # A graph with this many active memories and zero edges is suspiciously cold.
@@ -498,6 +504,7 @@ class MemoryHealthService:
         conditions = [
             self._rows_of(SleepReport.user_id, SleepReport.context_id, user_id, owners, owned_ids),
             SleepReport.started_at >= utcnow() - timedelta(days=_WINDOW_LOOKBACK_DAYS),
+            SleepReport.source == _SOURCE_SLEEP,
         ]
         if scope is not _ALL:
             conditions.append(SleepReport.context_id == scope)
