@@ -1,6 +1,6 @@
 """Re-process account erasures that ran before the #2235 fix (#2243).
 
-Erasures completed on v0.113.0 through v0.120.x could leave an erased
+Erasures completed on v0.113.0 through v0.122.x could leave an erased
 member's ``details`` behind on memories other members authored: in the
 prior of the next ``details`` edit after theirs in the revision log (the
 #2235 correlation bug), and as the live value where the erased member made

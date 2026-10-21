@@ -169,7 +169,7 @@ def _authored_by(
     """``row`` is on a memory ``subject`` authored (and, with ``existed_at``,
     was written by then).
 
-    ``existed_at`` bounds a re-run by pseudonym (#2243, Fable review S1) to
+    ``existed_at`` bounds a re-run by pseudonym (#2243 review S1) to
     the rows the erasure saw. The memory scrub NULLed the live ``details``
     of every memory the subject authored, so no row written after it can
     hold a value of theirs; without the bound, a re-run would strip and mark

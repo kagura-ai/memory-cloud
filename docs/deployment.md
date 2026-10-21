@@ -1671,13 +1671,15 @@ backups' retention in mind before `--apply --include-past-window`.
 ### Erasures run before v0.123.0 — Issue #2243
 
 **Run this once after upgrading to v0.123.0** if any account was erased on
-v0.113.0 through v0.120.x. An erasure on those versions could leave the erased
+v0.113.0 through v0.122.x. An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
-(the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0)
-and as the memory's live value where they made the newest `details` edit
-(#2244, fixed in v0.123.0, so an erasure on v0.121.x or v0.122.x can have left
-this one too). Erasures before v0.113.0 had no revision log, and erasures from
-v0.123.0 on do all of this as they run. Plan first, then apply:
+(the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
+erasures on v0.113.0 through v0.120.x) and as the memory's live value where
+they made the newest `details` edit (#2244, fixed in v0.123.0). Erasures
+before v0.113.0 had no revision log, and erasures from v0.123.0 on do all of
+this as they run. Run `--apply` off-peak: each request holds the erased
+member's memories locked while it patches the vector store one memory at a
+time. Plan first, then apply:
 
 ```bash
 # inside the API container / venv, from backend/
