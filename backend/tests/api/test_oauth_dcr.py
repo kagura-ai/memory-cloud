@@ -465,17 +465,26 @@ class TestDetectDcrProviderLoopbackClients:
         # to match, so a non-loopback redirect stays rejected as before.
         assert detect_dcr_provider(redirect_uri, client_name) == "custom"
 
-    def test_loopback_keywords_cover_every_hostname_provider(self):
-        # Every hostname provider must also be accepted on loopback, and the
-        # pre-#1657 keywords must stay ahead of the new ones.
+    def test_allowed_providers_cover_every_detected_provider(self):
+        # Every hostname and exact-redirect provider is allowed, every hostname
+        # provider is also a loopback keyword, and the pre-#1657 keywords stay
+        # ahead of the new ones. The exact-redirect providers (Gemini, #2222)
+        # must NOT be loopback keywords: a loopback registration naming them
+        # in ``client_name`` stays refused.
         from api.routes.oauth import (
             _DCR_ALLOWED_PROVIDERS,
             _LOOPBACK_PROVIDER_KEYWORDS,
+            _PROVIDER_EXACT_REDIRECTS,
             _PROVIDER_HOSTNAMES,
         )
 
-        assert set(_PROVIDER_HOSTNAMES) <= set(_DCR_ALLOWED_PROVIDERS)
+        assert set(_PROVIDER_HOSTNAMES) | set(_PROVIDER_EXACT_REDIRECTS) <= set(
+            _DCR_ALLOWED_PROVIDERS
+        )
+        assert set(_PROVIDER_HOSTNAMES) <= set(_LOOPBACK_PROVIDER_KEYWORDS)
         assert _LOOPBACK_PROVIDER_KEYWORDS[:3] == ("chatgpt", "claude", "cursor")
+        assert "gemini" not in _LOOPBACK_PROVIDER_KEYWORDS
+        assert "gemini" not in _PROVIDER_HOSTNAMES
         assert "codex" not in _PROVIDER_HOSTNAMES
         assert "hermes" not in _PROVIDER_HOSTNAMES
         assert "openclaw" not in _PROVIDER_HOSTNAMES
@@ -862,3 +871,194 @@ class TestDcrRateLimitExemption:
         response, counter = self._post(monkeypatch, client_ip, exempt)
         assert response.status_code == 429, response.text
         counter.assert_awaited_once()
+
+
+# Gemini custom MCP connector callbacks (#2222). ``123456789`` stands in for the
+# per-user binding id Google appends; it is an example value, not a real id.
+_GEMINI_HOST = "oauth-redirect.googleusercontent.com"
+_GEMINI_SANDBOX_HOST = "oauth-redirect-sandbox.googleusercontent.com"
+_GEMINI_PREFIX = "/r/user_bound_custom-mcp-"
+_GEMINI_URI = f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}123456789"
+_GEMINI_SANDBOX_URI = f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}123456789"
+
+
+class TestDetectDcrProviderGemini:
+    """Exact host + pinned path prefix + one segment, compared as written."""
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            _GEMINI_URI,
+            _GEMINI_SANDBOX_URI,
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}abc-123-slug",
+            f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}abc-123-slug",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}a",
+            # Percent-encoded unreserved character ("-").
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}abc%2D1",
+        ],
+    )
+    @pytest.mark.parametrize("client_name", ["Gemini", "Any Client"])
+    def test_accepted(self, redirect_uri: str, client_name: str):
+        assert detect_dcr_provider(redirect_uri, client_name) == "gemini"
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            f"http://{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+            f"HTTPS://{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+            # Case variant of the host: refused, the host is compared as written.
+            f"https://OAUTH-REDIRECT.googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://evil.googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://x.{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_HOST}.evil.com{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_HOST}.{_GEMINI_PREFIX}x",
+            f"https://user@{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+            f"https://user:pw@{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_HOST}:443{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_HOST}:443.evil.com{_GEMINI_PREFIX}x",
+            f"https://xn--oauth-redirect-xyz.googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://oauth-rédirect.googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_HOST}/r/other-x",
+            f"https://{_GEMINI_HOST}/r/user_bound_custom-mcp",
+            f"https://{_GEMINI_HOST}/R/user_bound_custom-mcp-x",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x/",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x/y",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%2Fy",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%2fy",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x\\y",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%5Cy",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}.",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}..",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x..",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%2E%2E",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}%2E",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%252F",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x?next=1",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x?",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x#f",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%23f",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x;p",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x%3Bp",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}*",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x y",
+            # Wildcard patterns pass the pydantic pattern check but are never Gemini.
+            f"https://{_GEMINI_HOST}/r/*",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}x/*",
+            f" https://{_GEMINI_HOST}{_GEMINI_PREFIX}x",
+        ],
+    )
+    def test_refused(self, redirect_uri: str):
+        assert detect_dcr_provider(redirect_uri, "Gemini") == "custom"
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            "http://localhost/cb",
+            "http://127.0.0.1:8080/oauth/callback",
+            "http://[::1]:8080/oauth/callback",
+        ],
+    )
+    @pytest.mark.parametrize("client_name", ["Gemini", "Gemini CLI", "gemini"])
+    def test_gemini_is_not_a_loopback_keyword(self, redirect_uri: str, client_name: str):
+        assert detect_dcr_provider(redirect_uri, client_name) == "custom"
+
+
+class TestDcrEndpointGemini:
+    """``POST /api/v1/oauth/register`` with Gemini callbacks (#2222)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+            patch("api.routes.oauth.logger") as fake_logger,
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session, fake_logger
+
+    @staticmethod
+    def _six_uris() -> list[str]:
+        # Example binding ids, not real ones.
+        return [
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}example-1",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}example-2",
+            f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}example-3",
+            f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}example-1",
+            f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}example-2",
+            f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}example-3",
+        ]
+
+    def test_six_gemini_uris_register_verbatim(self, client):
+        uris = self._six_uris()
+        response, fake_session, _ = self._register(
+            client, {"client_name": "Gemini", "redirect_uris": uris}
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "gemini"
+        assert response.json()["redirect_uris"] == uris
+        fake_session.add.assert_called_once()
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "gemini"
+        assert stored.redirect_uris == uris
+        assert stored.token_endpoint_auth_method == "none"
+
+    def test_one_foreign_uri_refuses_the_whole_list(self, client):
+        uris = [*self._six_uris(), f"https://{_GEMINI_HOST}/r/other"]
+        response, fake_session, fake_logger = self._register(
+            client, {"client_name": "Gemini", "redirect_uris": uris}
+        )
+
+        assert response.status_code == 400, response.text
+        body = response.json()
+        assert body["error"] == "invalid_client_metadata"
+        assert "gemini" in body["error_description"]
+        assert "Gemini" in body["error_description"]
+        fake_session.add.assert_not_called()
+        rejected = [
+            c for c in fake_logger.warning.call_args_list if c.args[0] == "dcr_provider_rejected"
+        ]
+        assert len(rejected) == 1
+        assert rejected[0].kwargs["refused_redirect_uris"] == 1
+        assert rejected[0].kwargs["redirect_uris"] == 7
+
+    def test_gemini_with_claude_stores_the_first(self, client):
+        uris = [_GEMINI_URI, "https://claude.ai/api/mcp/auth_callback"]
+        response, _, _ = self._register(client, {"client_name": "Gemini", "redirect_uris": uris})
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "gemini"
+
+    def test_claude_list_unchanged(self, client):
+        uris = ["https://claude.ai/api/mcp/auth_callback"]
+        response, _, _ = self._register(client, {"client_name": "Claude", "redirect_uris": uris})
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "claude"
+
+    @pytest.mark.parametrize(
+        "redirect_uris",
+        [
+            ["http://localhost:8080/oauth/callback"],
+            # A trailing ``/*`` wildcard passes the pattern check, then fails detection.
+            [f"https://{_GEMINI_HOST}/r/*"],
+            [f"https://evil.googleusercontent.com{_GEMINI_PREFIX}x"],
+        ],
+    )
+    def test_refused_registrations(self, client, redirect_uris: list[str]):
+        response, fake_session, _ = self._register(
+            client, {"client_name": "Gemini", "redirect_uris": redirect_uris}
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()

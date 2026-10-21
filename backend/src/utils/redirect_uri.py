@@ -157,6 +157,26 @@ def is_valid_redirect_uri_pattern(pattern: str) -> bool:
     return True
 
 
+def is_single_path_segment(segment: str) -> bool:
+    """Whether an already-unquoted ``segment`` is exactly one safe path segment.
+
+    The segment must be non-empty, carry no ``/`` and be neither ``.`` nor
+    contain ``..``, so it can not climb out of (or past) the path prefix it is
+    appended to. Callers ``unquote`` first so ``%2F`` / ``%2E%2E`` are caught.
+
+    Args:
+        segment: The decoded path text that follows a pinned prefix.
+
+    Returns:
+        True if ``segment`` is one non-traversing path segment.
+    """
+    if not segment:
+        return False
+    if "/" in segment:
+        return False
+    return not (segment == "." or ".." in segment)
+
+
 def redirect_uri_matches(pattern: str, redirect_uri: str) -> bool:
     """Check whether ``redirect_uri`` matches a stored ``pattern``.
 
@@ -219,14 +239,7 @@ def redirect_uri_matches(pattern: str, redirect_uri: str) -> bool:
     prefix = stored.path + "/"
     if not incoming.path.startswith(prefix):
         return False
-    suffix = unquote(incoming.path[len(prefix) :])
-    if not suffix:
-        return False
-    if "/" in suffix:
-        return False
-    if suffix == "." or ".." in suffix:
-        return False
-    return True
+    return is_single_path_segment(unquote(incoming.path[len(prefix) :]))
 
 
 def any_redirect_uri_matches(patterns: list[str] | None, redirect_uri: str) -> bool:

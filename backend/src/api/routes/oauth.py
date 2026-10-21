@@ -38,7 +38,15 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl,
+    unquote,
+    unquote_plus,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 from uuid import UUID
 
 from authlib.oauth2.rfc6749.errors import InvalidRequestError, OAuth2Error
@@ -93,6 +101,7 @@ from utils.oauth_errors import rfc6749_error_response
 from utils.oauth_messages import get_oauth_messages
 from utils.redirect_uri import (
     is_loopback_redirect_uri,
+    is_single_path_segment,
     is_valid_redirect_uri_pattern,
     redirect_uri_display_host,
 )
@@ -257,7 +266,7 @@ class OAuth2ClientCreateRequest(BaseModel):
     redirect_uris: list[str] = Field(..., min_length=1, description="Allowed redirect URIs")
     provider: str = Field(
         default="custom",
-        pattern="^(claude|chatgpt|cursor|custom)$",  # Add cursor
+        pattern="^(claude|chatgpt|cursor|gemini|custom)$",
         description="OAuth provider type (Migration 036)",
     )
     grant_types: list[str] = Field(
@@ -693,6 +702,35 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
     "cursor": ("cursor.sh", "cursor.com"),
 }
 
+# Providers recognized by an exact https redirect host plus a pinned path
+# prefix followed by exactly one path segment (issue #2222). Kept apart from
+# ``_PROVIDER_HOSTNAMES`` on purpose: ``googleusercontent.com`` serves user
+# content on many subdomains, so a suffix match would let anyone register a
+# DCR client whose callback is content they control. Only Google's two OAuth
+# redirector hosts qualify, compared as written (no userinfo, port, trailing
+# dot or case variant), and only inside the custom-MCP binding namespace of
+# the redirector (``/r/user_bound_custom-mcp-<one segment>``). No params,
+# query or fragment. The URI is stored exactly as sent and compared exactly at
+# /authorize and /token — never as a ``/r/*`` wildcard, which would match
+# every other binding on the redirector.
+_PROVIDER_EXACT_REDIRECTS: dict[str, tuple[frozenset[str], str]] = {
+    "gemini": (
+        frozenset(
+            {
+                "oauth-redirect.googleusercontent.com",
+                "oauth-redirect-sandbox.googleusercontent.com",
+            }
+        ),
+        "/r/user_bound_custom-mcp-",
+    ),
+}
+
+# Characters allowed in the trailing segment of an exact-redirect provider,
+# raw and after percent-decoding: RFC 3986 ``unreserved``. Anything else —
+# ``/ \ * ; ? # %`` and friends — refuses the URI.
+_EXACT_REDIRECT_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]+")
+_EXACT_REDIRECT_RAW_SEGMENT_RE = re.compile(r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+")
+
 # For loopback URIs only — the hostname is uninformative, so substring-match
 # the (NFKC-normalized, lowercased) ``client_name`` against these keywords.
 # Kept separate from ``_PROVIDER_HOSTNAMES`` (issue #1657): some native MCP
@@ -731,9 +769,14 @@ _LOOPBACK_CLIENT_LABELS: tuple[str, ...] = (
 )
 
 # Every provider value DCR may store in ``oauth_clients.provider``: the
-# hostname providers plus the loopback-only ones. Order follows
-# ``_LOOPBACK_PROVIDER_KEYWORDS`` (a superset of ``_PROVIDER_HOSTNAMES``).
-_DCR_ALLOWED_PROVIDERS: tuple[str, ...] = _LOOPBACK_PROVIDER_KEYWORDS
+# hostname providers plus the loopback-only ones (``_LOOPBACK_PROVIDER_KEYWORDS``
+# is a superset of ``_PROVIDER_HOSTNAMES``), then the exact-redirect ones. The
+# exact-redirect providers are NOT loopback keywords: a loopback registration
+# whose ``client_name`` says "Gemini" stays refused (#2222).
+_DCR_ALLOWED_PROVIDERS: tuple[str, ...] = (
+    *_LOOPBACK_PROVIDER_KEYWORDS,
+    *_PROVIDER_EXACT_REDIRECTS,
+)
 
 
 def _normalize_client_name(client_name: str) -> str:
@@ -750,11 +793,44 @@ def _normalize_client_name(client_name: str) -> str:
     return visible.lower()
 
 
+def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
+    """Return the ``_PROVIDER_EXACT_REDIRECTS`` provider ``redirect_uri`` names, or None.
+
+    The raw string must be ``https://<host><prefix><segment>`` for one of the
+    provider's hosts, character for character: the scheme and host are
+    compared as written, so userinfo, a port, a trailing dot, an IDNA or case
+    variant all miss. The segment must be RFC 3986 unreserved characters (or
+    percent-encodings of them) and one non-traversing path segment once
+    decoded, which also rules out params, a query and a fragment.
+
+    Args:
+        redirect_uri: The redirect URI exactly as the client sent it.
+
+    Returns:
+        The provider name, or None when no exact-redirect provider matches.
+    """
+    for provider, (hosts, prefix) in _PROVIDER_EXACT_REDIRECTS.items():
+        for host in hosts:
+            base = f"https://{host}{prefix}"
+            if not redirect_uri.startswith(base):
+                continue
+            raw_segment = redirect_uri[len(base) :]
+            if not _EXACT_REDIRECT_RAW_SEGMENT_RE.fullmatch(raw_segment):
+                return None
+            segment = unquote(raw_segment)
+            if not _EXACT_REDIRECT_SEGMENT_RE.fullmatch(segment):
+                return None
+            if not is_single_path_segment(segment):
+                return None
+            return provider
+    return None
+
+
 def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
     Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
-    ``"hermes"``, ``"openclaw"``, or ``"custom"``. The caller rejects
+    ``"hermes"``, ``"openclaw"``, ``"gemini"``, or ``"custom"``. The caller rejects
     ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
@@ -764,7 +840,10 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
            ``_LOOPBACK_PROVIDER_KEYWORDS``, first match wins. This is the
            only path that yields ``codex`` / ``hermes`` / ``openclaw``
            (Codex CLI, Hermes Agent, OpenClaw — issue #1657).
-        2. Otherwise → match the parsed hostname (case-insensitive) against
+        2. Otherwise → an exact-redirect provider (``_PROVIDER_EXACT_REDIRECTS``,
+           ``gemini``): exact https host + pinned path prefix + one segment,
+           compared as written (issue #2222).
+        3. Otherwise → match the parsed hostname (case-insensitive) against
            ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
            as exact host or single-suffix subdomain.
 
@@ -803,7 +882,12 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
                 return keyword
         return "custom"
 
-    # 2) Hostname suffix match for pre-existing providers. ``urlparse`` returns
+    # 2) Exact-redirect providers (#2222), before any suffix matching.
+    exact_provider = _match_exact_redirect_provider(redirect_uri)
+    if exact_provider is not None:
+        return exact_provider
+
+    # 3) Hostname suffix match for pre-existing providers. ``urlparse`` returns
     # ``None`` for inputs without a netloc (e.g. ``"not a url"``); the
     # ``or ""`` above turned that into an empty string — bail out early.
     if not hostname:
@@ -856,7 +940,9 @@ async def dynamic_client_registration(
     Security controls:
     - Provider whitelist: chatgpt, claude, cursor by redirect hostname; for
       RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
-      Cursor, Codex, Hermes Agent or OpenClaw (issue #1657). Every entry of
+      Cursor, Codex, Hermes Agent or OpenClaw (issue #1657); gemini by an
+      exact https redirect on Google's OAuth redirector hosts under
+      ``/r/user_bound_custom-mcp-`` (issue #2222). Every entry of
       ``redirect_uris`` must pass on its own (#1686)
     - IP-based rate limiting (5 registrations per minute per IP); addresses in
       ``OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`` are not limited (#1741)
@@ -936,7 +1022,9 @@ async def dynamic_client_registration(
                 f"{', '.join(_DCR_ALLOWED_PROVIDERS)}. "
                 "Native CLIs (RFC 8252) must use http://localhost, "
                 "http://127.0.0.1, or http://[::1] with a recognized "
-                f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)})."
+                f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)}). "
+                "Gemini must use an https redirect on Google's OAuth "
+                "redirect hosts."
             ),
         )
 

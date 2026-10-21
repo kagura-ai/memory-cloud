@@ -5,6 +5,7 @@ import pytest
 from utils.redirect_uri import (
     any_redirect_uri_matches,
     is_loopback_redirect_uri,
+    is_single_path_segment,
     is_valid_redirect_uri_pattern,
     redirect_uri_display_host,
     redirect_uri_matches,
@@ -325,3 +326,40 @@ class TestRedirectUriDisplayHost:
     )
     def test_host(self, uri, expected):
         assert redirect_uri_display_host(uri) == expected
+
+
+class TestIsSinglePathSegment:
+    """The decoded-suffix rule shared by wildcard matching and Gemini DCR (#2222)."""
+
+    @pytest.mark.parametrize("segment", ["a", "abc-123", "x.y", "a_b~c"])
+    def test_accepted(self, segment: str):
+        assert is_single_path_segment(segment) is True
+
+    @pytest.mark.parametrize("segment", ["", "/", "a/b", ".", "..", "x..", "..x", "a..b"])
+    def test_refused(self, segment: str):
+        assert is_single_path_segment(segment) is False
+
+
+class TestGeminiRedirectExactness:
+    """A Gemini callback is stored without a wildcard, so /authorize is exact (#2222)."""
+
+    # ``123456789`` is an example binding id, not a real one.
+    URI = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123456789"
+
+    def test_same_string_matches(self):
+        assert redirect_uri_matches(self.URI, self.URI) is True
+
+    @pytest.mark.parametrize(
+        "incoming",
+        [
+            URI + "/",
+            URI.replace("mcp-123456789", "mcp-123456780"),
+            URI.replace("user_bound", "USER_BOUND"),
+            URI.replace("oauth-redirect.", "OAUTH-REDIRECT."),
+            URI + "?x=1",
+            URI + "#f",
+            URI + "/extra",
+        ],
+    )
+    def test_any_other_string_does_not_match(self, incoming: str):
+        assert redirect_uri_matches(self.URI, incoming) is False

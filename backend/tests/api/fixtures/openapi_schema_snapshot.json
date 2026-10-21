@@ -6237,7 +6237,7 @@
           },
           "provider": {
             "default": "custom",
-            "pattern": "^(claude|chatgpt|cursor|custom)$",
+            "pattern": "^(claude|chatgpt|cursor|gemini|custom)$",
             "type": "string"
           },
           "redirect_uris": {
