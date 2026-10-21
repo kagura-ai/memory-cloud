@@ -749,6 +749,10 @@ class MemoryRevision(Base):
             "agent_id",
             "at",
         ),
+        # #2115: erasure finds the subject's events by actor alone. Full, not
+        # partial: the column is NOT NULL. The f10 migration builds it
+        # CONCURRENTLY; declared plainly here so ``create_all`` can build it.
+        Index("idx_memory_revisions_actor", "actor_user_id"),
     )
 
 

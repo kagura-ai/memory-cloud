@@ -62,3 +62,16 @@ def test_revision_item_schema_follows_the_vocabularies() -> None:
     fields = MemoryRevisionItem.model_fields
     assert get_args(fields["kind"].annotation) == REVISION_KINDS
     assert get_args(fields["writer"].annotation) == REVISION_WRITERS
+
+
+def test_actor_index_serves_erasure() -> None:
+    """#2115: account erasure finds the subject's events by actor alone. Full,
+    not partial (the column is NOT NULL), and declared plainly — the migration
+    builds it CONCURRENTLY, ``create_all`` cannot."""
+    (index,) = [
+        i for i in MemoryRevision.__table__.indexes if i.name == "idx_memory_revisions_actor"
+    ]
+    assert [c.name for c in index.columns] == ["actor_user_id"]
+    assert MemoryRevision.__table__.c.actor_user_id.nullable is False
+    assert index.dialect_options["postgresql"]["where"] is None
+    assert not index.dialect_options["postgresql"]["concurrently"]
