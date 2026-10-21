@@ -820,8 +820,9 @@ class TestKnnSeeding:
                 model_name="text-embedding-3-small",
             )
 
-        # begin_nested() called once per edge attempt (3 candidates)
-        assert db.begin_nested.call_count == 3
+        # One SAVEPOINT around the whole insert loop (the #2085 edit fence
+        # rolls it back), then one per edge attempt (3 candidates).
+        assert db.begin_nested.call_count == 1 + 3
 
     @pytest.mark.asyncio
     async def test_idempotent_skip_when_edges_already_exist(self):
@@ -1070,7 +1071,10 @@ class TestKnnSeeding:
     async def test_none_threshold_bootstrap_failure_rolls_back_then_detects(self):
         """#2006 review: a DB error swallowed inside the bootstrap trigger would
         leave the session aborted for the supersede detection that now follows.
-        The session is rolled back, and detection still persists the candidate."""
+        The trigger runs in a SAVEPOINT, which is rolled back, and detection
+        still persists the candidate. #2085: no root rollback, so ``memory``
+        is not expired and the detection's edit check still compares against
+        the text this run embedded."""
         memory = _make_memory()
         db = _make_db()
         mock_repo = _make_edge_repo()
@@ -1111,7 +1115,11 @@ class TestKnnSeeding:
                 model_name="text-embedding-3-small",
             )
 
-        db.rollback.assert_awaited_once()
+        db.rollback.assert_not_awaited()
+        savepoint_exit = db.begin_nested.return_value.__aexit__
+        assert any(isinstance(c.args[1], RuntimeError) for c in savepoint_exit.await_args_list), (
+            "the bootstrap SAVEPOINT was not rolled back on the error"
+        )
         stored = memory.supersede_candidate
         assert stored is not None
         assert stored["memory_id"] == dup_id
@@ -2563,13 +2571,14 @@ class TestKnnSeedEditFence:
         # The inserts ran inside the outer transaction; the fence rolls them back.
         assert repo.create_edge_if_absent.await_count == 2
         db.commit.assert_not_called()
-        db.rollback.assert_awaited_once()
-        fence, reload = db.refresh.await_args_list
-        assert set(fence.kwargs["attribute_names"]) >= {"summary", "content"}
-        # The rollback expired ``memory``; the full reload keeps it usable for
-        # the tag seeding the caller runs next (a lazy load there would raise
-        # MissingGreenlet).
-        assert "attribute_names" not in reload.kwargs
+        # Only the insert SAVEPOINT is rolled back: a root rollback would
+        # expire ``memory`` for the tag seeding the caller runs next (a lazy
+        # load there raises MissingGreenlet).
+        db.rollback.assert_not_awaited()
+        savepoint_exit = db.begin_nested.return_value.__aexit__
+        assert savepoint_exit.await_args_list[-1].args[0] is memory_service._SeedEdgesDropped
+        db.refresh.assert_awaited_once()
+        assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {"summary", "content"}
         assert "knn_seed_skipped_source_edited" in events
         assert "knn_seed_edges_created" not in events
 
@@ -2616,8 +2625,7 @@ class TestKnnSeedEditFence:
             memory, db, self._hits(memory, 0.93, 0.7), config=_make_config(), repo=repo
         )
 
-        # The detection's re-read, the fence's, then the reload after the rollback.
-        assert db.refresh.await_count == 3
+        assert db.refresh.await_count == 2  # the detection's re-read, then the fence's
         assert "supersede_candidate_skipped_source_edited" in events
         assert memory.summary == "B_v2: a different subject"
         db.commit.assert_not_called()
