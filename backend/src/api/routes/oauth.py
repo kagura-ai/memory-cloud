@@ -948,7 +948,10 @@ async def dynamic_client_registration(
       Cursor, Codex, Hermes Agent or OpenClaw (issue #1657); gemini by an
       exact https redirect on Google's OAuth redirector hosts under
       ``/r/user_bound_custom-mcp-`` (issue #2222). Every entry of
-      ``redirect_uris`` must pass on its own (#1686)
+      ``redirect_uris`` is checked on its own (#1686); entries that fail are
+      left out of the registration and only the rest are stored and echoed
+      (RFC 7591 §3.2.1). Refused with ``invalid_client_metadata`` only when
+      no entry passes (#2232)
     - IP-based rate limiting (5 registrations per minute per IP); addresses in
       ``OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`` are not limited (#1741)
     - Redirect URI pattern validation
@@ -1002,23 +1005,30 @@ async def dynamic_client_registration(
 
     # Detect the provider of every redirect_uri (hostname suffix match) with a
     # client_name keyword fallback for RFC 8252 loopback redirects. See
-    # ``detect_dcr_provider`` above for the rationale. Each redirect_uri must
-    # pass on its own (#1686); the client's provider is the first one's.
+    # ``detect_dcr_provider`` above for the rationale. Each redirect_uri is
+    # judged on its own (#1686); the ones that fail are left out of the
+    # registration rather than refusing it (#2232, RFC 7591 §3.2.1 lets the
+    # server replace requested metadata). What #1686 protects is the stored
+    # list: a refused entry is never stored, so /authorize and /token never
+    # accept it, and the client is the one the caller could get by sending the
+    # passing entries alone. The registration is refused only when none
+    # passes. The client's provider is the first *passing* entry's.
     providers = [detect_dcr_provider(uri, data.client_name) for uri in data.redirect_uris]
-    refused = [
-        uri
-        for uri, provider in zip(data.redirect_uris, providers, strict=True)
-        if provider not in _DCR_ALLOWED_PROVIDERS
-    ]
-    detected_provider = providers[0]
+    accepted: list[tuple[str, str]] = []
+    refused: list[str] = []
+    for uri, provider in zip(data.redirect_uris, providers, strict=True):
+        if provider in _DCR_ALLOWED_PROVIDERS:
+            accepted.append((uri, provider))
+        else:
+            refused.append(uri)
 
-    if refused:
+    if not accepted:
         logger.warning(
             "dcr_provider_rejected",
             ip=client_ip,
-            redirect_uri=_redact_redirect_uri_for_log(refused[0]),
             refused_redirect_uris=len(refused),
             redirect_uris=len(data.redirect_uris),
+            refused=_redact_dcr_redirect_uris_for_log(refused),
         )
         return rfc6749_error_response(
             error="invalid_client_metadata",
@@ -1033,6 +1043,20 @@ async def dynamic_client_registration(
                 "the path /r/user_bound_custom-mcp-<one segment> and no query "
                 "or fragment."
             ),
+        )
+
+    # Request order is kept; nothing is deduplicated or reordered.
+    redirect_uris = [uri for uri, _ in accepted]
+    detected_provider = accepted[0][1]
+    if refused:
+        logger.warning(
+            "dcr_redirect_uris_dropped",
+            ip=client_ip,
+            provider=detected_provider,
+            dropped_redirect_uris=len(refused),
+            registered_redirect_uris=len(redirect_uris),
+            redirect_uris=len(data.redirect_uris),
+            dropped=_redact_dcr_redirect_uris_for_log(refused),
         )
 
     # #1831: sync session work runs off the event loop (see _run_sync).
@@ -1054,7 +1078,7 @@ async def dynamic_client_registration(
                 client_id=client_id,
                 client_secret_hash="",  # Public client sentinel (Issue #689)
                 client_name=data.client_name,
-                redirect_uris=data.redirect_uris,
+                redirect_uris=redirect_uris,
                 grant_types=data.grant_types,
                 response_types=data.response_types,
                 scope=scope,
@@ -1755,6 +1779,47 @@ def _redact_redirect_uri_for_log(redirect_uri: str | None) -> str:
     if len(redacted) > 256:
         redacted = redacted[:253] + "..."
     return redacted
+
+
+# At most this many redirect URIs are listed in one DCR warning; the count
+# fields carry the total. ``redirect_uris`` has no upper bound, so without the
+# cap one request could write an unbounded log line (#2232).
+_DCR_LOG_MAX_REDIRECT_URIS = 10
+
+# Replaces the per-user binding segment after an exact-redirect path prefix.
+_DCR_LOG_SEGMENT_MASK = "<segment>"
+
+
+def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
+    """``_redact_redirect_uri_for_log`` plus a masked exact-redirect segment.
+
+    The segment after an exact-redirect provider's path prefix (Gemini's
+    ``/r/user_bound_custom-mcp-<segment>``, #2222) identifies one Google user,
+    so it is replaced with ``<segment>`` before the URI is logged (#2232). The
+    prefix is looked for anywhere in the path, case-insensitively and on any
+    host, so a refused URI from a redirector host outside the table is masked
+    too. Masking runs before the 256-char cap so a long path cannot push the
+    prefix past the cut unmasked.
+    """
+    try:
+        parts = urlsplit(redirect_uri)
+    except ValueError:
+        return _redact_redirect_uri_for_log(redirect_uri)
+    path = parts.path
+    lowered = path.lower()
+    for _hosts, prefix in _PROVIDER_EXACT_REDIRECTS.values():
+        index = lowered.find(prefix.lower())
+        if index != -1:
+            path = path[: index + len(prefix)] + _DCR_LOG_SEGMENT_MASK
+            break
+    return _redact_redirect_uri_for_log(urlunsplit(parts._replace(path=path)))
+
+
+def _redact_dcr_redirect_uris_for_log(redirect_uris: list[str]) -> list[str]:
+    """The first ``_DCR_LOG_MAX_REDIRECT_URIS`` entries, each redacted for the log."""
+    return [
+        _redact_dcr_redirect_uri_for_log(uri) for uri in redirect_uris[:_DCR_LOG_MAX_REDIRECT_URIS]
+    ]
 
 
 def _resolve_oauth_locale(request: Request, db_session, user_email: str | None) -> str:

@@ -1104,7 +1104,7 @@ authorization code grant and PKCE:
 is parsed, with `413` `invalid_request` (RFC 6749 JSON, `Cache-Control:
 no-store`); the consent POST answers it without a redirect.
 
-**Registration.** Every entry of `redirect_uris` must be accepted on its own:
+**Registration.** Each entry of `redirect_uris` is accepted on its own when
 its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
 subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
@@ -1113,9 +1113,16 @@ subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
 `https://oauth-redirect-sandbox.googleusercontent.com` exactly — no userinfo,
 port, trailing dot or case variant, no subdomain — with the path
 `/r/user_bound_custom-mcp-<one segment>` (RFC 3986 unreserved characters,
-written as is or percent-encoded; no `..`, query, fragment or params). A registration with any other entry is refused
-with `invalid_client_metadata`. Redirect URIs are stored as sent and compared
-exactly at `/authorize` and `/token`.
+written as is or percent-encoded; no `..`, query, fragment or params). Entries
+that do not qualify are left out of the registration (RFC 7591 §3.2.1): the
+response's `redirect_uris` lists what was registered, and only those are
+accepted at `/authorize` and `/token`, so compare it with what you sent. A
+registration with no qualifying entry is refused with `invalid_client_metadata`
+([#2232](https://github.com/kagura-ai/memory-cloud/issues/2232)). Each entry
+left out is logged as host and path (query and fragment dropped, the Gemini
+binding segment masked, at most 10 per registration plus a count). Registered
+redirect URIs are stored as sent and compared exactly at `/authorize` and
+`/token`.
 Registrations are limited to 5 per minute per client address (`429`
 `invalid_request` over it). `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`
 (comma-separated CIDR ranges, empty by default) exempts callers in those
