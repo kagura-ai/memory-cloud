@@ -1,8 +1,11 @@
 """Redis client for cache and session management.
 
-Singleton pattern for connection pooling.
+One pooled client per event loop: a single uvicorn worker runs one loop, so in
+production this is a process-wide singleton.
 """
 
+import asyncio
+import weakref
 from typing import cast
 
 import redis.asyncio as aioredis
@@ -18,9 +21,56 @@ logger = get_logger(__name__)
 # Singleton Redis client
 _redis_client: aioredis.Redis | None = None
 
+# Name of the attribute that records which loop a client belongs to (#1995).
+# It is set only on clients this module builds: a weak reference to the loop
+# that built the client, or None while it was built outside a running loop and
+# no loop has used it yet. A fake that a test puts into ``_redis_client`` has
+# no such attribute, so it is returned unchanged and never rebuilt.
+_LOOP_ATTR = "_kagura_loop"
+_UNTAGGED = object()
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _tag_loop(client: object, loop: asyncio.AbstractEventLoop | None) -> None:
+    try:
+        setattr(client, _LOOP_ATTR, weakref.ref(loop) if loop is not None else None)
+    except (AttributeError, TypeError):
+        pass  # a stand-in without attribute support stays untagged
+
+
+def _owned_by_another_loop(client: object, loop: asyncio.AbstractEventLoop) -> bool:
+    """Whether ``client`` was built by this module for a loop other than ``loop``.
+
+    A client built outside a running loop is claimed by the first loop that
+    asks for it. An untagged client (a test fake) is never owned by another
+    loop.
+    """
+    # Read the instance dict, not getattr(): a MagicMock invents attributes.
+    tag = (getattr(client, "__dict__", None) or {}).get(_LOOP_ATTR, _UNTAGGED)
+    if tag is _UNTAGGED:
+        return False
+    if tag is None:
+        _tag_loop(client, loop)
+        return False
+    return not isinstance(tag, weakref.ref) or tag() is not loop
+
 
 def get_redis_client() -> aioredis.Redis:
-    """Get singleton Redis client.
+    """Get the Redis client for the running event loop.
+
+    A ``redis.asyncio`` client's sockets and its pool's waiters belong to the
+    loop that first used them. When the running loop is not the one the
+    current client was built for, the old client is dropped without being
+    closed (its loop is usually gone, so it cannot be closed from here) and a
+    new one is built (#1995). That happens in tests, where each
+    ``TestClient`` portal and the pytest-asyncio session loop are separate
+    loops; a uvicorn worker runs one loop, so production builds once.
 
     Returns:
         Redis client instance
@@ -29,6 +79,12 @@ def get_redis_client() -> aioredis.Redis:
         RedisError: If connection fails
     """
     global _redis_client
+
+    loop = _running_loop()
+    if _redis_client is not None and loop is not None:
+        if _owned_by_another_loop(_redis_client, loop):
+            logger.debug("redis_client_rebuilt_for_new_loop")
+            _redis_client = None
 
     if _redis_client is None:
         settings = get_settings()
@@ -63,6 +119,7 @@ def get_redis_client() -> aioredis.Redis:
 
         try:
             _redis_client = aioredis.Redis.from_pool(pool)
+            _tag_loop(_redis_client, loop)
             logger.info(
                 "redis_client_initialized",
                 # Host and port only: ``redact_generic_url`` keeps the query,
@@ -78,13 +135,26 @@ def get_redis_client() -> aioredis.Redis:
 
 
 async def close_redis() -> None:
-    """Close Redis connection."""
+    """Close the Redis client and forget it.
+
+    The client is closed with ``aclose()`` only on the loop it belongs to; a
+    client from another loop is just dropped (its connections cannot be closed
+    from here). The module forgets the client before closing it, so it is
+    reset even when ``aclose()`` raises or is cancelled, and the error is
+    raised to the caller.
+    """
     global _redis_client
 
-    if _redis_client:
-        await _redis_client.close()
-        _redis_client = None
-        logger.info("redis_connection_closed")
+    client = _redis_client
+    if client is None:
+        return
+    other_loop = _owned_by_another_loop(client, asyncio.get_running_loop())
+    _redis_client = None
+    if other_loop:
+        logger.debug("redis_client_dropped_from_another_loop")
+        return
+    await client.aclose()
+    logger.info("redis_connection_closed")
 
 
 # Convenience functions

@@ -65,6 +65,20 @@ async def _start_scheduler_leader(app: FastAPI) -> None:
     logger.info("background_tasks_scheduled", scheduler_leader="pending")
 
 
+# Upper bound on closing the worker's Redis pool at shutdown (#1995).
+_REDIS_CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+async def _close_redis_on_shutdown() -> None:
+    """Close this worker's async Redis pool; bounded, logs and never raises (#1995)."""
+    from db import redis as redis_db
+
+    try:
+        await asyncio.wait_for(redis_db.close_redis(), timeout=_REDIS_CLOSE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("redis_close_failed", error_type=type(exc).__name__, error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -232,6 +246,10 @@ async def lifespan(app: FastAPI):
     if scheduler_leader is not None:
         await scheduler_leader.stop()
     logger.info("scheduler_stopped")
+
+    # After the scheduler (its cron jobs use Redis), before close_db(). A job
+    # that touches Redis after this builds a new client lazily (#1995).
+    await _close_redis_on_shutdown()
 
     # Release blob storage (Issue #485)
     from storage.factory import close_blob_storage
