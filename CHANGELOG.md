@@ -4,6 +4,23 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.119.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.119.0) — 2026-10-21
+
+Auth and access hardening: the OAuth consent form carries a session-bound CSRF token and no longer lets form fields override the authorization request, OAuth form bodies are bounded, MCP looks a Bearer token up only in the store its shape names, and `list_revisions` no longer reveals a historical type the caller may not read.
+
+### Changed
+- **OAuth consent: query-only parameters and a CSRF token** ([#2199](https://github.com/kagura-ai/memory-cloud/issues/2199)): the consent page carries a hidden `csrf_token` bound to the browser session, and both *Approve* and *Deny* require it; a missing or wrong token gets the `400` error page and nothing is issued or stored. The approve passes Authlib the URL's query only; OAuth parameters in the form body (`client_id`, `redirect_uri`, `scope`, …) are ignored. The consent page is sent with `Cache-Control: no-store`, `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.
+- **MCP Bearer routing** ([#1994](https://github.com/kagura-ai/memory-cloud/issues/1994)): a `kagura_` token is looked up only among API keys and any other token only among OAuth tokens, as on the REST API. An OAuth request no longer pays an API-key lookup; a miss in either store is the same `401`, and a failing lookup in one store no longer affects tokens of the other shape.
+
+### Fixed
+- **OAuth form bodies are bounded** ([#2200](https://github.com/kagura-ai/memory-cloud/issues/2200)): `POST /api/v1/oauth/token` and the consent `POST /api/v1/oauth/authorize` read at most 16 KiB of form body; a larger one gets RFC 6749 `invalid_request` with status `413` before it is parsed (nothing is spooled to disk).
+- **`list_revisions` hides a denied historical type** ([#2169](https://github.com/kagura-ai/memory-cloud/issues/2169)): for a caller whose agent binding filters memory types, an `updated` event whose before or after version has a type the caller may not read lists `changed_fields: []`, the same rule as `reference(version=N)`. Event count, versions and paging are unchanged; unfiltered callers see no difference.
+- **`DELETE /mcp` session lookup failure** ([#2074](https://github.com/kagura-ai/memory-cloud/issues/2074)): a session-store failure ends the session request with the same JSON-RPC `503` and `Retry-After` as GET and POST.
+
+### Notes
+- **Behaviour change for consent pages already open** when the server is upgraded: the page has no token, so submitting it gets the `400` page; reload the authorization URL. Rotating `AUDIT_HMAC_KEY` (which also keys the consent token) has the same effect on open consent pages.
+- No database migration, no new environment variables. MCP tool count unchanged (72). No OpenAPI change.
+
 ## [v0.118.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.118.0) — 2026-10-20
 
 Dependency refresh and the credential default-context follow-ups: the frontend moves to Next.js 16.4 with the open Dependabot advisories cleared, the Credentials page reads key defaults from one list and creates a key with its default in one call, the OAuth consent and token forms ignore file parts, and a bulk forget never outlasts one forget timeout.
