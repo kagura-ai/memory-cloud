@@ -546,7 +546,7 @@ class Settings(BaseSettings):
         variable is named in one error so a single restart fixes all of them;
         the values themselves are never included.
         """
-        if self.environment.strip().lower() != "production":
+        if not self.is_production:
             return self
         refused: list[str] = []
         for field, env in _PRODUCTION_SECRET_FIELDS.items():
@@ -1493,6 +1493,11 @@ class Settings(BaseSettings):
     environment: str = Field(
         default="development", description="Environment (development/staging/production)"
     )
+
+    @property
+    def is_production(self) -> bool:
+        """``ENVIRONMENT`` is production, ignoring case and surrounding blanks."""
+        return self.environment.strip().lower() == "production"
 
     # OAuth Provider Control (Issue #360)
     auth_providers: str = Field(

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import Response
 
-from config.settings import Settings
+from config.settings import Settings, get_settings
 from services import known_device_service as svc
 from services.known_device_service import (
     DEVICE_COOKIE_MAX_AGE,
@@ -66,7 +66,7 @@ class TestCookie:
         assert digest != hmac_sha256_hex(value, KEY)
 
     def test_set_cookie_attributes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
+        monkeypatch.setattr(get_settings(), "environment", "production")
         response = Response()
         set_device_cookie(response, "v" * 43)
         header = response.headers["set-cookie"]

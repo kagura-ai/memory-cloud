@@ -7,13 +7,13 @@ Provides secure session storage using Redis with singleton pattern.
 
 import json
 import logging
-import os
 import secrets
 import time
 from datetime import datetime, timedelta
 from typing import Any
 
 from config.database import INVALID_REDIS_URL_MESSAGE
+from config.settings import get_settings
 from utils.datetime import utcnow
 from utils.redis_lock import execute_watched_sync, watch_token_sync
 from utils.url_redact import redis_location
@@ -121,12 +121,14 @@ def browser_cookie_attrs() -> dict[str, Any]:
 
     The session cookie and the device cookie (#1769) must not diverge — #1487
     was an open-coded ``set_cookie`` that shipped without ``Secure`` in
-    production. ``Secure`` follows ``ENVIRONMENT=production``.
+    production. ``Secure`` follows ``ENVIRONMENT=production``, read through the
+    settings so it is normalized like the production secret guard (#2239):
+    ``Production`` or `` production `` count too.
     """
     return {
         "path": "/",
         "httponly": True,
-        "secure": os.getenv("ENVIRONMENT", "development") == "production",
+        "secure": get_settings().is_production,
         "samesite": "lax",
     }
 
