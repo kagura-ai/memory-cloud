@@ -501,9 +501,9 @@ async def test_restored_resource_rows_get_the_indexers_point_back(db_session, se
         assert rebuilt.vector == original.vector
         # ``indexed_at`` is each point's own write time (#1869): the rebuilt
         # point is written later than the original, everything else is equal,
-        # plus the row's editable metadata the rebuild carries over (#2160).
+        # the row's editable metadata included (#2160, #2218).
         assert rebuilt.payload["indexed_at"] >= original.payload["indexed_at"]
-        row_keys = {"indexed_at", "tags", "type", "context_summary"}
+        row_keys = {"indexed_at"}
         assert {k: v for k, v in rebuilt.payload.items() if k not in row_keys} == {
             k: v for k, v in original.payload.items() if k not in row_keys
         }

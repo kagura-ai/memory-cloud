@@ -2693,3 +2693,146 @@ class TestKnnSeedEditFence:
         assert order == ["rollback", "refresh"]
         assert "attribute_names" not in db.refresh.await_args.kwargs
         assert [c.args[0] for c in mock_logger.warning.call_args_list] == ["knn_seeding_failed"]
+
+
+class TestMechanicalReembed:
+    """#2092: a re-embed of unchanged text (chunk backfill, model switch, repair
+    re-queue) runs no supersede detection, no judge and no clear; seeding is
+    unaffected."""
+
+    @staticmethod
+    def _hits(memory, *others):
+        return [{"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []}] + [
+            {"id": str(i), "score": s, "payload": {}, "embedding": []} for i, s in others
+        ]
+
+    @staticmethod
+    async def _seed(memory, db, candidates, *, config, repo=None, threshold=None):
+        judge = AsyncMock()
+        detect = AsyncMock()
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch(
+                "neural.calibration.resolve_knn_threshold",
+                new=AsyncMock(return_value=threshold),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)
+            ) as search,
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=repo or _make_edge_repo(),
+            ),
+            patch(
+                "tasks.neural_calibration.maybe_trigger_bootstrap",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("services.supersede_verify.judge_pair", new=judge),
+            patch.object(memory_service, "_detect_supersede_candidate", new=detect),
+            patch("services.memory_service.logger") as log,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+                mechanical_reembed=True,
+            )
+        return search, judge, detect, log
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_runs_no_detection_and_no_judge(self):
+        memory = _make_memory()
+        db = _make_db()
+
+        search, judge, detect, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.93)),
+            config=_make_config(enabled=False, verify_mode="llm"),
+        )
+
+        search.assert_not_called()
+        judge.assert_not_called()
+        detect.assert_not_called()
+        assert memory.supersede_candidate is None
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_keeps_the_configured_suggest_state_log(self, monkeypatch):
+        monkeypatch.setattr(memory_service, "_SUPERSEDE_SUGGEST_LAST_SEEN", True)
+        memory = _make_memory()
+
+        _, _, _, log = await self._seed(
+            memory, _make_db(), self._hits(memory), config=_make_config(enabled=False)
+        )
+
+        assert memory_service._SUPERSEDE_SUGGEST_LAST_SEEN is True
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_suggest_disabled" not in events
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_still_seeds_edges(self):
+        memory = _make_memory()
+        repo = _make_edge_repo()
+
+        search, _, detect, _ = await self._seed(
+            memory,
+            _make_db(),
+            self._hits(memory, (uuid4(), 0.93), (uuid4(), 0.7)),
+            config=_make_config(enabled=True, verify_mode="llm"),
+            repo=repo,
+            threshold=0.5,
+        )
+
+        search.assert_awaited_once()
+        detect.assert_not_called()
+        repo.create_edge_if_absent.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_does_not_clear_a_stored_candidate(self):
+        """The accepted trade-off: a re-embed under an embedder that scores the
+        pair lower no longer clears the suggestion (#2059's branch)."""
+        from models.memory import Memory
+
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        memory.supersede_candidate = stored
+        db = _make_db()
+
+        await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.60)),
+            config=_make_config(enabled=False, verify_mode="llm"),
+        )
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_does_not_report_suggestions_off(self):
+        """Seeding on but uncalibrated, suggestions on: the run skips the query,
+        but the once-per-embedder INFO saying SUPERSEDE_SUGGEST_ENABLED is off
+        must not fire (it is on) nor spend its slot."""
+        memory = _make_memory()
+
+        search, _, _, log = await self._seed(
+            memory, _make_db(), self._hits(memory), config=_make_config(enabled=True)
+        )
+
+        search.assert_not_called()
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "knn_seed_skip_no_consumer" not in events
+        assert memory_service._KNN_SEED_NO_CONSUMER_REPORTED == set()
+        debug = [c for c in log.debug.call_args_list if c.args[0] == "knn_seed_skip_no_consumer"]
+        assert debug[0].kwargs["reason"] == "mechanical_reembed"

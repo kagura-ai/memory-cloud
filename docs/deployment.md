@@ -1132,6 +1132,12 @@ they never appear with the default `LOG_LEVEL=info`. If a DEBUG event is
 missing from your logs, the state may still have happened. Tally the INFO and
 WARNING events below.
 
+A re-embed whose summary and content are unchanged since the row's last
+successful embed (a content-chunk backfill, an embedding-model switch, a repair
+re-queue) runs neither the detection nor the judge. `embedding_completed`
+carries `mechanical_reembed=true` for it, so judge spend during a backfill is
+counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
+
 **Supersede suggestions** (`services/memory_service.py`, `services/edge_service.py`)
 
 | event | level | meaning |

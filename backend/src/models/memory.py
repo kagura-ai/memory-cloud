@@ -240,6 +240,13 @@ class Memory(Base):
     # re-evaluation, dedup tag merge, rollback); never by the initial write or
     # an embedding retry.
     embedding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #2092: the digest of summary + content this row was last embedded with
+    # (``services.supersede_verify.embedded_text_digest``). NULL = never
+    # successfully embedded since the column exists. Read by
+    # ``process_pending_embedding`` to tell a mechanical re-embed (unchanged
+    # text: chunk backfill, model switch, repair re-queue) from a first embed
+    # or an edit; written only by its success write.
+    embedded_text_digest: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Layer 2: 文脈説明
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

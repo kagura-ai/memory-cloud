@@ -8437,6 +8437,8 @@ async def _create_knn_seed_edges(
     vector: list[float],
     collection_name: str,
     model_name: str,
+    *,
+    mechanical_reembed: bool = False,
 ) -> None:
     """Create k-NN cold-start seed edges for a newly embedded memory.
 
@@ -8461,6 +8463,16 @@ async def _create_knn_seed_edges(
     ``supersede_suggest_enabled`` only the detection; the neighbour query runs
     when either is on.
 
+    Issue #2092: a re-embed of unchanged text (``mechanical_reembed``: a
+    content-chunk backfill, an embedding-model switch, a repair re-queue, an
+    admin retry of a once-embedded row) runs no supersede detection and no
+    judge call — the column already says what the neighbourhood said, and
+    verdicts are keyed on text, not vectors. The accepted trade-off: #2059's
+    "no near-duplicate any more clears the suggestion" no longer fires on an
+    unchanged-text re-embed (most visibly a model switch); a stored candidate then
+    stays until the next edit, accept or dismissal (the read path's liveness
+    guards still apply). Seed edges are unaffected.
+
     Best-effort: any failure is logged and swallowed — must not affect memory
     creation. Edge creation uses an isolated commit so partial failures do not
     roll back unrelated work.
@@ -8473,6 +8485,8 @@ async def _create_knn_seed_edges(
         collection_name: Qdrant collection name (varies by embedding model)
         model_name: Embedding model name (e.g. ``text-embedding-3-small``).
             Combined with ``len(vector)`` to key the calibration lookup.
+        mechanical_reembed: True when the row was already embedded with this
+            exact text (#2092); detection is skipped for this run.
     """
     from db.qdrant import search_memories_qdrant
     from neural.calibration import resolve_knn_threshold
@@ -8505,6 +8519,12 @@ async def _create_knn_seed_edges(
                 ),
             )
         _SUPERSEDE_SUGGEST_LAST_SEEN = suggest_enabled
+        # #2092: after the once-per-process log above, which reports the
+        # configured flag, not this run.
+        detection_skipped = mechanical_reembed and suggest_enabled
+        if detection_skipped:
+            logger.debug("supersede_detect_skipped_mechanical_reembed", memory_id=str(memory.id))
+            suggest_enabled = False
         if not seed_enabled and not suggest_enabled:
             return
 
@@ -8581,7 +8601,17 @@ async def _create_knn_seed_edges(
         needs_seed = seed_enabled and threshold is not None
         if not needs_seed and not suggest_enabled:
             skip_key = (model_name, len(vector))
-            if skip_key not in _KNN_SEED_NO_CONSUMER_REPORTED:
+            if detection_skipped:
+                # #2092: the flag is on; only this run skips the detection.
+                # Neither the INFO hint nor its once-per-embedder slot fits.
+                logger.debug(
+                    "knn_seed_skip_no_consumer",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    dimensions=len(vector),
+                    reason="mechanical_reembed",
+                )
+            elif skip_key not in _KNN_SEED_NO_CONSUMER_REPORTED:
                 _KNN_SEED_NO_CONSUMER_REPORTED.add(skip_key)
                 logger.info(
                     "knn_seed_skip_no_consumer",
@@ -9499,6 +9529,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     from services.context_routing import resolve_context_routing
     from services.embedding_claim import STALE_CLAIM_SECONDS, EmbeddingClaim
     from services.embedding_service import EmbeddingService
+    from services.supersede_verify import embedded_text_digest
     from utils.datetime import utcnow as _utcnow
 
     async for db in get_db():
@@ -9576,6 +9607,14 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             if not memory:
                 return
 
+            # #2092: the text this run embeds, and whether the row was already
+            # embedded with exactly that text (a content-chunk backfill, an
+            # embedding-model switch, a repair re-queue). Decided here, before
+            # the success write: that ORM UPDATE may sync the new digest onto
+            # ``memory``, which would make every run look mechanical.
+            embedded_digest = embedded_text_digest(memory.summary or "", memory.content or "")
+            mechanical_reembed = memory.embedded_text_digest == embedded_digest
+
             # Resolve per-context routing (#341: shared helper)
             collection, embed_svc = await resolve_context_routing(
                 db, memory.context_id, default_service=EmbeddingService(db)
@@ -9649,6 +9688,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     embedding_status="success",
                     embedding_error=None,
                     embedding_retry_count=0,
+                    # #2092: the only writer of the column.
+                    embedded_text_digest=embedded_digest,
                 )
             )
             await db.commit()
@@ -9662,7 +9703,11 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 )
                 return
 
-            logger.info("embedding_completed", memory_id=str(memory_id))
+            logger.info(
+                "embedding_completed",
+                memory_id=str(memory_id),
+                mechanical_reembed=mechanical_reembed,
+            )
 
             if vector is None:
                 # #1870: a resource point, as the indexer writes it — the
@@ -9686,6 +9731,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 vector=vector,
                 collection_name=collection,
                 model_name=embed_svc.model,
+                mechanical_reembed=mechanical_reembed,
             )
 
             # ================================================================

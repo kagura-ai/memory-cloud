@@ -221,6 +221,19 @@ def text_fingerprint(summary: str | None, content_head: str | None) -> str:
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def embedded_text_digest(summary: str, content: str) -> str:
+    """The digest of the full text one embedding run embedded (#2092).
+
+    ``md5(summary + "\\x1f" + content)`` over the UTF-8 bytes, 32 hex chars:
+    what ``memories.embedded_text_digest`` stores on a successful embed. The
+    f11 migration's SQL twin is ``md5(summary || chr(31) || content)``. Full
+    text, unlike :func:`text_fingerprint`: an edit past the judge's heads
+    still moves the summary vector or the chunk points.
+    """
+    payload = (summary + "\x1f" + content).encode("utf-8")
+    return hashlib.md5(payload, usedforsecurity=False).hexdigest()
+
+
 def _combine(old_fingerprint: str, new_fingerprint: str) -> str:
     """The pair digest from the two one-side digests (old first)."""
     return hashlib.sha256((old_fingerprint + new_fingerprint).encode("utf-8")).hexdigest()[:16]

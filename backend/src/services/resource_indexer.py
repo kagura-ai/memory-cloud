@@ -361,6 +361,45 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     return point_id
 
 
+# The ``Memory.source`` and ``Memory.type`` of a row the indexer creates.
+INDEXER_SOURCE = "resource_ingest"
+RESOURCE_MEMORY_TYPE = "resource_data"
+
+
+def _keeps_user_edits(
+    memory: Memory, new_details: dict[str, Any], context_summary: str
+) -> tuple[dict[str, Any], str]:
+    """Carry a row's user-authored values over a same-version re-index (#2218).
+
+    Returns the details and the ``context_summary`` the row and its point
+    keep: a copy of ``new_details`` with the row's ``details.location``, and
+    the row's or the indexer's ``context_summary``.
+
+    - ``details.location`` is always kept. Its only writer is a user or agent
+      edit (``_apply_location``): the indexer strips ``location`` from worker
+      lineage (#1331), so a location on the row is user-authored by
+      construction. Copied as stored; it was validated when written.
+    - ``context_summary`` is kept when the row was edited since the indexer
+      wrote it (``version > 1``: only an API edit or a rollback bumps it,
+      #2043) or was not written by the indexer (a ``remember(external_id)``
+      row matched by natural key, #2164), unless it is empty. Otherwise the
+      indexer's ``context_summary`` (the new truncation) is returned.
+
+    Accepted edges: an edit of another versioned field (importance, tags)
+    also keeps the old truncation, which on the same version differs from
+    the new one only if the schema's fulltext projection changed since; the
+    row's ``content`` and the point's text are refreshed either way.
+    """
+    details = dict(new_details)
+    location = (memory.details or {}).get("location")
+    if location is not None:
+        details["location"] = location
+    user_authored = memory.version > 1 or memory.source != INDEXER_SOURCE
+    if user_authored and memory.context_summary:
+        return details, memory.context_summary
+    return details, context_summary
+
+
 def resource_document_text(projected: dict[str, Any], doc_id: str) -> str:
     """The text a resource document is embedded and BM25-indexed by.
 
@@ -403,12 +442,12 @@ def build_resource_point(
         updated_at: When the document version was ingested.
         memory_id: The Memory row that owns the point.
         tags / memory_type / context_summary / location: The owning row's
-            editable metadata (#2160), so a rebuilt or re-indexed point
-            agrees with the row and recall's ``tags`` / ``type`` / geo
-            filters match it. ``None`` omits the key: a fresh create passes
-            none, so its point keeps the indexer-only shape. They are merged
-            under the indexer's keys, so they can never shadow the
-            identity or isolation keys.
+            editable metadata (#2160, #2218), so an indexed, re-indexed or
+            rebuilt point agrees with the row and recall's ``tags`` /
+            ``type`` / geo filters match it. ``None`` omits the key (a row
+            without a location has none). They are merged under the
+            indexer's keys, so they can never shadow the identity or
+            isolation keys.
     """
     # Issue #335: sparse BM25 vector from the same text as the dense
     # embedding, so resource points participate in hybrid search instead of
@@ -701,20 +740,33 @@ class ResourceIndexer:
 
             # 5. Process each event
             for event in events:
+                repointed_mark = len(self._repointed)
                 try:
+                    # #2218: one SAVEPOINT per event. A failed event's flush is
+                    # rolled back on its own and the session stays usable for
+                    # the rest of the batch, so one poisoned event can neither
+                    # sink the batch nor commit half of itself with it.
+                    async with self.db.begin_nested():
+                        if event.op == "upsert":
+                            await self._apply_upsert(
+                                event, schema, context, collection_name, embedding_service
+                            )
+                        elif event.op == "delete":
+                            await self._apply_delete(event, context, collection_name)
+                    # Counted after RELEASE SAVEPOINT: a failed release must
+                    # not count the event.
                     if event.op == "upsert":
-                        await self._apply_upsert(
-                            event, schema, context, collection_name, embedding_service
-                        )
                         metrics.applied_upserts += 1
                     elif event.op == "delete":
-                        await self._apply_delete(event, context, collection_name)
                         metrics.applied_deletes += 1
 
                     # Update offset after each successful event
                     state.last_offset = event.id
 
                 except Exception as e:
+                    # The event's re-points went with its savepoint: the rows
+                    # still name their old points, which must stay (#2164).
+                    del self._repointed[repointed_mark:]
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -1057,26 +1109,32 @@ class ResourceIndexer:
             "indexed_at": to_utc_iso(utcnow()),
         }
 
-        # #2160: a re-index of the same version updates a live row in place,
-        # so the point carries that row's metadata as it will be after this
-        # update: its tags and type are kept, its context_summary and details
-        # are replaced below. The location comes from the NEW details, not
-        # ``location_lat/lon``: those generated columns still hold the
-        # pre-update value until the flush round-trips them (the lineage
-        # strips a worker ``location`` today, #1331, so this is None and the
-        # point drops a coordinate the row is losing too). A fresh create
-        # passes none, so its point keeps the indexer-only shape.
-        row_metadata: dict[str, Any] = {}
+        # #2160 / #2218: the point carries the row's metadata as this upsert
+        # leaves it, on both branches, so recall's ``tags`` / ``type`` / geo
+        # filters match a fresh point the same way as a re-indexed or rebuilt
+        # one. A create writes the indexer's defaults. A re-index of the same
+        # version keeps the row's tags and type, and what the user edited
+        # (``_keeps_user_edits``).
         if existing_memory is not None:
-            # Local import: memory_service imports this module.
-            from services.memory_service import location_payload_from_details
+            tags = list(existing_memory.tags or [])
+            memory_type = existing_memory.type
+            new_details, context_summary = _keeps_user_edits(
+                existing_memory, new_details, context_summary
+            )
+        else:
+            tags, memory_type = [], RESOURCE_MEMORY_TYPE
+        # Local import: memory_service imports this module.
+        from services.memory_service import location_payload_from_details
 
-            row_metadata = {
-                "tags": list(existing_memory.tags or []),
-                "memory_type": existing_memory.type,
-                "context_summary": context_summary,
-                "location": location_payload_from_details(new_details),
-            }
+        # The location comes from the details the row is left with, not
+        # ``location_lat/lon``: those generated columns still hold the
+        # pre-update value until the flush round-trips them.
+        row_metadata: dict[str, Any] = {
+            "tags": tags,
+            "memory_type": memory_type,
+            "context_summary": context_summary,
+            "location": location_payload_from_details(new_details),
+        }
 
         point = build_resource_point(
             context=context,
@@ -1126,12 +1184,15 @@ class ResourceIndexer:
         # ========================================================================
         # 5. Issue #262: Create or update Memory entry
         # ========================================================================
-        # P1-4: Transaction consistency - Memory operations use same transaction
-        # If Memory operation fails, PostgreSQL will rollback but Qdrant stays committed
+        # P1-4 / #2218: the event runs in its own SAVEPOINT
+        # (``process_incremental``). If a Memory operation fails, only this
+        # event's row changes roll back; the Qdrant point written above stays.
         # This is acceptable because:
-        # 1. Qdrant upsert is idempotent (same point_id)
-        # 2. Next indexer run will retry Memory creation
-        # 3. A point left without a row is swept once its ``indexed_at`` is
+        # 1. Qdrant upsert is idempotent (same point_id): a re-sent or
+        #    replayed event rewrites the same point. A failed event is not
+        #    retried when a later event of the batch succeeds (the offset
+        #    moves past it).
+        # 2. A point left without a row is swept once its ``indexed_at`` is
         #    older than the sweep's grace period: the sweep judges resource
         #    points by their row (#1829).
 
@@ -1194,16 +1255,16 @@ class ResourceIndexer:
                     # source_uri_prefix queries (find_by_channel) work; NULL for
                     # non-worker resources (legacy behavior).
                     source_uri=lineage_source_uri,
-                    type="resource_data",
+                    type=memory_type,
                     # P0-2: Fix - use 'is not None' to allow importance=0.0
                     importance=event.importance if event.importance is not None else 0.6,
                     scope="working",
-                    source="resource_ingest",  # Issue #262: Track provenance
+                    source=INDEXER_SOURCE,  # Issue #262: Track provenance
                     # Issue #887: server-stamped provenance — connector/external
                     # ingestion is 'connector', never client-set. (Trust is
                     # authoritative at the context level; this is provenance.)
                     source_type=SOURCE_TYPE_CONNECTOR,
-                    tags=[],
+                    tags=tags,
                     context={"context_id": str(context.id)},
                     client="resource_indexer",
                     # Bugfix: Use UUID format for summary_embedding_id
@@ -1226,41 +1287,52 @@ class ResourceIndexer:
             # ==================================================================
             # 6. Issue #355: Auto-cleanup old versions of same doc_id
             # ==================================================================
+            # #2218: its own SAVEPOINT. The event already runs in one, and a
+            # failed flush deactivates the savepoint it ran in: swallowing the
+            # error inside the event's savepoint would fail the event's release
+            # (and lose the row written above) instead of being non-blocking.
+            # The old points are deleted only once the row deletes are
+            # flushed: a failed flush rolls the rows back, and they must keep
+            # their points.
             try:
-                old_memories_result = await self.db.execute(
-                    select(Memory).where(
-                        Memory.user_id == str(context.created_by),
-                        Memory.workspace_id == context.workspace_id,
-                        Memory.context_id == context.id,
-                        Memory.resource_id == event.resource_id,
-                        Memory.resource_doc_id == event.doc_id,
-                        Memory.resource_version != event.version,
-                    )
-                )
-                old_memories = old_memories_result.scalars().all()
-
-                if old_memories:
-                    for old_mem in old_memories:
-                        old_point_str = (
-                            f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
+                old_points: list[str] = []
+                async with self.db.begin_nested():
+                    old_memories_result = await self.db.execute(
+                        select(Memory).where(
+                            Memory.user_id == str(context.created_by),
+                            Memory.workspace_id == context.workspace_id,
+                            Memory.context_id == context.id,
+                            Memory.resource_id == event.resource_id,
+                            Memory.resource_doc_id == event.doc_id,
+                            Memory.resource_version != event.version,
                         )
-                        old_point_uuid = uuid5(NAMESPACE_DNS, old_point_str)
-                        try:
-                            await self.qdrant_client.delete(
-                                collection_name=collection_name,
-                                points_selector=[str(old_point_uuid)],
-                            )
-                        except Exception:
-                            pass  # Qdrant point may already be gone
-                        await self.db.delete(old_mem)
+                    )
+                    old_memories = old_memories_result.scalars().all()
 
-                    await self.db.flush()
+                    if old_memories:
+                        for old_mem in old_memories:
+                            old_point_str = (
+                                f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
+                            )
+                            old_points.append(str(uuid5(NAMESPACE_DNS, old_point_str)))
+                            await self.db.delete(old_mem)
+
+                        await self.db.flush()
+                for old_point in old_points:
+                    try:
+                        await self.qdrant_client.delete(
+                            collection_name=collection_name,
+                            points_selector=[old_point],
+                        )
+                    except Exception:
+                        pass  # Qdrant point may already be gone
+                if old_points:
                     logger.info(
                         "old_versions_cleaned",
                         resource_id=event.resource_id,
                         doc_id=event.doc_id,
                         current_version=event.version,
-                        cleaned_count=len(old_memories),
+                        cleaned_count=len(old_points),
                     )
             except Exception as cleanup_err:
                 # Non-blocking: cleanup failure should not block upsert
@@ -1272,9 +1344,8 @@ class ResourceIndexer:
                 )
 
         except Exception as e:
-            # P1-4: Log Memory creation/update failure
-            # PostgreSQL transaction will rollback, but Qdrant point remains
-            # Next indexer run will retry
+            # P1-4: Log Memory creation/update failure. The event's SAVEPOINT
+            # rolls back its row changes; the Qdrant point remains (see above).
             logger.error(
                 "resource_memory_operation_failed",
                 resource_id=event.resource_id,
