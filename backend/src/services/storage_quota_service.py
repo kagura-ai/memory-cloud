@@ -36,9 +36,11 @@ logger = get_logger(__name__)
 # allocates a ``Script`` wrapper and computes the SHA1 on each call, so
 # caching at first use avoids per-reservation overhead on the upload
 # hot path (Phase 6 review note + Copilot loop 2 finding). Auto-invalidates
-# when ``close_redis()`` is called (tests) and a fresh singleton is
-# constructed: ``id(client)`` differs, so the next call re-registers
-# against the new client. Production never resets the singleton.
+# when ``db.redis`` replaces its client: after ``close_redis()`` (worker
+# shutdown, tests) or when a test runs on a new event loop (#1995).
+# ``id(client)`` differs, so the next call re-registers against the new
+# client; the cached ``Script`` keeps the old client alive until then, so
+# its ``id`` cannot be reused. In production a worker builds one client.
 _reserve_quota_script: tuple[int, Any] | None = None
 
 # Sentinel returned by the atomic reserve Lua script when the requested

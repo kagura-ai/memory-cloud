@@ -18,7 +18,8 @@ from utils.url_redact import redis_location
 
 logger = get_logger(__name__)
 
-# Singleton Redis client
+# The client for the current event loop (one per worker in production; see
+# get_redis_client()). Callers fetch it at the point of use and never keep it.
 _redis_client: aioredis.Redis | None = None
 
 # Name of the attribute that records which loop a client belongs to (#1995).
@@ -44,19 +45,20 @@ def _tag_loop(client: object, loop: asyncio.AbstractEventLoop | None) -> None:
         pass  # a stand-in without attribute support stays untagged
 
 
+def _loop_tag(client: object) -> object:
+    """The client's loop tag, or ``_UNTAGGED`` for a client this module did not build."""
+    # Read the instance dict, not getattr(): a MagicMock invents attributes.
+    return (getattr(client, "__dict__", None) or {}).get(_LOOP_ATTR, _UNTAGGED)
+
+
 def _owned_by_another_loop(client: object, loop: asyncio.AbstractEventLoop) -> bool:
     """Whether ``client`` was built by this module for a loop other than ``loop``.
 
-    A client built outside a running loop is claimed by the first loop that
-    asks for it. An untagged client (a test fake) is never owned by another
-    loop.
+    An untagged client (a test fake) and a client not yet claimed by any loop
+    are never owned by another loop.
     """
-    # Read the instance dict, not getattr(): a MagicMock invents attributes.
-    tag = (getattr(client, "__dict__", None) or {}).get(_LOOP_ATTR, _UNTAGGED)
-    if tag is _UNTAGGED:
-        return False
-    if tag is None:
-        _tag_loop(client, loop)
+    tag = _loop_tag(client)
+    if tag is _UNTAGGED or tag is None:
         return False
     return not isinstance(tag, weakref.ref) or tag() is not loop
 
@@ -82,7 +84,10 @@ def get_redis_client() -> aioredis.Redis:
 
     loop = _running_loop()
     if _redis_client is not None and loop is not None:
-        if _owned_by_another_loop(_redis_client, loop):
+        if _loop_tag(_redis_client) is None:
+            # Built outside a running loop: the first loop that uses it owns it.
+            _tag_loop(_redis_client, loop)
+        elif _owned_by_another_loop(_redis_client, loop):
             logger.debug("redis_client_rebuilt_for_new_loop")
             _redis_client = None
 
