@@ -2274,8 +2274,9 @@ candidates before the cut to *k* (#2033):
 
 On the Ollama path a document whose request failed or whose reply holds no
 score is *unscored*. Up to 20% of the candidates may be unscored: they keep
-their hybrid order and `hybrid_score` and are placed after the scored ones
-(no 0 is written for them). Above 20% (for example most requests timing out)
+their hybrid order and are placed after the scored ones, reported with a
+score scaled under the lowest scored one (the top unscored one ties with it
+at most, the ratios of their hybrid scores are kept; [#2084](https://github.com/kagura-ai/memory-cloud/issues/2084)). Above 20% (for example most requests timing out)
 the recall fails open with `RerankNotDiscriminatingError`. Either way one
 warning per recall gives the counts:
 

@@ -295,6 +295,8 @@ Errors: `422` for a missing or malformed `filters.context_id`; a context the cal
 }
 ```
 
+With a reranker, `score` is the reranker's relevance; a candidate it could not score is placed after the scored ones and reported at or below the lowest scored one ([#2084](https://github.com/kagura-ai/memory-cloud/issues/2084)).
+
 **Example (curl):**
 
 ```bash
