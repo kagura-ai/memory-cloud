@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.120.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.120.0) — 2026-10-21
+
+Index and accounting correctness, plus Gemini DCR: a rebuilt resource point keeps the row's edited metadata and a re-pointed row leaves no stray chunks, the content-chunk pipeline closes its last reclaim, backfill and late-write gaps, k-NN seed edges are no longer built from text an edit replaced, a failed or cancelled analysis records its LLM spend, and an unscored rerank candidate is reported on the same scale as the scored ones; Gemini custom MCP clients can register through DCR.
+
+### Added
+- **Gemini custom MCP clients register through DCR** ([#2222](https://github.com/kagura-ai/memory-cloud/issues/2222)): Gemini's redirect URIs on `oauth-redirect.googleusercontent.com` and `oauth-redirect-sandbox.googleusercontent.com` (path `/r/user_bound_custom-mcp-<one segment>`, HTTPS, exact host) are accepted by `POST /register` as provider `gemini`, so Gemini can connect from the server URL alone. Other `googleusercontent.com` hosts and other paths are still refused.
+
+### Changed
+- **Unscored rerank candidates** ([#2084](https://github.com/kagura-ai/memory-cloud/issues/2084)): with a self-hosted reranker, a candidate the reranker could not score is now reported with a score at or below the lowest scored one — in recall `score`, the keyword-only confidence and co-activation — instead of its hybrid score on another scale. Order among unscored candidates is unchanged. The query cap on the raw `/v1/completions` path already shipped in v0.112.0 (#2097).
+- **Stale embedding runs spend retry budget** ([#2095](https://github.com/kagura-ai/memory-cloud/issues/2095)): a `processing` row whose claim expired is reclaimed at most 3 times; then it ends `failed` with `embedding_error` `claim_expired: …` (log `embedding_budget_exhausted reason=claim_expired`) and shows as stalled, so an admin retry resets it. A worker restart in the middle of a run now spends 1 of the 3 retries.
+
+### Fixed
+- **Resource point rebuilds keep the row's edits** ([#2160](https://github.com/kagura-ai/memory-cloud/issues/2160)): a rebuilt (restore, Sleep reindex, embedding migration) or re-indexed resource point carries the row's tags, type, context_summary and location, so tag-, type- and geo-filtered recall finds the row again. Resource points written before this release get these fields the next time they are rebuilt or re-indexed.
+- **Re-pointed rows leave no stray chunks** ([#2164](https://github.com/kagura-ai/memory-cloud/issues/2164)): when the resource indexer takes over a row by its natural key (for example a `remember(external_id=…)` row), the row's old content-chunk points and own-id point are deleted after the batch commits (best effort; the orphan vector sweep stays the backstop).
+- **Content-chunk pipeline gaps** ([#2095](https://github.com/kagura-ai/memory-cloud/issues/2095)): turning `content_chunks_enabled` on also backfills rows whose embedding run was in flight; a Sleep chunk write that lands over a newer run still in flight re-queues the row instead of leaving pre-edit chunks.
+- **k-NN seed edges after an edit** ([#2085](https://github.com/kagura-ai/memory-cloud/issues/2085)): seed edges are dropped when the memory's text changed between the run's success write and the edge commit (`knn_seed_skipped_source_edited`); the newer run seeds from the current text. Tag co-occurrence seeding still runs.
+- **Spend of a failed or cancelled analysis** ([#2088](https://github.com/kagura-ai/memory-cloud/issues/2088)): an analysis that fails its cluster-labeling threshold or is cancelled writes a report with its LLM spend (tokens, per-model breakdown, `cost_actual_cents`), so cost aggregation counts it; the analysis views show the actual cost. A threshold failure no longer leaves the analysis stuck in `running`. Sleep health now grades Sleep reports only.
+
+### Notes
+- Sleep Reports lists now also show failed and cancelled analysis runs (status Failed / Cancelled, message `analysis_failed: …`), next to the successful analysis reports already listed there; a source filter is tracked in #2219. The spend of LLM calls still in flight when an analysis is cancelled cannot be recorded.
+- No database migration, no new environment variables. MCP tool count unchanged. No OpenAPI change.
+
 ## [v0.119.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.119.0) — 2026-10-21
 
 Auth and access hardening: the OAuth consent form carries a session-bound CSRF token and no longer lets form fields override the authorization request, OAuth form bodies are bounded, MCP looks a Bearer token up only in the store its shape names, and `list_revisions` no longer reveals a historical type the caller may not read.
