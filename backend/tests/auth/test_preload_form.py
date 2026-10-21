@@ -153,8 +153,15 @@ def test_body_at_the_limit_is_parsed() -> None:
 
 
 async def test_client_disconnect_mid_body_is_a_400() -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"confirm=yes&pad=", "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
     async def receive() -> dict[str, Any]:
-        return {"type": "http.disconnect"}
+        return next(messages)
 
     scope = {
         "type": "http",

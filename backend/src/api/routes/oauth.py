@@ -123,7 +123,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # ============================================================================
 
 
-async def preload_form(request: Request):
+async def preload_form(request: Request) -> Request:
     """Preload form data for OAuth2 endpoints.
 
     Authlib's create_oauth2_request is sync, but FastAPI's request.form() is async.
@@ -2620,7 +2620,12 @@ class _DeviceAuthorizationRequestError(Exception):
 
 def _oauth_form_refused(request: Request, e: _DeviceAuthorizationRequestError) -> JSONResponse:
     """Answer a form body ``preload_form`` refused (#2200) as RFC 6749 ``invalid_request``."""
-    logger.info("oauth_form_body_refused", path=request.url.path, status_code=e.status_code)
+    logger.info(
+        "oauth_form_body_refused",
+        path=request.url.path,
+        status_code=e.status_code,
+        reason=e.description,
+    )
     return rfc6749_error_response(
         error="invalid_request", description=e.description, status_code=e.status_code
     )
