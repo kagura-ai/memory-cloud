@@ -8704,14 +8704,6 @@ async def _create_knn_seed_edges(
             )
             return
 
-        # #2085: an edit committed after this run's success write starts its
-        # own run, which finds no edges and seeds from the new text — unless
-        # this run seeds first: the guard above then keeps the stale edges for
-        # good. Re-read the text and leave the seeding to the newer run.
-        if await _source_text_moved(db, memory, embedded_fingerprint):
-            logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
-            return
-
         edges_created = 0
         similarities: list[float] = []
 
@@ -8756,6 +8748,16 @@ async def _create_knn_seed_edges(
                 )
 
         if edges_created > 0:
+            # #2085: an edit committed after this run's success write starts
+            # its own run, which finds no edges and seeds from the new text —
+            # unless this run commits first: the guard above then keeps the
+            # stale edges for good. The inserts are still uncommitted, so
+            # re-read the text right before the commit and, when it moved,
+            # drop them and leave the seeding to the newer run.
+            if await _source_text_moved(db, memory, embedded_fingerprint):
+                await db.rollback()
+                logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
+                return
             await db.commit()
             avg_similarity = sum(similarities) / len(similarities)
             logger.info(

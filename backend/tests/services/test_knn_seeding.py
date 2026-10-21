@@ -2508,9 +2508,10 @@ class TestLlmModeClearsStaleCandidates:
 
 class TestKnnSeedEditFence:
     """#2085: an edit committed after this run's success write and before its
-    edge inserts must not get seed edges from the earlier text. The
+    edges commit must not get seed edges from the earlier text. The
     already-seeded guard would keep them for good: the edit's own run then
-    skips seeding."""
+    skips seeding. The re-read runs after the inserts, right before the
+    commit, so an edit that lands during the insert loop is caught too."""
 
     @staticmethod
     async def _seed(memory, db, hits, *, config, repo):
@@ -2537,30 +2538,64 @@ class TestKnnSeedEditFence:
         ]
 
     @staticmethod
-    def _edit_lands(db):
+    def _edit_lands(db, *, field="summary"):
         """The row holds the edited text from the first re-read on."""
 
         async def refresh(obj, attribute_names=None):
-            obj.summary = "B_v2: a different subject"
+            setattr(obj, field, "B_v2: a different subject")
 
         db.refresh = AsyncMock(side_effect=refresh)
 
     @pytest.mark.asyncio
-    async def test_text_moved_before_the_inserts_skips_the_seeds(self):
+    @pytest.mark.parametrize("field", ["summary", "content"])
+    async def test_text_moved_before_the_commit_drops_the_seeds(self, field):
+        """A content-only edit skips too (#2069 parity: the fingerprint covers
+        summary and content although the vector comes from the summary)."""
         memory = _make_memory()
         db = _make_db()
-        self._edit_lands(db)
+        self._edit_lands(db, field=field)
         repo = _make_edge_repo()
 
         events = await self._seed(
             memory, db, self._hits(memory, 0.7, 0.6), config=_make_config(suggest=False), repo=repo
         )
 
-        repo.create_edge_if_absent.assert_not_awaited()
+        # The inserts ran inside the outer transaction; the fence rolls them back.
+        assert repo.create_edge_if_absent.await_count == 2
         db.commit.assert_not_called()
+        db.rollback.assert_awaited_once()
         assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {"summary", "content"}
         assert "knn_seed_skipped_source_edited" in events
         assert "knn_seed_edges_created" not in events
+
+    @pytest.mark.asyncio
+    async def test_the_fence_reads_after_the_inserts(self):
+        """An edit that lands during the insert loop is still caught: the
+        re-read follows the last insert and precedes the commit."""
+        memory = _make_memory()
+        db = _make_db()
+        order: list[str] = []
+        repo = _make_edge_repo()
+
+        async def insert(**_kwargs):
+            order.append("insert")
+            return MagicMock()
+
+        async def refresh(obj, attribute_names=None):
+            order.append("refresh")
+
+        async def commit():
+            order.append("commit")
+
+        repo.create_edge_if_absent = AsyncMock(side_effect=insert)
+        db.refresh = AsyncMock(side_effect=refresh)
+        db.commit = AsyncMock(side_effect=commit)
+
+        await self._seed(
+            memory, db, self._hits(memory, 0.7, 0.6), config=_make_config(suggest=False), repo=repo
+        )
+
+        assert order == ["insert", "insert", "refresh", "commit"]
 
     @pytest.mark.asyncio
     async def test_a_detection_reread_does_not_hide_the_edit(self):
@@ -2579,7 +2614,7 @@ class TestKnnSeedEditFence:
         assert db.refresh.await_count == 2  # the detection's re-read, then the fence's
         assert "supersede_candidate_skipped_source_edited" in events
         assert memory.summary == "B_v2: a different subject"
-        repo.create_edge_if_absent.assert_not_awaited()
+        db.commit.assert_not_called()
         assert "knn_seed_skipped_source_edited" in events
 
     @pytest.mark.asyncio
@@ -2600,7 +2635,7 @@ class TestKnnSeedEditFence:
 
     @pytest.mark.asyncio
     async def test_no_neighbours_spends_no_reread(self):
-        """Nothing to insert: the fence does not add a round trip."""
+        """Nothing inserted: the fence does not add a round trip."""
         memory = _make_memory()
         db = _make_db()
         repo = _make_edge_repo()
