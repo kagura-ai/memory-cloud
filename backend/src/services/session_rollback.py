@@ -62,7 +62,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -1144,10 +1143,14 @@ class _Executor:
         review F1). The collection and the chunk cascade are read now, while
         the session is in its transaction.
         """
-        from services.memory_service import metadata_patch_target, metadata_payload_patch
+        from services.memory_service import (
+            metadata_patch_target,
+            metadata_payload_patch,
+            restore_payload_request,
+        )
 
         updates, delete_keys = metadata_payload_patch(
-            _payload_request(memory, changed), None, memory.details
+            restore_payload_request(memory, changed), None, memory.details
         )
         if not (updates or delete_keys):
             return
@@ -1188,32 +1191,20 @@ def _sync_patch(sync: PayloadSync, row: Any | None) -> tuple[dict[str, Any], lis
     """``sync``'s patch, rebuilt from ``row`` (the row now) when there is one."""
     if row is None:
         return sync.updates, list(sync.delete_keys)
-    from services.memory_service import metadata_payload_patch, resource_point_patch
+    from services.memory_service import (
+        metadata_payload_patch,
+        resource_point_patch,
+        restore_payload_request,
+    )
 
     updates, delete_keys = metadata_payload_patch(
-        _payload_request(row, set(sync.fields)), None, row.details
+        restore_payload_request(row, set(sync.fields)), None, row.details
     )
     updates = {**updates, "updated_at": to_utc_iso(row.updated_at)}
     if sync.target != sync.memory_id:
         # #2100: an indexer point is not given every key.
         return resource_point_patch(updates, delete_keys)
     return updates, delete_keys
-
-
-def _payload_request(memory: Any, changed: set[str]) -> Any:
-    """The fields ``_update_sync_qdrant_payload`` reads, for a restore.
-
-    A field restored to NULL is still sent (``[]`` / ``{}``), so the payload
-    loses the value the session wrote.
-    """
-    return SimpleNamespace(
-        tags=(memory.tags or []) if "tags" in changed else None,
-        importance=memory.importance if "importance" in changed else None,
-        type=memory.type if "type" in changed else None,
-        details=(memory.details if memory.details is not None else {})
-        if "details" in changed
-        else None,
-    )
 
 
 def _add_totals(totals: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:

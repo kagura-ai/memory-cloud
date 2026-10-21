@@ -17,6 +17,7 @@ import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
@@ -291,6 +292,24 @@ def metadata_payload_patch(
         else:
             delete_keys.append("location")
     return payload_updates, delete_keys
+
+
+def restore_payload_request(memory: Any, changed: set[str]) -> Any:
+    """The request ``metadata_payload_patch`` reads, for a write that restored
+    ``changed`` on ``memory`` from the row itself (session rollback #2044,
+    account erasure's details revert #2244).
+
+    A field restored to NULL is still sent (``[]`` / ``{}``), so the payload
+    loses the value the overwritten write left there.
+    """
+    return SimpleNamespace(
+        tags=(memory.tags or []) if "tags" in changed else None,
+        importance=memory.importance if "importance" in changed else None,
+        type=memory.type if "type" in changed else None,
+        details=(memory.details if memory.details is not None else {})
+        if "details" in changed
+        else None,
+    )
 
 
 # Keys of a metadata patch an indexer point is not given (#2100). Its
