@@ -263,7 +263,7 @@ jobs:
   # without auth. Required-check promotion is deferred to #768 (after 5
   # consecutive green runs).
   frontend-a11y:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Playwright has no chromium for ubuntu-26.04 yet (#2270)
     needs: [frontend]
     steps:
       - uses: actions/checkout@v4
@@ -508,7 +508,7 @@ jobs:
   # boot env / port-wait timing may need tuning over the first runs; it is NOT
   # yet a Required check (#768).
   frontend-a11y-authed:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Playwright has no chromium for ubuntu-26.04 yet (#2270)
     needs: [detect-changes, frontend]
     if: |
       needs.detect-changes.outputs.frontend-a11y-authed == 'true' ||
@@ -649,7 +649,7 @@ jobs:
   # file this lane consumes). New CI-only lane — NOT yet a Required check (#768);
   # boot/timing may need tuning over the first runs.
   frontend-e2e-oauth:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Playwright has no chromium for ubuntu-26.04 yet (#2270)
     needs: [detect-changes, frontend]
     if: |
       needs.detect-changes.outputs.frontend-a11y-authed == 'true' ||
