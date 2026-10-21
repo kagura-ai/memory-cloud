@@ -12,7 +12,7 @@ import secrets
 import pytest
 from pydantic import ValidationError
 
-from config.settings import Settings
+from config.settings import _PRODUCTION_SECRET_FIELDS, Settings
 
 _FIELDS: dict[str, str] = {
     "api_key_secret": "API_KEY_SECRET",
@@ -52,6 +52,11 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(env, raising=False)
 
 
+def test_the_test_covers_every_guarded_secret():
+    # A fifth secret added to the guard must show up in these cases too.
+    assert _FIELDS == _PRODUCTION_SECRET_FIELDS
+
+
 def _private_secrets() -> dict[str, str]:
     return {field: secrets.token_hex(32) for field in _FIELDS}
 
@@ -79,6 +84,13 @@ def test_production_refuses_empty_and_change_me_prefixed_values(field, placehold
         Settings(_env_file=None, environment="production", **values)
 
 
+@pytest.mark.parametrize(("field", "placeholder"), _CASES)
+def test_production_refuses_placeholders_in_any_case(field, placeholder):
+    values = _private_secrets() | {field: f"  {placeholder.upper()} "}
+    with pytest.raises(ValidationError, match=_FIELDS[field]):
+        Settings(_env_file=None, environment="production", **values)
+
+
 def test_production_names_every_refused_variable_in_one_error():
     with pytest.raises(ValidationError) as exc:
         Settings(_env_file=None, environment="production")
@@ -86,6 +98,7 @@ def test_production_names_every_refused_variable_in_one_error():
     for env in _FIELDS.values():
         assert env in message
     assert "openssl rand -hex 32" in message
+    assert "docs/deployment.md" in message
     for values in _PLACEHOLDERS.values():
         for value in values:
             assert value not in message

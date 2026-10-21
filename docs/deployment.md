@@ -341,15 +341,21 @@ or the `change-me-…` / `kagura-erasure-v1` value from `.env.example` or
 | `AUDIT_HMAC_KEY` | Keyed hashes in audit rows, known-device cookies, consent CSRF token, secret-store audit chain | 32 |
 | `AUDIT_PSEUDO_SALT` | Erasure pseudonyms (`sha256(salt + identifier)`) | none (placeholder check only) |
 
-Generate each with `openssl rand -hex 32`. The check runs wherever the settings
-load, so the API, `alembic upgrade` and the admin CLIs all stop with a pydantic
-`ValidationError` whose message names the refused variables (never their
-values); look for it in `docker compose logs api`. Development, test and
-staging are not checked. `ENVIRONMENT=development` is not a free way around
-it: it also drops the `Secure` flag on session cookies.
+Placeholders are matched case-insensitively. Generate each value with
+`openssl rand -hex 32`. The API loads the settings on import, so it stops
+before serving with a pydantic `ValidationError` whose message names the
+refused variables (never their values); look for it in
+`docker compose logs api`. `alembic upgrade` and the admin CLIs do not load the
+settings on import and are **not** stopped by this check — a deploy with a
+placeholder can still migrate and then fail on the API healthcheck, so set the
+secrets before upgrading. Development, test and staging are not checked.
+`ENVIRONMENT=development` is not a free way around it: it also drops the
+`Secure` flag on session cookies.
 
-**Rotate only what is still a default.** The check does not ask you to change a
-value that is already private, and changing one has side effects:
+**Rotate only what is still a default.** A placeholder must go; a private value
+is left alone — except a private `API_KEY_SECRET`, `JWT_SECRET` or
+`AUDIT_HMAC_KEY` shorter than 32 characters, which is refused too. Replacing
+any value that is already private has side effects:
 
 - `AUDIT_HMAC_KEY`: every known-device cookie hash stops matching, so every
   user gets a new-device notice unless `user_known_devices` is cleared and

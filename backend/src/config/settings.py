@@ -71,18 +71,9 @@ _PRODUCTION_SECRET_FIELDS: dict[str, str] = {
     "audit_hmac_key": "AUDIT_HMAC_KEY",
     "audit_pseudo_salt": "AUDIT_PSEUDO_SALT",
 }
-_DEV_SECRET_PLACEHOLDERS: frozenset[str] = frozenset(
-    {
-        "",
-        "dev-secret-change-in-production",
-        "dev-audit-hmac-change-in-production",
-        "kagura-erasure-v1",
-        "change-me-api-key-secret",
-        "change-me-jwt-secret",
-        "change-me-audit-hmac-key",
-        "change-me-audit-pseudo-salt",
-    }
-)
+# Compared case-insensitively. The prefixes cover the ``dev-…`` defaults and
+# every ``change-me-…`` placeholder; the exact set holds the rest.
+_DEV_SECRET_PLACEHOLDERS: frozenset[str] = frozenset({"", "kagura-erasure-v1"})
 _DEV_SECRET_PREFIXES: tuple[str, ...] = ("change-me", "dev-secret", "dev-audit")
 # The three keys only. No length rule on AUDIT_PSEUDO_SALT: forcing a rotation
 # of a short private salt would break correlation between rows pseudonymized
@@ -552,9 +543,10 @@ class Settings(BaseSettings):
     def _refuse_development_secrets_in_production(self) -> "Settings":
         """Refuse public placeholder secrets under ENVIRONMENT=production (#2225).
 
-        Runs wherever ``Settings()`` is built — the API import, alembic and the
-        admin CLIs — so a production container with a shipped placeholder can
-        neither serve, migrate nor create an admin. ``environment`` is
+        Runs wherever ``Settings()`` is built. The API builds it on import
+        (``config.plan_tiers``), so a production container with a shipped
+        placeholder does not serve. alembic and the admin CLIs only reach it
+        on code paths that call ``get_settings()``. ``environment`` is
         normalized like ``auth.oauth_endpoints._is_production``. Every refused
         variable is named in one error so a single restart fixes all of them;
         the values themselves are never included.
@@ -564,7 +556,8 @@ class Settings(BaseSettings):
         refused: list[str] = []
         for field, env in _PRODUCTION_SECRET_FIELDS.items():
             value = str(getattr(self, field)).strip()
-            is_placeholder = value in _DEV_SECRET_PLACEHOLDERS or value.startswith(
+            folded = value.lower()
+            is_placeholder = folded in _DEV_SECRET_PLACEHOLDERS or folded.startswith(
                 _DEV_SECRET_PREFIXES
             )
             too_short = (
@@ -578,9 +571,10 @@ class Settings(BaseSettings):
                 "ENVIRONMENT=production refuses development-default or short secrets: "
                 f"{', '.join(refused)}. Set each to a private value "
                 f"(openssl rand -hex 32; the keys need at least {_PRODUCTION_SECRET_MIN_LEN} "
-                "characters) and restart. Rotate only values that are still a "
-                "default: see the v0.121.0 release notes before changing one that "
-                "is already private."
+                "characters) and restart. Replacing a key that is already private "
+                "has side effects (stored provider keys, known devices, the "
+                "secret-store audit chain): read 'Production secrets' in "
+                "docs/deployment.md first."
             )
         return self
 
