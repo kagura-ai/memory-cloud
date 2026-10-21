@@ -708,11 +708,11 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # prefix followed by exactly one path segment (issue #2222). Kept apart from
 # ``_PROVIDER_HOSTNAMES`` on purpose: ``googleusercontent.com`` serves user
 # content on many subdomains, so a suffix match would let anyone register a
-# DCR client whose callback is content they control. Only Google's two OAuth
-# redirector hosts qualify, compared as written (no userinfo, port, trailing
-# dot or case variant), and only inside the custom-MCP binding namespace of
-# the redirector (``/r/user_bound_custom-mcp-<one segment>``). No params,
-# query or fragment. The URI is stored exactly as sent and compared exactly at
+# DCR client whose callback is content they control. Only Google's OAuth
+# redirector hosts qualify (production, sandbox and, since #2232, test),
+# compared as written (no userinfo, port, trailing dot or case variant), and
+# only inside the custom-MCP binding namespace of the redirector
+# (``/r/user_bound_custom-mcp-<one segment>``). No params, query or fragment. The URI is stored exactly as sent and compared exactly at
 # /authorize and /token — never as a ``/r/*`` wildcard, which would match
 # every other binding on the redirector.
 # Hosts are an ordered tuple (not a frozenset) so the match order is fixed.
@@ -721,6 +721,7 @@ _PROVIDER_EXACT_REDIRECTS: dict[str, tuple[tuple[str, ...], str]] = {
         (
             "oauth-redirect.googleusercontent.com",
             "oauth-redirect-sandbox.googleusercontent.com",
+            "oauth-redirect-test.googleusercontent.com",
         ),
         "/r/user_bound_custom-mcp-",
     ),
@@ -731,6 +732,13 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
     (f"https://{host}{prefix}", provider)
     for provider, (hosts, prefix) in _PROVIDER_EXACT_REDIRECTS.items()
     for host in hosts
+)
+
+# The Gemini redirector hosts as the registration rejection message names them
+# ("https://a, https://b or https://c").
+_GEMINI_REDIRECT_ORIGINS = tuple(f"https://{h}" for h in _PROVIDER_EXACT_REDIRECTS["gemini"][0])
+_GEMINI_REDIRECT_HOSTS_TEXT = (
+    f"{', '.join(_GEMINI_REDIRECT_ORIGINS[:-1])} or {_GEMINI_REDIRECT_ORIGINS[-1]}"
 )
 
 # Characters allowed in the trailing segment of an exact-redirect provider:
@@ -1038,10 +1046,9 @@ async def dynamic_client_registration(
                 "Native CLIs (RFC 8252) must use http://localhost, "
                 "http://127.0.0.1, or http://[::1] with a recognized "
                 f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)}). "
-                "Gemini must use https://oauth-redirect.googleusercontent.com "
-                "or https://oauth-redirect-sandbox.googleusercontent.com with "
-                "the path /r/user_bound_custom-mcp-<one segment> and no query "
-                "or fragment."
+                f"Gemini must use {_GEMINI_REDIRECT_HOSTS_TEXT} with the path "
+                f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
+                "query or fragment."
             ),
         )
 

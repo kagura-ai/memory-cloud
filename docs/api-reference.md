@@ -1109,8 +1109,9 @@ its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
 subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
 `[::1]` URI and the `client_name` names a supported client, or (Gemini) it is
-`https://oauth-redirect.googleusercontent.com` or
-`https://oauth-redirect-sandbox.googleusercontent.com` exactly — no userinfo,
+`https://oauth-redirect.googleusercontent.com`,
+`https://oauth-redirect-sandbox.googleusercontent.com` or
+`https://oauth-redirect-test.googleusercontent.com` exactly — no userinfo,
 port, trailing dot or case variant, no subdomain — with the path
 `/r/user_bound_custom-mcp-<one segment>` (RFC 3986 unreserved characters,
 written as is or percent-encoded; no `..`, query, fragment or params). Entries

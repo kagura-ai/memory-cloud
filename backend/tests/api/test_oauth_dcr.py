@@ -1006,9 +1006,11 @@ class TestDcrRateLimitExemption:
 # per-user binding id Google appends; it is an example value, not a real id.
 _GEMINI_HOST = "oauth-redirect.googleusercontent.com"
 _GEMINI_SANDBOX_HOST = "oauth-redirect-sandbox.googleusercontent.com"
+_GEMINI_TEST_HOST = "oauth-redirect-test.googleusercontent.com"
 _GEMINI_PREFIX = "/r/user_bound_custom-mcp-"
 _GEMINI_URI = f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}123456789"
 _GEMINI_SANDBOX_URI = f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}123456789"
+_GEMINI_TEST_URI = f"https://{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}123456789"
 
 
 class TestDetectDcrProviderGemini:
@@ -1019,8 +1021,10 @@ class TestDetectDcrProviderGemini:
         [
             _GEMINI_URI,
             _GEMINI_SANDBOX_URI,
+            _GEMINI_TEST_URI,
             f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}abc-123-slug",
             f"https://{_GEMINI_SANDBOX_HOST}{_GEMINI_PREFIX}abc-123-slug",
+            f"https://{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}abc-123-slug",
             f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}a",
             # Percent-encoded unreserved character ("-").
             f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}abc%2D1",
@@ -1039,6 +1043,10 @@ class TestDetectDcrProviderGemini:
             f"https://OAUTH-REDIRECT.googleusercontent.com{_GEMINI_PREFIX}x",
             f"https://evil.googleusercontent.com{_GEMINI_PREFIX}x",
             f"https://googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://x.{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}x",
+            f"https://OAUTH-REDIRECT-TEST.googleusercontent.com{_GEMINI_PREFIX}x",
+            f"https://{_GEMINI_TEST_HOST}/r/*",
+            f"https://{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}x?next=1",
             f"https://x.{_GEMINI_HOST}{_GEMINI_PREFIX}x",
             f"https://{_GEMINI_HOST}.evil.com{_GEMINI_PREFIX}x",
             f"https://{_GEMINI_HOST}.{_GEMINI_PREFIX}x",
@@ -1269,6 +1277,39 @@ class TestDcrEndpointGemini:
             f"https://evil.googleusercontent.com{_GEMINI_PREFIX}<segment>"
         ]
         assert "example-9" not in repr(fake_logger.mock_calls)
+
+    def test_test_host_registers_with_the_others(self, client):
+        # The list Gemini sends: production, sandbox and test redirector hosts.
+        uris = [
+            *self._six_uris(),
+            f"https://{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}example-1",
+            f"https://{_GEMINI_TEST_HOST}{_GEMINI_PREFIX}example-2",
+        ]
+        response, fake_session, fake_logger = self._register(
+            client, {"client_name": "Gemini", "redirect_uris": uris}
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "gemini"
+        assert response.json()["redirect_uris"] == uris
+        assert fake_session.add.call_args.args[0].redirect_uris == uris
+        assert _warnings(fake_logger, "dcr_redirect_uris_dropped") == []
+
+    def test_rejection_description_names_every_gemini_host(self, client):
+        from api.routes.oauth import _PROVIDER_EXACT_REDIRECTS
+
+        response, _, _ = self._register(
+            client,
+            {"client_name": "Gemini", "redirect_uris": ["https://attacker.example/cb"]},
+        )
+
+        assert response.status_code == 400, response.text
+        description = response.json()["error_description"]
+        hosts, prefix = _PROVIDER_EXACT_REDIRECTS["gemini"]
+        assert hosts == (_GEMINI_HOST, _GEMINI_SANDBOX_HOST, _GEMINI_TEST_HOST)
+        for host in hosts:
+            assert f"https://{host}" in description
+        assert prefix in description
 
     def test_gemini_with_claude_stores_the_first(self, client):
         uris = [_GEMINI_URI, "https://claude.ai/api/mcp/auth_callback"]
