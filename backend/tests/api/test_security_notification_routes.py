@@ -22,6 +22,7 @@ import pytest_asyncio
 from fastapi import BackgroundTasks
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.datastructures import QueryParams
 
 from api.routes import api_keys as api_keys_routes
 from api.routes import member_credentials as mc
@@ -474,12 +475,16 @@ class TestOAuthRoutes:
 
     def _authorize(self, monkeypatch, *, first: bool, location: str) -> SimpleNamespace:
         request = _request()
-        request.query_params = {
-            "client_id": "cid-7",
-            "redirect_uri": "https://cb.example/cb",
-            "state": "s",
-            "scope": "memory:read",
-        }
+        # A real QueryParams: the route reads every value of the query to
+        # refuse a repeated parameter (#2208).
+        request.query_params = QueryParams(
+            {
+                "client_id": "cid-7",
+                "redirect_uri": "https://cb.example/cb",
+                "state": "s",
+                "scope": "memory:read",
+            }
+        )
         # The route wraps the request for Authlib (query only, #2199).
         request.method = "POST"
         request.url = "https://testserver/api/v1/oauth/authorize"
