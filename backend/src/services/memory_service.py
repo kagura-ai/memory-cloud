@@ -8512,8 +8512,8 @@ async def _create_knn_seed_edges(
     admin retry of a once-embedded row) runs no supersede detection and no
     judge call — the column already says what the neighbourhood said, and
     verdicts are keyed on text, not vectors. The accepted trade-off: #2059's
-    "a reindex under an embedder that scores the pair lower clears the
-    suggestion" no longer fires on a model switch; a stored candidate then
+    "no near-duplicate any more clears the suggestion" no longer fires on an
+    unchanged-text re-embed (most visibly a model switch); a stored candidate then
     stays until the next edit, accept or dismissal (the read path's liveness
     guards still apply). Seed edges are unaffected.
 
@@ -8563,9 +8563,10 @@ async def _create_knn_seed_edges(
                 ),
             )
         _SUPERSEDE_SUGGEST_LAST_SEEN = suggest_enabled
-        if mechanical_reembed and suggest_enabled:
-            # #2092: after the once-per-process log above, which reports the
-            # configured flag, not this run.
+        # #2092: after the once-per-process log above, which reports the
+        # configured flag, not this run.
+        detection_skipped = mechanical_reembed and suggest_enabled
+        if detection_skipped:
             logger.debug("supersede_detect_skipped_mechanical_reembed", memory_id=str(memory.id))
             suggest_enabled = False
         if not seed_enabled and not suggest_enabled:
@@ -8644,7 +8645,17 @@ async def _create_knn_seed_edges(
         needs_seed = seed_enabled and threshold is not None
         if not needs_seed and not suggest_enabled:
             skip_key = (model_name, len(vector))
-            if skip_key not in _KNN_SEED_NO_CONSUMER_REPORTED:
+            if detection_skipped:
+                # #2092: the flag is on; only this run skips the detection.
+                # Neither the INFO hint nor its once-per-embedder slot fits.
+                logger.debug(
+                    "knn_seed_skip_no_consumer",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    dimensions=len(vector),
+                    reason="mechanical_reembed",
+                )
+            elif skip_key not in _KNN_SEED_NO_CONSUMER_REPORTED:
                 _KNN_SEED_NO_CONSUMER_REPORTED.add(skip_key)
                 logger.info(
                     "knn_seed_skip_no_consumer",

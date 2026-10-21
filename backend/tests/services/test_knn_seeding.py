@@ -2818,3 +2818,21 @@ class TestMechanicalReembed:
 
         assert memory.supersede_candidate == stored
         db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_does_not_report_suggestions_off(self):
+        """Seeding on but uncalibrated, suggestions on: the run skips the query,
+        but the once-per-embedder INFO saying SUPERSEDE_SUGGEST_ENABLED is off
+        must not fire (it is on) nor spend its slot."""
+        memory = _make_memory()
+
+        search, _, _, log = await self._seed(
+            memory, _make_db(), self._hits(memory), config=_make_config(enabled=True)
+        )
+
+        search.assert_not_called()
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "knn_seed_skip_no_consumer" not in events
+        assert memory_service._KNN_SEED_NO_CONSUMER_REPORTED == set()
+        debug = [c for c in log.debug.call_args_list if c.args[0] == "knn_seed_skip_no_consumer"]
+        assert debug[0].kwargs["reason"] == "mechanical_reembed"
