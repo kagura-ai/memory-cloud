@@ -858,6 +858,8 @@ class TestDcrEveryRedirectUri:
         assert rejected[0].kwargs["refused_redirect_uris"] == len(redirect_uris)
         assert rejected[0].kwargs["redirect_uris"] == len(redirect_uris)
         assert rejected[0].kwargs["refused"] == logged
+        # The single-URI field kept from before #2232: the first refused entry.
+        assert rejected[0].kwargs["redirect_uri"] == logged[0]
         assert _warnings(fake_logger, "dcr_redirect_uris_dropped") == []
 
     def test_refused_list_in_the_log_is_capped(self, client):
@@ -1126,8 +1128,26 @@ class TestRedactDcrRedirectUrisForLog:
                 f"https://attacker.example/prefix{_GEMINI_PREFIX}example-1",
                 f"https://attacker.example/prefix{_GEMINI_PREFIX}<segment>",
             ),
-            # The prefix without a segment has nothing to mask.
+            # A path outside the binding namespace is logged as is.
             (f"https://{_GEMINI_HOST}/r/other", f"https://{_GEMINI_HOST}/r/other"),
+            # The prefix with an empty segment still gets the mask.
+            (
+                f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}",
+                f"https://{_GEMINI_HOST}{_GEMINI_PREFIX}<segment>",
+            ),
+            # Userinfo is never logged; host and port are.
+            ("https://user:s3cret@attacker.example/cb", "https://attacker.example/cb"),
+            ("https://user@attacker.example:8443/cb", "https://attacker.example:8443/cb"),
+            # A percent-encoded prefix: the whole path is masked, since the raw
+            # text has no prefix to cut after.
+            (
+                f"https://{_GEMINI_HOST}/r/user_bound_custom%2Dmcp-example-1",
+                f"https://{_GEMINI_HOST}/<encoded binding path>",
+            ),
+            (
+                f"https://{_GEMINI_HOST}/r/user%5Fbound_custom-mcp-example-1",
+                f"https://{_GEMINI_HOST}/<encoded binding path>",
+            ),
         ],
     )
     def test_redacts_one_uri(self, redirect_uri: str, expected: str):

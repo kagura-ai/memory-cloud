@@ -712,9 +712,10 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # redirector hosts qualify (production, sandbox and, since #2232, test),
 # compared as written (no userinfo, port, trailing dot or case variant), and
 # only inside the custom-MCP binding namespace of the redirector
-# (``/r/user_bound_custom-mcp-<one segment>``). No params, query or fragment. The URI is stored exactly as sent and compared exactly at
-# /authorize and /token — never as a ``/r/*`` wildcard, which would match
-# every other binding on the redirector.
+# (``/r/user_bound_custom-mcp-<one segment>``). No params, query or fragment.
+# The URI is stored exactly as sent and compared exactly at /authorize and
+# /token — never as a ``/r/*`` wildcard, which would match every other
+# binding on the redirector.
 # Hosts are an ordered tuple (not a frozenset) so the match order is fixed.
 _PROVIDER_EXACT_REDIRECTS: dict[str, tuple[tuple[str, ...], str]] = {
     "gemini": (
@@ -1021,10 +1022,10 @@ async def dynamic_client_registration(
     # accept it, and the client is the one the caller could get by sending the
     # passing entries alone. The registration is refused only when none
     # passes. The client's provider is the first *passing* entry's.
-    providers = [detect_dcr_provider(uri, data.client_name) for uri in data.redirect_uris]
     accepted: list[tuple[str, str]] = []
     refused: list[str] = []
-    for uri, provider in zip(data.redirect_uris, providers, strict=True):
+    for uri in data.redirect_uris:
+        provider = detect_dcr_provider(uri, data.client_name)
         if provider in _DCR_ALLOWED_PROVIDERS:
             accepted.append((uri, provider))
         else:
@@ -1034,6 +1035,7 @@ async def dynamic_client_registration(
         logger.warning(
             "dcr_provider_rejected",
             ip=client_ip,
+            redirect_uri=_redact_dcr_redirect_uri_for_log(refused[0]),
             refused_redirect_uris=len(refused),
             redirect_uris=len(data.redirect_uris),
             refused=_redact_dcr_redirect_uris_for_log(refused),
@@ -1796,6 +1798,11 @@ _DCR_LOG_MAX_REDIRECT_URIS = 10
 # Replaces the per-user binding segment after an exact-redirect path prefix.
 _DCR_LOG_SEGMENT_MASK = "<segment>"
 
+# Replaces a whole path that holds an exact-redirect prefix only once
+# percent-decoded (``/r/user_bound_custom%2Dmcp-...``): the raw text has no
+# prefix to cut after, so nothing of it is logged.
+_DCR_LOG_ENCODED_PATH_MASK = "/<encoded binding path>"
+
 
 def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
     """``_redact_redirect_uri_for_log`` plus a masked exact-redirect segment.
@@ -1805,8 +1812,11 @@ def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
     so it is replaced with ``<segment>`` before the URI is logged (#2232). The
     prefix is looked for anywhere in the path, case-insensitively and on any
     host, so a refused URI from a redirector host outside the table is masked
-    too. Masking runs before the 256-char cap so a long path cannot push the
-    prefix past the cut unmasked.
+    too; a path that holds the prefix only once percent-decoded is replaced
+    whole. Masking runs before the 256-char cap so a long path cannot push the
+    prefix past the cut unmasked. Userinfo is dropped from the authority: a
+    refused entry may carry credentials (``detect_dcr_provider`` refuses
+    userinfo), and the #218 form is scheme + host + path.
     """
     try:
         parts = urlsplit(redirect_uri)
@@ -1814,12 +1824,17 @@ def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
         return _redact_redirect_uri_for_log(redirect_uri)
     path = parts.path
     lowered = path.lower()
+    decoded = unquote(path).lower()
     for _hosts, prefix in _PROVIDER_EXACT_REDIRECTS.values():
         index = lowered.find(prefix.lower())
         if index != -1:
             path = path[: index + len(prefix)] + _DCR_LOG_SEGMENT_MASK
             break
-    return _redact_redirect_uri_for_log(urlunsplit(parts._replace(path=path)))
+        if prefix.lower() in decoded:
+            path = _DCR_LOG_ENCODED_PATH_MASK
+            break
+    netloc = parts.netloc.rpartition("@")[2]
+    return _redact_redirect_uri_for_log(urlunsplit(parts._replace(netloc=netloc, path=path)))
 
 
 def _redact_dcr_redirect_uris_for_log(redirect_uris: list[str]) -> list[str]:

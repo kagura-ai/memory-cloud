@@ -1119,8 +1119,11 @@ that do not qualify are left out of the registration (RFC 7591 §3.2.1): the
 response's `redirect_uris` lists what was registered, and only those are
 accepted at `/authorize` and `/token`, so compare it with what you sent. A
 registration with no qualifying entry is refused with `invalid_client_metadata`
-([#2232](https://github.com/kagura-ai/memory-cloud/issues/2232)). Each entry
-left out is logged as host and path (query and fragment dropped, the Gemini
+([#2232](https://github.com/kagura-ai/memory-cloud/issues/2232)). An entry that
+is not a redirect URI pattern at all (not an `http`/`https` URL with a host,
+or a `*` other than one trailing `/*` after a non-empty path) still fails the
+whole request with `422` before these checks. Each entry
+left out is logged as host and path (userinfo, query and fragment dropped, the Gemini
 binding segment masked, at most 10 per registration plus a count). Registered
 redirect URIs are stored as sent and compared exactly at `/authorize` and
 `/token`.
