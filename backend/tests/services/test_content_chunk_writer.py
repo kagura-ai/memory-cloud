@@ -50,6 +50,38 @@ def _embed_svc():
 LONG = "x" * (CONTENT_CHUNK_MIN_CONTENT_CHARS * 3)
 
 
+class _IsolatedSession:
+    """``isolated_session`` stand-in (#2095 over-run re-queue); ``execute`` is scripted."""
+
+    def __init__(self, rowcount=0, error=None):
+        self.statements = []
+        self.rowcount, self.error = rowcount, error
+        self.commit = AsyncMock()
+
+    def __call__(self, _db):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        if self.error is not None and len(self.statements) == 2:
+            raise self.error
+        return MagicMock(rowcount=self.rowcount)
+
+
+@pytest.fixture(autouse=True)
+def isolated():
+    """No test reaches a real session; a test that checks it configures this one."""
+    session = _IsolatedSession()
+    with patch.object(writer, "isolated_session", session):
+        yield session
+
+
 @pytest.fixture(autouse=True)
 def _trim():
     """The trim after the upsert (#2061); a test that checks it patches it again."""
@@ -947,6 +979,101 @@ async def test_requeue_embedding_is_fenced_on_a_live_success_row():
     assert event["reason"] == "chunk_write_failed"
 
 
+def _assert_requeue_over_run(stmt) -> None:
+    """#2095: the re-queue over a run in flight moves ``success`` or
+    ``processing``, never ``pending`` / ``failed`` / a deleted row."""
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(
+        stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).replace("memories.", "")
+    set_clause, where = sql.split(" WHERE ", 1)
+    assert set_clause.endswith("SET embedding_status='pending'")
+    assert "embedding_status IN ('success', 'processing')" in where
+    assert "deleted_at IS NULL" in where
+
+
+async def test_requeue_embedding_over_a_run_moves_processing_too():
+    db = _requeue_db(1)
+    assert await writer.requeue_embedding(db, uuid4(), reason="r", include_processing=True) is True
+    _assert_requeue_over_run(db.execute.await_args.args[0])
+
+
+def _stale_over_run_db(requeue_rowcounts):
+    """A Sleep write (no claim) of LONG whose row moved on after the write."""
+    db = _db_superseded_check(True, current_after_write=False)
+    db.execute.side_effect = [
+        *db.execute.side_effect,
+        *(MagicMock(rowcount=n) for n in requeue_rowcounts),
+    ]
+    return db
+
+
+@pytest.mark.parametrize("moved", [True, False])
+async def test_a_sleep_write_over_a_run_in_flight_re_queues_over_it(isolated, moved):
+    """#2095: the success-only re-queue moved nothing, so the row is ``processing``
+    (or ``pending``). The run in flight may have upserted before this write, and
+    its success write would then pass over this write's chunks: re-queue over
+    it, committed on its own session under a lock timeout. No chunk is read."""
+    import structlog
+    from sqlalchemy.dialects import postgresql
+
+    memory = _memory(LONG)
+    db = _stale_over_run_db([0])
+    isolated.rowcount = 1 if moved else 0
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_content_hash", AsyncMock()) as read,
+    ):
+        n, upsert, _trim = await _write_with(db, memory)
+
+    assert n == 0
+    upsert.assert_awaited_once()
+    read.assert_not_awaited()
+    assert db.execute.await_count == 6  # nothing more on the caller's session
+    lock_timeout, requeue = isolated.statements
+    assert "lock_timeout" in str(lock_timeout)
+    _assert_requeue_over_run(requeue)
+    sql = str(requeue.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert str(memory.id) in sql
+    isolated.commit.assert_awaited_once()
+    reasons = [e["reason"] for e in logs if e["event"] == "embedding_requeued"]
+    assert reasons == (["stale_chunks_over_run"] if moved else [])
+    event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
+    assert event["requeued"] is moved
+    assert event["over_run"] is moved
+
+
+async def test_a_failed_isolated_re_queue_falls_back_to_the_callers_transaction(isolated):
+    """The caller's own transaction may hold the row (the undo writes it first):
+    the lock wait times out, and the re-queue runs on the caller's session."""
+    import structlog
+
+    memory = _memory(LONG)
+    db = _stale_over_run_db([0, 1])
+    isolated.error = RuntimeError("lock timeout")
+    with structlog.testing.capture_logs() as logs:
+        n, _upsert, _trim = await _write_with(db, memory)
+
+    assert n == 0
+    assert db.execute.await_count == 7
+    _assert_requeue_over_run(db.execute.await_args_list[-1].args[0])
+    isolated.commit.assert_not_awaited()
+    failed = next(e for e in logs if e["event"] == "embedding_requeue_isolated_failed")
+    assert failed["error_class"] == "RuntimeError"
+    event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
+    assert event["requeued"] is True and event["over_run"] is True
+
+
+async def test_a_sleep_write_whose_success_re_queue_moved_the_row_stops_there(isolated):
+    memory = _memory(LONG)
+    db = _stale_over_run_db([1])
+    n, _upsert, _trim = await _write_with(db, memory)
+    assert n == 0
+    assert isolated.statements == []
+    assert db.execute.await_count == 6
+
+
 async def test_requeue_embedding_of_a_row_not_success_is_a_quiet_no_op():
     import structlog
 
@@ -990,13 +1117,17 @@ async def test_a_sleep_write_overtaken_by_a_newer_write_is_re_queued():
     assert not [e for e in logs if e["event"] == "content_chunks_written"]
 
 
-async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write():
+async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write(isolated):
+    import structlog
+
     memory = _memory("now short")
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[flag, _check(True), _check(False), MagicMock(rowcount=0)])
+    isolated.rowcount = 1
     with (
+        structlog.testing.capture_logs() as logs,
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
     ):
@@ -1005,7 +1136,14 @@ async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write():
         )
     assert n == 0
     delete.assert_awaited_once()
-    assert db.execute.await_count == 4  # flag, check, check after the write, re-queue
+    # flag, check, check after the write, the success-only re-queue — and
+    # #2095: it moved nothing, so the delete may have removed a run's new
+    # chunks: the re-queue over the run, on its own session.
+    assert db.execute.await_count == 4
+    _assert_requeue_over_run(isolated.statements[-1])
+    isolated.commit.assert_awaited_once()
+    event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
+    assert event["requeued"] is True and event["over_run"] is True
 
 
 async def test_an_embedding_run_does_not_check_after_its_write():
@@ -1019,6 +1157,7 @@ async def test_an_embedding_run_does_not_check_after_its_write():
     with (
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "upsert_chunk_points", AsyncMock()),
+        patch.object(writer, "chunk_points_content_hash", AsyncMock()) as read_hash,
     ):
         n = await writer.write_content_chunks(
             db,
@@ -1030,6 +1169,7 @@ async def test_an_embedding_run_does_not_check_after_its_write():
         )
     assert n == len(split_content(LONG))
     assert db.execute.await_count == 4
+    read_hash.assert_not_awaited()  # #2095: no extra read on the embedding path
 
 
 async def test_a_failed_check_after_the_write_keeps_the_write():

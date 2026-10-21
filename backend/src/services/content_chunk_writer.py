@@ -50,9 +50,12 @@ upsert. That is repaired, not prevented (#2061): a run without a claim reads
 the row once more after its write and re-queues it when it moved on, and an
 embedding run that finds its claim lost re-queues it
 (``process_pending_embedding``). Both re-queues (``requeue_embedding``) move
-only a ``success`` row, so a run still in flight is left to finish. The
-summary point has the same race; the claim-lost re-queue covers it too. The
-``content_hash`` every chunk point carries is not compared yet.
+only a ``success`` row, so a run still in flight is left to finish — except
+the one after a write without a claim over a row still ``processing``: the
+run in flight may have upserted already, and its success write would then
+pass over this write's stale chunks, so the row is re-queued over it
+(#2095). The summary point has the same race; the claim-lost re-queue covers
+it too.
 
 Every failure is logged (``content_chunks_failed``, error class only — never
 the text). By default it is then fail-open: the summary point is already
@@ -73,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.base import isolated_session
 from db.qdrant import (
     chunk_points_content_hash,
     chunk_points_supported,
@@ -82,7 +86,11 @@ from db.qdrant import (
     upsert_chunk_points,
 )
 from models.memory import Memory
-from services.content_chunk_gaps import record_content_chunk_gap
+from services.content_chunk_gaps import (
+    ROW_LOCK_TIMEOUT,
+    embedding_status_in,
+    record_content_chunk_gap,
+)
 from services.content_chunk_policy import content_chunks_status, content_chunks_stored
 from utils.content_chunks import (
     build_chunk_payload,
@@ -325,10 +333,20 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
     Such a run compares no claim stamp, so an edit plus the embedding run that
     followed it can land between its last check and its upsert, and this
     run's chunks then replace the current ones. One more read of the row
-    tells: if it moved on, re-queue it (``requeue_embedding``: a ``success``
-    row only — a ``pending`` or ``processing`` one is being embedded anyway)
-    so the embedding sweep writes the chunks of the current content. A failed
-    read is logged and taken as current, like the check before the write.
+    tells: if it moved on, re-queue it (``requeue_embedding``) so the
+    embedding sweep writes the chunks of the current content. A failed read
+    is logged and taken as current, like the check before the write.
+
+    The first re-queue moves a ``success`` row only. When it moves nothing,
+    the row is ``pending`` (an edit not claimed yet: embedded anyway) or
+    ``processing``: the newer run is in flight. It may already have upserted,
+    and then this write replaced its chunks (or this trim or delete removed
+    some of them), and its success write would still pass (#2095). The
+    order of the two writes cannot be told reliably from the store, so the
+    row is re-queued over the run (:func:`_requeue_over_run`), which fences
+    that run off: one extra re-embed when its write was the later one.
+    Nothing is deleted here: a delete would race the newer run's upsert and
+    could leave a ``success`` row with no chunks (#2041).
     """
     try:
         superseded = await _check_superseded(db, memory.id, content, None)
@@ -344,8 +362,60 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
     if not superseded:
         return False
     requeued = await requeue_embedding(db, memory.id, reason="stale_after_write")
-    logger.info("content_chunks_stale_after_write", memory_id=str(memory.id), requeued=requeued)
+    over_run = False
+    if not requeued:
+        over_run = requeued = await _requeue_over_run(db, memory.id)
+    logger.info(
+        "content_chunks_stale_after_write",
+        memory_id=str(memory.id),
+        requeued=requeued,
+        over_run=over_run,
+    )
     return True
+
+
+async def _requeue_over_run(db: AsyncSession, memory_id: Any) -> bool:
+    """Re-queue a row over the embedding run in flight on it (#2095).
+
+    Commits on its own session (``isolated_session``): a Sleep run is one long
+    transaction, and the row lock must not be held for the rest of it — the
+    run's renewal would wait on it while holding the claim's lock, and so
+    would the sweep's claim — nor be undone by a later Sleep rollback while
+    this write's chunks stay in the store. Moves a ``success`` row too: the
+    run may have finished since the first re-queue. It waits at most 5 s for
+    the row's lock. When the caller's own transaction holds that lock (the
+    undo writes the row before its chunks), the wait times out and the
+    re-queue falls back to the caller's transaction
+    (``requeue_embedding(include_processing=True)``): the run is blocked on
+    that same lock anyway, and the re-queue commits with the write it
+    belongs to.
+
+    Returns:
+        True when the row was re-queued.
+
+    Raises:
+        Exception: the fallback UPDATE failed, as ``requeue_embedding``.
+    """
+    try:
+        async with isolated_session(db) as session:
+            await session.execute(ROW_LOCK_TIMEOUT)
+            result = await session.execute(_requeue_statement(memory_id, include_processing=True))
+            await session.commit()
+    except Exception as e:
+        logger.warning(
+            "embedding_requeue_isolated_failed",
+            memory_id=str(memory_id),
+            reason=_OVER_RUN,
+            error_class=type(e).__name__,
+        )
+        return await requeue_embedding(db, memory_id, reason=_OVER_RUN, include_processing=True)
+    requeued = int(getattr(result, "rowcount", 0) or 0) > 0
+    if requeued:
+        logger.info("embedding_requeued", memory_id=str(memory_id), reason=_OVER_RUN)
+    return requeued
+
+
+_OVER_RUN = "stale_chunks_over_run"
 
 
 async def write_content_chunks(
@@ -513,7 +583,9 @@ async def write_content_chunks(
     return len(points)
 
 
-async def requeue_embedding(db: AsyncSession, memory_id: Any, *, reason: str) -> bool:
+async def requeue_embedding(
+    db: AsyncSession, memory_id: Any, *, reason: str, include_processing: bool = False
+) -> bool:
     """Put an embedded memory back to ``pending`` so the embedding sweep redoes it (#2061).
 
     For a chunk write that failed on a path that has no retry of its own (the
@@ -530,6 +602,12 @@ async def requeue_embedding(db: AsyncSession, memory_id: Any, *, reason: str) ->
     The UPDATE runs in a SAVEPOINT, so a failed one leaves the caller's
     transaction usable; the caller commits.
 
+    ``include_processing`` (#2095): move a ``processing`` row too, which
+    fences its run off (its renewal and its outcome writes match on
+    ``processing``). Only for a write that replaced that run's chunks
+    (``_stale_after_write``). ``pending``, ``failed`` and deleted rows are
+    still never moved.
+
     Returns:
         True when the row was re-queued.
 
@@ -538,19 +616,27 @@ async def requeue_embedding(db: AsyncSession, memory_id: Any, *, reason: str) ->
     """
     async with db.begin_nested():
         result = await db.execute(
-            update(Memory)
-            .where(
-                Memory.id == memory_id,
-                Memory.deleted_at.is_(None),
-                Memory.embedding_status == "success",
-            )
-            .values(embedding_status="pending")
-            .execution_options(synchronize_session=False)
+            _requeue_statement(memory_id, include_processing=include_processing)
         )
     requeued = int(getattr(result, "rowcount", 0) or 0) > 0
     if requeued:
         logger.info("embedding_requeued", memory_id=str(memory_id), reason=reason)
     return requeued
+
+
+def _requeue_statement(memory_id: Any, *, include_processing: bool) -> Any:
+    """The fenced re-queue UPDATE (``requeue_embedding``, ``_requeue_over_run``)."""
+    statuses = ("success", "processing") if include_processing else ("success",)
+    return (
+        update(Memory)
+        .where(
+            Memory.id == memory_id,
+            Memory.deleted_at.is_(None),
+            embedding_status_in(statuses),
+        )
+        .values(embedding_status="pending")
+        .execution_options(synchronize_session=False)
+    )
 
 
 #: Summary-point payload keys ``build_memory_point`` writes only when the

@@ -124,6 +124,14 @@ class TestReconcileContentChunkGapsTask:
 
 
 class TestSweepPendingEmbeddings:
+    @pytest.fixture(autouse=True)
+    def _no_exhaust_step(self, monkeypatch):
+        """These tests script the backlog count and the candidate query; the
+        #2095 exhaust step has its own tests below."""
+        from tasks import embedding_tasks
+
+        monkeypatch.setattr(embedding_tasks, "_fail_exhausted_reclaims", AsyncMock())
+
     @pytest.mark.asyncio
     async def test_no_stale_memories_exits_early(self):
         """When the candidate query returns nothing, the sweep does no work.
@@ -304,6 +312,10 @@ class TestSweepPendingEmbeddings:
         assert "embedding_retry_count" in sql
         assert "'pending'" in sql  # existing branch preserved
         assert "'processing'" in sql  # existing branch preserved
+        # #2095: the stale-processing branch is bounded by the retry budget
+        # too (shared with the claim), so an exhausted row is not a candidate.
+        processing = sql.split("embedding_status = 'processing'", 1)[1]
+        assert "embedding_retry_count < 3" in processing.split("embedding_status = 'failed'")[0]
 
     @pytest.mark.asyncio
     async def test_exception_during_sweep_is_logged(self):
@@ -359,3 +371,102 @@ class TestSweepPendingEmbeddings:
             "Second id was not attempted after first id raised — sweep "
             "failed to recover and continue iteration."
         )
+
+
+def _pg(stmt) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    return str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
+class TestFailExhaustedReclaims:
+    """#2095: a stale processing row with no budget left is failed by the sweep."""
+
+    def _db(self, *results):
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=list(results))
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+        return db
+
+    @pytest.mark.asyncio
+    async def test_runs_before_the_backlog_count_and_the_candidate_query(self):
+        """First, so the tick that fails a row also counts it as stalled."""
+        mid = uuid4()
+        backlog = MagicMock()
+        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        exhausted = MagicMock()
+        exhausted.all.return_value = [(mid, 3)]
+        candidates = MagicMock()
+        candidates.all.return_value = []
+        db = self._db(exhausted, backlog, candidates)
+
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            capture_logs() as logs,
+        ):
+            await sweep_pending_embeddings()
+
+        stmts = [c.args[0] for c in db.execute.await_args_list]
+        assert len(stmts) == 3
+        update_sql = _pg(stmts[0])
+        assert "count(*)" in _pg(stmts[1])
+        assert update_sql.startswith("UPDATE memories SET embedding_status='failed'")
+        assert "claim_expired: the run outlived its claim on every retry" in update_sql
+        where = update_sql.split(" WHERE ", 1)[1]
+        assert "embedding_status = 'processing'" in where
+        assert "embedding_retry_count >= 3" in where
+        assert "deleted_at IS NULL" in where
+        assert "embedding_attempted_at IS NULL" in where  # NULL-safe, as the claim
+        assert "updated_at" not in update_sql.replace("embedding_attempted_at", "")  # #1852
+        assert _pg(stmts[2]).startswith("SELECT")
+        db.commit.assert_awaited_once()
+        exhausted_logs = [e for e in logs if e["event"] == "embedding_budget_exhausted"]
+        assert exhausted_logs == [
+            {
+                "event": "embedding_budget_exhausted",
+                "log_level": "error",
+                "memory_id": str(mid),
+                "reason": "claim_expired",
+                "retry_count": 3,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_uses_the_claims_stale_cutoff(self):
+        """Another clock could fail a live run that still holds its claim."""
+        from datetime import datetime, timedelta
+
+        from services.embedding_claim import STALE_CLAIM_SECONDS
+        from tasks.embedding_tasks import _fail_exhausted_reclaims
+
+        now = datetime(2026, 1, 2, 3, 4, 5)
+        cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
+        result = MagicMock()
+        result.all.return_value = []
+        db = self._db(result)
+
+        await _fail_exhausted_reclaims(db, cutoff, now)
+
+        sql = _pg(db.execute.await_args.args[0])
+        assert f"embedding_attempted_at < '{cutoff.isoformat(sep=' ')}'" in sql
+
+    @pytest.mark.asyncio
+    async def test_a_failed_exhaust_update_does_not_stop_the_sweep(self):
+        mid = uuid4()
+        backlog = MagicMock()
+        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        candidates = MagicMock()
+        candidates.all.return_value = [(mid,)]
+        db = self._db(RuntimeError("lock timeout"), backlog, candidates)
+
+        with (
+            patch("db.base.get_db", mock_get_db_factory(db)),
+            patch("services.memory_service.process_pending_embedding", new=AsyncMock()) as proc,
+            capture_logs() as logs,
+        ):
+            await sweep_pending_embeddings()
+
+        db.rollback.assert_awaited_once()
+        proc.assert_awaited_once_with(mid)
+        assert ("embedding_reclaim_exhaust_failed", "error") in _events(logs)

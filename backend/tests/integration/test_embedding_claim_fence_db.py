@@ -294,3 +294,146 @@ async def test_a_run_whose_claim_a_finished_run_took_re_queues_the_row(
     assert final.embedding_status == "pending"
     assert final.embedding_attempted_at == newer_stamp
     knn.assert_not_awaited()
+
+
+# --------------------------------------------------------------------- #2095
+# A reclaim of a stale `processing` row spends one retry, so a run that
+# outlives its claim every time ends instead of looping forever: the claim
+# stops matching once the budget is spent, and the sweep fails the row.
+
+
+async def _make_stale(async_engine: AsyncEngine, memory_id: UUID, retry_count: int) -> None:
+    from sqlalchemy import update
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as session:
+        await session.execute(
+            update(Memory)
+            .where(Memory.id == memory_id)
+            .values(
+                embedding_status="processing",
+                embedding_attempted_at=utcnow() - timedelta(seconds=600),
+                embedding_retry_count=retry_count,
+            )
+        )
+        await session.commit()
+
+
+def _session_factory(async_engine: AsyncEngine, sessions: list[AsyncSession]):
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    def _get_db() -> AsyncIterator[AsyncSession]:
+        async def _gen() -> AsyncIterator[AsyncSession]:
+            session = maker()
+            sessions.append(session)
+            yield session
+
+        return _gen()
+
+    return _get_db
+
+
+async def test_a_stale_reclaim_spends_one_retry_and_success_resets_it(
+    async_engine: AsyncEngine, row: Memory
+) -> None:
+    from services import memory_service
+
+    await _make_stale(async_engine, row.id, retry_count=2)
+    seen: list[int] = []
+
+    async def _embed(*_a: Any, **_k: Any) -> list[float]:
+        seen.append((await _final(async_engine, row.id)).embedding_retry_count)
+        return [0.1]
+
+    svc = MagicMock(model="m")
+    svc.embed = AsyncMock(side_effect=_embed)
+    sessions: list[AsyncSession] = []
+    try:
+        with (
+            patch("db.base.get_db", side_effect=_session_factory(async_engine, sessions)),
+            patch("services.embedding_service.EmbeddingService", MagicMock()),
+            patch(
+                "services.context_routing.resolve_context_routing",
+                AsyncMock(return_value=("kagura_memories", svc)),
+            ),
+            patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
+            patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
+            patch.object(memory_service, "_create_knn_seed_edges", AsyncMock()),
+            patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()),
+        ):
+            await asyncio.wait_for(memory_service.process_pending_embedding(row.id), _TIMEOUT)
+    finally:
+        for session in sessions:
+            await session.close()
+
+    assert seen == [3]  # the reclaim spent one retry
+    final = await _final(async_engine, row.id)
+    assert final.embedding_status == "success"
+    assert final.embedding_retry_count == 0  # the budget is per failure episode
+
+
+async def test_an_exhausted_stale_row_is_not_claimed_and_the_sweep_fails_it(
+    async_engine: AsyncEngine, row: Memory
+) -> None:
+    from services import memory_service
+    from services.embedding_claim import STALE_CLAIM_SECONDS
+    from tasks.embedding_tasks import CLAIM_EXPIRED_ERROR, _fail_exhausted_reclaims
+
+    await _make_stale(async_engine, row.id, retry_count=3)
+    before = await _final(async_engine, row.id)
+    routing = AsyncMock()
+    sessions: list[AsyncSession] = []
+    try:
+        with (
+            patch("db.base.get_db", side_effect=_session_factory(async_engine, sessions)),
+            patch("services.context_routing.resolve_context_routing", routing),
+        ):
+            await asyncio.wait_for(memory_service.process_pending_embedding(row.id), _TIMEOUT)
+    finally:
+        for session in sessions:
+            await session.close()
+
+    routing.assert_not_awaited()
+    unclaimed = await _final(async_engine, row.id)
+    assert unclaimed.embedding_status == "processing"
+    assert unclaimed.embedding_attempted_at == before.embedding_attempted_at
+    assert unclaimed.embedding_retry_count == 3
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    now = utcnow()
+    async with maker() as session:
+        await _fail_exhausted_reclaims(session, now - timedelta(seconds=STALE_CLAIM_SECONDS), now)
+
+    final = await _final(async_engine, row.id)
+    assert final.embedding_status == "failed"
+    assert final.embedding_error == CLAIM_EXPIRED_ERROR
+    assert final.embedding_retry_count == 3
+    assert final.embedding_attempted_at == now
+
+
+async def test_the_exhaust_step_leaves_a_live_or_budgeted_row(
+    async_engine: AsyncEngine, row: Memory
+) -> None:
+    """A fresh claim (a live run) and a stale row with budget left are not failed."""
+    from sqlalchemy import update
+
+    from services.embedding_claim import STALE_CLAIM_SECONDS
+    from tasks.embedding_tasks import _fail_exhausted_reclaims
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    now = utcnow()
+    cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
+    for stamp, count in ((now, 3), (now - timedelta(seconds=600), 2)):
+        async with maker() as session:
+            await session.execute(
+                update(Memory)
+                .where(Memory.id == row.id)
+                .values(
+                    embedding_status="processing",
+                    embedding_attempted_at=stamp,
+                    embedding_retry_count=count,
+                )
+            )
+            await session.commit()
+            await _fail_exhausted_reclaims(session, cutoff, now)
+        assert (await _final(async_engine, row.id)).embedding_status == "processing"

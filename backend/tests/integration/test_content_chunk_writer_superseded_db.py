@@ -161,6 +161,58 @@ async def test_requeue_leaves_a_soft_deleted_row(db_session, row):
     assert (await _state(db_session, row))[0] == "success"
 
 
+@pytest.mark.parametrize(
+    ("status", "moved"),
+    [("success", True), ("processing", True), ("pending", False), ("failed", False)],
+)
+async def test_requeue_over_a_run_moves_processing_and_success_only(db_session, row, status, moved):
+    """#2095: a Sleep write that replaced a run's chunks re-queues over that run."""
+    from services.content_chunk_writer import requeue_embedding
+
+    stamp = row.embedding_attempted_at
+    await _set(db_session, row, embedding_status=status)
+    assert (
+        await requeue_embedding(db_session, row.id, reason="test", include_processing=True) is moved
+    )
+    await db_session.commit()
+    state = await _state(db_session, row)
+    assert state[0] == ("pending" if moved else status)
+    assert state[2] == stamp  # the claim stamp is not written
+
+
+async def test_requeue_over_a_run_leaves_a_soft_deleted_row(db_session, row):
+    from services.content_chunk_writer import requeue_embedding
+
+    await _set(db_session, row, embedding_status="processing", deleted_at=utcnow())
+    assert (
+        await requeue_embedding(db_session, row.id, reason="test", include_processing=True) is False
+    )
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == "processing"
+
+
+async def test_the_over_run_requeue_commits_on_its_own(db_session, row):
+    """#2095: it survives a rollback of the caller's (Sleep's) transaction."""
+    from services.content_chunk_writer import _requeue_over_run
+
+    await _set(db_session, row, embedding_status="processing")
+    assert await _requeue_over_run(db_session, row.id) is True
+    await db_session.rollback()
+    assert (await _state(db_session, row))[0] == "pending"
+
+
+async def test_the_over_run_requeue_falls_back_when_the_caller_holds_the_row(db_session, row):
+    """The caller's open transaction wrote the row (the undo does): the lock
+    wait times out, and the re-queue runs in the caller's transaction."""
+    from services.content_chunk_writer import _requeue_over_run
+
+    await _set(db_session, row, embedding_status="processing")
+    await db_session.execute(update(Memory).where(Memory.id == row.id).values(summary="undone"))
+    assert await _requeue_over_run(db_session, row.id) is True
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == "pending"
+
+
 async def test_requeue_sees_a_restore_in_the_same_uncommitted_transaction(db_session, row):
     """The undo re-queues inside its restore transaction, before the commit."""
     from services.content_chunk_writer import requeue_embedding

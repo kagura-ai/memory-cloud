@@ -222,6 +222,8 @@ class Memory(Base):
     # Issue #979: bounded auto-requeue of transiently-failed embeddings. The
     # sweep re-claims `failed` rows while this is below MAX_EMBEDDING_RETRIES,
     # incrementing it per retry; a poison row exhausts its budget and stops.
+    # #2095: reclaiming a stale `processing` row spends one too, so a run that
+    # outlives its claim every time ends `failed` instead of looping.
     # The manual admin retry endpoint resets this to 0.
     embedding_retry_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0", default=0

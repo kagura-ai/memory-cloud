@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -91,7 +91,7 @@ STAMPED_READ_LIMIT = 500
 #: for one.
 GAP_SEED_MARKER_KEY = "marker:content_chunks_gap_seed"
 #: How long a stamp, or the reconciler's re-queue, waits for a row lock.
-_LOCK_TIMEOUT = text("SET LOCAL lock_timeout = '5s'")
+ROW_LOCK_TIMEOUT = text("SET LOCAL lock_timeout = '5s'")
 
 
 def _stamp_values() -> dict[str, Any]:
@@ -124,7 +124,11 @@ def _long_plain_live(context_id: Any) -> list[Any]:
 
 
 async def queue_content_chunk_backfill(
-    db: AsyncSession, context_id: UUID, *, memory_ids: Sequence[UUID] | None = None
+    db: AsyncSession,
+    context_id: UUID,
+    *,
+    memory_ids: Sequence[UUID] | None = None,
+    include_in_flight: bool = False,
 ) -> int:
     """Re-queue the context's long ``success`` memories for chunking (#2015 D4, #2107).
 
@@ -133,11 +137,19 @@ async def queue_content_chunk_backfill(
     context whose content is long enough to split — or, with ``memory_ids``,
     those of them — goes back to ``pending``, and the embedding sweep rebuilds
     it (summary point and chunk points) under the usual claim and retry. The
-    row keeps its summary point meanwhile, so it stays searchable. Only
-    ``success`` rows: a ``processing`` row is a run in flight, ``pending`` /
-    ``failed`` rows are picked up anyway. Neither ``embedding_attempted_at``
-    (the pipeline's clock) nor ``updated_at`` (an edit's cue) is written.
-    Resource rows (``resource_id``) never get chunks and are left out.
+    row keeps its summary point meanwhile, so it stays searchable. ``pending``
+    / ``failed`` rows are picked up anyway and are left alone. Neither
+    ``embedding_attempted_at`` (the pipeline's clock) nor ``updated_at`` (an
+    edit's cue) is written. Resource rows (``resource_id``) never get chunks
+    and are left out.
+
+    ``include_in_flight`` (#2095): move ``processing`` rows too. The enable
+    passes it: a run in flight read the chunk flag before the enable
+    committed, so it writes no chunks and would stamp ``success`` without
+    them. Moving its row to ``pending`` fences that run off (its renewal, its
+    chunk checks and its outcome writes all match on ``processing``), and the
+    sweep embeds the row again with the flag on. No retry budget is spent.
+    The gap reconciler (``memory_ids``) leaves it off: its flag was already on.
 
     Returns:
         How many rows were queued (0 on a store without chunk points or for
@@ -145,7 +157,21 @@ async def queue_content_chunk_backfill(
     """
     if not chunk_points_supported() or (memory_ids is not None and not memory_ids):
         return 0
-    conditions = [*_long_plain_live(context_id), Memory.embedding_status == "success"]
+    conditions = [*_long_plain_live(context_id)]
+    if include_in_flight:
+        from services.embedding_claim import STALE_CLAIM_SECONDS
+        from services.memory_service import embedding_reclaim_exhausted_clause
+        from utils.datetime import utcnow
+
+        stale_cutoff = utcnow() - timedelta(seconds=STALE_CLAIM_SECONDS)
+        conditions += [
+            embedding_status_in(("success", "processing")),
+            # A stale processing row with no retry budget left is the sweep's
+            # to fail; moving it to pending would hand it a free claim.
+            ~embedding_reclaim_exhausted_clause(stale_cutoff),
+        ]
+    else:
+        conditions.append(embedding_status_in(("success",)))
     if memory_ids is not None:
         conditions.append(Memory.id.in_(list(memory_ids)))
     locked = (
@@ -158,6 +184,13 @@ async def queue_content_chunk_backfill(
         .execution_options(synchronize_session=False)
     )
     return int(getattr(result, "rowcount", 0) or 0)
+
+
+def embedding_status_in(statuses: Sequence[str]) -> Any:
+    """``embedding_status`` is one of ``statuses`` (a plain ``=`` for one)."""
+    if len(statuses) == 1:
+        return Memory.embedding_status == statuses[0]
+    return Memory.embedding_status.in_(tuple(statuses))
 
 
 async def count_long_rows_waiting(
@@ -220,7 +253,7 @@ async def record_content_chunk_gap(db: AsyncSession, context_id: Any, *, reason:
         if needed is None:
             return False
         async with isolated_session(db) as session:
-            await session.execute(_LOCK_TIMEOUT)
+            await session.execute(ROW_LOCK_TIMEOUT)
             result = await session.execute(
                 update(ContextSearchConfig)
                 .where(ContextSearchConfig.context_id == context_id, due)
@@ -278,7 +311,7 @@ async def seed_content_chunk_gaps(db: AsyncSession) -> int | None:
         return None
     # Rows locked in context id order, with a bounded wait: a timeout rolls
     # the marker back with the stamps, and the next tick tries again.
-    await db.execute(_LOCK_TIMEOUT)
+    await db.execute(ROW_LOCK_TIMEOUT)
     locked = (
         select(ContextSearchConfig.context_id)
         .where(
@@ -484,7 +517,7 @@ async def _reconcile_context(
     if missing:
         # Bounded wait behind a row another writer holds (a Sleep run): a
         # timeout fails this context for the tick, stamp and cursor kept.
-        await db.execute(_LOCK_TIMEOUT)
+        await db.execute(ROW_LOCK_TIMEOUT)
         requeued = await queue_content_chunk_backfill(db, context_id, memory_ids=missing)
         await db.commit()
         out.requeued += requeued

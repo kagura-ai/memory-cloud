@@ -68,6 +68,62 @@ async def test_claim_gate_includes_failed_with_retry_budget_and_increments():
     assert "'PROCESSING'" in sql
 
 
+@pytest.mark.asyncio
+async def test_a_stale_reclaim_is_bounded_by_and_spends_the_retry_budget():
+    """#2095: a run that outlives its claim every time is reclaimed at most
+    MAX_EMBEDDING_RETRIES times. The processing branch carries the budget
+    bound and the CASE counts a reclaim; a pending claim still spends nothing."""
+    from services import memory_service
+
+    captured: list = []
+    claim_result = MagicMock()
+    claim_result.scalar_one_or_none = MagicMock(return_value=None)
+    db = MagicMock()
+
+    async def _execute(stmt, *_a, **_k):
+        captured.append(stmt)
+        return claim_result
+
+    db.execute = AsyncMock(side_effect=_execute)
+    db.commit = AsyncMock()
+
+    async def _aiter():
+        yield db
+
+    with patch("db.base.get_db", return_value=_aiter()):
+        await memory_service.process_pending_embedding(uuid4())
+
+    sql = _compiled(captured[0])
+    set_clause, where = sql.split(" WHERE ", 1)
+    processing_branch = where.split("EMBEDDING_STATUS = 'PROCESSING'", 1)[1].split(
+        "EMBEDDING_STATUS = 'FAILED'"
+    )[0]
+    assert "EMBEDDING_RETRY_COUNT < 3" in processing_branch
+    assert "CASE WHEN (EMBEDDING_STATUS IN ('FAILED', 'PROCESSING'))" in set_clause
+    assert "THEN EMBEDDING_RETRY_COUNT + 1 ELSE EMBEDDING_RETRY_COUNT END" in set_clause
+
+
+def test_reclaim_clauses_split_on_the_budget():
+    """The claim/sweep reclaim clause and the sweep's exhaust clause cover the
+    same stale processing rows, split exactly at MAX_EMBEDDING_RETRIES."""
+    from datetime import UTC
+
+    from services.memory_service import (
+        embedding_reclaim_eligible_clause,
+        embedding_reclaim_exhausted_clause,
+    )
+
+    cutoff = datetime(2026, 6, 15, tzinfo=UTC)
+    eligible = _compiled(embedding_reclaim_eligible_clause(cutoff))
+    exhausted = _compiled(embedding_reclaim_exhausted_clause(cutoff))
+    for sql in (eligible, exhausted):
+        assert "EMBEDDING_STATUS = 'PROCESSING'" in sql
+        assert "EMBEDDING_ATTEMPTED_AT IS NULL" in sql
+        assert "EMBEDDING_ATTEMPTED_AT < '2026-06-15" in sql
+    assert "EMBEDDING_RETRY_COUNT < 3" in eligible
+    assert "EMBEDDING_RETRY_COUNT >= 3" in exhausted
+
+
 def test_retry_eligibility_clause_is_bounded_and_null_safe():
     """The shared clause (used by both the claim and the sweep prefilter) gates
     on retry budget and is NULL-safe on the backoff timestamp."""

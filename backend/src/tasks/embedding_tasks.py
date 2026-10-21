@@ -4,11 +4,12 @@ Issue #76: Crash recovery for memories whose embedding processing was
 interrupted (server restart, error, or create_task failure).
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.logger import get_logger
 
@@ -77,11 +78,58 @@ async def _log_unsearchable_backlog(db) -> None:
         )
 
 
+CLAIM_EXPIRED_ERROR = "claim_expired: the run outlived its claim on every retry"
+
+
+async def _fail_exhausted_reclaims(db: AsyncSession, stale_cutoff: datetime, now: datetime) -> None:
+    """Fail the stale ``processing`` rows that have spent their retry budget (#2095).
+
+    A reclaim spends one retry, and the claim only reclaims a row with budget
+    left, so a row whose runs keep outliving their claims ends up here. Each
+    one is logged as ``embedding_budget_exhausted`` (the alertable event), and
+    ``_log_unsearchable_backlog`` then counts it as stalled. The admin retry
+    resets it. A failure is logged and rolled back so the sweep still runs.
+    """
+    from sqlalchemy import update
+
+    from models.memory import Memory
+    from services.memory_service import embedding_reclaim_exhausted_clause
+
+    try:
+        result = await db.execute(
+            update(Memory)
+            .where(Memory.deleted_at.is_(None), embedding_reclaim_exhausted_clause(stale_cutoff))
+            .values(
+                embedding_status="failed",
+                embedding_error=CLAIM_EXPIRED_ERROR,
+                # #1852: the pipeline's own clock; updated_at is an edit's.
+                embedding_attempted_at=now,
+            )
+            .returning(Memory.id, Memory.embedding_retry_count)
+            .execution_options(synchronize_session=False)
+        )
+        rows = result.all()
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error("embedding_reclaim_exhaust_failed", error=str(e), exc_info=True)
+        return
+    for memory_id, retry_count in rows:
+        logger.error(
+            "embedding_budget_exhausted",
+            memory_id=str(memory_id),
+            reason="claim_expired",
+            retry_count=retry_count,
+        )
+
+
 async def sweep_pending_embeddings() -> None:
     """Find and process memories stuck in pending/processing/failed status.
 
     - pending older than 10s: create_task likely failed or never fired
-    - processing older than STALE_CLAIM_SECONDS: worker crashed mid-processing (stale)
+    - processing older than STALE_CLAIM_SECONDS: worker crashed mid-processing (stale);
+      a reclaim spends one retry (#2095), and a stale row with no budget left
+      is failed here (``_fail_exhausted_reclaims``)
     - failed past the retry backoff with budget left (#979): a transient
       embedding/Qdrant blip self-heals instead of needing the manual admin
       retry endpoint, bounded by MAX_EMBEDDING_RETRIES so a poison row stops.
@@ -94,7 +142,7 @@ async def sweep_pending_embeddings() -> None:
     from models.memory import Memory
     from services.embedding_claim import STALE_CLAIM_SECONDS
     from services.memory_service import (
-        embedding_clock_before,
+        embedding_reclaim_eligible_clause,
         embedding_retry_eligible_clause,
         process_pending_embedding,
     )
@@ -103,6 +151,13 @@ async def sweep_pending_embeddings() -> None:
     async for db in get_db():
         try:
             now = utcnow()
+            pending_cutoff = now - timedelta(seconds=10)
+            stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
+            # #2095: a stale processing row with no budget left can no longer
+            # be claimed, so no run would ever write its `failed`. Do it here,
+            # on the claim's own stale cutoff, before the backlog count (so
+            # this tick's count includes them) and the candidate query.
+            await _fail_exhausted_reclaims(db, stale_cutoff, now)
 
             # #1496: report the backlog BEFORE the candidate query, because the
             # `if not pending_ids: return` below is exactly the state that
@@ -115,8 +170,6 @@ async def sweep_pending_embeddings() -> None:
             # and the line's presence is itself the signal.
             await _log_unsearchable_backlog(db)
 
-            pending_cutoff = now - timedelta(seconds=10)
-            stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
             result = await db.execute(
                 select(Memory.id)
                 .where(
@@ -126,11 +179,9 @@ async def sweep_pending_embeddings() -> None:
                             Memory.embedding_status == "pending",
                             Memory.created_at < pending_cutoff,
                         ),
-                        and_(
-                            Memory.embedding_status == "processing",
-                            embedding_clock_before(stale_cutoff),
-                        ),
-                        # #979: shared with the claim gate so they cannot drift.
+                        # #979 / #2095: both shared with the claim gate so
+                        # they cannot drift.
+                        embedding_reclaim_eligible_clause(stale_cutoff),
                         embedding_retry_eligible_clause(now),
                     ),
                 )
