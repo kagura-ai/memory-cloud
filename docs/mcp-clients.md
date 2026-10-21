@@ -1,6 +1,6 @@
 # MCP Client Setup
 
-How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
+How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
 
 ## Which URL?
 
@@ -16,7 +16,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 
 A default context can come from three places, so a client that cannot edit its URL (or whose OAuth token is stored per URL) does not have to: `?context=` on the URL, a default set on the **API key** (key management on the Credentials & Integrations page, or `PATCH /api/v1/config/api-keys/{key_id}`), or a default set on the **app's OAuth grant** (picked on the consent page when you authorize the app, or changed later with `PUT /api/v1/me/oauth/grants/{client_id}/default-context`). Precedence: an explicit `context_id` > `?context=` > the key's or the app's default > an agent-bound key's default binding > none.
 
-An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
+An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Gemini, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
 The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.6 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
 
@@ -240,6 +240,20 @@ ChatGPT web (and ChatGPT Work on the web) runs no client-side hooks, so [tool gu
 
 Who writes what you see: a context editor or above, with a user credential (an agent-bound key cannot author a guardrail). The digest reaches **every** conversation of the connector, and a connector configured with one shared API key serves that key's digest to every user of the connector. Use `?guardrails=<context_id>` only for a context whose editor list you control; for a shared workspace context prefer the per-session `get_context_info.guardrails` lane. Preview exactly what a credential receives with `GET /api/v1/memory/guardrails/digest?context_id=<uuid>&target=instructions` ([API Reference](api-reference.md#get-apiv1memoryguardrailsdigest)); the full rules are in [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
 
+## Gemini (custom MCP connector)
+
+Gemini's custom MCP connector needs the server URL only:
+
+1. Add a custom MCP server in Gemini and enter the URL ([which one?](#which-url)):
+   - **Core tools (default):** `https://your-domain.com/mcp`
+   - **All tools:** `https://your-domain.com/mcp?profile=full`
+2. Confirm on Gemini's own connect and risk-acknowledgement pages.
+3. Gemini registers itself (Dynamic Client Registration) and opens the Kagura sign-in and consent page; no OAuth app to create.
+
+Gemini registers redirect URIs on Google's three OAuth redirector hosts (`oauth-redirect`, `oauth-redirect-sandbox`, `oauth-redirect-test` `.googleusercontent.com`). Only the `/r/user_bound_custom-mcp-<id>` callbacks are kept; the others it sends are dropped at registration and are not needed to connect. An OAuth app you created by hand for Gemini earlier is listed under **Earlier connector apps** on the credentials page and can be deleted once the connector works. If linking fails right after consent, remove the connector in Gemini and add it again.
+
+> Like Claude Chat and ChatGPT, Gemini needs a public URL: Google's servers exchange the code at the token endpoint.
+
 ## Gemini CLI
 
 Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
@@ -371,6 +385,7 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 | Claude Code | `"url"` in `.mcp.json` |
 | Claude Desktop / Claude Chat | `"url"` in the same `.mcp.json` shape / the endpoint URL of the custom MCP server |
 | ChatGPT | Server URL |
+| Gemini | Server URL of the custom MCP connector |
 | Gemini CLI | `"url"` in `.gemini/settings.json` |
 | Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
 | Codex CLI | `url = "http://localhost:8080/mcp?profile=full"` in `~/.codex/config.toml` |

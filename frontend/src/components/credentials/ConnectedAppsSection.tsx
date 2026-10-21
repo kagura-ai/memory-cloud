@@ -1,8 +1,8 @@
 /**
  * ConnectedAppsSection (#2129)
  *
- * The OAuth apps the signed-in user has authorized (Claude, ChatGPT, Cursor,
- * custom clients…), from `GET /api/v1/me/oauth/grants`, each with its MCP
+ * The OAuth apps the signed-in user has authorized (Claude, ChatGPT, Gemini,
+ * Cursor, custom clients…), from `GET /api/v1/me/oauth/grants`, each with its MCP
  * default context: a context-scoped tool called over that app's token
  * without `context_id` runs in it (`?context=` on the URL wins). Set with
  * `PUT …/default-context`, cleared with `DELETE`.

@@ -1,7 +1,7 @@
 /**
  * Tests for OAuthAppsTabPanel after #1836 (custom-only OAuth apps).
  *
- * Claude, ChatGPT, Cursor and Claude Code register themselves through
+ * Claude, ChatGPT, Gemini, Cursor and Claude Code register themselves through
  * Dynamic Client Registration, so the tab no longer offers the "Create
  * Claude app" / "Create ChatGPT app" presets. Apps created through those
  * presets before this change are still listed (with a note that they are no

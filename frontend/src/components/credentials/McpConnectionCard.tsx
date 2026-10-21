@@ -4,7 +4,7 @@
  * The one place on the credentials page that shows the MCP endpoint (#1836).
  * It sits above the API-key / custom-OAuth-app tabs because connecting is
  * what most visitors came for, and most of them need nothing from either tab:
- * Claude.ai, Claude Desktop, ChatGPT, Cursor and Claude Code paste the bare
+ * Claude.ai, Claude Desktop, ChatGPT, Gemini, Cursor and Claude Code paste the bare
  * `…/mcp` URL and sign in with OAuth (they register themselves through
  * Dynamic Client Registration).
  *
