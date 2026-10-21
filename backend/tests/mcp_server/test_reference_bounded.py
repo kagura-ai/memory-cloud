@@ -10,7 +10,8 @@ large memory produced a response of any size. These tests pin the contract:
   links) with explicit markers, never cut silently;
 * following ``*_next_offset`` reproduces content and details exactly;
 * every continuation goes through the same context / memory authorization,
-  but only a read without an offset records access (one adoption per read).
+  but only a read without an offset, or a continuation that is the session's
+  first read of the memory (#2139), records access (one adoption per read).
 
 The service is mocked; DB-backed reference() behaviour is covered elsewhere.
 These are RESPONSE budgets — the tools/list definition budgets live in
@@ -22,11 +23,13 @@ from __future__ import annotations
 import json
 from contextlib import ExitStack
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from api.correlation import set_correlation
 from mcp_server.tools._constants import (
     REFERENCE_DEFAULT_MAX_CHARS,
     REFERENCE_MAX_CHARS_LIMIT,
@@ -40,6 +43,7 @@ from mcp_server.tools.memory import (
     handle_reference,
 )
 from models.schemas import LinkedMemoryRef, ReferenceResponse, SupersedeCandidate
+from services.write_provenance import WriteProvenance
 from utils.exceptions import NotFoundException
 
 MEM_ID = uuid4()
@@ -96,12 +100,30 @@ def _response(
     )
 
 
-async def _call(args: dict, *, service_result=None, service_error=None, resolver=None):
-    """Run handle_reference with the service mocked; return (text, service mock)."""
-    svc = MagicMock(reference=AsyncMock(return_value=service_result, side_effect=service_error))
+async def _call(
+    args: dict,
+    *,
+    service_result=None,
+    service_error=None,
+    resolver=None,
+    mark=None,
+    adoption_lands=True,
+    db=None,
+):
+    """Run handle_reference with the service mocked; return (text, service mock).
+
+    ``mark`` replaces the #2139 once-per-session read marker (default: an
+    AsyncMock returning True); it is exposed as ``svc.mark``.
+    """
+    svc = MagicMock(
+        reference=AsyncMock(return_value=service_result, side_effect=service_error),
+        record_adoption=AsyncMock(return_value=adoption_lands),
+    )
+    svc.mark = mark if mark is not None else AsyncMock(return_value=True)
+    svc.unmark = AsyncMock()
 
     async def gen():
-        yield AsyncMock()
+        yield db if db is not None else AsyncMock()
 
     full_args = {"memory_id": str(MEM_ID), "context_id": str(CTX_ID), **args}
     with ExitStack() as stack:
@@ -114,6 +136,8 @@ async def _call(args: dict, *, service_result=None, service_error=None, resolver
         )
         stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
         stack.enter_context(patch("services.memory_service.MemoryService", return_value=svc))
+        stack.enter_context(patch("mcp_server.tools.memory.mark_first_read", new=svc.mark))
+        stack.enter_context(patch("mcp_server.tools.memory.unmark_read", new=svc.unmark))
         result = await handle_reference(args=full_args, user_id="u", workspace_id=uuid4())
     assert len(result) == 1
     return result[0].text, svc
@@ -656,6 +680,171 @@ async def test_reading_a_large_memory_page_by_page_records_one_access():
         offset = _memory(text)["content_next_offset"]
     assert len(records) > 2
     assert records.count(True) == 1 and records[0] is True
+
+
+# ------------------------------------- first continuation read (#2139)
+
+
+@pytest.fixture
+def session():
+    """A request with a client session id and an agent credential."""
+    agent_id = uuid4()
+    with patch(
+        "services.write_provenance.current_provenance",
+        return_value=WriteProvenance(agent_id=agent_id, session_id="run-2139"),
+    ):
+        yield SimpleNamespace(agent_id=agent_id)
+
+
+@pytest.fixture(autouse=True)
+def _no_correlation():
+    set_correlation(None)
+    yield
+    set_correlation(None)
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_that_is_the_sessions_first_read_records_one_adoption(session):
+    text, svc = await _call(
+        {"content_offset": 1500}, service_result=_response(content=_big_text(60_000))
+    )
+    _memory(text)
+    assert svc.reference.await_args.kwargs["record_access"] is False
+    svc.mark.assert_awaited_once_with(
+        user_id="u", agent_id=session.agent_id, session_id="run-2139", memory_id=MEM_ID
+    )
+    svc.record_adoption.assert_awaited_once_with(MEM_ID)
+
+
+@pytest.mark.asyncio
+async def test_the_adoption_is_recorded_after_the_request_commits(session):
+    order = []
+    db = AsyncMock()
+    db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+    mark = AsyncMock(side_effect=lambda **_: order.append("mark") or True)
+    await _call(
+        {"content_offset": 1500},
+        service_result=_response(content=_big_text(60_000)),
+        mark=mark,
+        db=db,
+    )
+    assert order == ["commit", "mark"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_continuation_whose_bump_did_not_land_is_unmarked(session):
+    _, svc = await _call(
+        {"content_offset": 1500},
+        service_result=_response(content=_big_text(60_000)),
+        adoption_lands=False,
+    )
+    svc.record_adoption.assert_awaited_once_with(MEM_ID)
+    svc.unmark.assert_awaited_once_with(
+        user_id="u", agent_id=session.agent_id, session_id="run-2139", memory_id=MEM_ID
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_landed_first_continuation_keeps_its_mark(session):
+    _, svc = await _call(
+        {"content_offset": 1500}, service_result=_response(content=_big_text(60_000))
+    )
+    svc.unmark.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_later_pages_after_a_counted_continuation_record_nothing(session):
+    result = _response(content=_big_text(70_000))
+    mark = AsyncMock(side_effect=[True] + [False] * 50)
+    adoptions = 0
+    pages = 0
+    offset = 1500
+    while offset is not None:
+        text, svc = await _call({"content_offset": offset}, service_result=result, mark=mark)
+        assert svc.reference.await_args.kwargs["record_access"] is False
+        adoptions += svc.record_adoption.await_count
+        pages += 1
+        offset = _memory(text)["content_next_offset"]
+    assert pages > 2
+    assert adoptions == 1
+    assert mark.await_count == pages
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_after_an_offset_less_read_in_the_same_session_records_nothing(
+    session,
+):
+    result = _response(content=_big_text(60_000))
+    mark = AsyncMock(side_effect=[True, False])
+    text, first = await _call({}, service_result=result, mark=mark)
+    assert first.reference.await_args.kwargs["record_access"] is True
+    first.record_adoption.assert_not_awaited()
+    assert mark.await_count == 1
+    offset = _memory(text)["content_next_offset"]
+    _, svc = await _call({"content_offset": offset}, service_result=result, mark=mark)
+    assert mark.await_count == 2
+    svc.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_without_a_session_records_nothing():
+    _, svc = await _call({"content_offset": 5}, service_result=_response(content="x" * 100))
+    svc.mark.assert_not_awaited()
+    svc.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_past_the_end_continuation_records_nothing_even_on_a_first_read(session):
+    text, svc = await _call({"content_offset": 10_000}, service_result=_response())
+    assert _error(text)["error"] == "invalid_argument"
+    svc.mark.assert_not_awaited()
+    svc.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_continuation_records_nothing(session):
+    missing = NotFoundException("Memory", str(MEM_ID))
+    text, svc = await _call({"content_offset": 5}, service_error=missing)
+    assert _error(text)["error"] == "memory_not_found"
+    svc.mark.assert_not_awaited()
+    svc.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_historical_continuation_records_nothing(session):
+    result = _response(content=_big_text(10_000))
+    result.historical = True
+    result.current_version = 3
+    text, svc = await _call({"content_offset": 5, "version": 1}, service_result=result)
+    _memory(text)
+    svc.mark.assert_not_awaited()
+    svc.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"content_offset": 5},
+        {"details_offset": 0},
+        {"fields": ["content", "context"], "context_offset": 0},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_continuation_counts_each_paged_field_once_per_session(session, args):
+    result = _response(content=_big_text(10_000))
+    mark = AsyncMock(side_effect=[True, False])
+    _, first = await _call(args, service_result=result, mark=mark)
+    _, again = await _call(args, service_result=result, mark=mark)
+    first.record_adoption.assert_awaited_once_with(MEM_ID)
+    again.record_adoption.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fields", [[], ["links"]])
+@pytest.mark.asyncio
+async def test_fields_without_layer3_never_mark(session, fields):
+    _, svc = await _call({"fields": fields}, service_result=_response())
+    svc.mark.assert_not_awaited()
+    svc.record_adoption.assert_not_awaited()
 
 
 # ------------------------------------------------------------------ definition

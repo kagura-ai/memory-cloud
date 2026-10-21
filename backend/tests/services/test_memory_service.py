@@ -355,6 +355,64 @@ class TestReference:
         service.db.commit.assert_not_awaited()
 
 
+class TestRecordAdoption:
+    """#2139: a continuation that is the session's first read bumps adoption once."""
+
+    @staticmethod
+    def _isolated(stats_db):
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=stats_db)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    @pytest.mark.asyncio
+    async def test_record_adoption_bumps_once_with_count_as_adoption(self):
+        service = MemoryService(MagicMock())
+        memory_id = uuid4()
+        stats_db = MagicMock(commit=AsyncMock())
+        repo = MagicMock(bulk_update_access_stats=AsyncMock(return_value={memory_id: object()}))
+        with (
+            patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
+            patch("services.memory_service.MemoryRepository", return_value=repo) as repo_cls,
+        ):
+            assert await service.record_adoption(memory_id) is True
+        repo_cls.assert_called_once_with(stats_db)
+        repo.bulk_update_access_stats.assert_awaited_once_with(
+            [memory_id], "api", count_as_adoption=True
+        )
+        stats_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_record_adoption_of_a_skipped_row_is_false(self):
+        """A row another transaction holds is skipped (SKIP LOCKED): not landed."""
+        service = MemoryService(MagicMock())
+        stats_db = MagicMock(commit=AsyncMock())
+        repo = MagicMock(bulk_update_access_stats=AsyncMock(return_value={}))
+        with (
+            patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
+            patch("services.memory_service.MemoryRepository", return_value=repo),
+        ):
+            assert await service.record_adoption(uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_record_adoption_failure_is_logged_not_raised(self):
+        service = MemoryService(MagicMock())
+        stats_db = MagicMock(commit=AsyncMock())
+        repo = MagicMock(
+            bulk_update_access_stats=AsyncMock(side_effect=RuntimeError("postgresql://u:pw@h/db"))
+        )
+        with (
+            patch.object(service, "_isolated_session", return_value=self._isolated(stats_db)),
+            patch("services.memory_service.MemoryRepository", return_value=repo),
+            patch("services.memory_service.logger") as log,
+        ):
+            assert await service.record_adoption(uuid4()) is False
+        stats_db.commit.assert_not_awaited()
+        log.warning.assert_called_once_with(
+            "access_stats_update_failed", error_type="RuntimeError", memory_count=1
+        )
+
+
 class TestReferenceWithLinks:
     """Issue #440: reference() exposes outgoing/incoming declared_link refs."""
 

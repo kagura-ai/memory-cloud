@@ -265,10 +265,10 @@ async def test_mixed_context_through_reembed_verify_and_switch(db_session, seed,
         assert point.payload["doc_id"] == doc_id
         assert point.payload["version"] == 2
         assert point.payload["memory_id"] == str(memory_id)
-        # The indexed point, but for the model and the write time, plus the
-        # row's editable metadata the rebuild carries (#2160).
+        # The indexed point, but for the model and the write time; the row's
+        # editable metadata included (#2160, #2218).
         original = source_points[str(point_ids[doc_id])]
-        row_keys = {"indexed_at", "tags", "type", "context_summary"}
+        row_keys = {"indexed_at"}
         assert {k: v for k, v in point.payload.items() if k not in row_keys} == {
             k: v for k, v in original.payload.items() if k not in row_keys
         }

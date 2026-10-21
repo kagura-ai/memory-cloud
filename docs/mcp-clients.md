@@ -352,6 +352,8 @@ Every memory write records the session it was made in, and `changes_since(sessio
 | Legacy stateful Streamable HTTP (opens with `initialize`) | The protocol session id (`Mcp-Session-Id`) — one per connection |
 | Stateless 2026-07-28 revision with none of the above | None — use the time window below |
 
+The session id also decides whether a `reference(content_offset=...)` that reads on from a recall result's content counts as a use of the memory: it does once per session ([#2139](https://github.com/kagura-ai/memory-cloud/issues/2139)), and never without a session id — another reason for a stateless client to send one.
+
 When several are present, the first in this order wins: OTel baggage, then `_meta["ai.kagura/sessionId"]`, then `Kagura-Session-Id`, then `Mcp-Session-Id`. The header name is namespaced (`Kagura-Session-Id`, matched case-insensitively) so that a session header a proxy or gateway sets for its own purposes is never taken for it. The header applies to every message of the HTTP request; the `_meta` key to its own `tools/call` only, so when both are sent and differ, `_meta` wins for that call. A client-supplied id follows the baggage rule — 1 to 128 characters of `A-Z a-z 0-9 . _ -` — and an invalid one is ignored (logged on the server, never an error), leaving the call with the next source in the order. It is not a tool argument: no tool schema has a `session_id` input for writes.
 
 ```json
