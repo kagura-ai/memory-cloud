@@ -27,6 +27,7 @@ if str(_BACKEND_SRC) not in sys.path:
 from cli import (  # noqa: E402
     apply_rerank_defaults,
     backfill_deleted_context_files,
+    reprocess_erasures,
     restore_context,
     sweep_orphan_vectors,
     transfer_context_creator,
@@ -126,6 +127,7 @@ _CLI_ARGV = [
     (sweep_orphan_vectors, []),
     (restore_context, ["00000000-0000-0000-0000-000000000002"]),
     (backfill_deleted_context_files, []),
+    (reprocess_erasures, ["--all"]),
 ]
 
 
