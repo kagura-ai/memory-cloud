@@ -40,6 +40,7 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     REVISION_KIND_CREATED,
     REVISION_KIND_FORGOTTEN,
+    REVISION_KIND_UPDATED,
     REVISION_WRITER_API,
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
@@ -2879,9 +2880,13 @@ class MemoryService:
             self.db, memory.id, before_id=before_id, limit=limit
         )
         caller_ids = await linked_user_ids(self.db, user_id)
+        unreadable = await self._unreadable_edits(memory, user_id, rows)
         revisions = []
         for row in rows:
-            item = MemoryRevisionItem(**revision_item(row, caller_ids=caller_ids))
+            readable = row.version not in unreadable
+            item = MemoryRevisionItem(
+                **revision_item(row, caller_ids=caller_ids, readable=readable)
+            )
             item._cursor = str(row.id)
             revisions.append(item)
         return MemoryRevisionsResponse(
@@ -2891,6 +2896,38 @@ class MemoryService:
             has_more=has_more,
             next_cursor=str(rows[-1].id) if has_more and rows else None,
         )
+
+    async def _unreadable_edits(self, memory: Memory, user_id: str, rows: list[Any]) -> set[int]:
+        """The versions of the ``updated`` events in ``rows`` that connect a
+        version the caller may not read (#2169).
+
+        An ``updated`` event at version K is the diff from K-1 to K, so it
+        names its changed fields only when ``reference`` would serve both
+        versions: each version's type passes the read gate under the #2116
+        rule (the live type keeps the live verdict, an unavailable type is
+        denied). The gate runs once per distinct historical type — never per
+        event — so a denial writes one audit row, and none runs when no edit
+        in reach changed the type.
+        """
+        from services.memory_versions import type_changes_above, types_at_versions
+
+        edits = [row.version for row in rows if row.kind == REVISION_KIND_UPDATED]
+        if not edits:
+            return set()
+        changes = await type_changes_above(self.db, memory.id, min(edits))
+        if not changes:
+            return set()
+        types = types_at_versions(memory.type, changes, {v for k in edits for v in (k - 1, k)})
+        verdicts: dict[str | None, bool] = {memory.type: True, None: False}
+
+        async def readable(memory_type: str | None) -> bool:
+            if memory_type not in verdicts:
+                verdicts[memory_type] = await self._can_read_memory(
+                    memory, user_id, memory_id=memory.id, memory_type=memory_type
+                )
+            return verdicts[memory_type]
+
+        return {k for k in edits if not (await readable(types[k - 1]) and await readable(types[k]))}
 
     async def reference(
         self,

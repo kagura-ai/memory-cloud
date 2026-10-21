@@ -13,7 +13,7 @@ from contextlib import ExitStack
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -323,3 +323,64 @@ async def test_list_revisions_scopes_the_memory_to_the_named_context() -> None:
     service = MagicMock(list_revisions=AsyncMock(return_value=_page(1)))
     await _list({"context_id": _CTX, "memory_id": str(uuid4())}, service)
     assert str(service.list_revisions.await_args.kwargs["context_id"]) == _CTX
+
+
+@pytest.mark.asyncio
+async def test_list_revisions_is_no_oracle_for_a_historical_type_the_filter_denies() -> None:
+    """#2169: the real service under a per-memory type filter (#1299) that
+    allows today's "note" but not version 1's "decision". ``reference(version=1)``
+    answers not-found, and the edit that connects version 1 to version 2 names
+    no field, so the log cannot say the type changed. The event itself, the
+    count and the paging stay as an unfiltered caller sees them."""
+    from tests.services.test_memory_revisions_read import (
+        TYPE_CHANGED_PAGE,
+        _type_changed_list_service,
+    )
+
+    async def pair(allowed: set[str]) -> tuple[dict[str, Any], dict[str, Any]]:
+        memory, service, perm = _type_changed_list_service(allowed)
+        memory.context_id = UUID(_CTX)  # the context the caller names
+        args = {"context_id": _CTX, "memory_id": str(memory.id)}
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+            patch(
+                "services.memory_versions.list_revision_rows",
+                new=AsyncMock(return_value=(TYPE_CHANGED_PAGE, True)),
+            ),
+            patch(
+                "services.memory_versions.type_changes_above",
+                new=AsyncMock(return_value=[(2, "decision")]),
+            ),
+            patch(
+                "services.identity_link_service.linked_user_ids",
+                new=AsyncMock(return_value=frozenset({"u"})),
+            ),
+        ):
+            listed = await _list(args, service)
+            referenced = await _reference({**args, "version": 1}, service)
+        return listed, referenced
+
+    listed, referenced = await pair({"note"})
+    assert referenced["error"] == "memory_not_found"
+    assert listed["status"] == "success"
+    redacted = listed["revisions"][1]
+    assert redacted == {
+        "version": 2,
+        "kind": "updated",
+        "at": redacted["at"],
+        "changed_fields": [],
+        "writer": "api",
+        "by_you": False,
+    }
+    assert [r["changed_fields"] for r in listed["revisions"]] == [["summary"], [], []]
+
+    unfiltered, unfiltered_ref = await pair({"note", "decision"})
+    assert unfiltered_ref["status"] == "success"
+    assert [r["changed_fields"] for r in unfiltered["revisions"]] == [
+        ["summary"],
+        ["summary", "type"],
+        [],
+    ]
+    for key in ("count", "has_more", "next_cursor", "current_version"):
+        assert listed[key] == unfiltered[key]

@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from models.auth import Context, Workspace
 from models.memory import Memory, MemoryRevision
 from services.account_erasure_service import AccountErasureService
-from services.memory_versions import list_revision_rows, load_version
+from services.memory_versions import (
+    list_revision_rows,
+    load_version,
+    type_changes_above,
+    types_at_versions,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -283,6 +288,67 @@ async def test_a_scrubbed_live_details_is_unavailable_in_older_versions(
         assert memory.details is None
         assert v1.values["summary"] == "first summary"
         assert v1.values["details"] is None and v1.unavailable == ("details",)
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+            await session.commit()
+
+
+async def test_the_type_projection_agrees_with_the_rebuild(async_engine: AsyncEngine) -> None:
+    """#2169: ``type_changes_above`` reads only the edits that name ``type``
+    (in ``prior`` or an erasure marker) from the lowest version up, and the
+    types it yields are the ones ``load_version`` rebuilds."""
+    ws_id, ctx_id, mem_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    owner = f"types-{uuid.uuid4().hex[:8]}"
+    async with _maker(async_engine)() as session:
+        session.add(Workspace(id=ws_id, name=f"ws-{owner}", owner_user_id=owner))
+        await session.flush()
+        session.add(Context(id=ctx_id, workspace_id=ws_id, name="types", created_by=owner))
+        await session.flush()
+        session.add(
+            Memory(
+                id=mem_id,
+                user_id=owner,
+                workspace_id=ws_id,
+                context_id=ctx_id,
+                summary="s5",
+                content="body",
+                type="note",
+                client="test",
+                embedding_status="success",
+                version=5,
+            )
+        )
+        await session.flush()
+        common = {
+            "memory_id": mem_id,
+            "context_id": ctx_id,
+            "writer": "api",
+            "kind": "updated",
+            "actor_user_id": owner,
+        }
+        session.add_all(
+            [
+                MemoryRevision(**common, version=2, prior={"type": "fact", "summary": "s1"}),
+                MemoryRevision(**common, version=3, prior={"summary": "s2"}),
+                MemoryRevision(**common, version=4, prior={"type": "decision"}),
+                # never written today (erasure marks only details): an
+                # unavailable type reads as None
+                MemoryRevision(**common, version=5, prior={"erased": ["type"], "summary": "s4"}),
+            ]
+        )
+        await session.commit()
+    try:
+        async with _maker(async_engine)() as session:
+            memory = await _memory(session, mem_id)
+            changes = await type_changes_above(session, mem_id, 3)
+            everything = await type_changes_above(session, mem_id, 1)
+            rebuilt = {
+                v: (await load_version(session, memory, v)).values["type"] for v in range(1, 6)
+            }
+        assert sorted(changes) == [(4, "decision"), (5, None)]
+        assert types_at_versions("note", everything, range(1, 6)) == rebuilt
+        assert rebuilt == {1: "fact", 2: "decision", 3: "decision", 4: None, 5: "note"}
     finally:
         async with _maker(async_engine)() as session:
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))

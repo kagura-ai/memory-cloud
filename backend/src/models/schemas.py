@@ -884,7 +884,9 @@ class MemoryRevisionItem(TZAwareBaseModel):
     version: int
     kind: Literal["created", "updated", "forgotten", "restored"]
     at: datetime
-    # The fields an ``updated`` event changed; empty for the other kinds.
+    # The fields an ``updated`` event changed; empty for the other kinds, and
+    # on an ``updated`` event whose before/after version the caller may not
+    # read (``reference`` answers not-found for it, #2169).
     changed_fields: list[str]
     writer: Literal["api", "rollback"]
     by_you: bool

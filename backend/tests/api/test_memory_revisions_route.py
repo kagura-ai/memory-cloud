@@ -154,3 +154,49 @@ def test_reference_a_historical_type_the_filter_denies_is_the_live_denials_404()
     historical_denied = call(live_allowed=True)
     assert historical_denied[0] == 404
     assert historical_denied == call(live_allowed=False)
+
+
+def test_revisions_a_historical_type_the_filter_denies_names_no_field() -> None:
+    """#2169: the REST mirror of the MCP tool — under a type filter that
+    denies version 1's type, the edit out of it is listed (200, same paging)
+    with an empty ``changed_fields``; an unfiltered caller sees the names."""
+    from unittest.mock import patch
+
+    from tests.services.test_memory_revisions_read import (
+        TYPE_CHANGED_PAGE,
+        _type_changed_list_service,
+    )
+
+    def call(allowed: set[str]) -> dict[str, Any]:
+        memory, service, perm = _type_changed_list_service(allowed)
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch(
+                "services.memory_versions.list_revision_rows",
+                new=AsyncMock(return_value=(TYPE_CHANGED_PAGE, True)),
+            ),
+            patch(
+                "services.memory_versions.type_changes_above",
+                new=AsyncMock(return_value=[(2, "decision")]),
+            ),
+            patch(
+                "services.identity_link_service.linked_user_ids",
+                new=AsyncMock(return_value=frozenset({"u1"})),
+            ),
+            _client(service) as client,
+        ):
+            response = client.get(f"/api/v1/memory/{memory.id}/revisions")
+        assert response.status_code == 200
+        return response.json()
+
+    filtered = call({"note"})
+    unfiltered = call({"note", "decision"})
+    assert [r["changed_fields"] for r in filtered["revisions"]] == [["summary"], [], []]
+    assert [r["changed_fields"] for r in unfiltered["revisions"]] == [
+        ["summary"],
+        ["summary", "type"],
+        [],
+    ]
+    assert [r["version"] for r in filtered["revisions"]] == [3, 2, 1]
+    for key in ("current_version", "has_more", "next_cursor"):
+        assert filtered[key] == unfiltered[key]

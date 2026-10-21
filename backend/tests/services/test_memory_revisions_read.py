@@ -32,6 +32,8 @@ from services.memory_versions import (
     prior_values,
     reconstruct_version,
     revision_item,
+    type_changes_above,
+    types_at_versions,
 )
 from utils.exceptions import NotFoundException, ValidationError
 
@@ -206,8 +208,91 @@ class TestRevisionItem:
         row = _log_row(kind="forgotten", prior={"summary": "ignored"})
         assert revision_item(row, caller_ids=frozenset())["changed_fields"] == []
 
+    def test_an_unreadable_edit_keeps_its_event_but_names_no_field(self) -> None:
+        # #2169: the event stays (dense versions, paging); only the diff goes
+        item = revision_item(_log_row(), caller_ids=frozenset({"me"}), readable=False)
+        assert item == {
+            "version": 2,
+            "kind": "updated",
+            "at": T2,
+            "changed_fields": [],
+            "writer": "api",
+            "by_you": False,
+        }
+
+
+class TestTypesAtVersions:
+    """#2169: the type each version had, from the live type and the type-naming
+    ``updated`` events — the same rule ``reconstruct_version`` applies."""
+
+    def test_no_type_change_reads_the_live_type_everywhere(self) -> None:
+        assert types_at_versions("note", [], [1, 2, 3]) == {1: "note", 2: "note", 3: "note"}
+
+    def test_one_change_splits_the_versions_at_its_edit(self) -> None:
+        # event 3 changed decision -> note: versions below 3 were a decision
+        assert types_at_versions("note", [(3, "decision")], [1, 2, 3, 4]) == {
+            1: "decision",
+            2: "decision",
+            3: "note",
+            4: "note",
+        }
+
+    def test_two_changes_stack(self) -> None:
+        # v1 fact; event 2 made it a decision; event 4 made it today's note
+        changes = [(4, "decision"), (2, "fact")]
+        assert types_at_versions("note", changes, [5, 4, 3, 2, 1]) == {
+            1: "fact",
+            2: "decision",
+            3: "decision",
+            4: "note",
+            5: "note",
+        }
+
+    def test_an_unavailable_type_reads_none_until_an_older_change_names_it(self) -> None:
+        # never today (erasure marks only details): None below event 3,
+        # event 2's prior names the type again below it
+        changes = [(3, None), (2, "fact")]
+        assert types_at_versions("note", changes, [1, 2, 3]) == {1: "fact", 2: None, 3: "note"}
+
+    def test_agrees_with_reconstruct_version(self) -> None:
+        rows = [
+            _rev(4, {"type": "decision", "summary": "s3"}),
+            _rev(3, {"tags": []}),
+            _rev(2, {"type": "fact"}),
+        ]
+        changes = [(r.version, r.prior["type"]) for r in rows if "type" in r.prior]
+        types = types_at_versions("note", changes, [1, 2, 3, 4])
+        for v in (1, 2, 3, 4):
+            assert types[v] == reconstruct_version({**LIVE}, 4, rows, v).values["type"]
+
 
 class TestQueries:
+    @pytest.mark.asyncio
+    async def test_type_changes_above_reads_only_type_naming_edits(self) -> None:
+        result = MagicMock()
+        result.all.return_value = [
+            SimpleNamespace(version=5, type="decision"),
+            SimpleNamespace(version=3, type=None),  # an erased / scrubbed type
+        ]
+        db = MagicMock(execute=AsyncMock(return_value=result))
+
+        assert await type_changes_above(db, uuid4(), 3) == [(5, "decision"), (3, None)]
+
+        (call,) = db.execute.await_args_list
+        sql = str(call.args[0].compile(dialect=postgresql.dialect()))
+        # an index range read on (memory_id, version, id) from the page's lowest version
+        assert "memory_revisions.memory_id = " in sql
+        assert "memory_revisions.version >= " in sql
+        assert "memory_revisions.kind = " in sql
+        # only the type is projected, never the other prior values
+        select_list = sql.split("FROM")[0]
+        assert select_list.startswith(
+            "SELECT memory_revisions.version, memory_revisions.prior ->> "
+        )
+        assert select_list.rstrip().endswith("AS type")
+        for key in ("type", PRIOR_ERASED_KEY, PRIOR_SCRUBBED_KEY):
+            assert key in str(call.args[0].compile(compile_kwargs={"literal_binds": True}))
+
     @pytest.mark.asyncio
     async def test_list_revision_rows_is_newest_first_keyset_with_one_extra(self) -> None:
         rows = [SimpleNamespace(id=i) for i in (9, 8, 7)]
@@ -549,6 +634,7 @@ class TestListRevisions:
                 "services.memory_versions.list_revision_rows",
                 new=AsyncMock(return_value=(rows, True)),
             ) as page_rows,
+            patch("services.memory_versions.type_changes_above", new=AsyncMock(return_value=[])),
             patch(
                 "services.identity_link_service.linked_user_ids",
                 new=AsyncMock(return_value=frozenset({"u"})),
@@ -576,6 +662,7 @@ class TestListRevisions:
                 "services.memory_versions.list_revision_rows",
                 new=AsyncMock(return_value=([_log_row()], False)),
             ),
+            patch("services.memory_versions.type_changes_above", new=AsyncMock(return_value=[])),
             patch(
                 "services.identity_link_service.linked_user_ids",
                 new=AsyncMock(return_value=frozenset({"u"})),
@@ -608,3 +695,248 @@ class TestListRevisions:
                 await service.list_revisions(memory.id, "u")
         page_rows.assert_not_awaited()
         service._ensure_capacity.assert_not_awaited()
+
+
+# #2169: v1 "decision"; event 2 changed it to today's "note" (and the
+# summary); event 3 edited the summary only. Newest first, as a page reads.
+TYPE_CHANGED_PAGE = [
+    _log_row(id=12, version=3, prior={"summary": "note summary v2"}),
+    _log_row(id=11, version=2, prior={"type": "decision", "summary": "decision summary"}),
+    _log_row(id=10, version=1, kind="created", prior={}),
+]
+
+
+def _type_filtered_list(
+    service: MemoryService,
+    memory: Any,
+    *,
+    rows: list[Any],
+    changes: list[tuple[int, str | None]],
+    has_more: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """``list_revisions`` with the page and the type projection stubbed."""
+
+    async def call() -> Any:
+        with (
+            patch(
+                "services.memory_versions.list_revision_rows",
+                new=AsyncMock(return_value=(rows, has_more)),
+            ),
+            patch(
+                "services.memory_versions.type_changes_above",
+                new=AsyncMock(return_value=changes),
+            ) as projection,
+            patch(
+                "services.identity_link_service.linked_user_ids",
+                new=AsyncMock(return_value=frozenset({"u"})),
+            ),
+        ):
+            page = await service.list_revisions(memory.id, "u", **kwargs)
+            return page, projection
+
+    return call()
+
+
+def _type_changed_list_service(allowed_types: set[str]) -> tuple[Any, MemoryService, MagicMock]:
+    """``_type_changed_service`` one edit later: version 3 edited the note's
+    summary, so ``reference(version=N)`` rebuilds from the same log the page
+    lists."""
+    memory, service, perm = _type_changed_service(allowed_types)
+    memory.version = 3
+    service.db.execute.return_value.all.return_value = [
+        _rev(3, {"summary": "note summary v2"}, at=T3),
+        *TYPE_CHANGED,
+    ]
+    return memory, service, perm
+
+
+class TestListRevisionsBindingFilter:
+    """#2169: an ``updated`` event names its changed fields only when the
+    caller may read both versions it connects — the rule ``reference(version)``
+    applies (#2116), so the log is no oracle for a denied historical type."""
+
+    @pytest.mark.asyncio
+    async def test_an_edit_from_a_denied_type_names_no_field(self) -> None:
+        memory, service, perm = _type_changed_list_service({"note"})
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, projection = await _type_filtered_list(
+                service, memory, rows=TYPE_CHANGED_PAGE, changes=[(2, "decision")], has_more=True
+            )
+
+        assert [r.version for r in page.revisions] == [3, 2, 1]  # no hole
+        assert [r.changed_fields for r in page.revisions] == [["summary"], [], []]
+        assert [r.kind for r in page.revisions] == ["updated", "updated", "created"]
+        # one gate call per distinct type, not per revision; live first
+        assert _gated_types(perm) == ["note", "decision"]
+        kwargs = perm.can_access_memory.await_args.kwargs
+        assert (kwargs["operation"], kwargs["memory_id"]) == ("reference", memory.id)
+        assert kwargs["memory_source_type"] == memory.source_type
+        # the projection reads from the page's lowest edit up
+        assert projection.await_args.args[1:] == (memory.id, 2)
+
+    @pytest.mark.asyncio
+    async def test_paging_is_the_unfiltered_callers(self) -> None:
+        pages = []
+        for allowed in ({"note"}, {"note", "decision"}):
+            memory, service, perm = _type_changed_list_service(allowed)
+            with patch("services.permission_service.PermissionService", return_value=perm):
+                page, _ = await _type_filtered_list(
+                    service,
+                    memory,
+                    rows=TYPE_CHANGED_PAGE,
+                    changes=[(2, "decision")],
+                    has_more=True,
+                )
+            pages.append(page)
+        filtered, unfiltered = pages
+        for field in ("current_version", "has_more", "next_cursor"):
+            assert getattr(filtered, field) == getattr(unfiltered, field)
+        assert len(filtered.revisions) == len(unfiltered.revisions)
+        assert [r._cursor for r in filtered.revisions] == [r._cursor for r in unfiltered.revisions]
+
+    @pytest.mark.asyncio
+    async def test_a_caller_allowed_both_types_sees_every_name(self) -> None:
+        memory, service, perm = _type_changed_list_service({"note", "decision"})
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, _ = await _type_filtered_list(
+                service, memory, rows=TYPE_CHANGED_PAGE, changes=[(2, "decision")]
+            )
+        assert [r.changed_fields for r in page.revisions] == [["summary"], ["summary", "type"], []]
+
+    @pytest.mark.asyncio
+    async def test_live_denied_is_not_found_before_any_log_read(self) -> None:
+        memory, service, perm = _type_changed_list_service({"decision"})
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            with (
+                patch("services.memory_versions.list_revision_rows", new=AsyncMock()) as page_rows,
+                patch("services.memory_versions.type_changes_above", new=AsyncMock()) as proj,
+            ):
+                with pytest.raises(NotFoundException):
+                    await service.list_revisions(memory.id, "u")
+        assert _gated_types(perm) == ["note"]
+        page_rows.assert_not_awaited()
+        proj.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_type_change_costs_no_extra_gate_call(self) -> None:
+        memory, service, perm = _type_changed_list_service({"note"})
+        rows = [_log_row(id=12, version=3), _log_row(id=11, version=2, prior={"tags": []})]
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, _ = await _type_filtered_list(service, memory, rows=rows, changes=[])
+        assert [r.changed_fields for r in page.revisions] == [["summary"], ["tags"]]
+        assert _gated_types(perm) == ["note"]
+
+    @pytest.mark.asyncio
+    async def test_a_page_without_edits_reads_no_projection(self) -> None:
+        memory, service, perm = _type_changed_list_service({"note"})
+        rows = [_log_row(id=10, version=1, kind="created", prior={})]
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, projection = await _type_filtered_list(service, memory, rows=rows, changes=[])
+        assert [r.changed_fields for r in page.revisions] == [[]]
+        projection.assert_not_awaited()
+        assert _gated_types(perm) == ["note"]
+
+    @pytest.mark.asyncio
+    async def test_edits_between_denied_versions_name_no_field_for_one_gate_call(self) -> None:
+        # v1 decision; event 2 edited the summary (still a decision); event 3
+        # made it a note; event 4 edited the note.
+        memory, service, perm = _type_changed_list_service({"note"})
+        memory.version = 4
+        rows = [
+            _log_row(id=13, version=4, prior={"summary": "s3"}),
+            _log_row(id=12, version=3, prior={"type": "decision"}),
+            _log_row(id=11, version=2, prior={"summary": "s1"}),
+            _log_row(id=10, version=1, kind="created", prior={}),
+        ]
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, _ = await _type_filtered_list(
+                service, memory, rows=rows, changes=[(3, "decision")]
+            )
+        assert [r.changed_fields for r in page.revisions] == [["summary"], [], [], []]
+        assert _gated_types(perm) == ["note", "decision"]
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_historical_type_is_denied_without_a_gate_call(self) -> None:
+        memory, service, perm = _type_changed_list_service({"note", "decision"})
+        with patch("services.permission_service.PermissionService", return_value=perm):
+            page, _ = await _type_filtered_list(
+                service, memory, rows=TYPE_CHANGED_PAGE, changes=[(2, None)]
+            )
+        assert [r.changed_fields for r in page.revisions] == [["summary"], [], []]
+        assert _gated_types(perm) == ["note"]
+
+
+class TestListRevisionsRealBindingGate:
+    """#2169 through the real PermissionService and AgentBindingService, as
+    ``TestReferenceVersionRealBindingGate``: an agent bound with
+    ``allowed_memory_types=["note"]``; two events touch the denied type."""
+
+    ROWS = [
+        _log_row(id=13, version=4, prior={"summary": "s3"}),
+        _log_row(id=12, version=3, prior={"type": "decision"}),
+        _log_row(id=11, version=2, prior={"summary": "s1"}),
+        _log_row(id=10, version=1, kind="created", prior={}),
+    ]
+
+    async def _list(self, mode: str) -> tuple[Any, AsyncMock]:
+        from auth.agent_scope import AgentScope
+        from models.agent import AgentContextBinding
+
+        memory = _memory(version=4, summary="note summary")
+        service, _ = _service(memory)
+        binding = AgentContextBinding(
+            id=uuid4(),
+            agent_id=uuid4(),
+            context_id=memory.context_id,
+            can_read=True,
+            write_policy="deny",
+            is_default=False,
+            allowed_memory_types=["note"],
+            allowed_source_types=None,
+            created_by="u",
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = binding  # the binding SELECT
+        service.db.execute = AsyncMock(return_value=result)
+        scope = AgentScope(agent_id=binding.agent_id, enforcement_mode=mode, workspace_id=uuid4())
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=scope),
+            patch(
+                "services.permission_service.PermissionService._seated_member",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()
+            ) as emit,
+        ):
+            page, _ = await _type_filtered_list(
+                service, memory, rows=self.ROWS, changes=[(3, "decision")]
+            )
+        return page, emit
+
+    @pytest.mark.asyncio
+    async def test_enforce_blanks_both_edits_with_one_binding_denied_event(self) -> None:
+        from services.agent_binding_service import DECISION_BINDING_DENIED, ROW_FILTER_KIND
+
+        page, emit = await self._list("enforce")
+        assert [r.changed_fields for r in page.revisions] == [["summary"], [], [], []]
+        (call,) = emit.await_args_list  # one deny for two affected events
+        assert call.kwargs["outcome"] == "denied"
+        assert call.kwargs["operation"] == "reference"
+        assert call.kwargs["policy_decision"] == DECISION_BINDING_DENIED
+        assert call.kwargs["extra_metadata"]["filter_kind"] == ROW_FILTER_KIND
+
+    @pytest.mark.asyncio
+    async def test_shadow_shows_the_names_and_records_one_would_deny(self) -> None:
+        from services.agent_binding_service import DECISION_WOULD_DENY
+
+        page, emit = await self._list("shadow")
+        assert [r.changed_fields for r in page.revisions] == [
+            ["summary"],
+            ["type"],
+            ["summary"],
+            [],
+        ]
+        decisions = [c.kwargs.get("policy_decision") for c in emit.await_args_list]
+        assert decisions.count(DECISION_WOULD_DENY) == 1

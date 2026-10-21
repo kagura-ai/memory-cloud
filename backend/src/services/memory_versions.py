@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
@@ -469,16 +469,76 @@ async def list_revision_rows(
     return rows[:limit], len(rows) > limit
 
 
-def revision_item(row: Any, *, caller_ids: frozenset[str]) -> dict[str, Any]:
+async def type_changes_above(
+    db: AsyncSession, memory_id: UUID, lowest_version: int
+) -> list[tuple[int, str | None]]:
+    """The ``updated`` events from ``lowest_version`` up that name ``type`` (#2169).
+
+    Each pair is the event's version and the type the memory had just below
+    it — ``prior.type``, or None where erasure marked the type unavailable
+    (never today: erasure marks only ``details``). Only the type is
+    projected, never another overwritten value. An index range read on
+    ``idx_memory_revisions_memory``; type changes are rare, so it is
+    normally empty.
+    """
+    prior = MemoryRevision.prior
+    result = await db.execute(
+        select(MemoryRevision.version, prior["type"].astext.label("type")).where(
+            MemoryRevision.memory_id == memory_id,
+            MemoryRevision.kind == REVISION_KIND_UPDATED,
+            MemoryRevision.version >= lowest_version,
+            or_(
+                prior.has_key("type"),
+                prior[PRIOR_ERASED_KEY].has_key("type"),
+                prior[PRIOR_SCRUBBED_KEY].has_key("type"),
+            ),
+        )
+    )
+    return [(row.version, row.type) for row in result.all()]
+
+
+def types_at_versions(
+    live_type: str | None,
+    type_changes: Iterable[tuple[int, str | None]],
+    versions: Iterable[int],
+) -> dict[int, str | None]:
+    """The type each of ``versions`` had (#2169), by ``reconstruct_version``'s
+    rule: the type below the lowest type-naming edit above the version, or
+    the live type when no edit above it named one.
+
+    Args:
+        live_type: The live row's type.
+        type_changes: ``type_changes_above`` pairs (at least every one above
+            the lowest of ``versions``).
+        versions: The versions to type.
+
+    Returns:
+        Version → type; None where the type is unavailable.
+    """
+    lowest_first = sorted(type_changes, key=lambda change: change[0])
+    return {
+        version: next((t for v, t in lowest_first if v > version), live_type)
+        for version in versions
+    }
+
+
+def revision_item(row: Any, *, caller_ids: frozenset[str], readable: bool = True) -> dict[str, Any]:
     """One ``list_revisions`` item. Never a member's sub: ``by_you`` says
     whether the caller (or an account linked to them) wrote the event, and
-    the agent and session of an event show only on the caller's own."""
+    the agent and session of an event show only on the caller's own.
+
+    ``readable=False`` (#2169): the caller may not read a version an
+    ``updated`` event connects (``reference`` answers not-found for it), so
+    the event names no changed field; the event itself stays, so versions
+    stay dense and paging is the same for every caller.
+    """
     by_you = row.actor_user_id in caller_ids
+    names = changed_fields(row.prior) if row.kind == REVISION_KIND_UPDATED and readable else []
     item: dict[str, Any] = {
         "version": row.version,
         "kind": row.kind,
         "at": row.at,
-        "changed_fields": changed_fields(row.prior) if row.kind == REVISION_KIND_UPDATED else [],
+        "changed_fields": names,
         "writer": row.writer,
         "by_you": by_you,
     }
