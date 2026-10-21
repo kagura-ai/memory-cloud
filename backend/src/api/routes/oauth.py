@@ -1951,6 +1951,17 @@ async def _save_consent_default_context(
         logger.warning("oauth_consent_default_context_failed", error_type=type(e).__name__)
 
 
+# #2199: the consent page carries the session's CSRF token, so it is neither
+# stored by a cache nor framed by another page (framing would let a page click
+# Approve with a valid token).
+_CONSENT_PAGE_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+}
+
+
 @router.get("/authorize", response_class=HTMLResponse)
 async def oauth_authorize_get(
     request: Request,
@@ -2097,7 +2108,9 @@ async def oauth_authorize_get(
     # ``TemplateResponse(name, context_with_request)`` causes
     # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
     # because Starlette interprets the dict as the template name.
-    return templates.TemplateResponse(request, "oauth_authorize.html", page)
+    response = templates.TemplateResponse(request, "oauth_authorize.html", page)
+    response.headers.update(_CONSENT_PAGE_HEADERS)
+    return response
 
 
 # #1831: the sync bodies of the OAuth routes run here, not on asyncio's default
@@ -2347,8 +2360,8 @@ async def oauth_authorize_post(
     confirm = form_data.get("confirm")
     ignored = sorted(set(form_data) - _CONSENT_FORM_FIELDS)
     if ignored:
-        # Names only: a value may be a credential.
-        logger.debug("oauth_consent_form_params_ignored", names=ignored, count=len(ignored))
+        # Names only (a value may be a credential), at most 20 of them.
+        logger.debug("oauth_consent_form_params_ignored", names=ignored[:20], count=len(ignored))
 
     client_id = request.query_params.get("client_id")
     redirect_uri = request.query_params.get("redirect_uri")

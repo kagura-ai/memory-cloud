@@ -37,6 +37,12 @@ def _render_consent(
     registered: list[str], redirect_uri: str, locale: str = "en"
 ) -> tuple[int, str]:
     """Render the consent page for a public client with ``registered`` URIs."""
+    response = _consent_response(registered, redirect_uri, locale)
+    return response.status_code, response.text
+
+
+def _consent_response(registered: list[str], redirect_uri: str, locale: str = "en"):
+    """The consent page response for a public client with ``registered`` URIs."""
     from models.auth import OAuth2Client
 
     fake_user = MagicMock(email="test@example.com", session_id="sid")
@@ -76,7 +82,7 @@ def _render_consent(
                 },
                 follow_redirects=False,
             )
-    return response.status_code, response.text
+    return response
 
 
 class TestConsentRedirectHost:
@@ -179,6 +185,15 @@ class TestOAuthAuthorizeTemplate:
         for form in forms:
             assert hidden in form, form
         assert body.count('name="csrf_token"') == 2
+
+    def test_consent_page_is_not_cached_or_framed(self):
+        """#2199: the page carries the token; no cache keeps it, no page frames it."""
+        response = _consent_response(["https://app.example/cb"], "https://app.example/cb")
+        assert response.status_code == 200, response.text[:300]
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["pragma"] == "no-cache"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
 
     @pytest.mark.parametrize("session_id", [None, ""])
     def test_authorize_redirects_to_login_without_a_session_id(self, session_id):
