@@ -425,23 +425,46 @@ class TestResolveOnce:
         assert hints == {v3.id: candidates[v3.id], other.id: other_hint}
 
     async def test_a_judged_row_whose_hint_was_dropped_is_not_resolved_again(self):
-        """The resolver dropped v3's hint (parallel, stale, target gone): the
-        sink records that, so the page neither asks again nor ships one."""
-        v1, v2 = _mem(1), _mem(0)
+        """The resolver dropped v2's hint (parallel, stale, target gone) and
+        kept v3's: the sink records both, so the page neither asks again nor
+        ships a hint for v2."""
+        v1, v2, v3 = _mem(2), _mem(1), _mem(0)
         _judged(v2, v1)
-        search_results, memories = _pool((v1, 0.9), (v2, 0.8))
-        svc = _service({})
+        _judged(v3, v1)
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        hint = _cand(v1, verified=None)  # unverified: nothing folds
+        svc = _service({v3.id: hint})
         resolved: dict = {}
 
         fold_map = await _fold(svc, search_results, memories, resolved=resolved)
         responses = await _page(svc, search_results, memories, fold_map, resolved)
 
         assert fold_map == {}
-        assert resolved == {v2.id: None}
+        assert resolved == {v2.id: None, v3.id: hint}
         # Only v1 (no stored candidate, so no query) goes to the page lookup.
         page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
         assert set(page_lookup) == {str(v1.id)}
-        assert [r.supersede_candidate for r in responses] == [None, None]
+        hints = {r.memory_id: r.supersede_candidate for r in responses}
+        assert hints == {v1.id: None, v2.id: None, v3.id: hint}
+
+    async def test_an_empty_answer_leaves_the_page_to_resolve(self):
+        """The real resolver fails open to {} (DB or binding error), which
+        cannot be told from "no hint survives": the sink stays empty and the
+        page resolves its rows itself, as before #2131."""
+        v1, v2, v3, candidates = _chain()
+        search_results, memories = _pool((v1, 0.9), (v2, 0.8), (v3, 0.7))
+        svc = _service(candidates)
+        svc._resolve_supersede_candidates.side_effect = [{}, candidates]
+        resolved: dict = {}
+
+        fold_map = await _fold(svc, search_results, memories, resolved=resolved)
+        responses = await _page(svc, search_results, memories, fold_map, resolved)
+
+        assert fold_map == {} and resolved == {}
+        page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
+        assert set(page_lookup) == {str(v1.id), str(v2.id), str(v3.id)}
+        hints = {r.memory_id: r.supersede_candidate for r in responses}
+        assert hints[v3.id] == candidates[v3.id]
 
     async def test_a_fold_that_fails_open_leaves_the_page_to_resolve(self):
         v1, v2, v3, candidates = _chain()

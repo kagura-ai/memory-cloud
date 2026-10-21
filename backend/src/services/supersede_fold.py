@@ -44,13 +44,10 @@ class FoldNodes(NamedTuple):
     """Hydrated pool rows."""
     bridges: dict[UUID, Memory]
     """Hydrated versions shadowing removed: link nodes, never rows."""
+    nodes: dict[UUID, Memory]
+    """Every node a link may end on: pool rows and bridges."""
     judged: dict[UUID, Memory]
     """Pool rows and bridges with a ``supersedes`` verdict (resolved by the service)."""
-
-    @property
-    def nodes(self) -> dict[UUID, Memory]:
-        """Every node a link may end on: pool rows and bridges."""
-        return {**self.pool, **self.bridges}
 
 
 def fold_nodes(
@@ -73,7 +70,7 @@ def fold_nodes(
             bridges.setdefault(memory.id, memory)
     nodes = {**pool, **bridges}
     judged = {mid: m for mid, m in nodes.items() if judged_supersedes(m)}
-    return FoldNodes(pool=pool, bridges=bridges, judged=judged)
+    return FoldNodes(pool=pool, bridges=bridges, nodes=nodes, judged=judged)
 
 
 def fold_links(

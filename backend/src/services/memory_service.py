@@ -3841,7 +3841,8 @@ class MemoryService:
            deployment without the judge). With ``resolved`` (#2131) the
            answer for every judged id — ``None`` where no hint survives — is
            written there, so the page builder resolves only the shipped rows
-           the fold did not.
+           the fold did not. An empty answer (nothing survived, or the
+           resolver failed open) writes nothing.
         2. A verified candidate is a directed link newer → older. A pool row
            reachable from another pool row along links is folded; links are
            followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
@@ -3884,9 +3885,11 @@ class MemoryService:
                 operation="recall",
                 trusted_only=trusted_only,
             )
-            if resolved is not None:
+            if resolved is not None and candidates:
                 # #2131: every judged id, None where no hint survives, so the
-                # page builder skips them all rather than asking again.
+                # page builder skips them all rather than asking again. Only
+                # from a non-empty answer: the resolver fails open to {}, and
+                # a failed lookup must leave the page to resolve as before.
                 for memory_id in nodes.judged:
                     resolved[memory_id] = candidates.get(memory_id)
             links = fold_links(nodes, candidates, shadow_map)
