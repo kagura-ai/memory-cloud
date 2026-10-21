@@ -326,6 +326,47 @@ as exposed:
 Until then, restrict who can read the container logs (root and the `docker`
 group on the host).
 
+## Production secrets (Issue #2225)
+
+With `ENVIRONMENT=production` (hard-coded in
+`terraform/single-server/docker-compose.prod.yml`), `Settings` refuses to load
+while any of these four is still a shipped placeholder — the built-in default,
+or the `change-me-…` / `kagura-erasure-v1` value from `.env.example` or
+`terraform/single-server/.env.prod.example`:
+
+| Variable | Used for | Minimum length |
+|---|---|---|
+| `API_KEY_SECRET` | Fernet encryption of stored provider keys and connector secrets | 32 |
+| `JWT_SECRET` | JWT signing secret | 32 |
+| `AUDIT_HMAC_KEY` | Keyed hashes in audit rows, known-device cookies, consent CSRF token, secret-store audit chain | 32 |
+| `AUDIT_PSEUDO_SALT` | Erasure pseudonyms (`sha256(salt + identifier)`) | none (placeholder check only) |
+
+Generate each with `openssl rand -hex 32`. The check runs wherever the settings
+load, so the API, `alembic upgrade` and the admin CLIs all stop with a pydantic
+`ValidationError` whose message names the refused variables (never their
+values); look for it in `docker compose logs api`. Development, test and
+staging are not checked. `ENVIRONMENT=development` is not a free way around
+it: it also drops the `Secure` flag on session cookies.
+
+**Rotate only what is still a default.** The check does not ask you to change a
+value that is already private, and changing one has side effects:
+
+- `AUDIT_HMAC_KEY`: every known-device cookie hash stops matching, so every
+  user gets a new-device notice unless `user_known_devices` is cleared and
+  `users.known_devices_since` is reset in the same step; `verify_audit_chain`
+  reports a mismatch on every secret-store audit row written before the
+  change; consent pages open at that moment answer 400; email HMACs in audit,
+  signup-gate and identity-link rows stop being comparable with new rows.
+  Moving off the public default is still required — do it once, in a
+  maintenance window.
+- `AUDIT_PSEUDO_SALT`: nothing is looked up by pseudonym, but rows
+  pseudonymized before and after the change for the same person no longer
+  correlate. Change it only if it is still the public default; a short private
+  salt is accepted.
+- `API_KEY_SECRET`: every stored Fernet ciphertext (BYOK provider keys,
+  connector secrets, worker app identities) becomes undecryptable, so stored
+  provider keys have to be entered again.
+
 ## Frontend Environment Variables
 
 Copy `frontend/.env.example` to `frontend/.env.local` and configure:

@@ -81,6 +81,8 @@ FK の依存逆順で削除:
 
 `audit_logs` 行は **保持** (legal retention)、ただし `user_email` / `user_id` カラムを SHA256 で pseudonymize。salt は per-deployment 定数 (`_AUDIT_PSEUDO_SALT`) で同一ユーザー由来行の cross-row 相関は維持、original sub/email は不可逆。
 
+`ENVIRONMENT=production` では `AUDIT_PSEUDO_SALT` が公開 default (`kagura-erasure-v1`) や `change-me-audit-pseudo-salt` のままだと起動しない (#2225)。default から外すのは必須だが、すでに private な値は変えないこと: pseudonym は書き込み時に一度だけ計算され再計算されないため lookup は壊れないが、変更前と変更後に pseudonymize された同一人物の行は相関しなくなる (salt の存在理由そのもの)。短い private salt も受け入れる (長さチェックなし)。
+
 ### 2.6 Redis (Step 6, best-effort)
 
 - `session:*` (`SessionManager.delete_user_sessions`)

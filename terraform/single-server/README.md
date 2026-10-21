@@ -206,9 +206,24 @@ Create `.env.prod`:
 
 ```bash
 cp .env.prod.example .env.prod
+# Generate the four server secrets (hex needs no quoting):
+for v in API_KEY_SECRET JWT_SECRET AUDIT_HMAC_KEY AUDIT_PSEUDO_SALT; do
+  sed -i "s|^$v=.*|$v=$(openssl rand -hex 32)|" .env.prod
+done
 vim .env.prod      # set KAGURA_DOMAIN, DB_PASSWORD, QDRANT_API_KEY,
-                   # API_KEY_SECRET, JWT_SECRET, Google OAuth client, etc.
+                   # Google OAuth client, etc.
 ```
+
+The API refuses to start under `ENVIRONMENT=production` (hard-coded in
+`docker-compose.prod.yml`) while `API_KEY_SECRET`, `JWT_SECRET`,
+`AUDIT_HMAC_KEY` or `AUDIT_PSEUDO_SALT` is still a shipped placeholder, or
+while one of the first three is shorter than 32 characters. The error in
+`docker compose logs api` names the variables (never their values); the same
+check stops `alembic upgrade` and the admin CLIs. Run the loop above only on a
+fresh `.env.prod`: on an existing install, change only the values that are
+still placeholders — rotating a private `AUDIT_HMAC_KEY`, `AUDIT_PSEUDO_SALT`
+or `API_KEY_SECRET` has side effects (see the `Production secrets` section of
+`docs/deployment.md`).
 
 Generate the rendered `Caddyfile` from the template. The rendered file is
 gitignored (not committed), so it does not exist on a fresh checkout — and the
