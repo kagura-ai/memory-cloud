@@ -3513,8 +3513,10 @@ async def _read_token_endpoint_form(request: Request) -> _TokenEndpointForm | JS
 
     A body over the limit is ``413`` and a client disconnect ``400``, both
     ``invalid_request``; a missing or empty ``token`` is ``400
-    invalid_request`` (``Form(...)`` answered both with a 422). A repeated
-    field keeps its last value, as ``Form()`` did.
+    invalid_request`` (``Form(...)`` answered both with a 422). As with
+    ``Form()``, a repeated field keeps its last value and an empty optional
+    field counts as absent: ``client_secret=`` next to HTTP Basic is not a
+    second authentication method.
     """
     try:
         await preload_form(request)
@@ -3526,9 +3528,9 @@ async def _read_token_endpoint_form(request: Request) -> _TokenEndpointForm | JS
         return rfc6749_error_response(error="invalid_request", description="Missing 'token'.")
     return _TokenEndpointForm(
         token=token,
-        client_id=form_data.get("client_id"),
-        client_secret=form_data.get("client_secret"),
-        token_type_hint=form_data.get("token_type_hint"),
+        client_id=form_data.get("client_id") or None,
+        client_secret=form_data.get("client_secret") or None,
+        token_type_hint=form_data.get("token_type_hint") or None,
     )
 
 
@@ -3541,14 +3543,15 @@ async def _read_token_endpoint_form(request: Request) -> _TokenEndpointForm | JS
             "description": (
                 "Missing ``token``, two client authentication methods in one request, "
                 "or a client disconnect mid-body (``invalid_request``)"
-            )
+            ),
+            "content": _RFC6749_ERROR_CONTENT,
         },
         401: {
             "description": (
                 "Missing or invalid client credentials, or a public client (``invalid_client``)"
             )
         },
-        413: {"description": _FORM_TOO_LARGE_DESCRIPTION},
+        413: {"description": _FORM_TOO_LARGE_DESCRIPTION, "content": _RFC6749_ERROR_CONTENT},
     },
     openapi_extra=_form_request_body(
         {
@@ -3601,7 +3604,7 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
     token, client_id, client_secret = form.token, form.client_id, form.client_secret
 
     caller_ip = request.client.host if request.client else "unknown"
-    token_prefix = token[:8] + "..." if token else "(empty)"
+    token_prefix = token[:8] + "..."
 
     # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
@@ -3670,10 +3673,11 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
             "description": (
                 "Missing ``token``, two client authentication methods in one request, "
                 "or a client disconnect mid-body (``invalid_request``)"
-            )
+            ),
+            "content": _RFC6749_ERROR_CONTENT,
         },
         401: {"description": "Missing client_id, unknown client, or bad secret"},
-        413: {"description": _FORM_TOO_LARGE_DESCRIPTION},
+        413: {"description": _FORM_TOO_LARGE_DESCRIPTION, "content": _RFC6749_ERROR_CONTENT},
     },
     openapi_extra=_form_request_body(
         {

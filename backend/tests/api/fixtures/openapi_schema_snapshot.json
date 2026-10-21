@@ -23835,9 +23835,49 @@
               }
             }
           },
-          "400": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "error_description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "error_description"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
           "401": {},
-          "413": {}
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "error_description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "error_description"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          }
         },
         "tags": [
           "oauth2-server"
@@ -23942,9 +23982,49 @@
               }
             }
           },
-          "400": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "error_description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "error_description"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
           "401": {},
-          "413": {}
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "error_description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "error_description"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          }
         },
         "tags": [
           "oauth2-server"

@@ -32,6 +32,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from api.main import app  # noqa: E402
+from api.routes.oauth import _OAUTH_FORM_MAX_BODY_BYTES  # noqa: E402
 from models.auth import OAuth2Client, OAuth2Token  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
@@ -278,7 +279,7 @@ class TestIntrospectionAuthentication:
 # Form body bound (#2207)
 # ---------------------------------------------------------------------------
 
-_FORM_LIMIT = 16384
+_FORM_LIMIT = _OAUTH_FORM_MAX_BODY_BYTES
 _ENDPOINTS = ["/api/v1/oauth/revoke", "/api/v1/oauth/introspect"]
 _FORM_HEADERS = {"content-type": "application/x-www-form-urlencoded"}
 
@@ -397,3 +398,31 @@ class TestMissingToken:
         )
         assert response.status_code == 200
         assert _stored(db_factory, "a").is_revoked()
+
+
+class TestEmptyOptionalFields:
+    """An empty optional form field counts as absent, as it did with
+    ``Form()`` (#2207): it is not a second client authentication method."""
+
+    def test_empty_client_secret_beside_basic_revokes(self, api, db_factory):
+        response = _revoke(
+            api,
+            {"token": "at-c", "client_secret": "", "token_type_hint": ""},
+            _basic(CONFIDENTIAL, CONFIDENTIAL_SECRET),
+        )
+        assert response.status_code == 200, response.text
+        assert _stored(db_factory, "c").is_revoked()
+
+    def test_empty_client_id_beside_basic_public_client(self, api, db_factory):
+        response = _revoke(api, {"token": "at-a", "client_id": ""}, _basic(PUBLIC_A, ""))
+        assert response.status_code == 200, response.text
+        assert _stored(db_factory, "a").is_revoked()
+
+    def test_empty_client_fields_beside_basic_introspect(self, api):
+        response = _introspect(
+            api,
+            {"token": "at-c", "client_id": "", "client_secret": ""},
+            _basic(CONFIDENTIAL, CONFIDENTIAL_SECRET),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["active"] is True
