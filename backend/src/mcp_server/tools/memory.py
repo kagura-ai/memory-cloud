@@ -37,6 +37,7 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
+from mcp_server.tools._reference_adoption import mark_first_read
 from services.memory_service import (
     DEDUPE_MODES,
     DEDUPE_SUGGEST,
@@ -1856,8 +1857,9 @@ async def _handle_forget_many(
 # Python str characters (code points). Every page goes through this same
 # handler, so context resolution and the memory-level access check run again
 # on each continuation — but only a call without an offset that selects
-# content, details or context records the read in the memory's access stats
-# (see handle_reference).
+# content, details or context records the read in the memory's access stats,
+# plus a continuation that is the session's first read of the memory (#2139:
+# reading on from a recall result's cut content; see handle_reference).
 
 _REFERENCE_FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "content": ("content",),
@@ -2145,6 +2147,40 @@ def _bound_reference_memory(memory: dict[str, Any], view: _ReferenceView) -> dic
     return bounded
 
 
+async def _record_session_read(
+    service: Any, user_id: str, memory_id: UUID, *, continuation: bool
+) -> None:
+    """Mark a delivered Layer-3 read in the session; count a first continuation (#2139).
+
+    A ``*_offset`` continuation counts as an adoption only when it is the
+    session's first read of the memory (an agent reading on from a recall
+    result's cut content). An offset-less read was already counted by
+    ``service.reference``; marking it keeps a later continuation in the same
+    session from counting again. Without a session id nothing is marked and a
+    continuation is not counted. Runs only after the page was built, so a
+    refused or past-the-end page leaves no mark.
+
+    Args:
+        service: The request's MemoryService.
+        user_id: The caller's sub.
+        memory_id: The memory read.
+        continuation: True for a call with an offset.
+    """
+    from services.write_provenance import current_provenance
+
+    provenance = current_provenance()
+    if provenance.session_id is None:
+        return
+    first = await mark_first_read(
+        user_id=user_id,
+        agent_id=provenance.agent_id,
+        session_id=provenance.session_id,
+        memory_id=memory_id,
+    )
+    if continuation and first:
+        await service.record_adoption(memory_id)
+
+
 async def handle_reference(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -2185,10 +2221,11 @@ async def handle_reference(
 
             service = MemoryService(db)
             # #1685: one logical read is one adoption (#1046). A call with an
-            # offset continues a read the first call already recorded, and a
-            # call that selects no Layer-3 field (fields=[] / ["links"]) fetched
-            # no Layer-3 detail — neither touches the access stats. The access
-            # check and the access audit event still run on every call.
+            # offset does not record the read here, and a call that selects no
+            # Layer-3 field (fields=[] / ["links"]) fetched no Layer-3 detail
+            # and never counts. A continuation that is the session's first read
+            # of the memory counts once after its page is built (#2139, below).
+            # The access check and the access audit event run on every call.
             record_access = view.page_field is None and not view.fields.isdisjoint(
                 _REFERENCE_LAYER3
             )
@@ -2290,6 +2327,11 @@ async def handle_reference(
                 )
                 return e.to_response()
             text = _dumps({"status": "success", "memory": bounded})
+
+            if not result.historical and (record_access or view.page_field is not None):
+                await _record_session_read(
+                    service, user_id, request.memory_id, continuation=not record_access
+                )
 
             await _log_tool_usage(
                 db, user_id, "reference", start_time, 200, current_context_id, workspace_id

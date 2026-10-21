@@ -295,8 +295,10 @@ class Memory(Base):
     # reference_count systematically UNDER-COUNTS adoptions satisfied from the
     # summary alone, and is biased toward long / detail-heavy memories that force
     # a Layer-3 fetch. Downstream consumers MUST account for this bias.
-    # #2124: recall now ships the top results' content too, so a memory
-    # answered from recall alone is never counted here — the bias grows.
+    # #2124 ships content on recall; #2139 counts a reference(*_offset)
+    # continuation once per session (its first read of the memory), so a
+    # memory read on from a recall cut is counted; one answered from the
+    # 1,500-char head alone still is not.
     reference_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0", default=0
     )

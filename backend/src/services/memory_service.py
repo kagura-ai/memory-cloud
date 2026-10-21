@@ -2952,7 +2952,8 @@ class MemoryService:
             record_access: Record the read in the memory's access stats
                 (access_count, the #1046 adoption signal reference_count,
                 last_used_at). The MCP handler passes False for a
-                continuation page of a read it already recorded, and for a
+                continuation page (it records a continuation that is the
+                session's first read via ``record_adoption``, #2139) and for a
                 call that returns no Layer-3 field (#1685). The access check
                 and the access audit event run either way.
             version: An earlier version to read (#2043): the versioned fields
@@ -5390,6 +5391,34 @@ class MemoryService:
             importance=memory.importance,
             accessed_by_clients=list(stats.accessed_by_clients or []),
         )
+
+    async def record_adoption(self, memory_id: UUID) -> None:
+        """Count one adoption (#1046) of a memory whose read was already checked.
+
+        Issue #2139: the MCP reference handler calls this for a continuation
+        page that is the session's first read of the memory, after the page
+        was built. Same bump as an offset-less ``reference()`` (access_count,
+        reference_count, last_used_at), in an isolated session so its row lock
+        and any failure stay out of the request transaction. Best-effort: a
+        failure is logged as ``access_stats_update_failed`` and never raised.
+
+        Args:
+            memory_id: The memory read.
+        """
+        try:
+            async with self._isolated_session() as stats_db:
+                await MemoryRepository(stats_db).update_access_stats(
+                    memory_id, client="api", count_as_adoption=True
+                )
+                await stats_db.commit()
+        except Exception as exc:  # noqa: BLE001 — the page is delivered; never fail it
+            logger.warning(
+                "access_stats_update_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                memory_count=1,
+                exc_info=True,
+            )
 
     async def _recall_record_access(
         self,
