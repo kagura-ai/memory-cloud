@@ -34,6 +34,7 @@ it.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
+from models.erasure import STATUS_COMPLETE, ErasureRequest
 from models.memory import (
     REVISION_KIND_UPDATED,
     REVISION_WRITER_ERASURE,
@@ -77,9 +79,43 @@ from services.memory_versions import (
 )
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
+from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_PSEUDONYM = re.compile(SHA256_HEX_PATTERN)
+
+
+def is_pseudonym(value: str) -> bool:
+    """``value`` has the shape of the salted sha256 pseudonym (64 hex)."""
+    return _PSEUDONYM.fullmatch(value) is not None
+
+
+def finalized_erasure() -> ColumnElement[bool]:
+    """An ``erasure_requests`` row an erasure run completed (``_finalize``).
+
+    ``status='complete'`` alone is not enough: the sweep marks a request
+    whose user row is already gone ``complete`` without running it, and
+    that row keeps the raw account id (which an IdP may issue as 64 hex).
+    Only a run writes ``deleted_data_summary.postgres`` (since #360), and
+    only ``_finalize`` stores the pseudonym in ``user_id`` (since v0.58.1).
+    """
+    return (ErasureRequest.status == STATUS_COMPLETE) & func.coalesce(
+        ErasureRequest.deleted_data_summary.has_key("postgres"), False
+    )
+
+
+async def completed_pseudonyms(db: AsyncSession) -> frozenset[str]:
+    """The pseudonyms of every member whose erasure completed (#2243).
+
+    What ``restore_editor_details`` takes as ``erased_actors``, so a restore
+    never puts back a value one of them wrote — in a live erasure as in a
+    re-run. Read from ``erasure_requests`` as stored (finalized rows whose
+    ``user_id`` has the pseudonym's shape); never derived.
+    """
+    rows = await db.execute(select(ErasureRequest.user_id).where(finalized_erasure()))
+    return frozenset(value for value in rows.scalars() if is_pseudonym(value))
 
 
 @dataclass(frozen=True)

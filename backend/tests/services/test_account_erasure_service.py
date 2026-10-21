@@ -76,6 +76,10 @@ def restore_details():
             new=AsyncMock(return_value=RestoreReport()),
         ) as mock,
         patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])),
+        patch(
+            "services.account_erasure_service.completed_pseudonyms",
+            new=AsyncMock(return_value=frozenset()),
+        ),
     ):
         yield mock
 
@@ -1007,6 +1011,26 @@ class TestDeletePostgresSweep:
         assert ContextReadAttribution in swept_models
 
     @pytest.mark.asyncio
+    async def test_restore_never_puts_back_an_earlier_erased_members_value(self, restore_details):
+        # #2243 review S1: the live erasure passes every completed erasure's
+        # pseudonym, as the reprocess command does (one shared helper).
+        erased = frozenset({"e" * 64})
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+
+        with patch(
+            "services.account_erasure_service.completed_pseudonyms",
+            new=AsyncMock(return_value=erased),
+        ) as loaded:
+            await svc._delete_postgres(_user())
+
+        loaded.assert_awaited_once_with(svc.db)
+        assert restore_details.await_args.kwargs["erased_actors"] == erased
+
+    @pytest.mark.asyncio
     async def test_sweep_covers_known_devices(self):
         # #1769: the FK cascades, but the sweep deletes and counts them so the
         # erasure summary lists the browsers that were forgotten.
@@ -1132,7 +1156,9 @@ class TestRestoreEditorDetailsWiring:
             pseudonym = svc._pseudonym("raw-sub")
 
         assert order == ["restore", "provenance", "revisions"]
-        restore_details.assert_awaited_once_with(svc.db, "raw-sub", actor=pseudonym)
+        restore_details.assert_awaited_once_with(
+            svc.db, "raw-sub", actor=pseudonym, erased_actors=frozenset()
+        )
         assert pseudonym != "raw-sub"
         assert counts["details_restored"] == 2
         assert counts["details_restored_unavailable"] == 1

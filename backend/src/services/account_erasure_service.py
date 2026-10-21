@@ -82,6 +82,7 @@ from services.billing_contract import (
 )
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
+    completed_pseudonyms,
     lock_subject_memories,
     pseudonymize_revision_actor,
     restore_editor_details,
@@ -1312,7 +1313,14 @@ class AccountErasureService:
         # the pseudonym, which the strip and the pseudonymize step never
         # match. Patches the vector payload before the commit; a failure
         # fails the erasure with Postgres rolled back.
-        restore = await restore_editor_details(self.db, user_id, actor=self._pseudonym(user_id))
+        # #2243: a value a member erased earlier wrote is never put back, even
+        # where an erasure from before the #2235 fix left it in a prior.
+        restore = await restore_editor_details(
+            self.db,
+            user_id,
+            actor=self._pseudonym(user_id),
+            erased_actors=await completed_pseudonyms(self.db),
+        )
         counts["details_restored"] = restore.restored
         counts["details_restored_unavailable"] = restore.unavailable
         counts["details_payload_skipped"] = restore.payload_skipped

@@ -41,6 +41,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService
+from utils.datetime import utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
 
@@ -414,6 +415,117 @@ class TestEditorDetailsRestore:
             )
         ).scalar_one_or_none()
         assert user is not None
+
+
+class TestEarlierErasedMembersValue:
+    """#2243 review S1 through the whole ``_execute`` pipeline: a member
+    erased earlier (before the #2235 fix) left their value in the prior of
+    the target's edit. The target's erasure must not make it live again."""
+
+    @pytest.mark.asyncio
+    async def test_a_value_an_erased_member_wrote_is_not_put_back(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        from sqlalchemy import delete
+
+        from models.auth import Context
+        from models.memory import Memory, MemoryRevision
+
+        other = erasure_scenario["other_user_id"]
+        target = erasure_scenario["target_user_id"]
+        earlier = uuid4().hex * 2  # the stored pseudonym of a finalized erasure
+        absent = uuid4().hex * 2  # a raw 64-hex sub the sweep marked complete unrun
+        context = Context(
+            id=uuid4(),
+            workspace_id=erasure_scenario["workspace_id"],
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=other,
+        )
+        db_session.add(context)
+        await db_session.flush()
+        memory = Memory(
+            id=uuid4(),
+            user_id=other,
+            workspace_id=erasure_scenario["workspace_id"],
+            context_id=context.id,
+            summary="the other member's memory",
+            content="body",
+            type="note",
+            client="test",
+            details={"by": "target"},
+            version=3,
+            embedding_status="success",
+        )
+        db_session.add(memory)
+        await db_session.flush()
+        requests = [
+            ErasureRequest(
+                user_id=user_id,
+                user_email_hash="0" * 64,
+                initiated_by="admin-x",
+                is_self_service=False,
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                status=STATUS_COMPLETE,
+                completed_at=utcnow(),
+                deleted_data_summary=summary,
+            )
+            for user_id, summary in (
+                (earlier, {"postgres": {}}),
+                (absent, {"note": "user_row_already_absent"}),
+            )
+        ]
+        db_session.add_all(
+            [
+                MemoryRevision(
+                    memory_id=memory.id,
+                    context_id=context.id,
+                    version=2,
+                    kind="updated",
+                    writer="api",
+                    actor_user_id=earlier,
+                    prior={"details": {"by": "author"}},
+                ),
+                MemoryRevision(
+                    memory_id=memory.id,
+                    context_id=context.id,
+                    version=3,
+                    kind="updated",
+                    writer="api",
+                    actor_user_id=target,
+                    prior={"details": {"by": "earlier"}},
+                ),
+                *requests,
+            ]
+        )
+        await db_session.commit()
+        try:
+            with patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()):
+                request = await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    reason_detail="integration test (#2243)",
+                )
+
+            assert request.status == STATUS_COMPLETE
+            postgres = request.deleted_data_summary["postgres"]
+            assert (postgres["details_restored"], postgres["details_restored_unavailable"]) == (
+                0,
+                1,
+            )
+            live = (
+                await db_session.execute(
+                    select(Memory.details)
+                    .where(Memory.id == memory.id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            assert live is None  # not the earlier erased member's value
+        finally:
+            await db_session.execute(
+                delete(ErasureRequest).where(ErasureRequest.id.in_([r.id for r in requests]))
+            )
+            await db_session.commit()
 
 
 class TestPartialUniqueIndexRace:
