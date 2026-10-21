@@ -701,20 +701,33 @@ class ResourceIndexer:
 
             # 5. Process each event
             for event in events:
+                repointed_mark = len(self._repointed)
                 try:
+                    # #2218: one SAVEPOINT per event. A failed event's flush is
+                    # rolled back on its own and the session stays usable for
+                    # the rest of the batch, so one poisoned event can neither
+                    # sink the batch nor commit half of itself with it.
+                    async with self.db.begin_nested():
+                        if event.op == "upsert":
+                            await self._apply_upsert(
+                                event, schema, context, collection_name, embedding_service
+                            )
+                        elif event.op == "delete":
+                            await self._apply_delete(event, context, collection_name)
+                    # Counted after RELEASE SAVEPOINT: a failed release must
+                    # not count the event.
                     if event.op == "upsert":
-                        await self._apply_upsert(
-                            event, schema, context, collection_name, embedding_service
-                        )
                         metrics.applied_upserts += 1
                     elif event.op == "delete":
-                        await self._apply_delete(event, context, collection_name)
                         metrics.applied_deletes += 1
 
                     # Update offset after each successful event
                     state.last_offset = event.id
 
                 except Exception as e:
+                    # The event's re-points went with its savepoint: the rows
+                    # still name their old points, which must stay (#2164).
+                    del self._repointed[repointed_mark:]
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -1126,12 +1139,13 @@ class ResourceIndexer:
         # ========================================================================
         # 5. Issue #262: Create or update Memory entry
         # ========================================================================
-        # P1-4: Transaction consistency - Memory operations use same transaction
-        # If Memory operation fails, PostgreSQL will rollback but Qdrant stays committed
+        # P1-4 / #2218: the event runs in its own SAVEPOINT
+        # (``process_incremental``). If a Memory operation fails, only this
+        # event's row changes roll back; the Qdrant point written above stays.
         # This is acceptable because:
-        # 1. Qdrant upsert is idempotent (same point_id)
-        # 2. Next indexer run will retry Memory creation
-        # 3. A point left without a row is swept once its ``indexed_at`` is
+        # 1. Qdrant upsert is idempotent (same point_id), so a retry of the
+        #    event rewrites the same point
+        # 2. A point left without a row is swept once its ``indexed_at`` is
         #    older than the sweep's grace period: the sweep judges resource
         #    points by their row (#1829).
 
@@ -1226,42 +1240,47 @@ class ResourceIndexer:
             # ==================================================================
             # 6. Issue #355: Auto-cleanup old versions of same doc_id
             # ==================================================================
+            # #2218: its own SAVEPOINT. The event already runs in one, and a
+            # failed flush deactivates the savepoint it ran in: swallowing the
+            # error inside the event's savepoint would fail the event's release
+            # (and lose the row written above) instead of being non-blocking.
             try:
-                old_memories_result = await self.db.execute(
-                    select(Memory).where(
-                        Memory.user_id == str(context.created_by),
-                        Memory.workspace_id == context.workspace_id,
-                        Memory.context_id == context.id,
-                        Memory.resource_id == event.resource_id,
-                        Memory.resource_doc_id == event.doc_id,
-                        Memory.resource_version != event.version,
-                    )
-                )
-                old_memories = old_memories_result.scalars().all()
-
-                if old_memories:
-                    for old_mem in old_memories:
-                        old_point_str = (
-                            f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
+                async with self.db.begin_nested():
+                    old_memories_result = await self.db.execute(
+                        select(Memory).where(
+                            Memory.user_id == str(context.created_by),
+                            Memory.workspace_id == context.workspace_id,
+                            Memory.context_id == context.id,
+                            Memory.resource_id == event.resource_id,
+                            Memory.resource_doc_id == event.doc_id,
+                            Memory.resource_version != event.version,
                         )
-                        old_point_uuid = uuid5(NAMESPACE_DNS, old_point_str)
-                        try:
-                            await self.qdrant_client.delete(
-                                collection_name=collection_name,
-                                points_selector=[str(old_point_uuid)],
-                            )
-                        except Exception:
-                            pass  # Qdrant point may already be gone
-                        await self.db.delete(old_mem)
-
-                    await self.db.flush()
-                    logger.info(
-                        "old_versions_cleaned",
-                        resource_id=event.resource_id,
-                        doc_id=event.doc_id,
-                        current_version=event.version,
-                        cleaned_count=len(old_memories),
                     )
+                    old_memories = old_memories_result.scalars().all()
+
+                    if old_memories:
+                        for old_mem in old_memories:
+                            old_point_str = (
+                                f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
+                            )
+                            old_point_uuid = uuid5(NAMESPACE_DNS, old_point_str)
+                            try:
+                                await self.qdrant_client.delete(
+                                    collection_name=collection_name,
+                                    points_selector=[str(old_point_uuid)],
+                                )
+                            except Exception:
+                                pass  # Qdrant point may already be gone
+                            await self.db.delete(old_mem)
+
+                        await self.db.flush()
+                        logger.info(
+                            "old_versions_cleaned",
+                            resource_id=event.resource_id,
+                            doc_id=event.doc_id,
+                            current_version=event.version,
+                            cleaned_count=len(old_memories),
+                        )
             except Exception as cleanup_err:
                 # Non-blocking: cleanup failure should not block upsert
                 logger.warning(
@@ -1272,9 +1291,8 @@ class ResourceIndexer:
                 )
 
         except Exception as e:
-            # P1-4: Log Memory creation/update failure
-            # PostgreSQL transaction will rollback, but Qdrant point remains
-            # Next indexer run will retry
+            # P1-4: Log Memory creation/update failure. The event's SAVEPOINT
+            # rolls back its row changes; the Qdrant point remains (see above).
             logger.error(
                 "resource_memory_operation_failed",
                 resource_id=event.resource_id,

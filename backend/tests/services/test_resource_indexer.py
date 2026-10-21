@@ -20,6 +20,26 @@ from services.resource_indexer import ResourceIndexer
 from utils.datetime import utcnow
 
 
+def _savepoint() -> AsyncMock:
+    """An async context manager standing in for ``db.begin_nested()``."""
+    nested = AsyncMock()
+    nested.__aenter__ = AsyncMock(return_value=None)
+    nested.__aexit__ = AsyncMock(return_value=None)
+    return nested
+
+
+def _mock_db(db: AsyncMock | None = None) -> AsyncMock:
+    """A mocked session whose ``begin_nested()`` works under ``async with``.
+
+    An ``AsyncMock().begin_nested()`` returns a coroutine, which breaks
+    ``async with`` (#2218: every event, and the old-version cleanup, runs in
+    a SAVEPOINT).
+    """
+    db = db if db is not None else AsyncMock()
+    db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
+    return db
+
+
 def _make_event() -> MagicMock:
     event = MagicMock()
     event.id = 1
@@ -86,7 +106,7 @@ class TestResourceIndexerNamedVectorUpsert:
 
         db.execute.side_effect = _execute_side_effect
         db.add = MagicMock()
-        return db
+        return _mock_db(db)
 
     @pytest.fixture
     def indexer(self, mock_db):
@@ -328,7 +348,7 @@ class TestResourceIndexerNamedVectorUpsert:
 
         db.execute.side_effect = _side_effect
         db.add = MagicMock()
-        return db
+        return _mock_db(db)
 
     @pytest.mark.asyncio
     async def test_apply_upsert_update_path_projects_lineage(self):
@@ -568,7 +588,7 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
     @pytest.mark.asyncio
     async def test_resolve_called_once_for_multi_event_batch(self):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            indexer = ResourceIndexer(AsyncMock())
+            indexer = ResourceIndexer(_mock_db())
 
         # Stub out everything except the helper under inspection.
         state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
@@ -624,7 +644,7 @@ class TestProcessIncrementalMemoriesPerDay:
 
     def _indexer(self, events, existing: set[str] | None = None):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            indexer = ResourceIndexer(AsyncMock())
+            indexer = ResourceIndexer(_mock_db())
         self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
         self.context = _make_context()
         indexer._get_or_create_state = AsyncMock(return_value=self.state)
@@ -776,7 +796,7 @@ class TestProcessIncrementalSuspendedOrFull:
 
     def _indexer(self, events, *, suspended: bool = False, room: int = 10_000, existing=None):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            indexer = ResourceIndexer(AsyncMock())
+            indexer = ResourceIndexer(_mock_db())
         self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
         self.context = _make_context()
         indexer._get_or_create_state = AsyncMock(return_value=self.state)
@@ -899,7 +919,7 @@ class TestProcessIncrementalSuspendedOrFull:
     @pytest.mark.asyncio
     async def test_plan_suspended_reads_the_workspace(self):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            indexer = ResourceIndexer(AsyncMock())
+            indexer = ResourceIndexer(_mock_db())
         workspace = Workspace(id=uuid4(), name="w", plan_name="free", owner_user_id="u")
         indexer.db.get = AsyncMock(return_value=workspace)
         context = _make_context()
@@ -968,7 +988,7 @@ class TestExistingResourceDocIds:
 
     def _indexer(self, rows):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            indexer = ResourceIndexer(AsyncMock())
+            indexer = ResourceIndexer(_mock_db())
         result = MagicMock()
         result.scalars.return_value.all.return_value = rows
         indexer.db.execute = AsyncMock(return_value=result)
@@ -1356,3 +1376,292 @@ class TestRepointedRowDropsItsStrayPoints:
         chunks.assert_not_awaited()
         points.assert_not_awaited()
         assert indexer._repointed == []
+
+
+class TestProcessIncrementalSavepoints:
+    """#2218: every event runs in its own SAVEPOINT, so a failed event rolls
+    back only itself and the session stays usable for the rest of the batch."""
+
+    COLLECTION = "kagura_memories"
+
+    def _indexer(self, events):
+        db = AsyncMock()
+        self.savepoints: list[AsyncMock] = []
+
+        def _begin_nested():
+            nested = _savepoint()
+            self.savepoints.append(nested)
+            return nested
+
+        db.begin_nested = MagicMock(side_effect=_begin_nested)
+        db.commit = AsyncMock()
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        indexer._get_or_create_state = AsyncMock(return_value=self.state)
+        indexer._fetch_events = AsyncMock(return_value=events)
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=_make_context())
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
+        indexer._apply_upsert = AsyncMock()
+        indexer._apply_delete = AsyncMock()
+        indexer._plan_suspended = AsyncMock(return_value=False)
+        indexer._workspace_memory_room = AsyncMock(return_value=10_000)
+        return indexer
+
+    async def _process(self, indexer, chunks=None, points=None):
+        routing = AsyncMock(return_value=(self.COLLECTION, MagicMock()))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+            patch("services.resource_indexer.delete_chunk_points", chunks or AsyncMock()),
+            patch("services.resource_indexer.delete_points_from_qdrant", points or AsyncMock()),
+        ):
+            quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
+            return await indexer.process_incremental("res_test", uuid4())
+
+    @pytest.mark.asyncio
+    async def test_each_event_runs_in_its_own_savepoint(self):
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3")))
+
+        metrics = await self._process(indexer)
+
+        assert len(self.savepoints) == 3
+        for nested in self.savepoints:
+            nested.__aenter__.assert_awaited_once()
+            nested.__aexit__.assert_awaited_once()
+            assert nested.__aexit__.await_args.args[0] is None
+        assert metrics.applied_upserts == 3
+        assert self.state.last_offset == 3
+
+    @pytest.mark.asyncio
+    async def test_a_failed_event_rolls_back_only_itself(self):
+        events = _numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3"))
+        indexer = self._indexer(events)
+        indexer._apply_upsert.side_effect = [None, RuntimeError("boom"), None]
+
+        metrics = await self._process(indexer)
+
+        # The second savepoint saw the exception (its rollback), the others none.
+        assert self.savepoints[1].__aexit__.await_args.args[0] is RuntimeError
+        assert self.savepoints[0].__aexit__.await_args.args[0] is None
+        assert self.savepoints[2].__aexit__.await_args.args[0] is None
+        assert metrics.applied_upserts == 2
+        assert metrics.errors == 1
+        assert self.state.last_offset == events[2].id
+        indexer.db.commit.assert_awaited_once()
+        indexer.db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_events_repoints_are_dropped(self):
+        events = _numbered(_upsert("doc_1"), _upsert("doc_2"))
+        indexer = self._indexer(events)
+        kept_id, dropped_id = uuid4(), uuid4()
+
+        async def _apply(event, *_a):
+            if event.doc_id == "doc_1":
+                indexer._repointed.append((kept_id, kept_id, self.COLLECTION))
+                return
+            indexer._repointed.append((dropped_id, dropped_id, self.COLLECTION))
+            raise RuntimeError("flush failed after the re-point")
+
+        indexer._apply_upsert.side_effect = _apply
+        chunks, points = AsyncMock(), AsyncMock()
+
+        metrics = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 1
+        chunks.assert_awaited_once_with([kept_id], self.COLLECTION)
+        points.assert_awaited_once_with([str(kept_id)], self.COLLECTION)
+        assert indexer._repointed == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_release_does_not_count_the_event(self):
+        events = _numbered(_upsert("doc_1"), _upsert("doc_2"))
+        indexer = self._indexer(events)
+        release_error = RuntimeError("RELEASE SAVEPOINT failed")
+        original = indexer.db.begin_nested.side_effect
+
+        def _begin_nested():
+            nested = original()
+            if len(self.savepoints) == 2:
+                nested.__aexit__ = AsyncMock(side_effect=release_error)
+            return nested
+
+        indexer.db.begin_nested.side_effect = _begin_nested
+
+        metrics = await self._process(indexer)
+
+        assert metrics.applied_upserts == 1
+        assert metrics.errors == 1
+        assert self.state.last_offset == events[0].id
+
+    @pytest.mark.asyncio
+    async def test_old_version_cleanup_runs_in_its_own_savepoint(self):
+        """Step 6 is non-blocking: a failed cleanup rolls back only itself."""
+        old = MagicMock()
+        old.resource_version = 0
+        db = AsyncMock()
+        existing = MagicMock()
+        existing.scalar_one_or_none.return_value = None
+        old_versions = MagicMock()
+        old_versions.scalars.return_value.all.return_value = [old]
+        db.execute.side_effect = [existing, old_versions]
+        db.add = MagicMock()
+        db.delete = AsyncMock(side_effect=RuntimeError("cleanup flush failed"))
+        cleanup = _savepoint()
+        db.begin_nested = MagicMock(return_value=cleanup)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _make_event()
+        event.event_metadata = None
+
+        with patch("services.resource_indexer.logger") as log:
+            await indexer._apply_upsert(
+                event, _make_schema(), _make_context(), self.COLLECTION, indexer.embedding_service
+            )
+
+        db.begin_nested.assert_called_once()
+        assert cleanup.__aexit__.await_args.args[0] is RuntimeError
+        db.add.assert_called_once()
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert "old_version_cleanup_failed" in warned
+
+
+async def _seed_indexed_resource(db_session, events: list[dict]):
+    """A workspace, context, resource and schema with ``events`` queued.
+
+    Committed: ``process_incremental`` commits, so the caller must hand the
+    returned ids to ``_drop_indexed_resource``.
+    """
+    from models.resource import Resource, ResourceEvent, ResourceSchema
+
+    owner = f"owner-{uuid4().hex[:8]}"
+    slug = f"res-{uuid4().hex[:8]}"
+    ws = Workspace(id=uuid4(), name=f"ws-{uuid4().hex[:8]}", plan_name="pro", owner_user_id=owner)
+    ctx = Context(
+        id=uuid4(),
+        workspace_id=ws.id,
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=owner,
+        is_private=False,
+        resource_id=slug,
+    )
+    resource = Resource(id=uuid4(), workspace_id=ws.id, resource_id=slug)
+    db_session.add(ws)
+    await db_session.flush()
+    db_session.add_all([ctx, resource])
+    await db_session.flush()
+    db_session.add(
+        ResourceSchema(
+            resource_pk=resource.id,
+            resource_id=slug,
+            schema_version=1,
+            field_definitions=[
+                {"name": "title", "classification": "public", "index_hint": "fulltext"}
+            ],
+        )
+    )
+    for spec in events:
+        db_session.add(
+            ResourceEvent(
+                resource_pk=resource.id,
+                resource_id=slug,
+                op="upsert",
+                created_at=utcnow(),
+                **spec,
+            )
+        )
+    await db_session.commit()
+    return ws.id, ctx.id, resource.id, slug, owner
+
+
+async def _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk) -> None:
+    from sqlalchemy import delete
+
+    from models.memory import MemoryRevision
+    from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
+
+    await db_session.rollback()
+    await db_session.execute(delete(MemoryRevision).where(MemoryRevision.context_id == ctx_id))
+    await db_session.execute(delete(Memory).where(Memory.workspace_id == ws_id))
+    await db_session.execute(delete(IndexerState).where(IndexerState.context_id == ctx_id))
+    for model in (ResourceEvent, ResourceSchema):
+        await db_session.execute(delete(model).where(model.resource_pk == resource_pk))
+    await db_session.execute(delete(Resource).where(Resource.id == resource_pk))
+    await db_session.execute(delete(Context).where(Context.id == ctx_id))
+    await db_session.execute(delete(Workspace).where(Workspace.id == ws_id))
+    await db_session.commit()
+
+
+def _db_indexer(db_session):
+    with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+        indexer = ResourceIndexer(db_session)
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[0.1] * 512)
+    indexer._plan_suspended = AsyncMock(return_value=False)
+    indexer._workspace_memory_room = AsyncMock(return_value=10_000)
+    return indexer, embedder
+
+
+async def _db_process(indexer, embedder, slug, ctx_id):
+    with (
+        patch(
+            "services.resource_indexer.resolve_context_routing",
+            AsyncMock(return_value=("kagura_memories", embedder)),
+        ),
+        patch("services.resource_indexer.QuotaService") as quota_cls,
+    ):
+        quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
+        return await indexer.process_incremental(slug, ctx_id)
+
+
+class TestFailedEventDoesNotPoisonTheBatch:
+    """#2218, against the real DB: a DB-level failure in one event (here a
+    CHECK violation at its flush) is rolled back on its own; the rest of the
+    batch and the offset commit."""
+
+    @pytest.mark.asyncio
+    async def test_a_check_violation_in_one_event_leaves_the_rest_committed(self, db_session):
+        from models.resource import IndexerState, ResourceEvent
+
+        ws_id, ctx_id, resource_pk, slug, _ = await _seed_indexed_resource(
+            db_session,
+            [
+                # importance outside [0, 1] violates memories.valid_importance.
+                {"doc_id": "doc_1", "version": 1, "payload": {"title": "a"}, "importance": 5.0},
+                {"doc_id": "doc_2", "version": 1, "payload": {"title": "b"}},
+            ],
+        )
+        try:
+            indexer, embedder = _db_indexer(db_session)
+
+            metrics = await _db_process(indexer, embedder, slug, ctx_id)
+
+            assert metrics.errors == 1
+            assert metrics.applied_upserts == 1
+            assert metrics.reason is None
+            db_session.expire_all()
+            rows = (
+                (await db_session.execute(select(Memory).where(Memory.context_id == ctx_id)))
+                .scalars()
+                .all()
+            )
+            assert [m.resource_doc_id for m in rows] == ["doc_2"]
+            doc_2_event = (
+                await db_session.execute(
+                    select(ResourceEvent.id).where(
+                        ResourceEvent.resource_pk == resource_pk, ResourceEvent.doc_id == "doc_2"
+                    )
+                )
+            ).scalar_one()
+            state = (
+                await db_session.execute(
+                    select(IndexerState).where(IndexerState.context_id == ctx_id)
+                )
+            ).scalar_one()
+            assert state.last_offset == doc_2_event
+        finally:
+            await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
