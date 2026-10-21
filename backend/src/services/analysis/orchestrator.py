@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 # Pre-warm umap + sklearn at module level. Both project_to_2d and
@@ -126,7 +126,10 @@ class AnalysisParams:
 # fires loud at startup rather than at the first INSERT. ``paid_by``
 # comes from the lane since #1569 (``services/analysis/llm_lane.py``).
 _STATUS_RUNNING = "running"
-_STATUS_CANCELLED = "cancelled"
+assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES, (
+    f"_STATUS_RUNNING out of sync with MEMORY_ANALYSIS_STATUSES: {MEMORY_ANALYSIS_STATUSES}"
+)
+_STATUS_CANCELLED: Final = "cancelled"
 assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
 
 
@@ -141,11 +144,6 @@ def _row_id(analysis: MemoryAnalysis) -> str:
     """
     identity = sa_inspect(analysis).identity
     return str(identity[0]) if identity else "unknown"
-
-
-assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES, (
-    f"_STATUS_RUNNING out of sync with MEMORY_ANALYSIS_STATUSES: {MEMORY_ANALYSIS_STATUSES}"
-)
 
 
 def _params_iso_to_naive_utc(s: str | None, *, end_of_day: bool = False) -> datetime | None:
@@ -684,7 +682,7 @@ class AnalysisOrchestrator:
 
             logger.info(
                 "analysis_run_succeeded",
-                analysis_id=str(analysis.id),
+                analysis_id=str(analysis_id),
                 n_memories=len(pull.memories),
                 n_clusters=cluster_result.n_clusters,
             )
@@ -708,11 +706,16 @@ class AnalysisOrchestrator:
                 error=str(e),
                 exc_info=True,
             )
-            await self._mark_failed(
-                analysis,
-                str(e),
-                cluster_results=cluster_label_results or collected or None,
-            )
+            spent = cluster_label_results or collected
+            try:
+                await self._mark_failed(analysis, str(e), cluster_results=spent or None)
+            except asyncio.CancelledError:
+                # A soft-cancel that lands while the failure is being
+                # recorded (the DELETE handler won the row lock released by
+                # the persist rollback) cuts persist_failure off — record
+                # the spend on the cancel path instead.
+                await self._persist_cancel_spend(analysis, spent)
+                raise
             raise
 
     async def _persist_cancel_spend(
@@ -756,8 +759,8 @@ class AnalysisOrchestrator:
                 self.db,
                 analysis=analysis,
                 cluster_results=cluster_results,
-                status="cancelled",
-                error_message=analysis.cancellation_reason or "cancelled",
+                status=_STATUS_CANCELLED,
+                error_message=analysis.cancellation_reason or _STATUS_CANCELLED,
             )
             await self.db.commit()
         except Exception:

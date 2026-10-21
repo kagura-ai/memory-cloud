@@ -1167,9 +1167,17 @@ def _billed_label(cluster_index: int, *, failed: bool = False):
     )
 
 
+# Contexts seeded by the #2088 spend tests. Those tests COMMIT (the code
+# under test commits), so their sleep_reports rows would outlive the test and
+# leak into suites that assume an empty table (cost aggregation) — the class
+# fixture below deletes them.
+_SPEND_CONTEXTS: list = []
+
+
 async def _seed_spend_run(db_session):
     ws_id = uuid4()
     ctx_id = uuid4()
+    _SPEND_CONTEXTS.append(ctx_id)
     await _seed_workspace_context(db_session, ws_id, ctx_id)
     pricing = await _seed_pricing(db_session)
     analysis = MemoryAnalysis(
@@ -1243,6 +1251,23 @@ async def _analysis_reports(db_session, analysis):
 
 
 class TestRunRecordsSpendOfUnsuccessfulRun:
+    @pytest_asyncio.fixture(autouse=True)
+    async def _cleanup_committed_rows(self, db_session):
+        from sqlalchemy import delete
+
+        from models.sleep import SleepReport
+
+        yield
+        await db_session.rollback()
+        ids = list(_SPEND_CONTEXTS)
+        _SPEND_CONTEXTS.clear()
+        if ids:
+            await db_session.execute(delete(SleepReport).where(SleepReport.context_id.in_(ids)))
+            await db_session.execute(
+                delete(MemoryAnalysis).where(MemoryAnalysis.context_id.in_(ids))
+            )
+            await db_session.commit()
+
     @pytest.mark.asyncio
     async def test_threshold_failure_records_failed_spend_report(self, db_session) -> None:
         """A run whose labeling breached the threshold lands 'failed' WITH
@@ -1386,3 +1411,51 @@ class TestRunRecordsSpendOfUnsuccessfulRun:
         await db_session.refresh(analysis)
         assert analysis.status == "cancelled"
         assert analysis.cost_actual_cents is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_marking_failed_records_cancelled_spend(self, db_session) -> None:
+        """Threshold failure vs soft-cancel race: the cancel lands while the
+        failure is being recorded — the spend goes through the cancel path."""
+        import asyncio
+
+        from sqlalchemy import update
+
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        service = AnalysisOrchestrator(db_session)
+        analysis = await _seed_spend_run(db_session)
+        labels = [_billed_label(0, failed=True), _billed_label(1, failed=True)]
+
+        async def _cancel_during_failure(*args, **kwargs):
+            await db_session.execute(
+                update(MemoryAnalysis)
+                .where(MemoryAnalysis.id == analysis.id)
+                .values(status="cancelled", cancellation_reason="user")
+            )
+            await db_session.commit()
+            raise asyncio.CancelledError
+
+        p1, p2, p3, p4, p5 = _compute_patches(AsyncMock(return_value=labels))
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            p5,
+            patch(
+                "services.analysis.orchestrator.persist_results",
+                new=AsyncMock(side_effect=ClusterLabelingThresholdExceeded("2/2")),
+            ),
+            patch(
+                "services.analysis.orchestrator.persist_failure",
+                new=AsyncMock(side_effect=_cancel_during_failure),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "cancelled"
+        assert analysis.cost_actual_cents == 100
+        reports = await _analysis_reports(db_session, analysis)
+        assert [r.status for r in reports] == ["cancelled"]
