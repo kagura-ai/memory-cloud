@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes import oauth as oauth_routes
+from auth.consent_csrf import consent_csrf_token
 
 _CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 CTX_A, CTX_B = uuid.uuid4(), uuid.uuid4()
@@ -28,7 +29,7 @@ CTX_A, CTX_B = uuid.uuid4(), uuid.uuid4()
 def _render(groups, selected: str = "") -> tuple[int, str]:
     from models.auth import OAuth2Client
 
-    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_user = MagicMock(email="test@example.com", user_id="user-1", session_id="sid-x")
     fake_client = OAuth2Client(
         client_id="test",
         client_name="Some App",
@@ -130,19 +131,20 @@ def _post_response(
     *,
     files: dict | list | None = None,
     save: AsyncMock | None = None,
-    seen: list[tuple[dict, list]] | None = None,
+    seen: list[tuple[dict, dict]] | None = None,
 ) -> tuple[Any, AsyncMock]:
-    """POST the consent form; ``seen`` collects the preloaded form Authlib reads."""
-    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    """POST the consent form with the session's CSRF token (#2199); ``seen``
+    collects the payload and form Authlib reads."""
+    fake_user = MagicMock(email="test@example.com", user_id="user-1", session_id="sid-x")
+    form = {"csrf_token": consent_csrf_token("sid-x"), **form}
     fake_client = MagicMock(client_name="App", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=True)
     save = save or AsyncMock()
     redirect = SimpleNamespace(location=location)
 
-    def run_oauth_sync(action: str, request: object, **kwargs: object) -> SimpleNamespace:
-        state = request.state  # type: ignore[attr-defined]
+    def run_oauth_sync(action: str, request: Any, **kwargs: object) -> SimpleNamespace:
         if seen is not None:
-            seen.append((dict(state.form_data), list(state.form_items)))
+            seen.append((dict(request.payload.data), dict(request.form)))
         return redirect
 
     with (
@@ -155,7 +157,9 @@ def _post_response(
         db = MagicMock()
         db.query.return_value.filter_by.return_value.first.return_value = fake_client
         mock_sess.return_value = db
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ) as client:
             response = client.post(
                 "/api/v1/oauth/authorize",
                 params={
@@ -214,20 +218,20 @@ def test_a_file_part_named_default_context_never_interrupts_the_approve():
 # ------------------------------------------------------------------ non-string parts (#2190)
 
 
-def _no_upload(seen: list[tuple[dict, list]]) -> None:
+def _no_upload(seen: list[tuple[dict, dict]]) -> None:
     from starlette.datastructures import UploadFile
 
     assert seen, "Authlib was not reached"
-    for form_data, form_items in seen:
-        assert not any(isinstance(v, UploadFile) for v in form_data.values())
-        assert not any(isinstance(v, UploadFile) for _, v in form_items)
+    for payload, form in seen:
+        assert not any(isinstance(v, UploadFile) for v in payload.values())
+        assert not any(isinstance(v, UploadFile) for v in form.values())
 
 
 @pytest.mark.parametrize("name", ["scope", "state", "client_id", "code_challenge"])
 def test_a_file_part_named_like_an_oauth_parameter_never_reaches_authlib(name):
     """The OAuth values ride the query string: a file part with the same name
     is dropped, so Authlib reads the query value and the approve completes."""
-    seen: list[tuple[dict, list]] = []
+    seen: list[tuple[dict, dict]] = []
     response, _ = _post_response(
         {"confirm": "yes"},
         files={name: ("x.txt", b"evil", "text/plain")},
@@ -237,11 +241,15 @@ def test_a_file_part_named_like_an_oauth_parameter_never_reaches_authlib(name):
     assert response.status_code == 303
     assert response.headers["location"] == "https://app.example/cb?code=abc&state=s"
     _no_upload(seen)
-    assert seen[0][0] == {"confirm": "yes"}
+    # Authlib reads the query only and sees no form (#2199).
+    assert seen[0] == (
+        {"client_id": "test", "redirect_uri": "https://app.example/cb", "state": "s"},
+        {},
+    )
 
 
 def test_a_file_part_named_confirm_is_a_denial():
-    seen: list[tuple[dict, list]] = []
+    seen: list[tuple[dict, dict]] = []
     response, save = _post_response(
         {}, files={"confirm": ("c.txt", b"yes", "text/plain")}, seen=seen
     )
@@ -253,7 +261,7 @@ def test_a_file_part_named_confirm_is_a_denial():
 
 
 def test_a_text_part_survives_a_file_part_with_the_same_name():
-    seen: list[tuple[dict, list]] = []
+    seen: list[tuple[dict, dict]] = []
     response, save = _post_response(
         {"confirm": "yes", "default_context": str(CTX_A)},
         files={"default_context": ("ctx.txt", str(CTX_B).encode(), "text/plain")},
@@ -299,7 +307,7 @@ def test_a_refused_request_stores_nothing():
 
 
 def test_the_picker_is_not_read_for_a_request_that_fails_validation():
-    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_user = MagicMock(email="test@example.com", user_id="user-1", session_id="sid-x")
     fake_client = MagicMock(client_name="App", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=False)
     choices = AsyncMock(return_value=([], ""))
@@ -469,7 +477,7 @@ def test_the_loopback_interstitial_path_stores_the_choice_too():
     default is stored on that path as well, once the code is issued."""
     from fastapi.responses import HTMLResponse
 
-    fake_user = MagicMock(email="test@example.com", user_id="user-1")
+    fake_user = MagicMock(email="test@example.com", user_id="user-1", session_id="sid-x")
     fake_client = MagicMock(client_name="CLI", scope="memory:read")
     fake_client.check_redirect_uri = MagicMock(return_value=True)
     save = AsyncMock()
@@ -488,11 +496,17 @@ def test_the_loopback_interstitial_path_stores_the_choice_too():
         db = MagicMock()
         db.query.return_value.filter_by.return_value.first.return_value = fake_client
         mock_sess.return_value = db
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ) as client:
             response = client.post(
                 "/api/v1/oauth/authorize",
                 params={"client_id": "test", "redirect_uri": "http://127.0.0.1:8765/cb"},
-                data={"confirm": "yes", "default_context": str(CTX_A)},
+                data={
+                    "confirm": "yes",
+                    "default_context": str(CTX_A),
+                    "csrf_token": consent_csrf_token("sid-x"),
+                },
                 follow_redirects=False,
             )
 

@@ -13,6 +13,7 @@ handler reaches the ``TemplateResponse`` call and verifies it returns a 200
 HTML response instead of crashing.
 """
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -22,9 +23,11 @@ _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
+from auth.consent_csrf import consent_csrf_token  # noqa: E402
 from utils.oauth_messages import OAUTH_MESSAGES  # noqa: E402
 
 _CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -36,7 +39,7 @@ def _render_consent(
     """Render the consent page for a public client with ``registered`` URIs."""
     from models.auth import OAuth2Client
 
-    fake_user = MagicMock(email="test@example.com")
+    fake_user = MagicMock(email="test@example.com", session_id="sid")
     fake_client = OAuth2Client(
         client_id="test",
         client_name="Some App",
@@ -126,7 +129,7 @@ class TestOAuthAuthorizeTemplate:
         """Regression for #205: TemplateResponse must accept request as
         the first positional arg, otherwise Jinja2 raises
         TypeError: unhashable type: 'dict' and the client sees 500."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid")
         fake_client = MagicMock(
             client_name="Test Client",
             scope="memory:read memory:write",
@@ -165,6 +168,36 @@ class TestOAuthAuthorizeTemplate:
         assert response.headers.get("content-type", "").startswith("text/html")
         # Body should mention the client name from our mock.
         assert "Test Client" in response.text
+
+    def test_both_forms_carry_the_session_csrf_token(self):
+        """#2199: the deny and the approve form each post the session's token."""
+        status, body = _render_consent(["https://app.example/cb"], "https://app.example/cb")
+        assert status == 200, body[:300]
+        hidden = f'<input type="hidden" name="csrf_token" value="{consent_csrf_token("sid")}">'
+        forms = re.findall(r"<form [^>]*>.*?</form>", body, flags=re.S)
+        assert len(forms) == 2, forms
+        for form in forms:
+            assert hidden in form, form
+        assert body.count('name="csrf_token"') == 2
+
+    @pytest.mark.parametrize("session_id", [None, ""])
+    def test_authorize_redirects_to_login_without_a_session_id(self, session_id):
+        """No session id, no token to render: back to the sign-in page."""
+        fake_user = MagicMock(email="test@example.com", session_id=session_id)
+        with patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user):
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get(
+                    "/api/v1/oauth/authorize",
+                    params={
+                        "response_type": "code",
+                        "client_id": "test",
+                        "redirect_uri": "http://x",
+                        "state": "s",
+                    },
+                    follow_redirects=False,
+                )
+        assert response.status_code in (302, 307)
+        assert "/login" in response.headers.get("location", "")
 
     def test_authorize_redirects_to_login_when_no_session(self):
         """Sanity guard: the no-session redirect path still works."""

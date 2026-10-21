@@ -21,13 +21,18 @@ class StarletteOAuth2Payload:
     This class extracts data from Starlette Request's query_params and form_data.
     """
 
-    def __init__(self, request: Request):
+    def __init__(self, request: Request, *, include_form: bool = True):
         """Initialize payload from Starlette Request.
 
         Args:
             request: Starlette/FastAPI Request object
+            include_form: Read the preloaded form as well (it applies over the
+                query string). False reads the query string only: the consent
+                POST, whose OAuth parameters travel in its query and whose form
+                carries only the user's answer (#2199).
         """
         self._request = request
+        self._include_form = include_form
         self._data_cache = None
 
     def __getattr__(self, key: str):
@@ -78,7 +83,9 @@ class StarletteOAuth2Payload:
             data[k] = v
 
         # Preloaded form data (set by preload_form dependency)
-        form: dict | None = getattr(self._request.state, "form_data", None)
+        form: dict | None = (
+            getattr(self._request.state, "form_data", None) if self._include_form else None
+        )
         if form:
             for k, v in form.items():
                 data[k] = v
@@ -98,6 +105,9 @@ class StarletteOAuth2Payload:
         # Query params (multi-value support)
         for k, v in self._request.query_params.multi_items():
             values[k].append(v)
+
+        if not self._include_form:
+            return values
 
         # Form data: every value of a repeated field (``form_items``, #1686),
         # else the one-value-per-name ``form_data``.
@@ -122,11 +132,13 @@ class StarletteOAuth2Request(OAuth2Request):
     This follows the same pattern as Django OAuth2 integration.
     """
 
-    def __init__(self, request: Request):
+    def __init__(self, request: Request, *, include_form: bool = True):
         """Create OAuth2Request from Starlette Request.
 
         Args:
             request: Starlette/FastAPI Request object
+            include_form: See :class:`StarletteOAuth2Payload`; False also
+                leaves ``form`` empty (#2199).
         """
         uri = str(request.url)
 
@@ -146,8 +158,9 @@ class StarletteOAuth2Request(OAuth2Request):
         # mutates it at runtime — the assignment here is a contract Authlib
         # documents but the type stub does not capture. Cast keeps the
         # narrowing local to this constructor.
-        self.payload = cast(Any, StarletteOAuth2Payload(request))
+        self.payload = cast(Any, StarletteOAuth2Payload(request, include_form=include_form))
         self._request = request
+        self._include_form = include_form
 
     @property
     def form(self):
@@ -157,6 +170,9 @@ class StarletteOAuth2Request(OAuth2Request):
         for client_secret_post authentication method.
 
         Returns:
-            Dict of form data from request.state.form_data
+            Dict of form data from request.state.form_data; empty when the
+            request was created with ``include_form=False``
         """
+        if not self._include_form:
+            return {}
         return getattr(self._request.state, "form_data", {})

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.routes import api_keys as api_keys_routes
 from api.routes import member_credentials as mc
 from api.routes import oauth as oauth_routes
+from auth.consent_csrf import consent_csrf_token
 from models.auth import (
     OAuth2AuthorizationCode,
     OAuth2Client,
@@ -479,12 +480,17 @@ class TestOAuthRoutes:
             "state": "s",
             "scope": "memory:read",
         }
-        request.state.form_data = {"confirm": "yes"}
+        # The route wraps the request for Authlib (query only, #2199).
+        request.method = "POST"
+        request.url = "https://testserver/api/v1/oauth/authorize"
+        request.state.form_data = {"confirm": "yes", "csrf_token": consent_csrf_token("sid-7")}
         monkeypatch.setattr(oauth_routes, "preload_form", AsyncMock())
         monkeypatch.setattr(
             oauth_routes,
             "get_current_user_from_session",
-            lambda request: oauth_routes._OAuthUser(user_id="u-7", email="u7@example.test"),
+            lambda request: oauth_routes._OAuthUser(
+                user_id="u-7", email="u7@example.test", session_id="sid-7"
+            ),
         )
         monkeypatch.setattr(oauth_routes, "get_sync_session", MagicMock())
         monkeypatch.setattr(

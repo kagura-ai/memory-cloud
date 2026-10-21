@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
 from api.routes import oauth as oauth_routes  # noqa: E402
+from auth.consent_csrf import consent_csrf_token  # noqa: E402
 from utils.oauth_messages import OAUTH_MESSAGES  # noqa: E402
 
 CODE = "Zq9secretAuthCode7"
@@ -70,7 +71,9 @@ def _post(
     """
     if location is None:
         location = f"{redirect_uri}?code={CODE}&state=st-1"
-    fake_user = oauth_routes._OAuthUser(user_id="u-2155", email="u2155@example.test")
+    fake_user = oauth_routes._OAuthUser(
+        user_id="u-2155", email="u2155@example.test", session_id="sid-2155"
+    )
     row = _fake_client(client_name) if client_row == "default" else client_row
 
     # The pre-check reads the client first; the interstitial lookup then gets
@@ -100,7 +103,9 @@ def _post(
         db = MagicMock()
         db.query.side_effect = _query
         mock_sess.return_value = db
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ) as client:
             response = client.post(
                 "/api/v1/oauth/authorize",
                 params={
@@ -110,7 +115,7 @@ def _post(
                     "state": "st-1",
                     "locale": locale,
                 },
-                data={"confirm": confirm},
+                data={"confirm": confirm, "csrf_token": consent_csrf_token("sid-2155")},
                 follow_redirects=False,
             )
     return response, schedule

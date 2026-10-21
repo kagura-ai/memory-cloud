@@ -60,6 +60,7 @@ if str(_BACKEND_SRC) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
+from auth.consent_csrf import consent_csrf_token  # noqa: E402
 
 
 def _make_fake_client(*, accepts: bool, client_name: str = "Test Client"):
@@ -81,7 +82,7 @@ class TestGetAuthorizeRedirectUriPreCheck:
     """GET /authorize must reject unregistered redirect_uri before render."""
 
     def test_unregistered_redirect_uri_returns_error_page_not_consent(self):
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=False)
 
         with (
@@ -120,7 +121,7 @@ class TestGetAuthorizeRedirectUriPreCheck:
 
     def test_registered_redirect_uri_still_renders_consent(self):
         """Happy path: registered redirect_uri produces the consent screen."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True, client_name="Legit App")
 
         with (
@@ -157,7 +158,7 @@ class TestGetAuthorizePercentEncodedTraversal:
         matcher already unquotes before checking, but we assert it at the
         route level so a future regression in the matcher would still be
         caught here."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         # Use a real-ish OAuth2Client wired to the actual matcher.
         from models.auth import OAuth2Client
 
@@ -193,7 +194,7 @@ class TestGetAuthorizePercentEncodedTraversal:
         )
 
     def test_percent_encoded_dot_dot_rejected(self):
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         from models.auth import OAuth2Client
 
         real_client = OAuth2Client()
@@ -229,7 +230,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
 
     def test_deny_with_unregistered_redirect_uri_returns_error_not_redirect(self):
         """CWE-601 regression: confirm=no must not 303 to attacker URI."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=False)
 
         with (
@@ -249,7 +250,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "no"},
+                    data={"confirm": "no", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -265,7 +266,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
 
     def test_deny_with_registered_redirect_uri_still_redirects(self):
         """Happy path: registered URI deny still 303s with access_denied."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True)
 
         with (
@@ -285,7 +286,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "no"},
+                    data={"confirm": "no", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -298,7 +299,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
     def test_post_with_missing_redirect_uri_returns_error_page(self):
         """Missing redirect_uri must hit the same error page (no 500, no
         ambiguous HTTPException JSON)."""
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
 
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
@@ -316,7 +317,7 @@ class TestPostAuthorizeRedirectUriPreCheck:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "no"},
+                    data={"confirm": "no", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -337,7 +338,7 @@ class TestPostAuthorizeExceptionBranches:
     def test_oauth2error_redirects_to_registered_uri_with_error_params(self):
         from authlib.oauth2.rfc6749.errors import InvalidScopeError
 
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True)
 
         with (
@@ -352,7 +353,9 @@ class TestPostAuthorizeExceptionBranches:
             db.query.return_value.filter_by.return_value.first.return_value = fake_client
             mock_sess.return_value = db
 
-            with TestClient(app, raise_server_exceptions=False) as client:
+            with TestClient(
+                app, base_url="https://testserver", raise_server_exceptions=False
+            ) as client:
                 response = client.post(
                     "/api/v1/oauth/authorize",
                     params={
@@ -361,7 +364,7 @@ class TestPostAuthorizeExceptionBranches:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "yes"},
+                    data={"confirm": "yes", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -373,7 +376,7 @@ class TestPostAuthorizeExceptionBranches:
         assert "attacker" not in location
 
     def test_generic_exception_redirects_to_registered_uri_with_server_error(self):
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True)
 
         with (
@@ -388,7 +391,9 @@ class TestPostAuthorizeExceptionBranches:
             db.query.return_value.filter_by.return_value.first.return_value = fake_client
             mock_sess.return_value = db
 
-            with TestClient(app, raise_server_exceptions=False) as client:
+            with TestClient(
+                app, base_url="https://testserver", raise_server_exceptions=False
+            ) as client:
                 response = client.post(
                     "/api/v1/oauth/authorize",
                     params={
@@ -397,7 +402,7 @@ class TestPostAuthorizeExceptionBranches:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "yes"},
+                    data={"confirm": "yes", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -422,7 +427,7 @@ class TestAppendQueryParamsRegression:
     def test_deny_with_query_string_in_registered_uri_merges_correctly(self):
         from urllib.parse import parse_qs, urlsplit
 
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True)
 
         with (
@@ -442,7 +447,7 @@ class TestAppendQueryParamsRegression:
                         "state": "s",
                         "locale": "en",
                     },
-                    data={"confirm": "no"},
+                    data={"confirm": "no", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 
@@ -468,7 +473,7 @@ class TestAppendQueryParamsRegression:
         drop our state/error."""
         from urllib.parse import parse_qs, urlsplit
 
-        fake_user = MagicMock(email="test@example.com")
+        fake_user = MagicMock(email="test@example.com", session_id="sid-x")
         fake_client = _make_fake_client(accepts=True)
 
         with (
@@ -489,7 +494,7 @@ class TestAppendQueryParamsRegression:
                         "state": "fresh",
                         "locale": "en",
                     },
-                    data={"confirm": "no"},
+                    data={"confirm": "no", "csrf_token": consent_csrf_token("sid-x")},
                     follow_redirects=False,
                 )
 

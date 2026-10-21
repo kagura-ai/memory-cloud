@@ -44,6 +44,8 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
 from api.main import app  # noqa: E402
+from api.routes.oauth import _CONSENT_CSRF_DESCRIPTION  # noqa: E402
+from auth.consent_csrf import consent_csrf_token  # noqa: E402
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
 from auth.oauth2_server import _OAuthUser  # noqa: E402
 from config.settings import get_settings  # noqa: E402
@@ -67,6 +69,7 @@ LEGACY_DCR_CLIENT = "oauth_flow_dcr_claudeai"
 CONFIDENTIAL_CLIENT = "oauth_flow_confidential"
 CONFIDENTIAL_SECRET = "confidential-client-secret-for-the-flow-test"
 USER_ID = "flow-user"
+SESSION_ID = "sid-flow"
 
 
 @pytest.fixture
@@ -149,7 +152,7 @@ def api(db_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[T
     monkeypatch.setenv("FRONTEND_URL", FRONTEND)
     monkeypatch.delenv("MCP_BASE_PATH", raising=False)
     monkeypatch.setattr(get_settings(), "oauth_pkce_required", True)
-    user = _OAuthUser(user_id=USER_ID, email="flow-user@example.test", session_id="sid-flow")
+    user = _OAuthUser(user_id=USER_ID, email="flow-user@example.test", session_id=SESSION_ID)
     with (
         patch("api.routes.oauth.get_sync_session", side_effect=db_factory),
         patch("api.routes.oauth.get_current_user_from_session", return_value=user),
@@ -225,11 +228,21 @@ def _assert_error_page(response: Any, error: str) -> None:
     assert 'name="confirm" value="yes"' not in response.text
 
 
+def _consent_form(confirm: str = "yes", **extra: str) -> dict[str, str]:
+    """The consent form body with the session's CSRF token (#2199)."""
+    return {"confirm": confirm, "csrf_token": consent_csrf_token(SESSION_ID), **extra}
+
+
+def _page_csrf_tokens(page: Any) -> list[str]:
+    """The hidden ``csrf_token`` values the consent page renders, one per form."""
+    return re.findall(r'<input type="hidden" name="csrf_token" value="([^"]*)">', page.text)
+
+
 def _submit_consent(api: TestClient, params: dict[str, str]) -> Any:
     """POST the consent form directly (without loading the consent page)."""
     return api.post(
         f"/api/v1/oauth/authorize?{urlencode(params)}",
-        data={"confirm": "yes"},
+        data=_consent_form(),
         follow_redirects=False,
     )
 
@@ -238,9 +251,12 @@ def _consent(api: TestClient, params: dict[str, str]) -> dict[str, str]:
     """Approve on the consent page; return the redirect's query parameters."""
     page = api.get("/api/v1/oauth/authorize", params=params, follow_redirects=False)
     assert page.status_code == 200, page.text[:300]
+    tokens = _page_csrf_tokens(page)
+    # Both forms (deny and approve) carry the session's token.
+    assert tokens == [consent_csrf_token(SESSION_ID)] * 2, tokens
     approved = api.post(
         f"/api/v1/oauth/authorize?{urlencode(params)}",
-        data={"confirm": "yes"},
+        data={"confirm": "yes", "csrf_token": tokens[1]},
         follow_redirects=False,
     )
     # A granted loopback consent shows the callback URL on a page (#2155).
@@ -732,7 +748,7 @@ class TestResourceBinding:
         params = _authorize_params(challenge=challenge, resource="https://other.example/mcp")
         response = api.post(
             f"/api/v1/oauth/authorize?{urlencode(params)}",
-            data={"confirm": "yes"},
+            data=_consent_form(),
             follow_redirects=False,
         )
 
@@ -1067,7 +1083,7 @@ class TestRepeatedParameters:
         pairs += [("resource", resource) for resource in resources]
         response = api.post(
             f"/api/v1/oauth/authorize?{urlencode(pairs)}",
-            data={"confirm": "yes"},
+            data=_consent_form(),
             follow_redirects=False,
         )
         assert response.status_code == 303
@@ -1202,7 +1218,7 @@ class TestNonStringFormParts:
         params = _authorize_params(challenge=challenge, state="query-state")
         approved = api.post(
             f"/api/v1/oauth/authorize?{urlencode(params)}",
-            data={"confirm": "yes"},
+            data=_consent_form(),
             files={name: ("part.txt", b"memory:admin", "text/plain")},
             follow_redirects=False,
         )
@@ -1262,3 +1278,160 @@ class TestOversizedForm:
         assert set(response.json()) == {"error", "error_description"}
         assert response.json()["error"] == "invalid_request"
         assert response.headers["cache-control"] == "no-store"
+
+
+class TestConsentFormAndCsrf:
+    """The consent POST reads OAuth parameters from the query only and needs
+    the session's CSRF token on both buttons (#2199)."""
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {},
+            {"redirect_uri": "https://evil.example/callback"},
+            {"code_challenge": "form-challenge-" + "x" * 40, "code_challenge_method": "plain"},
+            {"response_type": "token", "resource": "https://other.example/mcp"},
+        ],
+        ids=["client-and-scope", "redirect-uri", "pkce", "response-type-and-resource"],
+    )
+    def test_oauth_params_in_the_form_are_ignored(
+        self, api: TestClient, db_factory: sessionmaker, extra: dict[str, str]
+    ) -> None:
+        # THE regression: the query names the public client; a form naming the
+        # confidential client with memory:admin must not change the grant.
+        verifier, challenge = _pkce()
+        params = _authorize_params(challenge=challenge, state="query-state")
+        body = {
+            "client_id": CONFIDENTIAL_CLIENT,
+            "scope": "memory:admin",
+            "state": "form-state",
+            **extra,
+        }
+        # A debug line, below the configured level: read it off the logger.
+        with patch("api.routes.oauth.logger") as route_logger:
+            approved = api.post(
+                f"/api/v1/oauth/authorize?{urlencode(params)}",
+                data=_consent_form(**body),
+                follow_redirects=False,
+            )
+
+        redirect = _redirect_params(approved)
+        assert "error" not in redirect, redirect
+        assert redirect["state"] == "query-state"
+        with db_factory() as db:
+            stored = db.query(OAuth2AuthorizationCode).one()
+            assert stored.client_id == PUBLIC_CLIENT
+            assert stored.scope == "memory:read memory:write"
+            assert stored.redirect_uri == REDIRECT_URI
+        tokens = _exchange(api, redirect["code"], verifier)
+        assert tokens["scope"] == "memory:read memory:write"
+        # The ignored fields are logged by name, never by value.
+        ignored = [
+            c
+            for c in route_logger.debug.call_args_list
+            if c.args == ("oauth_consent_form_params_ignored",)
+        ]
+        assert len(ignored) == 1, route_logger.debug.call_args_list
+        assert ignored[0].kwargs == {"names": sorted(body), "count": len(body)}
+
+    def test_page_tokens_are_the_session_token(self, api: TestClient) -> None:
+        _, challenge = _pkce()
+        page = api.get(
+            "/api/v1/oauth/authorize",
+            params=_authorize_params(challenge=challenge),
+            follow_redirects=False,
+        )
+        assert page.status_code == 200, page.text[:300]
+        assert _page_csrf_tokens(page) == [consent_csrf_token(SESSION_ID)] * 2
+
+    @pytest.mark.parametrize("confirm", ["yes", "no"])
+    @pytest.mark.parametrize(
+        "token",
+        [None, "", "wrong", "other-session"],
+        ids=["missing", "empty", "wrong", "other-session"],
+    )
+    def test_bad_token_is_an_error_page_and_stores_nothing(
+        self, api: TestClient, db_factory: sessionmaker, confirm: str, token: str | None
+    ) -> None:
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge)
+        form = {"confirm": confirm}
+        if token == "other-session":
+            form["csrf_token"] = consent_csrf_token("other-sid")
+        elif token is not None:
+            form["csrf_token"] = token
+        with (
+            capture_logs() as events,
+            patch("api.routes.oauth._save_consent_default_context") as save_default,
+        ):
+            response = api.post(
+                f"/api/v1/oauth/authorize?{urlencode(params)}",
+                data={**form, "default_context": "3f2b8c1e-5d6a-4b7c-9e0f-000000000001"},
+                follow_redirects=False,
+            )
+
+        _assert_error_page(response, "invalid_request")
+        assert _CONSENT_CSRF_DESCRIPTION in response.text
+        assert "access_denied" not in response.text
+        assert _codes(db_factory) == 0
+        save_default.assert_not_called()
+        rejected = [e for e in events if e["event"] == "oauth_authorize_post_rejected_csrf"]
+        assert len(rejected) == 1, events
+        assert rejected[0]["client_id"] == PUBLIC_CLIENT
+        assert rejected[0]["reason"] == ("missing" if not token else "mismatch")
+        if form.get("csrf_token"):
+            assert form["csrf_token"] not in repr(events)
+
+    def test_session_without_an_id_is_refused(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge)
+        user = _OAuthUser(user_id=USER_ID, email="flow-user@example.test", session_id=None)
+        with patch("api.routes.oauth.get_current_user_from_session", return_value=user):
+            response = api.post(
+                f"/api/v1/oauth/authorize?{urlencode(params)}",
+                data=_consent_form(),
+                follow_redirects=False,
+            )
+
+        _assert_error_page(response, "invalid_request")
+        assert _codes(db_factory) == 0
+
+    def test_deny_with_the_token_redirects_with_access_denied(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge, state="deny-state")
+        response = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(params)}",
+            data=_consent_form("no"),
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303, response.text[:300]
+        redirect = _redirect_params(response)
+        assert redirect == {"error": "access_denied", "state": "deny-state"}
+        assert _codes(db_factory) == 0
+
+    def test_unregistered_redirect_uri_page_comes_before_the_token_check(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        # The #218 pre-check keeps its place: the redirect_uri page, not the
+        # CSRF page, even without a token.
+        _, challenge = _pkce()
+        params = {
+            **_authorize_params(challenge=challenge),
+            "redirect_uri": "https://evil.example/callback",
+        }
+        response = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(params)}",
+            data={"confirm": "yes"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 400
+        assert "location" not in response.headers
+        assert "https://evil.example/callback" in response.text
+        assert _CONSENT_CSRF_DESCRIPTION not in response.text
+        assert _codes(db_factory) == 0

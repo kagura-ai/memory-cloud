@@ -41,7 +41,7 @@ from typing import Any, TypeVar
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 from uuid import UUID
 
-from authlib.oauth2.rfc6749.errors import OAuth2Error
+from authlib.oauth2.rfc6749.errors import InvalidRequestError, OAuth2Error
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 from starlette.requests import ClientDisconnect
 
+from auth.consent_csrf import consent_csrf_token, consent_csrf_valid
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
@@ -73,7 +74,7 @@ from auth.oauth2_server import (
 )
 from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
 from auth.session import SESSION_COOKIE_NAME
-from auth.starlette_oauth2_request import StarletteOAuth2Payload
+from auth.starlette_oauth2_request import StarletteOAuth2Payload, StarletteOAuth2Request
 from config.settings import get_settings
 from db.base import get_sync_session
 from db.redis import increment_counter
@@ -131,12 +132,13 @@ async def preload_form(request: Request) -> Request:
     ``form_data`` holds one value per name, ``form_items`` every value in
     order, so a repeated parameter is seen in full (#1686).
 
-    Only textual parts are kept (#2190). Authlib reads these values (the form
-    overrides the query string), so a multipart *file* part would reach it as
-    an ``UploadFile`` and fail on its first string operation. Our own forms
-    never send one; a dropped part counts as absent, which leaves the query
-    value in place at ``/authorize`` and gives Authlib's own error at
-    ``/token``.
+    Only textual parts are kept (#2190). At ``/token`` Authlib reads these
+    values (the form overrides the query string), so a multipart *file* part
+    would reach it as an ``UploadFile`` and fail on its first string
+    operation. Our own forms never send one; a dropped part counts as absent,
+    which gives Authlib's own error at ``/token``. The consent POST
+    ``/authorize`` reads only its own fields from the form; Authlib gets the
+    query string there (#2199).
 
     The body is read bounded before it is parsed (#2200): a body over
     ``_OAUTH_FORM_MAX_BODY_BYTES`` raises ``_DeviceAuthorizationRequestError``
@@ -1972,7 +1974,9 @@ async def oauth_authorize_get(
     the granted scope.
 
     Every parameter travels to the consent POST in its query string, and the
-    POST validates them again through the grant.
+    POST validates them again through the grant. Both forms carry the
+    session's CSRF token (#2199); a session without an id goes back to the
+    sign-in page like no session.
     """
     logger.info(
         "oauth_authorize_get",
@@ -1985,13 +1989,17 @@ async def oauth_authorize_get(
 
     user = get_current_user_from_session(request)
 
-    if not user:
+    # #2199: the consent form's CSRF token is derived from the session id, so
+    # a session without one is treated like no session.
+    if not user or not isinstance(user.session_id, str) or not user.session_id:
         # Redirect to login
         from urllib.parse import quote
 
         return_to = quote(str(request.url), safe="")
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
+
+    csrf_token = consent_csrf_token(user.session_id)
 
     # #1831: sync session work runs off the event loop (see _run_sync). Returns
     # an error response, or the consent page's template values.
@@ -2059,6 +2067,7 @@ async def oauth_authorize_get(
                 "client_name": client.client_name,
                 "user_email": user.email,
                 "query_string": query_string,
+                "csrf_token": csrf_token,
                 "locale": locale,
                 "messages": messages,
                 "permission_keys": _consent_permission_keys(granted_scope),
@@ -2250,6 +2259,17 @@ def _render_loopback_interstitial(
 
 _AUTHORIZATION_FAILED_DESCRIPTION = "Authorization failed"
 
+# #2199: the consent form's own fields. The consent POST reads every OAuth
+# parameter from its query string; any other form field is ignored.
+_CONSENT_FORM_FIELDS = frozenset({"confirm", "default_context", "csrf_token"})
+
+# The error page's description for a consent POST without the session's CSRF
+# token (#2199). English, like Authlib's descriptions shown on that page.
+_CONSENT_CSRF_DESCRIPTION = (
+    "The consent form has expired or was not sent from this site. "
+    "Start the authorization again from the app."
+)
+
 
 def _authorization_server_error_redirect(
     redirect_uri: str | None, description: str, state: str | None
@@ -2293,9 +2313,15 @@ async def oauth_authorize_post(
 ):
     """Process authorization consent.
 
-    OAuth2 params (client_id, redirect_uri, etc.) must be in query string,
-    not in POST body. This is required by Authlib 1.6.5 which generates
-    payload from query params for authorization endpoint.
+    OAuth2 params (client_id, redirect_uri, scope, etc.) are read from the
+    query string only (#2199): Authlib gets a request without the form. The
+    form supplies ``confirm``, ``default_context`` and ``csrf_token``; any
+    other form field is ignored.
+
+    The consent page's CSRF token, derived from the browser session
+    (``auth.consent_csrf``), is required for both answers. A missing or
+    wrong token gets the error page (400): no redirect, nothing stored. The
+    #218 redirect_uri pre-check runs first.
 
     Issue #1752: the user is emailed a security notice once the
     authorization code is stored, when the consent grants the client
@@ -2316,13 +2342,31 @@ async def oauth_authorize_post(
     if not user:
         raise AuthenticationError("Not authenticated")
 
-    # Get confirm from preloaded form data
-    confirm = request.state.form_data.get("confirm")
+    # The form's own fields (#2199); the OAuth2 params come from the query.
+    form_data = request.state.form_data
+    confirm = form_data.get("confirm")
+    ignored = sorted(set(form_data) - _CONSENT_FORM_FIELDS)
+    if ignored:
+        # Names only: a value may be a credential.
+        logger.debug("oauth_consent_form_params_ignored", names=ignored, count=len(ignored))
 
-    # Get OAuth2 params from query
     client_id = request.query_params.get("client_id")
     redirect_uri = request.query_params.get("redirect_uri")
     state = request.query_params.get("state")
+
+    # #2199: the consent page's session-bound CSRF token, required for both
+    # answers (a forged deny would still send the browser to the client).
+    # Checked after the #218 pre-check, inside it, so an unregistered
+    # redirect_uri keeps its own page.
+    presented_csrf = form_data.get("csrf_token")
+    csrf_rejection: str | None = None
+    if not consent_csrf_valid(user.session_id, presented_csrf):
+        if not isinstance(user.session_id, str) or not user.session_id:
+            csrf_rejection = "no_session_id"
+        elif not presented_csrf:
+            csrf_rejection = "missing"
+        else:
+            csrf_rejection = "mismatch"
 
     # Issue #218: Pre-validate redirect_uri before *any* downstream branch
     # can act on it. Without this, the deny path and the exception handlers
@@ -2344,6 +2388,17 @@ async def oauth_authorize_post(
                 )
                 locale = _resolve_oauth_locale(request, pre_check_session, user.email)
                 return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
+            if csrf_rejection is not None:
+                # Never the token itself.
+                logger.warning(
+                    "oauth_authorize_post_rejected_csrf",
+                    client_id=client_id,
+                    reason=csrf_rejection,
+                )
+                locale = _resolve_oauth_locale(request, pre_check_session, user.email)
+                return _render_authorization_request_error(
+                    request, locale, InvalidRequestError(description=_CONSENT_CSRF_DESCRIPTION)
+                )
             return None
         finally:
             pre_check_session.close()
@@ -2370,9 +2425,12 @@ async def oauth_authorize_post(
     # Only this call's failure becomes an error redirect (#2190): the code is
     # committed inside it (``save_authorization_code``), followed only by the
     # Location string being built, so every step after it fails open.
+    # Authlib gets the query only (#2199): a form field cannot change the
+    # client, redirect_uri, scope or PKCE values it validates and stores.
     try:
+        oauth_request = StarletteOAuth2Request(request, include_form=False)
         response = await asyncio.to_thread(
-            _run_oauth_sync, "create_authorization_response", request, grant_user=user
+            _run_oauth_sync, "create_authorization_response", oauth_request, grant_user=user
         )
     except Exception as e:
         import traceback
@@ -2421,7 +2479,7 @@ async def oauth_authorize_post(
         # already sees it.
         async with _post_issuance_step("default_context", client_id):
             await _save_consent_default_context(
-                user.user_id, client_id, request.state.form_data.get("default_context")
+                user.user_id, client_id, form_data.get("default_context")
             )
     if new_authorization and user.user_id and issued:
         async with _post_issuance_step("security_notification", client_id):
