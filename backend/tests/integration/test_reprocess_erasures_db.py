@@ -178,6 +178,8 @@ async def world(async_engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
         await session.commit()
     try:
         yield {
+            "ws": ws,
+            "ctx": ctx,
             "p": p,
             "author": author,
             "third": third,
@@ -420,3 +422,62 @@ async def test_a_vector_store_failure_rolls_the_request_back(
     async with _maker(async_engine)() as session:
         assert await _snapshots(session, []) == before
         assert await _details(session, live.id) == SUBJECTS
+
+
+async def test_a_value_another_erased_member_wrote_never_comes_back(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review finding: S2 wrote over the author's value, S1 over S2's; both
+    erased before the #2235 fix, so S1's own row still holds S2's value in its
+    prior. Re-processing S1 alone must not make S2's
+    value live (it becomes NULL); S2's re-run then puts the author's back and
+    strips S2's value from the log."""
+    p1, p2 = _pseudonym(), _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], SUBJECTS, 3)
+    s2_value = {"by": "s2", "location": {"lat": 1.0, "lon": 2.0}}
+    first, second = _request(p1, minutes=3), _request(p2, minutes=4)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(memory, 2, p2, {"details": AUTHORS}),
+                _edit(memory, 3, p1, {"details": s2_value}),
+                first,
+                second,
+            ]
+        )
+        await session.commit()
+    try:
+        sync = AsyncMock()
+        code, _ = await _run(async_engine, ["--request", str(first.id), "--apply", "--yes"], sync)
+        assert code == 0
+        async with _maker(async_engine)() as session:
+            assert await _details(session, memory.id) is None
+            assert (await _log(session, memory.id))[-1] == (
+                4,
+                "erasure",
+                p1,
+                {"erased": ["details"], "restored_from": 3},
+            )
+        # the cleared location went to the payload, S2's never did
+        assert sync.await_args.kwargs["delete_keys"] == ["location"]
+
+        code, _ = await _run(async_engine, ["--request", str(second.id), "--apply", "--yes"])
+        assert code == 0
+        async with _maker(async_engine)() as session:
+            assert await _details(session, memory.id) == AUTHORS
+            assert await _log(session, memory.id) == [
+                (2, "api", p2, {"details": AUTHORS}),
+                (3, "api", p1, STRIPPED),
+                (4, "erasure", p1, {"erased": ["details"], "restored_from": 3}),
+                (5, "erasure", p2, {"erased": ["details"], "restored_from": 2}),
+            ]
+        capsys.readouterr()
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id.in_([p1, p2])))
+            await session.execute(
+                delete(ErasureRequest).where(ErasureRequest.id.in_([first.id, second.id]))
+            )
+            await session.commit()

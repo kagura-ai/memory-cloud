@@ -27,13 +27,19 @@ Per completed erasure request, one transaction:
 A request that changed gets one ``account_erasure_reprocess`` audit row
 (counts only). The command reads the pseudonym stored on the request and
 never derives one; a request that still stores a raw account id (completed
-before v0.58.1, before the revision log existed) is skipped and counted.
-Running it again changes nothing. The dry run writes nothing and makes no
-vector-store call; it prints request ids and counts, never values.
+before v0.58.1, so before the revision log of v0.113.0) is skipped and
+counted. A value another erased member wrote is never put back. Running it
+again changes nothing. The dry run writes and locks nothing and makes no
+vector-store call; it prints request ids and counts, never values. It
+previews each request on its own: where two erased members edited the same
+memory, applying the first can uncover a restore for the second that the
+plan did not count; the apply report and the audit rows list it, and a
+plan afterwards shows 0.
 
 Exit codes: 0 ok · 1 error (a vector-store failure rolls back that request
-and stops the run; the requests before it stay done, and a re-run picks up
-the rest).
+and stops the run; the requests before it stay done — each is logged to
+stderr as ``erasure_reprocessed`` and has its audit row — and a re-run
+picks up the rest).
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ import asyncio
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -56,7 +62,7 @@ from cli._oneshot import add_log_level_argument, configure_logging, run_plan_app
 from models.auth import AuditLog  # noqa: E402
 from models.erasure import STATUS_COMPLETE, ErasureRequest  # noqa: E402
 from services.erasure_details import restore_editor_details, strip_subject_details  # noqa: E402
-from utils.datetime import to_utc_iso  # noqa: E402
+from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
 from utils.hashing import SHA256_HEX_PATTERN  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
@@ -110,13 +116,6 @@ class ReprocessResult:
         return sum(change.changes for change in self.changed)
 
 
-def _naive_utc(value: datetime) -> datetime:
-    """``memory_revisions.at`` is naive UTC; ``completed_at`` is aware."""
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)
-
-
 async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
     """The email pseudonym the erasure's audit row carries, else ``pseudonym``."""
     email = (
@@ -131,18 +130,31 @@ async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
 
 
 async def _reprocess_one(
-    db: AsyncSession, request_id: UUID, pseudonym: str, completed_at: datetime, dry_run: bool
+    db: AsyncSession,
+    request_id: UUID,
+    pseudonym: str,
+    completed_at: datetime,
+    dry_run: bool,
+    erased: frozenset[str],
 ) -> RequestChange:
     """Restore, then strip, by ``pseudonym``; commit (or roll back a dry run).
 
     The order of the live erasure (``_delete_postgres``). Never the
     pseudonymize step: with the pseudonym as the subject it would hash the
-    hash.
+    hash. ``erased`` are every completed erasure's pseudonyms: a value
+    another erased member wrote is never put back, even where their own
+    erasure left it in a prior (their re-run strips it).
     """
     try:
-        restore = await restore_editor_details(db, pseudonym, actor=pseudonym, dry_run=dry_run)
+        restore = await restore_editor_details(
+            db,
+            pseudonym,
+            actor=pseudonym,
+            dry_run=dry_run,
+            erased_actors=erased - {pseudonym},
+        )
         strip = await strip_subject_details(
-            db, pseudonym, existed_at=_naive_utc(completed_at), dry_run=dry_run
+            db, pseudonym, existed_at=to_naive_utc(completed_at), dry_run=dry_run
         )
         change = RequestChange(
             request_id=request_id,
@@ -223,6 +235,15 @@ async def reprocess_erasures(
     if request_id is not None:
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
+    erased = frozenset(
+        user_id
+        for user_id in (
+            await db.execute(
+                select(ErasureRequest.user_id).where(ErasureRequest.status == STATUS_COMPLETE)
+            )
+        ).scalars()
+        if _PSEUDONYM.fullmatch(user_id)
+    )
     await db.rollback()
     if request_id is not None and not requests:
         raise LookupError(f"{request_id} is not a completed erasure request")
@@ -236,7 +257,7 @@ async def reprocess_erasures(
             result.skipped.append((request.id, SKIPPED_NO_COMPLETION_TIME))
             continue
         change = await _reprocess_one(
-            db, request.id, request.user_id, request.completed_at, dry_run
+            db, request.id, request.user_id, request.completed_at, dry_run, erased
         )
         if change.changes:
             result.changed.append(change)

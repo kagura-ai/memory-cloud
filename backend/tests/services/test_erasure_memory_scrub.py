@@ -274,7 +274,7 @@ async def test_a_re_run_bounds_the_authored_arm_to_rows_the_erasure_saw() -> Non
 
 @pytest.mark.asyncio
 async def test_a_dry_run_strip_counts_and_writes_nothing() -> None:
-    """#2243: the dry run counts with the same predicates; no UPDATE."""
+    """#2243: the dry run counts with the same predicates; no UPDATE, no lock."""
     from sqlalchemy.dialects import postgresql
 
     from services.erasure_details import StripCounts, strip_subject_details
@@ -285,7 +285,7 @@ async def test_a_dry_run_strip_counts_and_writes_nothing() -> None:
         return result
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[MagicMock(), scalar(5), scalar(2)])
+    db.execute = AsyncMock(side_effect=[scalar(5), scalar(2)])
 
     with patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])):
         assert await strip_subject_details(db, "p", dry_run=True) == StripCounts(5, 2)
@@ -293,5 +293,6 @@ async def test_a_dry_run_strip_counts_and_writes_nothing() -> None:
     sqls = [
         str(c.args[0].compile(dialect=postgresql.dialect())) for c in db.execute.await_args_list
     ]
-    assert not any(sql.startswith("UPDATE") for sql in sqls)
-    assert all(sql.startswith("SELECT count(") for sql in sqls[1:])
+    # counts only: no UPDATE, and no row lock (review: a preview blocks no edit)
+    assert all(sql.startswith("SELECT count(") for sql in sqls)
+    assert not any("FOR UPDATE" in sql for sql in sqls)

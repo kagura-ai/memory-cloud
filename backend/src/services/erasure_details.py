@@ -35,7 +35,7 @@ it.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -137,7 +137,11 @@ def _authored_by(
     the rows the erasure saw. The memory scrub NULLed the live ``details``
     of every memory the subject authored, so no row written after it can
     hold a value of theirs; without the bound, a re-run would strip and mark
-    the rows surviving members wrote on those memories since.
+    the rows surviving members wrote on those memories since. The request's
+    ``completed_at`` is stamped a few statements after the scrub commits
+    (no scrub time is stored), so a row written in between still counts as
+    existing: it holds at most the scrubbed NULL, and erring that way only
+    marks it, never keeps a value of the subject's.
     """
     authored = row.memory_id.in_(select(Memory.id).where(Memory.user_id == subject))
     if existed_at is None:
@@ -300,14 +304,15 @@ async def strip_subject_details(
             written by then (``_authored_by``), so what surviving members
             wrote on the scrubbed memories since stays as it is. None during
             erasure (every row predates it).
-        dry_run: Count the rows the two UPDATEs would change and write
-            nothing.
+        dry_run: Count the rows the two UPDATEs would change; write and
+            lock nothing.
 
     Returns:
         The rowcounts of the two UPDATEs (or the counts they would have);
         both 0 on a re-run.
     """
-    await lock_subject_memories(db, subject)
+    if not dry_run:
+        await lock_subject_memories(db, subject)
     held = held_details_ids(await _details_edits(db, subject), subject)
     if dry_run:
         return StripCounts(
@@ -571,7 +576,9 @@ def held_details_ids(rows: Iterable[DetailsEdit], subject: str) -> list[int]:
     return sorted(held)
 
 
-def restore_targets(rows: Iterable[DetailsEdit], subject: str) -> list[RestoreTarget]:
+def restore_targets(
+    rows: Iterable[DetailsEdit], subject: str, *, erased_actors: Collection[str] = frozenset()
+) -> list[RestoreTarget]:
     """Where ``subject`` wrote a memory's live ``details``: the value to put back.
 
     Pure. ``rows`` are the details edits of the candidate memories, in any
@@ -598,6 +605,12 @@ def restore_targets(rows: Iterable[DetailsEdit], subject: str) -> list[RestoreTa
     was overwritten by the erased member's edit and was not what the memory
     held before the subject's edits.
 
+    ``erased_actors`` (#2243): pseudonyms of other members whose erasure
+    completed. A value one of them wrote is unavailable too, even when its
+    prior was never stripped — an erasure from before the #2235 fix left
+    such priors behind, and a re-run must not make that value live again
+    (it would stay live until that member's own re-run strips it).
+
     Returns:
         One target per memory to restore, in memory id order.
     """
@@ -611,16 +624,18 @@ def restore_targets(rows: Iterable[DetailsEdit], subject: str) -> list[RestoreTa
         )
         if not edits or edits[0].actor_user_id != subject:
             continue
-        lowest = edits[0]
+        lowest, below = edits[0], None
         for edit in edits[1:]:
             if edit.actor_user_id != subject:
+                below = edit  # wrote the value in lowest's prior
                 break
             lowest = edit
+        unavailable = lowest.erased or (below is not None and below.actor_user_id in erased_actors)
         targets.append(
             RestoreTarget(
                 memory_id=memory_id,
-                details=None if lowest.erased else lowest.details,
-                unavailable=lowest.erased,
+                details=None if unavailable else lowest.details,
+                unavailable=unavailable,
                 from_version=lowest.version,
             )
         )
@@ -746,7 +761,12 @@ async def _sync_details_payload(
 
 
 async def restore_editor_details(
-    db: AsyncSession, subject: str, *, actor: str, dry_run: bool = False
+    db: AsyncSession,
+    subject: str,
+    *,
+    actor: str,
+    dry_run: bool = False,
+    erased_actors: Collection[str] = frozenset(),
 ) -> RestoreReport:
     """Put back the ``details`` ``subject`` wrote on memories others authored.
 
@@ -791,7 +811,10 @@ async def restore_editor_details(
         actor: The pseudonym written as the new rows' actor — never the raw
             sub, which must not outlive the erasure.
         dry_run: Compute what would change and write nothing (no row, no
-            vector-store call).
+            vector-store call, no row lock: the log is read as of the
+            statement, which a preview can afford).
+        erased_actors: Pseudonyms of other erased members (``restore_targets``);
+            a re-run over past erasures (#2243) passes every completed one.
 
     Returns:
         The counts and the restored memories.
@@ -800,9 +823,12 @@ async def restore_editor_details(
         QdrantError: A payload patch of a live, embedded row failed; the
             caller rolls back.
     """
-    await lock_subject_memories(db, subject)
+    if not dry_run:
+        await lock_subject_memories(db, subject)
     report = RestoreReport()
-    targets = restore_targets(await _details_edits(db, subject), subject)
+    targets = restore_targets(
+        await _details_edits(db, subject), subject, erased_actors=erased_actors
+    )
     if not targets:
         return report
     memories = {

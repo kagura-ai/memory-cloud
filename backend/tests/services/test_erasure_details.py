@@ -336,3 +336,24 @@ def test_held_ids_ignore_input_order_and_other_memories() -> None:
     for _ in range(5):
         random.shuffle(rows)
         assert held_details_ids(rows, SUBJECT) == [9]
+
+
+def test_a_value_another_erased_member_wrote_is_never_put_back() -> None:
+    """#2243 review: S2 wrote, S1 wrote over it; S2's erasure ran before the
+    #2235 fix, so S1's prior still holds S2's value. Re-processing S1 must
+    not make it live again: unavailable, NULL."""
+    m = uuid4()
+    s1, s2 = "1" * 64, "2" * 64
+    rows = [
+        _edit(m, 2, s2, {"by": "author"}),
+        _edit(m, 3, s1, {"by": "s2"}),
+    ]
+    assert restore_targets(rows, s1, erased_actors={s2}) == [
+        RestoreTarget(memory_id=m, details=None, unavailable=True, from_version=3)
+    ]
+    # without the set, the value would come back (what the live path sees)
+    assert restore_targets(rows, s1)[0].details == {"by": "s2"}
+    # a surviving member's value, and the creation value, still come back
+    kept = [_edit(m, 2, OTHER, {"by": "author"}), _edit(m, 3, s1, {"by": "other"})]
+    assert restore_targets(kept, s1, erased_actors={s2})[0].details == {"by": "other"}
+    assert restore_targets(kept[1:], s1, erased_actors={s2})[0].details == {"by": "other"}

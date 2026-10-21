@@ -1688,8 +1688,10 @@ python -m src.cli.reprocess_erasures --all --apply --yes  # write; --request <uu
 The command reads the completed erasure requests and uses the pseudonym each
 one stores; it never derives one (no salt, no plaintext needed). A request
 completed before v0.58.1 still stores the raw account id: it is skipped and
-listed as `not pseudonymized` (it predates the revision log anyway). For each
-request, in one transaction:
+listed as `not pseudonymized` (it predates the revision log anyway). A value
+another erased member wrote is never put back: where it is the one to go
+back to, the `details` become empty instead. For each request, in one
+transaction:
 
 1. where the erased member wrote the live `details` of a memory someone else
    authored, the last value someone else wrote is put back — a new version
@@ -1702,11 +1704,15 @@ request, in one transaction:
 
 A request that changed gets one `account_erasure_reprocess` audit row (counts
 and the request id, under the pseudonyms of its `account_erasure` row).
-The dry run writes nothing and makes no vector-store call, and its report
-prints request ids and counts, never values. A second `--apply` changes
-nothing. The vector store must be reachable: a payload failure rolls that
-request back and stops the run with exit code 1; the requests before it stay
-done and a re-run picks up the rest. A restored memory whose embedding had not
+The dry run writes and locks nothing and makes no vector-store call, and its
+report prints request ids and counts, never values. It previews each request
+on its own: where two erased members edited the same memory, applying the
+first can uncover a restore for the second that the plan did not count — the
+apply report and the audit rows list it, and a plan afterwards shows 0. A
+second `--apply` changes nothing. The vector store must be reachable: a
+payload failure rolls that request back and stops the run with exit code 1;
+the requests before it stay done (each is logged to stderr as
+`erasure_reprocessed` and has its audit row) and a re-run picks up the rest. A restored memory whose embedding had not
 succeeded is re-queued instead of patched, and the sweep re-embeds it.
 
 ### Restoring a deleted context — Issue #1804
