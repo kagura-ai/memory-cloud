@@ -37,13 +37,10 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, case, delete, or_, select, tuple_, type_coerce, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import case, delete, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
-from sqlalchemy.orm.util import AliasedClass
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
@@ -77,14 +74,14 @@ from models.erasure import (
     VALID_REASON_CODES,
     ErasureRequest,
 )
-from models.memory import REVISION_KIND_UPDATED, Memory, MemoryRevision
+from models.memory import Memory, MemoryRevision
 from services.billing_contract import (
     ensure_no_billing_contract,
     owned_workspaces_under_contract,
     workspaces_under_contract,
 )
 from services.email_service import EmailService, get_email_service
-from services.memory_versions import PRIOR_ERASED_KEY, PRIOR_SCRUBBED_KEY
+from services.erasure_details import pseudonymize_revision_actor, strip_subject_details
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
@@ -1505,104 +1502,32 @@ class AccountErasureService:
     async def _erase_memory_revisions(self, user_id: str) -> int:
         """Scrub the erased subject out of ``memory_revisions`` (#2043).
 
-        An ``updated`` row's ``prior`` holds the values its edit OVERWROTE,
-        so the ``details`` the subject wrote sit in the prior of the next
-        edit that changed ``details`` after theirs — not in the subject's own
-        row, whose prior is the previous writer's. Three UPDATEs, the first
-        two in the revision-log twin of ``_scrub_surviving_memories`` (which
-        NULLs the surviving memories' ``details``):
+        Two steps of ``services.erasure_details``, in this order:
+        ``strip_subject_details`` (the subject's ``details`` leave every
+        prior; the authored memories' events are marked scrubbed — the
+        revision-log twin of ``_scrub_surviving_memories``, which NULLs the
+        surviving memories' ``details``), then
+        ``pseudonymize_revision_actor`` (the subject's own events get the
+        salted pseudonym as actor and a NULL session). The strip finds the
+        subject's edits by the raw ``actor_user_id``, so it goes first.
 
-        - ``prior.details`` is removed from every revision of a memory the
-          subject authored and from every revision that holds a ``details``
-          the subject wrote; the key is replaced by
-          ``{"erased": ["details"]}`` (``PRIOR_ERASED_KEY``) so a rebuilt
-          earlier version reports its details as unavailable instead of
-          passing another value off as it. The overwritten text stays, as
-          the memory text itself does.
-        - every ``updated`` row of a memory the subject authored gets
-          ``{"scrubbed": ["details"]}`` (``PRIOR_SCRUBBED_KEY``): the live
-          ``details`` that a rebuild starts from is NULLed by the memory
-          scrub, so no version below those events can read it either.
-        - the subject's own events get the salted pseudonym as
-          ``actor_user_id`` (the same pseudonym as the memories, so the log
-          still lines up) and a NULL ``session_id`` (the
-          ``memory_access_events`` rule: an opaque session token has no
-          post-erasure value).
-
-        Runs BEFORE ``_scrub_surviving_memories`` (it finds the authored
-        memories by the raw ``user_id``) and before its own pseudonymization
-        (it finds the subject's edits by the raw ``actor_user_id``). Each
-        statement's subqueries read the rows as they were when it started.
+        Runs BEFORE ``_scrub_surviving_memories``: the strip finds the
+        authored memories by the raw ``user_id``. Each statement is scoped
+        to the subject's memories and locks its rows in id order (#2242).
 
         Returns:
             How many revision rows were pseudonymized.
         """
-        authored = MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id))
-        # The subject's details edit, and no other details edit between it
-        # and this row: this row's prior is the value the subject wrote.
-        # Both subqueries correlate explicitly (#2235): auto-correlation only
-        # reaches the immediately enclosing SELECT, so the inner one would
-        # otherwise get its own uncorrelated ``memory_revisions`` FROM entry
-        # and look at every memory's edits instead of this row's memory.
-        # A details edit is a row whose prior still has ``details``, or one an
-        # earlier erasure already stripped (its prior lists ``details`` under
-        # ``PRIOR_ERASED_KEY``): it changed details all the same.
-        theirs = aliased(MemoryRevision)
-        between = aliased(MemoryRevision)
-
-        def edited_details(row: AliasedClass[MemoryRevision]) -> ColumnElement[bool]:
-            return or_(row.prior.has_key("details"), row.prior[PRIOR_ERASED_KEY].has_key("details"))
-
-        holds_subjects_details = (
-            select(theirs.id)
-            .where(
-                theirs.memory_id == MemoryRevision.memory_id,
-                theirs.actor_user_id == user_id,
-                edited_details(theirs),
-                theirs.version < MemoryRevision.version,
-                ~select(between.id)
-                .where(
-                    between.memory_id == MemoryRevision.memory_id,
-                    edited_details(between),
-                    between.version > theirs.version,
-                    between.version < MemoryRevision.version,
-                )
-                .correlate(MemoryRevision, theirs)
-                .exists(),
-            )
-            .correlate(MemoryRevision)
-            .exists()
+        stripped = await strip_subject_details(self.db, user_id)
+        pseudonymized = await pseudonymize_revision_actor(
+            self.db, user_id, self._pseudonym(user_id)
         )
-        await self.db.execute(
-            update(MemoryRevision)
-            .where(
-                MemoryRevision.prior.has_key("details"),
-                authored | holds_subjects_details,
-            )
-            .values(
-                prior=MemoryRevision.prior.delete_path(["details"]).op("||", return_type=JSONB)(
-                    type_coerce({PRIOR_ERASED_KEY: ["details"]}, JSONB)
-                )
-            )
+        logger.debug(
+            "erasure_revisions_scrubbed",
+            details_stripped=stripped.details_stripped,
+            scrub_marked=stripped.scrub_marked,
         )
-        await self.db.execute(
-            update(MemoryRevision)
-            .where(authored, MemoryRevision.kind == REVISION_KIND_UPDATED)
-            .values(
-                prior=MemoryRevision.prior.op("||", return_type=JSONB)(
-                    type_coerce({PRIOR_SCRUBBED_KEY: ["details"]}, JSONB)
-                )
-            )
-        )
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(MemoryRevision)
-                .where(MemoryRevision.actor_user_id == user_id)
-                .values(actor_user_id=self._pseudonym(user_id), session_id=None)
-            ),
-        )
-        return result.rowcount or 0
+        return pseudonymized
 
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).
