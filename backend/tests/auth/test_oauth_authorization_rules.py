@@ -32,11 +32,13 @@ from auth import oauth2_server as mod  # noqa: E402
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier  # noqa: E402
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
 from auth.oauth2_server import (  # noqa: E402
+    AUTHORIZATION_REQUEST_SINGLE_VALUED,
     AuthorizationCodeGrant,
     InvalidTargetError,
     OAuth2AuthorizationServer,
     S256CodeChallenge,
     check_code_challenge,
+    repeated_parameter,
     requested_resource,
     settle_audience,
     validate_authorization_parameters,
@@ -422,6 +424,34 @@ class TestCheckCodeChallenge:
 
     def test_not_required_lets_a_public_client_omit_pkce(self) -> None:
         check_code_challenge(_payload(), _client("none"), required=False)
+
+
+class TestAuthorizationRequestSingleValued:
+    """The /authorize parameters that may be sent once (#2208)."""
+
+    def test_names_authlibs_five_and_the_pkce_pair_but_not_resource(self) -> None:
+        assert set(AUTHORIZATION_REQUEST_SINGLE_VALUED) == {
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+        }
+        assert "resource" not in AUTHORIZATION_REQUEST_SINGLE_VALUED
+
+    def test_first_repeated_name_is_returned(self) -> None:
+        payload = _multi_payload(
+            client_id=["a"],
+            redirect_uri=["https://a.example/cb", "https://b.example/cb"],
+            state=["s1", "s2"],
+        )
+        assert repeated_parameter(payload, AUTHORIZATION_REQUEST_SINGLE_VALUED) == "redirect_uri"
+
+    def test_a_repeated_resource_alone_is_not_a_repeat(self) -> None:
+        payload = _multi_payload(client_id=["a"], state=["s"], resource=[MCP, MCP])
+        assert repeated_parameter(payload, AUTHORIZATION_REQUEST_SINGLE_VALUED) is None
 
 
 class TestS256CodeVerifier:
