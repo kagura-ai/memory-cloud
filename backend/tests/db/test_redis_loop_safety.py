@@ -11,6 +11,7 @@ client. In production a uvicorn worker runs one loop, so it builds once.
 No server is needed: redis-py connects lazily, and these tests send no command.
 """
 
+import ast
 import asyncio
 from pathlib import Path
 
@@ -162,14 +163,31 @@ async def _get():
 
 class TestLifespanClosesRedis:
     def test_shutdown_closes_redis_after_the_scheduler_and_before_the_db(self):
-        """Cron jobs use Redis, so the scheduler stops first; close_db() comes last."""
+        """Cron jobs use Redis, so the scheduler stops first; close_db() comes last.
+
+        Reads the awaited calls after ``yield`` in ``lifespan()`` from the AST,
+        so comments and strings do not count.
+        """
         src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
-        shutdown = src[src.index('logger.info("application_shutting_down")') :]
+        lifespan = next(
+            node
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan"
+        )
+        yield_line = next(n.lineno for n in ast.walk(lifespan) if isinstance(n, ast.Yield))
+        awaited = [
+            ast.unparse(node.value.func)
+            for node in sorted(
+                (n for n in ast.walk(lifespan) if isinstance(n, ast.Await)),
+                key=lambda n: (n.lineno, n.col_offset),
+            )
+            if node.lineno > yield_line and isinstance(node.value, ast.Call)
+        ]
 
-        scheduler_stop = shutdown.index("await scheduler_leader.stop()")
-        redis_close = shutdown.index("await _close_redis_on_shutdown()")
-        db_close = shutdown.index("await close_db()")
-
+        assert awaited.count("_close_redis_on_shutdown") == 1
+        scheduler_stop = awaited.index("scheduler_leader.stop")
+        redis_close = awaited.index("_close_redis_on_shutdown")
+        db_close = awaited.index("close_db")
         assert scheduler_stop < redis_close < db_close
 
     async def test_a_failing_close_is_logged_and_swallowed(self, monkeypatch):
