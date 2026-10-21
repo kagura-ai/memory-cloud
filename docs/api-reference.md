@@ -1085,6 +1085,12 @@ authorization code grant and PKCE:
    the host the user is sent to after approving (with its port for a loopback
    redirect), and warns when every registered `redirect_uri` of the client is
    a loopback URI, since such a client's name cannot be verified.
+   Each of `response_type`, `client_id`, `redirect_uri`, `scope`, `state`,
+   `code_challenge` and `code_challenge_method` may be sent once; a repeated
+   one gets the error page (`400`, `invalid_request`) on the GET and on the
+   consent POST, without a redirect. `resource` may be repeated (RFC 8707);
+   every value must name this server's MCP resource
+   ([#2208](https://github.com/kagura-ai/memory-cloud/issues/2208)).
 2. Approving redirects to `redirect_uri` with `code` and `state`. The consent
    page posts its form to `POST /api/v1/oauth/authorize` with the
    authorization request in the query string; the form sends only `confirm`,
