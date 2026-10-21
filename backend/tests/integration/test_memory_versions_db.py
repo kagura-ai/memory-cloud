@@ -11,6 +11,9 @@
    committed version.
 4. The erasure scrub pseudonymizes the subject's events, NULLs their session
    and strips ``details`` from ``prior``, leaving the erased / scrubbed markers (#2043 §1e).
+   On memories the subject only edited, the row after their details edit is
+   stripped, judged by that memory's log alone and counting edits an earlier
+   erasure already stripped (#2235).
 5. ``f03_2043_memory_versions`` round trip: existing rows read ``version = 1``;
    the downgrade drops the table and the column.
 
@@ -333,6 +336,72 @@ async def test_erasure_scrubs_the_revision_log(
     ]
 
 
+def _edit(
+    ctx: uuid.UUID, memory_id: uuid.UUID, version: int, actor: str, prior: dict[str, Any]
+) -> MemoryRevision:
+    return MemoryRevision(
+        memory_id=memory_id,
+        context_id=ctx,
+        version=version,
+        kind="updated",
+        writer="api",
+        actor_user_id=actor,
+        prior=prior,
+    )
+
+
+async def _seed_log(
+    session: AsyncSession,
+    seeded: dict[str, Any],
+    owners: dict[uuid.UUID, str],
+    edits: list[MemoryRevision],
+) -> None:
+    for memory_id, owner in owners.items():
+        session.add(
+            Memory(
+                id=memory_id,
+                user_id=owner,
+                workspace_id=seeded["workspace_id"],
+                context_id=seeded["context_id"],
+                summary="not the subject's memory",
+                content="body",
+                type="note",
+                client="test",
+            )
+        )
+    await session.flush()
+    session.add_all(edits)
+    await session.commit()
+
+
+async def _erase_revisions(session: AsyncSession, subject: str) -> str:
+    """Run the revision-log erasure for ``subject``; returns their pseudonym."""
+    from services.account_erasure_service import AccountErasureService
+
+    service = AccountErasureService.__new__(AccountErasureService)
+    service.db = session
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        await service._erase_memory_revisions(subject)
+        pseudonym = service._pseudonym(subject)
+    await session.commit()
+    return pseudonym
+
+
+async def _log(session: AsyncSession, *memory_ids: uuid.UUID) -> list[tuple[Any, ...]]:
+    """``(memory_id, version, actor, prior)`` per revision, in ``memory_ids`` order."""
+    rows = (
+        await session.execute(
+            select(
+                MemoryRevision.memory_id,
+                MemoryRevision.version,
+                MemoryRevision.actor_user_id,
+                MemoryRevision.prior,
+            ).where(MemoryRevision.memory_id.in_(memory_ids))
+        )
+    ).all()
+    return sorted((tuple(r) for r in rows), key=lambda r: (memory_ids.index(r[0]), r[1]))
+
+
 async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edited(
     async_engine: AsyncEngine, seeded: dict[str, Any]
 ) -> None:
@@ -345,73 +414,32 @@ async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edite
     subject's value stayed. Rows that never held the subject's value are
     untouched.
     """
-    from services.account_erasure_service import AccountErasureService
-
     subject, author, third = seeded["owner"], "edited-author", "third-member"
-    ws, ctx = seeded["workspace_id"], seeded["context_id"]
+    ctx = seeded["context_id"]
     edited, unrelated = uuid.uuid4(), uuid.uuid4()
-
-    def _rev(memory_id: uuid.UUID, version: int, actor: str, prior: dict[str, Any]) -> Any:
-        return MemoryRevision(
-            memory_id=memory_id,
-            context_id=ctx,
-            version=version,
-            kind="updated",
-            writer="api",
-            actor_user_id=actor,
-            prior=prior,
-        )
-
     async with _maker(async_engine)() as session:
-        for memory_id, owner in ((edited, author), (unrelated, third)):
-            session.add(
-                Memory(
-                    id=memory_id,
-                    user_id=owner,
-                    workspace_id=ws,
-                    context_id=ctx,
-                    summary="not the subject's memory",
-                    content="body",
-                    type="note",
-                    client="test",
-                )
-            )
-        await session.flush()
-        session.add_all(
+        await _seed_log(
+            session,
+            seeded,
+            {edited: author, unrelated: third},
             [
                 # the subject overwrites the author's details (prior = the author's)
-                _rev(edited, 2, subject, {"details": {"by": "author"}}),
+                _edit(ctx, edited, 2, subject, {"details": {"by": "author"}}),
                 # a non-details edit: no details in its prior
-                _rev(edited, 3, author, {"importance": 0.4}),
+                _edit(ctx, edited, 3, author, {"importance": 0.4}),
                 # the next details edit: its prior is the subject's value
-                _rev(edited, 4, author, {"details": {"by": "subject"}}),
+                _edit(ctx, edited, 4, author, {"details": {"by": "subject"}}),
                 # a later details edit: its prior is the author's own value
-                _rev(edited, 5, third, {"details": {"by": "author-again"}}),
+                _edit(ctx, edited, 5, third, {"details": {"by": "author-again"}}),
                 # an unrelated memory with details edits after version 2
-                _rev(unrelated, 3, third, {"details": {"u": 1}}),
-                _rev(unrelated, 4, third, {"details": {"u": 2}}),
-                _rev(unrelated, 6, third, {"details": {"u": 3}}),
-            ]
+                _edit(ctx, unrelated, 3, third, {"details": {"u": 1}}),
+                _edit(ctx, unrelated, 4, third, {"details": {"u": 2}}),
+                _edit(ctx, unrelated, 6, third, {"details": {"u": 3}}),
+            ],
         )
-        await session.commit()
-
-        service = AccountErasureService.__new__(AccountErasureService)
-        service.db = session
-        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-            await service._erase_memory_revisions(subject)
-            pseudonym = service._pseudonym(subject)
-        await session.commit()
-
-        rows = (
-            await session.execute(
-                text(
-                    "SELECT memory_id, version, actor_user_id, prior FROM memory_revisions "
-                    "WHERE memory_id IN (:e, :u) ORDER BY memory_id = :u, version"
-                ),
-                {"e": edited, "u": unrelated},
-            )
-        ).all()
-    assert [tuple(r) for r in rows] == [
+        pseudonym = await _erase_revisions(session, subject)
+        log = await _log(session, edited, unrelated)
+    assert log == [
         (edited, 2, pseudonym, {"details": {"by": "author"}}),
         (edited, 3, author, {"importance": 0.4}),
         (edited, 4, author, {"erased": ["details"]}),
@@ -419,6 +447,69 @@ async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edite
         (unrelated, 3, third, {"details": {"u": 1}}),
         (unrelated, 4, third, {"details": {"u": 2}}),
         (unrelated, 6, third, {"details": {"u": 3}}),
+    ]
+
+
+async def test_a_second_erasure_finds_an_edit_the_first_one_stripped(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2235 review: two editors of one memory erased one after the other.
+
+    Erasing the first editor strips the second editor's row (its prior held
+    the first editor's value). That row is still the second editor's details
+    edit, so erasing them strips the next details edit, whose prior holds
+    their value.
+    """
+    first, second, author, third = seeded["owner"], "second-editor", "the-author", "third"
+    ctx = seeded["context_id"]
+    edited = uuid.uuid4()
+    async with _maker(async_engine)() as session:
+        await _seed_log(
+            session,
+            seeded,
+            {edited: author},
+            [
+                _edit(ctx, edited, 2, first, {"details": {"by": "author"}}),
+                _edit(ctx, edited, 4, second, {"details": {"by": "first"}}),
+                _edit(ctx, edited, 6, third, {"details": {"by": "second"}}),
+            ],
+        )
+        first_pseudonym = await _erase_revisions(session, first)
+        second_pseudonym = await _erase_revisions(session, second)
+        log = await _log(session, edited)
+    assert log == [
+        (edited, 2, first_pseudonym, {"details": {"by": "author"}}),
+        (edited, 4, second_pseudonym, {"erased": ["details"]}),
+        (edited, 6, third, {"erased": ["details"]}),
+    ]
+
+
+async def test_an_already_stripped_edit_in_between_ends_the_subjects_value(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2235 review: a details edit whose prior was stripped earlier (it held
+    the subject's value) still counts as an edit in between, so the later
+    edit — whose prior is another member's value — keeps its details."""
+    subject, author, other = seeded["owner"], "the-author", "other-member"
+    ctx = seeded["context_id"]
+    edited = uuid.uuid4()
+    async with _maker(async_engine)() as session:
+        await _seed_log(
+            session,
+            seeded,
+            {edited: author},
+            [
+                _edit(ctx, edited, 2, subject, {"details": {"by": "author"}}),
+                _edit(ctx, edited, 3, other, {"erased": ["details"]}),
+                _edit(ctx, edited, 5, author, {"details": {"by": "other"}}),
+            ],
+        )
+        pseudonym = await _erase_revisions(session, subject)
+        log = await _log(session, edited)
+    assert log == [
+        (edited, 2, pseudonym, {"details": {"by": "author"}}),
+        (edited, 3, other, {"erased": ["details"]}),
+        (edited, 5, author, {"details": {"by": "other"}}),
     ]
 
 

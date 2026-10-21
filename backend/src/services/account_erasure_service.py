@@ -37,12 +37,13 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import case, delete, select, tuple_, type_coerce, update
+from sqlalchemy import ColumnElement, case, delete, or_, select, tuple_, type_coerce, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm.util import AliasedClass
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
@@ -1543,19 +1544,26 @@ class AccountErasureService:
         # reaches the immediately enclosing SELECT, so the inner one would
         # otherwise get its own uncorrelated ``memory_revisions`` FROM entry
         # and look at every memory's edits instead of this row's memory.
+        # A details edit is a row whose prior still has ``details``, or one an
+        # earlier erasure already stripped (its prior lists ``details`` under
+        # ``PRIOR_ERASED_KEY``): it changed details all the same.
         theirs = aliased(MemoryRevision)
         between = aliased(MemoryRevision)
+
+        def edited_details(row: AliasedClass[MemoryRevision]) -> ColumnElement[bool]:
+            return or_(row.prior.has_key("details"), row.prior[PRIOR_ERASED_KEY].has_key("details"))
+
         holds_subjects_details = (
             select(theirs.id)
             .where(
                 theirs.memory_id == MemoryRevision.memory_id,
                 theirs.actor_user_id == user_id,
-                theirs.prior.has_key("details"),
+                edited_details(theirs),
                 theirs.version < MemoryRevision.version,
                 ~select(between.id)
                 .where(
                     between.memory_id == MemoryRevision.memory_id,
-                    between.prior.has_key("details"),
+                    edited_details(between),
                     between.version > theirs.version,
                     between.version < MemoryRevision.version,
                 )
