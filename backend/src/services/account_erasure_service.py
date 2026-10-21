@@ -81,7 +81,11 @@ from services.billing_contract import (
     workspaces_under_contract,
 )
 from services.email_service import EmailService, get_email_service
-from services.erasure_details import pseudonymize_revision_actor, strip_subject_details
+from services.erasure_details import (
+    lock_subject_memories,
+    pseudonymize_revision_actor,
+    strip_subject_details,
+)
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
@@ -1291,6 +1295,10 @@ class AccountErasureService:
         # revisions with them through the FK cascade either way.
         # #2044: BEFORE the revision scrub, which NULLs the subject's session
         # ids that this one matches memories' last-writer sessions against.
+        # #2242: lock the subject's memories in id order first, before any of
+        # the memories / memory_revisions UPDATEs below, so edits, session
+        # rollbacks and other erasures queue on them instead of deadlocking.
+        await lock_subject_memories(self.db, user_id)
         counts.update(await self._erase_session_provenance(user_id))
         counts["memory_revisions_pseudonymized"] = await self._erase_memory_revisions(user_id)
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)

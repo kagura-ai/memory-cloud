@@ -19,9 +19,11 @@ past erasures by pseudonym (#2243) share one definition:
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
-tenant's ``prior``, and locks its rows in ascending ``id`` through an
-ordered ``FOR UPDATE`` subquery (``.claude/rules/backend.md``), waiting on a
-held row rather than skipping it.
+tenant's ``prior``. The subject's memories are locked first, in id order
+(``lock_subject_memories``); then each revision statement locks its rows in
+ascending ``id`` through an ordered ``FOR UPDATE`` subquery
+(``.claude/rules/backend.md``), waiting on a held row rather than skipping
+it.
 """
 
 from __future__ import annotations
@@ -184,6 +186,40 @@ def locked_revision_ids(
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()
 
 
+async def lock_subject_memories(db: AsyncSession, subject: str) -> None:
+    """Lock ``subject``'s memories (``subject_memory_ids``) in id order.
+
+    Taken before any revision row, so the erasure holds every ``memories``
+    row whose log it rewrites before it touches that log — the order edits
+    (``MemoryService._lock_for_edit``, then an INSERT) and session rollback
+    (memories in id order, then ``undone_by``) use. That closes three gaps a
+    per-statement order leaves (#2242 review):
+
+    - an edit cannot slip between the strip's snapshot and the memory scrub
+      and copy the subject's live ``details`` into a fresh ``prior``: it
+      waits for the erasure to commit and copies the scrubbed value;
+    - a rollback holding a memory and waiting on its events, and an erasure
+      holding those events and waiting on the memory, cannot form a cycle;
+    - two erasures whose subjects edited each other's memories queue on the
+      memory rows instead of deadlocking across the revision statements
+      (every revision row an erasure locks belongs to a memory it holds).
+
+    Re-locking a row this transaction already holds is free, so calling it
+    again (``strip_subject_details`` does) costs one index-driven read.
+
+    Args:
+        db: The session; the caller owns the transaction.
+        subject: The raw sub, or the stored salted pseudonym (#2243).
+    """
+    memory = aliased(Memory)
+    await db.execute(
+        select(memory.id)
+        .where(memory.id.in_(subject_memory_ids(subject)))
+        .order_by(memory.id)
+        .with_for_update()
+    )
+
+
 async def strip_subject_details(db: AsyncSession, subject: str) -> StripCounts:
     """Strip ``subject``'s ``details`` out of the revision log.
 
@@ -200,10 +236,12 @@ async def strip_subject_details(db: AsyncSession, subject: str) -> StripCounts:
        ``details`` that a rebuild starts from is NULLed by the memory scrub,
        so no version below those events can read it either.
 
-    During erasure this runs BEFORE the subject's events are pseudonymized
-    (1 finds their edits by ``actor_user_id``) and before the memory scrub
-    (1 and 2 find the authored memories by ``memories.user_id``). Each
-    statement's subqueries read the rows as they were when it started.
+    It first locks the subject's memories (``lock_subject_memories``), so
+    no edit adds a revision to their logs until the caller commits. During
+    erasure this runs BEFORE the subject's events are pseudonymized (1 finds
+    their edits by ``actor_user_id``) and before the memory scrub (1 and 2
+    find the authored memories by ``memories.user_id``). Each statement's
+    subqueries read the rows as they were when it started.
 
     Args:
         db: The session; the caller owns the transaction.
@@ -213,6 +251,7 @@ async def strip_subject_details(db: AsyncSession, subject: str) -> StripCounts:
     Returns:
         The rowcounts of the two UPDATEs; both 0 on a re-run.
     """
+    await lock_subject_memories(db, subject)
     stripped = cast(
         CursorResult[Any],
         await db.execute(

@@ -89,7 +89,15 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
         count = await service._erase_memory_revisions("google-oauth2|erased")
 
     assert count == 3
-    strip, scrub, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
+    lock, strip, scrub, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
+    # #2242 review: the subject's memories are locked first, in id order, so
+    # no edit adds to their logs and no rollback / erasure deadlocks on them
+    lock_sql = " ".join(str(lock.compile(dialect=postgresql.dialect())).split())
+    assert lock_sql.startswith(
+        "SELECT memories_1.id FROM memories AS memories_1 WHERE memories_1.id IN (SELECT"
+    )
+    assert " UNION SELECT " in lock_sql
+    assert lock_sql.endswith("ORDER BY memories_1.id FOR UPDATE")
     strip_compiled = strip.compile(dialect=postgresql.dialect())
     strip_sql = str(strip_compiled)
     assert strip_sql.startswith("UPDATE memory_revisions SET prior=((memory_revisions.prior #-")
@@ -215,10 +223,12 @@ async def test_strip_subject_details_takes_one_subject_string() -> None:
     from services.erasure_details import StripCounts, strip_subject_details
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[MagicMock(rowcount=4), MagicMock(rowcount=1)])
+    db.execute = AsyncMock(side_effect=[MagicMock(), MagicMock(rowcount=4), MagicMock(rowcount=1)])
 
     assert await strip_subject_details(db, "pseudo") == StripCounts(4, 1)
 
+    # the memory lock, the strip and the scrub mark — all by the one subject
+    assert db.execute.await_count == 3
     for call in db.execute.await_args_list:
         params = call.args[0].compile(dialect=postgresql.dialect()).params
         actors = {k: v for k, v in params.items() if k.startswith(("user_id", "actor_user_id"))}

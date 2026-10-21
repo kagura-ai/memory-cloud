@@ -41,6 +41,7 @@ from models.schemas import UpdateMemoryRequest
 from services.account_erasure_service import AccountErasureService
 from services.erasure_details import (
     StripCounts,
+    lock_subject_memories,
     pseudonymize_revision_actor,
     strip_subject_details,
     subject_memory_ids,
@@ -603,7 +604,9 @@ async def test_erasure_leaves_other_users_revisions_untouched(
                 _edit(ctx, by_author, 3, author, {"details": {"w": 2}}),
             ],
         )
-        in_scope = [authored, edited]
+        # the subject's memories: the seeded one (no revisions), the one
+        # they authored and the one they edited
+        in_scope = [seeded["memory_id"], authored, edited]
         revisions_before = await _snapshot(session, _REVISIONS_OUTSIDE, in_scope)
         memories_before = await _snapshot(session, _ALL_MEMORIES)
         await session.commit()
@@ -718,6 +721,82 @@ async def test_revision_updates_lock_in_id_order(
                 (authored, 2, other, {"erased": ["details"], "scrubbed": ["details"]}),
                 (authored, 3, other, {"erased": ["details"], "scrubbed": ["details"]}),
             ]
+
+
+async def test_an_edit_waits_for_the_erasure_and_copies_the_scrubbed_details(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2242 review: the subject's memories are locked before the strip.
+
+    An edit of a memory the subject authored, arriving after the strip took
+    its snapshot, would otherwise copy the subject's live ``details`` into a
+    new revision's prior that nothing strips (the memory scrub NULLs only the
+    live value). It waits on the memory lock instead and, once the erasure
+    commits, copies the scrubbed value.
+    """
+    subject, third = seeded["owner"], "third-member"
+    ctx = seeded["context_id"]
+    authored = uuid.uuid4()
+    async with _maker(async_engine)() as session:
+        await _seed_log(
+            session,
+            seeded,
+            {authored: subject},
+            [_edit(ctx, authored, 2, third, {"importance": 1})],
+        )
+        await session.execute(
+            update(Memory)
+            .where(Memory.id == authored)
+            .values(details={"secret": "the subject's"}, version=2)
+        )
+        await session.commit()
+
+    factory = _maker(async_engine)
+
+    async def edit() -> Any:
+        async with factory() as session:
+            return await _service(session)._update_in_place(
+                UpdateMemoryRequest(memory_id=authored, details={"by": "editor"}),
+                user_id="editor",
+            )
+
+    with (
+        patch("services.account_erasure_service._audit_salt", return_value="salt"),
+        patch(
+            "services.permission_service.PermissionService.can_access_memory",
+            AsyncMock(return_value=True),
+        ),
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+    ):
+        async with factory() as eraser, factory() as probe:
+            eraser_pid = await _pid(eraser)
+            await lock_subject_memories(eraser, subject)
+            editor = asyncio.create_task(edit())
+            try:
+                deadline = asyncio.get_running_loop().time() + _TIMEOUT
+                while not await probe.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE :pid = ANY(pg_blocking_pids(pid))"
+                    ),
+                    {"pid": eraser_pid},
+                ):
+                    await probe.rollback()
+                    assert not editor.done(), "the edit did not wait for the erasure"
+                    assert asyncio.get_running_loop().time() < deadline
+                    await asyncio.sleep(0.05)
+                await probe.rollback()
+                service = _erasure_service(eraser)
+                await service._erase_memory_revisions(subject)
+                await service._scrub_surviving_memories(subject)
+            finally:
+                await eraser.commit()
+            await asyncio.wait_for(editor, _TIMEOUT)
+
+        async with factory() as session:
+            log = await _log(session, authored)
+    assert log[-1][2:] == ("editor", {"details": None})
+    assert all("the subject's" not in str(prior) for *_, prior in log)
 
 
 async def test_strip_by_pseudonym_is_idempotent_after_erasure(
