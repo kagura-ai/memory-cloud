@@ -177,9 +177,10 @@ class TestBoost:
 
     @pytest.mark.asyncio
     async def test_unscored_rerank_candidates_stay_after_scored_ones(self, monkeypatch) -> None:
-        """#2062: an unscored rerank candidate keeps its hybrid_score, which is
-        on another scale than the scored ones' rerank score — the boost must
-        not lift it above a scored candidate, only reorder the unscored tail."""
+        """#2062: an unscored rerank candidate (here with a hand-built
+        off-scale hybrid_score; #2084 floors it in RerankerService, this
+        guards the sort key alone) — the boost must not lift it above a
+        scored candidate, only reorder the unscored tail."""
         monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
         monkeypatch.setenv("KAGURA_GRAPH_BOOST_MAX", "0.15")
         results, memories = _pool(0.30, 0.20, 0.85, 0.84)
@@ -187,6 +188,24 @@ class TestBoost:
         results[3][RERANK_UNSCORED_KEY] = True
         # r3 is connected (factor 1.15): it passes r2, never r0 / r1.
         svc = _service(edge_rows=[(_mid(memories, "r1"), _mid(memories, "r3"), 2.0)])
+
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=4)
+
+        assert [r["id"] for r in results] == ["r0", "r1", "r3", "r2"]
+
+    @pytest.mark.asyncio
+    async def test_floored_unscored_candidate_is_not_boosted_over_a_scored_one(
+        self, monkeypatch
+    ) -> None:
+        """#2084: as RerankerService floors them (0.20 * [0.85, 0.84] / 0.85),
+        the unscored rows sit at or under the weakest scored one; a boost of
+        1.15 would lift r3 over r1 (0.193 * 1.15 > 0.20) without the sort key."""
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_MAX", "0.15")
+        results, memories = _pool(0.30, 0.20, 0.20, 0.20 * 0.84 / 0.85)
+        results[2][RERANK_UNSCORED_KEY] = True
+        results[3][RERANK_UNSCORED_KEY] = True
+        svc = _service(edge_rows=[(_mid(memories, "r0"), _mid(memories, "r3"), 2.0)])
 
         await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=4)
 

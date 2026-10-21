@@ -254,9 +254,10 @@ def _rerank_sort_key(result: dict, adjusted: float) -> tuple[bool, float]:
     """Sort key for a bounded re-rank over (possibly) reranked results (#2062).
 
     A candidate the reranker could not score (``RERANK_UNSCORED_KEY``, stamped
-    by RerankerService) keeps its hybrid_score, which is on another scale than the
-    scored candidates' rerank score. Sorted descending, it stays after every
-    scored candidate and only moves among the unscored ones. Without a rerank
+    by RerankerService) has its hybrid_score floored below the scored ones
+    (#2084), but a reinforce or graph-boost factor could still lift it over a
+    scored one. Sorted descending, it stays after every scored candidate and
+    only moves among the unscored ones. Without a rerank
     nothing is stamped and the order is the adjusted score's alone.
     """
     return (not result.get(RERANK_UNSCORED_KEY, False), adjusted)
@@ -4369,8 +4370,9 @@ class MemoryService:
 
             # Sort and stamp ONLY the top-k slice; items past the slice keep
             # their original order (they are outside the experiment). A
-            # candidate the reranker could not score stays after the scored
-            # ones (#2062, see _rerank_sort_key).
+            # candidate the reranker could not score is floored below the
+            # scored ones and stays after them (#2062, #2084, see
+            # _rerank_sort_key).
             order_before = [x for x in (_sid(r) for r in scoped) if x is not None]
             scoped.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             for r in scoped:
@@ -4508,8 +4510,9 @@ class MemoryService:
                 r["_rerank_factor"] = factors.get(sid, 1.0) if sid is not None else 1.0
 
             order_before = [s for s in (_sid(r) for r in search_results) if s is not None]
-            # A candidate the reranker could not score stays after the
-            # scored ones (#2062, see _rerank_sort_key).
+            # A candidate the reranker could not score is floored below the
+            # scored ones and stays after them (#2062, #2084, see
+            # _rerank_sort_key).
             search_results.sort(key=lambda r: _rerank_sort_key(r, _adjusted(r)), reverse=True)
             order_after = [s for s in (_sid(r) for r in search_results) if s is not None]
 
@@ -5562,6 +5565,8 @@ class MemoryService:
                 continue
             mid = str(memory.id)
             embedding = search_result.get("embedding", [])
+            # A candidate the reranker could not score is kept, at its
+            # floored hybrid_score: at most the weakest scored row (#2084).
             score_map[mid] = search_result.get("hybrid_score", search_result["score"])
             nodes_dict[mid] = NeuralMemoryNode(
                 id=mid,

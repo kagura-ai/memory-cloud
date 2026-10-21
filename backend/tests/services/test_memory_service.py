@@ -2000,9 +2000,10 @@ class TestReinforceRerank:
 
     @pytest.mark.asyncio
     async def test_unscored_rerank_candidates_stay_after_scored_ones(self):
-        """#2062: a self-hosted rerank leaves a candidate it could not score
-        with its hybrid_score (``RERANK_UNSCORED_KEY``) while the scored ones
-        carry P(yes). The re-sort must not compare the two scales: the
+        """#2062: a self-hosted rerank stamps a candidate it could not score
+        (``RERANK_UNSCORED_KEY``) while the scored ones carry P(yes). The
+        fixture keeps hand-built off-scale hybrid scores on purpose (#2084
+        floors them in RerankerService; this guards the sort key alone): the
         unscored ones stay after every scored one, and only reorder among
         themselves by their own adjusted score."""
         from decimal import Decimal
@@ -2653,3 +2654,135 @@ class TestAccessEventEmission:
         assert kw["memory_id"] is None  # plural: no single authoritative id
         assert kw["result_count"] == 2
         assert kw["extra_metadata"]["memory_ids"] == [str(m) for m in ids]
+
+
+class TestFlooredUnscoredRerankCandidates:
+    """#2084: a candidate the reranker could not score reaches the readers of
+    ``hybrid_score`` — recall ``score`` and the co-activation activation — at
+    or under the weakest scored row, as RerankerService floors it."""
+
+    @staticmethod
+    async def _reranked_pool():
+        from services.reranker_service import RerankerService
+
+        mems = [
+            SimpleNamespace(
+                id=uuid4(),
+                context_id=uuid4(),
+                summary=f"fact {i}",
+                context_summary=None,
+                content=None,
+                type="fact",
+                importance=0.5,
+                confidence=0.5,
+                scope="working",
+                created_at=datetime(2026, 10, 1),
+                updated_at=None,
+                last_used_at=None,
+                access_count=0,
+                client="test",
+                tags=[],
+                context=None,
+                source_uri=None,
+                source_type=None,
+                version=1,
+                supersede_candidate=None,
+            )
+            for i in range(4)
+        ]
+        # Hybrid scores far above the rerank scale for the unscored ones.
+        candidates = [
+            {
+                "id": str(m.id),
+                "score": h,
+                "hybrid_score": h,
+                "embedding": [1.0, 0.0],
+                "payload": {"summary": m.summary},
+            }
+            for m, h in zip(mems, [0.9, 3.2, 0.7, 2.4], strict=True)
+        ]
+        provider = MagicMock(provider_name="self_hosted")
+        provider.rerank = AsyncMock(
+            return_value=[
+                {"index": 0, "relevance_score": 0.6},
+                {"index": 2, "relevance_score": 0.3},
+                {"index": 1, "relevance_score": None},
+                {"index": 3, "relevance_score": None},
+            ]
+        )
+        reranker = RerankerService(MagicMock())
+        reranker.get_active_provider = AsyncMock(return_value=provider)
+        out = await reranker.rerank("q", candidates, "u", k=4)
+        return out, {str(m.id): m for m in mems}
+
+    @pytest.mark.asyncio
+    async def test_recall_score_of_an_unscored_row_is_at_most_the_lowest_scored(self):
+        out, memories = await self._reranked_pool()
+        svc = MemoryService(MagicMock())
+        svc._resolve_supersede_candidates = AsyncMock(return_value={})
+        svc._recall_trusted_context_ids = AsyncMock(return_value=set())
+        responses = await svc._recall_build_responses(
+            RecallRequest(query="q", k=4),
+            out,
+            memories,
+            shadow_map={},
+            contradiction_map={},
+            user_id="u",
+        )
+        scores = [r.score for r in responses]
+        assert scores == pytest.approx([0.6, 0.3, 0.3, 0.3 * 2.4 / 3.2])
+        assert all(s <= 0.3 for s in scores[2:])
+
+    @pytest.mark.asyncio
+    async def test_coactivation_uses_the_floored_score(self):
+        from neural.config import NeuralMemoryConfig
+
+        out, memories = await self._reranked_pool()
+        captured: dict[str, float] = {}
+
+        class _Stop(Exception):
+            pass
+
+        async def no_db():
+            raise RuntimeError("no DB in this test")
+            yield  # pragma: no cover
+
+        def record_activation(user_id, activated_nodes, **kwargs):
+            captured.update({n.node_id: n.activation for n in activated_nodes})
+            raise _Stop
+
+        tracker = MagicMock()
+        tracker.load_from_redis = AsyncMock()
+        tracker.record_activation = record_activation
+        graph_repo = MagicMock()
+        graph_repo.get_or_create = AsyncMock()
+        with (
+            patch(
+                "services.memory_service.try_lock_graph_learning",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                AsyncMock(return_value=NeuralMemoryConfig()),
+            ),
+            patch("repositories.graph.GraphRepository", return_value=graph_repo),
+            patch("services.graph_service.GraphService"),
+            patch("neural.hebbian.HebbianLearner"),
+            patch("db.base.get_db", no_db),
+            patch("neural.co_activation.CoActivationTracker", return_value=tracker),
+            pytest.raises(_Stop),
+        ):
+            await MemoryService(MagicMock())._recall_learn_on_session(
+                MagicMock(),
+                RecallRequest(query="q", k=4),
+                out,
+                memories,
+                user_id="u",
+                current_context_id=uuid4(),
+                effective_workspace_id=uuid4(),
+            )
+
+        # top_k_coactivation=3: the two scored rows and the top unscored one.
+        ids = [r["id"] for r in out[:3]]
+        activations = [captured[str(memories[i].id)] for i in ids]
+        assert activations == pytest.approx([0.6, 0.3, 0.3])

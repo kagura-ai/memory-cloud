@@ -117,14 +117,14 @@ _GENERATE_UNSUPPORTED_WARNED = False
 
 # Share of documents SelfHostedReranker may leave unscored (failed or
 # unparseable) before the call fails open (#2033). Up to it, unscored
-# documents keep their hybrid position and score after the scored ones;
-# above it, they would make up too much of the "ranking".
+# documents keep their hybrid order after the scored ones, with a score
+# floored under the lowest scored one (#2084); above it, they would make up too much of the "ranking".
 SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO = 0.2
 
 # Key RerankerService stamps (True) on a candidate the provider could not
-# score (#2062). Its hybrid_score is on another scale than the scored
-# candidates' rerank score, so the later bounded re-sorts in MemoryService
-# (reinforce, graph boost) keep it after every scored candidate.
+# score (#2062). The later bounded re-sorts in MemoryService (reinforce,
+# graph boost) keep it after every scored candidate; its hybrid_score is
+# floored under the lowest scored one (#2084, _floor_unscored_scores).
 RERANK_UNSCORED_KEY = "_rerank_unscored"
 
 
@@ -745,6 +745,7 @@ class SelfHostedReranker(RerankerProvider):
         # Scored documents by score, then the unscored ones with
         # relevance_score None in input (= hybrid) order: RerankerService keeps
         # those after the scored ones, in hybrid order with their hybrid_score
+        # floored under the lowest scored one (#2084)
         # (stamped RERANK_UNSCORED_KEY so the later re-sorts keep them there,
         # #2062), instead of a 0.0 that would sink them. Whether the scores
         # rank at all is RerankerService's shared guard.
@@ -1177,6 +1178,25 @@ def _try_parse_relevance_score(text: str) -> float | None:
     return None
 
 
+def _floor_unscored_scores(unscored: list[dict[str, Any]], floor: float) -> None:
+    """Put unscored candidates' hybrid_score on the rerank scale (#2084).
+
+    A candidate the reranker could not score keeps only its hybrid score,
+    which is on another scale than the scored ones' relevance. Every reader
+    (recall ``score``, co-activation, keyword-only confidence, re-sort bases,
+    supersede fold) reads ``hybrid_score``, so it is rewritten here, once:
+    scaled proportionally under ``floor`` (the lowest scored relevance), so
+    the top unscored row ties with it at most and the hybrid ratios among
+    the unscored rows are kept. A missing, None or negative hybrid score
+    counts as 0; when none is positive every unscored row reports 0.0.
+    Mutates the candidates in place.
+    """
+    hybrids = [max(float(c.get("hybrid_score") or 0.0), 0.0) for c in unscored]
+    top = max(hybrids)
+    for candidate, hybrid in zip(unscored, hybrids, strict=True):
+        candidate["hybrid_score"] = floor * hybrid / top if top > 0 else 0.0
+
+
 class RerankerService:
     """Service for dynamic reranker provider selection.
 
@@ -1445,11 +1465,9 @@ class RerankerService:
                 return candidates[:k]
 
         # Map reranked results back to candidates: scored ones in score order,
-        # then unscored ones (None) in their hybrid order with their
-        # hybrid_score. Their hybrid_score is on another scale than the
-        # scored ones' rerank score, so they are stamped RERANK_UNSCORED_KEY:
-        # the later re-sorts (reinforce, graph boost) keep them after every
-        # scored candidate instead of comparing the two scales (#2062).
+        # then unscored ones (None) in their hybrid order. They are stamped
+        # RERANK_UNSCORED_KEY so the later re-sorts (reinforce, graph boost)
+        # keep them after every scored candidate (#2062).
         reranked = []
         unscored_idx: list[int] = []
         for result in results:
@@ -1461,7 +1479,10 @@ class RerankerService:
             candidate["rerank_score"] = result["relevance_score"]
             candidate["hybrid_score"] = result["relevance_score"]  # Override hybrid score
             reranked.append(candidate)
-        reranked = (reranked + [candidates[i] for i in sorted(unscored_idx)])[:k]
+        unscored = [candidates[i] for i in sorted(unscored_idx)]
+        if reranked and unscored:
+            _floor_unscored_scores(unscored, min(c["rerank_score"] for c in reranked))
+        reranked = (reranked + unscored)[:k]
 
         logger.debug(
             "reranking_completed",
