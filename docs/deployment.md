@@ -1663,7 +1663,11 @@ would to a re-index.
   vector of its label. It is final after the first attempt (retrying cannot
   help until one of the two steps below is taken) and is logged once as
   `embedding_resource_unrebuildable`, a warning, not as
-  `embedding_budget_exhausted`. The dry run and the restore both warn with the
+  `embedding_budget_exhausted` (the error for a memory that used up its
+  retries; with `reason=claim_expired` its runs kept outliving their claim,
+  for example a slow embedder on a very long content, and it ends `failed`
+  with `embedding_error` `claim_expired: …` until the admin retry below resets
+  it). The dry run and the restore both warn with the
   number of memories whose resource has no schema. Two ways to make such a
   memory searchable again:
   - publish the resource's schema again, then reset the failed memories with
