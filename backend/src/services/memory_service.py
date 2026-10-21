@@ -3824,6 +3824,7 @@ class MemoryService:
         trusted_only: bool,
         shadow_map: Mapping[UUID, UUID] | None = None,
         resolved: dict[UUID, SupersedeCandidate | None] | None = None,
+        filters: Mapping[str, Any] | None = None,
     ) -> dict[UUID, list[UUID]]:
         """#2123: fold judge-verified older versions of a fact under the newer one.
 
@@ -3843,7 +3844,9 @@ class MemoryService:
            answer for every judged id — ``None`` where no hint survives — is
            written there, so the page builder resolves only the shipped rows
            the fold did not. An empty answer (nothing survived, or the
-           resolver failed open) writes nothing.
+           resolver failed open) writes nothing. ``filters`` (#2027) are the
+           recall's effective row filters, so a hint the page reuses honours
+           them exactly as one it resolves itself.
         2. A verified candidate is a directed link newer → older. A pool row
            reachable from another pool row along links is folded; links are
            followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
@@ -3885,6 +3888,7 @@ class MemoryService:
                 user_id=user_id,
                 operation="recall",
                 trusted_only=trusted_only,
+                filters=filters,
             )
             if resolved is not None and candidates:
                 # #2131: every judged id, None where no hint survives, so the
@@ -3908,6 +3912,7 @@ class MemoryService:
         user_id: str,
         operation: str,
         trusted_only: bool = False,
+        filters: Mapping[str, Any] | None = None,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
 
@@ -3937,6 +3942,15 @@ class MemoryService:
         construction — the target shares the (already trusted) source's
         context.
 
+        ``filters`` (#2027) are the recall's effective row filters (after the
+        ``tags_normalize`` widening): ``type``, ``scope``, ``source_type``,
+        ``source_uri_prefix``, ``tags`` and ``importance`` join the one target
+        query (:func:`services.memory_listing.recall_row_predicates`), so a
+        target the filter keeps out is not returned and its suggestion is
+        dropped like a deleted target's — the source row stays. Time windows
+        are not applied: a target is older than its source by construction.
+        ``None`` (reference, update_memory) applies no row filter.
+
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
         suggestion is a read-path enhancement and must never blank
@@ -3947,6 +3961,7 @@ class MemoryService:
         from services.agent_binding_service import filter_memory_rows_by_binding
 
         try:
+            from services.memory_listing import recall_row_predicates
             from services.supersede_verify import (
                 CONTENT_HEAD_CHARS,
                 is_parallel,
@@ -3989,6 +4004,9 @@ class MemoryService:
                 ).where(
                     Memory.id.in_(target_ids),
                     Memory.deleted_at.is_(None),
+                    # #2027: the recall's row filters; an off-filter target
+                    # is "gone" for this read.
+                    *recall_row_predicates(filters),
                 )
             )
             # Same agent-binding row filter every other recall lane enforces
@@ -5033,6 +5051,7 @@ class MemoryService:
         fold_map: Mapping[UUID, list[UUID]] | None = None,
         content_trusted_only: bool = False,
         resolved_candidates: Mapping[UUID, SupersedeCandidate | None] | None = None,
+        filters: Mapping[str, Any] | None = None,
     ) -> list[MemoryResponse]:
         """Build the page that ships: supersede hints and response rows.
 
@@ -5051,6 +5070,9 @@ class MemoryService:
                 not connector-ingested) may carry content.
             resolved_candidates: #2131 the fold's resolution (memory id →
                 surviving hint or ``None``); those rows are not resolved again.
+            filters: #2027 the row filters the recall searched with (after the
+                ``tags_normalize`` widening); a suggestion's target is held to
+                them. ``None`` reads ``request.filters``.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5078,6 +5100,7 @@ class MemoryService:
                     user_id=user_id,
                     operation="recall",
                     trusted_only=_is_trusted_recall(request),
+                    filters=request.filters if filters is None else filters,
                 )
             )
         fold_map = fold_map or {}
@@ -6206,6 +6229,8 @@ class MemoryService:
             trusted_only=_is_trusted_recall(request),
             shadow_map=shadow_map,
             resolved=resolved_candidates,
+            # #2027: the filters the rows matched with, widened tags included.
+            filters=effective_filters,
         )
 
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
@@ -6258,6 +6283,7 @@ class MemoryService:
                 fold_map=fold_map,
                 content_trusted_only=content_trusted_only,
                 resolved_candidates=resolved_candidates,
+                filters=effective_filters,
             )
 
         # #2144: the opt-in LLM selector over the page that would ship — after
