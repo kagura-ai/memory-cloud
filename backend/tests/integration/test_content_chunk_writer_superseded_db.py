@@ -191,6 +191,28 @@ async def test_requeue_over_a_run_leaves_a_soft_deleted_row(db_session, row):
     assert (await _state(db_session, row))[0] == "processing"
 
 
+async def test_the_over_run_requeue_commits_on_its_own(db_session, row):
+    """#2095: it survives a rollback of the caller's (Sleep's) transaction."""
+    from services.content_chunk_writer import _requeue_over_run
+
+    await _set(db_session, row, embedding_status="processing")
+    assert await _requeue_over_run(db_session, row.id) is True
+    await db_session.rollback()
+    assert (await _state(db_session, row))[0] == "pending"
+
+
+async def test_the_over_run_requeue_falls_back_when_the_caller_holds_the_row(db_session, row):
+    """The caller's open transaction wrote the row (the undo does): the lock
+    wait times out, and the re-queue runs in the caller's transaction."""
+    from services.content_chunk_writer import _requeue_over_run
+
+    await _set(db_session, row, embedding_status="processing")
+    await db_session.execute(update(Memory).where(Memory.id == row.id).values(summary="undone"))
+    assert await _requeue_over_run(db_session, row.id) is True
+    await db_session.commit()
+    assert (await _state(db_session, row))[0] == "pending"
+
+
 async def test_requeue_sees_a_restore_in_the_same_uncommitted_transaction(db_session, row):
     """The undo re-queues inside its restore transaction, before the commit."""
     from services.content_chunk_writer import requeue_embedding

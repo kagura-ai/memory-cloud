@@ -151,6 +151,13 @@ async def sweep_pending_embeddings() -> None:
     async for db in get_db():
         try:
             now = utcnow()
+            pending_cutoff = now - timedelta(seconds=10)
+            stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
+            # #2095: a stale processing row with no budget left can no longer
+            # be claimed, so no run would ever write its `failed`. Do it here,
+            # on the claim's own stale cutoff, before the backlog count (so
+            # this tick's count includes them) and the candidate query.
+            await _fail_exhausted_reclaims(db, stale_cutoff, now)
 
             # #1496: report the backlog BEFORE the candidate query, because the
             # `if not pending_ids: return` below is exactly the state that
@@ -163,12 +170,6 @@ async def sweep_pending_embeddings() -> None:
             # and the line's presence is itself the signal.
             await _log_unsearchable_backlog(db)
 
-            pending_cutoff = now - timedelta(seconds=10)
-            stale_cutoff = now - timedelta(seconds=STALE_CLAIM_SECONDS)
-            # #2095: a stale processing row with no budget left can no longer
-            # be claimed, so no run would ever write its `failed`. Do it here,
-            # on the claim's own stale cutoff, before the candidate query.
-            await _fail_exhausted_reclaims(db, stale_cutoff, now)
             result = await db.execute(
                 select(Memory.id)
                 .where(

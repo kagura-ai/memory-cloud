@@ -390,7 +390,8 @@ class TestFailExhaustedReclaims:
         return db
 
     @pytest.mark.asyncio
-    async def test_runs_before_the_candidate_query_and_logs_each_row(self):
+    async def test_runs_before_the_backlog_count_and_the_candidate_query(self):
+        """First, so the tick that fails a row also counts it as stalled."""
         mid = uuid4()
         backlog = MagicMock()
         backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
@@ -398,7 +399,7 @@ class TestFailExhaustedReclaims:
         exhausted.all.return_value = [(mid, 3)]
         candidates = MagicMock()
         candidates.all.return_value = []
-        db = self._db(backlog, exhausted, candidates)
+        db = self._db(exhausted, backlog, candidates)
 
         with (
             patch("db.base.get_db", mock_get_db_factory(db)),
@@ -408,7 +409,8 @@ class TestFailExhaustedReclaims:
 
         stmts = [c.args[0] for c in db.execute.await_args_list]
         assert len(stmts) == 3
-        update_sql = _pg(stmts[1])
+        update_sql = _pg(stmts[0])
+        assert "count(*)" in _pg(stmts[1])
         assert update_sql.startswith("UPDATE memories SET embedding_status='failed'")
         assert "claim_expired: the run outlived its claim on every retry" in update_sql
         where = update_sql.split(" WHERE ", 1)[1]
@@ -456,7 +458,7 @@ class TestFailExhaustedReclaims:
         backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
         candidates = MagicMock()
         candidates.all.return_value = [(mid,)]
-        db = self._db(backlog, RuntimeError("lock timeout"), candidates)
+        db = self._db(RuntimeError("lock timeout"), backlog, candidates)
 
         with (
             patch("db.base.get_db", mock_get_db_factory(db)),

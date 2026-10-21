@@ -89,6 +89,8 @@ async def world(db_session):
         "long": _memory(ws.id, ctx, "long"),
         "short": _memory(ws.id, ctx, "short", content=SHORT),
         "processing": _memory(ws.id, ctx, "processing", status="processing"),
+        # Stale (its stamp is _STAMP) with no budget left: the sweep's to fail.
+        "exhausted": _memory(ws.id, ctx, "exhausted", status="processing", embedding_retry_count=3),
         "short_processing": _memory(
             ws.id, ctx, "short_processing", content=SHORT, status="processing"
         ),
@@ -136,6 +138,7 @@ async def test_enabling_requeues_exactly_the_long_live_success_and_processing_ro
     after = await _statuses(db_session, rows)
     pending = {label for label, r in after.items() if r.embedding_status == "pending"}
     assert pending == {"long", "processing"}
+    assert after["exhausted"].embedding_status == "processing"
     assert after["short_processing"].embedding_status == "processing"
     assert after["resource_processing"].embedding_status == "processing"
     assert after["failed"].embedding_status == "failed"
@@ -147,7 +150,8 @@ async def test_enabling_requeues_exactly_the_long_live_success_and_processing_ro
     assert queued and queued[0].kwargs["count"] == 2
 
     # What the response serves: long, live, not success, not a resource row.
-    assert await repo.content_chunk_backfill_pending(ctx) == 3  # long, processing, failed
+    # long, processing, exhausted, failed
+    assert await repo.content_chunk_backfill_pending(ctx) == 4
 
 
 async def test_the_moved_runs_renewal_finds_its_claim_gone(db_session, world):

@@ -9214,9 +9214,7 @@ def embedding_reclaim_eligible_clause(stale_cutoff: datetime):
     from models.memory import Memory
 
     return and_(
-        Memory.embedding_status == "processing",
-        embedding_clock_before(stale_cutoff),
-        Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
+        _stale_processing(stale_cutoff), Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES
     )
 
 
@@ -9233,10 +9231,20 @@ def embedding_reclaim_exhausted_clause(stale_cutoff: datetime):
     from models.memory import Memory
 
     return and_(
-        Memory.embedding_status == "processing",
-        embedding_clock_before(stale_cutoff),
-        Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES,
+        _stale_processing(stale_cutoff), Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES
     )
+
+
+def _stale_processing(stale_cutoff: datetime):
+    """``processing`` with a claim stamp older than ``stale_cutoff`` (NULL-safe).
+
+    The one definition both reclaim clauses split on the retry budget.
+    """
+    from sqlalchemy import and_
+
+    from models.memory import Memory
+
+    return and_(Memory.embedding_status == "processing", embedding_clock_before(stale_cutoff))
 
 
 def embedding_clock_before(cutoff: datetime):

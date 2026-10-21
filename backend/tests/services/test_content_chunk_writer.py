@@ -50,6 +50,38 @@ def _embed_svc():
 LONG = "x" * (CONTENT_CHUNK_MIN_CONTENT_CHARS * 3)
 
 
+class _IsolatedSession:
+    """``isolated_session`` stand-in (#2095 over-run re-queue); ``execute`` is scripted."""
+
+    def __init__(self, rowcount=0, error=None):
+        self.statements = []
+        self.rowcount, self.error = rowcount, error
+        self.commit = AsyncMock()
+
+    def __call__(self, _db):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        if self.error is not None and len(self.statements) == 2:
+            raise self.error
+        return MagicMock(rowcount=self.rowcount)
+
+
+@pytest.fixture(autouse=True)
+def isolated():
+    """No test reaches a real session; a test that checks it configures this one."""
+    session = _IsolatedSession()
+    with patch.object(writer, "isolated_session", session):
+        yield session
+
+
 @pytest.fixture(autouse=True)
 def _trim():
     """The trim after the upsert (#2061); a test that checks it patches it again."""
@@ -977,59 +1009,68 @@ def _stale_over_run_db(requeue_rowcounts):
     return db
 
 
-@pytest.mark.parametrize(
-    ("stored", "over_run"),
-    [("own", True), ("other", False), (None, False), (RuntimeError("qdrant"), False)],
-)
-async def test_a_sleep_write_over_a_run_in_flight_is_re_queued_only_when_visible(stored, over_run):
+@pytest.mark.parametrize("moved", [True, False])
+async def test_a_sleep_write_over_a_run_in_flight_re_queues_over_it(isolated, moved):
     """#2095: the success-only re-queue moved nothing, so the row is ``processing``
-    (or ``pending``). When chunk 0 still carries the hash of the text this write
-    put there, the run in flight upserted first and this write replaced its
-    chunks: re-queue over it. Another hash, none, or a failed read: the newer
-    write stands."""
+    (or ``pending``). The run in flight may have upserted before this write, and
+    its success write would then pass over this write's chunks: re-queue over
+    it, committed on its own session under a lock timeout. No chunk is read."""
     import structlog
+    from sqlalchemy.dialects import postgresql
 
     memory = _memory(LONG)
-    db = _stale_over_run_db([0, 1])
-    digest = writer.content_hash(LONG)
-    if stored == "own":
-        read = AsyncMock(return_value=digest)
-    elif stored == "other":
-        read = AsyncMock(return_value="newer-hash")
-    elif stored is None:
-        read = AsyncMock(return_value=None)
-    else:
-        read = AsyncMock(side_effect=stored)
+    db = _stale_over_run_db([0])
+    isolated.rowcount = 1 if moved else 0
     with (
         structlog.testing.capture_logs() as logs,
-        patch.object(writer, "chunk_points_content_hash", read),
+        patch.object(writer, "chunk_points_content_hash", AsyncMock()) as read,
     ):
         n, upsert, _trim = await _write_with(db, memory)
 
     assert n == 0
     upsert.assert_awaited_once()
-    read.assert_awaited_once_with(memory.id, "c")
-    executes = db.execute.await_args_list
-    assert len(executes) == (7 if over_run else 6)
-    if over_run:
-        _assert_requeue_over_run(executes[-1].args[0])
-        reasons = [e["reason"] for e in logs if e["event"] == "embedding_requeued"]
-        assert reasons == ["stale_chunks_over_run"]
+    read.assert_not_awaited()
+    assert db.execute.await_count == 6  # nothing more on the caller's session
+    lock_timeout, requeue = isolated.statements
+    assert "lock_timeout" in str(lock_timeout)
+    _assert_requeue_over_run(requeue)
+    sql = str(requeue.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert str(memory.id) in sql
+    isolated.commit.assert_awaited_once()
+    reasons = [e["reason"] for e in logs if e["event"] == "embedding_requeued"]
+    assert reasons == (["stale_chunks_over_run"] if moved else [])
     event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
-    assert event["requeued"] is over_run
-    assert event["over_run"] is over_run
-    if isinstance(stored, Exception):
-        failed = next(e for e in logs if e["event"] == "content_chunks_superseded_check_failed")
-        assert failed["stage"] == "over_run"
+    assert event["requeued"] is moved
+    assert event["over_run"] is moved
 
 
-async def test_a_sleep_write_whose_success_re_queue_moved_the_row_reads_no_hash():
+async def test_a_failed_isolated_re_queue_falls_back_to_the_callers_transaction(isolated):
+    """The caller's own transaction may hold the row (the undo writes it first):
+    the lock wait times out, and the re-queue runs on the caller's session."""
+    import structlog
+
+    memory = _memory(LONG)
+    db = _stale_over_run_db([0, 1])
+    isolated.error = RuntimeError("lock timeout")
+    with structlog.testing.capture_logs() as logs:
+        n, _upsert, _trim = await _write_with(db, memory)
+
+    assert n == 0
+    assert db.execute.await_count == 7
+    _assert_requeue_over_run(db.execute.await_args_list[-1].args[0])
+    isolated.commit.assert_not_awaited()
+    failed = next(e for e in logs if e["event"] == "embedding_requeue_isolated_failed")
+    assert failed["error_class"] == "RuntimeError"
+    event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
+    assert event["requeued"] is True and event["over_run"] is True
+
+
+async def test_a_sleep_write_whose_success_re_queue_moved_the_row_stops_there(isolated):
     memory = _memory(LONG)
     db = _stale_over_run_db([1])
-    with patch.object(writer, "chunk_points_content_hash", AsyncMock()) as read:
-        n, _upsert, _trim = await _write_with(db, memory)
+    n, _upsert, _trim = await _write_with(db, memory)
     assert n == 0
-    read.assert_not_awaited()
+    assert isolated.statements == []
     assert db.execute.await_count == 6
 
 
@@ -1076,39 +1117,31 @@ async def test_a_sleep_write_overtaken_by_a_newer_write_is_re_queued():
     assert not [e for e in logs if e["event"] == "content_chunks_written"]
 
 
-async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write():
+async def test_a_sleep_delete_of_shrunk_content_is_checked_after_the_write(isolated):
     import structlog
 
     memory = _memory("now short")
     flag = MagicMock()
     flag.scalar_one_or_none.return_value = True
     db = MagicMock()
-    db.execute = AsyncMock(
-        side_effect=[
-            flag,
-            _check(True),
-            _check(False),
-            MagicMock(rowcount=0),
-            MagicMock(rowcount=1),
-        ]
-    )
+    db.execute = AsyncMock(side_effect=[flag, _check(True), _check(False), MagicMock(rowcount=0)])
+    isolated.rowcount = 1
     with (
         structlog.testing.capture_logs() as logs,
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
-        patch.object(writer, "chunk_points_content_hash", AsyncMock()) as read_hash,
     ):
         n = await writer.write_content_chunks(
             db, memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
         )
     assert n == 0
     delete.assert_awaited_once()
-    # flag, check, check after the write, the success-only re-queue, and —
-    # #2095: it moved nothing, and the delete may have removed a run's new
-    # chunks; nothing to compare, so the re-queue over the run, no read.
-    assert db.execute.await_count == 5
-    read_hash.assert_not_awaited()
-    _assert_requeue_over_run(db.execute.await_args_list[-1].args[0])
+    # flag, check, check after the write, the success-only re-queue — and
+    # #2095: it moved nothing, so the delete may have removed a run's new
+    # chunks: the re-queue over the run, on its own session.
+    assert db.execute.await_count == 4
+    _assert_requeue_over_run(isolated.statements[-1])
+    isolated.commit.assert_awaited_once()
     event = next(e for e in logs if e["event"] == "content_chunks_stale_after_write")
     assert event["requeued"] is True and event["over_run"] is True
 

@@ -156,6 +156,8 @@ async def test_only_the_enable_moves_rows_in_flight(qdrant):
     )
     assert "'processing'" not in reconciler
     assert "embedding_status IN ('success', 'processing')" in enable
+    # A stale processing row with no budget left stays the sweep's to fail.
+    assert "NOT (" in enable and "embedding_retry_count >= 3" in enable
 
 
 async def test_the_backfill_with_no_ids_writes_nothing(qdrant):
