@@ -333,6 +333,95 @@ async def test_erasure_scrubs_the_revision_log(
     ]
 
 
+async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edited(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2235: the "no details edit in between" check looks at this memory only.
+
+    The subject edits the details of another member's memory; the next
+    details edit there holds the subject's value in its prior and must be
+    stripped. An unrelated memory with two later details edits used to make
+    the uncorrelated inner ``NOT EXISTS`` false for every row, so the
+    subject's value stayed. Rows that never held the subject's value are
+    untouched.
+    """
+    from services.account_erasure_service import AccountErasureService
+
+    subject, author, third = seeded["owner"], "edited-author", "third-member"
+    ws, ctx = seeded["workspace_id"], seeded["context_id"]
+    edited, unrelated = uuid.uuid4(), uuid.uuid4()
+
+    def _rev(memory_id: uuid.UUID, version: int, actor: str, prior: dict[str, Any]) -> Any:
+        return MemoryRevision(
+            memory_id=memory_id,
+            context_id=ctx,
+            version=version,
+            kind="updated",
+            writer="api",
+            actor_user_id=actor,
+            prior=prior,
+        )
+
+    async with _maker(async_engine)() as session:
+        for memory_id, owner in ((edited, author), (unrelated, third)):
+            session.add(
+                Memory(
+                    id=memory_id,
+                    user_id=owner,
+                    workspace_id=ws,
+                    context_id=ctx,
+                    summary="not the subject's memory",
+                    content="body",
+                    type="note",
+                    client="test",
+                )
+            )
+        await session.flush()
+        session.add_all(
+            [
+                # the subject overwrites the author's details (prior = the author's)
+                _rev(edited, 2, subject, {"details": {"by": "author"}}),
+                # a non-details edit: no details in its prior
+                _rev(edited, 3, author, {"importance": 0.4}),
+                # the next details edit: its prior is the subject's value
+                _rev(edited, 4, author, {"details": {"by": "subject"}}),
+                # a later details edit: its prior is the author's own value
+                _rev(edited, 5, third, {"details": {"by": "author-again"}}),
+                # an unrelated memory with details edits after version 2
+                _rev(unrelated, 3, third, {"details": {"u": 1}}),
+                _rev(unrelated, 4, third, {"details": {"u": 2}}),
+                _rev(unrelated, 6, third, {"details": {"u": 3}}),
+            ]
+        )
+        await session.commit()
+
+        service = AccountErasureService.__new__(AccountErasureService)
+        service.db = session
+        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+            await service._erase_memory_revisions(subject)
+            pseudonym = service._pseudonym(subject)
+        await session.commit()
+
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT memory_id, version, actor_user_id, prior FROM memory_revisions "
+                    "WHERE memory_id IN (:e, :u) ORDER BY memory_id = :u, version"
+                ),
+                {"e": edited, "u": unrelated},
+            )
+        ).all()
+    assert [tuple(r) for r in rows] == [
+        (edited, 2, pseudonym, {"details": {"by": "author"}}),
+        (edited, 3, author, {"importance": 0.4}),
+        (edited, 4, author, {"erased": ["details"]}),
+        (edited, 5, third, {"details": {"by": "author-again"}}),
+        (unrelated, 3, third, {"details": {"u": 1}}),
+        (unrelated, 4, third, {"details": {"u": 2}}),
+        (unrelated, 6, third, {"details": {"u": 3}}),
+    ]
+
+
 def test_f03_round_trip_reads_existing_rows_at_version_one() -> None:
     from tests.integration.test_alembic_migrations import (
         _downgrade_to,

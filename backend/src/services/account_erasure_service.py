@@ -1539,6 +1539,10 @@ class AccountErasureService:
         authored = MemoryRevision.memory_id.in_(select(Memory.id).where(Memory.user_id == user_id))
         # The subject's details edit, and no other details edit between it
         # and this row: this row's prior is the value the subject wrote.
+        # Both subqueries correlate explicitly (#2235): auto-correlation only
+        # reaches the immediately enclosing SELECT, so the inner one would
+        # otherwise get its own uncorrelated ``memory_revisions`` FROM entry
+        # and look at every memory's edits instead of this row's memory.
         theirs = aliased(MemoryRevision)
         between = aliased(MemoryRevision)
         holds_subjects_details = (
@@ -1555,8 +1559,10 @@ class AccountErasureService:
                     between.version > theirs.version,
                     between.version < MemoryRevision.version,
                 )
+                .correlate(MemoryRevision, theirs)
                 .exists(),
             )
+            .correlate(MemoryRevision)
             .exists()
         )
         await self.db.execute(
