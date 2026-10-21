@@ -35,6 +35,7 @@ from auth.password import (  # noqa: E402
     hash_password,
     is_password_too_long,
 )
+from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
@@ -55,6 +56,9 @@ def seed_e2e_admin() -> None:
         # bcrypt hashes at most 72 bytes (#1707); fail before touching the DB.
         print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_TOO_LONG_MESSAGE}")
         sys.exit(1)
+
+    # The production secret guard (#2239) before any DB work.
+    require_settings()
 
     engine = create_engine(get_sync_database_url())
     try:

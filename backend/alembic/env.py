@@ -12,7 +12,6 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import models.agent  # noqa: F401  # Issue #1274: Agent Registry (RFC-0002 P0-1)
-import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
 import models.analysis  # noqa: F401  # Issue #494: Memory Broadlistening tables
 import models.auth  # noqa: F401
 import models.config  # noqa: F401
@@ -21,15 +20,24 @@ import models.file_objects  # noqa: F401  # Issue #485: file storage tables
 import models.hub_tag  # noqa: F401
 import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
 import models.memory  # noqa: F401
+import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
 import models.neural  # noqa: F401
 import models.resource  # noqa: F401
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
 from alembic import context
 from config.database import get_database_url, to_async_database_url
+from config.settings import get_settings
 
 # Import all models so autogenerate can detect them
 from db.base import Base  # noqa: F401
+
+# The production secret guard (#2225, #2239): under ENVIRONMENT=production a
+# development-default or short secret stops the migration here, before any
+# schema change — in deploy.sh that is Step 2, before traffic moves, rather
+# than the API healthcheck after it. A no-op where the settings are already
+# cached (the in-process migration tests).
+get_settings()
 
 # Alembic Config object
 config = context.config

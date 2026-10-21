@@ -345,10 +345,11 @@ Placeholders are matched case-insensitively. Generate each value with
 `openssl rand -hex 32`. The API loads the settings on import, so it stops
 before serving with a pydantic `ValidationError` whose message names the
 refused variables (never their values); look for it in
-`docker compose logs api`. `alembic upgrade` and the admin CLIs do not load the
-settings on import and are **not** stopped by this check — a deploy with a
-placeholder can still migrate and then fail on the API healthcheck, so set the
-secrets before upgrading. Development, test and staging are not checked.
+`docker compose logs api`. `alembic upgrade` (so `deploy.sh` stops at its
+migration step, before traffic moves) and the admin CLIs (`create_admin`,
+`reset_password`, `delete_admin`, `seed_e2e_admin` and the one-shot maintenance
+commands) are refused the same way, before they touch the database.
+Development, test and staging are not checked.
 `ENVIRONMENT=development` is not a free way around it: it also drops the
 `Secure` flag on session cookies.
 

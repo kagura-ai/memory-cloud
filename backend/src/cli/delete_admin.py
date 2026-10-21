@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import create_engine, delete, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
 
@@ -22,6 +23,9 @@ def delete_admin():
     print("=" * 50)
     print("Kagura Memory Cloud - Delete Password Admin")
     print("=" * 50)
+
+    # The production secret guard (#2239) before any DB work.
+    require_settings()
 
     engine = create_engine(get_sync_database_url())
 

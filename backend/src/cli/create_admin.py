@@ -30,6 +30,7 @@ from auth.password_policy import (  # noqa: E402
     validate_password_policy,
 )
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
+from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
@@ -134,7 +135,6 @@ def _create_workspace(db: Session, user_id: str) -> Workspace:
 
 def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
     """Create an API key for the admin user scoped to workspace."""
-    _require_api_key_secret()
     from utils.encryption import get_encryptor  # noqa: E402
 
     raw_key = APIKeyManager._generate_key()
@@ -256,6 +256,13 @@ def create_admin(skip_mcp_json: bool = False):
     print("Kagura Memory Cloud - Create Admin")
     print("=" * 50)
 
+    # API_KEY_SECRET first (environment, then the API container), then the
+    # settings: they are cached for the process and the encryptor reads the
+    # key from them, so the other order would encrypt the admin's API key and
+    # TOTP secret with this host's default instead of the API's key (#2239).
+    # The settings also run the production secret guard before any DB work.
+    require_settings(api_key_secret=_require_api_key_secret())
+
     engine = create_engine(get_sync_database_url())
 
     with Session(engine) as db:
@@ -308,8 +315,6 @@ def create_admin(skip_mcp_json: bool = False):
         mfa_choice = input("  Enable MFA? [Y/n]: ").strip().lower()
 
         if mfa_choice != "n":
-            _require_api_key_secret()
-
             totp_secret = generate_totp_secret()
             uri = get_provisioning_uri(totp_secret, login_id)
 

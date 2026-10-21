@@ -65,3 +65,20 @@ def _no_real_session_store(monkeypatch):
     manager = MagicMock()
     manager.delete_user_sessions.return_value = 0
     monkeypatch.setattr("cli.reset_password.SessionManager", MagicMock(return_value=manager))
+
+
+@pytest.fixture(autouse=True)
+def _no_docker_secret_lookup(monkeypatch):
+    """The admin CLIs must not ask a developer's running API container (#2239).
+
+    ``create_admin`` / ``reset_password`` resolve ``API_KEY_SECRET`` from the
+    environment, then ``docker compose exec api printenv``. The environment
+    gets the key the cached settings already hold, so the CLIs' "secret
+    resolved before the settings" check passes; tests of that order patch
+    both themselves.
+    """
+    from config.settings import get_settings
+
+    monkeypatch.setenv("API_KEY_SECRET", get_settings().api_key_secret)
+    monkeypatch.setattr("cli.create_admin._get_env_from_docker", lambda key: None)
+    monkeypatch.setattr("cli.reset_password._get_env_from_docker", lambda key: None)

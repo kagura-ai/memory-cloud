@@ -545,8 +545,9 @@ class Settings(BaseSettings):
 
         Runs wherever ``Settings()`` is built. The API builds it on import
         (``config.plan_tiers``), so a production container with a shipped
-        placeholder does not serve. alembic and the admin CLIs only reach it
-        on code paths that call ``get_settings()``. ``environment`` is
+        placeholder does not serve; ``alembic/env.py`` and the admin CLIs
+        (``cli/_env_guard.py``, #2239) build it before any database work.
+        ``environment`` is
         normalized like ``auth.oauth_endpoints._is_production``. Every refused
         variable is named in one error so a single restart fixes all of them;
         the values themselves are never included.

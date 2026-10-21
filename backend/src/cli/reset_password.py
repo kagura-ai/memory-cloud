@@ -66,6 +66,7 @@ from auth.password_policy import (  # noqa: E402
     validate_password_policy,
 )
 from auth.session import SessionManager  # noqa: E402
+from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from config.database import get_redis_url  # noqa: E402
 from models.auth import User  # noqa: E402
@@ -147,6 +148,17 @@ def reset_password():
     print("=" * 50)
     print("Kagura Memory Cloud - Reset Password / MFA")
     print("=" * 50)
+
+    # API_KEY_SECRET (environment, then the API container) before the
+    # settings: they are cached for the process and the encryptor reads the
+    # key from them, so a TOTP secret re-enabled below is encrypted with the
+    # API's key, not this host's default (#2239). Not fatal here — only the
+    # optional MFA re-enable needs it, and it checks the key below. The
+    # settings also run the production secret guard before any DB work.
+    api_key_secret = os.getenv("API_KEY_SECRET") or _get_env_from_docker("API_KEY_SECRET")
+    if api_key_secret:
+        os.environ["API_KEY_SECRET"] = api_key_secret
+    settings = require_settings()
 
     engine = create_engine(get_sync_database_url())
 
@@ -280,13 +292,13 @@ def reset_password():
                     verify_totp,
                 )
 
-                api_key_secret = os.getenv("API_KEY_SECRET") or _get_env_from_docker(
-                    "API_KEY_SECRET"
-                )
                 if not api_key_secret:
                     print("  ⚠ API_KEY_SECRET not available. Ensure Docker is running.")
+                elif settings.api_key_secret != api_key_secret:
+                    # Encrypting now would use a key the API does not have.
+                    print("  ⚠ API_KEY_SECRET changed after the settings were loaded.")
+                    print("    MFA remains disabled; run this command again to re-enable it.")
                 else:
-                    os.environ["API_KEY_SECRET"] = api_key_secret
                     totp_secret = generate_totp_secret()
                     uri = get_provisioning_uri(totp_secret, login_id)
                     print(f"\n  Scan this URI:\n  {uri}")
