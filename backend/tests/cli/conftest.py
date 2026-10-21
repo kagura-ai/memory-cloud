@@ -8,7 +8,8 @@ import warnings
 from pathlib import Path
 
 import pytest
-import structlog
+
+from tests.structlog_state import preserved_structlog_config
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
@@ -27,13 +28,11 @@ def _restore_logging_state():
     Covers the structlog config, the root and HTTP-client logger levels and
     the warnings filters.
     """
-    saved_structlog = structlog.get_config()
     root = logging.getLogger()
     saved_root_level = root.level
     saved_levels = {name: logging.getLogger(name).level for name in _PER_REQUEST_LOGGERS}
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), preserved_structlog_config():
         yield
-    structlog.configure(**saved_structlog)
     root.setLevel(saved_root_level)
     for name, level in saved_levels.items():
         logging.getLogger(name).setLevel(level)

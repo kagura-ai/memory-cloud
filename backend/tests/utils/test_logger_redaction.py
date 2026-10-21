@@ -15,6 +15,7 @@ import uuid
 import pytest
 import structlog
 
+from tests.structlog_state import preserved_structlog_config
 from utils.logger import redact_pg_detail, setup_logger
 
 
@@ -23,9 +24,9 @@ def _structlog_reset():
     # Snapshot + restore (NOT reset_defaults): the suite-wide conftest
     # configures structlog for kwarg logging, and resetting to library
     # defaults would make later tests order-dependent. Copilot review.
-    saved = structlog.get_config()
-    yield
-    structlog.configure(**saved)
+    # Restored in place: setup_logger() edits the live list (#2167).
+    with preserved_structlog_config():
+        yield
 
 
 def _fresh_logger():

@@ -32,6 +32,7 @@ import pytest
 import structlog
 
 from api.middleware.request_logger import RequestLoggingMiddleware
+from tests.structlog_state import preserved_structlog_config
 from utils.logger import redact_pg_detail, setup_logger
 from utils.url_redact import redact_invite_tokens
 
@@ -160,13 +161,12 @@ class TestStructlogProcessor:
 
 @pytest.fixture
 def _logging_reset():
-    saved_structlog = structlog.get_config()
     root = logging.getLogger()
     access = logging.getLogger("uvicorn.access")
     saved = (root.handlers[:], access.handlers[:], access.propagate)
-    yield root, access
+    with preserved_structlog_config():
+        yield root, access
     root.handlers[:], access.handlers[:], access.propagate = saved
-    structlog.configure(**saved_structlog)
 
 
 class TestRenderedPipelines:

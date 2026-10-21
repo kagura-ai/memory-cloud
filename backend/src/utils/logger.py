@@ -132,6 +132,14 @@ def setup_logger(
             the host runtime already installed keep their own destination.
             A one-shot CLI passes ``sys.stderr`` so stdout stays its report
             (#1788).
+
+    A repeat call keeps the configured processor list instance and replaces
+    its contents (#2167). Loggers cached on first use
+    (``cache_logger_on_first_use``) hold that list, so they pick up the new
+    chain, and ``structlog.testing.capture_logs()``, which edits the current
+    list in place, still reaches them. Their level and output stream do not
+    change: structlog freezes ``wrapper_class`` and ``logger_factory`` per
+    logger on first use.
     """
     level_str = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
     level = getattr(logging, level_str, logging.INFO)
@@ -204,6 +212,13 @@ def setup_logger(
         # must exist to be scrubbed), BEFORE the renderer.
         processors.append(redact_pg_detail)
         processors.append(structlog.processors.JSONRenderer())
+
+    if structlog.is_configured():
+        # #2167: keep the list identity, the way capture_logs() does — cached
+        # loggers hold this list, and a new list would strand them.
+        current = structlog.get_config()["processors"]
+        current[:] = processors
+        processors = current
 
     structlog.configure(
         processors=processors,
