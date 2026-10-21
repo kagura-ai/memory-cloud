@@ -87,16 +87,9 @@ async def test_create_team_conflict_wire_bodies_carry_reason():
 
 
 @pytest.fixture
-def _fernet_env(monkeypatch):
-    """Set a Fernet key and reset the ``get_encryptor`` singleton around a test."""
-    from cryptography.fernet import Fernet
-
-    import utils.encryption as enc_module
-
-    monkeypatch.setenv("API_KEY_SECRET", Fernet.generate_key().decode())
-    enc_module._encryptor = None
-    yield
-    enc_module._encryptor = None
+def _fernet_env(fernet_api_key_secret: str) -> str:
+    """A fresh Fernet ``API_KEY_SECRET`` and encryptor (shared fixture, #2239)."""
+    return fernet_api_key_secret
 
 
 class _ScanRedis:

@@ -5,7 +5,7 @@ Used for storing external API keys (OpenAI, Anthropic, etc.) in database.
 
 Security:
 - Fernet provides authenticated encryption (AES-128 in CBC mode + HMAC)
-- Encryption key derived from API_KEY_SECRET environment variable
+- Encryption key derived from API_KEY_SECRET (read through ``Settings``)
 - Encrypted values are base64-encoded strings
 - Decryption verifies integrity (prevents tampering)
 
@@ -22,9 +22,10 @@ Example:
 import base64
 import hashlib
 import logging
-import os
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 class APIKeyEncryption:
     """Fernet-based symmetric encryption for API keys.
 
-    Uses API_KEY_SECRET environment variable as the encryption key.
+    The caller passes the key; ``get_encryptor`` passes ``API_KEY_SECRET``.
     Provides encrypt/decrypt methods with error handling.
     """
 
@@ -152,13 +153,16 @@ _encryptor: APIKeyEncryption | None = None
 def get_encryptor() -> APIKeyEncryption:
     """Get global encryption instance.
 
-    Uses API_KEY_SECRET environment variable.
+    Uses ``Settings.api_key_secret`` (``API_KEY_SECRET``), so the key is the
+    one the production secret guard checked (#2239). Outside production an
+    unset ``API_KEY_SECRET`` falls back to the public development default,
+    with a warning; production refuses that default when the settings load.
 
     Returns:
         APIKeyEncryption instance
 
     Raises:
-        ValueError: If API_KEY_SECRET not set
+        ValueError: If API_KEY_SECRET is empty
 
     Example:
         >>> encryptor = get_encryptor()
@@ -167,10 +171,17 @@ def get_encryptor() -> APIKeyEncryption:
     global _encryptor
 
     if _encryptor is None:
-        secret = os.getenv("API_KEY_SECRET")
-        if not secret:
-            msg = "API_KEY_SECRET environment variable not set. Required for API key encryption."
+        secret = get_settings().api_key_secret
+        if not secret.strip():
+            msg = "API_KEY_SECRET is empty. Required for API key encryption."
             raise ValueError(msg)
+        if secret == Settings.model_fields["api_key_secret"].default:
+            # Once per process: the singleton is built once.
+            logger.warning(
+                "API_KEY_SECRET is the public development default; stored provider "
+                "keys and connector secrets are encrypted with a key anyone can read. "
+                "Set a private value (python -m src.cli.setup_env, or openssl rand -hex 32)."
+            )
 
         _encryptor = APIKeyEncryption(secret)
         logger.info("Global encryption instance initialized")

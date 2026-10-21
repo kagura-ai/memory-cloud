@@ -420,6 +420,26 @@ async def db_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
                 pass  # Ignore close errors
 
 
+@pytest.fixture
+def fernet_api_key_secret(monkeypatch) -> str:
+    """A fresh Fernet key as ``API_KEY_SECRET``, with a new encryptor (#2239).
+
+    ``utils.encryption.get_encryptor`` reads the key from the cached settings,
+    which a test must not rebuild (see the check at the top of this module):
+    patch the cached instance and drop the encryptor singleton. ``monkeypatch``
+    restores both, the previous encryptor included.
+    """
+    from cryptography.fernet import Fernet
+
+    import utils.encryption as enc_module
+    from config.settings import get_settings
+
+    key = Fernet.generate_key().decode()
+    monkeypatch.setattr(get_settings(), "api_key_secret", key)
+    monkeypatch.setattr(enc_module, "_encryptor", None)
+    return key
+
+
 # Non-async fixtures for simple data
 @pytest_asyncio.fixture
 def test_user_id() -> str:

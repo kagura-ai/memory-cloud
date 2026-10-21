@@ -13,7 +13,6 @@ These are ORM-mock / metadata-introspection tests (no DB) so they run under
 from __future__ import annotations
 
 import pytest
-from cryptography.fernet import Fernet
 from sqlalchemy import event
 
 from models.resource import (
@@ -24,14 +23,9 @@ from models.resource import (
 
 
 @pytest.fixture
-def _fernet_env(monkeypatch):
-    """Set a deterministic Fernet key and reset the get_encryptor singleton."""
-    monkeypatch.setenv("API_KEY_SECRET", Fernet.generate_key().decode())
-    import utils.encryption as enc_module
-
-    enc_module._encryptor = None
-    yield
-    enc_module._encryptor = None
+def _fernet_env(fernet_api_key_secret: str) -> str:
+    """A fresh Fernet ``API_KEY_SECRET`` and encryptor (shared fixture, #2239)."""
+    return fernet_api_key_secret
 
 
 class TestOAuthTokenEncryption:

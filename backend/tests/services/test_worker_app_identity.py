@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from cryptography.fernet import Fernet
 
 from models.worker_app import WorkerAppIdentity
 from services.worker_app_identity import WorkerAppIdentityService, identity_collection_revision
@@ -13,13 +12,9 @@ from utils.datetime import utcnow
 
 
 @pytest.fixture
-def _fernet_env(monkeypatch):
-    monkeypatch.setenv("API_KEY_SECRET", Fernet.generate_key().decode())
-    import utils.encryption as enc_module
-
-    enc_module._encryptor = None
-    yield
-    enc_module._encryptor = None
+def _fernet_env(fernet_api_key_secret: str) -> str:
+    """A fresh Fernet ``API_KEY_SECRET`` and encryptor (shared fixture, #2239)."""
+    return fernet_api_key_secret
 
 
 @pytest.mark.asyncio

@@ -187,7 +187,7 @@ class TestCreateKeyBoundContextValidation:
 
         Patches ``utils.encryption.get_encryptor`` because ``create_key``
         encrypts the plaintext-for-reveal at-rest via Fernet, and the
-        global encryptor reads ``API_KEY_SECRET`` from the environment.
+        global encryptor reads ``API_KEY_SECRET`` from the settings.
         Setting that env var in unit tests would leak production-shaped
         config into CI; mocking the encryptor keeps this test a true
         validation-layer unit test.

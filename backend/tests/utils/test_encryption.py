@@ -4,10 +4,13 @@ Pure utility — no DB or external services required.
 """
 
 import base64
+import logging
 from unittest.mock import patch
 
 import pytest
 
+import utils.encryption as enc_module
+from config.settings import Settings, get_settings
 from utils.encryption import APIKeyEncryption, generate_fernet_key, get_encryptor
 
 
@@ -74,34 +77,46 @@ class TestAPIKeyEncryption:
 
 
 class TestGetEncryptor:
-    def test_raises_without_api_key_secret(self, monkeypatch):
-        monkeypatch.delenv("API_KEY_SECRET", raising=False)
-        # Reset singleton to force re-evaluation
-        import utils.encryption as enc_module
+    """``get_encryptor`` reads ``API_KEY_SECRET`` from the cached settings (#2239)."""
 
-        enc_module._encryptor = None
-        with pytest.raises(ValueError, match="API_KEY_SECRET environment variable not set"):
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_refuses_an_empty_api_key_secret(self, monkeypatch, value):
+        monkeypatch.setattr(get_settings(), "api_key_secret", value)
+        monkeypatch.setattr(enc_module, "_encryptor", None)
+        with pytest.raises(ValueError, match="API_KEY_SECRET is empty"):
             get_encryptor()
 
-    def test_returns_singleton(self, monkeypatch):
-        key = generate_fernet_key()
-        monkeypatch.setenv("API_KEY_SECRET", key)
-        import utils.encryption as enc_module
-
-        enc_module._encryptor = None
+    def test_returns_singleton(self, fernet_api_key_secret):
         e1 = get_encryptor()
         e2 = get_encryptor()
         assert e1 is e2
 
-    def test_uses_env_secret(self, monkeypatch):
-        key = generate_fernet_key()
-        monkeypatch.setenv("API_KEY_SECRET", key)
-        import utils.encryption as enc_module
-
-        enc_module._encryptor = None
-        encryptor = get_encryptor()
-        encrypted = encryptor.encrypt("test-secret")
+    def test_uses_the_settings_secret(self, fernet_api_key_secret):
+        encrypted = get_encryptor().encrypt("test-secret")
         assert encrypted != "test-secret"
+        assert APIKeyEncryption(fernet_api_key_secret).decrypt(encrypted) == "test-secret"
+
+    def test_ignores_a_process_env_set_after_the_settings(self, fernet_api_key_secret, monkeypatch):
+        monkeypatch.setenv("API_KEY_SECRET", generate_fernet_key())
+        encrypted = get_encryptor().encrypt("test-secret")
+        assert APIKeyEncryption(fernet_api_key_secret).decrypt(encrypted) == "test-secret"
+
+    def test_private_secret_does_not_warn(self, fernet_api_key_secret, caplog):
+        with caplog.at_level(logging.WARNING, logger="utils.encryption"):
+            get_encryptor()
+        assert "development default" not in caplog.text
+
+    def test_development_default_warns_once(self, monkeypatch, caplog):
+        default = Settings.model_fields["api_key_secret"].default
+        monkeypatch.setattr(get_settings(), "api_key_secret", default)
+        monkeypatch.setattr(enc_module, "_encryptor", None)
+        with caplog.at_level(logging.WARNING, logger="utils.encryption"):
+            get_encryptor()
+            get_encryptor()
+        warnings = [r for r in caplog.records if "development default" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == logging.WARNING
+        assert default not in caplog.text
 
 
 class TestGenerateFernetKey:

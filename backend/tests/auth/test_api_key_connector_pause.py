@@ -21,7 +21,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -213,16 +212,14 @@ class TestReservedPrefix:
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def connector_key(db_session: AsyncSession, monkeypatch) -> AsyncIterator[dict[str, object]]:
+async def connector_key(
+    db_session: AsyncSession, fernet_api_key_secret: str
+) -> AsyncIterator[dict[str, object]]:
     """A Free workspace with one connector and its minted ``connector:{id}`` key.
 
     ``create_key`` encrypts the plaintext-for-reveal with the global Fernet
     encryptor, so a test secret is set and the singleton reset around the test.
     """
-    import utils.encryption as enc_module
-
-    monkeypatch.setenv("API_KEY_SECRET", Fernet.generate_key().decode())
-    enc_module._encryptor = None
     user_id = f"u_{uuid4().hex[:8]}"
     workspace_id = uuid4()
     db_session.add(
@@ -301,7 +298,6 @@ async def connector_key(db_session: AsyncSession, monkeypatch) -> AsyncIterator[
         "cross_plaintext": cross_plaintext,
         "manager": manager,
     }
-    enc_module._encryptor = None
 
 
 @pytest.mark.asyncio(loop_scope="session")
