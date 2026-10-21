@@ -130,11 +130,18 @@ REVISION_KINDS: tuple[str, ...] = (
     REVISION_KIND_FORGOTTEN,
     REVISION_KIND_RESTORED,
 )
-# Who wrote the event: an API caller (MCP / REST) or a session rollback (#2044).
-# Sleep maintenance writes no revision (its own action log covers it).
+# Who wrote the event: an API caller (MCP / REST), a session rollback (#2044)
+# or account erasure reverting the details an erased member wrote on another
+# author's memory (#2244, ``services.erasure_details``). Sleep maintenance
+# writes no revision (its own action log covers it).
 REVISION_WRITER_API = "api"
 REVISION_WRITER_ROLLBACK = "rollback"
-REVISION_WRITERS: tuple[str, ...] = (REVISION_WRITER_API, REVISION_WRITER_ROLLBACK)
+REVISION_WRITER_ERASURE = "erasure"
+REVISION_WRITERS: tuple[str, ...] = (
+    REVISION_WRITER_API,
+    REVISION_WRITER_ROLLBACK,
+    REVISION_WRITER_ERASURE,
+)
 
 # #2044: ``memory_session_rollbacks.status``. ``in_progress`` = a call stopped
 # at the per-call cap and the next call continues; ``partial`` = the last call

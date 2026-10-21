@@ -888,7 +888,7 @@ class MemoryRevisionItem(TZAwareBaseModel):
     # on an ``updated`` event whose before/after version the caller may not
     # read (``reference`` answers not-found for it, #2169).
     changed_fields: list[str]
-    writer: Literal["api", "rollback"]
+    writer: Literal["api", "rollback", "erasure"]
     by_you: bool
     agent_id: str | None = None
     session_id: str | None = None

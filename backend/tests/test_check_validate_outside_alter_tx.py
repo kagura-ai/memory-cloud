@@ -57,6 +57,8 @@ _CASES = [
     ("e98_2007_mae_list_changes_since", "downgrade"),
     ("f00_2019_llm_log_supersede", "upgrade"),
     ("f00_2019_llm_log_supersede", "downgrade"),
+    ("f12_2244_rev_writer_erasure", "upgrade"),
+    ("f12_2244_rev_writer_erasure", "downgrade"),
 ]
 
 # Runs that read the database before they finish, so a real ``alembic --sql``
@@ -72,6 +74,7 @@ _NEEDS_LIVE_CONNECTION = {
     ("e84_1619_tool_guardrails", "downgrade"): "first",
     ("e98_2007_mae_list_changes_since", "downgrade"): "first",
     ("f00_2019_llm_log_supersede", "downgrade"): "first",
+    ("f12_2244_rev_writer_erasure", "downgrade"): "scalar",
 }
 
 _ADD_NOT_VALID = re.compile(r"ADD CONSTRAINT (\w+)\b.*\bNOT VALID;$")
@@ -80,7 +83,7 @@ _PHRASE = "VALIDATE CONSTRAINT"
 
 # VALIDATE literals the walker finds across ``alembic/versions``. A new
 # migration that VALIDATEs bumps it; a drop means the walker lost a shape.
-_KNOWN_SITE_COUNT = 12
+_KNOWN_SITE_COUNT = 13
 
 
 class _NoRows:
@@ -231,6 +234,7 @@ def test_the_validate_walker_finds_the_known_sites():
         "e65_1275_api_keys_agent.py",
         "e67_1281_agent_key_workspace.py",
         "f00_2019_llm_log_supersede.py",
+        "f12_2244_rev_writer_erasure.py",
     ):
         assert name in sites, sorted(sites)
     assert sum(len(found) for found in sites.values()) == _KNOWN_SITE_COUNT, sites

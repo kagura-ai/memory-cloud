@@ -2,10 +2,11 @@
 
 The CHECK constraints are derived from ordered tuples so
 ``Base.metadata.create_all()`` produces literals byte-identical to the alembic
-migration (``f03_2043_memory_versions``); adding a value requires the
-coordinated edits caught here (the ``test_memory_access_event_constants``
-pattern). #2044 writes ``restored`` and ``rollback`` rows, so both are in the
-vocabulary from the start.
+migration (``f03_2043_memory_versions``, and ``f12_2244_rev_writer_erasure``
+for the writer CHECK); adding a value requires the coordinated edits caught
+here (the ``test_memory_access_event_constants`` pattern). #2044 writes
+``restored`` and ``rollback`` rows, so both are in the vocabulary from the
+start; #2244 appends the ``erasure`` writer.
 """
 
 from models.memory import (
@@ -23,14 +24,15 @@ def _check(name: str) -> str:
 
 def test_kind_and_writer_vocabularies() -> None:
     assert REVISION_KINDS == ("created", "updated", "forgotten", "restored")
-    assert REVISION_WRITERS == ("api", "rollback")
+    assert REVISION_WRITERS == ("api", "rollback", "erasure")
 
 
 def test_check_literals_byte_identical_to_migration() -> None:
     assert _check("valid_revision_kind") == (
         "kind IN ('created', 'updated', 'forgotten', 'restored')"
     )
-    assert _check("valid_revision_writer") == "writer IN ('api', 'rollback')"
+    # f03 created it with ('api', 'rollback'); f12 (#2244) appended 'erasure'.
+    assert _check("valid_revision_writer") == "writer IN ('api', 'rollback', 'erasure')"
 
 
 def test_revisions_go_with_their_memory() -> None:
