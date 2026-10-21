@@ -1884,7 +1884,7 @@ def _repeated_authorization_parameter(request: Request) -> str | None:
 def _repeated_parameter_error(name: str) -> InvalidRequestError:
     """The ``invalid_request`` error for a parameter sent more than once.
 
-    Same wording as the token endpoint's refusal. Names only, never values.
+    Shared with the token endpoint's refusal. Names only, never values.
     """
     return InvalidRequestError(description=f"Parameter {name} is included more than once.")
 
@@ -2723,7 +2723,7 @@ async def oauth_token(request: Request):
         logger.info("token_request_rejected", reason="repeated_parameter", param=repeated)
         return rfc6749_error_response(
             error="invalid_request",
-            description=f"Parameter {repeated} is included more than once.",
+            description=str(_repeated_parameter_error(repeated).description),
         )
 
     # Run Authlib operations in thread pool to avoid blocking event loop.

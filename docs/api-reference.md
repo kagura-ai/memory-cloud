@@ -1088,7 +1088,8 @@ authorization code grant and PKCE:
    Each of `response_type`, `client_id`, `redirect_uri`, `scope`, `state`,
    `code_challenge` and `code_challenge_method` may be sent once; a repeated
    one gets the error page (`400`, `invalid_request`) on the GET and on the
-   consent POST, without a redirect. `resource` may be repeated (RFC 8707);
+   consent POST, without a redirect (a signed-out user is sent to sign in
+   first, as for any request). `resource` may be repeated (RFC 8707);
    every value must name this server's MCP resource
    ([#2208](https://github.com/kagura-ai/memory-cloud/issues/2208)).
 2. Approving redirects to `redirect_uri` with `code` and `state`. The consent

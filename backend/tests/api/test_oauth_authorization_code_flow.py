@@ -1543,10 +1543,11 @@ class TestRepeatedAuthorizationParameters:
         assert response.headers["location"].startswith(f"{FRONTEND}/login?return_to=")
 
     @_SINGLE_VALUED
+    @pytest.mark.parametrize("same", [True, False], ids=["same-value", "two-values"])
     def test_consent_approval_with_a_repeat_stores_no_code(
-        self, api: TestClient, db_factory: sessionmaker, name: str, other: str
+        self, api: TestClient, db_factory: sessionmaker, name: str, other: str, same: bool
     ) -> None:
-        pairs = _repeated_pairs(name, other)
+        pairs = _repeated_pairs(name, None if same else other)
         with capture_logs() as events:
             response = api.post(
                 f"/api/v1/oauth/authorize?{urlencode(pairs)}",
