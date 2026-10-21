@@ -71,6 +71,7 @@ from auth.consent_csrf import consent_csrf_token, consent_csrf_valid
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
+    AUTHORIZATION_REQUEST_SINGLE_VALUED,
     TOKEN_REQUEST_SINGLE_VALUED,
     OwnerLockTimeout,
     _OAuthUser,
@@ -1861,6 +1862,33 @@ def _render_invalid_redirect_uri_error(
     )
 
 
+def _repeated_authorization_parameter(request: Request) -> str | None:
+    """The first single-valued authorization parameter repeated in the query.
+
+    Both ``/authorize`` routes read the OAuth parameters from the query string
+    only (the consent POST ignores them in its form, #2199), so the payload is
+    query-only. ``resource`` may repeat (RFC 8707 §2) (#2208).
+
+    Args:
+        request: The ``GET`` or consent ``POST /authorize`` request.
+
+    Returns:
+        The parameter name, or ``None`` when each is sent at most once.
+    """
+    return repeated_parameter(
+        StarletteOAuth2Payload(request, include_form=False),
+        AUTHORIZATION_REQUEST_SINGLE_VALUED,
+    )
+
+
+def _repeated_parameter_error(name: str) -> InvalidRequestError:
+    """The ``invalid_request`` error for a parameter sent more than once.
+
+    Same wording as the token endpoint's refusal. Names only, never values.
+    """
+    return InvalidRequestError(description=f"Parameter {name} is included more than once.")
+
+
 def _render_authorization_request_error(
     request: Request,
     locale: str,
@@ -2077,7 +2105,8 @@ async def oauth_authorize_get(
     clients), and a ``resource`` naming this server's MCP resource. A failing
     request gets an error page (400) showing the OAuth error; nothing is sent
     to the client before the user acts. The screen lists the permissions of
-    the granted scope.
+    the granted scope. A parameter read as one value and sent twice gets the
+    same page, before the client is looked up (#2208).
 
     Every parameter travels to the consent POST in its query string, and the
     POST validates them again through the grant. Both forms carry the
@@ -2112,6 +2141,24 @@ async def oauth_authorize_get(
     def _sync() -> Response | dict[str, Any]:
         db_session = get_sync_session()
         try:
+            # #2208: a parameter read as one value may be sent once (RFC 6749
+            # §3.1). Checked first: with two client_id or redirect_uri values
+            # there is no single one to look up. The typed Query values above
+            # hold only the last one; the payload sees every value.
+            repeated = _repeated_authorization_parameter(request)
+            if repeated:
+                logger.info(
+                    "oauth_authorize_get_rejected",
+                    client_id=client_id,
+                    error="invalid_request",
+                    reason="repeated_parameter",
+                    param=repeated,
+                )
+                locale = _resolve_oauth_locale(request, db_session, user.email)
+                return _render_authorization_request_error(
+                    request, locale, _repeated_parameter_error(repeated)
+                )
+
             client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
             if not client:
                 raise HTTPException(status_code=404, detail="Client not found")
@@ -2488,6 +2535,21 @@ async def oauth_authorize_post(
     def _pre_check():
         pre_check_session = get_sync_session()
         try:
+            # #2208: first, so a repeated redirect_uri or state can never
+            # drive the deny redirect or reach the grant. Query only: OAuth
+            # names in the form are ignored (#2199), not repeats.
+            repeated = _repeated_authorization_parameter(request)
+            if repeated:
+                logger.warning(
+                    "oauth_authorize_post_rejected",
+                    client_id=client_id,
+                    reason="repeated_parameter",
+                    param=repeated,
+                )
+                locale = _resolve_oauth_locale(request, pre_check_session, user.email)
+                return _render_authorization_request_error(
+                    request, locale, _repeated_parameter_error(repeated)
+                )
             if not _validate_authorize_redirect_uri(pre_check_session, client_id, redirect_uri):
                 logger.warning(
                     "oauth_authorize_post_rejected_redirect_uri: "

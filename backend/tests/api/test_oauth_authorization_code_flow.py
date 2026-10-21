@@ -1435,3 +1435,191 @@ class TestConsentFormAndCsrf:
         assert "https://evil.example/callback" in response.text
         assert _CONSENT_CSRF_DESCRIPTION not in response.text
         assert _codes(db_factory) == 0
+
+
+_EVIL_REDIRECT_URI = "https://evil.example/callback"
+
+
+def _repeated_pairs(name: str, second: str | None = None) -> list[tuple[str, str]]:
+    """A valid authorization request whose ``name`` is sent twice.
+
+    The second value is ``second``, or the first one again.
+    """
+    _, challenge = _pkce()
+    params = _authorize_params(challenge=challenge)
+    pairs = list(params.items())
+    return [*pairs, (name, params[name] if second is None else second)]
+
+
+_SINGLE_VALUED = pytest.mark.parametrize(
+    ("name", "other"),
+    [
+        ("response_type", "token"),
+        ("client_id", CONFIDENTIAL_CLIENT),
+        ("redirect_uri", _EVIL_REDIRECT_URI),
+        ("scope", "memory:read memory:admin"),
+        ("state", "second-state"),
+        ("code_challenge", "second-challenge-" + "y" * 40),
+        ("code_challenge_method", "plain"),
+    ],
+)
+
+
+def _assert_repeat_page(response: Any, name: str) -> None:
+    _assert_error_page(response, "invalid_request")
+    assert f"Parameter {name} is included more than once." in response.text
+    # The consent page was not rendered.
+    assert _page_csrf_tokens(response) == []
+
+
+class TestRepeatedAuthorizationParameters:
+    """A parameter /authorize reads as one value may be sent once (RFC 6749
+    §3.1): a repeat gets the error page on the GET and on the consent POST,
+    never a redirect. ``resource`` may repeat (RFC 8707 §2) (#2208)."""
+
+    @_SINGLE_VALUED
+    @pytest.mark.parametrize("same", [True, False], ids=["same-value", "two-values"])
+    def test_authorization_request_with_a_repeat_is_an_error_page(
+        self, api: TestClient, name: str, other: str, same: bool
+    ) -> None:
+        pairs = _repeated_pairs(name, None if same else other)
+        with capture_logs() as events:
+            response = api.get(
+                f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False
+            )
+
+        _assert_repeat_page(response, name)
+        rejected = [
+            e
+            for e in events
+            if e["event"] == "oauth_authorize_get_rejected"
+            and e.get("reason") == "repeated_parameter"
+        ]
+        assert len(rejected) == 1, events
+        assert rejected[0]["param"] == name
+        assert "second-state" not in repr(rejected)
+        assert _EVIL_REDIRECT_URI not in repr(rejected)
+
+    @pytest.mark.parametrize(
+        "uris",
+        [[REDIRECT_URI, _EVIL_REDIRECT_URI], [_EVIL_REDIRECT_URI, REDIRECT_URI]],
+        ids=["registered-then-evil", "evil-then-registered"],
+    )
+    def test_two_redirect_uris_in_either_order(self, api: TestClient, uris: list[str]) -> None:
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge)
+        del params["redirect_uri"]
+        pairs = [*params.items(), *(("redirect_uri", uri) for uri in uris)]
+        response = api.get(f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False)
+
+        _assert_repeat_page(response, "redirect_uri")
+
+    def test_two_client_ids_are_a_repeat_not_an_unknown_client(self, api: TestClient) -> None:
+        pairs = _repeated_pairs("client_id", "no-such-client")
+        response = api.get(f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False)
+
+        _assert_repeat_page(response, "client_id")
+
+    def test_two_mcp_resources_still_get_the_consent_page(self, api: TestClient) -> None:
+        _, challenge = _pkce()
+        pairs = [
+            *_authorize_params(challenge=challenge).items(),
+            ("resource", MCP_RESOURCE),
+            ("resource", MCP_RESOURCE),
+        ]
+        response = api.get(f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False)
+
+        assert response.status_code == 200, response.text[:300]
+        assert _page_csrf_tokens(response) == [consent_csrf_token(SESSION_ID)] * 2
+
+    def test_signed_out_request_with_a_repeat_goes_to_sign_in(self, api: TestClient) -> None:
+        pairs = _repeated_pairs("state", "second-state")
+        with patch("api.routes.oauth.get_current_user_from_session", return_value=None):
+            response = api.get(
+                f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False
+            )
+
+        assert response.status_code in (302, 307), response.text[:300]
+        assert response.headers["location"].startswith(f"{FRONTEND}/login?return_to=")
+
+    @_SINGLE_VALUED
+    def test_consent_approval_with_a_repeat_stores_no_code(
+        self, api: TestClient, db_factory: sessionmaker, name: str, other: str
+    ) -> None:
+        pairs = _repeated_pairs(name, other)
+        with capture_logs() as events:
+            response = api.post(
+                f"/api/v1/oauth/authorize?{urlencode(pairs)}",
+                data=_consent_form(),
+                follow_redirects=False,
+            )
+
+        _assert_repeat_page(response, name)
+        assert _codes(db_factory) == 0
+        rejected = [e for e in events if e["event"] == "oauth_authorize_post_rejected"]
+        assert len(rejected) == 1, events
+        assert rejected[0]["reason"] == "repeated_parameter"
+        assert rejected[0]["param"] == name
+        assert "second-state" not in repr(rejected)
+        assert _EVIL_REDIRECT_URI not in repr(rejected)
+
+    @pytest.mark.parametrize(
+        "uris",
+        [[REDIRECT_URI, _EVIL_REDIRECT_URI], [_EVIL_REDIRECT_URI, REDIRECT_URI]],
+        ids=["registered-then-evil", "evil-then-registered"],
+    )
+    def test_consent_denial_with_two_redirect_uris_does_not_redirect(
+        self, api: TestClient, db_factory: sessionmaker, uris: list[str]
+    ) -> None:
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge)
+        del params["redirect_uri"]
+        pairs = [*params.items(), *(("redirect_uri", uri) for uri in uris)]
+        response = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(pairs)}",
+            data=_consent_form("no"),
+            follow_redirects=False,
+        )
+
+        _assert_repeat_page(response, "redirect_uri")
+        assert _codes(db_factory) == 0
+
+    def test_repeat_page_comes_before_the_csrf_check(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        pairs = _repeated_pairs("state", "second-state")
+        response = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(pairs)}",
+            data={"confirm": "yes"},
+            follow_redirects=False,
+        )
+
+        _assert_repeat_page(response, "state")
+        assert _CONSENT_CSRF_DESCRIPTION not in response.text
+        assert _codes(db_factory) == 0
+
+    def test_repeated_oauth_names_in_the_consent_form_are_ignored(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        # #2199: the form carries no OAuth parameter, so a repeat there is
+        # not a repeat of the query's single value.
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge, state="query-state")
+        form = [
+            *_consent_form().items(),
+            ("state", "form-state-1"),
+            ("state", "form-state-2"),
+            ("client_id", CONFIDENTIAL_CLIENT),
+            ("client_id", PUBLIC_CLIENT),
+        ]
+        approved = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(params)}",
+            content=urlencode(form),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+
+        redirect = _redirect_params(approved)
+        assert "error" not in redirect, redirect
+        assert redirect["state"] == "query-state"
+        assert _codes(db_factory) == 1

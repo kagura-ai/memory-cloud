@@ -113,6 +113,20 @@ TOKEN_REQUEST_SINGLE_VALUED = (
 )
 
 
+# Authorization request parameters this server reads; each may be sent once
+# (RFC 6749 §3.1). ``resource`` may repeat (RFC 8707 §2) and every value is
+# checked by ``requested_resource`` (#2208).
+AUTHORIZATION_REQUEST_SINGLE_VALUED = (
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "scope",
+    "state",
+    "code_challenge",
+    "code_challenge_method",
+)
+
+
 def repeated_parameter(payload: Any, names: tuple[str, ...]) -> str | None:
     """The first of ``names`` sent more than once in the request, if any.
 
