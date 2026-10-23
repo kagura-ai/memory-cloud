@@ -1636,3 +1636,41 @@ async def test_a_window_record_whose_writes_are_gone_is_closed(world: World) -> 
     # A window that never had a record still answers no_writes_in_window.
     with pytest.raises(sr.NoWritesInWindowError):
         await _window(w, me, since - timedelta(hours=1), since, dry_run=True)
+
+
+async def test_a_restore_stamps_its_events_and_the_row_from_one_server_clock(
+    world: World,
+) -> None:
+    """#2135: an un-forget that also puts back values writes a ``restored`` and
+    an ``updated`` event; both carry the one ``utcnow()`` the restore took, and
+    so does the row's ``updated_at`` — never the database's ``now()``."""
+    w, member = world, world.member
+    me = SessionPrincipal(member, None)
+    target = await w.create(member, None, summary="the value before the window")
+    since = _mark(w)
+    await w.update(target, member, None, summary="edited in the window")
+    await w.forget(target, member, None)
+    until = _mark(w)
+    await w.session.commit()
+
+    plan = await _window(w, me, since, until, dry_run=True)
+    (item,) = plan.items
+    assert (item.memory_id, item.action, item.unforget) == (target, sr.ACTION_RESTORE, True)
+
+    stamp = (utcnow() - timedelta(hours=1)).replace(microsecond=123456)
+    with patch("services.session_rollback.utcnow", return_value=stamp):
+        result = await _window(w, me, since, until, dry_run=False)
+    await w.session.commit()
+    assert (result.status, result.errors) == ("completed", [])
+
+    rows = (
+        await w.session.execute(
+            select(MemoryRevision.kind, MemoryRevision.at)
+            .where(MemoryRevision.memory_id == target, MemoryRevision.writer == "rollback")
+            .order_by(MemoryRevision.id)
+        )
+    ).all()
+    assert [tuple(r) for r in rows] == [("restored", stamp), ("updated", stamp)]
+    row = await w.row(target)
+    assert (row["deleted_at"], row["updated_at"]) == (None, stamp)
+    assert row["summary"] == "the value before the window"

@@ -12,11 +12,9 @@ caller's own writes in a time window — for clients that have no session id
 principal (verified sub + the credential's agent), never a context owner's
 override; it is at most ``MAX_ROLLBACK_WINDOW`` wide, and an omitted ``until``
 (or one later than now) continues the caller's unfinished rollback of a
-window from the same ``since`` before it defaults to now. "Now" is the later
-of the database clock and this server's clock: ``memory_revisions.at`` comes
-from both (a created event takes the database's ``now()``, an edit or a
-forget the server's ``utcnow()``), so neither clock alone may cut off a
-write that has already happened.
+window from the same ``since`` before it defaults to now. "Now" is the
+server clock: every ``memory_revisions.at`` is stamped by it (#2135), so no
+write that has already happened is cut off.
 """
 
 from __future__ import annotations
@@ -111,7 +109,7 @@ def _window_too_wide(since: datetime, until: datetime) -> list[TextContent] | No
 def _parse_window(
     since_arg: Any, until_arg: Any
 ) -> tuple[datetime, datetime | None] | list[TextContent]:
-    """``since`` / ``until`` → naive UTC. Comparing them with now needs the database (``_window_now``)."""
+    """``since`` / ``until`` → naive UTC; ``_resolve_window`` compares them with now."""
     if not isinstance(since_arg, str) or (until_arg is not None and not isinstance(until_arg, str)):
         return _error_response("validation_error", "since and until must be ISO 8601 strings.")
     try:
@@ -130,18 +128,6 @@ def _parse_window(
     return since, until
 
 
-async def _window_now(db: Any) -> datetime:
-    """Now for a window (naive UTC): the later of the database and the server clock.
-
-    ``memory_revisions.at`` is stamped by both — the database's ``now()`` on a
-    created event, the server's ``utcnow()`` on an edit or a forget.
-    """
-    from sqlalchemy import func, select
-
-    db_now = to_naive_utc(await db.scalar(select(func.clock_timestamp())))
-    return max(db_now, utcnow())
-
-
 async def _resolve_window(
     db: Any, context_id: UUID, principal: Any, since: datetime, until: datetime | None
 ) -> tuple[datetime, datetime, bool] | list[TextContent]:
@@ -155,7 +141,7 @@ async def _resolve_window(
     """
     from services.session_rollback import unfinished_window_until
 
-    now = await _window_now(db)
+    now = utcnow()  # #2135: the clock every revision's ``at`` is stamped with
     if since >= now:
         return _error_response("validation_error", "since must be earlier than now.")
     continued = False
