@@ -522,7 +522,7 @@ class TestTimeMemories:
 
         from models.auth import Context
         from models.memory import Memory, MemoryRevision
-        from utils.time_trigger import normalize_trigger
+        from utils.time_trigger import normalize_trigger, trigger_window
 
         other = erasure_scenario["other_user_id"]
         target = erasure_scenario["target_user_id"]
@@ -602,7 +602,9 @@ class TestTimeMemories:
 
         own = await row(own_time.id)
         assert own.user_id == request.user_id != target  # the pseudonym
-        assert own.details == {"trigger": trigger}
+        # the window only: the trigger's ``text`` (the subject's words) goes
+        assert own.details == {"trigger": trigger_window(trigger)}
+        assert "launch" not in repr(own.details)
         assert (own.trigger_from, own.trigger_until) == (trigger["from"], trigger["until"])
         assert own.location_lat is None
         note = await row(own_note.id)

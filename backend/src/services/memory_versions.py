@@ -44,9 +44,10 @@ PRIOR_ERASED_KEY = "erased"
 # from the live row) reports ``details`` as unavailable below them. Unlike
 # ``erased`` it does not mean the event changed the field.
 PRIOR_SCRUBBED_KEY = "scrubbed"
-# Account erasure's details revert (#2244, ``writer='erasure'``) records the
-# lowest version of the block of edits it reverted, so a later erasure can
-# tell whose value it put back. Not a versioned field and not a marker:
+# Account erasure's details revert (#2244, ``writer='erasure'``) and a session
+# rollback's restore of values (#2266, ``writer='rollback'``) record the lowest
+# version of the block of edits they reverted, so a later erasure can tell
+# whose value was put back. Not a versioned field and not a marker:
 # ``prior_values`` and the marker readers ignore it.
 PRIOR_RESTORED_FROM_KEY = "restored_from"
 

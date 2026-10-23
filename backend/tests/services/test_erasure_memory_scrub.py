@@ -64,14 +64,15 @@ async def test_scrub_surviving_memories_pseudonymizes_and_nulls_details() -> Non
     # window); every other row gets NULL
     scrub_sql = " ".join(str(scrub).split())
     assert "details=CAST(CASE WHEN (memories.type = %(type_1)s::VARCHAR" in scrub_sql
-    assert (
-        "THEN json_build_object(%(json_build_object_1)s::VARCHAR, "
-        "memories.details -> %(details_2)s::TEXT) ELSE NULL END AS JSON)"
-    ) in scrub_sql
+    assert "THEN json_build_object(%(json_build_object_1)s::VARCHAR, json_build_object(" in (
+        scrub_sql
+    )
+    assert scrub_sql.count("ELSE NULL END AS JSON)") == 1
     assert scrub.params["type_1"] == "time"
-    assert {scrub.params[k] for k in ("json_build_object_1", "details_1", "details_2")} == {
-        "trigger"
-    }
+    assert scrub.params["json_build_object_1"] == "trigger"
+    # the window keys only, never the trigger's ``text``
+    keys = {v for k, v in scrub.params.items() if k.startswith("json_build_object_")}
+    assert keys == {"trigger", "year", "month", "day", "hour", "minute", "from", "until"}
     assert scrub.params["user_id"] == pseudonym != "google-oauth2|erased"
     assert _memories_locked_in_id_order("memories", str(scrub)) == (
         "memories_1.user_id = %(user_id_1)s::VARCHAR"

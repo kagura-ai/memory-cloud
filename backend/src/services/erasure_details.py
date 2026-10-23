@@ -88,6 +88,7 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
+from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
 
 logger = get_logger(__name__)
 
@@ -561,7 +562,8 @@ class RestoreReport:
             gone, or without a context) at patch time: their point is gone
             or going, as ``forget`` leaves it.
         payload_skipped_shared: Restored memories whose point another live
-            row shares: left as it is (``metadata_patch_target``).
+            row shares, or whose patch had nothing left to write: left as it
+            is (``metadata_patch_target`` returned None).
         payload_skipped_moved: Restored memories edited between the commit
             and the patch: that edit synced its own payload.
         payload_skipped_requeued: Patches that failed on a row already
@@ -861,7 +863,9 @@ async def sync_restored_payloads(
     Called AFTER the restore's transaction committed, in the same session (a
     fresh transaction), by the live erasure and by the re-run (#2266): no
     vector-store round trip happens while the subject's memories are locked.
-    Reads the rows without a lock; per row:
+    Reads the rows ``FOR SHARE`` in id order (as ``session_rollback``'s
+    payload step does) and holds them until its commit, so an edit that lands
+    meanwhile waits and then syncs its own payload over this one; per row:
 
     - a tombstone (or a row gone, or without a context) is skipped: its point
       is gone or going, as ``forget`` leaves it;
@@ -871,8 +875,8 @@ async def sync_restored_payloads(
       ``embedding_status``: a row the restore re-queued may still have a
       point carrying the subject's location. The point, the keys and the
       chunk cascade follow ``MemoryService._sync_metadata_payload``
-      (``metadata_patch_target``; a point another live row shares is left
-      as it is).
+      (``metadata_patch_target``; a point another live row shares, or a
+      patch with nothing left to write, is left as it is).
 
     A patch that fails with ``QdrantError`` degrades to an embedding re-queue
     (``requeue_embedding``: the sweep's upsert rewrites the whole payload from
@@ -907,6 +911,7 @@ async def sync_restored_payloads(
                 select(Memory)
                 .where(Memory.id.in_(list(versions)))
                 .order_by(Memory.id)
+                .with_for_update(read=True)
                 .execution_options(populate_existing=True)
             )
         ).scalars()
@@ -957,7 +962,8 @@ async def sync_restored_payloads(
                 report.payload_requeued_after_error += 1
             else:
                 report.payload_skipped_requeued += 1
-            logger.warning(
+            # a row queued already may have no point yet: not a fault
+            (logger.warning if requeued else logger.info)(
                 "erasure_details_payload_failed",
                 memory_id=str(memory.id),
                 point_id=str(target.point_id),
@@ -972,20 +978,30 @@ def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
     """``value`` as a time memory can hold it (#2266).
 
     A ``type='time'`` row must keep its trigger window
-    (``valid_trigger_window_format``). Where the value to put back has no
-    ``trigger`` — it is unavailable (None), or the author wrote it before the
-    row became a time memory — the live trigger is merged in. The live one is
-    normalized: every write path runs ``_apply_time_trigger``.
+    (``valid_trigger_window_format``). A value whose trigger carries a window
+    goes back as it is. A trigger written while the row was not a time memory
+    was never normalized: it is normalized now. Where the value has no usable
+    trigger — it is unavailable (None), or the author wrote it before the row
+    became a time memory — the live trigger's window is merged in: only its
+    window keys (``trigger_window``), since the erased member may have
+    written it and its ``text`` is theirs. The live one is normalized: every
+    write path runs ``_apply_time_trigger``.
 
     Returns:
         The value to write, and whether the live trigger was merged in.
     """
     if memory.type != MEMORY_TYPE_TIME:
         return value, False
-    if isinstance(value, dict) and value.get("trigger"):
+    trigger = value.get("trigger") if isinstance(value, dict) else None
+    if trigger_window(trigger) is not None:
         return value, False
+    if trigger is not None:
+        try:
+            return {**value, "trigger": normalize_trigger(trigger)}, False
+        except TriggerValidationError:
+            pass
     live = memory.details.get("trigger") if isinstance(memory.details, dict) else None
-    return {**(value if isinstance(value, dict) else {}), "trigger": live}, True
+    return {**(value if isinstance(value, dict) else {}), "trigger": trigger_window(live)}, True
 
 
 async def restore_editor_details(

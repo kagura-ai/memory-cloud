@@ -69,6 +69,22 @@ def _days_in_month(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
 
 
+# The keys that define a trigger's window (``normalize_trigger``'s output minus
+# ``text`` and any key the caller passed through). Account erasure keeps only
+# these on a time memory (#2266): the CHECK needs the window, not the label.
+TRIGGER_WINDOW_KEYS = ("year", "month", "day", "hour", "minute", "from", "until")
+
+
+def trigger_window(trigger: Any) -> dict | None:
+    """The window keys of a normalized ``trigger``; None when it has no
+    ``from`` / ``until`` (not normalized)."""
+    if not isinstance(trigger, dict) or not (
+        isinstance(trigger.get("from"), str) and isinstance(trigger.get("until"), str)
+    ):
+        return None
+    return {key: trigger.get(key) for key in TRIGGER_WINDOW_KEYS}
+
+
 def normalize_trigger(trigger: Any) -> dict:
     """Validate Y/M/D[/H/M] components and return a dict with the derived window.
 

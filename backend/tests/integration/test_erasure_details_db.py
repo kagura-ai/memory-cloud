@@ -955,6 +955,42 @@ async def test_a_time_memory_keeps_the_live_trigger(
         assert await _snapshot(session, _MEMORIES_OUTSIDE, everything_else) == memories_before
 
 
+async def test_a_merged_live_trigger_loses_its_text(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """The subject may have written the live trigger: only its window is
+    merged into the author's value, never its ``text``."""
+    subject, author = world["subject"], world["author"]
+    labelled = normalize_trigger({"year": 2027, "month": 1, "day": 1, "text": "private"})
+    memory = _memory(world, author, {"trigger": labelled}, 2, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        with patch(_QDRANT, AsyncMock()):
+            await _erase_memories(session, subject)
+        live = await _live(session, memory.id)
+        assert live.details == {**AUTHORS, "trigger": TRIGGER}
+        assert "private" not in repr(live.details)
+
+
+async def test_an_unnormalized_authors_trigger_is_normalized(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """The author wrote a trigger while the row was a note (never normalized,
+    no window); the subject made it a time memory. Put back as is, it would
+    break the CHECK: it is normalized."""
+    subject, author = world["subject"], world["author"]
+    raw = {"trigger": {"year": 2028, "month": 3}, "by": "author"}
+    memory = _memory(world, author, {"trigger": TRIGGER}, 2, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": raw})])
+        with patch(_QDRANT, AsyncMock()):
+            _, report = await _erase_memories(session, subject)
+        assert report.restored == 1
+        live = await _live(session, memory.id)
+        assert live.details == {"by": "author", "trigger": AUTHORS_TRIGGER}
+        assert live.trigger_from == AUTHORS_TRIGGER["from"]
+
+
 async def test_a_time_memory_gets_the_authors_trigger_back(
     async_engine: AsyncEngine, world: dict[str, Any]
 ) -> None:

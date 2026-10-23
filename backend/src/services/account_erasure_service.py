@@ -111,6 +111,7 @@ from utils.exceptions import (
 )
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
+from utils.time_trigger import TRIGGER_WINDOW_KEYS
 from utils.utf8 import is_utf8_encodable
 
 logger = get_logger(__name__)
@@ -168,14 +169,20 @@ class PostgresErasure:
 def _trigger_only_details() -> Any:
     """What the memory scrub leaves in ``details`` (#2266).
 
-    ``{"trigger": <the row's trigger>}`` on a ``type='time'`` row that has
-    one, NULL on every other row. ``details`` is ``json`` (not ``jsonb``), so
-    the object is built with ``json_build_object``.
+    ``{"trigger": <its window>}`` on a ``type='time'`` row that has a trigger
+    — the window keys only (``TRIGGER_WINDOW_KEYS``): the trigger's ``text``
+    and any key the author passed through are personal payload like the
+    rest — and NULL on every other row. ``details`` is ``json`` (not
+    ``jsonb``), so the object is built with ``json_build_object``.
     """
+    trigger = Memory.details["trigger"]
+    window = func.json_build_object(
+        *(part for key in TRIGGER_WINDOW_KEYS for part in (key, trigger[key]))
+    )
     return case(
         (
-            and_(Memory.type == MEMORY_TYPE_TIME, Memory.details["trigger"].is_not(None)),
-            func.json_build_object("trigger", Memory.details["trigger"]),
+            and_(Memory.type == MEMORY_TYPE_TIME, trigger.is_not(None)),
+            func.json_build_object("trigger", window),
         ),
         else_=null(),
     ).cast(JSON)
