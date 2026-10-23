@@ -50,8 +50,11 @@ async def test_scrub_surviving_memories_pseudonymizes_and_nulls_details() -> Non
 
     assert count == 4
     # #2263: the tombstones are hard-deleted earlier (``_delete_subject_tombstones``)
+    statements = [c.args[0] for c in db.execute.await_args_list]
+    # the ORM cannot evaluate the subquery; it must not fetch every id back
+    assert all(s.get_execution_options()["synchronize_session"] is False for s in statements)
     scrub, memories_deleted_by, contexts_deleted_by = (
-        c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
+        s.compile(dialect=postgresql.dialect()) for s in statements
     )
     # 1) Survivors: user_id pseudonymized + details NULLed in one UPDATE,
     #    over the subject's authored rows (raw sub), locked in id order.
@@ -92,6 +95,7 @@ async def test_delete_subject_tombstones_locks_in_id_order() -> None:
     assert await service._delete_subject_tombstones("google-oauth2|erased") == 2
 
     (statement,) = (c.args[0] for c in db.execute.await_args_list)
+    assert statement.get_execution_options()["synchronize_session"] is False
     compiled = statement.compile(dialect=postgresql.dialect())
     assert str(compiled).startswith("DELETE FROM memories WHERE memories.id IN (SELECT")
     assert _memories_locked_in_id_order("memories", str(compiled)) == (
@@ -126,6 +130,44 @@ async def test_session_provenance_locks_memories_in_id_order() -> None:
         "AND memory_revisions.session_id IS NOT NULL)"
     )
     assert compiled.params == {"session_id": None, "actor_user_id_1": "google-oauth2|erased"}
+
+
+@pytest.mark.asyncio
+async def test_lock_subject_memories_with_deleted_by_is_one_ordered_statement() -> None:
+    """#2263: the live erasure locks the memories the subject deleted in the
+    same ordered statement as their own — a second lock phase would let two
+    erasures wait on each other's memories. Without the flag (the strip's
+    re-lock, a re-run) the scope is unchanged."""
+    from sqlalchemy.dialects import postgresql
+
+    from services.erasure_details import lock_subject_memories
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    await lock_subject_memories(db, "raw", deleted_by=True)
+    await lock_subject_memories(db, "raw")
+
+    with_deleted_by, plain = (
+        c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
+    )
+    sql = " ".join(str(with_deleted_by).split())
+    assert sql == (
+        "SELECT memories_1.id FROM memories AS memories_1 WHERE memories_1.id IN ("
+        "SELECT memories_2.id FROM memories AS memories_2 "
+        "WHERE memories_2.user_id = %(user_id_1)s::VARCHAR "
+        "UNION SELECT memory_revisions_1.memory_id FROM memory_revisions AS memory_revisions_1 "
+        "WHERE memory_revisions_1.actor_user_id = %(actor_user_id_1)s::VARCHAR "
+        "UNION SELECT memories_3.id FROM memories AS memories_3 "
+        "WHERE memories_3.deleted_by = %(deleted_by_1)s::VARCHAR) "
+        "ORDER BY memories_1.id FOR UPDATE"
+    )
+    assert with_deleted_by.params == {
+        "user_id_1": "raw",
+        "actor_user_id_1": "raw",
+        "deleted_by_1": "raw",
+    }
+    assert "deleted_by" not in str(plain)
+    assert plain.params == {"user_id_1": "raw", "actor_user_id_1": "raw"}
 
 
 def test_revision_changed_field_is_the_one_helper() -> None:

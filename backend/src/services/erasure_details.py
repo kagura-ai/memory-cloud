@@ -238,38 +238,33 @@ def scrub_mark_predicate(
     )
 
 
-def locked_revision_ids(
-    predicate_on: Callable[[AliasedClass[MemoryRevision]], Sequence[ColumnElement[bool]]],
-) -> Select[int]:
-    """Ids of the revision rows ``predicate_on`` matches, locked in id order.
-
-    Postgres does not pull up a sub-select that carries a locking clause, so
-    the rows are locked on the sorted output, ascending ``id``, before the
-    UPDATE rewrites them — two statements over overlapping rows queue instead
-    of deadlocking. ``FOR UPDATE`` waits: a skipped row would silently keep
-    personal data, so never ``SKIP LOCKED`` / ``NOWAIT`` here. Row locks last
-    until the transaction commits, so a later statement re-locking a row is
-    free.
-    """
-    row = aliased(MemoryRevision)
-    return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()
-
-
 def locked_ids(
-    model: type[Memory] | type[Context],
+    model: type[Memory] | type[Context] | type[MemoryRevision],
     predicate_on: Callable[[Any], Sequence[ColumnElement[bool]]],
 ) -> Select[Any]:
     """Ids of the ``model`` rows ``predicate_on`` matches, locked in id order.
 
-    The ``locked_revision_ids`` shape for ``memories`` and ``contexts``
-    (#2263): a multi-row UPDATE / DELETE that reaches its rows through it
-    locks them ascending, so it queues behind another ordered statement over
-    the same rows instead of deadlocking. ``predicate_on`` receives an alias
-    of ``model``. ``FOR UPDATE`` waits, never ``SKIP LOCKED`` / ``NOWAIT``:
-    an erasure that skipped a row would keep personal data in it.
+    ``predicate_on`` receives an alias of ``model``. Postgres does not pull
+    up a sub-select that carries a locking clause, so the rows are locked on
+    the sorted output, ascending ``id``, before the UPDATE / DELETE that
+    reaches its rows through it rewrites them — two statements over
+    overlapping rows queue instead of deadlocking. ``FOR UPDATE`` waits: a
+    skipped row would silently keep personal data, so never ``SKIP LOCKED`` /
+    ``NOWAIT`` here. Row locks last until the transaction commits, so a later
+    statement re-locking a row is free. Used for ``memory_revisions``
+    (``locked_revision_ids``, #2242) and for ``memories`` / ``contexts``
+    (#2263).
     """
     row = aliased(model)
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()
+
+
+def locked_revision_ids(
+    predicate_on: Callable[[AliasedClass[MemoryRevision]], Sequence[ColumnElement[bool]]],
+) -> Select[int]:
+    """Ids of the revision rows ``predicate_on`` matches, locked in id order
+    (``locked_ids`` over ``memory_revisions``)."""
+    return locked_ids(MemoryRevision, predicate_on)
 
 
 async def _count(
@@ -281,7 +276,9 @@ async def _count(
     return (await db.execute(select(func.count(row.id)).where(*predicate_on(row)))).scalar_one()
 
 
-async def lock_subject_memories(db: AsyncSession, subject: str) -> None:
+async def lock_subject_memories(
+    db: AsyncSession, subject: str, *, deleted_by: bool = False
+) -> None:
     """Lock ``subject``'s memories (``subject_memory_ids``) in id order.
 
     Taken before any revision row, so the erasure holds every ``memories``
@@ -302,16 +299,28 @@ async def lock_subject_memories(db: AsyncSession, subject: str) -> None:
     Re-locking a row this transaction already holds is free, so calling it
     again (``strip_subject_details`` does) costs one index-driven read.
 
+    With ``deleted_by`` (the live erasure, #2263) the same ordered statement
+    also locks the memories whose ``deleted_by`` is ``subject`` — other
+    members' tombstones the erasure clears later. Locking them in a second
+    phase would let two erasures, each holding its own memories, wait on each
+    other's. ``memories.deleted_by`` has no index: that arm is a sequential
+    scan, as the clear itself is.
+
     Args:
         db: The session; the caller owns the transaction.
         subject: The raw sub, or the stored salted pseudonym (#2243).
+        deleted_by: Also lock the memories ``subject`` deleted.
     """
+    scope: CompoundSelect[UUID] = subject_memory_ids(subject)
+    if deleted_by:
+        forgotten_by = aliased(Memory)
+        scope = union(
+            *scope.selects,
+            select(forgotten_by.id).where(forgotten_by.deleted_by == subject),
+        )
     memory = aliased(Memory)
     await db.execute(
-        select(memory.id)
-        .where(memory.id.in_(subject_memory_ids(subject)))
-        .order_by(memory.id)
-        .with_for_update()
+        select(memory.id).where(memory.id.in_(scope)).order_by(memory.id).with_for_update()
     )
 
 

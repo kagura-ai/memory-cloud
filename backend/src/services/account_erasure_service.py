@@ -1306,7 +1306,13 @@ class AccountErasureService:
         # #2242: lock the subject's memories in id order first, before any of
         # the memories / memory_revisions UPDATEs below, so edits, session
         # rollbacks and other erasures queue on them instead of deadlocking.
-        await lock_subject_memories(self.db, user_id)
+        # #2263: first the contexts the subject deleted, then — in the same
+        # ordered statement as the subject's memories — the memories the
+        # subject deleted, both cleared at the end of the memory steps. One
+        # lock phase per table, contexts before memories: the order
+        # ``restore_deleted_context`` takes (the context, then its memories).
+        await self.db.execute(locked_ids(Context, lambda c: (c.deleted_by == user_id,)))
+        await lock_subject_memories(self.db, user_id, deleted_by=True)
         # #2263: the subject's tombstones go before any revision statement, so
         # the details strip below never locks, rewrites or counts rows the FK
         # cascade removes with them.
@@ -1601,13 +1607,15 @@ class AccountErasureService:
         result = cast(
             CursorResult[Any],
             await self.db.execute(
-                delete(Memory).where(
+                delete(Memory)
+                .where(
                     Memory.id.in_(
                         locked_ids(
                             Memory, lambda m: (m.user_id == user_id, m.deleted_at.is_not(None))
                         )
                     )
                 )
+                .execution_options(synchronize_session=False)
             ),
         )
         return result.rowcount or 0
@@ -1623,9 +1631,12 @@ class AccountErasureService:
         at rest. The subject's tombstones are gone already
         (``_delete_subject_tombstones``).
 
-        Every statement locks its rows in id order (#2263). The authored rows
-        are held since ``lock_subject_memories``; the ``deleted_by`` rows are
-        other members' memories and contexts, outside that scope.
+        Every statement locks its rows in id order (#2263); all of them are
+        held since the erasure's first memory step (the authored and the
+        ``deleted_by`` memories by ``lock_subject_memories``, the contexts
+        before it), so the re-lock is free. ``synchronize_session=False``:
+        nothing in the session reads these rows afterwards, and the ORM
+        cannot evaluate the subquery in memory (it would fetch every id back).
         """
         result = cast(
             CursorResult[Any],
@@ -1633,6 +1644,7 @@ class AccountErasureService:
                 update(Memory)
                 .where(Memory.id.in_(locked_ids(Memory, lambda m: (m.user_id == user_id,))))
                 .values(user_id=self._pseudonym(user_id), details=None)
+                .execution_options(synchronize_session=False)
             ),
         )
         # The subject's raw sub also survives in OTHER rows' deleted_by
@@ -1644,6 +1656,7 @@ class AccountErasureService:
                 update(model)
                 .where(model.id.in_(locked_ids(model, lambda m: (m.deleted_by == user_id,))))
                 .values(deleted_by=None)
+                .execution_options(synchronize_session=False)
             )
         return result.rowcount or 0
 
@@ -1652,23 +1665,18 @@ class AccountErasureService:
         model: Any,
         column: Any,
         user_id: str,
-        extra_values: dict[str, Any] | None = None,
     ) -> int:
         """SHA256-pseudonymize a column across all matching rows.
 
         Used for legal-retention tables (e.g. plan_changes) where the row
         must survive but the personal-data link to the deleted user must
-        not. ``extra_values`` lets a caller scrub additional columns in the
-        same UPDATE (#1336: memories.details) so the pseudonym convention
-        stays single-sourced here.
+        not. The pseudonym itself is ``_pseudonym``'s.
         """
-        pseudonym = self._pseudonym(user_id)
-        values: dict[Any, Any] = {column: pseudonym}
-        if extra_values:
-            values.update(extra_values)
         result = cast(
             CursorResult[Any],
-            await self.db.execute(update(model).where(column == user_id).values(values)),
+            await self.db.execute(
+                update(model).where(column == user_id).values({column: self._pseudonym(user_id)})
+            ),
         )
         return result.rowcount or 0
 

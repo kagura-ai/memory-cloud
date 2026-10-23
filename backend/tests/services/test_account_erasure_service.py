@@ -1089,7 +1089,7 @@ class TestDeletePostgresSweep:
         # Distinct per-column values pin the SUM semantics exactly — a
         # refactor that doubles one sweep (2 * created_by) would still
         # produce 2 under a uniform return_value.
-        async def _by_column(model, column, user_id, extra_values=None):
+        async def _by_column(model, column, user_id):
             if model is WorkerAppIdentity and column is WorkerAppIdentity.created_by:
                 return 1
             if model is WorkerAppIdentity and column is WorkerAppIdentity.updated_by:
@@ -1147,8 +1147,9 @@ class TestRestoreEditorDetailsWiring:
             order.append("revisions")
             return {"memory_revisions_pseudonymized": 4, "revision_details_stripped": 3}
 
-        async def _lock(_db, _user_id):
+        async def _lock(_db, _user_id, *, deleted_by=False):
             order.append("lock")
+            assert deleted_by  # #2263: the memories the subject deleted too
 
         async def _tombstones(_user_id):
             order.append("tombstones")
@@ -1157,6 +1158,18 @@ class TestRestoreEditorDetailsWiring:
         svc._erase_session_provenance = AsyncMock(side_effect=_provenance)
         svc._erase_memory_revisions = AsyncMock(side_effect=_revisions)
         svc._delete_subject_tombstones = AsyncMock(side_effect=_tombstones)
+
+        async def _execute(statement, *args, **kwargs):
+            sql = " ".join(str(statement).split())
+            if sql.startswith("SELECT contexts_1.id FROM contexts AS contexts_1"):
+                assert sql.endswith(
+                    "WHERE contexts_1.deleted_by = :deleted_by_1 ORDER BY contexts_1.id FOR UPDATE"
+                )
+                assert statement.compile().params == {"deleted_by_1": "raw-sub"}
+                order.append("contexts_lock")
+            return MagicMock()
+
+        svc.db.execute = AsyncMock(side_effect=_execute)
         target = _user(user_id="raw-sub")
 
         with (
@@ -1172,7 +1185,16 @@ class TestRestoreEditorDetailsWiring:
         # #2263: the subject's tombstones go right after the memory lock, so
         # no revision statement below meets their rows (the FK cascade takes
         # their revisions)
-        assert order == ["lock", "tombstones", "restore", "provenance", "revisions"]
+        # #2263: the contexts the subject deleted are locked first, the order
+        # ``restore_deleted_context`` takes (context, then its memories)
+        assert order == [
+            "contexts_lock",
+            "lock",
+            "tombstones",
+            "restore",
+            "provenance",
+            "revisions",
+        ]
         svc._delete_subject_tombstones.assert_awaited_once_with("raw-sub")
         assert counts["memory_tombstones_deleted"] == 2
         restore_details.assert_awaited_once_with(
@@ -1291,7 +1313,7 @@ class TestErasureResiduals1365:
             (WorkspaceInvitation, "accepted_by"): 16,
         }
 
-        async def _by_column(model, column, user_id, extra_values=None):
+        async def _by_column(model, column, user_id):
             return expected.get((model, column.key), 0)
 
         svc = _service()

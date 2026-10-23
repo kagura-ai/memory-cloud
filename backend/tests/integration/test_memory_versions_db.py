@@ -854,6 +854,57 @@ async def test_deleted_by_clear_locks_in_id_order(
         assert await _rows(session, _CONTEXTS_BUT, [deleted_ctx]) == contexts_before
 
 
+async def test_the_erasure_lock_holds_the_memories_the_subject_deleted(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2263: ``lock_subject_memories(deleted_by=True)`` holds, in its one
+    ordered statement, another member's tombstone the subject deleted, next
+    to the subject's own memory; a tombstone someone else deleted is not
+    locked, and without the flag the deleted one is not either."""
+    subject, other = seeded["owner"], "other-member"
+    deleted, unrelated = uuid.uuid4(), uuid.uuid4()
+    async with _maker(async_engine)() as session:
+        for memory_id, deleted_by in ((deleted, subject), (unrelated, other)):
+            session.add(
+                Memory(
+                    id=memory_id,
+                    user_id=other,
+                    workspace_id=seeded["workspace_id"],
+                    context_id=seeded["context_id"],
+                    summary="another member's tombstone",
+                    content="body",
+                    type="note",
+                    client="test",
+                    deleted_at=utcnow(),
+                    deleted_by=deleted_by,
+                )
+            )
+        await session.commit()
+
+    async def locked(flag: bool) -> set[uuid.UUID]:
+        factory = _maker(async_engine)
+        async with factory() as eraser, factory() as probe:
+            await lock_subject_memories(eraser, subject, deleted_by=flag)
+            held: set[uuid.UUID] = set()
+            try:
+                for memory_id in (seeded["memory_id"], deleted, unrelated):
+                    try:
+                        await probe.execute(
+                            text("SELECT id FROM memories WHERE id = :id FOR UPDATE NOWAIT"),
+                            {"id": memory_id},
+                        )
+                    except DBAPIError as exc:
+                        assert getattr(exc.orig, "sqlstate", None) == "55P03"
+                        held.add(memory_id)
+                    await probe.rollback()
+            finally:
+                await eraser.rollback()
+            return held
+
+    assert await locked(True) == {seeded["memory_id"], deleted}
+    assert await locked(False) == {seeded["memory_id"]}
+
+
 async def test_an_edit_waits_for_the_erasure_and_copies_the_scrubbed_details(
     async_engine: AsyncEngine, seeded: dict[str, Any]
 ) -> None:
