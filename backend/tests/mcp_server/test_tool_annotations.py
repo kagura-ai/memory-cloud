@@ -299,6 +299,17 @@ def test_only_the_chat_connector_is_open_world():
     assert open_world == ["setup_connector"]
 
 
+def test_update_context_resource_id_reads_as_inbound():
+    """resource_id names Kagura's own ingestion endpoint; "external ingestion"
+    read to an automated scan as an outbound call on a closed-world tool (#2279)."""
+    tool = _by_name()["update_context"]
+    assert tool["annotations"]["openWorldHint"] is False
+    text = tool["inputSchema"]["properties"]["resource_id"]["description"]
+    assert "Kagura's own ingestion API" in text
+    assert "makes no outbound call" in text
+    assert "external" not in text.lower()
+
+
 # --------------------------------------------------------------------- profiles
 
 
