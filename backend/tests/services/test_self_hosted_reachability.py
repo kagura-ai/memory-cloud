@@ -200,9 +200,9 @@ async def test_an_llm_misconfigured_server_is_not_unreachable():
     assert not isinstance(err.value, SelfHostedUnreachableError)
 
 
-async def test_a_long_lived_llm_provider_probes_again_after_the_ttl():
-    """No per-instance flag: the LLMService-held provider re-checks after the TTL."""
-    http = _http(_ok(), _ok())
+async def test_a_long_lived_llm_provider_does_not_probe_again():
+    """The LLMService-held provider keeps its first success past the TTL."""
+    http = _http(_ok())
     clock = [1000.0]
     provider = _provider()
     with (
@@ -210,8 +210,28 @@ async def test_a_long_lived_llm_provider_probes_again_after_the_ttl():
         patch.object(sh.time, "monotonic", side_effect=lambda: clock[0]),
     ):
         await provider._verify()
-        await provider._verify()
-        assert http.get.await_count == 1
         clock[0] += sh.REACHABILITY_TTL_SECONDS + 1
         await provider._verify()
-    assert http.get.await_count == 2
+    assert http.get.await_count == 1
+
+
+async def test_a_trailing_slash_shares_the_cache_entry():
+    """Embedding passes the setting as written; the LLM path strips the slash."""
+    http = _http(_ok())
+    with patch("httpx.AsyncClient", return_value=http):
+        await sh.ensure_self_hosted_reachable(BASE + "/", None, label="inference server")
+        await _provider(base_url=BASE + "/")._verify()
+    assert http.get.await_count == 1
+
+
+async def test_expired_entries_are_dropped_on_store():
+    http = _http(_ok(), _ok())
+    clock = [1000.0]
+    with (
+        patch("httpx.AsyncClient", return_value=http),
+        patch.object(sh.time, "monotonic", side_effect=lambda: clock[0]),
+    ):
+        await sh.ensure_self_hosted_reachable("http://gone:8000", None)
+        clock[0] += sh.REACHABILITY_TTL_SECONDS + 1
+        await sh.ensure_self_hosted_reachable(BASE, None)
+    assert list(sh._REACHABLE_UNTIL) == [sh._reachability_key(BASE, None)]

@@ -94,7 +94,7 @@ class TestOpenAIProvider:
         assert usage == Usage(total=60, input=50, output=10, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
+    async def test_complete_json_returns_provider_response(self):
         provider = OpenAIProvider(api_key="sk-test")
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content='{"key": "value"}'))]
@@ -187,7 +187,7 @@ class TestAnthropicProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
+    async def test_complete_json_returns_provider_response(self):
         provider = AnthropicProvider(api_key="sk-ant-test")
         mock_response = MagicMock()
         mock_response.content = [MagicMock(type="text", text='{"key": "value"}')]
@@ -236,7 +236,7 @@ class TestGeminiProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
+    async def test_complete_json_returns_provider_response(self):
         provider = GeminiProvider(api_key="gemini-test")
         mock_response = MagicMock()
         mock_response.text = '{"key": "value"}'
@@ -489,7 +489,7 @@ class TestOllamaCloudProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
+    async def test_complete_json_returns_provider_response(self):
         from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
 
         provider = OllamaCloudProvider(api_key="test-key")
