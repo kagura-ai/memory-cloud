@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.124.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.124.1) — 2026-10-23
+
+MCP tool annotations: the tools that change who outside the workspace can reach a context now report `openWorldHint: true`.
+
+### Fixed
+- **Open-world hint for publishing tools** ([#2290](https://github.com/kagura-ai/memory-cloud/issues/2290)): `update_context` (`is_public` publishes a context through the public API) and `setup_resource` (creates a public context and a token for an outside system to write with) now report `openWorldHint: true`. Directory scanners flagged `update_context` as closed-world after the #2279 rewording. The rule is stated once in `docs/mcp-tools.md`: a tool is open-world when it connects to an outside system or when the call itself changes a context's reach. Writes into an already-public context, merges and download links stay closed-world. `readOnlyHint`, `destructiveHint` and `idempotentHint` are unchanged.
+
+### Notes
+- No migration, no new environment variables. After deploy, rescan the server in the directory portals so they pick up the new annotations.
+
 ## [v0.124.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.124.0) — 2026-10-23
 
 Erasure completeness and sweep robustness: erasing a member who authored a time memory no longer fails, the erasure patches vector payloads after its commit and never fails a request on them, one failed request no longer stops the sweep, a request that fails after the Postgres step stays pseudonymized and re-processable, double-erasure chains restore the original author's value, and every erasure write locks its rows in id order.
