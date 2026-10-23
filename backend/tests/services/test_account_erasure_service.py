@@ -1945,7 +1945,7 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         audit = [
             i
             for i, stmt in enumerate(order)
-            if isinstance(stmt, Update) and stmt.table.name == "audit_logs"
+            if isinstance(stmt, Update) and str(stmt.table) == "audit_logs"
         ]
         assert len(audit) == 1
         # last statement before the user delete, and before the one commit
