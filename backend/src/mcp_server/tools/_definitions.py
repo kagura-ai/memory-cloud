@@ -1029,8 +1029,8 @@ Returns: {status, message, updated_fields, context_{id, name, display_name, is_p
                         "type": "string",
                         "description": (
                             "Name under which resource-token holders push data into this context "
-                            "through Kagura's own ingestion API: lowercase alphanumerics, underscores "
-                            "and hyphens (e.g. 'ec_products'), unique in the workspace. Setting it "
+                            "through Kagura's own ingestion API: lowercase alphanumerics and underscores "
+                            "(e.g. 'product_feed'), unique on this server. Setting it "
                             "makes no outbound call. Changing it revokes the resource tokens you "
                             "issued for the old slug."
                         ),

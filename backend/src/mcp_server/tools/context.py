@@ -716,7 +716,7 @@ async def handle_update_context(
                 ):
                     return _error_response(
                         "resource_id_conflict",
-                        f"Resource ID '{args.get('resource_id', '')}' is already used by another context in this workspace.",
+                        f"Resource ID '{args.get('resource_id', '')}' is already used by another context on this server (it may belong to another workspace).",
                     )
                 raise
             await db.refresh(context)
