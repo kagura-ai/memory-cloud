@@ -155,8 +155,11 @@ async def test_lock_subject_memories_with_deleted_by_is_one_ordered_statement() 
     from services.erasure_details import lock_subject_memories
 
     db = MagicMock()
-    db.execute = AsyncMock()
-    await lock_subject_memories(db, "raw", deleted_by=True)
+    result = MagicMock()
+    result.all.return_value = [("a",), ("b",)]
+    db.execute = AsyncMock(return_value=result)
+    # #2266: how many rows were locked (the restore logs it)
+    assert await lock_subject_memories(db, "raw", deleted_by=True) == 2
     await lock_subject_memories(db, "raw")
 
     with_deleted_by, plain = (

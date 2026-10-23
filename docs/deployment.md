@@ -1678,8 +1678,9 @@ erasures on v0.113.0 through v0.120.x) and as the memory's live value where
 they made the newest `details` edit (#2244, fixed in v0.123.0). Erasures
 before v0.113.0 had no revision log, and erasures from v0.123.0 on do all of
 this as they run. Run `--apply` off-peak: each request holds the erased
-member's memories locked while it patches the vector store one memory at a
-time. Plan first, then apply:
+member's memories locked until its commit, and patches the vector store after
+each request's commit; a patch that fails re-queues the memory for embedding.
+Plan first, then apply:
 
 ```bash
 # inside the API container / venv, from backend/
@@ -1699,8 +1700,8 @@ instead. For each request, in one transaction:
 
 1. where the erased member wrote the live `details` of a memory someone else
    authored, the last value someone else wrote is put back — a new version
-   with one revision row (`writer: erasure`, details unavailable), and the
-   memory's vector payload (`location`) is patched before the commit;
+   with one revision row (`writer: erasure`, details unavailable); the
+   memory's vector payload (`location`) is patched right after the commit;
 2. their `details` are removed from every revision prior that still holds
    them. On memories they authored (scrubbed by the erasure), only revision
    rows that existed when the erasure completed are touched — what other
@@ -1713,12 +1714,16 @@ report prints request ids and counts, never values. It previews each request
 on its own: where two erased members edited the same memory, applying the
 first can uncover a restore for the second that the plan did not count — the
 apply report and the audit rows list it, and a plan afterwards shows 0. A
-second `--apply` changes nothing. The vector store must be reachable: a
-payload failure rolls that request back and stops the run with exit code 1;
-the requests before it stay done (each is logged to stderr as
-`erasure_reprocessed` and has its audit row) and a re-run picks up the rest.
-A restored memory whose embedding had not succeeded is re-queued instead of
-patched, and the sweep re-embeds it.
+second `--apply` changes nothing. A payload patch that fails does not fail the
+run: the memory is re-queued for embedding, and the embedding sweep rewrites
+its payload from the restored row within about a minute — until then its
+point may still carry the erased member's `location`. A restored memory whose
+embedding had not succeeded is re-queued in the transaction and its point, if
+it has one, patched too. The apply report prints, per request, the patches
+done, skipped (tombstone, a point another memory shares, a memory edited
+since) and re-queued. An error stops the run with exit code 1; the requests
+before it stay done (each is logged to stderr as `erasure_reprocessed` and has
+its audit row) and a re-run picks up the rest.
 
 Two changes reach erasures that run from v0.123.0 on, too:
 

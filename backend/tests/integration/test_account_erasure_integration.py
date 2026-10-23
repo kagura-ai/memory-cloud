@@ -360,8 +360,18 @@ class TestEditorDetailsRestore:
         postgres = request.deleted_data_summary["postgres"]
         assert postgres["details_restored"] == 1
         assert postgres["details_restored_unavailable"] == 0
-        assert postgres["details_payload_skipped"] == 0
-        assert postgres["details_embedding_requeued"] == 0
+        # #2266: the payload outcome, split, after the commit
+        assert postgres["details_payload_synced"] == 1
+        assert "details_payload_skipped" not in postgres
+        for key in (
+            "details_payload_skipped_tombstone",
+            "details_payload_skipped_shared",
+            "details_payload_skipped_moved",
+            "details_payload_skipped_requeued",
+            "details_payload_requeued_after_error",
+            "details_embedding_requeued",
+        ):
+            assert postgres[key] == 0, key
         assert postgres["revision_details_stripped"] == 0
         assert await self._state(db_session, edited_by_target) == (
             {"by": "author"},
@@ -372,49 +382,48 @@ class TestEditorDetailsRestore:
         assert sync.await_args.kwargs["delete_keys"] == ["location"]
 
     @pytest.mark.asyncio
-    async def test_payload_failure_fails_the_erasure_and_changes_nothing(
+    async def test_a_payload_failure_requeues_and_the_erasure_completes(
         self, db_session: AsyncSession, erasure_scenario, edited_by_target, patched_external_stores
     ):
-        from models.erasure import STATUS_FAILED
+        """#2266: the payload is patched after the Postgres commit; a failure
+        there re-queues the memory for embedding instead of failing the
+        erasure (before, the request failed and stayed failed)."""
+        from models.memory import Memory
         from utils.exceptions import QdrantError
 
-        before = await self._state(db_session, edited_by_target)
-        with (
-            patch(
-                "services.erasure_details.update_memory_payload_in_qdrant",
-                AsyncMock(side_effect=QdrantError("vector store down")),
-            ),
-            pytest.raises(QdrantError),
+        with patch(
+            "services.erasure_details.update_memory_payload_in_qdrant",
+            AsyncMock(side_effect=QdrantError("vector store down")),
         ):
-            await AccountErasureService(db_session).admin_force_erase(
+            request = await AccountErasureService(db_session).admin_force_erase(
                 target_user_id=erasure_scenario["target_user_id"],
                 initiator_user_id="admin-runner",
                 reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
-                reason_detail="integration test (#2244)",
+                reason_detail="integration test (#2266)",
             )
 
-        request = (
+        assert request.status == STATUS_COMPLETE
+        postgres = request.deleted_data_summary["postgres"]
+        assert (
+            postgres["details_payload_synced"],
+            postgres["details_payload_requeued_after_error"],
+        ) == (
+            0,
+            1,
+        )
+        assert await self._state(db_session, edited_by_target) == (
+            {"by": "author"},
+            3,
+            ["api", "erasure"],
+        )
+        status = (
             await db_session.execute(
-                select(ErasureRequest)
-                .where(ErasureRequest.user_id == erasure_scenario["target_user_id"])
+                select(Memory.embedding_status)
+                .where(Memory.id == edited_by_target)
                 .execution_options(populate_existing=True)
             )
         ).scalar_one()
-        assert request.status == STATUS_FAILED
-        # the user and their edit are still there; the author's memory still
-        # holds the target's value, with no erasure row
-        assert before == (
-            {"by": "target", "location": {"lat": 35.0, "lon": 139.0}},
-            2,
-            ["api"],
-        )
-        assert await self._state(db_session, edited_by_target) == before
-        user = (
-            await db_session.execute(
-                select(User).where(User.user_id == erasure_scenario["target_user_id"])
-            )
-        ).scalar_one_or_none()
-        assert user is not None
+        assert status == "pending"
 
 
 class TestSweepAfterAFailure:

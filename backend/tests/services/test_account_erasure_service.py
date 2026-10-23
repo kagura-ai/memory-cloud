@@ -123,7 +123,7 @@ def _service() -> AccountErasureService:
     db.flush = AsyncMock()
     db.rollback = AsyncMock()
     db.refresh = AsyncMock()
-    db.execute = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock())  # a result, with sync methods
     email = AsyncMock()
     email.send_erasure_receipt = AsyncMock(return_value=True)
     email.send_erasure_cooling_off_started = AsyncMock(return_value=True)
@@ -1004,7 +1004,7 @@ class TestDeletePostgresSweep:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert counts["context_read_attributions"] == 3
         swept_models = [call.args[0] for call in svc._count_and_delete.await_args_list]
@@ -1042,7 +1042,7 @@ class TestDeletePostgresSweep:
         svc.db.delete = AsyncMock()
         svc.db.commit = AsyncMock()
 
-        counts = await svc._delete_postgres(_user())
+        counts = (await svc._delete_postgres(_user())).counts
 
         assert counts["user_known_devices"] == 2
         swept_models = [call.args[0] for call in svc._count_and_delete.await_args_list]
@@ -1063,7 +1063,7 @@ class TestDeletePostgresSweep:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert counts["agents_pseudonymized"] == 2
         pseudonymized = [call.args[0] for call in svc._pseudonymize_field.await_args_list]
@@ -1101,7 +1101,7 @@ class TestDeletePostgresSweep:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert counts["worker_app_identities_pseudonymized"] == 3
         calls = [
@@ -1125,13 +1125,7 @@ class TestRestoreEditorDetailsWiring:
         order: list[str] = []
         restore_details.side_effect = lambda *a, **k: (
             order.append("restore"),
-            RestoreReport(
-                restored=2,
-                unavailable=1,
-                payload_synced=1,
-                payload_skipped=2,
-                embedding_requeued=3,
-            ),
+            RestoreReport(restored=2, unavailable=1, embedding_requeued=3),
         )[1]
         svc = _service()
         svc._count_and_delete = AsyncMock(return_value=0)
@@ -1150,6 +1144,7 @@ class TestRestoreEditorDetailsWiring:
         async def _lock(_db, _user_id, *, deleted_by=False):
             order.append("lock")
             assert deleted_by  # #2263: the memories the subject deleted too
+            return 0
 
         async def _tombstones(_user_id):
             order.append("tombstones")
@@ -1179,7 +1174,7 @@ class TestRestoreEditorDetailsWiring:
                 new=AsyncMock(side_effect=_lock),
             ),
         ):
-            counts = await svc._delete_postgres(target)
+            counts = (await svc._delete_postgres(target)).counts
             pseudonym = svc._pseudonym("raw-sub")
 
         # #2263: the subject's tombstones go right after the memory lock, so
@@ -1203,8 +1198,9 @@ class TestRestoreEditorDetailsWiring:
         assert pseudonym != "raw-sub"
         assert counts["details_restored"] == 2
         assert counts["details_restored_unavailable"] == 1
-        assert counts["details_payload_skipped"] == 2
         assert counts["details_embedding_requeued"] == 3
+        # #2266: the payload counts come after the commit (``_execute``)
+        assert not [key for key in counts if key.startswith("details_payload")]
         assert counts["memory_revisions_pseudonymized"] == 4
         assert counts["revision_details_stripped"] == 3
 
@@ -1257,7 +1253,7 @@ class TestErasureResiduals1365:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert "config_overrides_pseudonymized" in counts
         calls = [c for c in svc._pseudonymize_field.await_args_list if c.args[0] is ConfigOverride]
@@ -1324,7 +1320,7 @@ class TestErasureResiduals1365:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert counts["authorship_columns_pseudonymized"] == sum(expected.values())
         swept = {
@@ -1360,7 +1356,7 @@ class TestErasureResiduals1365:
             return_value=RevokedGrants(authorization_codes=1, device_codes=2, tokens=3)
         )
         with patch("services.account_erasure_service.revoke_oauth_grants", revoke):
-            counts = await svc._delete_postgres(target)
+            counts = (await svc._delete_postgres(target)).counts
 
         revoke.assert_awaited_once_with(svc.db, target.user_id, delete_tokens=True)
         assert counts["oauth_authorization_codes"] == 1
@@ -1459,7 +1455,7 @@ class TestErasureResiduals1365:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        counts = await svc._delete_postgres(target)
+        counts = (await svc._delete_postgres(target)).counts
 
         assert counts["secret_access_log_pseudonymized"] == 5
         svc._erase_secret_access_log.assert_awaited_once_with(target.user_id)
@@ -1660,7 +1656,10 @@ def _execute_request(*, self_service: bool) -> ErasureRequest:
 
 def _stub_execute_steps(svc: AccountErasureService) -> None:
     svc._handle_owned_workspaces = AsyncMock(return_value={})
-    svc._delete_postgres = AsyncMock(return_value={})
+    from services.account_erasure_service import PostgresErasure
+    from services.erasure_details import RestoreReport
+
+    svc._delete_postgres = AsyncMock(return_value=PostgresErasure({}, RestoreReport()))
     svc._pseudonymize_audit_logs = AsyncMock(return_value=0)
     svc._clear_redis = AsyncMock(return_value={})
     svc._write_audit_log = AsyncMock()

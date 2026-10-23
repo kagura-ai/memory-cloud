@@ -1357,7 +1357,7 @@ class TestErasingThroughTheService:
         mine = await _memory(db_session, context, oauth)
         await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
 
-        counts = await AccountErasureService(db_session)._delete_postgres(admin)
+        counts = (await AccountErasureService(db_session)._delete_postgres(admin)).counts
         await db_session.flush()
         await db_session.refresh(context)
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import secrets
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -82,12 +83,15 @@ from services.billing_contract import (
 )
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
+    RestoreReport,
     completed_pseudonyms,
     lock_subject_memories,
     locked_ids,
+    payload_counts,
     pseudonymize_revision_actor,
     restore_editor_details,
     strip_subject_details,
+    sync_restored_payloads,
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
@@ -147,6 +151,20 @@ CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
 # rows belonging to the same erased user without revealing the email/sub.
 # Goal is irreversibility, not rainbow-table protection — once the user
 # row is gone there is no plaintext to recover.
+@dataclass(frozen=True)
+class PostgresErasure:
+    """What ``_delete_postgres`` did (#2266).
+
+    Attributes:
+        counts: The ``postgres`` section of the erasure summary.
+        restore: The details restore; its ``to_sync`` are the payloads
+            ``sync_restored_payloads`` patches after the commit.
+    """
+
+    counts: dict[str, int]
+    restore: RestoreReport
+
+
 def _trigger_only_details() -> Any:
     """What the memory scrub leaves in ``details`` (#2266).
 
@@ -864,7 +882,14 @@ class AccountErasureService:
             )
 
             # Step 3: Postgres deletes (FK-safe order)
-            summary["postgres"] = await self._delete_postgres(target)
+            erased = await self._delete_postgres(target)
+            summary["postgres"] = erased.counts
+
+            # Step 3b (#2266): the restored memories' vector payloads, after
+            # the commit — no vector-store call while the subject's memories
+            # are locked. A failed patch re-queues the memory for embedding.
+            await sync_restored_payloads(self.db, erased.restore.to_sync, erased.restore)
+            erased.counts.update(payload_counts(erased.restore))
 
             # Step 4: pseudonymize existing audit_logs referencing this user
             summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
@@ -1108,13 +1133,17 @@ class AccountErasureService:
 
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
-    async def _delete_postgres(self, target: User) -> dict[str, int]:
-        """Delete every Postgres row that references the user.
+    async def _delete_postgres(self, target: User) -> PostgresErasure:
+        """Delete every Postgres row that references the user, and commit.
 
         Order matters because not every column is FK-cascaded — most
         cross-table user references are plain VARCHAR (OAuth2 sub) with
         no cascade. The full sweep here is the application-layer
         equivalent of `ON DELETE CASCADE` for all per-user data.
+
+        Returns:
+            The counts, and the details restore whose payloads the caller
+            syncs after this commit (``sync_restored_payloads``).
         """
         # Optional model imports so the service doesn't crash if a model
         # is renamed/removed in a future refactor.
@@ -1350,8 +1379,8 @@ class AccountErasureService:
         # among the memory steps: it finds the subject's edits by the raw
         # actor (pseudonymized below) and writes its own revision row under
         # the pseudonym, which the strip and the pseudonymize step never
-        # match. Patches the vector payload before the commit; a failure
-        # fails the erasure with Postgres rolled back.
+        # match. No vector-store call here (#2266): ``_execute`` patches the
+        # payloads after the commit below.
         # #2243: a value a member erased earlier wrote is never put back, even
         # where an erasure from before the #2235 fix left it in a prior.
         restore = await restore_editor_details(
@@ -1362,7 +1391,6 @@ class AccountErasureService:
         )
         counts["details_restored"] = restore.restored
         counts["details_restored_unavailable"] = restore.unavailable
-        counts["details_payload_skipped"] = restore.payload_skipped
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id))
@@ -1409,7 +1437,7 @@ class AccountErasureService:
         await self.db.commit()
         counts["users"] = 1
 
-        return counts
+        return PostgresErasure(counts, restore)
 
     def _pseudonym(self, value: str) -> str:
         """Salted-SHA256 pseudonym — the single derivation every sweep uses.

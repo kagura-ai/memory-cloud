@@ -340,14 +340,17 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
             "details_restored_unavailable": 0,
             "details_stripped": 1,
             "scrub_marked": 0,
-            "details_payload_synced": 1,
-            "details_payload_skipped": 0,
+            # #2266: the payload outcome is known only after the commit
             "details_embedding_requeued": 0,
             "tool": "cli.reprocess_erasures",
         }
     sync.assert_awaited_once()
     assert sync.await_args.kwargs["memory_id"] == live.id
     assert sync.await_args.kwargs["payload_updates"]["location"] == {"lat": 10.5, "lon": 20.25}
+    assert (
+        f"payload  {world['request'].id}  synced 1, skipped 0 "
+        "(tombstone 0, shared 0, edited since 0), re-queued for embedding 0"
+    ) in out
 
 
 async def test_a_second_run_changes_nothing(
@@ -446,25 +449,29 @@ async def test_request_narrows_and_an_unknown_request_is_an_error(
     assert "is not a completed erasure request" in capsys.readouterr().err
 
 
-async def test_a_vector_store_failure_rolls_the_request_back(
+async def test_a_vector_store_failure_requeues_and_the_request_commits(
     async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    live = world["live"]
-    async with _maker(async_engine)() as session:
-        before = await _snapshots(session, [])
-
+    """#2266: the payload is patched after the request's commit; a failure
+    re-queues the memory for embedding, and the run succeeds."""
+    p, live = world["p"], world["live"]
     code, sync = await _run(
         async_engine,
         ["--request", str(world["request"].id), "--apply", "--yes"],
         AsyncMock(side_effect=QdrantError("vector store down")),
     )
 
-    assert code == 1
-    assert "vector store down" in capsys.readouterr().err
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "re-queued for embedding 1" in out
     sync.assert_awaited_once()
     async with _maker(async_engine)() as session:
-        assert await _snapshots(session, []) == before
-        assert await _details(session, live.id) == SUBJECTS
+        assert await _details(session, live.id) == AUTHORS
+        status = (
+            await session.execute(select(Memory.embedding_status).where(Memory.id == live.id))
+        ).scalar_one()
+        assert status == "pending"
+        assert len(await _reprocess_audit_rows(session, p)) == 1
 
 
 async def test_a_value_another_erased_member_wrote_never_comes_back(

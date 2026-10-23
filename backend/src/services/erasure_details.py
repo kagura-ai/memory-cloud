@@ -22,6 +22,9 @@ past erasures by pseudonym (#2243) share one definition:
   the subject wrote the live ``details`` of a memory someone else authored,
   put back the last value someone else wrote. Like the strip, a function of
   one subject string; ``actor`` is always the pseudonym.
+- ``sync_restored_payloads(db, syncs, report)`` (#2266) — the restored
+  memories' vector payloads, patched after the caller's commit: no
+  vector-store call happens while the subject's memories are locked.
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
@@ -82,6 +85,7 @@ from services.memory_versions import (
 )
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import QdrantError
 from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
@@ -277,9 +281,7 @@ async def _count(
     return (await db.execute(select(func.count(row.id)).where(*predicate_on(row)))).scalar_one()
 
 
-async def lock_subject_memories(
-    db: AsyncSession, subject: str, *, deleted_by: bool = False
-) -> None:
+async def lock_subject_memories(db: AsyncSession, subject: str, *, deleted_by: bool = False) -> int:
     """Lock ``subject``'s memories (``subject_memory_ids``) in id order.
 
     Taken before any revision row, so the erasure holds every ``memories``
@@ -311,6 +313,9 @@ async def lock_subject_memories(
         db: The session; the caller owns the transaction.
         subject: The raw sub, or the stored salted pseudonym (#2243).
         deleted_by: Also lock the memories ``subject`` deleted.
+
+    Returns:
+        How many memories were locked (logged by the restore, #2266).
     """
     scope: CompoundSelect[UUID] = subject_memory_ids(subject)
     if deleted_by:
@@ -320,9 +325,10 @@ async def lock_subject_memories(
             select(forgotten_by.id).where(forgotten_by.deleted_by == subject),
         )
     memory = aliased(Memory)
-    await db.execute(
+    rows = await db.execute(
         select(memory.id).where(memory.id.in_(scope)).order_by(memory.id).with_for_update()
     )
+    return len(rows.all())
 
 
 async def strip_subject_details(
@@ -520,31 +526,77 @@ class RestoreTarget:
     from_version: int
 
 
+@dataclass(frozen=True)
+class PayloadSync:
+    """A restored memory whose vector payload ``sync_restored_payloads`` patches.
+
+    Attributes:
+        memory_id: The memory.
+        version: Its version right after the restore; a row at another
+            version by the time of the patch was edited since, and that
+            edit synced its own payload.
+    """
+
+    memory_id: UUID
+    version: int
+
+
 @dataclass
 class RestoreReport:
-    """What ``restore_editor_details`` changed (or would change, on a dry run).
+    """What ``restore_editor_details`` changed (or would change, on a dry run),
+    and what ``sync_restored_payloads`` did after the commit (#2266).
 
     Attributes:
         restored: Memories whose ``details`` went back to another member's
             value (NULL included, when that value was NULL).
-        unavailable: Memories whose ``details`` became NULL because the value
-            to go back to was removed by an earlier erasure.
-        payload_synced: Vector points whose payload was patched.
-        payload_skipped: Restored memories whose point was left as it is: a
-            tombstone, or a point another live row shares. Always 0 on a dry
-            run.
-        embedding_requeued: Restored memories whose embedding had not
-            succeeded, re-queued so the next embed writes the payload from the
-            restored row. Always 0 on a dry run.
+        unavailable: Memories whose ``details`` became NULL (a time memory:
+            only its live trigger) because the value to go back to was
+            removed by an earlier erasure.
+        embedding_requeued: Restored live memories whose embedding had not
+            succeeded, re-queued in the restore's transaction so the next
+            embed writes the payload from the restored row. Always 0 on a
+            dry run.
+        payload_synced: Points whose payload was patched after the commit.
+        payload_skipped_tombstone: Restored memories that are tombstones (or
+            gone, or without a context) at patch time: their point is gone
+            or going, as ``forget`` leaves it.
+        payload_skipped_shared: Restored memories whose point another live
+            row shares: left as it is (``metadata_patch_target``).
+        payload_skipped_moved: Restored memories edited between the commit
+            and the patch: that edit synced its own payload.
+        payload_skipped_requeued: Patches that failed on a row already
+            queued for embedding (not ``success``): the next embed rewrites
+            the payload.
+        payload_requeued_after_error: Patches that failed on an embedded row:
+            the row was re-queued for embedding instead.
         memory_ids: The restored memories, in id order.
+        to_sync: The restored memories, for ``sync_restored_payloads``.
     """
 
     restored: int = 0
     unavailable: int = 0
-    payload_synced: int = 0
-    payload_skipped: int = 0
     embedding_requeued: int = 0
+    payload_synced: int = 0
+    payload_skipped_tombstone: int = 0
+    payload_skipped_shared: int = 0
+    payload_skipped_moved: int = 0
+    payload_skipped_requeued: int = 0
+    payload_requeued_after_error: int = 0
     memory_ids: list[UUID] = field(default_factory=list)
+    to_sync: list[PayloadSync] = field(default_factory=list)
+
+
+def payload_counts(report: RestoreReport) -> dict[str, int]:
+    """The summary keys of ``sync_restored_payloads``'s outcome, as the erasure summary and
+    the re-run report name them (#2266)."""
+    return {
+        "details_payload_synced": report.payload_synced,
+        "details_payload_skipped_tombstone": report.payload_skipped_tombstone,
+        "details_payload_skipped_shared": report.payload_skipped_shared,
+        "details_payload_skipped_moved": report.payload_skipped_moved,
+        "details_payload_skipped_requeued": report.payload_skipped_requeued,
+        "details_payload_requeued_after_error": report.payload_requeued_after_error,
+    }
 
 
 def _past_put_back(edits: Sequence[DetailsEdit], i: int) -> int:
@@ -780,29 +832,66 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
     ]
 
 
-async def _sync_details_payload(
-    db: AsyncSession, memories: Sequence[Memory], report: RestoreReport
+def _requeue_unembedded(memory: Memory, report: RestoreReport) -> None:
+    """Re-queue a restored live row whose embedding has not succeeded.
+
+    ``pending`` / ``processing`` / ``failed`` may have no point yet, and a run
+    in flight may already have read the subject's ``details``: the row goes
+    back to ``pending`` with a fresh retry budget (the embedding switch's
+    re-queue; ``requeue_embedding`` is fenced to ``success``). A run in flight
+    then loses its claim when it tries to stamp ``success``, and the sweep
+    re-embeds from the restored row, whose payload replaces whatever the
+    earlier run wrote. Inside the restore's transaction: no vector store.
+    """
+    if memory.deleted_at is not None or memory.context_id is None:
+        return
+    if memory.embedding_status == "success":
+        return
+    memory.embedding_status = "pending"
+    memory.embedding_error = None
+    memory.embedding_retry_count = 0
+    report.embedding_requeued += 1
+
+
+async def sync_restored_payloads(
+    db: AsyncSession, syncs: Sequence[PayloadSync], report: RestoreReport
 ) -> None:
     """Bring the restored memories' points in line with the restored ``details``.
 
-    A row whose embedding succeeded gets its ``location`` payload patched
-    inside the caller's transaction, before its commit, and a vector-store
-    error propagates (``update_memory``'s convention): a completed erasure
-    must not leave the subject's coordinates on another author's point, and
-    an erasure that fails here rolls Postgres back and is re-run whole (the
-    patch converges). The point, the keys and the chunk cascade follow
-    ``MemoryService._sync_metadata_payload`` (``metadata_patch_target``).
+    Called AFTER the restore's transaction committed, in the same session (a
+    fresh transaction), by the live erasure and by the re-run (#2266): no
+    vector-store round trip happens while the subject's memories are locked.
+    Reads the rows without a lock; per row:
 
-    A row whose embedding has not succeeded (``pending`` / ``processing`` /
-    ``failed``) may have no point yet, and a run in flight may already have
-    read the subject's ``details``: it is re-queued instead (``pending``, a
-    fresh retry budget — the embedding switch's re-queue). A run in flight
-    then loses its claim when it tries to stamp ``success``, and the sweep
-    re-embeds from the restored row, whose payload replaces whatever the
-    earlier run wrote. A tombstone is skipped (its point is gone or going,
-    as ``forget`` leaves it), as is a point another live row shares.
+    - a tombstone (or a row gone, or without a context) is skipped: its point
+      is gone or going, as ``forget`` leaves it;
+    - a row whose version moved since the restore was edited, and that edit
+      synced its own payload: skipped;
+    - else the ``location`` payload is patched — whatever the row's
+      ``embedding_status``: a row the restore re-queued may still have a
+      point carrying the subject's location. The point, the keys and the
+      chunk cascade follow ``MemoryService._sync_metadata_payload``
+      (``metadata_patch_target``; a point another live row shares is left
+      as it is).
+
+    A patch that fails with ``QdrantError`` degrades to an embedding re-queue
+    (``requeue_embedding``: the sweep's upsert rewrites the whole payload from
+    the row); a row not ``success`` is queued already. One warning per
+    failure, with ids only. Any other error propagates. Commits at the end
+    (the re-queues).
+
+    Semantics: between the restore's commit and the patch — or, when the
+    patch fails, until the embedding sweep re-embeds the row — the point may
+    still carry the ``location`` the erased member wrote.
+
+    Args:
+        db: The session; its restore transaction has committed.
+        syncs: ``RestoreReport.to_sync``.
+        report: Gets the ``payload_*`` counts.
     """
-    from services.content_chunk_writer import chunk_cascade_needed
+    if not syncs:
+        return
+    from services.content_chunk_writer import chunk_cascade_needed, requeue_embedding
     from services.context_routing import resolve_collection_name
     from services.memory_service import (
         metadata_patch_target,
@@ -810,16 +899,32 @@ async def _sync_details_payload(
         restore_payload_request,
     )
 
+    versions = {sync.memory_id: sync.version for sync in syncs}
+    memories = {
+        memory.id: memory
+        for memory in (
+            await db.execute(
+                select(Memory)
+                .where(Memory.id.in_(list(versions)))
+                .order_by(Memory.id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
     routes: dict[UUID, tuple[str, bool]] = {}
-    for memory in memories:
-        if memory.deleted_at is not None or memory.context_id is None:
-            report.payload_skipped += 1
+    for memory_id in sorted(versions):
+        memory = memories.get(memory_id)
+        if memory is None or memory.deleted_at is not None or memory.context_id is None:
+            report.payload_skipped_tombstone += 1
             continue
-        if memory.embedding_status != "success":
-            memory.embedding_status = "pending"
-            memory.embedding_error = None
-            memory.embedding_retry_count = 0
-            report.embedding_requeued += 1
+        if memory.version != versions[memory_id]:
+            report.payload_skipped_moved += 1
+            logger.info(
+                "erasure_details_payload_moved",
+                memory_id=str(memory_id),
+                restored_version=versions[memory_id],
+                version=memory.version,
+            )
             continue
         updates, delete_keys = metadata_payload_patch(
             restore_payload_request(memory, {"details"}), None, memory.details
@@ -828,7 +933,7 @@ async def _sync_details_payload(
         updates["updated_at"] = to_utc_iso(memory.updated_at)
         target = await metadata_patch_target(db, memory.id, memory.point_id, updates, delete_keys)
         if target is None:
-            report.payload_skipped += 1
+            report.payload_skipped_shared += 1
             continue
         if memory.context_id not in routes:
             routes[memory.context_id] = (
@@ -836,15 +941,31 @@ async def _sync_details_payload(
                 await chunk_cascade_needed(db, memory.context_id),
             )
         collection, cascade = routes[memory.context_id]
-        await update_memory_payload_in_qdrant(
-            memory_id=target.point_id,
-            payload_updates=target.updates,
-            collection_name=collection,
-            delete_keys=target.delete_keys or None,
-            cascade_chunks=cascade and target.own_point,
-        )
+        try:
+            await update_memory_payload_in_qdrant(
+                memory_id=target.point_id,
+                payload_updates=target.updates,
+                collection_name=collection,
+                delete_keys=target.delete_keys or None,
+                cascade_chunks=cascade and target.own_point,
+            )
+        except QdrantError:
+            requeued = memory.embedding_status == "success" and await requeue_embedding(
+                db, memory.id, reason="erasure_details_payload"
+            )
+            if requeued:
+                report.payload_requeued_after_error += 1
+            else:
+                report.payload_skipped_requeued += 1
+            logger.warning(
+                "erasure_details_payload_failed",
+                memory_id=str(memory.id),
+                point_id=str(target.point_id),
+                requeued=requeued,
+            )
+            continue
         report.payload_synced += 1
-    await db.flush()
+    await db.commit()
 
 
 def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
@@ -889,8 +1010,8 @@ async def restore_editor_details(
     its actor and ``{"erased": ["details"], "restored_from": <from_version>}``
     as its prior — "details changed; the overwritten value is unavailable;
     the edits from that version up were reverted" — so the subject's value
-    is in no prior, a later erasure can tell whose value is live, ``expected_version`` protects the restored value from a
-    stale edit, and a rebuilt version at or above the subject's edits reads
+    is in no prior, a later erasure can tell whose value is live,
+    ``expected_version`` protects the restored value from a stale edit, and a rebuilt version at or above the subject's edits reads
     ``details`` as unavailable. The memory's last writer (``agent_id`` /
     ``session_id``) becomes none. A restore that would write the live value
     again is skipped.
@@ -904,7 +1025,11 @@ async def restore_editor_details(
     so neither statement touches it. The value it reads (the prior of the
     lowest row of the subject's run) is one the strip leaves alone. The
     locks are held until the caller commits; a subject with many edits holds
-    many rows for that long, which an erasure accepts.
+    many rows for that long, which an erasure accepts. No vector-store call
+    happens here (#2266): a restored live row whose embedding has not
+    succeeded is re-queued in this transaction, and every restored row is
+    listed in ``report.to_sync`` for ``sync_restored_payloads``, which the
+    caller runs after its commit.
 
     The resource indexer rewrites ``details`` without a revision; on such a
     row the restore may replace the indexer's value until its next run
@@ -918,24 +1043,20 @@ async def restore_editor_details(
         actor: The pseudonym written as the new rows' actor — never the raw
             sub, which must not outlive the erasure.
         dry_run: Compute what would change and write nothing (no row, no
-            vector-store call, no row lock: the log is read as of the
-            statement, which a preview can afford).
+            row lock: the log is read as of the statement, which a preview
+            can afford); ``to_sync`` stays empty.
         erased_actors: Pseudonyms of other erased members (``restore_targets``);
             a re-run over past erasures (#2243) passes every completed one.
 
     Returns:
-        The counts and the restored memories.
-
-    Raises:
-        QdrantError: A payload patch of a live, embedded row failed; the
-            caller rolls back.
+        The counts, the restored memories and the payloads to sync.
     """
-    if not dry_run:
-        await lock_subject_memories(db, subject)
+    locked = 0 if dry_run else await lock_subject_memories(db, subject)
     report = RestoreReport()
     targets = restore_targets(
         await _updated_rows(db, subject), subject, erased_actors=erased_actors
     )
+    logger.info("erasure_restore_candidates", locked=locked, targets=len(targets))
     if not targets:
         return report
     memories = {
@@ -949,7 +1070,6 @@ async def restore_editor_details(
             )
         ).scalars()
     }
-    restored: list[Memory] = []
     for target in targets:
         memory = memories[target.memory_id]
         value, trigger_kept = _with_live_trigger(memory, target.details)
@@ -975,7 +1095,8 @@ async def restore_editor_details(
             writer=REVISION_WRITER_ERASURE,
             provenance=WriteProvenance(None, None),
         )
-        restored.append(memory)
+        _requeue_unembedded(memory, report)
+        report.to_sync.append(PayloadSync(memory.id, memory.version))
         logger.info(
             "erasure_details_restored",
             memory_id=str(memory.id),
@@ -983,8 +1104,6 @@ async def restore_editor_details(
             unavailable=target.unavailable,
             trigger_kept=trigger_kept,
         )
-    if not restored:
-        return report
-    await db.flush()
-    await _sync_details_payload(db, restored, report)
+    if report.to_sync:
+        await db.flush()
     return report

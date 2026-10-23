@@ -17,8 +17,9 @@ Per completed erasure request, one transaction:
 
 1. where the erased member wrote the live ``details`` of a memory someone
    else authored, the last value someone else wrote is put back (a new
-   version, one ``erasure`` revision row, the vector payload's ``location``
-   patched before the commit);
+   version, one ``erasure`` revision row; the vector payload's ``location``
+   is patched right after the commit, and a patch that fails re-queues the
+   memory for embedding, which rewrites the payload);
 2. the erased member's ``details`` leave every revision prior that still
    holds them; on memories they authored, only rows that existed when the
    erasure completed are touched — what other members wrote there since
@@ -37,10 +38,10 @@ memory, applying the first can uncover a restore for the second that the
 plan did not count; the apply report and the audit rows list it, and a
 plan afterwards shows 0.
 
-Exit codes: 0 ok · 1 error (a vector-store failure rolls back that request
-and stops the run; the requests before it stay done — each is logged to
-stderr as ``erasure_reprocessed`` and has its audit row — and a re-run
-picks up the rest).
+Exit codes: 0 ok · 1 error (the run stops at that request; the requests
+before it stay done — each is logged to stderr as ``erasure_reprocessed``
+and has its audit row — and a re-run picks up the rest). A vector-store
+failure is not an error: the memory is re-queued for embedding.
 """
 
 from __future__ import annotations
@@ -65,8 +66,10 @@ from services.erasure_details import (  # noqa: E402
     completed_pseudonyms,
     finalized_erasure,
     is_pseudonym,
+    payload_counts,
     restore_editor_details,
     strip_subject_details,
+    sync_restored_payloads,
 )
 from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
@@ -93,9 +96,10 @@ class RequestChange:
     details_restored_unavailable: int
     details_stripped: int
     scrub_marked: int
-    payload_synced: int = 0
-    payload_skipped: int = 0
     embedding_requeued: int = 0
+    # #2266: ``sync_restored_payloads``'s outcome after the commit (the
+    # ``details_payload_*`` keys of the erasure summary); empty on a dry run
+    payload: dict[str, int] = field(default_factory=dict)
 
     @property
     def changes(self) -> int:
@@ -142,9 +146,11 @@ async def _reprocess_one(
     dry_run: bool,
     erased: frozenset[str],
 ) -> RequestChange:
-    """Restore, then strip, by ``pseudonym``; commit (or roll back a dry run).
+    """Restore, then strip, by ``pseudonym``; commit (or roll back a dry run);
+    then patch the restored memories' payloads (``sync_restored_payloads``).
 
-    The order of the live erasure (``_delete_postgres``). Never the
+    The order of the live erasure (``_delete_postgres``, then ``_execute``'s
+    payload step): no vector-store call while the memories are locked. Never the
     pseudonymize step: with the pseudonym as the subject it would hash the
     hash. ``erased`` are every completed erasure's pseudonyms: a value
     another erased member wrote is never put back, even where their own
@@ -168,8 +174,6 @@ async def _reprocess_one(
             details_restored_unavailable=restore.unavailable,
             details_stripped=strip.details_stripped,
             scrub_marked=strip.scrub_marked,
-            payload_synced=restore.payload_synced,
-            payload_skipped=restore.payload_skipped,
             embedding_requeued=restore.embedding_requeued,
         )
         if dry_run or not change.changes:
@@ -187,8 +191,6 @@ async def _reprocess_one(
                     "details_restored_unavailable": change.details_restored_unavailable,
                     "details_stripped": change.details_stripped,
                     "scrub_marked": change.scrub_marked,
-                    "details_payload_synced": change.payload_synced,
-                    "details_payload_skipped": change.payload_skipped,
                     "details_embedding_requeued": change.embedding_requeued,
                     "tool": TOOL,
                 },
@@ -206,6 +208,13 @@ async def _reprocess_one(
         details_stripped=change.details_stripped,
         scrub_marked=change.scrub_marked,
     )
+    try:
+        await sync_restored_payloads(db, restore.to_sync, restore)
+    except BaseException:
+        await db.rollback()
+        raise
+    change.payload = payload_counts(restore)
+    logger.info("erasure_reprocessed_payloads", request_id=str(request_id), **change.payload)
     return change
 
 
@@ -230,7 +239,6 @@ async def reprocess_erasures(
 
     Raises:
         LookupError: ``request_id`` is not a completed erasure request.
-        QdrantError: A payload patch failed; that request was rolled back.
     """
     stmt = (
         select(
@@ -292,9 +300,18 @@ def _print_plan(result: ReprocessResult) -> None:
 def _print_applied(result: ReprocessResult) -> None:
     for c in result.changed:
         if c.details_restored or c.details_restored_unavailable:
+            p = c.payload
+            skipped = {
+                "tombstone": p.get("details_payload_skipped_tombstone", 0),
+                "shared": p.get("details_payload_skipped_shared", 0),
+                "edited since": p.get("details_payload_skipped_moved", 0),
+            }
+            requeued = c.embedding_requeued + p.get("details_payload_requeued_after_error", 0)
             print(
-                f"payload  {c.request_id}  synced {c.payload_synced}, "
-                f"skipped {c.payload_skipped}, re-queued for embedding {c.embedding_requeued}"
+                f"payload  {c.request_id}  synced {p.get('details_payload_synced', 0)}, "
+                f"skipped {sum(skipped.values())} "
+                f"({', '.join(f'{k} {v}' for k, v in skipped.items())}), "
+                f"re-queued for embedding {requeued}"
             )
 
 

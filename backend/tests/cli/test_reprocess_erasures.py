@@ -40,8 +40,9 @@ def _result(*, dry_run: bool, changed: bool = True) -> cli.ReprocessResult:
                 details_restored_unavailable=1,
                 details_stripped=3,
                 scrub_marked=4,
-                payload_synced=0 if dry_run else 2,
-                payload_skipped=0 if dry_run else 1,
+                payload={}
+                if dry_run
+                else {"details_payload_synced": 2, "details_payload_skipped_shared": 1},
             )
         )
     return result
@@ -86,7 +87,10 @@ class TestReprocessErasuresCommand:
             "changed 1 erasure request(s): 2 memory details restored, 1 cleared (unavailable), "
             "3 revision prior(s) stripped, 4 marked scrubbed"
         ) in out
-        assert f"payload  {REQUEST_ID}  synced 2, skipped 1, re-queued for embedding 0" in out
+        assert (
+            f"payload  {REQUEST_ID}  synced 2, skipped 1 (tombstone 0, shared 1, edited since 0), "
+            "re-queued for embedding 0"
+        ) in out
 
     def test_the_confirmation_is_honoured(self, capsys):
         worker = AsyncMock(return_value=_result(dry_run=True))
