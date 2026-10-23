@@ -19,6 +19,7 @@ from typing import TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cli._env_guard import require_settings
 from db.base import get_db
 from utils.logger import setup_logger
 
@@ -99,6 +100,9 @@ async def run_plan_apply(
 ) -> int:
     """Plan, print, confirm, apply — the body of every one-shot command's main.
 
+    Runs the production secret guard first (#2264), so a refused install
+    stops with the variables named, before any session is opened.
+
     Args:
         run: ``run(db, dry_run)`` — the command's worker; the same callable
             serves the plan (``dry_run=True``) and the write (``False``).
@@ -119,6 +123,11 @@ async def run_plan_apply(
     Returns:
         Process exit code: 0 ok, 1 error.
     """
+
+    # The production secret guard first (#2264): a refused install stops with
+    # the variables named, before any session is opened. Outside the ``try``
+    # so its exit is not reported as ``error: ...``.
+    require_settings()
 
     def describe(result: R) -> str:
         if summary is not None:

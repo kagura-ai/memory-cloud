@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.settings import get_settings  # noqa: E402
+from cli._env_guard import require_settings  # noqa: E402
 from db.base import get_db  # noqa: E402
 from services.llm_pricing_service import SyncResult, sync_llm_pricing_overrides  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
@@ -47,7 +47,8 @@ def _print_result(result: SyncResult, *, applied: bool) -> None:
 
 
 async def _main(args: argparse.Namespace) -> int:
-    overrides = get_settings().parsed_llm_pricing_overrides
+    # The production secret guard, before the settings are read (#2264).
+    overrides = require_settings().parsed_llm_pricing_overrides
     if not overrides:
         print("LLM_PRICING_OVERRIDES is empty; nothing to sync")
         return 0

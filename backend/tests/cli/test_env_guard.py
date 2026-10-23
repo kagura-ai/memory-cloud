@@ -10,6 +10,7 @@ from them.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from pathlib import Path
@@ -23,10 +24,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from cli import (  # noqa: E402
     _env_guard,
+    apply_rerank_defaults,
+    backfill_deleted_context_files,
     create_admin,
     delete_admin,
+    migrate_context_embedding,
+    reprocess_erasures,
     reset_password,
+    restore_context,
     seed_e2e_admin,
+    sweep_orphan_vectors,
+    sync_llm_pricing,
+    transfer_context_creator,
 )
 from cli._env_guard import (  # noqa: E402
     API_CONTAINERS,
@@ -120,6 +129,55 @@ def test_each_cli_stops_before_the_database(module, entry, refused, monkeypatch,
     assert exc_info.value.code == 1
     engine.assert_not_called()
     assert "API_KEY_SECRET" in capsys.readouterr().err
+
+
+_UUID = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.mark.parametrize(
+    ("module", "argv", "get_db"),
+    [
+        (apply_rerank_defaults, ["--all"], "cli._oneshot.get_db"),
+        (backfill_deleted_context_files, [], "cli._oneshot.get_db"),
+        (restore_context, [_UUID], "cli._oneshot.get_db"),
+        (sweep_orphan_vectors, [], "cli._oneshot.get_db"),
+        (
+            transfer_context_creator,
+            ["--from", "local:x", "--to", _UUID, "--workspace", _UUID],
+            "cli._oneshot.get_db",
+        ),
+        (reprocess_erasures, ["--all"], "cli._oneshot.get_db"),
+        (
+            migrate_context_embedding,
+            ["--context", _UUID, "--to", "any-model"],
+            "cli.migrate_context_embedding.get_db",
+        ),
+        (sync_llm_pricing, [], "cli.sync_llm_pricing.get_db"),
+    ],
+    ids=[
+        "apply_rerank_defaults",
+        "backfill_deleted_context_files",
+        "restore_context",
+        "sweep_orphan_vectors",
+        "transfer_context_creator",
+        "reprocess_erasures",
+        "migrate_context_embedding",
+        "sync_llm_pricing",
+    ],
+)
+def test_each_one_shot_cli_stops_before_the_database(module, argv, get_db, refused, capsys) -> None:
+    # The one-shot commands used to hit the guard only when their session
+    # opened, as "error: 1 validation error ..." or a traceback (#2264).
+    with patch(get_db, side_effect=AssertionError("opened the database")) as opened:
+        with pytest.raises(SystemExit) as exc_info:
+            asyncio.run(module._main(module._parse(argv)))
+
+    assert exc_info.value.code == 1
+    opened.assert_not_called()
+    err = capsys.readouterr().err
+    assert "API_KEY_SECRET" in err
+    assert _PLACEHOLDER not in err
+    assert "error:" not in err
 
 
 def _record_settings(monkeypatch) -> list[str | None]:

@@ -348,9 +348,9 @@ refused variables (never their values); look for it in
 migration step, before traffic moves) and the admin CLIs (`create_admin`,
 `reset_password`, `delete_admin`, `seed_e2e_admin`) are refused the same way,
 before they touch the database. The one-shot maintenance commands
-(`restore_context`, `sweep_orphan_vectors`, ...) load the settings when they
-open their database session and stop there, with the same message in a
-traceback.
+(`restore_context`, `sweep_orphan_vectors`, `migrate_context_embedding`,
+`sync_llm_pricing`, ...) are refused the same way, before they open a database
+session.
 Development, test and staging are not checked.
 `ENVIRONMENT=development` is not a free way around it: it also drops the
 `Secure` flag on session cookies.
