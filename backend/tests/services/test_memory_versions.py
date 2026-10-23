@@ -140,11 +140,15 @@ class TestRecordEdit:
         assert record_edit(db, row, before, actor_user_id="u1") is True
         db.add.assert_not_called()
 
-    def test_record_revision_without_at_leaves_the_column_default(self) -> None:
+    def test_record_revision_requires_at(self) -> None:
+        """#2135: no caller may fall back to the column's ``now()`` default."""
         db = MagicMock()
-        record_revision(db, _row(version=1), kind="created", actor_user_id="u1")
+        with pytest.raises(TypeError, match="at"):
+            record_revision(db, _row(version=1), kind="created", actor_user_id="u1")  # type: ignore[call-arg]
+        db.add.assert_not_called()
+        record_revision(db, _row(version=1), kind="created", actor_user_id="u1", at=_STAMP)
         (revision,) = _added_revisions(db)
-        assert revision.at is None  # unset: the INSERT applies now(), the row's created_at
+        assert revision.at == _STAMP  # the writer's stamp, never the column default
         assert revision.prior == {}
 
 
@@ -456,7 +460,8 @@ async def test_remember_logs_created_at_version_one(remember_service, mock_db) -
     assert (revision.memory_id, revision.kind, revision.version) == (created.id, "created", 1)
     assert revision.context_id == remember_service._ctx.id
     assert revision.actor_user_id == "u1"
-    assert revision.at is None  # the INSERT's now(): the row's created_at
+    # #2135: the server clock stamps the row and the event alike
+    assert revision.at is not None and revision.at == created.created_at
 
 
 @pytest.mark.asyncio
@@ -475,6 +480,10 @@ async def test_remember_many_logs_one_created_row_per_item(remember_service, moc
     revisions = _added_revisions(mock_db)
     assert [r.kind for r in revisions] == ["created", "created"]
     assert [r.memory_id for r in revisions] == [r.memory_id for r in results]
+    # #2135: each item carries its own row's stamp, in write order
+    created = [c.args[0] for c in remember_service.memory_repo.create.await_args_list]
+    assert [r.at for r in revisions] == [m.created_at for m in created]
+    assert revisions[0].at is not None and revisions[0].at <= revisions[1].at
 
 
 @pytest.mark.asyncio

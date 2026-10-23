@@ -91,8 +91,10 @@ _REACHABLE_UNTIL: dict[tuple[str, str], float] = {}
 
 
 def _reachability_key(base_url: str, api_key: str | None) -> tuple[str, str]:
+    # #2064: the LLM path strips a trailing slash and the embedding path passes
+    # the setting as written; one server must map to one entry either way.
     fingerprint = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
-    return base_url, fingerprint
+    return base_url.rstrip("/"), fingerprint
 
 
 async def ensure_self_hosted_reachable(
@@ -118,7 +120,12 @@ async def ensure_self_hosted_reachable(
     if _REACHABLE_UNTIL.get(key, 0.0) > time.monotonic():
         return
     await verify_self_hosted_reachable(base_url, api_key, label=label)
-    _REACHABLE_UNTIL[key] = time.monotonic() + REACHABILITY_TTL_SECONDS
+    now = time.monotonic()
+    # #2064: the LLM path also caches workspace-configured base URLs, so drop
+    # expired entries on each store instead of letting the dict only grow.
+    for stale in [k for k, until in _REACHABLE_UNTIL.items() if until <= now]:
+        del _REACHABLE_UNTIL[stale]
+    _REACHABLE_UNTIL[key] = now + REACHABILITY_TTL_SECONDS
 
 
 def clear_self_hosted_reachability_cache() -> None:
@@ -167,6 +174,7 @@ class SelfHostedProvider(LLMProvider):
             api_key=self._api_key or _PLACEHOLDER_API_KEY,
             timeout=settings.self_hosted_llm_timeout_seconds,
         )
+        # Set after this instance's first successful probe (#2064).
         self._verified = False
         # #1569: some OpenAI-compatible servers reject ``response_format``
         # (HTTP 400). Once seen, later calls skip it and rely on the prompt +
@@ -178,16 +186,24 @@ class SelfHostedProvider(LLMProvider):
         return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     async def _verify(self) -> None:
-        """Health-check the backend once per instance via ``GET /v1/models``.
+        """Health-check the backend via ``GET /v1/models`` before first use.
 
         ``/v1/models`` is the OpenAI-compatible listing endpoint served by
         both Ollama and vLLM, so it is a portable liveness probe (unlike the
         bare root ``GET /`` that only Ollama answers with HTTP 200).
+
+        #2064: the probe goes through ``ensure_self_hosted_reachable``, the
+        process-wide cache the embedding path uses (#2049), so a provider
+        built per request or per task reuses a recent successful probe (keyed
+        by base URL and key); a failure is never remembered. Once this
+        instance has seen a success it does not probe again: a long-lived
+        provider (the one ``LLMService`` keeps) must not put a 5 s probe on
+        every call after the TTL, where a slow ``/v1/models`` would fail a
+        chat request that would have gone through.
         """
         if self._verified:
             return
-
-        await verify_self_hosted_reachable(self._base_url, self._api_key, label="LLM backend")
+        await ensure_self_hosted_reachable(self._base_url, self._api_key, label="LLM backend")
         self._verified = True
 
     async def complete_json(

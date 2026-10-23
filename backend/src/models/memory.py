@@ -727,6 +727,8 @@ class MemoryRevision(Base):
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     # Same width and charset as memory_access_events.session_id.
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Always stamped by the writer with ``utcnow()`` (#2135); the default only
+    # covers raw INSERTs.
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     # #2044: the ``memory_session_rollbacks.id`` that handled this event —
     # reversed it or skipped it (the summary names the cause); an item that

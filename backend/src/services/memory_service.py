@@ -978,7 +978,11 @@ class MemoryService:
             await self.memory_repo.create(prepared.memory)
             # #2043: the created event commits with the row.
             record_revision(
-                self.db, prepared.memory, kind=REVISION_KIND_CREATED, actor_user_id=user_id
+                self.db,
+                prepared.memory,
+                kind=REVISION_KIND_CREATED,
+                actor_user_id=user_id,
+                at=prepared.memory.created_at,
             )
             await self.db.commit()
             return await self._finish_remember(prepared)
@@ -1202,6 +1206,10 @@ class MemoryService:
             # #2043: explicit, so the version is known before the INSERT applies
             # the column default (the created revision and the response read it).
             version=1,
+            # #2135: the created event and the row share one stamp from the
+            # server clock; memory_repo.create refreshes the row, so the value
+            # round-trips unchanged.
+            created_at=utcnow(),
         )
         # #2044: the writer's agent / session go into the INSERT itself (the
         # created revision reads the same values and leaves the row clean).
@@ -1398,7 +1406,11 @@ class MemoryService:
                     )
                     await self.memory_repo.create(item.memory)
                     record_revision(  # #2043: in the batch's one transaction
-                        self.db, item.memory, kind=REVISION_KIND_CREATED, actor_user_id=user_id
+                        self.db,
+                        item.memory,
+                        kind=REVISION_KIND_CREATED,
+                        actor_user_id=user_id,
+                        at=item.memory.created_at,
                     )
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc

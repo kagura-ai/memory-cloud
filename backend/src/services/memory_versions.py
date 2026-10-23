@@ -129,7 +129,7 @@ def revision_values(
     version: int,
     kind: str,
     actor_user_id: str,
-    at: datetime | None = None,
+    at: datetime,
     prior: dict[str, Any] | None = None,
     writer: str = REVISION_WRITER_API,
     provenance: WriteProvenance | None = None,
@@ -138,8 +138,9 @@ def revision_values(
     per-row writer (``record_revision``) and the bulk forget INSERT use, so a
     column added here (#2044's provenance) reaches every write path.
 
-    ``at`` is left out when None, so the column default applies.
-    ``provenance`` defaults to the current request's (#2044).
+    ``at`` is required: the writer's ``utcnow()`` stamp (#2135, see
+    ``record_revision``). ``provenance`` defaults to the current request's
+    (#2044).
     """
     prov = provenance if provenance is not None else current_provenance()
     values: dict[str, Any] = {
@@ -152,9 +153,8 @@ def revision_values(
         "actor_user_id": actor_user_id,
         "agent_id": prov.agent_id,
         "session_id": prov.session_id,
+        "at": at,
     }
-    if at is not None:
-        values["at"] = at
     return values
 
 
@@ -184,18 +184,21 @@ def record_revision(
     *,
     kind: str,
     actor_user_id: str,
-    at: datetime | None = None,
+    at: datetime,
     prior: dict[str, Any] | None = None,
     writer: str = REVISION_WRITER_API,
     provenance: WriteProvenance | None = None,
 ) -> None:
     """Add one revision row for ``memory`` at its current version.
 
-    ``at`` is the timestamp the write stamped on the row (``updated_at`` /
-    ``deleted_at``), so the log and the row agree; omitted, the column's
-    ``now()`` default applies (the transaction time, which is what a new
-    row's ``created_at`` holds). The row's ``agent_id`` / ``session_id`` are
-    the writer's (#2044), which also become the memory's last writer.
+    ``at`` is the timestamp the write stamped on the row (``created_at`` /
+    ``updated_at`` / ``deleted_at``), always the server's ``utcnow()``
+    (#2135), so the log, the row, ``changes_since`` and the rollback window
+    (``since <= at < until``, #2121) read one clock. It is required: the
+    column's ``now()`` default is a safety net for raw INSERTs, not a clock
+    the app uses. Replicas are expected to share NTP time, as they already
+    do for ``updated_at``. The row's ``agent_id`` / ``session_id`` are the
+    writer's (#2044), which also become the memory's last writer.
 
     A legacy row without a context gets no revision and no writer stamp:
     the column is NOT NULL and no context-scoped read can reach such a row.
@@ -205,7 +208,7 @@ def record_revision(
         memory: The row the event is about, at its post-event version.
         kind: One of ``REVISION_KINDS``.
         actor_user_id: The caller who wrote the event.
-        at: The event time, or None for the database default.
+        at: The event time: the row's stamp, from ``utcnow()``.
         prior: ``changed_prior`` of an ``updated`` event; empty otherwise.
         writer: One of ``REVISION_WRITERS``.
         provenance: The writer's agent and session; None reads the current
