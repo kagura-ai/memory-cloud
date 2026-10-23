@@ -292,18 +292,20 @@ def test_an_audited_read_stays_read_only():
     assert _hints("secret_get")["readOnlyHint"] is True
 
 
-def test_only_the_chat_connector_is_open_world():
+def test_open_world_tools_reach_or_open_to_outside_parties():
+    """setup_connector reads a chat platform; update_context can publish a context
+    (is_public) or open it to outside writers (resource_id), and setup_resource
+    creates a public context with a token for them (#2290)."""
     open_world = sorted(
         tool["name"] for tool in get_tool_definitions() if tool["annotations"]["openWorldHint"]
     )
-    assert open_world == ["setup_connector"]
+    assert open_world == ["setup_connector", "setup_resource", "update_context"]
 
 
 def test_update_context_resource_id_reads_as_inbound():
     """resource_id names Kagura's own ingestion endpoint; "external ingestion"
     read to an automated scan as an outbound call on a closed-world tool (#2279)."""
     tool = _by_name()["update_context"]
-    assert tool["annotations"]["openWorldHint"] is False
     text = tool["inputSchema"]["properties"]["resource_id"]["description"]
     assert "Kagura's own ingestion API" in text
     assert "makes no outbound call" in text

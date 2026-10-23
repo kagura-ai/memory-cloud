@@ -24,8 +24,11 @@ destructive. ``idempotentHint`` is true only when repeating the call with the
 same arguments changes nothing further (set-to-value updates, deleting a named
 target); creates that mint new ids or tokens are not, and neither is a call that
 restarts a relative expiry. ``openWorldHint`` is true when a tool connects this
-server to an outside system (``setup_connector``, a third-party chat platform).
-The model providers the server calls to process data it already holds
+server to an outside system (``setup_connector``, a third-party chat platform) or
+opens a context to parties outside the caller's workspace: published to anyone
+through the public API (``update_context`` ``is_public``) or written by outside
+systems through a resource token (``update_context`` ``resource_id``,
+``setup_resource``) (#2290). The model providers the server calls to process data it already holds
 (embedding, reranking, analysis labelling) do not make a tool open-world.
 
 These are hints for a client's confirmation UI, and a client is free to ignore
@@ -68,9 +71,11 @@ def _additive(title: str, *, idempotent: bool = False, open_world: bool = False)
     )
 
 
-def _destructive(title: str, *, idempotent: bool) -> dict[str, Any]:
+def _destructive(title: str, *, idempotent: bool, open_world: bool = False) -> dict[str, Any]:
     """Can remove or overwrite existing data, on some argument branch at least."""
-    return _hints(title, read_only=False, destructive=True, idempotent=idempotent, open_world=False)
+    return _hints(
+        title, read_only=False, destructive=True, idempotent=idempotent, open_world=open_world
+    )
 
 
 # Registry order. ``tests/mcp_server/test_tool_annotations.py`` requires exactly
@@ -103,7 +108,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "list_contexts": _read("List Contexts"),
     "list_tags": _read("List Tags"),
     "create_context": _additive("Create Context"),
-    "update_context": _destructive("Update Context", idempotent=True),
+    # is_public publishes the context; resource_id opens it to outside writers.
+    "update_context": _destructive("Update Context", idempotent=True, open_world=True),
     "delete_context": _destructive("Delete Context", idempotent=True),
     # Copies again on every call; delete_source=true soft-deletes the source.
     "merge_contexts": _destructive("Merge Contexts", idempotent=False),
@@ -116,7 +122,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     # #2044: a repeat continues an unfinished rollback (cap, failed items),
     # so it can change more; a finished one is refused.
     "rollback_session": _destructive("Roll Back Session", idempotent=False),
-    "setup_resource": _additive("Set Up Resource"),
+    # Creates a public context and a token for an outside system to write with.
+    "setup_resource": _additive("Set Up Resource", open_world=True),
     # Stores a chat platform's OAuth tokens for a connector that reads from it.
     "setup_connector": _additive("Set Up Connector", open_world=True),
     "ingest_events": _destructive("Ingest Resource Events", idempotent=False),
