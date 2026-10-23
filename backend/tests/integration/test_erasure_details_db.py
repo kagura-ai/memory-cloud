@@ -165,6 +165,7 @@ async def _erase_memories(session: AsyncSession, subject: str) -> tuple[str, Res
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
         pseudonym = service._pseudonym(subject)
         await lock_subject_memories(session, subject)
+        await service._delete_subject_tombstones(subject)
         report = await restore_editor_details(session, subject, actor=pseudonym)
         await service._erase_session_provenance(subject)
         await service._erase_memory_revisions(subject)
@@ -353,6 +354,73 @@ async def test_a_tombstone_is_restored_without_a_payload_call(
         assert live.deleted_at is not None
         assert (await _log(session, memory.id))[-1][1:4] == (3, "erasure", pseudonym)
     sync.assert_not_awaited()
+
+
+async def test_the_subjects_tombstones_leave_before_the_strip(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2263: the subject's own tombstone is hard-deleted right after the
+    memory lock, so the strip and the scrub mark never lock or count its
+    revision rows (the FK cascade takes them). The counts are exactly those
+    of the same scenario without the tombstone: one stripped row on the
+    subject's live memory, one on a tombstone the subject only edited (kept,
+    stripped as before), one scrub mark. Rows of no memory in scope change."""
+    subject, author, third = world["subject"], world["author"], world["third"]
+    tombstone = _memory(world, subject, SUBJECTS, 3, deleted=True)
+    live = _memory(world, subject, SUBJECTS, 2)
+    edited = _memory(world, author, {"by": "third"}, 3, deleted=True)
+    in_scope = [tombstone.id, live.id, edited.id]
+    strips: list[StripCounts] = []
+
+    async def strip(*args: Any, **kwargs: Any) -> StripCounts:
+        strips.append(await strip_subject_details(*args, **kwargs))
+        return strips[-1]
+
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [tombstone, live, edited],
+            [
+                _edit(world, tombstone, 2, third, {"details": CREATION}),
+                _edit(world, tombstone, 3, author, {"details": AUTHORS}),
+                _edit(world, live, 2, third, {"details": CREATION}),
+                _edit(world, edited, 2, subject, {"details": AUTHORS}),
+                _edit(world, edited, 3, third, {"details": SUBJECTS}),
+            ],
+        )
+        revisions_before = await _snapshot(session, _REVISIONS_OUTSIDE, in_scope)
+        memories_before = await _snapshot(session, _MEMORIES_OUTSIDE, in_scope)
+        await session.commit()
+
+        service = _service(session)
+        with (
+            patch(_QDRANT, AsyncMock()),
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch("services.account_erasure_service.strip_subject_details", new=strip),
+        ):
+            pseudonym = service._pseudonym(subject)
+            await lock_subject_memories(session, subject)
+            assert await service._delete_subject_tombstones(subject) == 1
+            await restore_editor_details(session, subject, actor=pseudonym)
+            await service._erase_session_provenance(subject)
+            counts = await service._erase_memory_revisions(subject)
+            assert await service._scrub_surviving_memories(subject) == 1  # ``live``
+        await session.commit()
+
+        assert strips == [StripCounts(details_stripped=2, scrub_marked=1)]
+        assert counts["revision_details_stripped"] == 2
+        remaining = (
+            await session.execute(select(Memory.id).where(Memory.id.in_(in_scope)))
+        ).scalars()
+        assert set(remaining) == {live.id, edited.id}
+        assert await _log(session, tombstone.id, live.id, edited.id) == [
+            (live.id, 2, "api", third, {"erased": ["details"], "scrubbed": ["details"]}, None),
+            (edited.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
+            (edited.id, 3, "api", third, {"erased": ["details"]}, None),
+        ]
+        assert (await _live(session, edited.id)).details == {"by": "third"}
+        assert await _snapshot(session, _REVISIONS_OUTSIDE, in_scope) == revisions_before
+        assert await _snapshot(session, _MEMORIES_OUTSIDE, in_scope) == memories_before
 
 
 async def test_a_payload_failure_raises_and_postgres_rolls_back(

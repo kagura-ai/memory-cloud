@@ -84,6 +84,7 @@ from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     completed_pseudonyms,
     lock_subject_memories,
+    locked_ids,
     pseudonymize_revision_actor,
     restore_editor_details,
     strip_subject_details,
@@ -1297,15 +1298,19 @@ class AccountErasureService:
         # trigger_from/until) derived from it. Runs AFTER the workspace
         # cascade so the count reflects only survivors.
         # #2043: the revision log of surviving memories. BEFORE the memory
-        # scrub: it still finds the subject's memories by their raw user_id,
-        # and the subject's tombstones (hard-deleted there) take their
-        # revisions with them through the FK cascade either way.
+        # scrub: it still finds the subject's memories by their raw user_id.
+        # The subject's tombstones are hard-deleted before it (#2263) and
+        # take their revisions with them through the FK cascade.
         # #2044: BEFORE the revision scrub, which NULLs the subject's session
         # ids that this one matches memories' last-writer sessions against.
         # #2242: lock the subject's memories in id order first, before any of
         # the memories / memory_revisions UPDATEs below, so edits, session
         # rollbacks and other erasures queue on them instead of deadlocking.
         await lock_subject_memories(self.db, user_id)
+        # #2263: the subject's tombstones go before any revision statement, so
+        # the details strip below never locks, rewrites or counts rows the FK
+        # cascade removes with them.
+        counts["memory_tombstones_deleted"] = await self._delete_subject_tombstones(user_id)
         # #2244: where the subject wrote the live details of a memory another
         # member authored, put back the last value someone else wrote. FIRST
         # among the memory steps: it finds the subject's edits by the raw
@@ -1495,11 +1500,19 @@ class AccountErasureService:
             MemoryRevision.actor_user_id == user_id,
             MemoryRevision.session_id.is_not(None),
         )
+        # #2263: in id order, like every multi-row write over ``memories`` here
+        # (these rows are the subject's, already held: the re-lock is free)
         memories = cast(
             CursorResult[Any],
             await self.db.execute(
                 update(Memory)
-                .where(tuple_(Memory.id, Memory.session_id).in_(subject_sessions))
+                .where(
+                    Memory.id.in_(
+                        locked_ids(
+                            Memory, lambda m: (tuple_(m.id, m.session_id).in_(subject_sessions),)
+                        )
+                    )
+                )
                 .values(session_id=None)
                 .execution_options(synchronize_session=False)
             ),
@@ -1568,6 +1581,37 @@ class AccountErasureService:
             "revision_details_stripped": stripped.details_stripped,
         }
 
+    async def _delete_subject_tombstones(self, user_id: str) -> int:
+        """Hard-delete the erased subject's tombstoned memories (#1336, #2263).
+
+        They are invisible to every member already and their Qdrant points
+        were removed in step 1 (``delete_user_points``), so a hard DELETE
+        beats scrubbing — a pseudonymized tombstone would be unpurgeable
+        forever (no sleep run ever executes for the pseudonym, so no
+        retention window matches it). Their revisions go with them (FK
+        cascade). Runs right after ``lock_subject_memories``, before any
+        revision statement, so the details strip never locks, rewrites or
+        counts rows about to be deleted. The rows are the subject's, already
+        held; the id-ordered lock keeps every multi-row write here in one
+        order.
+
+        Returns:
+            How many tombstones were deleted.
+        """
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                delete(Memory).where(
+                    Memory.id.in_(
+                        locked_ids(
+                            Memory, lambda m: (m.user_id == user_id, m.deleted_at.is_not(None))
+                        )
+                    )
+                )
+            ),
+        )
+        return result.rowcount or 0
+
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).
 
@@ -1576,32 +1620,32 @@ class AccountErasureService:
         compliance, the sub is unrecoverable) and ``details`` is NULLed —
         the memory text remains workspace content, but structured personal
         payload (coordinates, triggers, arbitrary detail keys) is removed
-        at rest. Tombstoned rows of the subject are HARD-DELETED first (not
-        scrubbed): their points are already gone and a pseudonymized
-        tombstone would be unpurgeable by any retention run.
+        at rest. The subject's tombstones are gone already
+        (``_delete_subject_tombstones``).
+
+        Every statement locks its rows in id order (#2263). The authored rows
+        are held since ``lock_subject_memories``; the ``deleted_by`` rows are
+        other members' memories and contexts, outside that scope.
         """
-        # Tombstoned rows first: they are invisible to every member already
-        # and their Qdrant points were removed in step 1 (delete_user_points),
-        # so hard-DELETE beats scrubbing — a pseudonymized tombstone would be
-        # unpurgeable forever (no sleep run ever executes for the pseudonym,
-        # so no retention window matches it).
-        await self.db.execute(
-            delete(Memory).where(Memory.user_id == user_id, Memory.deleted_at.is_not(None))
-        )
-        scrubbed = await self._pseudonymize_field(
-            Memory, Memory.user_id, user_id, extra_values={"details": None}
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(Memory)
+                .where(Memory.id.in_(locked_ids(Memory, lambda m: (m.user_id == user_id,))))
+                .values(user_id=self._pseudonym(user_id), details=None)
+            ),
         )
         # The subject's raw sub also survives in OTHER rows' deleted_by
         # (forget()/context-delete stamp the actor) and contexts.deleted_by.
         # Clear to NULL — the member-removal precedent
         # (member_credentials_service) — so no raw sub outlives erasure.
-        await self.db.execute(
-            update(Memory).where(Memory.deleted_by == user_id).values(deleted_by=None)
-        )
-        await self.db.execute(
-            update(Context).where(Context.deleted_by == user_id).values(deleted_by=None)
-        )
-        return scrubbed
+        for model in (Memory, Context):
+            await self.db.execute(
+                update(model)
+                .where(model.id.in_(locked_ids(model, lambda m: (m.deleted_by == user_id,))))
+                .values(deleted_by=None)
+            )
+        return result.rowcount or 0
 
     async def _pseudonymize_field(
         self,

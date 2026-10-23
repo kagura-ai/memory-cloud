@@ -1147,15 +1147,34 @@ class TestRestoreEditorDetailsWiring:
             order.append("revisions")
             return {"memory_revisions_pseudonymized": 4, "revision_details_stripped": 3}
 
+        async def _lock(_db, _user_id):
+            order.append("lock")
+
+        async def _tombstones(_user_id):
+            order.append("tombstones")
+            return 2
+
         svc._erase_session_provenance = AsyncMock(side_effect=_provenance)
         svc._erase_memory_revisions = AsyncMock(side_effect=_revisions)
+        svc._delete_subject_tombstones = AsyncMock(side_effect=_tombstones)
         target = _user(user_id="raw-sub")
 
-        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        with (
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch(
+                "services.account_erasure_service.lock_subject_memories",
+                new=AsyncMock(side_effect=_lock),
+            ),
+        ):
             counts = await svc._delete_postgres(target)
             pseudonym = svc._pseudonym("raw-sub")
 
-        assert order == ["restore", "provenance", "revisions"]
+        # #2263: the subject's tombstones go right after the memory lock, so
+        # no revision statement below meets their rows (the FK cascade takes
+        # their revisions)
+        assert order == ["lock", "tombstones", "restore", "provenance", "revisions"]
+        svc._delete_subject_tombstones.assert_awaited_once_with("raw-sub")
+        assert counts["memory_tombstones_deleted"] == 2
         restore_details.assert_awaited_once_with(
             svc.db, "raw-sub", actor=pseudonym, erased_actors=frozenset()
         )

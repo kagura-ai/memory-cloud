@@ -16,8 +16,26 @@ import pytest
 from services.account_erasure_service import AccountErasureService
 
 
+def _memories_locked_in_id_order(table: str, sql: str) -> str:
+    """#2263: the statement over ``table`` reaches its rows only through an
+    id-ordered ``FOR UPDATE`` subquery over an alias, and waits on a held row
+    (never skips one). Returns the subquery's WHERE clause."""
+    flat = " ".join(sql.split())
+    match = re.search(
+        rf"WHERE {table}\.id IN \(SELECT {table}_1\.id FROM {table} AS {table}_1 "
+        rf"WHERE (.+) ORDER BY {table}_1\.id FOR UPDATE\)$",
+        flat,
+    )
+    assert match, sql
+    assert "SKIP LOCKED" not in sql
+    assert "NOWAIT" not in sql
+    return match.group(1)
+
+
 @pytest.mark.asyncio
 async def test_scrub_surviving_memories_pseudonymizes_and_nulls_details() -> None:
+    from sqlalchemy.dialects import postgresql
+
     db = MagicMock()
     cursor = MagicMock()
     cursor.rowcount = 4
@@ -28,26 +46,125 @@ async def test_scrub_surviving_memories_pseudonymizes_and_nulls_details() -> Non
 
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
         count = await service._scrub_surviving_memories("google-oauth2|erased")
+        pseudonym = service._pseudonym("google-oauth2|erased")
 
     assert count == 4
-    statements = [c.args[0] for c in db.execute.await_args_list]
-    sqls = [str(stmt) for stmt in statements]
-    # 1) Tombstones hard-deleted (points already gone via delete_user_points;
-    #    a pseudonymized tombstone would be unpurgeable by any retention run).
-    assert any("DELETE FROM memories" in q and "deleted_at IS NOT NULL" in q for q in sqls)
-    # 2) Survivors: user_id pseudonymized + details NULLed in one UPDATE.
-    scrub = next(
-        stmt
-        for stmt, q in zip(statements, sqls, strict=True)
-        if "UPDATE memories" in q and "details" in q
+    # #2263: the tombstones are hard-deleted earlier (``_delete_subject_tombstones``)
+    scrub, memories_deleted_by, contexts_deleted_by = (
+        c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
     )
-    compiled = scrub.compile()
-    assert compiled.params["details"] is None
-    assert compiled.params["user_id"] != "google-oauth2|erased"
-    # 3) The raw sub is cleared from OTHER rows' deleted_by (memories and
-    #    contexts) — no raw sub outlives erasure anywhere.
-    assert any("UPDATE memories" in q and "deleted_by" in q for q in sqls)
-    assert any("UPDATE contexts" in q and "deleted_by" in q for q in sqls)
+    # 1) Survivors: user_id pseudonymized + details NULLed in one UPDATE,
+    #    over the subject's authored rows (raw sub), locked in id order.
+    assert str(scrub).startswith("UPDATE memories SET ")
+    assert scrub.params["details"] is None
+    assert scrub.params["user_id"] == pseudonym != "google-oauth2|erased"
+    assert _memories_locked_in_id_order("memories", str(scrub)) == (
+        "memories_1.user_id = %(user_id_1)s::VARCHAR"
+    )
+    assert scrub.params["user_id_1"] == "google-oauth2|erased"
+    # 2) The raw sub is cleared from OTHER rows' deleted_by (memories and
+    #    contexts) — no raw sub outlives erasure anywhere. Those rows are
+    #    outside the subject's memory locks, so each UPDATE takes its own in
+    #    id order (#2263); the parameter is the raw sub, never the pseudonym.
+    for table, compiled in (
+        ("memories", memories_deleted_by),
+        ("contexts", contexts_deleted_by),
+    ):
+        # (``contexts`` also gets its ``updated_at`` onupdate stamp)
+        assert re.match(rf"UPDATE {table} SET (updated_at=now\(\), )?deleted_by=", str(compiled))
+        assert _memories_locked_in_id_order(table, str(compiled)) == (
+            f"{table}_1.deleted_by = %(deleted_by_1)s::VARCHAR"
+        )
+        assert compiled.params == {"deleted_by": None, "deleted_by_1": "google-oauth2|erased"}
+
+
+@pytest.mark.asyncio
+async def test_delete_subject_tombstones_locks_in_id_order() -> None:
+    """#2263: the subject's tombstones go in one DELETE, scoped to the raw
+    sub's tombstoned rows and locked in id order; it returns the rowcount."""
+    from sqlalchemy.dialects import postgresql
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=2))
+    service = AccountErasureService.__new__(AccountErasureService)
+    service.db = db
+
+    assert await service._delete_subject_tombstones("google-oauth2|erased") == 2
+
+    (statement,) = (c.args[0] for c in db.execute.await_args_list)
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert str(compiled).startswith("DELETE FROM memories WHERE memories.id IN (SELECT")
+    assert _memories_locked_in_id_order("memories", str(compiled)) == (
+        "memories_1.user_id = %(user_id_1)s::VARCHAR AND memories_1.deleted_at IS NOT NULL"
+    )
+    assert compiled.params == {"user_id_1": "google-oauth2|erased"}
+
+
+@pytest.mark.asyncio
+async def test_session_provenance_locks_memories_in_id_order() -> None:
+    """#2263: the ``memories.session_id`` scrub matches the subject's own
+    (memory, session) pairs and locks the rows in id order."""
+    from sqlalchemy.dialects import postgresql
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+    service = AccountErasureService.__new__(AccountErasureService)
+    service.db = db
+
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        counts = await service._erase_session_provenance("google-oauth2|erased")
+
+    assert counts == {"memory_sessions_scrubbed": 1, "session_rollbacks_pseudonymized": 2}
+    memories = db.execute.await_args_list[0].args[0]
+    assert memories.get_execution_options()["synchronize_session"] is False
+    compiled = memories.compile(dialect=postgresql.dialect())
+    assert str(compiled).startswith("UPDATE memories SET session_id=")
+    assert _memories_locked_in_id_order("memories", str(compiled)) == (
+        "(memories_1.id, memories_1.session_id) IN (SELECT memory_revisions.memory_id, "
+        "memory_revisions.session_id FROM memory_revisions "
+        "WHERE memory_revisions.actor_user_id = %(actor_user_id_1)s::VARCHAR "
+        "AND memory_revisions.session_id IS NOT NULL)"
+    )
+    assert compiled.params == {"session_id": None, "actor_user_id_1": "google-oauth2|erased"}
+
+
+def test_revision_changed_field_is_the_one_helper() -> None:
+    """#2263: ``revision_edited_details`` and the type read share one test —
+    the prior still holds the field, or erasure listed it as erased; the
+    version rebuild form adds the scrubbed marker."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from models.memory import MemoryRevision
+    from services.erasure_details import revision_edited_details
+    from services.memory_versions import revision_changed_field
+
+    def render(expr: object) -> tuple[str, dict]:
+        compiled = expr.compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+        return " ".join(str(compiled).split()), compiled.params
+
+    row = aliased(MemoryRevision)
+    assert render(revision_edited_details(row)) == render(revision_changed_field(row, "details"))
+    sql, params = render(revision_changed_field(row, "details"))
+    assert sql == (
+        "(memory_revisions_1.prior ? %(prior_1)s::VARCHAR) OR "
+        "(memory_revisions_1.prior[%(prior_2)s::TEXT] ? %(param_1)s::VARCHAR)"
+    )
+    assert params == {"prior_1": "details", "prior_2": "erased", "param_1": "details"}
+
+    sql, params = render(revision_changed_field(MemoryRevision, "type", scrubbed=True))
+    assert sql == (
+        "(memory_revisions.prior ? %(prior_1)s::VARCHAR) OR "
+        "(memory_revisions.prior[%(prior_2)s::TEXT] ? %(param_1)s::VARCHAR) OR "
+        "(memory_revisions.prior[%(prior_3)s::TEXT] ? %(param_2)s::VARCHAR)"
+    )
+    assert params == {
+        "prior_1": "type",
+        "prior_2": "erased",
+        "param_1": "type",
+        "prior_3": "scrubbed",
+        "param_2": "type",
+    }
 
 
 _LOCKED_IN_ID_ORDER = re.compile(

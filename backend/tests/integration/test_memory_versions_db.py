@@ -47,6 +47,7 @@ from services.erasure_details import (
     subject_memory_ids,
 )
 from services.memory_service import MemoryService
+from utils.datetime import utcnow
 from utils.exceptions import VersionConflictError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -722,6 +723,135 @@ async def test_revision_updates_lock_in_id_order(
                 (authored, 2, other, {"erased": ["details"], "scrubbed": ["details"]}),
                 (authored, 3, other, {"erased": ["details"], "scrubbed": ["details"]}),
             ]
+
+
+_MEMORIES_BUT = text(
+    "SELECT t.id, to_jsonb(t) FROM memories AS t WHERE NOT (t.id = ANY(:excluded))"
+)
+_CONTEXTS_BUT = text(
+    "SELECT t.id, to_jsonb(t) FROM contexts AS t WHERE NOT (t.id = ANY(:excluded))"
+)
+# a cleared row, apart from the cleared column (and the ORM's onupdate stamp)
+_CLEARED_MEMORIES = text(
+    "SELECT t.id, to_jsonb(t) - 'deleted_by' - 'updated_at' FROM memories AS t "
+    "WHERE t.id = ANY(:ids)"
+)
+_CLEARED_CONTEXTS = text(
+    "SELECT t.id, to_jsonb(t) - 'deleted_by' - 'updated_at' FROM contexts AS t "
+    "WHERE t.id = ANY(:ids)"
+)
+
+
+async def _rows(session: AsyncSession, query: Any, ids: list[uuid.UUID]) -> dict[Any, Any]:
+    return {r[0]: r[1] for r in (await session.execute(query, {"excluded": ids, "ids": ids})).all()}
+
+
+async def test_deleted_by_clear_locks_in_id_order(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2263: the ``deleted_by`` clear locks its rows in ascending id and waits.
+
+    Two tombstones of another member's memories carry the subject as
+    ``deleted_by`` — rows outside the subject's memory locks. The higher id
+    sits physically first, so a heap scan reaches it first. Another session
+    holds the higher id; the scrub must block on it while already holding the
+    lower one, which it can only have locked first in id order. Afterwards
+    both lose ``deleted_by`` and nothing else; a tombstone another member
+    deleted, every other memory and context, are byte-identical — and so is a
+    context the subject deleted, apart from ``deleted_by``.
+    """
+    subject, other = seeded["owner"], "other-member"
+    ws, ctx = seeded["workspace_id"], seeded["context_id"]
+    low, high = sorted((uuid.uuid4(), uuid.uuid4()))
+    unrelated = uuid.uuid4()
+    deleted_ctx, other_ctx = uuid.uuid4(), uuid.uuid4()
+    async with _maker(async_engine)() as session:
+        for memory_id, deleted_by in ((high, subject), (low, subject), (unrelated, other)):
+            session.add(
+                Memory(
+                    id=memory_id,
+                    user_id=other,
+                    workspace_id=ws,
+                    context_id=ctx,
+                    summary="another member's tombstone",
+                    content="body",
+                    type="note",
+                    client="test",
+                    details={"k": str(memory_id)},
+                    deleted_at=utcnow(),
+                    deleted_by=deleted_by,
+                )
+            )
+            await session.flush()  # one at a time: ``high`` first in the heap
+        for context_id, deleted_by in ((deleted_ctx, subject), (other_ctx, other)):
+            session.add(
+                Context(
+                    id=context_id,
+                    workspace_id=ws,
+                    name=f"deleted-{context_id.hex[:6]}",
+                    created_by=other,
+                    deleted_at=utcnow(),
+                    deleted_by=deleted_by,
+                )
+            )
+        await session.commit()
+        cleared = [low, high]
+        memories_before = await _rows(session, _MEMORIES_BUT, [*cleared, seeded["memory_id"]])
+        contexts_before = await _rows(session, _CONTEXTS_BUT, [deleted_ctx])
+        cleared_before = await _rows(session, _CLEARED_MEMORIES, cleared)
+        ctx_before = await _rows(session, _CLEARED_CONTEXTS, [deleted_ctx])
+        await session.commit()
+
+    factory = _maker(async_engine)
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        async with factory() as holder, factory() as writer, factory() as probe:
+            holder_pid, writer_pid = await _pid(holder), await _pid(writer)
+            await holder.execute(
+                text("SELECT id FROM memories WHERE id = :id FOR UPDATE"), {"id": high}
+            )
+            scrub = asyncio.create_task(_erasure_service(writer)._scrub_surviving_memories(subject))
+            held: DBAPIError | None = None
+            try:
+                await _wait_until_blocked(probe, writer_pid, holder_pid)
+                try:
+                    await probe.execute(
+                        text("SELECT id FROM memories WHERE id = :id FOR UPDATE NOWAIT"),
+                        {"id": low},
+                    )
+                except DBAPIError as exc:
+                    held = exc
+                await probe.rollback()
+                blocked = not scrub.done()
+            finally:
+                await holder.commit()
+                scrubbed = await asyncio.wait_for(scrub, _TIMEOUT)
+            await writer.commit()
+            assert blocked
+            assert held is not None
+            assert getattr(held.orig, "sqlstate", None) == "55P03"  # lock_not_available
+            assert scrubbed == 1  # the subject's own memory (the fixture's)
+
+    async with _maker(async_engine)() as session:
+        deleted_by = dict(
+            (
+                await session.execute(
+                    select(Memory.id, Memory.deleted_by).where(
+                        Memory.id.in_([low, high, unrelated])
+                    )
+                )
+            ).all()
+        )
+        assert deleted_by == {low: None, high: None, unrelated: other}
+        assert await _rows(session, _CLEARED_MEMORIES, cleared) == cleared_before
+        assert all(row["deleted_at"] is not None for row in cleared_before.values())
+        assert (
+            await session.scalar(select(Context.deleted_by).where(Context.id == deleted_ctx))
+        ) is None
+        assert await _rows(session, _CLEARED_CONTEXTS, [deleted_ctx]) == ctx_before
+        assert (
+            await _rows(session, _MEMORIES_BUT, [*cleared, seeded["memory_id"]]) == memories_before
+        )
+        assert await _rows(session, _CONTEXTS_BUT, [deleted_ctx]) == contexts_before
 
 
 async def test_an_edit_waits_for_the_erasure_and_copies_the_scrubbed_details(

@@ -63,6 +63,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
+from models.auth import Context
 from models.erasure import STATUS_COMPLETE, ErasureRequest
 from models.memory import (
     REVISION_KIND_UPDATED,
@@ -76,6 +77,7 @@ from services.memory_versions import (
     PRIOR_RESTORED_FROM_KEY,
     PRIOR_SCRUBBED_KEY,
     record_revision,
+    revision_changed_field,
 )
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
@@ -136,13 +138,13 @@ class StripCounts:
 def revision_edited_details(
     row: AliasedClass[MemoryRevision] | type[MemoryRevision],
 ) -> ColumnElement[bool]:
-    """A revision that changed ``details``.
+    """A revision that changed ``details`` (``revision_changed_field``).
 
     Its prior still holds the overwritten ``details``, or an earlier erasure
     stripped it (the prior lists ``details`` under ``PRIOR_ERASED_KEY``): it
     changed details all the same (#2235).
     """
-    return or_(row.prior.has_key("details"), row.prior[PRIOR_ERASED_KEY].has_key("details"))
+    return revision_changed_field(row, "details")
 
 
 def subject_memory_ids(subject: str) -> CompoundSelect[UUID]:
@@ -250,6 +252,23 @@ def locked_revision_ids(
     free.
     """
     row = aliased(MemoryRevision)
+    return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()
+
+
+def locked_ids(
+    model: type[Memory] | type[Context],
+    predicate_on: Callable[[Any], Sequence[ColumnElement[bool]]],
+) -> Select[Any]:
+    """Ids of the ``model`` rows ``predicate_on`` matches, locked in id order.
+
+    The ``locked_revision_ids`` shape for ``memories`` and ``contexts``
+    (#2263): a multi-row UPDATE / DELETE that reaches its rows through it
+    locks them ascending, so it queues behind another ordered statement over
+    the same rows instead of deadlocking. ``predicate_on`` receives an alias
+    of ``model``. ``FOR UPDATE`` waits, never ``SKIP LOCKED`` / ``NOWAIT``:
+    an erasure that skipped a row would keep personal data in it.
+    """
+    row = aliased(model)
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()
 
 
