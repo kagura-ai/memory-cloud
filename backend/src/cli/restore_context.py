@@ -30,6 +30,14 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from cli._env_guard import require_settings  # noqa: E402
+
+if __name__ == "__main__":
+    # The services imported below build the settings on import
+    # (config.plan_tiers): run the production secret guard first, so a refused
+    # install gets the variables named instead of a traceback (#2264).
+    require_settings()
+
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402

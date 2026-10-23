@@ -18,9 +18,11 @@ codes/tokens. Two invariants keep the seam safe:
      (the flag or a stray ``OAUTH_*_URL``) is active while
      ``ENVIRONMENT=production``.
 
-All values are read live from ``os.environ`` on each call (the lookups are
-trivial), so tests can ``monkeypatch.setenv`` without fighting a cached
-``Settings`` singleton.
+The production decision comes from the cached ``Settings`` (``is_production``,
+#2264): the same source and normalization as the production secret guard and
+the cookie ``Secure`` flag. The override flag and the ``OAUTH_*_URL`` values
+have no ``Settings`` field — they are E2E-only knobs — and are still read live
+from ``os.environ`` on each call.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
+from config.settings import get_settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -59,8 +62,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _is_production() -> bool:
-    # Mirrors how pydantic-settings binds Settings.environment from ENVIRONMENT.
-    return os.environ.get("ENVIRONMENT", "development").strip().lower() == "production"
+    return get_settings().is_production
 
 
 def _overrides_enabled() -> bool:

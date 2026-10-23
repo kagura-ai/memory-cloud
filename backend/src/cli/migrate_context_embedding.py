@@ -47,6 +47,14 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from cli._env_guard import require_settings  # noqa: E402
+
+if __name__ == "__main__":
+    # The services imported below build the settings on import
+    # (config.plan_tiers): run the production secret guard first, so a refused
+    # install gets the variables named instead of a traceback (#2264).
+    require_settings()
+
 from config.constants import EMBEDDING_MODEL_REGISTRY  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from db.base import get_db  # noqa: E402
@@ -413,6 +421,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
 
 async def _main(args: argparse.Namespace) -> int:
+    require_settings()  # the production secret guard, before the database (#2264)
     worst = 0
     async for db in get_db():
         if args.all:

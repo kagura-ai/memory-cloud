@@ -218,9 +218,11 @@ The API refuses to start under `ENVIRONMENT=production` (hard-coded in
 `docker-compose.prod.yml`) while `API_KEY_SECRET`, `AUDIT_HMAC_KEY` or
 `AUDIT_PSEUDO_SALT` is still a shipped placeholder, or while one of the first
 two is shorter than 32 characters. The error in
-`docker compose logs api` names the variables (never their values).
-`alembic upgrade` and the admin CLIs (`create_admin`, `reset_password`, ...)
-are refused the same way before they touch the database, so set the secrets
+`docker compose -f docker-compose.prod.yml logs api-blue api-green` names the
+variables (never their values).
+`alembic upgrade`, the admin CLIs (`create_admin`, `reset_password`, ...) and
+the one-shot maintenance commands (`restore_context`, `sweep_orphan_vectors`,
+...) are refused the same way before they touch the database, so set the secrets
 before the first deploy. Run the loop above only on a fresh `.env.prod`: on an
 existing install, change only the values that are refused — rotating a private
 `AUDIT_HMAC_KEY`, `AUDIT_PSEUDO_SALT` or `API_KEY_SECRET` has side effects (see
@@ -470,7 +472,7 @@ gcloud compute ssh ${GCP_VM} \
 
 ```bash
 docker compose -f docker-compose.prod.yml logs -f caddy
-docker compose -f docker-compose.prod.yml logs -f api
+docker compose -f docker-compose.prod.yml logs -f api-blue api-green
 ```
 
 **Rotation (#1591).** Every service in the compose files declares the

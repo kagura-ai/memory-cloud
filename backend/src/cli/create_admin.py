@@ -12,7 +12,6 @@ import argparse
 import getpass
 import json
 import os
-import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -30,16 +29,16 @@ from auth.password_policy import (  # noqa: E402
     validate_password_policy,
 )
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
-from cli._env_guard import require_settings  # noqa: E402
+from cli import _env_guard  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
-# Project root for docker compose commands (always the repo root on host).
+# Project root for the .mcp.json output (the repo root on host).
 # Inside the Docker container this resolves to "/" (WORKDIR=/app, code at
-# /app/src/cli/create_admin.py → 4 parents = /), which is unused because
-# docker compose is only invoked from the host and Docker builds use
-# MCP_JSON_DIR or the smart fallback in _resolve_mcp_json_path() below.
+# /app/src/cli/create_admin.py → 4 parents = /), which is not a repo, so
+# Docker runs use MCP_JSON_DIR or the smart fallback in
+# _resolve_mcp_json_path() below.
 _project_root = Path(__file__).parent.parent.parent.parent
 
 
@@ -77,40 +76,6 @@ def _resolve_mcp_json_path() -> Path | None:
             return candidate / ".mcp.json"
 
     return None
-
-
-def _get_env_from_docker(key: str) -> str | None:
-    """Get env var from running API container."""
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "exec", "-T", "api", "printenv", key],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(_project_root),
-        )
-        value = result.stdout.strip()
-        return value if result.returncode == 0 and value else None
-    except Exception:
-        return None  # Docker not running or not accessible
-
-
-def _require_api_key_secret() -> str:
-    """Get API_KEY_SECRET from Docker container. Exit if unavailable."""
-    # Check environment first (may already be set)
-    secret = os.getenv("API_KEY_SECRET")
-    if secret:
-        return secret
-
-    # Get from Docker
-    secret = _get_env_from_docker("API_KEY_SECRET")
-    if secret:
-        os.environ["API_KEY_SECRET"] = secret
-        return secret
-
-    print("✗ API_KEY_SECRET not available.")
-    print("  Ensure Docker is running: docker compose up -d")
-    sys.exit(1)
 
 
 def _create_workspace(db: Session, user_id: str) -> Workspace:
@@ -218,7 +183,9 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
     from utils.encryption import get_encryptor  # noqa: E402
 
     # 1. Check OPENAI_API_KEY (Docker/env.local first, host env as fallback)
-    openai_key = _get_env_from_docker("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    openai_key = _env_guard.get_env_from_api_container("OPENAI_API_KEY") or os.getenv(
+        "OPENAI_API_KEY"
+    )
     if openai_key:
         encryptor = get_encryptor()
         ext_key = ExternalAPIKey(
@@ -236,10 +203,10 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
     # 2. Check self-hosted backend (OpenAI-compatible /v1/models — Ollama, vLLM)
     self_hosted_url = (
         os.getenv("SELF_HOSTED_BASE_URL")
-        or _get_env_from_docker("SELF_HOSTED_BASE_URL")
+        or _env_guard.get_env_from_api_container("SELF_HOSTED_BASE_URL")
         or "http://localhost:11434"
     )
-    self_hosted_key = os.getenv("SELF_HOSTED_API_KEY") or _get_env_from_docker(
+    self_hosted_key = os.getenv("SELF_HOSTED_API_KEY") or _env_guard.get_env_from_api_container(
         "SELF_HOSTED_API_KEY"
     )
     from cli._env_probe import probe_self_hosted_available
@@ -261,7 +228,7 @@ def create_admin(skip_mcp_json: bool = False):
     # key from them, so the other order would encrypt the admin's API key and
     # TOTP secret with this host's default instead of the API's key (#2239).
     # The settings also run the production secret guard before any DB work.
-    require_settings(api_key_secret=_require_api_key_secret())
+    _env_guard.require_settings(api_key_secret=_env_guard.require_api_key_secret())
 
     engine = create_engine(get_sync_database_url())
 

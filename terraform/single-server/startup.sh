@@ -180,7 +180,7 @@ Next steps for the operator:
   7. scp Cloudflare origin cert/key to /var/lib/kagura/origin-ca/
   8. cp .env.prod.example .env.prod && vim .env.prod
   9. docker compose -f docker-compose.prod.yml up -d --build
- 10. docker compose exec api alembic upgrade head
- 11. docker compose exec api python -m src.cli.create_admin
+ 10. docker compose -f docker-compose.prod.yml exec api-blue alembic upgrade head
+ 11. docker compose -f docker-compose.prod.yml exec api-blue python -m src.cli.create_admin
  12. sudo systemctl enable kagura-memory   # auto-restart on reboot
 HINT

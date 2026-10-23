@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from auth import oauth_endpoints as oe
+from config.settings import get_settings
 
 # Every override env var the module recognizes — cleared before each test so a
 # stray value from the ambient environment can't leak in.
@@ -37,7 +38,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start each test from a known-clean override environment."""
     for name in _ALL_OVERRIDE_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setattr(get_settings(), "environment", "development")
 
 
 def test_defaults_returned_when_no_override() -> None:
@@ -77,7 +78,7 @@ def test_override_with_invalid_scheme_falls_back(monkeypatch: pytest.MonkeyPatch
 def test_guard_passes_in_production_with_no_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(get_settings(), "environment", "production")
     # Must not raise.
     oe.assert_oauth_endpoints_safe()
 
@@ -94,7 +95,7 @@ def test_guard_passes_in_development_with_overrides(
 def test_guard_raises_in_production_when_flag_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(get_settings(), "environment", "production")
     monkeypatch.setenv(oe.OVERRIDE_FLAG_ENV, "true")
     with pytest.raises(RuntimeError, match="OAuth endpoint override"):
         oe.assert_oauth_endpoints_safe()
@@ -105,7 +106,7 @@ def test_guard_raises_in_production_when_override_url_present_even_without_flag(
 ) -> None:
     # Defense in depth: a stray override URL in prod blocks boot even if the
     # master flag was never set.
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(get_settings(), "environment", "production")
     monkeypatch.setenv("OAUTH_GOOGLE_TOKEN_URL", "http://attacker/token")
     with pytest.raises(RuntimeError, match="OAuth endpoint override"):
         oe.assert_oauth_endpoints_safe()
@@ -114,10 +115,34 @@ def test_guard_raises_in_production_when_override_url_present_even_without_flag(
 def test_production_resolution_ignores_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     # Even if the guard were somehow bypassed, resolution itself must never
     # honor an override in production.
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(get_settings(), "environment", "production")
     monkeypatch.setenv(oe.OVERRIDE_FLAG_ENV, "true")
     monkeypatch.setenv("OAUTH_GITHUB_TOKEN_URL", "http://attacker/token")
     assert oe.github_token_url() == oe.GITHUB_TOKEN_URL_DEFAULT
+
+
+@pytest.mark.parametrize("environment", ["Production ", " PRODUCTION", "production\n"])
+def test_production_decision_uses_the_settings_normalization(
+    monkeypatch: pytest.MonkeyPatch, environment: str
+) -> None:
+    # Same check as the secret guard and the cookie Secure flag (#2264).
+    monkeypatch.setattr(get_settings(), "environment", environment)
+    monkeypatch.setenv(oe.OVERRIDE_FLAG_ENV, "true")
+    with pytest.raises(RuntimeError, match="OAuth endpoint override"):
+        oe.assert_oauth_endpoints_safe()
+
+
+def test_the_process_env_alone_does_not_decide_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cached settings are the source (#2264); a later process-env change
+    # does not flip the guard or the resolution.
+    monkeypatch.setattr(get_settings(), "environment", "development")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv(oe.OVERRIDE_FLAG_ENV, "true")
+    monkeypatch.setenv("OAUTH_GITHUB_TOKEN_URL", "http://localhost:9999/token")
+    oe.assert_oauth_endpoints_safe()
+    assert oe.github_token_url() == "http://localhost:9999/token"
 
 
 # --- Wiring: the route layer must resolve URLs through the seam, not bake them in ---
