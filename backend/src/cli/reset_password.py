@@ -49,8 +49,6 @@ prints that hint.
 """
 
 import getpass
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -66,7 +64,7 @@ from auth.password_policy import (  # noqa: E402
     validate_password_policy,
 )
 from auth.session import SessionManager  # noqa: E402
-from cli._env_guard import require_settings  # noqa: E402
+from cli._env_guard import require_settings, resolve_api_key_secret  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from config.database import get_redis_url  # noqa: E402
 from models.auth import User  # noqa: E402
@@ -80,24 +78,6 @@ from services.oauth_grant_revocation import (  # noqa: E402
     revoke_oauth_grants_sync,
 )
 from utils.url_redact import redis_location  # noqa: E402
-
-_project_root = Path(__file__).parent.parent.parent.parent
-
-
-def _get_env_from_docker(key: str) -> str | None:
-    """Get env var from running API container."""
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "exec", "-T", "api", "printenv", key],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(_project_root),
-        )
-        value = result.stdout.strip()
-        return value if result.returncode == 0 and value else None
-    except Exception:
-        return None  # Docker not running or not accessible
 
 
 def _refusal(*lines: str) -> SystemExit:
@@ -155,9 +135,7 @@ def reset_password():
     # API's key, not this host's default (#2239). Not fatal here — only the
     # optional MFA re-enable needs it, and it checks the key below. The
     # settings also run the production secret guard before any DB work.
-    api_key_secret = os.getenv("API_KEY_SECRET") or _get_env_from_docker("API_KEY_SECRET")
-    if api_key_secret:
-        os.environ["API_KEY_SECRET"] = api_key_secret
+    api_key_secret = resolve_api_key_secret()
     settings = require_settings()
 
     engine = create_engine(get_sync_database_url())

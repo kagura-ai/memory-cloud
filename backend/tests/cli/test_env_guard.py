@@ -10,6 +10,7 @@ from them.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +21,19 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from cli import create_admin, delete_admin, reset_password, seed_e2e_admin  # noqa: E402
-from cli._env_guard import require_settings  # noqa: E402
+from cli import (  # noqa: E402
+    _env_guard,
+    create_admin,
+    delete_admin,
+    reset_password,
+    seed_e2e_admin,
+)
+from cli._env_guard import (  # noqa: E402
+    API_CONTAINERS,
+    get_env_from_api_container,
+    require_settings,
+    resolve_api_key_secret,
+)
 from config.settings import Settings  # noqa: E402
 
 _PLACEHOLDER = "change-me-api-key-secret"
@@ -126,7 +138,7 @@ def _record_settings(monkeypatch) -> list[str | None]:
 
 def test_create_admin_resolves_the_container_secret_before_the_settings(monkeypatch) -> None:
     monkeypatch.delenv("API_KEY_SECRET", raising=False)
-    monkeypatch.setattr(create_admin, "_get_env_from_docker", lambda key: "container-secret")
+    monkeypatch.setattr(_env_guard, "get_env_from_api_container", lambda key: "container-secret")
     seen = _record_settings(monkeypatch)
 
     with patch.object(create_admin, "create_engine", side_effect=_Stop):
@@ -152,7 +164,7 @@ def test_create_admin_without_a_secret_exits_before_the_settings(monkeypatch, ca
 
 def test_reset_password_resolves_the_container_secret_before_the_settings(monkeypatch) -> None:
     monkeypatch.delenv("API_KEY_SECRET", raising=False)
-    monkeypatch.setattr(reset_password, "_get_env_from_docker", lambda key: "container-secret")
+    monkeypatch.setattr(_env_guard, "get_env_from_api_container", lambda key: "container-secret")
     seen = _record_settings(monkeypatch)
 
     with patch.object(reset_password, "create_engine", side_effect=_Stop):
@@ -198,3 +210,87 @@ def test_reset_password_does_not_re_enable_mfa_under_a_stale_key(monkeypatch, ca
     assert user.totp_enabled is False
     assert user.totp_secret is None
     assert "API_KEY_SECRET changed" in capsys.readouterr().out
+
+
+def _completed(name: str, returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        ["docker", "exec", name, "printenv", "API_KEY_SECRET"], returncode, stdout, ""
+    )
+
+
+class TestGetEnvFromApiContainer:
+    """One lookup for every stack, by the pinned ``container_name`` (#2264)."""
+
+    @pytest.fixture(autouse=True)
+    def _real_lookup(self, monkeypatch) -> None:
+        # tests/cli/conftest.py stubs the lookup for every CLI test; undo it.
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", get_env_from_api_container)
+
+    def test_the_container_names_of_both_stacks(self) -> None:
+        assert API_CONTAINERS == ("kagura-api", "kagura-api-blue", "kagura-api-green")
+
+    def test_tries_each_container_in_order_without_compose(self) -> None:
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", returncode=1),
+                _completed("kagura-api-blue", stdout="\n"),
+                _completed("kagura-api-green", stdout="green-secret\n"),
+            ],
+        ) as run:
+            assert get_env_from_api_container("API_KEY_SECRET") == "green-secret"
+
+        assert [c.args[0] for c in run.call_args_list] == [
+            ["docker", "exec", name, "printenv", "API_KEY_SECRET"] for name in API_CONTAINERS
+        ]
+        for c in run.call_args_list:
+            assert "cwd" not in c.kwargs
+            assert c.kwargs["timeout"] == 10
+
+    def test_stops_at_the_first_hit(self) -> None:
+        with patch(
+            "cli._env_guard.subprocess.run",
+            return_value=_completed("kagura-api", stdout="dev-secret\n"),
+        ) as run:
+            assert get_env_from_api_container("API_KEY_SECRET") == "dev-secret"
+
+        assert run.call_count == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [FileNotFoundError("docker"), subprocess.TimeoutExpired(["docker"], 10)],
+        ids=["no-docker", "timeout"],
+    )
+    def test_docker_errors_fall_through_to_none(self, error) -> None:
+        with patch("cli._env_guard.subprocess.run", side_effect=error) as run:
+            assert get_env_from_api_container("API_KEY_SECRET") is None
+
+        assert run.call_count == len(API_CONTAINERS)
+
+    def test_the_environment_wins_without_asking_docker(self, monkeypatch) -> None:
+        monkeypatch.setenv("API_KEY_SECRET", "env-secret")
+        with patch("cli._env_guard.subprocess.run") as run:
+            assert resolve_api_key_secret() == "env-secret"
+
+        run.assert_not_called()
+
+    def test_a_container_hit_is_exported_for_the_settings(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        with patch(
+            "cli._env_guard.subprocess.run",
+            return_value=_completed("kagura-api", stdout="container-secret\n"),
+        ):
+            assert resolve_api_key_secret() == "container-secret"
+
+        assert os.environ["API_KEY_SECRET"] == "container-secret"
+
+    def test_nothing_found_returns_none(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        with patch("cli._env_guard.subprocess.run", side_effect=FileNotFoundError("docker")):
+            assert resolve_api_key_secret() is None
+
+        assert "API_KEY_SECRET" not in os.environ

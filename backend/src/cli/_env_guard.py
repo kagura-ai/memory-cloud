@@ -16,6 +16,8 @@ secret was resolved, and data encrypted now could not be decrypted by the API.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,70 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from config.settings import Settings
+
+# The ``container_name`` pinned by ``docker-compose.yml`` (the dev stack, the
+# host-side case the README documents) and by
+# ``terraform/single-server/docker-compose.{prod,app}.yml`` (the blue/green
+# colors). Both colors take the same ``env_file``, so whichever is running
+# holds the same values and the active-color marker is not needed.
+API_CONTAINERS: tuple[str, ...] = ("kagura-api", "kagura-api-blue", "kagura-api-green")
+
+
+def get_env_from_api_container(key: str) -> str | None:
+    """Read ``key`` from the first running API container that has it (#2264).
+
+    ``docker exec`` by container name needs no compose project, ``-f`` or
+    working directory, so the same lookup works for the dev stack and the
+    single-server stack. Any failure (no ``docker`` on ``PATH`` — the CLI runs
+    inside a container —, the container is not running, a timeout) moves on to
+    the next name. Worst case is 10 s per name on a hung Docker daemon.
+
+    Returns:
+        The non-empty value, or ``None`` when no container provided one.
+    """
+    for name in API_CONTAINERS:
+        try:
+            result = subprocess.run(
+                ["docker", "exec", name, "printenv", key],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue  # Docker not installed, not running or not answering
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            return value
+    return None
+
+
+def resolve_api_key_secret() -> str | None:
+    """Resolve ``API_KEY_SECRET``: the environment, then the API container.
+
+    A value found in the container is exported into ``os.environ`` so the
+    ``Settings`` built next (:func:`require_settings`) and
+    ``utils.encryption.get_encryptor`` use it. Call this *before*
+    :func:`require_settings`: the settings are cached for the process, and
+    the other order would encrypt with this host's default instead of the
+    API's key (#2239).
+    """
+    secret = os.getenv("API_KEY_SECRET")
+    if secret:
+        return secret
+    secret = get_env_from_api_container("API_KEY_SECRET")
+    if secret:
+        os.environ["API_KEY_SECRET"] = secret
+    return secret
+
+
+def require_api_key_secret() -> str:
+    """:func:`resolve_api_key_secret`, or exit 1 when there is none."""
+    secret = resolve_api_key_secret()
+    if secret:
+        return secret
+    print("✗ API_KEY_SECRET not available.")
+    print("  Ensure Docker is running: docker compose up -d")
+    sys.exit(1)
 
 
 def require_settings(api_key_secret: str | None = None) -> Settings:
