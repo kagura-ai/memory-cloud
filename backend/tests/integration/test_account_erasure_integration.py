@@ -682,10 +682,11 @@ class TestTimeMemories:
 class TestEarlierErasedMembersValue:
     """#2243 review S1 through the whole ``_execute`` pipeline: a member
     erased earlier (before the #2235 fix) left their value in the prior of
-    the target's edit. The target's erasure must not make it live again."""
+    the target's edit. The target's erasure must not make it live again: the
+    walk goes past the earlier member's edit to the author's value (#2268)."""
 
     @pytest.mark.asyncio
-    async def test_a_value_an_erased_member_wrote_is_not_put_back(
+    async def test_a_value_an_erased_member_wrote_is_walked_past(
         self, db_session: AsyncSession, erasure_scenario, patched_external_stores
     ):
         from sqlalchemy import delete
@@ -772,8 +773,8 @@ class TestEarlierErasedMembersValue:
             assert request.status == STATUS_COMPLETE
             postgres = request.deleted_data_summary["postgres"]
             assert (postgres["details_restored"], postgres["details_restored_unavailable"]) == (
-                0,
                 1,
+                0,
             )
             live = (
                 await db_session.execute(
@@ -782,7 +783,8 @@ class TestEarlierErasedMembersValue:
                     .execution_options(populate_existing=True)
                 )
             ).scalar_one()
-            assert live is None  # not the earlier erased member's value
+            # not the earlier erased member's value: the author's, below it
+            assert live == {"by": "author"}
         finally:
             await db_session.execute(
                 delete(ErasureRequest).where(ErasureRequest.id.in_([r.id for r in requests]))

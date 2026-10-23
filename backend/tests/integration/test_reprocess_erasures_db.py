@@ -474,18 +474,24 @@ async def test_a_vector_store_failure_requeues_and_the_request_commits(
         assert len(await _reprocess_audit_rows(session, p)) == 1
 
 
-async def test_a_value_another_erased_member_wrote_never_comes_back(
-    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("first_is_newest", [True, False])
+async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_order(
+    async_engine: AsyncEngine,
+    world: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    first_is_newest: bool,
 ) -> None:
-    """Review finding: S2 wrote over the author's value, S1 over S2's; both
-    erased before the #2235 fix, so S1's own row still holds S2's value in its
-    prior. Re-processing S1 alone must not make S2's
-    value live (it becomes NULL); S2's re-run then puts the author's back and
-    strips S2's value from the log."""
+    """#2268 (owner decision): S2 wrote over the author's value, S1 over S2's;
+    both erased before the #2235 fix, so S1's own row still holds S2's value
+    in its prior. Whichever request is processed first, the walk goes past
+    both erased members to the author's value: one ``erasure`` row, S2's
+    value stripped from the log, the second request restores nothing. The
+    author's own memory and every other row are untouched."""
     p1, p2 = _pseudonym(), _pseudonym()
     memory = _memory(world["ws"], world["ctx"], world["author"], SUBJECTS, 3)
     s2_value = {"by": "s2", "location": {"lat": 1.0, "lon": 2.0}}
-    first, second = _request(p1, minutes=3), _request(p2, minutes=4)
+    s1_request, s2_request = _request(p1, minutes=3), _request(p2, minutes=4)
+    order = [s1_request, s2_request] if first_is_newest else [s2_request, s1_request]
     async with _maker(async_engine)() as session:
         session.add(memory)
         await session.flush()
@@ -493,42 +499,49 @@ async def test_a_value_another_erased_member_wrote_never_comes_back(
             [
                 _edit(memory, 2, p2, {"details": AUTHORS}),
                 _edit(memory, 3, p1, {"details": s2_value}),
-                first,
-                second,
+                s1_request,
+                s2_request,
             ]
         )
         await session.commit()
     try:
-        sync = AsyncMock()
-        code, _ = await _run(async_engine, ["--request", str(first.id), "--apply", "--yes"], sync)
-        assert code == 0
         async with _maker(async_engine)() as session:
-            assert await _details(session, memory.id) is None
-            assert (await _log(session, memory.id))[-1] == (
-                4,
-                "erasure",
-                p1,
-                {"erased": ["details"], "restored_from": 3},
+            before = await _snapshots(session, [memory.id])
+        reports = []
+        for request in order:
+            sync = AsyncMock()
+            code, _ = await _run(
+                async_engine, ["--request", str(request.id), "--apply", "--yes"], sync
             )
-        # the cleared location went to the payload, S2's never did
-        assert sync.await_args.kwargs["delete_keys"] == ["location"]
+            assert code == 0
+            reports.append((capsys.readouterr().out, sync))
 
-        code, _ = await _run(async_engine, ["--request", str(second.id), "--apply", "--yes"])
-        assert code == 0
         async with _maker(async_engine)() as session:
             assert await _details(session, memory.id) == AUTHORS
-            assert await _log(session, memory.id) == [
-                (2, "api", p2, {"details": AUTHORS}),
-                (3, "api", p1, STRIPPED),
-                (4, "erasure", p1, {"erased": ["details"], "restored_from": 3}),
-                (5, "erasure", p2, {"erased": ["details"], "restored_from": 2}),
+            log = await _log(session, memory.id)
+            assert log[:2] == [(2, "api", p2, {"details": AUTHORS}), (3, "api", p1, STRIPPED)]
+            # exactly one erasure row, by the request that restored, naming
+            # the whole run of erased members' edits
+            assert [row for row in log if row[1] == "erasure"] == [
+                (4, "erasure", p1, {"erased": ["details"], "restored_from": 2})
             ]
-        capsys.readouterr()
+            assert len(log) == 3
+            after = await _snapshots(session, [memory.id])
+        for snapshot in (before, after):
+            snapshot.pop("audit_logs")
+        assert after == before  # the author's own memory and every other row
+        restored = [
+            "1 memory details restored" in out for out, _ in reports
+        ]  # only the request whose subject made the newest edit restores
+        assert restored == ([True, False] if first_is_newest else [False, True])
+        # the author's location went to the payload, S2's never did
+        (sync,) = [sync for out, sync in reports if sync.await_count]
+        assert sync.await_args.kwargs["payload_updates"]["location"] == AUTHORS["location"]
     finally:
         async with _maker(async_engine)() as session:
             await session.execute(delete(AuditLog).where(AuditLog.user_id.in_([p1, p2])))
             await session.execute(
-                delete(ErasureRequest).where(ErasureRequest.id.in_([first.id, second.id]))
+                delete(ErasureRequest).where(ErasureRequest.id.in_([s1_request.id, s2_request.id]))
             )
             await session.commit()
 

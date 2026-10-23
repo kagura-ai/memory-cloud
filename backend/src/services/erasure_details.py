@@ -513,11 +513,11 @@ class RestoreTarget:
 
     Attributes:
         memory_id: The memory.
-        details: The last ``details`` someone other than the subject wrote, or
-            None when ``unavailable``.
+        details: The last ``details`` a surviving member wrote (or the
+            creation value), or None when ``unavailable``.
         unavailable: That value was itself removed by an earlier erasure.
-        from_version: The version of the subject's lowest edit in their
-            trailing run of details edits (the row whose prior is
+        from_version: The version of the lowest edit in the trailing run of
+            erased members' details edits (the row whose prior is
             ``details``); the erasure row records it as ``restored_from``.
     """
 
@@ -732,27 +732,34 @@ def restore_targets(
     else the live value is not theirs and the memory is left alone — a
     rollback the subject requested put back someone else's value, and an
     erasure row put back the value of the edit below the block it names.
-    The walk goes down the subject's trailing run among those edits
-    (edits of other fields are not among them); the prior of the run's lowest
-    edit is the last value someone else wrote — or the creation value, when
-    every authored details edit is the subject's.
+    The walk goes down the trailing run of edits by erased members — the
+    subject and every one of ``erased_actors`` (edits of other fields are
+    not among them); the prior of the run's lowest edit is the last value a
+    surviving member wrote — or the creation value, when every authored
+    details edit is by an erased member.
 
     Whole-``details`` revert equals the per-key one: ``prior`` holds the
     whole previous value, and every value written above that lowest edit
-    is the subject's or one put back over theirs, so a key differs between
-    the value put back and the live one only where the subject wrote it.
+    is an erased member's or one put back over theirs, so a key differs
+    between the value put back and the live one only where an erased member
+    wrote it.
 
-    When that prior was stripped by an earlier erasure (its writer was
-    erased first), the value is unavailable: the target is ``None`` with
-    ``unavailable=True``. The walk does not go further down: the value below
-    was overwritten by the erased member's edit and was not what the memory
-    held before the subject's edits.
+    When that prior was stripped by an earlier erasure, the value is
+    unavailable: the target is ``None`` with ``unavailable=True``. That is
+    the case only when the prior below the whole run is gone — the author
+    was erased too (their erasure strips every prior of the memories they
+    authored), or an erasure stripped it before its writer's edit was known
+    to be an erased member's.
 
-    ``erased_actors`` (#2243): pseudonyms of other members whose erasure
-    completed. A value one of them wrote is unavailable too, even when its
-    prior was never stripped — an erasure from before the #2235 fix left
-    such priors behind, and a re-run must not make that value live again
-    (it would stay live until that member's own re-run strips it).
+    ``erased_actors`` (#2243, #2268): pseudonyms of other members whose
+    erasure ran in Postgres (``erased_pseudonyms``). Their edits are walked
+    past like the subject's, so a value one of them wrote never becomes live
+    again (an erasure from before the #2235 fix left such priors behind),
+    and the result is the same whichever erasure is processed first: A then
+    B, or B then A, ends with the surviving member's value live and one
+    ``erasure`` row — the second finds the first one's row on top, drops
+    the block it names (``restored_from`` = the lowest version of the whole
+    run) and sees no edit of its subject left as the newest.
 
     Returns:
         One target per memory to restore, in memory id order.
@@ -760,20 +767,21 @@ def restore_targets(
     by_memory: dict[UUID, list[DetailsEdit]] = defaultdict(list)
     for row in rows:
         by_memory[row.memory_id].append(row)
+    erased = {subject, *erased_actors}
     targets: list[RestoreTarget] = []
     for memory_id in sorted(by_memory):
         edits = _authored_edits(
             sorted(by_memory[memory_id], key=lambda e: (e.version, e.id), reverse=True)
         )
         if not edits or edits[0].actor_user_id != subject:
-            continue
-        lowest, below = edits[0], None
+            continue  # the live value must be the subject's
+        lowest = edits[0]
         for edit in edits[1:]:
-            if edit.actor_user_id != subject:
-                below = edit  # wrote the value in lowest's prior
-                break
+            if edit.actor_user_id not in erased:
+                break  # a surviving member wrote the value in lowest's prior
             lowest = edit
-        unavailable = lowest.erased or (below is not None and below.actor_user_id in erased_actors)
+        # its prior was stripped: the value from before the run is gone
+        unavailable = lowest.erased
         targets.append(
             RestoreTarget(
                 memory_id=memory_id,

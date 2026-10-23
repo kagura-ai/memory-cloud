@@ -348,22 +348,68 @@ def test_held_ids_ignore_input_order_and_other_memories() -> None:
         assert held_details_ids(rows, SUBJECT) == [9]
 
 
-def test_a_value_another_erased_member_wrote_is_never_put_back() -> None:
-    """#2243 review: S2 wrote, S1 wrote over it; S2's erasure ran before the
-    #2235 fix, so S1's prior still holds S2's value. Re-processing S1 must
-    not make it live again: unavailable, NULL."""
+def test_a_chain_of_erased_actors_is_walked_past_to_the_authors_value() -> None:
+    """#2268 (owner decision): S2 wrote over the author's value, S1 over S2's;
+    both erased before the #2235 fix, so S1's own row still holds S2's value
+    in its prior. The walk goes past every erased member's edit to the last
+    value a surviving member wrote, whichever erasure is processed first."""
+    m = uuid4()
+    s1, s2 = "1" * 64, "2" * 64
+    author = {"by": "author"}
+    rows = [_edit(m, 2, s2, author), _edit(m, 3, s1, {"by": "s2"})]
+    # S1 first: past S2's edit to the author's value
+    assert restore_targets(rows, s1, erased_actors={s2}) == [
+        RestoreTarget(memory_id=m, details=author, unavailable=False, from_version=2)
+    ]
+    # S2 first: S1's edit is the newest, so S2 restores nothing; S2's strip
+    # then removes S2's value from S1's prior; S1's run still reaches the author
+    assert restore_targets(rows, s2, erased_actors={s1}) == []
+    stripped = [rows[0], _edit(m, 3, s1, erased=True)]
+    assert restore_targets(stripped, s1, erased_actors={s2}) == [
+        RestoreTarget(memory_id=m, details=author, unavailable=False, from_version=2)
+    ]
+    # after either run: the erasure row names the whole run, so the other
+    # erasure finds no edit of its subject as the newest
+    after = [*rows, _erasure(m, 4, s1, restored_from=2)]
+    assert restore_targets(after, s2, erased_actors={s1}) == []
+    assert restore_targets(after, s1, erased_actors={s2}) == []
+    # without the set, S2 is a surviving writer and their value would come back
+    assert restore_targets(rows, s1)[0].details == {"by": "s2"}
+
+
+def test_an_interleaved_chain_stops_at_the_first_surviving_writer() -> None:
+    """S1 and S2 interleave with OTHER (a surviving member): the walk stops
+    at OTHER's edit, so OTHER's value comes back, not the creation value."""
     m = uuid4()
     s1, s2 = "1" * 64, "2" * 64
     rows = [
-        _edit(m, 2, s2, {"by": "author"}),
-        _edit(m, 3, s1, {"by": "s2"}),
+        _edit(m, 2, s1, {"by": "creation"}),
+        _edit(m, 3, OTHER, {"by": "s1"}),
+        _edit(m, 4, s2, {"by": "other"}),
+        _edit(m, 5, s1, {"by": "s2"}),
     ]
+    for subject, others in ((s1, {s2}), (s2, {s1})):
+        targets = restore_targets(rows, subject, erased_actors=others)
+        if subject == s1:
+            assert targets == [
+                RestoreTarget(
+                    memory_id=m, details={"by": "other"}, unavailable=False, from_version=4
+                )
+            ]
+        else:
+            assert targets == []  # S1's edit is the newest
+
+
+def test_a_chain_down_to_an_erased_authors_stripped_prior_is_unavailable() -> None:
+    """The author was erased too: their erasure stripped every prior of the
+    memory, so below the whole run there is no value to put back."""
+    m = uuid4()
+    s1, s2 = "1" * 64, "2" * 64
+    rows = [_edit(m, 2, s2, erased=True), _edit(m, 3, s1, erased=True)]
     assert restore_targets(rows, s1, erased_actors={s2}) == [
-        RestoreTarget(memory_id=m, details=None, unavailable=True, from_version=3)
+        RestoreTarget(memory_id=m, details=None, unavailable=True, from_version=2)
     ]
-    # without the set, the value would come back (what the live path sees)
-    assert restore_targets(rows, s1)[0].details == {"by": "s2"}
-    # a surviving member's value, and the creation value, still come back
+    # the creation value is a surviving author's: it comes back
     kept = [_edit(m, 2, OTHER, {"by": "author"}), _edit(m, 3, s1, {"by": "other"})]
     assert restore_targets(kept, s1, erased_actors={s2})[0].details == {"by": "other"}
     assert restore_targets(kept[1:], s1, erased_actors={s2})[0].details == {"by": "other"}
