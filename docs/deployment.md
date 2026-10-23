@@ -1753,14 +1753,16 @@ left the member's audit rows with their account id and email. The command
 pseudonymizes them, in the request's transaction, for any request in scope:
 the rows are found by the pseudonym (an `audit_logs.user_id` no user row has,
 whose pseudonym with the deployment's salt is the request's), and the email
-by the request's email hash (the one of those rows' `user_email` values whose
-sha256 is the request's `user_email_hash`). The plan lists `would
+by the request's email hash (those rows' `user_email` values whose sha256 is
+the `user_email_hash` of one of the account's requests — two when the
+account was erased, re-created with the same id under another email and
+erased again; the rows are then handled once, under the older request). The plan lists `would
 pseudonymize audit rows <request id> <n> row(s)`, the apply report
 `pseudonymized audit rows …`; `email not recovered` means none of the rows
 carries the email the request was made under — then the account id is
 replaced and `user_email` left as it is. An account id that belongs to a user
-again (re-registered) is never matched: its rows may be the new account's, so
-they are kept and the plan prints `audit <request id> rows kept: the account
+again (re-registered) is never matched — also when it gets its user row
+while the command runs: its rows may be the new account's, so they are kept and the plan prints `audit <request id> rows kept: the account
 id is in use again`. With a salt other than the erasure's, nothing matches
 and the rows stay. Rows where another member (an admin) acted on the erased
 member are not the member's own rows and are not touched, here as during the

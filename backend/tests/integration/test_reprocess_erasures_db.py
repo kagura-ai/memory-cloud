@@ -1270,30 +1270,90 @@ async def test_the_dry_run_counts_audit_rows_and_writes_nothing(
 async def test_two_requests_of_one_account_pseudonymize_its_rows_once(
     async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Erased, re-created with the same account id, erased again: both
-    requests store the pseudonym. The rows are counted under the older one
-    only, in the plan as when applied."""
+    """Erased, re-created with the same account id under another email, and
+    erased again: both requests store the pseudonym. The rows are handled
+    under the older request only, in the plan as when applied — with the
+    emails of both requests."""
     case = audit_case
+    second_email = f"second-{uuid.uuid4().hex[:6]}@example.com"
     first = await _add_request(async_engine, case, legacy=False)
-    second = await _add_request(async_engine, case, legacy=False)
+    second = await _add_request(async_engine, case, legacy=False, email=second_email)
     async with _maker(async_engine)() as session:
-        await session.execute(
-            update(ErasureRequest)
-            .where(ErasureRequest.id == second.id)
-            .values(started_at=COMPLETED_AT + timedelta(days=1))
+        later = AuditLog(
+            user_email=second_email,
+            user_id=case.sub,
+            action="password_set",
+            resource=f"user:{second_email}",
         )
-        await session.execute(
-            update(ErasureRequest)
-            .where(ErasureRequest.id == first.id)
-            .values(started_at=COMPLETED_AT)
-        )
+        session.add(later)
+        await session.flush()
+        case.own.append(later.id)
+        for request, at in ((first, COMPLETED_AT), (second, COMPLETED_AT + timedelta(days=1))):
+            await session.execute(
+                update(ErasureRequest).where(ErasureRequest.id == request.id).values(started_at=at)
+            )
         await session.commit()
 
     code, _ = await _run(async_engine, ["--all", "--apply", "--yes"])
     assert code == 0
     out = capsys.readouterr().out
-    assert f"would pseudonymize audit rows  {first.id}  2 row(s)\n" in out
-    assert f"pseudonymized audit rows  {first.id}  2 row(s)\n" in out
+    assert f"would pseudonymize audit rows  {first.id}  3 row(s)\n" in out
+    assert f"pseudonymized audit rows  {first.id}  3 row(s)\n" in out
     assert f"audit rows  {second.id}" not in out
+    assert second_email not in out
+    second_p = _salted(second_email)
     async with _maker(async_engine)() as session:
-        assert [row[0] for row in await _own_rows(session, case)] == [case.p, case.p]
+        assert await _own_rows(session, case) == [
+            (case.p, case.email_p, f"user:{case.email_p}"),
+            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, second_p, f"user:{second_p}"),
+        ]
+
+
+async def test_an_account_id_registered_during_the_run_keeps_its_rows(
+    async_engine: AsyncEngine, audit_case: _AuditCase
+) -> None:
+    """The re-run read the audit subs before the account id got a user row
+    again: the UPDATE itself still skips rows whose account id has one."""
+    from services.erasure_details import pseudonymize_audit_logs
+
+    case = audit_case
+    async with _maker(async_engine)() as session:
+        session.add(User(email=case.email, user_id=case.sub, name="again", role="user"))
+        await session.commit()
+    case.users.append(case.sub)
+    async with _maker(async_engine)() as session:
+        before = await _audit(session, case.own)
+        assert (
+            await pseudonymize_audit_logs(session, case.sub, [case.email], orphaned_only=True) == 0
+        )
+        await session.commit()
+        assert await _audit(session, case.own) == before
+
+
+async def test_a_resource_the_pseudonyms_lengthen_is_cut_to_the_column(
+    async_engine: AsyncEngine, audit_case: _AuditCase
+) -> None:
+    """A pseudonym is longer than the sub or email it replaces; a ``resource``
+    near the column's length must not fail the statement (in the live
+    erasure that would roll the whole Postgres step back on every retry)."""
+    from services.erasure_details import pseudonymize_audit_logs
+
+    case = audit_case
+    async with _maker(async_engine)() as session:
+        long_row = AuditLog(
+            user_email=case.email,
+            user_id=case.sub,
+            action="config_update",
+            resource=(f"user:{case.email}|" + "x" * 255)[:255],
+        )
+        session.add(long_row)
+        await session.commit()
+        case.own.append(long_row.id)
+        assert await pseudonymize_audit_logs(session, case.sub, [case.email]) == 3
+        await session.commit()
+        resource = (
+            await session.execute(select(AuditLog.resource).where(AuditLog.id == long_row.id))
+        ).scalar_one()
+    assert len(resource) == 255
+    assert resource.startswith(f"user:{case.email_p}|") and case.email not in resource

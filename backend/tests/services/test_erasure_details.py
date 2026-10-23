@@ -8,6 +8,7 @@ trailing run of details edits, NULL when an earlier erasure removed it.
 from __future__ import annotations
 
 import random
+from typing import Any
 from uuid import UUID, uuid4
 
 from services.erasure_details import (
@@ -497,7 +498,7 @@ def test_a_non_details_row_is_never_an_authored_details_edit() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _audit_update(email: str | None) -> tuple[str, dict]:
+async def _audit_update(emails: list[str], **kwargs: Any) -> tuple[str, dict]:
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from sqlalchemy.dialects import postgresql
@@ -507,29 +508,55 @@ async def _audit_update(email: str | None) -> tuple[str, dict]:
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(rowcount=2))
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        assert await pseudonymize_audit_logs(db, "raw-sub", email) == 2
+        assert await pseudonymize_audit_logs(db, "raw-sub", emails, **kwargs) == 2
     compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
     return str(compiled), compiled.params
+
+
+def _subs(params: dict) -> set:
+    return {v for k, v in params.items() if k.startswith("user_id_")}
 
 
 async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> None:
     from utils.hashing import sha256_hex
 
-    sql, params = await _audit_update("a@example.com")
+    sql, params = await _audit_update(["a@example.com"])
 
     assert sql.count("replace(") == 2
     assert "user_email=CASE WHEN" in sql
+    # cut to the column's length: a pseudonym may not fit where the value did
+    assert "resource=left(" in sql and 255 in params.values()
     # the WHERE is the raw sub, never a pseudonym (that would hash the hash),
     # through rows locked in id order
     assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
-    assert {v for k, v in params.items() if k.startswith("user_id_")} == {"raw-sub"}
+    assert _subs(params) == {"raw-sub"}
     assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
     assert sha256_hex("a@example.com", salt="salt") in params.values()
+    assert "EXISTS" not in sql  # the live erasure: the user row is still there
 
 
 async def test_without_an_email_only_the_sub_is_replaced() -> None:
-    sql, params = await _audit_update(None)
+    sql, params = await _audit_update([])
 
     assert sql.count("replace(") == 1
     assert "user_email" not in sql
-    assert {v for k, v in params.items() if k.startswith("user_id_")} == {"raw-sub"}
+    assert _subs(params) == {"raw-sub"}
+
+
+async def test_every_email_given_is_replaced_the_longest_first() -> None:
+    from utils.hashing import sha256_hex
+
+    sql, params = await _audit_update(["a@x.io", "longer@example.com"])
+
+    assert sql.count("replace(") == 3 and sql.count("WHEN") == 2
+    values = list(params.values())
+    assert values.index("longer@example.com") < values.index("a@x.io")
+    for email in ("a@x.io", "longer@example.com"):
+        assert sha256_hex(email, salt="salt") in values
+
+
+async def test_orphaned_only_never_matches_a_user_row() -> None:
+    sql, _ = await _audit_update([], orphaned_only=True)
+
+    # in the locking sub-select and in the UPDATE's own WHERE
+    assert sql.count("NOT (EXISTS (SELECT") == 2

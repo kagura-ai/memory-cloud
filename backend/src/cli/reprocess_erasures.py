@@ -48,10 +48,10 @@ The subject's own ``audit_logs`` rows that still carry the account id
 before; since v0.125.0 that step is part of the Postgres transaction) are
 pseudonymized in the request's transaction: an ``audit_logs.user_id`` no
 user row has whose pseudonym is the request's is the subject's account id,
-and the email is the one of those rows' ``user_email`` values whose sha256
-is the request's ``user_email_hash`` (left as it is when none is). An
-account id that belongs to a user again (re-registered) is never matched:
-its rows are kept and the request is listed. Running it again changes
+and the emails are those rows' ``user_email`` values whose sha256 is the
+``user_email_hash`` of one of the account's requests (left as they are when
+none is). An account id that belongs to a user again (re-registered) is
+never matched: its rows are kept and the request is listed. Running it again changes
 nothing. The dry run writes and locks nothing and makes no
 vector-store call; it prints request ids and counts, never values or
 account ids.
@@ -68,6 +68,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -232,13 +234,17 @@ async def _count_audit_rows(db: AsyncSession, account_id: str) -> int:
     ).scalar_one()
 
 
-async def _recover_email(db: AsyncSession, account_id: str, email_hash: str) -> str | None:
-    """The subject's email among the ``user_email`` values of their own audit
-    rows: the one whose unsalted sha256 is the request's ``user_email_hash``
-    (the email at request time). None when no row carries it (the subject
-    never acted under it, or changed it before the request) — then
-    ``user_email`` stays and only the account id is replaced. Rows written
-    under an earlier address keep it."""
+async def _recover_emails(
+    db: AsyncSession, account_id: str, email_hashes: Collection[str]
+) -> list[str]:
+    """The subject's emails among the ``user_email`` values of their own audit
+    rows: those whose unsalted sha256 is the ``user_email_hash`` of one of
+    the account's requests (the email at each request's time; two when the
+    account was erased, re-created with the same id under another email and
+    erased again). Empty when no row carries one (the subject never acted
+    under it, or changed it before the request) — then ``user_email`` stays
+    and only the account id is replaced. Rows written under an address no
+    request was made under keep it."""
     candidates = (
         (
             await db.execute(
@@ -248,7 +254,7 @@ async def _recover_email(db: AsyncSession, account_id: str, email_hash: str) -> 
         .scalars()
         .all()
     )
-    return next((email for email in candidates if sha256_hex(email) == email_hash), None)
+    return sorted(email for email in candidates if sha256_hex(email) in email_hashes)
 
 
 def _existed_at(
@@ -343,7 +349,7 @@ async def _reprocess_one(
     *,
     account_id: str | None = None,
     audit_account_id: str | None = None,
-    email_hash: str | None = None,
+    email_hashes: Collection[str] = (),
 ) -> RequestChange:
     """Repair the row (``account_id``), restore, then strip, by ``pseudonym``;
     commit (or roll back a dry run); then patch the restored memories'
@@ -358,7 +364,8 @@ async def _reprocess_one(
     its row gets the pseudonym in the same transaction.
     ``audit_account_id`` (#2287) is the subject's account id found among the
     orphaned audit subs (``_audit_subs``): their audit rows are pseudonymized
-    in the same transaction, the email recovered by ``email_hash``.
+    in the same transaction, the emails recovered by ``email_hashes`` (every
+    request of the account's).
     """
     try:
         repaired = account_id is not None
@@ -366,13 +373,15 @@ async def _reprocess_one(
             repaired = await _repair(db, request_id, cast(str, account_id), pseudonym)
         audited, email_recovered = 0, None
         if audit_account_id is not None:
-            email = await _recover_email(db, audit_account_id, email_hash or "")
+            emails = await _recover_emails(db, audit_account_id, email_hashes)
             if dry_run:
                 audited = await _count_audit_rows(db, audit_account_id)
             else:
-                audited = await pseudonymize_audit_logs(db, audit_account_id, email)
+                audited = await pseudonymize_audit_logs(
+                    db, audit_account_id, emails, orphaned_only=True
+                )
             if audited:
-                email_recovered = email is not None
+                email_recovered = bool(emails)
         details = await erase_subject_details(
             db,
             pseudonym,
@@ -505,6 +514,12 @@ async def reprocess_erasures(
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
     audited: set[str] = set()
+    # every request's email hash, by the pseudonym of its subject: the one
+    # request that pseudonymizes an account id's rows recovers every email
+    email_hashes: dict[str, set[str]] = defaultdict(set)
+    for request in requests:
+        subject = erasure_pseudonym(request.user_id) if request.unrepaired else request.user_id
+        email_hashes[subject].add(request.user_email_hash)
 
     def audit_account_id(request_id: UUID, pseudonym: str) -> str | None:
         """The subject's account id on audit rows, once per account id."""
@@ -540,7 +555,7 @@ async def reprocess_erasures(
                 erased,
                 account_id=request.user_id,
                 audit_account_id=audit_account_id(request.id, pseudonym),
-                email_hash=request.user_email_hash,
+                email_hashes=email_hashes[pseudonym],
             )
         else:
             # Both checks before the user_id is used as a subject: only a row
@@ -560,7 +575,7 @@ async def reprocess_erasures(
                 dry_run,
                 erased,
                 audit_account_id=audit_account_id(request.id, request.user_id),
-                email_hash=request.user_email_hash,
+                email_hashes=email_hashes[request.user_id],
             )
         if change.changes:
             result.changed.append(change)

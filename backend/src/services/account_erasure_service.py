@@ -1831,7 +1831,7 @@ class AccountErasureService:
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
         """The subject's audit rows (``erasure_details.pseudonymize_audit_logs``),
         in ``_delete_postgres``'s transaction (#2287)."""
-        return await pseudonymize_audit_logs(self.db, user_id, email)
+        return await pseudonymize_audit_logs(self.db, user_id, [email])
 
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
