@@ -10,7 +10,7 @@ deterministic.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2315,3 +2315,405 @@ def test_pseudonymized_request_values(subject_initiated):
     if subject_initiated:
         expected["initiated_by"] = "p" * 64
     assert values == expected
+
+
+# ---------------------------------------------------------------------------
+# #2282: a vector-store failure at the first step reschedules the request
+# ---------------------------------------------------------------------------
+
+
+def _recording_execute(svc: AccountErasureService, *, rowcount: int = 1) -> list[Any]:
+    """Record every statement and the rollbacks/commits, in order."""
+    order: list[Any] = []
+    svc.db.execute = AsyncMock(
+        side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=rowcount)
+    )
+    svc.db.rollback = AsyncMock(side_effect=lambda: order.append("rollback"))
+    svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+    return order
+
+
+def _request_update(order: list[Any]) -> Any:
+    """The one UPDATE of ``erasure_requests`` the handler wrote."""
+    from sqlalchemy.sql.dml import Update
+
+    (stmt,) = [s for s in order if isinstance(s, Update) and str(s.table) == "erasure_requests"]
+    return stmt
+
+
+class TestAVectorStoreOutageReschedulesTheRequest:
+    """#2282: a ``QdrantError`` from ``delete_user_points`` (step 1) leaves
+    nothing erased, so the request goes back to ``cooling_off`` with a later
+    ``scheduled_for`` and ``summary.retry`` — up to
+    ``VECTOR_STORE_MAX_ATTEMPTS`` attempts, then ``failed``."""
+
+    @pytest.mark.parametrize("self_service", [True, False])
+    @pytest.mark.asyncio
+    async def test_the_first_failure_reschedules(self, self_service):
+        from models.erasure import STATUS_IN_PROGRESS
+        from services.account_erasure_service import VECTOR_STORE_MAX_ATTEMPTS
+        from utils.datetime import utcnow
+        from utils.exceptions import ErasureRetryScheduledError, QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=self_service)
+        request.ip_address, request.user_agent = "203.0.113.9", "agent"
+
+        before = utcnow()
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=QdrantError("connection refused")),
+        ):
+            with pytest.raises(ErasureRetryScheduledError) as caught:
+                await svc._execute(request, _user())
+        after = utcnow()
+
+        # nothing past step 1 ran
+        svc._handle_owned_workspaces.assert_not_awaited()
+        svc._delete_postgres.assert_not_awaited()
+        svc._clear_redis.assert_not_awaited()
+        svc._write_audit_log.assert_not_awaited()
+        svc._finalize.assert_not_awaited()
+        svc.email_service.send_erasure_complete.assert_not_awaited()
+
+        stmt = _request_update(order)
+        # before it only reads (the owned-workspace lookup); then rolled
+        # back, the one UPDATE, its commit
+        from sqlalchemy.sql.selectable import Select
+
+        assert order[-3:] == ["rollback", stmt, "commit"]
+        assert all(isinstance(s, Select) for s in order[:-3])
+        params = stmt.compile().params
+        assert params["id_1"] == request.id
+        # guarded: a row moved meanwhile (not in_progress) is left alone
+        assert params["status_1"] == STATUS_IN_PROGRESS
+        assert "erasure_requests.status = :status_1" in str(stmt)
+        assert params["status"] == STATUS_COOLING_OFF
+        assert before + timedelta(minutes=15) <= params["scheduled_for"]
+        assert params["scheduled_for"] <= after + timedelta(minutes=15)
+        retry = params["deleted_data_summary"]["retry"]
+        assert params["deleted_data_summary"] == {"retry": retry}
+        assert {k: v for k, v in retry.items() if k != "last_attempt_at"} == {
+            "attempts": 1,
+            "step": "vector_store",
+            "error_class": "QdrantError",
+        }
+        assert retry["last_attempt_at"].endswith("Z")
+        # the row's own ids are not touched (nothing was erased), and no
+        # failure is recorded
+        assert set(params) == {
+            "status",
+            "scheduled_for",
+            "deleted_data_summary",
+            "id_1",
+            "status_1",
+        }
+        assert "u-1" not in repr(params["deleted_data_summary"])
+
+        exc = caught.value
+        assert exc.status_code == 503
+        assert exc.error_code == "ERASURE-007"
+        assert exc.details == {
+            "request_id": str(request.id),
+            "attempt": 1,
+            "max_attempts": VECTOR_STORE_MAX_ATTEMPTS,
+            "scheduled_for": exc.details["scheduled_for"],
+            "error_class": "QdrantError",
+        }
+        assert exc.scheduled_for == params["scheduled_for"]
+        assert isinstance(exc.__cause__, QdrantError)
+
+    @pytest.mark.parametrize("previous", [1, 2])
+    @pytest.mark.asyncio
+    async def test_a_later_failure_counts_on(self, previous):
+        from utils.exceptions import ErasureRetryScheduledError, QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"retry": {"attempts": previous, "step": "vector_store"}}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=QdrantError("timeout")),
+        ):
+            with pytest.raises(ErasureRetryScheduledError) as caught:
+                await svc._execute(request, _user())
+
+        assert caught.value.attempt == previous + 1
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_COOLING_OFF
+        assert params["deleted_data_summary"]["retry"]["attempts"] == previous + 1
+
+    @pytest.mark.asyncio
+    async def test_the_last_attempt_fails_the_request(self):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from utils.exceptions import QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"retry": {"attempts": 3, "step": "vector_store"}}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=QdrantError("connection refused")),
+        ):
+            with pytest.raises(QdrantError):
+                await svc._execute(request, _user())
+
+        svc._handle_owned_workspaces.assert_not_awaited()
+        svc._delete_postgres.assert_not_awaited()
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == (
+            "vector_store_unavailable after 4 attempts: Qdrant service error: connection refused"
+        )
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        # nothing was erased: the row keeps its ids, and no later run
+        assert "user_id" not in params and "initiated_by" not in params
+        assert "scheduled_for" not in params
+        # the history is kept on the failed row
+        assert params["deleted_data_summary"]["retry"]["attempts"] == 4
+        assert params["deleted_data_summary"]["retry"]["error_class"] == "QdrantError"
+
+    @pytest.mark.parametrize("error", [RuntimeError("bad config"), ValueError("bad filter")])
+    @pytest.mark.asyncio
+    async def test_any_other_error_at_step_one_stays_terminal(self, error):
+        from models.erasure import STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=error),
+        ):
+            with pytest.raises(type(error)):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == str(error)
+        assert params["deleted_data_summary"] is None
+        assert "scheduled_for" not in params
+
+    @pytest.mark.parametrize("failing", ["_handle_owned_workspaces", "_delete_postgres"])
+    @pytest.mark.asyncio
+    async def test_a_vector_store_error_at_another_step_stays_terminal(self, failing):
+        """Only step 1 is retryable: a ``QdrantError`` from a later step (the
+        Postgres step's details restore calls the vector store, #2244) fails
+        the request as before."""
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        setattr(svc, failing, AsyncMock(side_effect=QdrantError("down")))
+        order = _recording_execute(svc)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(QdrantError):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == "Qdrant service error: down"
+        assert "scheduled_for" not in params
+        assert "user_id" not in params
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_commit_keeps_the_retry_history(self):
+        """The failure handlers write ``summary``, which carries the earlier
+        attempts' block from the start."""
+        from models.erasure import STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        previous = {"attempts": 2, "step": "vector_store", "error_class": "QdrantError"}
+        request.deleted_data_summary = {"retry": previous}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(RuntimeError):
+                await svc._execute(request, _user())
+
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == "deadlock"
+        summary = params["deleted_data_summary"]
+        assert summary["retry"] == previous
+        assert "postgres" not in summary
+
+    @pytest.mark.asyncio
+    async def test_the_attempt_that_succeeds_keeps_the_history(self):
+        svc = _service()
+        _stub_execute_steps(svc)
+        request = _execute_request(self_service=True)
+        previous = {"attempts": 2, "step": "vector_store", "error_class": "QdrantError"}
+        request.deleted_data_summary = {"retry": previous}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 3}),
+        ):
+            await svc._execute(request, _user())
+
+        summary = svc._finalize.await_args.args[1]
+        assert summary["retry"] == previous
+        assert summary["qdrant"] == {"kagura_memories": 3}
+        assert "postgres" in summary
+
+    @pytest.mark.asyncio
+    async def test_a_row_moved_meanwhile_is_logged_and_still_raises(self):
+        from utils.exceptions import ErasureRetryScheduledError, QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        _recording_execute(svc, rowcount=0)
+        request = _execute_request(self_service=True)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(side_effect=QdrantError("down")),
+            ),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            with pytest.raises(ErasureRetryScheduledError):
+                await svc._execute(request, _user())
+
+        events = [c.args[0] for c in log.warning.call_args_list]
+        assert "erasure_retry_request_moved" in events
+        assert "erasure_retry_scheduled" not in events
+
+    @pytest.mark.asyncio
+    async def test_the_log_line_names_the_request_not_the_account(self):
+        from utils.exceptions import ErasureRetryScheduledError, QdrantError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        _recording_execute(svc)
+        request = _execute_request(self_service=True)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(side_effect=QdrantError("down for u-1")),
+            ),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            with pytest.raises(ErasureRetryScheduledError):
+                await svc._execute(request, _user())
+
+        (call,) = [c for c in log.warning.call_args_list if c.args[0] == "erasure_retry_scheduled"]
+        assert call.kwargs["request_id"] == str(request.id)
+        assert call.kwargs["attempt"] == 1
+        assert call.kwargs["error_class"] == "QdrantError"
+        assert "u-1" not in repr(call)
+        assert log.error.call_args_list == []  # not a failure (yet)
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (None, (None, 0)),
+        ({}, (None, 0)),
+        ({"retry": "junk"}, (None, 0)),
+        ({"retry": {"attempts": 2}}, ({"attempts": 2}, 2)),
+        ({"retry": {"attempts": "2"}}, ({"attempts": "2"}, 0)),
+        ({"retry": {"attempts": True}}, ({"attempts": True}, 0)),
+        ({"retry": {"attempts": -1}}, ({"attempts": -1}, 0)),
+        ({"retry": {}}, ({}, 0)),
+    ],
+)
+def test_previous_retry(summary, expected):
+    """#2282: an unreadable count starts the budget over rather than failing."""
+    from services.account_erasure_service import _previous_retry
+
+    assert _previous_retry(summary) == expected
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_logs_a_rescheduled_request_and_goes_on():
+    """#2282: ``_execute`` rescheduled the first request; the sweep logs it
+    (request id, no account id), does not count it, and runs the next one."""
+    from utils.datetime import utcnow
+    from utils.exceptions import ErasureRetryScheduledError
+
+    svc = _service()
+    first, second = _execute_request(self_service=True), _execute_request(self_service=True)
+    second.user_id = second.initiated_by = "u-2"
+    claimed = MagicMock()
+    claimed.scalars.return_value.all.return_value = [first, second]
+    fresh = [MagicMock(), MagicMock()]
+    fresh[0].scalar_one_or_none.return_value = first
+    fresh[1].scalar_one_or_none.return_value = second
+    svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), claimed, *fresh])
+    svc._load_user_or_none = AsyncMock(side_effect=[_user(), _user(user_id="u-2")])
+    retry = ErasureRetryScheduledError(
+        request_id=str(first.id),
+        attempt=2,
+        max_attempts=4,
+        scheduled_for=utcnow() + timedelta(minutes=15),
+        error_class="QdrantError",
+    )
+    svc._execute = AsyncMock(side_effect=[retry, None])
+
+    with patch("services.account_erasure_service.logger") as log:
+        assert await svc.sweep_pending_erasures() == 1
+
+    assert svc._execute.await_count == 2
+    (call,) = [
+        c for c in log.warning.call_args_list if c.args[0] == "erasure_sweep_retry_scheduled"
+    ]
+    assert call.kwargs["request_id"] == str(first.id)
+    assert call.kwargs["attempt"] == 2
+    assert "u-1" not in repr(call)
+    assert not [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_execute_failed"]
+
+
+@pytest.mark.asyncio
+async def test_admin_force_erase_forwards_the_reschedule():
+    """#2282: the admin path runs ``_execute`` inline, so the caller gets the
+    503 with the request id and the retry time."""
+    from utils.datetime import utcnow
+    from utils.exceptions import ErasureRetryScheduledError
+
+    svc = _service()
+    svc._load_user_or_404 = AsyncMock(return_value=_user())
+    svc._find_active_request = AsyncMock(return_value=None)
+    retry = ErasureRetryScheduledError(
+        request_id="r-1",
+        attempt=1,
+        max_attempts=4,
+        scheduled_for=utcnow() + timedelta(minutes=15),
+        error_class="QdrantError",
+    )
+    svc._execute = AsyncMock(side_effect=retry)
+
+    with patch("services.account_erasure_service.SystemAdminService") as admin_svc:
+        admin_svc.return_value.can_delete_admin = AsyncMock(return_value=(True, None))
+        with pytest.raises(ErasureRetryScheduledError) as caught:
+            await svc.admin_force_erase(
+                target_user_id="u-1",
+                initiator_user_id="admin-1",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            )
+
+    assert caught.value.status_code == 503
+    assert caught.value.details["request_id"] == "r-1"
+    svc._execute.assert_awaited_once()
