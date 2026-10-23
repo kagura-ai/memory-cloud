@@ -121,8 +121,16 @@ async def run_plan_apply(
             ``changes`` still decides whether there is anything to do.
 
     Returns:
-        Process exit code: 0 ok, 1 error.
+        Process exit code: 0 ok, 1 error, 2 usage (``--yes`` without
+        ``--apply``).
     """
+
+    # #2268: ``--yes`` answers the apply prompt; without ``--apply`` there is
+    # none, and an operator who typed it expected a write the plan never
+    # does. A usage error (exit 2, as argparse's), before anything else runs.
+    if assume_yes and not apply:
+        print("error: --yes needs --apply (the plan never writes)", file=sys.stderr)
+        return 2
 
     # The production secret guard first (#2264): a refused install stops with
     # the variables named, before any session is opened. Outside the ``try``

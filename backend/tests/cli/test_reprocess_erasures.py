@@ -127,6 +127,17 @@ class TestReprocessErasuresCommand:
 
         assert "is not a completed request" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("argv", [["--all", "--yes"], ["--all", "--plan", "--yes"]])
+    def test_yes_without_apply_is_a_usage_error(self, argv, capsys):
+        """#2268: the plan never writes, so ``--yes`` without ``--apply`` is
+        refused (exit 2) instead of silently running the plan only."""
+        worker = AsyncMock(return_value=_result(dry_run=True))
+
+        assert _run(argv, worker) == 2
+
+        worker.assert_not_awaited()
+        assert "--yes needs --apply" in capsys.readouterr().err
+
     @pytest.mark.parametrize(
         "argv",
         [
