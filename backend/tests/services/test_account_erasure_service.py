@@ -1877,7 +1877,9 @@ class TestFailureAfterThePostgresCommit:
         params = self._failed_values(svc)
         assert params["status"] == STATUS_FAILED
         assert params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
-        assert "boom" in params["failure_reason"]
+        # the step and the class only: an exception text can name the account
+        assert params["failure_reason"].endswith(": RuntimeError")
+        assert "boom" not in params["failure_reason"]
         assert params["user_id"] == pseudonym != "u-1"
         assert (params["ip_address"], params["user_agent"]) == (None, None)
         if self_service:
@@ -1906,3 +1908,21 @@ class TestFailureAfterThePostgresCommit:
         assert params["failure_reason"] == "deadlock"
         assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
         assert "user_id" not in params and "initiated_by" not in params
+
+
+@pytest.mark.asyncio
+async def test_the_audit_log_pseudonymization_is_committed_before_the_next_step():
+    """#2268 review: a failure in a later step rolls the session back; the
+    audit rows pseudonymized in step 4 must already be committed."""
+    svc = _service()
+    _stub_execute_steps(svc)
+    order: list[str] = []
+    svc._pseudonymize_audit_logs = AsyncMock(side_effect=lambda *a: order.append("audit_logs") or 0)
+    svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+    svc._clear_redis = AsyncMock(side_effect=lambda *a: order.append("redis") or {})
+
+    with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+        await svc._execute(_execute_request(self_service=False), _user())
+
+    assert order[order.index("audit_logs") + 1] == "commit"
+    assert order.index("commit", order.index("audit_logs")) < order.index("redis")

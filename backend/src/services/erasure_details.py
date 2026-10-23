@@ -133,7 +133,8 @@ def _ran_in_postgres() -> ColumnElement[bool]:
 
 def _failed_after_commit_marked() -> ColumnElement[bool]:
     return func.coalesce(
-        ErasureRequest.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT), False
+        ErasureRequest.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT, autoescape=True),
+        False,
     )
 
 
@@ -257,7 +258,8 @@ def _authored_by(
     still counts as existing: it holds at most the scrubbed NULL, and erring
     that way only marks it, never keeps a value of the subject's. A request
     with neither (failed after its Postgres step before v0.124.0) is not
-    bounded — the same direction.
+    bounded: no value of the subject's is kept, but the history surviving
+    members wrote on those memories since is stripped and marked too.
     """
     authored = row.memory_id.in_(select(Memory.id).where(Memory.user_id == subject))
     if existed_at is None:

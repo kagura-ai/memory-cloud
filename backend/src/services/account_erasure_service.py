@@ -929,6 +929,9 @@ class AccountErasureService:
             summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
                 target.user_id, target.email
             )
+            # #2268 review: committed on its own, so a failure in a later step
+            # (whose handler rolls back) cannot undo it
+            await self.db.commit()
 
             # Step 5: Redis cleanup (best-effort)
             step = "redis"
@@ -1054,7 +1057,9 @@ class AccountErasureService:
                     user_id=user_pseudonym,
                     ip_address=None,
                     user_agent=None,
-                    failure_reason=(f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {exc}")[:1000],
+                    # the class only: an exception text (a constraint's
+                    # DETAIL, a Redis key) can name the account (#2268 review)
+                    failure_reason=f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {type(exc).__name__}",
                 )
                 if subject_initiated:
                     values["initiated_by"] = user_pseudonym

@@ -571,7 +571,7 @@ class TestFailureAfterThePostgresCommit:
             )
         ).scalar_one()
         assert request.status == STATUS_FAILED
-        assert request.failure_reason.startswith(f"{FAILURE_AFTER_POSTGRES_COMMIT}finalize: ")
+        assert request.failure_reason == f"{FAILURE_AFTER_POSTGRES_COMMIT}finalize: RuntimeError"
         assert (request.initiated_by, request.ip_address, request.user_agent) == (
             "admin-runner",
             None,

@@ -53,7 +53,8 @@ VALID_STATUSES = frozenset(
 )
 
 # #2268: ``failure_reason`` prefix of a request that failed AFTER its Postgres
-# step committed (audit-log pseudonymize, Redis, audit row or finalize): the
+# step committed (payload patch, audit-log pseudonymize, Redis, audit row or
+# finalize; the step's name follows the prefix, then the exception class): the
 # subject is erased in Postgres, its user row is gone, and the row stores the
 # pseudonym like a ``complete`` one. ``reprocess_erasures`` and the live
 # erasure's erased-members set treat such a row as an erasure that ran.

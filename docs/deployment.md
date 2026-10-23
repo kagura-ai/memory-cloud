@@ -1717,19 +1717,25 @@ first. For each request, in one transaction:
    completion time) — what other members wrote there since stays as it is.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request
-whose audit-log, Redis, audit-row or finalize step fails after the Postgres
-step committed ends `failed` with `failure_reason` starting
-`after_postgres_commit: ` and the step's name; the member is erased in
-Postgres and their user row is gone, so the request row is pseudonymized like
-a completed one (account id, request IP and user agent replaced or cleared).
-On earlier versions such a row kept the account id. The command lists it as
-`would repair` in the plan and `repaired` on `--apply`: the derived pseudonym
-is stored, the request metadata cleared and the marker added in the same
-transaction as the request's restore and strip. Such a request has no
-completion time (`-` in the report), so its strip on authored memories is not
-bounded. Steps after the Postgres step that never ran are not re-run: if the
-audit-log step failed, the member's earlier audit rows keep their account id
-and email.
+whose payload, audit-log, Redis, audit-row or finalize step fails after the
+Postgres step committed ends `failed` with `failure_reason` set to
+`after_postgres_commit: <step>: <exception class>` (no exception text, which
+can name the account); the member is erased in Postgres and their user row is
+gone, so the request row is pseudonymized like a completed one (account id,
+request IP and user agent replaced or cleared). On earlier versions such a row
+kept the account id and the exception text. The command lists it as `would
+repair` in the plan and `repaired` on `--apply`: the derived pseudonym is
+stored, the request metadata cleared and `failure_reason` replaced by the
+marker, in the same transaction as the request's restore and strip. When no
+memory or revision row carries the derived pseudonym (none survived, or the
+salt is not the one the erasure used) the row is skipped and left as it is.
+Such a request has no completion time (`-` in the report), so its strip on
+the memories the member authored is not bounded: revision history that other
+members wrote on those memories after the erasure is stripped and marked too.
+Steps after the Postgres step that never ran are not re-run: if the audit-log
+step failed, the member's earlier audit rows keep their account id and email
+(a failure in a later step no longer undoes that step, which commits on its
+own since v0.124.0).
 
 A request that changed gets one `account_erasure_reprocess` audit row (counts
 and the request id, under the pseudonyms of its `account_erasure` row).

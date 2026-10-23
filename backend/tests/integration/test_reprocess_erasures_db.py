@@ -447,7 +447,7 @@ async def test_request_narrows_and_an_unknown_request_is_an_error(
 
     code, _ = await _run(async_engine, ["--request", str(uuid.uuid4())])
     assert code == 1
-    assert "is not a completed erasure request" in capsys.readouterr().err
+    assert "is not an erasure request that ran in Postgres" in capsys.readouterr().err
 
 
 async def test_a_vector_store_failure_requeues_and_the_request_commits(
@@ -685,7 +685,8 @@ async def test_a_legacy_failed_after_commit_request_is_repaired_and_reprocessed(
                 row = await _request_row(session, legacy.id)
                 assert (row.status, row.user_id, row.initiated_by) == ("failed", p, p)
                 assert (row.ip_address, row.user_agent) == (None, None)
-                assert row.failure_reason == f"{FAILURE_AFTER_POSTGRES_COMMIT}redis down"
+                # the old reason is replaced: an exception text can name the account
+                assert row.failure_reason == FAILURE_AFTER_POSTGRES_COMMIT + cli.REPAIRED_REASON
                 assert await _details(session, live.id) == AUTHORS
                 assert (await _log(session, leftover.id))[1] == (
                     3,
@@ -874,4 +875,65 @@ async def test_the_same_pseudonym_in_two_requests_is_handled_once(
                 delete(ErasureRequest).where(ErasureRequest.id.in_([first.id, second.id]))
             )
             await session.execute(delete(Memory).where(Memory.id.in_([own.id, live.id])))
+            await session.commit()
+
+
+async def test_a_legacy_row_whose_pseudonym_no_row_carries_is_left_alone(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2268 review: with another salt than the erasure's (or no surviving
+    row) the derived pseudonym matches nothing; the account id is not
+    overwritten with it. A reason that only looks like the marker under LIKE
+    (``_`` is a wildcard) does not make the row count as marked."""
+    from services.erasure_details import erased_pseudonyms
+
+    raw = f"google-oauth2|nosalt-{uuid.uuid4().hex[:8]}"
+    legacy = _request(raw, status="failed", summary={"postgres": {"users": 1}})
+    legacy.failure_reason = "afterXpostgresXcommit: lookalike"
+    async with _maker(async_engine)() as session:
+        session.add(legacy)
+        await session.commit()
+    try:
+        with patch("services.account_erasure_service._audit_salt", return_value=_SALT):
+            async with _maker(async_engine)() as session:
+                before = await _snapshots(session, [])
+                assert _salted(raw) in await erased_pseudonyms(session)  # unrepaired
+            code, sync = await _run(async_engine, ["--request", str(legacy.id), "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"skipped  {legacy.id}  failed after its Postgres step: no memory" in out
+        assert raw not in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
+            await session.commit()
+
+
+async def test_a_repair_another_run_already_made_writes_nothing(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2268 review: two runs race on one legacy row; the second one's repair
+    matches no row (``user_id`` changed), so it is not counted, and with
+    nothing else to do no audit row is written."""
+    raw = f"google-oauth2|race-{uuid.uuid4().hex[:8]}"
+    p = _salted(raw)
+    done = _request(p, status="failed", summary={"postgres": {"users": 1}})
+    async with _maker(async_engine)() as session:
+        session.add(done)
+        await session.commit()
+    try:
+        async with _maker(async_engine)() as session:
+            change = await cli._reprocess_one(
+                session, done.id, p, None, None, False, frozenset(), account_id=raw
+            )
+        assert (change.repaired, change.changes) == (False, 0)
+        async with _maker(async_engine)() as session:
+            assert await _reprocess_audit_rows(session, p) == []
+            assert (await _request_row(session, done.id)).user_id == p
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == done.id))
             await session.commit()

@@ -61,12 +61,13 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import func, select, update  # noqa: E402
+from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
@@ -76,6 +77,7 @@ from models.erasure import (  # noqa: E402
     STATUS_COMPLETE,
     ErasureRequest,
 )
+from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
     erase_subject_details,
     erased_pseudonyms,
@@ -100,6 +102,13 @@ SKIPPED_NOT_RUN = "never ran: marked complete because the user row was already g
 SKIPPED_NOT_PSEUDONYMIZED = "stores the account id: finalized before v0.58.1"
 # #2268: never prints the account id it replaces
 REPAIRED = "failed after its Postgres step: the account id is replaced by its pseudonym"
+REPAIRED_REASON = "failed before v0.124.0; the original reason is removed (it may name the account)"
+# the derived pseudonym is on no row: none survived, or the salt is not the
+# erasure's — the account id is not overwritten with a value nothing carries
+SKIPPED_NO_ROWS = (
+    "failed after its Postgres step: no memory or revision row carries the derived "
+    "pseudonym (none survived, or the salt changed); left as it is"
+)
 
 
 @dataclass
@@ -175,12 +184,30 @@ def _existed_at(summary: dict[str, Any] | None, completed_at: datetime | None) -
     return to_naive_utc(completed_at) if completed_at is not None else None
 
 
-async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym: str) -> None:
+async def _carries(db: AsyncSession, pseudonym: str) -> bool:
+    """Some memory or revision row carries ``pseudonym`` (#2268 review): the
+    derivation matches what the erasure wrote (same salt)."""
+    memory = select(Memory.id).where(Memory.user_id == pseudonym).limit(1)
+    revision = select(MemoryRevision.id).where(MemoryRevision.actor_user_id == pseudonym).limit(1)
+    for probe in (memory, revision):
+        if (await db.execute(probe)).first() is not None:
+            return True
+    return False
+
+
+async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym: str) -> bool:
     """Give a request that failed after its Postgres step (before v0.124.0)
     what the failure handler writes since #2268: the pseudonym instead of
     the account id, no request metadata, and the marker in
-    ``failure_reason``. Scoped to the one row, by its id and stored value."""
-    await db.execute(
+    ``failure_reason``. Scoped to the one row, by its id and stored value.
+
+    The old ``failure_reason`` is replaced, not kept: an exception text (a
+    constraint's ``DETAIL``, a Redis key) can name the account.
+
+    Returns:
+        Whether the row was repaired (False when another run got there first).
+    """
+    result = await db.execute(
         update(ErasureRequest)
         .where(ErasureRequest.id == request_id, ErasureRequest.user_id == account_id)
         .values(
@@ -190,14 +217,10 @@ async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym
             ),
             ip_address=None,
             user_agent=None,
-            failure_reason=func.left(
-                func.concat(
-                    FAILURE_AFTER_POSTGRES_COMMIT, func.coalesce(ErasureRequest.failure_reason, "")
-                ),
-                1000,
-            ),
+            failure_reason=FAILURE_AFTER_POSTGRES_COMMIT + REPAIRED_REASON,
         )
     )
+    return bool(cast(CursorResult[Any], result).rowcount)
 
 
 async def _reprocess_one(
@@ -224,8 +247,9 @@ async def _reprocess_one(
     its row gets the pseudonym in the same transaction.
     """
     try:
-        if account_id is not None and not dry_run:
-            await _repair(db, request_id, account_id, pseudonym)
+        repaired = account_id is not None
+        if repaired and not dry_run:
+            repaired = await _repair(db, request_id, cast(str, account_id), pseudonym)
         details = await erase_subject_details(
             db,
             pseudonym,
@@ -243,7 +267,7 @@ async def _reprocess_one(
             details_stripped=strip.details_stripped,
             scrub_marked=strip.scrub_marked,
             embedding_requeued=restore.embedding_requeued,
-            repaired=account_id is not None,
+            repaired=repaired,
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -340,7 +364,10 @@ async def reprocess_erasures(
     erased = await erased_pseudonyms(db)
     await db.rollback()
     if request_id is not None and not requests:
-        raise LookupError(f"{request_id} is not a completed erasure request")
+        raise LookupError(
+            f"{request_id} is not an erasure request that ran in Postgres "
+            "(complete, or failed after its Postgres step)"
+        )
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
     for request in requests:
@@ -348,10 +375,16 @@ async def reprocess_erasures(
         if request.unrepaired:
             # #2268: failed after its Postgres step before v0.124.0; the
             # subject's rows carry the pseudonym, the request row the account id
+            pseudonym = erasure_pseudonym(request.user_id)
+            carries = await _carries(db, pseudonym)
+            await db.rollback()
+            if not carries:
+                result.skipped.append((request.id, SKIPPED_NO_ROWS))
+                continue
             change = await _reprocess_one(
                 db,
                 request.id,
-                erasure_pseudonym(request.user_id),
+                pseudonym,
                 request.completed_at,
                 existed_at,
                 dry_run,
