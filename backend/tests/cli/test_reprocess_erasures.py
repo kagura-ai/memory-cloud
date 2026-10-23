@@ -224,3 +224,28 @@ def test_the_rerun_bound_prefers_the_scrub_time(summary, completed_at, expected)
     """#2268: ``memory_scrub_at`` when stored, else the completion time, else
     no bound (a legacy request that failed after its Postgres step)."""
     assert cli._existed_at(summary, completed_at) == expected
+
+
+def test_a_legacy_failed_request_is_bounded_an_hour_after_its_start():
+    """#2268 review: no scrub or completion time, but ``started_at``: the
+    sweep's crash cutoff after it bounds the strip. Ahead of it, the stored
+    times win."""
+    started = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    assert cli._existed_at({"postgres": {"users": 1}}, None, started) == datetime(2026, 9, 1, 13, 0)
+    completed = datetime(2026, 9, 1, 12, 5, tzinfo=UTC)
+    assert cli._existed_at({"postgres": {}}, completed, started) == datetime(2026, 9, 1, 12, 5)
+
+
+@pytest.mark.parametrize(
+    ("summary", "wrote"),
+    [
+        ({"postgres": {"memories_scrubbed": 2}}, True),
+        ({"postgres": {"memories_scrubbed": 0, "memory_revisions_pseudonymized": 3}}, True),
+        ({"postgres": {"memories_scrubbed": 0, "memory_revisions_pseudonymized": 0}}, False),
+        ({"postgres": {"users": 1}}, False),
+        (None, False),
+    ],
+)
+def test_only_an_erasure_that_wrote_the_pseudonym_can_fail_the_probe(summary, wrote):
+    """#2268 review: a subject with nothing left is repaired, not skipped."""
+    assert cli._wrote_pseudonym(summary) is wrote

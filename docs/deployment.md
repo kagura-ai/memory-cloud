@@ -1726,16 +1726,25 @@ request IP and user agent replaced or cleared). On earlier versions such a row
 kept the account id and the exception text. The command lists it as `would
 repair` in the plan and `repaired` on `--apply`: the derived pseudonym is
 stored, the request metadata cleared and `failure_reason` replaced by the
-marker, in the same transaction as the request's restore and strip. When no
-memory or revision row carries the derived pseudonym (none survived, or the
-salt is not the one the erasure used) the row is skipped and left as it is.
-Such a request has no completion time (`-` in the report), so its strip on
-the memories the member authored is not bounded: revision history that other
-members wrote on those memories after the erasure is stripped and marked too.
-Steps after the Postgres step that never ran are not re-run: if the audit-log
-step failed, the member's earlier audit rows keep their account id and email
-(a failure in a later step no longer undoes that step, which commits on its
-own since v0.124.0).
+marker, in the same transaction as the request's restore and strip. When the
+request's summary counts memory or revision rows it pseudonymized but none
+carries the derived pseudonym (the salt is not the one the erasure used), the
+row is skipped and left as it is; when it counts none, the row is repaired
+anyway. Such a request has no completion time (`-` in the report); its strip
+on the memories the member authored is bounded at its `started_at` plus one
+hour (the sweep's own cutoff for a crashed run), so revision history other
+members wrote there within that hour is stripped and marked too, and later
+history stays. Steps after the Postgres step that never ran are not re-run:
+if the audit-log step failed, the member's earlier audit rows keep their
+account id and email (a failure in a later step no longer undoes that step,
+which commits on its own since v0.124.0).
+
+**Before `--apply`, read the `failure_reason` of every `would repair`
+request** directly in the database (`SELECT id, failure_reason FROM
+erasure_requests WHERE id = '<request id>'`) and keep a note of it: it is the
+only record of which step failed — and so whether the member's earlier audit
+rows still carry their account id and email — and the repair replaces it
+(the old text can name the account, so it is not kept).
 
 A request that changed gets one `account_erasure_reprocess` audit row (counts
 and the request id, under the pseudonyms of its `account_erasure` row).

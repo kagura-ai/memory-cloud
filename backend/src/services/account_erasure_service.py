@@ -846,12 +846,14 @@ class AccountErasureService:
                 )
                 continue
             except Exception as exc:
+                # #2268 review: the request id and the class only. ``_execute``
+                # logged the failure already (with the account and the text
+                # only when nothing was erased yet); after the Postgres commit
+                # the account id and an exception text must not reach the logs.
                 logger.error(
                     "erasure_sweep_execute_failed",
                     request_id=str(request_id),
-                    user_id=user_id,
-                    error=str(exc),
-                    exc_info=True,
+                    error_class=type(exc).__name__,
                 )
                 # `_execute` already marked status=failed; continue to
                 # the next request in this batch.
@@ -1027,13 +1029,23 @@ class AccountErasureService:
             await self.db.commit()
             raise
         except Exception as exc:
-            logger.error(
-                "erasure_execute_failed",
-                request_id=str(request_id),
-                user_id=target.user_id,
-                error=str(exc),
-                exc_info=True,
-            )
+            if erased_in_postgres:
+                # #2268 review: the subject is erased — no account id, no
+                # exception text (it can name the account), as on the row
+                logger.error(
+                    "erasure_failed_after_postgres_commit",
+                    request_id=str(request_id),
+                    step=step,
+                    error_class=type(exc).__name__,
+                )
+            else:
+                logger.error(
+                    "erasure_execute_failed",
+                    request_id=str(request_id),
+                    user_id=target.user_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
             await self.db.rollback()
             # Use a fresh write to record the failure without depending on
             # the just-rolled-back ORM state.
@@ -1047,12 +1059,6 @@ class AccountErasureService:
                 # gone, so nobody can retry: the row must not keep the raw sub
                 # any more than a ``complete`` one does (``_finalize``), and
                 # the marker lets the re-run and later erasures find it.
-                logger.error(
-                    "erasure_failed_after_postgres_commit",
-                    request_id=str(request_id),
-                    step=step,
-                    error_class=type(exc).__name__,
-                )
                 values.update(
                     user_id=user_pseudonym,
                     ip_address=None,

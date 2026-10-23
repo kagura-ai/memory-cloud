@@ -888,7 +888,8 @@ async def test_a_legacy_row_whose_pseudonym_no_row_carries_is_left_alone(
     from services.erasure_details import erased_pseudonyms
 
     raw = f"google-oauth2|nosalt-{uuid.uuid4().hex[:8]}"
-    legacy = _request(raw, status="failed", summary={"postgres": {"users": 1}})
+    # the erasure says it pseudonymized rows, yet none carries the pseudonym
+    legacy = _request(raw, status="failed", summary={"postgres": {"memories_scrubbed": 2}})
     legacy.failure_reason = "afterXpostgresXcommit: lookalike"
     async with _maker(async_engine)() as session:
         session.add(legacy)
@@ -901,7 +902,7 @@ async def test_a_legacy_row_whose_pseudonym_no_row_carries_is_left_alone(
             code, sync = await _run(async_engine, ["--request", str(legacy.id), "--apply", "--yes"])
         assert code == 0
         out = capsys.readouterr().out
-        assert f"skipped  {legacy.id}  failed after its Postgres step: no memory" in out
+        assert f"skipped  {legacy.id}  {cli.SKIPPED_NO_ROWS}" in out
         assert raw not in out
         sync.assert_not_awaited()
         async with _maker(async_engine)() as session:
@@ -936,4 +937,84 @@ async def test_a_repair_another_run_already_made_writes_nothing(
     finally:
         async with _maker(async_engine)() as session:
             await session.execute(delete(ErasureRequest).where(ErasureRequest.id == done.id))
+            await session.commit()
+
+
+async def test_a_legacy_row_whose_erasure_wrote_no_pseudonym_is_still_repaired(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2268 review: nothing of the subject survived (the summary counts no
+    pseudonymized memory or revision row), so no row can carry the pseudonym.
+    The account id must not stay on the row: it is repaired anyway."""
+    raw = f"google-oauth2|empty-{uuid.uuid4().hex[:8]}"
+    p = _salted(raw)
+    legacy = _request(
+        raw,
+        status="failed",
+        summary={"postgres": {"memories_scrubbed": 0, "memory_revisions_pseudonymized": 0}},
+    )
+    async with _maker(async_engine)() as session:
+        session.add(legacy)
+        await session.commit()
+    try:
+        with patch("services.account_erasure_service._audit_salt", return_value=_SALT):
+            code, _ = await _run(async_engine, ["--request", str(legacy.id), "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"repaired  {legacy.id}" in out and raw not in out
+        async with _maker(async_engine)() as session:
+            assert (await _request_row(session, legacy.id)).user_id == p
+            assert len(await _reprocess_audit_rows(session, p)) == 1
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
+            await session.commit()
+
+
+async def test_a_legacy_row_is_bounded_an_hour_after_its_start(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2268 review: no scrub or completion time on a legacy failed request;
+    ``started_at`` + 1h (the sweep's crash cutoff) bounds the strip on the
+    subject's memories, so a surviving member's later history stays."""
+    raw = f"google-oauth2|bound-{uuid.uuid4().hex[:8]}"
+    p = _salted(raw)
+    started = datetime(2026, 9, 1, 12, 0, 0)  # naive UTC
+    own = _memory(world["ws"], world["ctx"], p, None, 3)
+    legacy = _request(raw, status="failed", summary={"postgres": {"memories_scrubbed": 1}})
+    legacy.started_at = started.replace(tzinfo=UTC)
+    async with _maker(async_engine)() as session:
+        session.add(own)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(own, 2, world["third"], {"details": SUBJECTS}, started - timedelta(days=1)),
+                _edit(own, 3, world["fourth"], {"details": THIRDS}, started + timedelta(hours=2)),
+                legacy,
+            ]
+        )
+        await session.commit()
+    try:
+        async with _maker(async_engine)() as session:
+            before = await _snapshots(session, [own.id])
+        with patch("services.account_erasure_service._audit_salt", return_value=_SALT):
+            code, _ = await _run(async_engine, ["--request", str(legacy.id), "--apply", "--yes"])
+        assert code == 0
+        capsys.readouterr()
+        async with _maker(async_engine)() as session:
+            assert [row[3] for row in await _log(session, own.id)] == [
+                SCRUBBED,  # before the erasure: the subject's value, stripped
+                {"details": THIRDS},  # after the bound: left alone
+            ]
+            after = await _snapshots(session, [own.id])
+        for snapshot in (before, after):
+            snapshot.pop("audit_logs")
+            snapshot["erasure_requests"].pop(legacy.id)
+        assert after == before
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
+            await session.execute(delete(Memory).where(Memory.id == own.id))
             await session.commit()

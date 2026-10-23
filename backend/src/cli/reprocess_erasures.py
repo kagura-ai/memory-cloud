@@ -59,7 +59,7 @@ import argparse
 import asyncio
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -106,9 +106,12 @@ REPAIRED_REASON = "failed before v0.124.0; the original reason is removed (it ma
 # the derived pseudonym is on no row: none survived, or the salt is not the
 # erasure's — the account id is not overwritten with a value nothing carries
 SKIPPED_NO_ROWS = (
-    "failed after its Postgres step: no memory or revision row carries the derived "
-    "pseudonym (none survived, or the salt changed); left as it is"
+    "failed after its Postgres step: its summary counts memory or revision rows it "
+    "pseudonymized, but none carries the derived pseudonym (the salt changed?); "
+    "left as it is"
 )
+# the sweep's crash cutoff (``sweep_pending_erasures``): a run is over by then
+STALE_RUN = timedelta(hours=1)
 
 
 @dataclass
@@ -167,7 +170,11 @@ async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
     return email or pseudonym
 
 
-def _existed_at(summary: dict[str, Any] | None, completed_at: datetime | None) -> datetime | None:
+def _existed_at(
+    summary: dict[str, Any] | None,
+    completed_at: datetime | None,
+    started_at: datetime | None = None,
+) -> datetime | None:
     """The bound of the authored arm of the strip (``_authored_by``), naive UTC.
 
     ``memory_scrub_at`` (#2268): when the erasure locked the subject's
@@ -175,13 +182,34 @@ def _existed_at(summary: dict[str, Any] | None, completed_at: datetime | None) -
     commit. A request from before v0.124.0 has only ``completed_at``, a few
     statements later (a row written in between holds at most the scrubbed
     value; erring that way only marks it). A request that failed after its
-    Postgres step before v0.124.0 has neither: no bound.
+    Postgres step before v0.124.0 has neither: its ``started_at`` plus an
+    hour (#2268 review) — the sweep's own crash cutoff, so the scrub ran
+    before it and every row the erasure saw is older. Rows surviving members
+    wrote on the subject's memories within that hour are stripped and marked
+    too; later ones are left alone. Without ``started_at``, no bound.
     """
     postgres = (summary or {}).get("postgres")
     scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
     if isinstance(scrubbed, str):
         return to_naive_utc(datetime.fromisoformat(scrubbed))
-    return to_naive_utc(completed_at) if completed_at is not None else None
+    if completed_at is not None:
+        return to_naive_utc(completed_at)
+    if started_at is not None:
+        return to_naive_utc(started_at) + STALE_RUN
+    return None
+
+
+def _wrote_pseudonym(summary: dict[str, Any] | None) -> bool:
+    """The erasure's summary says it wrote the pseudonym on memory or revision
+    rows (#2268 review). When it wrote none, no row can carry it and the
+    repair goes ahead: the account id must not stay on the row."""
+    postgres = (summary or {}).get("postgres")
+    if not isinstance(postgres, dict):
+        return False
+    return any(
+        isinstance(postgres.get(key), int) and postgres[key] > 0
+        for key in ("memories_scrubbed", "memory_revisions_pseudonymized")
+    )
 
 
 async def _carries(db: AsyncSession, pseudonym: str) -> bool:
@@ -342,6 +370,7 @@ async def reprocess_erasures(
             ErasureRequest.id,
             ErasureRequest.user_id,
             ErasureRequest.completed_at,
+            ErasureRequest.started_at,
             ErasureRequest.deleted_data_summary,
             finalized_erasure().label("finalized"),
             unrepaired_erasure().label("unrepaired"),
@@ -371,14 +400,16 @@ async def reprocess_erasures(
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
     for request in requests:
-        existed_at = _existed_at(request.deleted_data_summary, request.completed_at)
+        existed_at = _existed_at(
+            request.deleted_data_summary, request.completed_at, request.started_at
+        )
         if request.unrepaired:
             # #2268: failed after its Postgres step before v0.124.0; the
             # subject's rows carry the pseudonym, the request row the account id
             pseudonym = erasure_pseudonym(request.user_id)
             carries = await _carries(db, pseudonym)
             await db.rollback()
-            if not carries:
+            if not carries and _wrote_pseudonym(request.deleted_data_summary):
                 result.skipped.append((request.id, SKIPPED_NO_ROWS))
                 continue
             change = await _reprocess_one(

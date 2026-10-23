@@ -1926,3 +1926,47 @@ async def test_the_audit_log_pseudonymization_is_committed_before_the_next_step(
 
     assert order[order.index("audit_logs") + 1] == "commit"
     assert order.index("commit", order.index("audit_logs")) < order.index("redis")
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_commit_logs_no_account_id_or_exception_text():
+    """#2268 review: after the Postgres commit the logs carry the request id,
+    the step and the exception class — never the account id or the text."""
+    svc = _service()
+    _stub_execute_steps(svc)
+    svc._finalize = AsyncMock(side_effect=RuntimeError("Key (user_id)=(u-1) violates"))
+
+    with (
+        patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+        patch("services.account_erasure_service.logger") as log,
+    ):
+        with pytest.raises(RuntimeError):
+            await svc._execute(_execute_request(self_service=True), _user())
+
+    calls = [*log.error.call_args_list, *log.warning.call_args_list, *log.info.call_args_list]
+    assert any(c.args and c.args[0] == "erasure_failed_after_postgres_commit" for c in calls)
+    assert not any(c.args and c.args[0] == "erasure_execute_failed" for c in calls)
+    for call in calls:
+        assert "u-1" not in repr(call), call
+        assert call.kwargs.get("exc_info") is None
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_logs_no_account_id_for_a_failed_request():
+    """#2268 review: the sweep's own line after ``_execute`` raised names the
+    request and the exception class only."""
+    svc = _service()
+    request = _execute_request(self_service=True)
+    claimed = MagicMock()
+    claimed.scalars.return_value.all.return_value = [request]
+    fresh = MagicMock()
+    fresh.scalar_one_or_none.return_value = request
+    svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), claimed, fresh])
+    svc._load_user_or_none = AsyncMock(return_value=_user())
+    svc._execute = AsyncMock(side_effect=RuntimeError("Key (user_id)=(u-1) violates"))
+
+    with patch("services.account_erasure_service.logger") as log:
+        assert await svc.sweep_pending_erasures() == 0
+
+    (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_execute_failed"]
+    assert call.kwargs == {"request_id": str(request.id), "error_class": "RuntimeError"}
