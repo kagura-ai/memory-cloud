@@ -757,47 +757,59 @@ class AccountErasureService:
 
         # Mark all as in_progress immediately (under the same FOR UPDATE
         # lock) so a second sweeper waking up between iterations cannot
-        # also see them as cooling_off.
+        # also see them as cooling_off. The ids are read first, while the
+        # rows are fresh: a failed ``_execute`` rolls the session back, which
+        # expires every loaded instance, and an async session cannot
+        # lazy-load an expired attribute (MissingGreenlet, #2266).
+        due = [(req.id, req.user_id) for req in due_requests]
         for req in due_requests:
             req.status = STATUS_IN_PROGRESS
             req.started_at = now
         await self.db.commit()
 
-        # Bulk-load every target user up-front rather than one SELECT per
-        # request — collapses up to `batch_size` round-trips into one.
-        user_ids = [req.user_id for req in due_requests]
-        users_result = await self.db.execute(select(User).where(User.user_id.in_(user_ids)))
-        users_by_id: dict[str, User] = {u.user_id: u for u in users_result.scalars().all()}
-
         executed = 0
-        for req in due_requests:
-            target = users_by_id.get(req.user_id)
+        for request_id, user_id in due:
+            # One SELECT each (≤ batch_size rows per sweep): both rows are
+            # read after any earlier request's rollback, never from an
+            # expired instance. Handlers below log the locals only.
+            request = (
+                await self.db.execute(select(ErasureRequest).where(ErasureRequest.id == request_id))
+            ).scalar_one_or_none()
+            if request is None:
+                continue  # removed since it was claimed; nothing to run
+            target = await self._load_user_or_none(user_id)
             if target is None:
                 # User row already gone (race / manual cleanup). Mark complete
                 # with empty summary; nothing to delete.
-                req.status = STATUS_COMPLETE
-                req.completed_at = utcnow()
-                req.deleted_data_summary = {"note": "user_row_already_absent"}
+                await self.db.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .values(
+                        status=STATUS_COMPLETE,
+                        completed_at=utcnow(),
+                        deleted_data_summary={"note": "user_row_already_absent"},
+                    )
+                )
                 await self.db.commit()
                 continue
             try:
-                await self._execute(req, target)
+                await self._execute(request, target)
                 executed += 1
             except BillingContractActiveError as exc:
                 # Expected refusal (#1940), not a fault: `_execute` already
                 # marked the row failed with the reason. No stack trace/alert.
                 logger.warning(
                     "erasure_sweep_blocked_by_billing_contract",
-                    request_id=str(req.id),
-                    user_id=req.user_id,
+                    request_id=str(request_id),
+                    user_id=user_id,
                     workspace_ids=exc.details.get("workspace_ids"),
                 )
                 continue
             except Exception as exc:
                 logger.error(
                     "erasure_sweep_execute_failed",
-                    request_id=str(req.id),
-                    user_id=req.user_id,
+                    request_id=str(request_id),
+                    user_id=user_id,
                     error=str(exc),
                     exc_info=True,
                 )

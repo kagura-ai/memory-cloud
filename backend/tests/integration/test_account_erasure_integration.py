@@ -417,6 +417,88 @@ class TestEditorDetailsRestore:
         assert user is not None
 
 
+class TestSweepAfterAFailure:
+    """#2266: one request failing in ``_execute`` (which rolls the session
+    back and so expires every loaded instance) must not stop the sweep: the
+    next due request still runs, and nothing escapes."""
+
+    @pytest.mark.asyncio
+    async def test_the_next_request_runs(self, db_session: AsyncSession, patched_external_stores):
+        from datetime import timedelta
+
+        from sqlalchemy import delete
+
+        from models.erasure import STATUS_COOLING_OFF, STATUS_FAILED
+
+        users = [
+            User(
+                email=f"sweep-{uuid4().hex[:8]}@example.com",
+                user_id=f"sweep_{uuid4().hex[:8]}",
+                name="Sweep",
+                role="user",
+                is_initial_admin=False,
+                auth_method="oauth",
+                auth_provider="google",
+            )
+            for _ in range(2)
+        ]
+        db_session.add_all(users)
+        await db_session.flush()
+        failing, passing = (u.user_id for u in users)
+        requests = [
+            ErasureRequest(
+                user_id=user.user_id,
+                user_email_hash=sha256_hex(user.email),
+                initiated_by=user.user_id,
+                is_self_service=True,
+                reason_code="self_service",
+                status=STATUS_COOLING_OFF,
+                # the failing one first: the sweep orders by scheduled_for
+                scheduled_for=utcnow() - timedelta(minutes=10 - i),
+            )
+            for i, user in enumerate(users)
+        ]
+        db_session.add_all(requests)
+        await db_session.commit()
+        request_ids = [r.id for r in requests]
+
+        async def points(user_id: str) -> dict[str, int]:
+            if user_id == failing:
+                raise RuntimeError("vector store down")
+            return {"kagura_memories": 0}
+
+        try:
+            with patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(side_effect=points),
+            ):
+                executed = await AccountErasureService(db_session).sweep_pending_erasures()
+
+            assert executed == 1
+            statuses = dict(
+                (
+                    await db_session.execute(
+                        select(ErasureRequest.id, ErasureRequest.status).where(
+                            ErasureRequest.id.in_(request_ids)
+                        )
+                    )
+                ).all()
+            )
+            assert statuses == {request_ids[0]: STATUS_FAILED, request_ids[1]: STATUS_COMPLETE}
+            remaining = (
+                await db_session.execute(
+                    select(User.user_id).where(User.user_id.in_([failing, passing]))
+                )
+            ).scalars()
+            assert set(remaining) == {failing}
+        finally:
+            await db_session.execute(
+                delete(ErasureRequest).where(ErasureRequest.id.in_(request_ids))
+            )
+            await db_session.execute(delete(User).where(User.user_id == failing))
+            await db_session.commit()
+
+
 class TestTimeMemories:
     """#2266: ``type='time'`` rows must keep a trigger window
     (``valid_trigger_window_format``), so neither the scrub nor the restore
