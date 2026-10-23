@@ -25,9 +25,9 @@ Coverage gaps these tests close (per QA-Lead Gate2 review):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -1721,3 +1721,321 @@ class TestThePostgresStepMergesTheSummary:
         assert {k: v for k, v in summary["postgres"].items() if k != "memory_scrub_at"} == (
             erased.counts
         )
+
+
+# ---------------------------------------------------------------------------
+# #2282: a vector-store outage at the first step reschedules the request
+# ---------------------------------------------------------------------------
+
+
+def _vector_store_down():
+    from utils.exceptions import QdrantError
+
+    return patch(
+        "services.account_erasure_service.delete_user_points",
+        new=AsyncMock(side_effect=QdrantError("connection refused")),
+    )
+
+
+async def _due_self_service_request(
+    db_session: AsyncSession, scenario: dict, *, summary: dict | None = None
+):
+    """A confirmed self-service request of the scenario's target, due now."""
+    from datetime import timedelta
+
+    from models.erasure import STATUS_COOLING_OFF
+
+    target = scenario["target_user_id"]
+    request = ErasureRequest(
+        user_id=target,
+        user_email_hash=sha256_hex(scenario["target_email"]),
+        initiated_by=target,
+        is_self_service=True,
+        reason_code="self_service",
+        status=STATUS_COOLING_OFF,
+        requested_at=utcnow() - timedelta(days=8),
+        confirmed_at=utcnow() - timedelta(days=7, minutes=1),
+        scheduled_for=utcnow() - timedelta(minutes=1),
+        ip_address="203.0.113.9",
+        user_agent="agent",
+        deleted_data_summary=summary,
+    )
+    db_session.add(request)
+    await db_session.commit()
+    return request.id
+
+
+async def _make_due(db_session: AsyncSession, request_id) -> None:
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    await db_session.execute(
+        update(ErasureRequest)
+        .where(ErasureRequest.id == request_id)
+        .values(scheduled_for=utcnow() - timedelta(minutes=1))
+    )
+    await db_session.commit()
+
+
+async def _user_exists(db_session: AsyncSession, user_id: str) -> bool:
+    row = (await db_session.execute(select(User.id).where(User.user_id == user_id))).first()
+    return row is not None
+
+
+class TestAVectorStoreOutageAtStepOne:
+    """#2282: ``delete_user_points`` raising ``QdrantError`` leaves nothing
+    erased: the request goes back to ``cooling_off`` with a later
+    ``scheduled_for`` and ``summary.retry``; the sweep runs it again when
+    due, and the fourth failed attempt fails it."""
+
+    @pytest.mark.asyncio
+    async def test_it_reschedules_and_the_next_sweep_erases(
+        self, db_session: AsyncSession, erasure_scenario, bystanders, patched_external_stores
+    ):
+        from datetime import timedelta
+
+        from models.erasure import STATUS_COOLING_OFF
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        before_row = await _request_snapshot(db_session, request_id)
+        before = await _everything_but(db_session, request_id)
+
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_COOLING_OFF
+        scheduled_for = datetime.fromisoformat(row["scheduled_for"])
+        assert scheduled_for > datetime.fromisoformat(before_row["scheduled_for"]) + timedelta(
+            minutes=14
+        )
+        assert row["started_at"] is not None  # the claim's; set again on the next one
+        retry = row["deleted_data_summary"]["retry"]
+        assert row["deleted_data_summary"] == {"retry": retry}
+        assert (retry["attempts"], retry["step"], retry["error_class"]) == (
+            1,
+            "vector_store",
+            "QdrantError",
+        )
+        assert row["failure_reason"] is None
+        # nothing was erased or pseudonymized: the row keeps what it held
+        # before the first step, and every other row of every table is as it was
+        unchanged = {
+            k: v
+            for k, v in row.items()
+            if k not in ("status", "scheduled_for", "started_at", "deleted_data_summary")
+        }
+        assert unchanged == {
+            k: v
+            for k, v in before_row.items()
+            if k not in ("status", "scheduled_for", "started_at", "deleted_data_summary")
+        }
+        assert row["user_id"] == target  # the raw sub stays, as on any live request
+        assert await _everything_but(db_session, request_id) == before
+        assert await _user_exists(db_session, target)
+
+        # not due yet: a sweep right after leaves it alone
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert await _request_snapshot(db_session, request_id) == row
+
+        # due, the vector store is back: the erasure runs and keeps the history
+        await _make_due(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 1
+        done = await _request_snapshot(db_session, request_id)
+        assert done["status"] == STATUS_COMPLETE
+        assert done["deleted_data_summary"]["retry"] == retry
+        assert done["deleted_data_summary"]["qdrant"] == {"kagura_memories": 0}
+        assert done["user_id"] == sha256_hex(target, salt=_audit_salt())
+        assert not await _user_exists(db_session, target)
+        # the bystanders' requests and user row are untouched throughout
+        after = await _table_snapshot(db_session, "erasure_requests")
+        for bystander_id in bystanders["request_ids"]:
+            assert after[bystander_id] == before["erasure_requests"][bystander_id]
+        assert await _user_exists(db_session, bystanders["user_id"])
+
+    @pytest.mark.asyncio
+    async def test_the_fourth_attempt_fails_it(
+        self, db_session: AsyncSession, erasure_scenario, bystanders, patched_external_stores
+    ):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(
+            db_session,
+            erasure_scenario,
+            summary={"retry": {"attempts": 3, "step": "vector_store"}},
+        )
+        before = await _everything_but(db_session, request_id)
+
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"].startswith(
+            "vector_store_unavailable after 4 attempts: Qdrant service error"
+        )
+        assert not row["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert row["deleted_data_summary"]["retry"]["attempts"] == 4
+        # nothing erased: raw ids kept (a new request is the retry)
+        assert (row["user_id"], row["initiated_by"], row["ip_address"]) == (
+            target,
+            target,
+            "203.0.113.9",
+        )
+        assert await _everything_but(db_session, request_id) == before
+        assert await _user_exists(db_session, target)
+        # terminal: no later sweep runs it
+        await _make_due(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert (await _request_snapshot(db_session, request_id))["status"] == STATUS_FAILED
+
+    @pytest.mark.asyncio
+    async def test_the_user_can_cancel_it_while_it_waits(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        from models.erasure import STATUS_CANCELLED
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        cancelled = await AccountErasureService(db_session).cancel_self_service(user_id=target)
+        assert cancelled.id == request_id
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        assert row["deleted_data_summary"]["retry"]["attempts"] == 1
+
+        # never run again, even once its time has passed
+        await _make_due(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert (await _request_snapshot(db_session, request_id))["status"] == STATUS_CANCELLED
+        assert await _user_exists(db_session, target)
+
+        # a new request starts its own count
+        new_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert (await _request_snapshot(db_session, new_id))["deleted_data_summary"]["retry"][
+            "attempts"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_rescheduled_request_whose_user_vanished_is_closed_unrun(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        await db_session.execute(delete(User).where(User.user_id == target))
+        await db_session.commit()
+        await _make_due(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_COMPLETE
+        assert row["deleted_data_summary"] == {
+            "note": "user_row_already_absent",
+            "pseudonymized": True,
+        }
+        assert row["user_id"] == sha256_hex(target, salt=_audit_salt())
+        assert target not in repr(row)
+
+    @pytest.mark.asyncio
+    async def test_the_retry_history_survives_a_run_interrupted_after_the_commit(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        """The Postgres step merges its summary into the row's, so the
+        ``retry`` block written on the reschedule is still there when the
+        sweep closes an interrupted run (#2286)."""
+        import asyncio
+
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        retry = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]["retry"]
+
+        await _make_due(db_session, request_id)
+        with (
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
+            patch.object(
+                AccountErasureService,
+                "_clear_redis",
+                AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await AccountErasureService(db_session).sweep_pending_erasures()
+        await db_session.rollback()
+        db_session.expire_all()
+
+        interrupted = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]
+        assert interrupted["retry"] == retry
+        assert interrupted["postgres"]["users"] == 1
+
+        await _age(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        closed = await _request_snapshot(db_session, request_id)
+        assert closed["status"] == STATUS_FAILED
+        assert closed["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert closed["deleted_data_summary"]["retry"] == retry
+        assert "memory_scrub_at" in closed["deleted_data_summary"]["postgres"]
+
+    @pytest.mark.asyncio
+    async def test_admin_force_erase_answers_503_and_keeps_the_request(
+        self, db_session: AsyncSession, erasure_scenario, bystanders, patched_external_stores
+    ):
+        from models.erasure import STATUS_COOLING_OFF
+        from utils.exceptions import ErasureRetryScheduledError
+
+        target = erasure_scenario["target_user_id"]
+        before_users = await _table_snapshot(db_session, "users")
+        with _vector_store_down():
+            with pytest.raises(ErasureRetryScheduledError) as caught:
+                await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    ip_address="198.51.100.1",
+                )
+
+        assert caught.value.status_code == 503
+        request_id = UUID(caught.value.details["request_id"])
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_COOLING_OFF
+        assert row["is_self_service"] is False
+        # the time the 503 names is the one stored (asyncpg reads a naive
+        # value as local time, as on every write of this column: compare the same way)
+        assert caught.value.scheduled_for.astimezone(UTC) == datetime.fromisoformat(
+            row["scheduled_for"]
+        )
+        assert row["deleted_data_summary"]["retry"]["attempts"] == 1
+        assert (row["user_id"], row["initiated_by"], row["ip_address"]) == (
+            target,
+            "admin-runner",
+            "198.51.100.1",
+        )
+        assert await _table_snapshot(db_session, "users") == before_users
+
+        # one active request per user: a second force-erase meanwhile is refused
+        with pytest.raises(ErasureAlreadyInProgressError):
+            await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=target,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            )
+
+        # the sweep runs it when due
+        await _make_due(db_session, request_id)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 1
+        done = await _request_snapshot(db_session, request_id)
+        assert done["status"] == STATUS_COMPLETE
+        assert done["initiated_by"] == "admin-runner"
+        assert not await _user_exists(db_session, target)
