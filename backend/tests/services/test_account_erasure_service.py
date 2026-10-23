@@ -2023,3 +2023,236 @@ async def test_the_sweep_logs_no_account_id_for_a_failed_request():
 
     (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_execute_failed"]
     assert call.kwargs == {"request_id": str(request.id), "error_class": "RuntimeError"}
+
+
+# ---------------------------------------------------------------------------
+# #2286: a run interrupted after the Postgres commit
+# ---------------------------------------------------------------------------
+
+_SCRUB_AT = datetime(2026, 10, 1, 12, 0)
+
+
+def _sweep_with_absent_user(
+    request: ErasureRequest,
+) -> tuple[AccountErasureService, list[Any]]:
+    """The sweep claims ``request``; its user row is gone."""
+    svc = _service()
+    claimed = MagicMock()
+    claimed.scalars.return_value.all.return_value = [request]
+    fresh = MagicMock()
+    fresh.scalar_one_or_none.return_value = request
+    results = iter([MagicMock(rowcount=0), claimed, fresh])
+    statements: list[Any] = []
+
+    def execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+        statements.append(stmt)
+        return next(results, MagicMock(rowcount=1))
+
+    svc.db.execute = AsyncMock(side_effect=execute)
+    svc._load_user_or_none = AsyncMock(return_value=None)
+    svc._execute = AsyncMock()
+    svc._clear_redis = AsyncMock(return_value={"sessions": 1, "co_act": 0})
+    return svc, statements
+
+
+def _close_values(statements: list[Any]) -> dict[str, Any]:
+    """The params of the one UPDATE that closed the request."""
+    from sqlalchemy.sql.dml import Update
+
+    (closing,) = [s for s in statements[3:] if isinstance(s, Update)]
+    assert str(closing.table) == "erasure_requests"
+    return closing.compile().params
+
+
+class TestSweepClosesARequestWithoutAUserRow:
+    """#2286: a claimed request whose user row is gone is never re-run. The
+    ``postgres`` summary (written in the Postgres step's transaction) tells
+    a run interrupted after that commit from one that never started; both
+    end pseudonymized."""
+
+    @pytest.mark.parametrize("self_service", [True, False])
+    @pytest.mark.asyncio
+    async def test_an_interrupted_run_is_failed_marked_and_pseudonymized(self, self_service):
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        request = _execute_request(self_service=self_service)
+        request.ip_address, request.user_agent = "203.0.113.9", "agent"
+        postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        request.deleted_data_summary = {"postgres": postgres}
+        svc, statements = _sweep_with_absent_user(request)
+
+        with (
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            assert await svc.sweep_pending_erasures() == 0
+            pseudonym = svc._pseudonym("u-1")
+
+        svc._execute.assert_not_awaited()
+        svc._clear_redis.assert_awaited_once_with("u-1")
+        params = _close_values(statements)
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert params["user_id"] == pseudonym != "u-1"
+        assert (params["ip_address"], params["user_agent"]) == (None, None)
+        if self_service:
+            assert params["initiated_by"] == pseudonym
+        else:
+            assert "initiated_by" not in params  # the admin's id stays
+        assert "completed_at" not in params
+        # the Postgres counts and the scrub time stay; the Redis counts join
+        assert params["deleted_data_summary"] == {
+            "postgres": postgres,
+            "redis": {"sessions": 1, "co_act": 0},
+        }
+        # guarded: a row moved since the claim is left alone
+        assert params["status_1"] == "in_progress"
+        assert params["id_1"] == request.id
+        (call,) = [
+            c for c in log.warning.call_args_list if c.args[0] == "erasure_sweep_user_row_absent"
+        ]
+        assert call.kwargs == {"request_id": str(request.id), "ran_in_postgres": True}
+        for c in [*log.warning.call_args_list, *log.error.call_args_list]:
+            assert "u-1" not in repr(c), c
+
+    @pytest.mark.parametrize("summary", [None, {"qdrant": {"kagura_memories": 0}}])
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_ran_is_complete_noted_and_pseudonymized(self, summary):
+        from models.erasure import STATUS_COMPLETE
+
+        request = _execute_request(self_service=True)
+        request.ip_address, request.user_agent = "203.0.113.9", "agent"
+        request.deleted_data_summary = summary
+        svc, statements = _sweep_with_absent_user(request)
+
+        with (
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            await svc.sweep_pending_erasures()
+            pseudonym = svc._pseudonym("u-1")
+
+        svc._clear_redis.assert_not_awaited()
+        params = _close_values(statements)
+        assert params["status"] == STATUS_COMPLETE
+        assert params["completed_at"] is not None
+        assert params["deleted_data_summary"] == {"note": "user_row_already_absent"}
+        assert "failure_reason" not in params
+        assert params["user_id"] == params["initiated_by"] == pseudonym
+        assert (params["ip_address"], params["user_agent"]) == (None, None)
+        (call,) = [
+            c for c in log.warning.call_args_list if c.args[0] == "erasure_sweep_user_row_absent"
+        ]
+        assert call.kwargs == {"request_id": str(request.id), "ran_in_postgres": False}
+
+    @pytest.mark.asyncio
+    async def test_a_redis_failure_does_not_stop_the_close(self):
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT
+
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"postgres": {"users": 1}}
+        svc, statements = _sweep_with_absent_user(request)
+        svc._clear_redis = AsyncMock(side_effect=RuntimeError("redis down for u-1"))
+
+        with patch("services.account_erasure_service.logger") as log:
+            await svc.sweep_pending_erasures()
+
+        params = _close_values(statements)
+        assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert params["deleted_data_summary"] == {"postgres": {"users": 1}}
+        svc.db.commit.assert_awaited()
+        (call,) = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "erasure_sweep_redis_cleanup_failed"
+        ]
+        assert call.kwargs == {"request_id": str(request.id), "error_class": "RuntimeError"}
+        for c in [*log.warning.call_args_list, *log.error.call_args_list]:
+            assert "u-1" not in repr(c), c
+
+
+class TestThePostgresStepRecordsItselfOnTheRequest:
+    """#2286: ``_delete_postgres`` writes the ``postgres`` summary on the
+    request row inside its transaction, so a crash after the commit cannot
+    lose the fact that it ran."""
+
+    @staticmethod
+    def _recording_service() -> tuple[AccountErasureService, list[Any]]:
+        svc = _delete_postgres_service()
+        order: list[Any] = []
+        svc.db.execute = AsyncMock(
+            side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=2)
+        )
+        svc.db.delete = AsyncMock(side_effect=lambda *a: order.append("delete"))
+        svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        return svc, order
+
+    @staticmethod
+    def _request_updates(order: list[Any]) -> list[int]:
+        from sqlalchemy.sql.dml import Update
+
+        return [
+            i
+            for i, stmt in enumerate(order)
+            if isinstance(stmt, Update) and str(stmt.table) == "erasure_requests"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_summary_is_the_last_write_before_the_commit(self):
+        from sqlalchemy.sql.dml import Update
+
+        svc, order = self._recording_service()
+        request_id = uuid4()
+
+        with patch("services.account_erasure_service.utcnow", return_value=_SCRUB_AT):
+            erased = await svc._delete_postgres(_user(), request_id=request_id)
+
+        (i,) = self._request_updates(order)
+        # after the audit-log statement (its count is in the summary), then
+        # the user delete and the one commit
+        audit = next(
+            j
+            for j, stmt in enumerate(order)
+            if isinstance(stmt, Update) and str(stmt.table) == "audit_logs"
+        )
+        assert audit < i
+        assert order[i + 1 :] == ["delete", "commit"]
+        params = order[i].compile().params
+        assert params["id_1"] == request_id  # scoped to the one request row
+        postgres = params["deleted_data_summary"]["postgres"]
+        assert postgres == {**erased.counts, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        assert postgres["users"] == 1 and postgres["audit_logs_pseudonymized"] == 2
+
+    @pytest.mark.asyncio
+    async def test_without_a_request_no_request_row_is_written(self):
+        svc, order = self._recording_service()
+
+        await svc._delete_postgres(_user())
+
+        assert self._request_updates(order) == []
+        assert order[-2:] == ["delete", "commit"]
+
+    @pytest.mark.asyncio
+    async def test_execute_passes_its_request(self):
+        svc = _service()
+        _stub_execute_steps(svc)
+        request = _execute_request(self_service=True)
+
+        with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+            await svc._execute(request, _user())
+
+        assert svc._delete_postgres.await_args.kwargs == {"request_id": request.id}
+
+
+@pytest.mark.parametrize("subject_initiated", [True, False])
+def test_pseudonymized_request_values(subject_initiated):
+    """#2286 (one #2288 carve-out): the one values dict every writer that
+    pseudonymizes a request row uses."""
+    from services.account_erasure_service import _pseudonymized_request_values
+
+    values = _pseudonymized_request_values("p" * 64, subject_initiated=subject_initiated)
+
+    expected = {"user_id": "p" * 64, "ip_address": None, "user_agent": None}
+    if subject_initiated:
+        expected["initiated_by"] = "p" * 64
+    assert values == expected

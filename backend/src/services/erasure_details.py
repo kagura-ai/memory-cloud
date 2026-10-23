@@ -208,8 +208,15 @@ async def pseudonymize_audit_logs(
 
 def _ran_in_postgres() -> ColumnElement[bool]:
     """The request's Postgres step committed: only a run writes
-    ``deleted_data_summary.postgres`` (since #360), after that commit."""
+    ``deleted_data_summary.postgres`` (since #360) — after that commit
+    before v0.125.0, inside its transaction since (#2286)."""
     return func.coalesce(ErasureRequest.deleted_data_summary.has_key("postgres"), False)
+
+
+def _never_ran() -> ColumnElement[bool]:
+    """A ``complete`` request without ``postgres`` in its summary: the
+    sweep's ``user_row_already_absent`` rows, its only writer (#2286)."""
+    return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
 
 
 def _failed_after_commit_marked() -> ColumnElement[bool]:
@@ -224,11 +231,13 @@ def finalized_erasure() -> ColumnElement[bool]:
 
     ``status='complete'`` alone is not enough: the sweep marks a request
     whose user row is already gone ``complete`` without running it, and
-    that row keeps the raw account id (which an IdP may issue as 64 hex).
-    Only a run writes ``deleted_data_summary.postgres`` (since #360), and
-    only ``_finalize`` stores the pseudonym in ``user_id`` (since v0.58.1)
-    — or, since #2268, the failure handler of a request that failed after
-    its Postgres step committed (``FAILURE_AFTER_POSTGRES_COMMIT``).
+    before v0.125.0 that row kept the raw account id (which an IdP may issue
+    as 64 hex). Only a run writes ``deleted_data_summary.postgres`` (since
+    #360), and only ``_finalize`` stores the pseudonym in ``user_id`` (since
+    v0.58.1) — or, since #2268, the failure handler of a request that failed
+    after its Postgres step committed (``FAILURE_AFTER_POSTGRES_COMMIT``),
+    and since #2286 the sweep for a run interrupted after that commit
+    (``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the same prefix).
     """
     return _ran_in_postgres() & (
         (ErasureRequest.status == STATUS_COMPLETE)
@@ -261,15 +270,28 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
     v0.58.1 stores the raw sub, and that member's edits predate the revision
     log); a row ``unrepaired_erasure`` matches gives the pseudonym derived
     from its raw sub, which is what the subject's rows carry.
+
+    A row the sweep marked ``complete`` with the ``user_row_already_absent``
+    note (``_never_ran``, #2286) gives the pseudonym derived from its
+    ``user_id``, with no shape test. Before v0.125.0 the sweep kept the raw
+    sub on such a row, and it may stand for an erasure that did run —
+    interrupted after its Postgres commit, when the summary was written only
+    after it — whose subject's rows carry that pseudonym. When it really
+    never ran, nothing carries it; on a row written since v0.125.0 the value
+    is already a pseudonym and its hash matches nothing either: both no-ops.
+    The stored value itself is never taken: on a legacy row it can be a raw
+    sub with the pseudonym's shape.
     """
+    never_ran = _never_ran()
     rows = await db.execute(
-        select(ErasureRequest.user_id, unrepaired_erasure().label("unrepaired")).where(
-            finalized_erasure() | unrepaired_erasure()
-        )
+        select(
+            ErasureRequest.user_id,
+            (unrepaired_erasure() | never_ran).label("derive"),
+        ).where(finalized_erasure() | unrepaired_erasure() | never_ran)
     )
     pseudonyms: set[str] = set()
-    for user_id, unrepaired in rows.all():
-        if unrepaired:
+    for user_id, derive in rows.all():
+        if derive:
             pseudonyms.add(erasure_pseudonym(user_id))
         elif is_pseudonym(user_id):
             pseudonyms.add(user_id)

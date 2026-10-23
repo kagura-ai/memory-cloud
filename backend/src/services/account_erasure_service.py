@@ -31,6 +31,13 @@ user row is gone — and the subject is erased in Postgres: the row is marked
 its own PII is pseudonymized as ``_finalize`` would, so the re-run
 (``reprocess_erasures``) and later erasures treat it as an erasure that ran.
 
+A crash after that commit that no handler sees (SIGTERM, OOM, a cancelled
+task, #2286) leaves the row ``in_progress``. The Postgres step writes its
+``postgres`` summary on the request row inside its own transaction, so the
+sweep, finding the user row gone, can tell such a run from one that never
+started: it marks it ``failed`` with ``INTERRUPTED_AFTER_POSTGRES_COMMIT`` and
+pseudonymizes it like the handler would.
+
 The Qdrant call is best-effort: its internal try/except swallows API
 failures and records the outcome in the summary, so a Qdrant outage
 never blocks the Postgres delete pipeline.
@@ -73,6 +80,7 @@ from models.auth import (
 )
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
+    INTERRUPTED_AFTER_POSTGRES_COMMIT,
     REASON_DETAIL_MAX_CHARS,
     REASON_SELF_SERVICE,
     STATUS_CANCELLED,
@@ -211,6 +219,24 @@ def _audit_salt() -> str:
 
 
 _sha256_hex = sha256_hex  # backward-compat alias for tests + this module
+
+
+def _pseudonymized_request_values(pseudonym: str, *, subject_initiated: bool) -> dict[str, Any]:
+    """The request row's own PII, pseudonymized once its subject is erased.
+
+    ``user_id`` (always the subject) becomes ``pseudonym``, the request
+    metadata (``ip_address``/``user_agent``) is cleared, and ``initiated_by``
+    becomes ``pseudonym`` only when the subject started the request
+    (self-service); an admin's id is accountability evidence and stays. One
+    definition for every writer that pseudonymizes a request row:
+    ``_finalize``, ``_execute``'s handler after the Postgres commit (#2268)
+    and the sweep's interrupted / user-row-gone branch (#2286).
+    ``reprocess_erasures``'s ``_repair`` decides the same in SQL.
+    """
+    values: dict[str, Any] = {"user_id": pseudonym, "ip_address": None, "user_agent": None}
+    if subject_initiated:
+        values["initiated_by"] = pseudonym
+    return values
 
 
 class AccountErasureService:
@@ -733,7 +759,15 @@ class AccountErasureService:
         - **Stale ``in_progress``** (``started_at`` older than 1h): these
           are runs that were marked in-progress but did not complete
           (process SIGTERM/OOM between commit and ``_execute``). Picked
-          up by the main sweep query and re-executed.
+          up by the main sweep query and re-executed while the user row
+          exists. When it is gone (#2286), the request is never re-run:
+          a summary with ``postgres`` (written in the Postgres step's own
+          transaction) means that step committed and the run was
+          interrupted after it — ``failed`` with
+          ``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the subject's Redis state
+          cleared best-effort; without it nothing ran — ``complete`` with
+          the ``user_row_already_absent`` note. Either way the row is
+          pseudonymized (``_pseudonymized_request_values``).
 
         - **Stale ``pending``** (``requested_at`` older than 1h + 5min
           grace): the Redis confirm token (TTL 1h) has expired and the
@@ -822,18 +856,7 @@ class AccountErasureService:
                 continue  # removed since it was claimed; nothing to run
             target = await self._load_user_or_none(user_id)
             if target is None:
-                # User row already gone (race / manual cleanup). Mark complete
-                # with empty summary; nothing to delete.
-                await self.db.execute(
-                    update(ErasureRequest)
-                    .where(ErasureRequest.id == request_id)
-                    .values(
-                        status=STATUS_COMPLETE,
-                        completed_at=utcnow(),
-                        deleted_data_summary={"note": "user_row_already_absent"},
-                    )
-                )
-                await self.db.commit()
+                await self._close_request_without_user(request)
                 continue
             try:
                 await self._execute(request, target)
@@ -862,6 +885,78 @@ class AccountErasureService:
                 # the next request in this batch.
                 continue
         return executed
+
+    async def _close_request_without_user(self, request: ErasureRequest) -> None:
+        """Close a claimed request whose user row is gone (#2286).
+
+        ``deleted_data_summary.postgres`` is written in the Postgres step's
+        own transaction (``_delete_postgres``), so its presence means the
+        subject was erased in Postgres and the run was interrupted after
+        that commit, before the handler or ``_finalize`` wrote the row: it
+        becomes ``failed`` with ``INTERRUPTED_AFTER_POSTGRES_COMMIT`` (no
+        completion time; ``memory_scrub_at`` stays in the summary), so
+        ``finalized_erasure`` — the re-run, the erased-members set — treats
+        it as an erasure that ran. The subject's Redis state is cleared
+        best-effort here; the payload patch of restored memories, the
+        ``account_erasure`` audit row and the completion email are not
+        done. Without ``postgres`` nothing was erased (the row was removed
+        some other way, or the run was interrupted before the Postgres
+        commit on a version that wrote the summary only after it): the
+        ``complete`` row gets the ``user_row_already_absent`` note.
+
+        Either way the row is pseudonymized: the account no longer exists,
+        and the raw sub must not outlive it on this row. The UPDATE is
+        guarded by ``status = in_progress`` (the claim set it), so a row
+        moved meanwhile is left alone. The log line carries the request id
+        only.
+        """
+        request_id = request.id
+        user_id = request.user_id
+        summary = dict(request.deleted_data_summary or {})
+        ran = isinstance(summary.get("postgres"), dict)
+        values = _pseudonymized_request_values(
+            self._pseudonym(user_id), subject_initiated=request.initiated_by == user_id
+        )
+        if ran:
+            redis = await self._clear_redis_best_effort(request_id, user_id)
+            if redis is not None:
+                summary["redis"] = redis
+            values.update(
+                status=STATUS_FAILED,
+                failure_reason=INTERRUPTED_AFTER_POSTGRES_COMMIT,
+                deleted_data_summary=summary,
+            )
+        else:
+            values.update(
+                status=STATUS_COMPLETE,
+                completed_at=utcnow(),
+                deleted_data_summary={"note": "user_row_already_absent"},
+            )
+        await self.db.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS)
+            .values(**values)
+        )
+        await self.db.commit()
+        logger.warning(
+            "erasure_sweep_user_row_absent", request_id=str(request_id), ran_in_postgres=ran
+        )
+
+    async def _clear_redis_best_effort(
+        self, request_id: UUID, user_id: str
+    ) -> dict[str, int] | None:
+        """``_clear_redis`` for an interrupted run (#2286): a failure is logged
+        (request id and class only — the subject is erased) and gives None.
+        The keys expire by themselves and the sub names no account any more."""
+        try:
+            return await self._clear_redis(user_id)
+        except Exception as exc:
+            logger.warning(
+                "erasure_sweep_redis_cleanup_failed",
+                request_id=str(request_id),
+                error_class=type(exc).__name__,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Core execution (multi-step orchestrator)
@@ -916,7 +1011,7 @@ class AccountErasureService:
             )
 
             # Step 3: Postgres deletes (FK-safe order)
-            erased = await self._delete_postgres(target)
+            erased = await self._delete_postgres(target, request_id=request_id)
             erased_in_postgres = True  # committed: no step below can undo it
             postgres: dict[str, int | str | None] = dict(erased.counts)
             # #2268: the re-run's bound for the subject's authored memories
@@ -1058,15 +1153,13 @@ class AccountErasureService:
                 # any more than a ``complete`` one does (``_finalize``), and
                 # the marker lets the re-run and later erasures find it.
                 values.update(
-                    user_id=user_pseudonym,
-                    ip_address=None,
-                    user_agent=None,
+                    _pseudonymized_request_values(
+                        user_pseudonym, subject_initiated=subject_initiated
+                    ),
                     # the class only: an exception text (a constraint's
                     # DETAIL, a Redis key) can name the account (#2268 review)
                     failure_reason=f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {type(exc).__name__}",
                 )
-                if subject_initiated:
-                    values["initiated_by"] = user_pseudonym
             await self.db.execute(
                 update(ErasureRequest).where(ErasureRequest.id == request_id).values(**values)
             )
@@ -1197,13 +1290,24 @@ class AccountErasureService:
 
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
-    async def _delete_postgres(self, target: User) -> PostgresErasure:
+    async def _delete_postgres(
+        self, target: User, *, request_id: UUID | None = None
+    ) -> PostgresErasure:
         """Delete every Postgres row that references the user, and commit.
 
         Order matters because not every column is FK-cascaded — most
         cross-table user references are plain VARCHAR (OAuth2 sub) with
         no cascade. The full sweep here is the application-layer
         equivalent of `ON DELETE CASCADE` for all per-user data.
+
+        Args:
+            target: The user being erased.
+            request_id: The erasure request (``_execute`` passes it, #2286):
+                the ``postgres`` summary (counts, ``memory_scrub_at``) is
+                written on that row in this transaction, so the fact that
+                this step committed survives a crash before any later step
+                records it (``_close_request_without_user``). None writes
+                nothing on a request row.
 
         Returns:
             The counts, and the details restore whose payloads the caller
@@ -1512,11 +1616,28 @@ class AccountErasureService:
         counts["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
             user_id, target.email
         )
+        counts["users"] = 1  # deleted below, in this transaction
+
+        # #2286: "this step committed", on the request row and in the same
+        # commit: a crash after it (no handler runs) is then told apart from
+        # a run that never reached it. The request row is the last row this
+        # transaction locks (the user row is locked since the grant revoke);
+        # no other writer holds a request row while waiting on these rows.
+        # ``_execute`` overwrites the summary later with the fuller one.
+        if request_id is not None:
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request_id)
+                .values(
+                    deleted_data_summary={
+                        "postgres": {**counts, "memory_scrub_at": to_utc_iso(memory_scrub_at)}
+                    }
+                )
+            )
 
         # Finally the user row itself.
         await self.db.delete(target)
         await self.db.commit()
-        counts["users"] = 1
 
         return PostgresErasure(counts, restore, memory_scrub_at)
 
@@ -1912,17 +2033,15 @@ class AccountErasureService:
         success path pseudonymizes: a failed/cancelled request means the user was
         NOT erased, so that row legitimately keeps identifying info.
         """
-        pseudonym = self._pseudonym(request.user_id)
         values: dict[str, Any] = {
             "status": STATUS_COMPLETE,
             "completed_at": utcnow(),
             "deleted_data_summary": summary,
-            "user_id": pseudonym,
-            "ip_address": None,
-            "user_agent": None,
+            **_pseudonymized_request_values(
+                self._pseudonym(request.user_id),
+                subject_initiated=request.initiated_by == request.user_id,
+            ),
         }
-        if request.initiated_by == request.user_id:
-            values["initiated_by"] = pseudonym
         await self.db.execute(
             update(ErasureRequest).where(ErasureRequest.id == request.id).values(**values)
         )

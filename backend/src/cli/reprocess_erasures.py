@@ -37,11 +37,14 @@ exception is a request that failed after its Postgres step on a version
 before v0.124.0 and still stores the account id: it is ``repaired`` — its
 pseudonym is derived with the deployment's salt (the erasure's own
 derivation), stored on the row with the request metadata cleared, and the
-request is then processed by it. A request that still stores the raw
-account id otherwise is skipped and counted: one the sweep marked complete
-without running it (the user row was already gone), and one finalized
-before v0.58.1 (before the revision log of v0.113.0 anyway). A request that
-failed before its Postgres step erased nothing and is not listed.
+request is then processed by it. Two kinds of completed request are
+skipped and counted: one the sweep marked complete without running it (the
+user row was already gone; it stores the account id, or since v0.125.0 its
+pseudonym, #2286), and one finalized before v0.58.1 that stores the account
+id (before the revision log of v0.113.0 anyway). A request the sweep found
+interrupted after its Postgres step (``after_postgres_commit: interrupted:
+sweep``, #2286) ran and is processed like any other. A request that failed
+before its Postgres step erased nothing and is not listed.
 
 The subject's own ``audit_logs`` rows that still carry the account id
 (#2287: the audit-log step failed after the Postgres commit, on v0.124.x or
@@ -111,7 +114,8 @@ AUDIT_ACTION = "account_erasure_reprocess"
 # The erasure's own audit row: its user_email is the email pseudonym.
 ERASURE_AUDIT_ACTION = "account_erasure"
 TOOL = "cli.reprocess_erasures"
-# Both keep the raw account id in ``user_id``, which is never used or printed.
+# Neither ``user_id`` is used or printed: the account id (the second one, and
+# the first one before v0.125.0) or a pseudonym of an erasure that never ran.
 SKIPPED_NOT_RUN = "never ran: marked complete because the user row was already gone"
 SKIPPED_NOT_PSEUDONYMIZED = "stores the account id: finalized before v0.58.1"
 # #2268: never prints the account id it replaces
