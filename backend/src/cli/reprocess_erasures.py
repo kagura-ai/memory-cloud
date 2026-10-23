@@ -13,7 +13,8 @@ DATABASE_URL, QDRANT_*), e.g. inside the API container::
     python -m src.cli.reprocess_erasures --all --apply --yes       # write
     python -m src.cli.reprocess_erasures --request <uuid> --apply  # one erasure request
 
-Per completed erasure request, one transaction:
+Per erasure request that ran in Postgres (``complete``, or ``failed`` after
+its Postgres step committed), oldest first, one transaction:
 
 1. where the erased member wrote the live ``details`` of a memory someone
    else authored, the last value someone else wrote is put back (a new
@@ -22,26 +23,34 @@ Per completed erasure request, one transaction:
    memory for embedding, which rewrites the payload);
 2. the erased member's ``details`` leave every revision prior that still
    holds them; on memories they authored, only rows that existed when the
-   erasure completed are touched — what other members wrote there since
-   stays as it is.
+   erasure locked them (``memory_scrub_at`` in the request's summary, since
+   v0.124.0; else its completion time) are touched — what other members
+   wrote there since stays as it is.
+
+The walk of 1 goes back past every erased member's edits (#2268) to the last
+value a surviving member wrote, so the result does not depend on which of
+two erasures that edited the same memory is processed first.
 
 A request that changed gets one ``account_erasure_reprocess`` audit row
-(counts only). The command reads the pseudonym stored on the request and
-never derives one. A request that still stores the raw account id is
-skipped and counted: one the sweep marked complete without running it (the
-user row was already gone), and one finalized before v0.58.1 (before the
-revision log of v0.113.0 anyway). A value another erased member wrote is never put back. Running it
-again changes nothing. The dry run writes and locks nothing and makes no
-vector-store call; it prints request ids and counts, never values. It
-previews each request on its own: where two erased members edited the same
-memory, applying the first can uncover a restore for the second that the
-plan did not count; the apply report and the audit rows list it, and a
-plan afterwards shows 0.
+(counts only). The command uses the pseudonym stored on the request. The one
+exception is a request that failed after its Postgres step on a version
+before v0.124.0 and still stores the account id: it is ``repaired`` — its
+pseudonym is derived with the deployment's salt (the erasure's own
+derivation), stored on the row with the request metadata cleared, and the
+request is then processed by it. A request that still stores the raw
+account id otherwise is skipped and counted: one the sweep marked complete
+without running it (the user row was already gone), and one finalized
+before v0.58.1 (before the revision log of v0.113.0 anyway). A request that
+failed before its Postgres step erased nothing and is not listed. Running
+it again changes nothing. The dry run writes and locks nothing and makes no
+vector-store call; it prints request ids and counts, never values or
+account ids.
 
 Exit codes: 0 ok · 1 error (the run stops at that request; the requests
 before it stay done — each is logged to stderr as ``erasure_reprocessed``
-and has its audit row — and a re-run picks up the rest). A vector-store
-failure is not an error: the memory is re-queued for embedding.
+and has its audit row — and a re-run picks up the rest) · 2 usage (``--yes``
+without ``--apply``). A vector-store failure is not an error: the memory is
+re-queued for embedding.
 """
 
 from __future__ import annotations
@@ -52,24 +61,30 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select, update  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from models.auth import AuditLog  # noqa: E402
-from models.erasure import STATUS_COMPLETE, ErasureRequest  # noqa: E402
+from models.erasure import (  # noqa: E402
+    FAILURE_AFTER_POSTGRES_COMMIT,
+    STATUS_COMPLETE,
+    ErasureRequest,
+)
 from services.erasure_details import (  # noqa: E402
-    completed_pseudonyms,
+    erase_subject_details,
+    erased_pseudonyms,
+    erasure_pseudonym,
     finalized_erasure,
     is_pseudonym,
     payload_counts,
-    restore_editor_details,
-    strip_subject_details,
     sync_restored_payloads,
+    unrepaired_erasure,
 )
 from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
@@ -83,7 +98,8 @@ TOOL = "cli.reprocess_erasures"
 # Both keep the raw account id in ``user_id``, which is never used or printed.
 SKIPPED_NOT_RUN = "never ran: marked complete because the user row was already gone"
 SKIPPED_NOT_PSEUDONYMIZED = "stores the account id: finalized before v0.58.1"
-SKIPPED_NO_COMPLETION_TIME = "no completion time"
+# #2268: never prints the account id it replaces
+REPAIRED = "failed after its Postgres step: the account id is replaced by its pseudonym"
 
 
 @dataclass
@@ -91,7 +107,8 @@ class RequestChange:
     """What re-processing one completed erasure request changed (or would)."""
 
     request_id: UUID
-    completed_at: datetime
+    # None on a request that failed after its Postgres step (never completed)
+    completed_at: datetime | None
     details_restored: int
     details_restored_unavailable: int
     details_stripped: int
@@ -100,6 +117,8 @@ class RequestChange:
     # #2266: ``sync_restored_payloads``'s outcome after the commit (the
     # ``details_payload_*`` keys of the erasure summary); empty on a dry run
     payload: dict[str, int] = field(default_factory=dict)
+    # #2268: the request row stored the account id and gets the pseudonym
+    repaired: bool = False
 
     @property
     def changes(self) -> int:
@@ -108,12 +127,13 @@ class RequestChange:
             + self.details_restored_unavailable
             + self.details_stripped
             + self.scrub_marked
+            + int(self.repaired)
         )
 
 
 @dataclass
 class ReprocessResult:
-    """One pass over the completed erasure requests in scope."""
+    """One pass over the erasure requests in scope."""
 
     dry_run: bool
     scanned: int = 0
@@ -138,35 +158,83 @@ async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
     return email or pseudonym
 
 
+def _existed_at(summary: dict[str, Any] | None, completed_at: datetime | None) -> datetime | None:
+    """The bound of the authored arm of the strip (``_authored_by``), naive UTC.
+
+    ``memory_scrub_at`` (#2268): when the erasure locked the subject's
+    memories — every row it saw is older, every later edit waited for its
+    commit. A request from before v0.124.0 has only ``completed_at``, a few
+    statements later (a row written in between holds at most the scrubbed
+    value; erring that way only marks it). A request that failed after its
+    Postgres step before v0.124.0 has neither: no bound.
+    """
+    postgres = (summary or {}).get("postgres")
+    scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
+    if isinstance(scrubbed, str):
+        return to_naive_utc(datetime.fromisoformat(scrubbed))
+    return to_naive_utc(completed_at) if completed_at is not None else None
+
+
+async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym: str) -> None:
+    """Give a request that failed after its Postgres step (before v0.124.0)
+    what the failure handler writes since #2268: the pseudonym instead of
+    the account id, no request metadata, and the marker in
+    ``failure_reason``. Scoped to the one row, by its id and stored value."""
+    await db.execute(
+        update(ErasureRequest)
+        .where(ErasureRequest.id == request_id, ErasureRequest.user_id == account_id)
+        .values(
+            user_id=pseudonym,
+            initiated_by=func.coalesce(
+                func.nullif(ErasureRequest.initiated_by, account_id), pseudonym
+            ),
+            ip_address=None,
+            user_agent=None,
+            failure_reason=func.left(
+                func.concat(
+                    FAILURE_AFTER_POSTGRES_COMMIT, func.coalesce(ErasureRequest.failure_reason, "")
+                ),
+                1000,
+            ),
+        )
+    )
+
+
 async def _reprocess_one(
     db: AsyncSession,
     request_id: UUID,
     pseudonym: str,
-    completed_at: datetime,
+    completed_at: datetime | None,
+    existed_at: datetime | None,
     dry_run: bool,
     erased: frozenset[str],
+    *,
+    account_id: str | None = None,
 ) -> RequestChange:
-    """Restore, then strip, by ``pseudonym``; commit (or roll back a dry run);
-    then patch the restored memories' payloads (``sync_restored_payloads``).
+    """Repair the row (``account_id``), restore, then strip, by ``pseudonym``;
+    commit (or roll back a dry run); then patch the restored memories'
+    payloads (``sync_restored_payloads``).
 
     The order of the live erasure (``_delete_postgres``, then ``_execute``'s
     payload step): no vector-store call while the memories are locked. Never the
     pseudonymize step: with the pseudonym as the subject it would hash the
-    hash. ``erased`` are every completed erasure's pseudonyms: a value
-    another erased member wrote is never put back, even where their own
-    erasure left it in a prior (their re-run strips it).
+    hash. ``erased`` are every erased member's pseudonyms
+    (``erased_pseudonyms``): the restore walks past their edits too.
+    ``account_id`` is set only for a request ``unrepaired_erasure`` matches:
+    its row gets the pseudonym in the same transaction.
     """
     try:
-        restore = await restore_editor_details(
+        if account_id is not None and not dry_run:
+            await _repair(db, request_id, account_id, pseudonym)
+        details = await erase_subject_details(
             db,
             pseudonym,
             actor=pseudonym,
-            dry_run=dry_run,
             erased_actors=erased - {pseudonym},
+            existed_at=existed_at,
+            dry_run=dry_run,
         )
-        strip = await strip_subject_details(
-            db, pseudonym, existed_at=to_naive_utc(completed_at), dry_run=dry_run
-        )
+        restore, strip = details.restore, details.strip
         change = RequestChange(
             request_id=request_id,
             completed_at=completed_at,
@@ -175,6 +243,7 @@ async def _reprocess_one(
             details_stripped=strip.details_stripped,
             scrub_marked=strip.scrub_marked,
             embedding_requeued=restore.embedding_requeued,
+            repaired=account_id is not None,
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -192,6 +261,7 @@ async def _reprocess_one(
                     "details_stripped": change.details_stripped,
                     "scrub_marked": change.scrub_marked,
                     "details_embedding_requeued": change.embedding_requeued,
+                    "request_repaired": change.repaired,
                     "tool": TOOL,
                 },
             )
@@ -207,6 +277,7 @@ async def _reprocess_one(
         details_restored_unavailable=change.details_restored_unavailable,
         details_stripped=change.details_stripped,
         scrub_marked=change.scrub_marked,
+        request_repaired=change.repaired,
     )
     try:
         await sync_restored_payloads(db, restore.to_sync, restore)
@@ -221,16 +292,18 @@ async def _reprocess_one(
 async def reprocess_erasures(
     db: AsyncSession, *, request_id: UUID | None = None, dry_run: bool = True
 ) -> ReprocessResult:
-    """Re-apply today's erasure rules to completed erasure requests.
+    """Re-apply today's erasure rules to the erasure requests that ran.
 
-    One transaction per request, oldest first. Idempotent: a second run
-    changes 0 rows, writes no revision or audit row and makes no
-    vector-store call.
+    In scope: every ``complete`` request, and every ``failed`` one whose
+    Postgres step committed (``deleted_data_summary.postgres``); a request
+    that failed before it erased nothing. One transaction per request,
+    oldest first. Idempotent: a second run changes 0 rows, writes no
+    revision or audit row and makes no vector-store call.
 
     Args:
         db: The session. Each request's work is committed (or, on a dry run
             or with nothing to change, rolled back) before the next.
-        request_id: Only this request; None for every completed one.
+        request_id: Only this request; None for every one in scope.
         dry_run: Count what would change; write nothing, call no vector
             store.
 
@@ -238,42 +311,65 @@ async def reprocess_erasures(
         The requests with changes, the skipped ones, and how many were read.
 
     Raises:
-        LookupError: ``request_id`` is not a completed erasure request.
+        LookupError: ``request_id`` is not an erasure request in scope.
     """
     stmt = (
         select(
             ErasureRequest.id,
             ErasureRequest.user_id,
             ErasureRequest.completed_at,
+            ErasureRequest.deleted_data_summary,
             finalized_erasure().label("finalized"),
+            unrepaired_erasure().label("unrepaired"),
         )
-        .where(ErasureRequest.status == STATUS_COMPLETE)
-        .order_by(ErasureRequest.completed_at, ErasureRequest.id)
+        .where(
+            (ErasureRequest.status == STATUS_COMPLETE) | unrepaired_erasure() | finalized_erasure()
+        )
+        .order_by(
+            func.coalesce(
+                ErasureRequest.completed_at,
+                ErasureRequest.started_at,
+                ErasureRequest.requested_at,
+            ),
+            ErasureRequest.id,
+        )
     )
     if request_id is not None:
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
-    erased = await completed_pseudonyms(db)
+    erased = await erased_pseudonyms(db)
     await db.rollback()
     if request_id is not None and not requests:
         raise LookupError(f"{request_id} is not a completed erasure request")
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
     for request in requests:
-        # Both checks before the user_id is used as a subject: only a row
-        # an erasure run finalized stores the pseudonym (``finalized_erasure``).
-        if not request.finalized:
-            result.skipped.append((request.id, SKIPPED_NOT_RUN))
-            continue
-        if not is_pseudonym(request.user_id):
-            result.skipped.append((request.id, SKIPPED_NOT_PSEUDONYMIZED))
-            continue
-        if request.completed_at is None:
-            result.skipped.append((request.id, SKIPPED_NO_COMPLETION_TIME))
-            continue
-        change = await _reprocess_one(
-            db, request.id, request.user_id, request.completed_at, dry_run, erased
-        )
+        existed_at = _existed_at(request.deleted_data_summary, request.completed_at)
+        if request.unrepaired:
+            # #2268: failed after its Postgres step before v0.124.0; the
+            # subject's rows carry the pseudonym, the request row the account id
+            change = await _reprocess_one(
+                db,
+                request.id,
+                erasure_pseudonym(request.user_id),
+                request.completed_at,
+                existed_at,
+                dry_run,
+                erased,
+                account_id=request.user_id,
+            )
+        else:
+            # Both checks before the user_id is used as a subject: only a row
+            # an erasure run finalized stores the pseudonym (``finalized_erasure``).
+            if not request.finalized:
+                result.skipped.append((request.id, SKIPPED_NOT_RUN))
+                continue
+            if not is_pseudonym(request.user_id):
+                result.skipped.append((request.id, SKIPPED_NOT_PSEUDONYMIZED))
+                continue
+            change = await _reprocess_one(
+                db, request.id, request.user_id, request.completed_at, existed_at, dry_run, erased
+            )
         if change.changes:
             result.changed.append(change)
     return result
@@ -284,10 +380,13 @@ def _print_plan(result: ReprocessResult) -> None:
         print(f"{'request':36}  {'completed at':20}  restored  unavailable  stripped  scrub_marked")
     for c in result.changed:
         print(
-            f"{str(c.request_id):36}  {to_utc_iso(c.completed_at):20}  "
+            f"{str(c.request_id):36}  {to_utc_iso(c.completed_at) or '-':20}  "
             f"{c.details_restored:8}  {c.details_restored_unavailable:11}  "
             f"{c.details_stripped:8}  {c.scrub_marked:12}"
         )
+    for c in result.changed:
+        if c.repaired:
+            print(f"{'would repair' if result.dry_run else 'repaired'}  {c.request_id}  {REPAIRED}")
     for request_id, reason in result.skipped:
         print(f"skipped  {request_id}  {reason}")
     verb = "would change" if result.dry_run else "changed"
@@ -330,11 +429,12 @@ def _summary(result: ReprocessResult) -> str:
     unavailable = sum(c.details_restored_unavailable for c in result.changed)
     stripped = sum(c.details_stripped for c in result.changed)
     marked = sum(c.scrub_marked for c in result.changed)
+    repaired = sum(c.repaired for c in result.changed)
     return (
         f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
         f"{unavailable} cleared (unavailable), {stripped} revision prior(s) stripped, "
         f"{marked} marked scrubbed"
-    )
+    ) + (f", {repaired} request row(s) repaired" if repaired else "")
 
 
 async def _main(args: argparse.Namespace) -> int:

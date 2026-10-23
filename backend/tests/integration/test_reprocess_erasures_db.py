@@ -342,6 +342,7 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
             "scrub_marked": 0,
             # #2266: the payload outcome is known only after the commit
             "details_embedding_requeued": 0,
+            "request_repaired": False,
             "tool": "cli.reprocess_erasures",
         }
     sync.assert_awaited_once()

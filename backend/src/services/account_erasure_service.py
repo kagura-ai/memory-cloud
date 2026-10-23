@@ -23,6 +23,12 @@ and is what ops needs for manual reconciliation. On any raise:
 - ``deleted_data_summary`` captures whatever steps did complete,
 - the exception is re-raised.
 
+A failure AFTER the Postgres step committed (#2268) cannot be retried — the
+user row is gone — and the subject is erased in Postgres: the row is marked
+``failed`` with ``FAILURE_AFTER_POSTGRES_COMMIT`` in ``failure_reason`` and
+its own PII is pseudonymized as ``_finalize`` would, so the re-run
+(``reprocess_erasures``) and later erasures treat it as an erasure that ran.
+
 The Qdrant call is best-effort: its internal try/except swallows API
 failures and records the outcome in the summary, so a Qdrant outage
 never blocks the Postgres delete pipeline.
@@ -34,7 +40,7 @@ import asyncio
 import hmac
 import secrets
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -64,6 +70,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.erasure import (
+    FAILURE_AFTER_POSTGRES_COMMIT,
     REASON_DETAIL_MAX_CHARS,
     REASON_SELF_SERVICE,
     STATUS_CANCELLED,
@@ -84,12 +91,14 @@ from services.billing_contract import (
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     RestoreReport,
-    completed_pseudonyms,
+    StripCounts,
+    erase_subject_details,
+    erased_pseudonyms,
+    erasure_pseudonym,
     lock_subject_memories,
     locked_ids,
     payload_counts,
     pseudonymize_revision_actor,
-    restore_editor_details,
     strip_subject_details,
     sync_restored_payloads,
 )
@@ -155,10 +164,16 @@ class PostgresErasure:
         counts: The ``postgres`` section of the erasure summary.
         restore: The details restore; its ``to_sync`` are the payloads
             ``sync_restored_payloads`` patches after the commit.
+        memory_scrub_at: When the subject's memories were locked (#2268):
+            every revision row the erasure saw was written before it, and any
+            later edit of those memories waited for the commit. Stored in the
+            summary as ``memory_scrub_at``; ``reprocess_erasures`` bounds the
+            authored arm of its strip by it.
     """
 
     counts: dict[str, int]
     restore: RestoreReport
+    memory_scrub_at: datetime
 
 
 def _trigger_only_details() -> Any:
@@ -861,6 +876,12 @@ class AccountErasureService:
         # expired id back (MissingGreenlet) — the row would never be marked
         # failed (#2244: a vector-store failure inside the Postgres step).
         request_id = request.id
+        # #2268: what a failure after the Postgres commit writes on the row —
+        # read now, like ``request_id``
+        user_pseudonym = self._pseudonym(target.user_id)
+        subject_initiated = request.initiated_by == request.user_id
+        erased_in_postgres = False
+        step = "postgres"
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
@@ -890,26 +911,35 @@ class AccountErasureService:
 
             # Step 3: Postgres deletes (FK-safe order)
             erased = await self._delete_postgres(target)
-            summary["postgres"] = erased.counts
+            erased_in_postgres = True  # committed: no step below can undo it
+            postgres: dict[str, int | str | None] = dict(erased.counts)
+            # #2268: the re-run's bound for the subject's authored memories
+            postgres["memory_scrub_at"] = to_utc_iso(erased.memory_scrub_at)
+            summary["postgres"] = postgres
 
             # Step 3b (#2266): the restored memories' vector payloads, after
             # the commit — no vector-store call while the subject's memories
             # are locked. A failed patch re-queues the memory for embedding.
+            step = "payloads"
             await sync_restored_payloads(self.db, erased.restore.to_sync, erased.restore)
-            erased.counts.update(payload_counts(erased.restore))
+            postgres.update(payload_counts(erased.restore))
 
             # Step 4: pseudonymize existing audit_logs referencing this user
+            step = "audit_logs"
             summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
                 target.user_id, target.email
             )
 
             # Step 5: Redis cleanup (best-effort)
+            step = "redis"
             summary["redis"] = await self._clear_redis(target.user_id)
 
             # Step 6: write the new "account_erasure" audit row
+            step = "audit_row"
             await self._write_audit_log(request, target, summary)
 
             # Step 7: finalize the erasure_requests row
+            step = "finalize"
             await self._finalize(request, summary)
             if overridden:
                 logger.warning(
@@ -1004,14 +1034,32 @@ class AccountErasureService:
             await self.db.rollback()
             # Use a fresh write to record the failure without depending on
             # the just-rolled-back ORM state.
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(ErasureRequest.id == request_id)
-                .values(
-                    status=STATUS_FAILED,
-                    failure_reason=str(exc)[:1000],
-                    deleted_data_summary=summary or None,
+            values: dict[str, Any] = {
+                "status": STATUS_FAILED,
+                "failure_reason": str(exc)[:1000],
+                "deleted_data_summary": summary or None,
+            }
+            if erased_in_postgres:
+                # #2268: the subject is erased in Postgres and the user row is
+                # gone, so nobody can retry: the row must not keep the raw sub
+                # any more than a ``complete`` one does (``_finalize``), and
+                # the marker lets the re-run and later erasures find it.
+                logger.error(
+                    "erasure_failed_after_postgres_commit",
+                    request_id=str(request_id),
+                    step=step,
+                    error_class=type(exc).__name__,
                 )
+                values.update(
+                    user_id=user_pseudonym,
+                    ip_address=None,
+                    user_agent=None,
+                    failure_reason=(f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {exc}")[:1000],
+                )
+                if subject_initiated:
+                    values["initiated_by"] = user_pseudonym
+            await self.db.execute(
+                update(ErasureRequest).where(ErasureRequest.id == request_id).values(**values)
             )
             await self.db.commit()
             raise
@@ -1377,6 +1425,9 @@ class AccountErasureService:
         # ``restore_deleted_context`` takes (the context, then its memories).
         await self.db.execute(locked_ids(Context, lambda c: (c.deleted_by == user_id,)))
         await lock_subject_memories(self.db, user_id, deleted_by=True)
+        # #2268: from here on no edit lands on the subject's memories until
+        # the commit — every revision row this erasure sees is older
+        memory_scrub_at = utcnow()
         # #2263: the subject's tombstones go before any revision statement, so
         # the details strip below never locks, rewrites or counts rows the FK
         # cascade removes with them.
@@ -1388,19 +1439,22 @@ class AccountErasureService:
         # the pseudonym, which the strip and the pseudonymize step never
         # match. No vector-store call here (#2266): ``_execute`` patches the
         # payloads after the commit below.
-        # #2243: a value a member erased earlier wrote is never put back, even
-        # where an erasure from before the #2235 fix left it in a prior.
-        restore = await restore_editor_details(
+        # #2243, #2268: the restore walks past every edit of a member erased
+        # earlier, even where an erasure from before the #2235 fix left their
+        # value in a prior. The strip runs right after it, from the same read
+        # of the logs (``erase_subject_details``).
+        details = await erase_subject_details(
             self.db,
             user_id,
             actor=self._pseudonym(user_id),
-            erased_actors=await completed_pseudonyms(self.db),
+            erased_actors=await erased_pseudonyms(self.db),
         )
+        restore = details.restore
         counts["details_restored"] = restore.restored
         counts["details_restored_unavailable"] = restore.unavailable
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
-        counts.update(await self._erase_memory_revisions(user_id))
+        counts.update(await self._erase_memory_revisions(user_id, details.strip))
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
         # #1365 review sweep: neural graph edges, analysis runs, retrieval
@@ -1444,7 +1498,7 @@ class AccountErasureService:
         await self.db.commit()
         counts["users"] = 1
 
-        return PostgresErasure(counts, restore)
+        return PostgresErasure(counts, restore, memory_scrub_at)
 
     def _pseudonym(self, value: str) -> str:
         """Salted-SHA256 pseudonym — the single derivation every sweep uses.
@@ -1453,7 +1507,7 @@ class AccountErasureService:
         produce inconsistent pseudonyms for the same subject across tables
         (same-user cross-row correlation is the legal-retention contract).
         """
-        return sha256_hex(value, salt=_audit_salt())
+        return erasure_pseudonym(value)
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.
@@ -1615,7 +1669,9 @@ class AccountErasureService:
             + (requester.rowcount or 0),
         }
 
-    async def _erase_memory_revisions(self, user_id: str) -> dict[str, int]:
+    async def _erase_memory_revisions(
+        self, user_id: str, stripped: StripCounts | None = None
+    ) -> dict[str, int]:
         """Scrub the erased subject out of ``memory_revisions`` (#2043).
 
         Two steps of ``services.erasure_details``, in this order:
@@ -1631,12 +1687,17 @@ class AccountErasureService:
         authored memories by the raw ``user_id``. Each statement is scoped
         to the subject's memories and locks its rows in id order (#2242).
 
+        ``stripped``: the strip's counts when the caller ran it already
+        (``_delete_postgres`` runs it in ``erase_subject_details``, right
+        after the restore, #2268); None runs it here.
+
         Returns:
             ``memory_revisions_pseudonymized`` (the subject's own events) and
             ``revision_details_stripped`` (priors whose ``details`` was
             removed) for the erasure summary.
         """
-        stripped = await strip_subject_details(self.db, user_id)
+        if stripped is None:
+            stripped = await strip_subject_details(self.db, user_id)
         pseudonymized = await pseudonymize_revision_actor(
             self.db, user_id, self._pseudonym(user_id)
         )

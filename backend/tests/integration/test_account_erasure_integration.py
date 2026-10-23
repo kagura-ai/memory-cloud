@@ -25,6 +25,7 @@ Coverage gaps these tests close (per QA-Lead Gate2 review):
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -41,7 +42,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService, _audit_salt
-from utils.datetime import utcnow
+from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
 
@@ -403,6 +404,43 @@ class TestEditorDetailsRestore:
         )
         sync.assert_awaited_once()
         assert sync.await_args.kwargs["delete_keys"] == ["location"]
+        # #2268: the scrub time, the re-run's bound, before the completion
+        scrubbed = datetime.fromisoformat(postgres["memory_scrub_at"])
+        assert scrubbed.tzinfo is not None
+        assert (
+            to_naive_utc(request.started_at)
+            <= to_naive_utc(scrubbed)
+            <= to_naive_utc(request.completed_at)
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_logs_are_read_once_for_restore_and_strip(
+        self, db_session: AsyncSession, erasure_scenario, edited_by_target, patched_external_stores
+    ):
+        """#2268: one ``_updated_rows`` read per erasure serves the restore and
+        the strip (``erase_subject_details``); the outcome is the two-call one."""
+        from services import erasure_details
+
+        with (
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
+            patch.object(
+                erasure_details, "_updated_rows", wraps=erasure_details._updated_rows
+            ) as read,
+        ):
+            request = await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=erasure_scenario["target_user_id"],
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2268)",
+            )
+
+        assert request.status == STATUS_COMPLETE
+        assert read.await_count == 1
+        assert await self._state(db_session, edited_by_target) == (
+            {"by": "author"},
+            3,
+            ["api", "erasure"],
+        )
 
     @pytest.mark.asyncio
     async def test_a_payload_failure_requeues_and_the_erasure_completes(
@@ -487,6 +525,84 @@ class TestPayloadStepNeverFailsTheRequest:
             )
         ).scalar_one()
         assert status == "pending"
+
+
+class TestFailureAfterThePostgresCommit:
+    """#2268: a step after the Postgres commit fails (here ``_finalize``). The
+    subject is erased in Postgres and the user row is gone: the request is
+    ``failed`` with the marker and stores the pseudonym, and the re-run
+    treats it as an erasure that ran (nothing left to change)."""
+
+    @pytest.mark.asyncio
+    async def test_the_request_is_pseudonymized_and_the_rerun_finds_it_done(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        edited_by_target,
+        patched_external_stores,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        from cli import reprocess_erasures as cli
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        target = erasure_scenario["target_user_id"]
+        with (
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
+            patch.object(
+                AccountErasureService,
+                "_finalize",
+                AsyncMock(side_effect=RuntimeError("finalize failed")),
+            ),
+        ):
+            with pytest.raises(RuntimeError):
+                await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    reason_detail="integration test (#2268)",
+                )
+
+        pseudonym = sha256_hex(target, salt=_audit_salt())
+        request = (
+            await db_session.execute(
+                select(ErasureRequest)
+                .where(ErasureRequest.user_id == pseudonym)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert request.status == STATUS_FAILED
+        assert request.failure_reason.startswith(f"{FAILURE_AFTER_POSTGRES_COMMIT}finalize: ")
+        assert (request.initiated_by, request.ip_address, request.user_agent) == (
+            "admin-runner",
+            None,
+            None,
+        )
+        assert "memory_scrub_at" in request.deleted_data_summary["postgres"]
+        assert (
+            await db_session.execute(select(User).where(User.user_id == target))
+        ).scalar_one_or_none() is None
+        # the restore happened in the committed Postgres step
+        assert await TestEditorDetailsRestore._state(db_session, edited_by_target) == (
+            {"by": "author"},
+            3,
+            ["api", "erasure"],
+        )
+        await db_session.commit()
+        capsys.readouterr()  # the erasure's own log lines carry the raw id
+
+        async def get_db():
+            yield db_session
+
+        with (
+            patch("cli._oneshot.get_db", get_db),
+            patch.object(cli, "configure_logging", lambda level: None),
+        ):
+            code = await cli._main(cli._parse(["--request", str(request.id)]))
+        assert code == 0
+        out = capsys.readouterr().out
+        # in scope (not "not a completed erasure request"), nothing to change
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        assert target not in out
 
 
 class TestSweepAfterAFailure:

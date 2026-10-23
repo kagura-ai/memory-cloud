@@ -52,6 +52,13 @@ VALID_STATUSES = frozenset(
     }
 )
 
+# #2268: ``failure_reason`` prefix of a request that failed AFTER its Postgres
+# step committed (audit-log pseudonymize, Redis, audit row or finalize): the
+# subject is erased in Postgres, its user row is gone, and the row stores the
+# pseudonym like a ``complete`` one. ``reprocess_erasures`` and the live
+# erasure's erased-members set treat such a row as an erasure that ran.
+FAILURE_AFTER_POSTGRES_COMMIT = "after_postgres_commit: "
+
 # Reason codes — admin paths use the non-self_service values; the
 # self-service path is locked to ``self_service`` by the CHECK constraint.
 REASON_SELF_SERVICE = "self_service"

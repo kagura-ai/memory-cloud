@@ -10,6 +10,7 @@ deterministic.
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -66,18 +67,18 @@ def restore_details():
     other authors' memories — queries (and a vector-store patch) the mocked
     sessions in this module do not script. The real step is covered in
     ``tests/integration/test_erasure_details_db.py``."""
-    from services.erasure_details import RestoreReport
+    from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
 
-    # #2243: the strip reads the subject's details edits too (the provenance
-    # walk); the walk itself is covered in ``tests/services/test_erasure_details.py``
+    # #2268: restore and strip run in one step (``erase_subject_details``);
+    # the walk itself is covered in ``tests/services/test_erasure_details.py``
     with (
         patch(
-            "services.account_erasure_service.restore_editor_details",
-            new=AsyncMock(return_value=RestoreReport()),
+            "services.account_erasure_service.erase_subject_details",
+            new=AsyncMock(return_value=SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))),
         ) as mock,
         patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=[])),
         patch(
-            "services.account_erasure_service.completed_pseudonyms",
+            "services.account_erasure_service.erased_pseudonyms",
             new=AsyncMock(return_value=frozenset()),
         ),
     ):
@@ -1022,7 +1023,7 @@ class TestDeletePostgresSweep:
         svc.db.commit = AsyncMock()
 
         with patch(
-            "services.account_erasure_service.completed_pseudonyms",
+            "services.account_erasure_service.erased_pseudonyms",
             new=AsyncMock(return_value=erased),
         ) as loaded:
             await svc._delete_postgres(_user())
@@ -1120,12 +1121,14 @@ class TestRestoreEditorDetailsWiring:
 
     @pytest.mark.asyncio
     async def test_restore_runs_before_the_revision_scrub_and_is_counted(self, restore_details):
-        from services.erasure_details import RestoreReport
+        from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
 
         order: list[str] = []
         restore_details.side_effect = lambda *a, **k: (
             order.append("restore"),
-            RestoreReport(restored=2, unavailable=1, embedding_requeued=3),
+            SubjectDetailsErasure(
+                RestoreReport(restored=2, unavailable=1, embedding_requeued=3), StripCounts(3, 1)
+            ),
         )[1]
         svc = _service()
         svc._count_and_delete = AsyncMock(return_value=0)
@@ -1137,8 +1140,9 @@ class TestRestoreEditorDetailsWiring:
             order.append("provenance")
             return {"memory_sessions_scrubbed": 0, "session_rollbacks_pseudonymized": 0}
 
-        async def _revisions(_user_id):
+        async def _revisions(_user_id, stripped):
             order.append("revisions")
+            assert stripped == StripCounts(3, 1)  # #2268: from the same step
             return {"memory_revisions_pseudonymized": 4, "revision_details_stripped": 3}
 
         async def _lock(_db, _user_id, *, deleted_by=False):
@@ -1659,7 +1663,9 @@ def _stub_execute_steps(svc: AccountErasureService) -> None:
     from services.account_erasure_service import PostgresErasure
     from services.erasure_details import RestoreReport
 
-    svc._delete_postgres = AsyncMock(return_value=PostgresErasure({}, RestoreReport()))
+    svc._delete_postgres = AsyncMock(
+        return_value=PostgresErasure({}, RestoreReport(), datetime(2026, 10, 1, 12, 0))
+    )
     svc._pseudonymize_audit_logs = AsyncMock(return_value=0)
     svc._clear_redis = AsyncMock(return_value={})
     svc._write_audit_log = AsyncMock()
@@ -1834,3 +1840,69 @@ class TestBillingContractBlocksErasure:
         # Soft-deleted ones are hard-deleted too, so they are part of the log.
         assert override[0].kwargs["workspace_ids"] == [str(live.id), str(deleted.id)]
         assert order.index("finalize") < order.index("erasure_admin_override_billing_contract")
+
+
+class TestFailureAfterThePostgresCommit:
+    """#2268: a failure after ``_delete_postgres`` committed cannot be
+    retried (the user row is gone) and the subject is erased in Postgres: the
+    request row is marked with ``FAILURE_AFTER_POSTGRES_COMMIT`` and stores
+    the pseudonym like a ``complete`` one."""
+
+    @staticmethod
+    def _failed_values(svc: AccountErasureService) -> dict:
+        return svc.db.execute.await_args.args[0].compile().params
+
+    @pytest.mark.parametrize(
+        "failing", ["_pseudonymize_audit_logs", "_write_audit_log", "_finalize"]
+    )
+    @pytest.mark.parametrize("self_service", [True, False])
+    @pytest.mark.asyncio
+    async def test_the_row_is_pseudonymized_and_marked(self, failing, self_service):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        setattr(svc, failing, AsyncMock(side_effect=RuntimeError("boom")))
+        request = _execute_request(self_service=self_service)
+        request.ip_address, request.user_agent = "203.0.113.9", "agent"
+
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+        ):
+            with pytest.raises(RuntimeError):
+                await svc._execute(request, _user())
+            pseudonym = svc._pseudonym("u-1")
+
+        params = self._failed_values(svc)
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "boom" in params["failure_reason"]
+        assert params["user_id"] == pseudonym != "u-1"
+        assert (params["ip_address"], params["user_agent"]) == (None, None)
+        if self_service:
+            assert params["initiated_by"] == pseudonym
+        else:
+            assert "initiated_by" not in params  # the admin's id stays
+        # the summary keeps the Postgres counts and the scrub time
+        summary = params["deleted_data_summary"]
+        assert summary["postgres"]["memory_scrub_at"] == "2026-10-01T12:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_commit_keeps_the_row_as_it_was(self):
+        """Nothing was erased in Postgres: the user can retry, so the row keeps
+        its ids and gets no marker."""
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
+
+        with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+            with pytest.raises(RuntimeError):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        params = self._failed_values(svc)
+        assert params["failure_reason"] == "deadlock"
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "user_id" not in params and "initiated_by" not in params

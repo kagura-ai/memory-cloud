@@ -67,7 +67,12 @@ from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import Context
-from models.erasure import STATUS_COMPLETE, ErasureRequest
+from models.erasure import (
+    FAILURE_AFTER_POSTGRES_COMMIT,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    ErasureRequest,
+)
 from models.memory import (
     MEMORY_TYPE_TIME,
     REVISION_KIND_UPDATED,
@@ -86,7 +91,7 @@ from services.memory_versions import (
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
-from utils.hashing import SHA256_HEX_PATTERN
+from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
 
@@ -100,30 +105,88 @@ def is_pseudonym(value: str) -> bool:
     return _PSEUDONYM.fullmatch(value) is not None
 
 
+def erasure_pseudonym(value: str) -> str:
+    """The salted sha256 pseudonym an erasure stores for ``value`` (a raw sub).
+
+    The one derivation: ``AccountErasureService._pseudonym`` delegates here,
+    and ``reprocess_erasures`` uses it only to repair a request row that
+    failed after its Postgres step on a version before v0.124.0 and still
+    stores the raw sub (#2268). The salt is looked up through
+    ``services.account_erasure_service._audit_salt`` at call time (a lazy
+    import: that module imports this one).
+    """
+    from services import account_erasure_service
+
+    return sha256_hex(value, salt=account_erasure_service._audit_salt())
+
+
+def _ran_in_postgres() -> ColumnElement[bool]:
+    """The request's Postgres step committed: only a run writes
+    ``deleted_data_summary.postgres`` (since #360), after that commit."""
+    return func.coalesce(ErasureRequest.deleted_data_summary.has_key("postgres"), False)
+
+
+def _failed_after_commit_marked() -> ColumnElement[bool]:
+    return func.coalesce(
+        ErasureRequest.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT), False
+    )
+
+
 def finalized_erasure() -> ColumnElement[bool]:
-    """An ``erasure_requests`` row an erasure run completed (``_finalize``).
+    """An ``erasure_requests`` row whose erasure ran and that stores the pseudonym.
 
     ``status='complete'`` alone is not enough: the sweep marks a request
     whose user row is already gone ``complete`` without running it, and
     that row keeps the raw account id (which an IdP may issue as 64 hex).
     Only a run writes ``deleted_data_summary.postgres`` (since #360), and
-    only ``_finalize`` stores the pseudonym in ``user_id`` (since v0.58.1).
+    only ``_finalize`` stores the pseudonym in ``user_id`` (since v0.58.1)
+    — or, since #2268, the failure handler of a request that failed after
+    its Postgres step committed (``FAILURE_AFTER_POSTGRES_COMMIT``).
     """
-    return (ErasureRequest.status == STATUS_COMPLETE) & func.coalesce(
-        ErasureRequest.deleted_data_summary.has_key("postgres"), False
+    return _ran_in_postgres() & (
+        (ErasureRequest.status == STATUS_COMPLETE)
+        | ((ErasureRequest.status == STATUS_FAILED) & _failed_after_commit_marked())
     )
 
 
-async def completed_pseudonyms(db: AsyncSession) -> frozenset[str]:
-    """The pseudonyms of every member whose erasure completed (#2243).
+def unrepaired_erasure() -> ColumnElement[bool]:
+    """A request that failed after its Postgres step on a version before
+    v0.124.0 (#2268): the subject is erased in Postgres, but the row still
+    stores the raw sub (no failure handler pseudonymized it then).
+
+    ``reprocess_erasures`` repairs it (``erasure_pseudonym``); until then
+    ``erased_pseudonyms`` derives its pseudonym the same way.
+    """
+    return (
+        (ErasureRequest.status == STATUS_FAILED)
+        & _ran_in_postgres()
+        & ~_failed_after_commit_marked()
+    )
+
+
+async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
+    """The pseudonyms of every member whose erasure ran in Postgres (#2243, #2268).
 
     What ``restore_editor_details`` takes as ``erased_actors``, so a restore
-    never puts back a value one of them wrote — in a live erasure as in a
-    re-run. Read from ``erasure_requests`` as stored (finalized rows whose
-    ``user_id`` has the pseudonym's shape); never derived.
+    walks past every edit one of them made — in a live erasure as in a
+    re-run. A finalized row (``finalized_erasure``) gives its stored
+    pseudonym when it has the pseudonym's shape (a row finalized before
+    v0.58.1 stores the raw sub, and that member's edits predate the revision
+    log); a row ``unrepaired_erasure`` matches gives the pseudonym derived
+    from its raw sub, which is what the subject's rows carry.
     """
-    rows = await db.execute(select(ErasureRequest.user_id).where(finalized_erasure()))
-    return frozenset(value for value in rows.scalars() if is_pseudonym(value))
+    rows = await db.execute(
+        select(ErasureRequest.user_id, unrepaired_erasure().label("unrepaired")).where(
+            finalized_erasure() | unrepaired_erasure()
+        )
+    )
+    pseudonyms: set[str] = set()
+    for user_id, unrepaired in rows.all():
+        if unrepaired:
+            pseudonyms.add(erasure_pseudonym(user_id))
+        elif is_pseudonym(user_id):
+            pseudonyms.add(user_id)
+    return frozenset(pseudonyms)
 
 
 @dataclass(frozen=True)
@@ -338,6 +401,7 @@ async def strip_subject_details(
     *,
     existed_at: datetime | None = None,
     dry_run: bool = False,
+    rows: Sequence[DetailsEdit] | None = None,
 ) -> StripCounts:
     """Strip ``subject``'s ``details`` out of the revision log.
 
@@ -378,14 +442,19 @@ async def strip_subject_details(
             erasure (every row predates it).
         dry_run: Count the rows the two UPDATEs would change; write and
             lock nothing.
+        rows: The subject's ``_updated_rows``, read by the caller under the
+            memory locks (``erase_subject_details``, #2268); the caller
+            locked, so nothing is locked or read here. None reads them.
 
     Returns:
         The rowcounts of the two UPDATEs (or the counts they would have);
         both 0 on a re-run.
     """
-    if not dry_run:
-        await lock_subject_memories(db, subject)
-    held = held_details_ids(await _updated_rows(db, subject), subject)
+    if rows is None:
+        if not dry_run:
+            await lock_subject_memories(db, subject)
+        rows = await _updated_rows(db, subject)
+    held = held_details_ids(rows, subject)
     if dry_run:
         return StripCounts(
             details_stripped=await _count(
@@ -1082,6 +1151,7 @@ async def restore_editor_details(
     actor: str,
     dry_run: bool = False,
     erased_actors: Collection[str] = frozenset(),
+    rows: Sequence[DetailsEdit] | None = None,
 ) -> RestoreReport:
     """Put back the ``details`` ``subject`` wrote on memories others authored.
 
@@ -1132,18 +1202,22 @@ async def restore_editor_details(
         dry_run: Compute what would change and write nothing (no row, no
             row lock: the log is read as of the statement, which a preview
             can afford); ``to_sync`` stays empty.
-        erased_actors: Pseudonyms of other erased members (``restore_targets``);
-            a re-run over past erasures (#2243) passes every completed one.
+        erased_actors: Pseudonyms of other erased members (``restore_targets``,
+            ``erased_pseudonyms``).
+        rows: The subject's ``_updated_rows``, read by the caller under the
+            memory locks (``erase_subject_details``, #2268); the caller
+            locked, so nothing is locked or read here. None reads them.
 
     Returns:
         The counts, the restored memories and the payloads to sync.
     """
-    locked = 0 if dry_run else await lock_subject_memories(db, subject)
+    if rows is None:
+        locked = 0 if dry_run else await lock_subject_memories(db, subject)
+        rows = await _updated_rows(db, subject)
+        logger.info("erasure_restore_locked", locked=locked)
     report = RestoreReport()
-    targets = restore_targets(
-        await _updated_rows(db, subject), subject, erased_actors=erased_actors
-    )
-    logger.info("erasure_restore_candidates", locked=locked, targets=len(targets))
+    targets = restore_targets(rows, subject, erased_actors=erased_actors)
+    logger.info("erasure_restore_candidates", targets=len(targets))
     if not targets:
         return report
     memories = {
@@ -1194,3 +1268,58 @@ async def restore_editor_details(
     if report.to_sync:
         await db.flush()
     return report
+
+
+@dataclass(frozen=True)
+class SubjectDetailsErasure:
+    """What ``erase_subject_details`` did (or would do, on a dry run)."""
+
+    restore: RestoreReport
+    strip: StripCounts
+
+
+async def erase_subject_details(
+    db: AsyncSession,
+    subject: str,
+    *,
+    actor: str,
+    erased_actors: Collection[str],
+    existed_at: datetime | None = None,
+    dry_run: bool = False,
+) -> SubjectDetailsErasure:
+    """Restore, then strip, ``subject``'s ``details`` — one log read (#2268).
+
+    The two steps of the live erasure (``_delete_postgres``) and of the
+    re-run (``reprocess_erasures``), in that order: ``restore_editor_details``
+    then ``strip_subject_details``. The subject's memories are locked first
+    (``lock_subject_memories``; free when the caller holds them already),
+    and their logs are read once under those locks: the ``erasure`` rows the
+    restore adds sit on top of each log, with nothing above them, and are
+    put-back rows whose prior holds no value — they change no
+    ``held_details_ids`` result, so the strip works from the same read.
+
+    Args:
+        db: The session; the caller owns the transaction.
+        subject: The raw sub during erasure, or the stored pseudonym on a
+            re-run.
+        actor: The pseudonym written as the restore rows' actor.
+        erased_actors: Other erased members' pseudonyms
+            (``erased_pseudonyms``, without the subject's).
+        existed_at: The re-run's bound for the authored arm of the strip
+            (``_authored_by``); None during erasure.
+        dry_run: Count; write and lock nothing.
+
+    Returns:
+        The restore report (its ``to_sync`` for ``sync_restored_payloads``
+        after the caller's commit) and the strip counts.
+    """
+    locked = 0 if dry_run else await lock_subject_memories(db, subject)
+    rows = await _updated_rows(db, subject)
+    logger.info("erasure_details_rows", locked=locked, rows=len(rows))
+    restore = await restore_editor_details(
+        db, subject, actor=actor, dry_run=dry_run, erased_actors=erased_actors, rows=rows
+    )
+    strip = await strip_subject_details(
+        db, subject, existed_at=existed_at, dry_run=dry_run, rows=rows
+    )
+    return SubjectDetailsErasure(restore=restore, strip=strip)
