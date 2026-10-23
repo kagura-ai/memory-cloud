@@ -1226,3 +1226,384 @@ class TestAgentErasureCascade:
             select(AgentContextBinding).where(AgentContextBinding.id == s["binding_id"])
         )
         assert result.scalar_one_or_none() is None
+
+
+# ---------------------------------------------------------------------------
+# #2286: a run interrupted after the Postgres commit; a user row gone unrun
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def bystanders(db_session: AsyncSession):
+    """A live account with a scheduled (not yet due) request and another
+    account's request in progress (not stale): the sweep must leave both
+    rows, and the live user row, byte-identical."""
+    from datetime import timedelta
+
+    from models.erasure import STATUS_COOLING_OFF, STATUS_IN_PROGRESS
+
+    tag = uuid4().hex[:8]
+    user = User(
+        email=f"bystander-{tag}@example.com",
+        user_id=f"bystander_{tag}",
+        name="Bystander",
+        role="user",
+        is_initial_admin=False,
+        auth_method="oauth",
+        auth_provider="google",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    requests = [
+        ErasureRequest(
+            user_id=user.user_id,
+            user_email_hash=sha256_hex(user.email),
+            initiated_by=user.user_id,
+            is_self_service=True,
+            reason_code="self_service",
+            status=STATUS_COOLING_OFF,
+            scheduled_for=utcnow() + timedelta(days=3),
+            ip_address="198.51.100.7",
+        ),
+        ErasureRequest(
+            user_id=f"running_{tag}",
+            user_email_hash="1" * 64,
+            initiated_by="admin-x",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_IN_PROGRESS,
+            started_at=utcnow() - timedelta(minutes=5),
+        ),
+    ]
+    db_session.add_all(requests)
+    await db_session.commit()
+    ids = [r.id for r in requests]
+    user_id = user.user_id  # read now: the teardown's rollback expires it
+    yield {"user_id": user_id, "request_ids": ids}
+    await db_session.rollback()
+    await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id.in_(ids)))
+    await db_session.execute(delete(User).where(User.user_id == user_id))
+    await db_session.commit()
+
+
+async def _everything_but(db_session: AsyncSession, request_id) -> dict:
+    """Whole-table snapshots the sweep must not change, minus the request
+    it closes."""
+    requests = await _table_snapshot(db_session, "erasure_requests")
+    requests.pop(request_id, None)
+    return {
+        "erasure_requests": requests,
+        **{
+            table: await _table_snapshot(db_session, table)
+            for table in ("users", "memories", "memory_revisions", "audit_logs")
+        },
+    }
+
+
+async def _age(db_session: AsyncSession, request_id, *, hours: int = 2) -> None:
+    """Make the request stale for the sweep (``started_at`` past its cutoff)."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    await db_session.execute(
+        update(ErasureRequest)
+        .where(ErasureRequest.id == request_id)
+        .values(started_at=utcnow() - timedelta(hours=hours))
+    )
+    await db_session.commit()
+
+
+async def _request_snapshot(db_session: AsyncSession, request_id) -> dict:
+    return (await _table_snapshot(db_session, "erasure_requests"))[request_id]
+
+
+class TestARunInterruptedAfterThePostgresCommit:
+    """#2286: the process dies after ``_delete_postgres`` committed (here a
+    ``CancelledError``, which no handler catches): the request stays
+    ``in_progress`` with the raw sub. The Postgres step wrote its summary on
+    the row in its own transaction, so the sweep (user row gone) marks it
+    ``failed`` with the ``interrupted`` marker and pseudonymizes it; the
+    erased-members set and the re-run treat it as an erasure that ran."""
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_pseudonymizes_it_and_the_rerun_finds_it_done(
+        self,
+        db_session: AsyncSession,
+        async_engine,
+        erasure_scenario,
+        edited_by_target,
+        other_actors_audit,
+        bystanders,
+        patched_external_stores,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        import asyncio
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from cli import reprocess_erasures as cli
+        from models.erasure import (
+            INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            STATUS_FAILED,
+            STATUS_IN_PROGRESS,
+        )
+        from services.erasure_details import erased_pseudonyms
+
+        target = erasure_scenario["target_user_id"]
+        pseudonym = sha256_hex(target, salt=_audit_salt())
+        with (
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
+            patch.object(
+                AccountErasureService,
+                "_clear_redis",
+                AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    reason_detail="integration test (#2286)",
+                    ip_address="203.0.113.9",
+                    user_agent="agent",
+                )
+
+        # what another process sees: the Postgres step committed, and with it
+        # its summary; no handler ran, so the row keeps the raw sub
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        async with maker() as other:
+            row = (
+                await other.execute(select(ErasureRequest).where(ErasureRequest.user_id == target))
+            ).scalar_one()
+            assert row.status == STATUS_IN_PROGRESS
+            assert "memory_scrub_at" in row.deleted_data_summary["postgres"]
+            assert row.deleted_data_summary["postgres"]["users"] == 1
+            assert (
+                await other.execute(select(User).where(User.user_id == target))
+            ).scalar_one_or_none() is None
+        request_id = row.id
+        await db_session.rollback()
+        # not stale yet: the sweep leaves a running request alone
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert (await _request_snapshot(db_session, request_id))["status"] == STATUS_IN_PROGRESS
+
+        await _age(db_session, request_id)
+        before = await _everything_but(db_session, request_id)
+        capsys.readouterr()
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        closed = await _request_snapshot(db_session, request_id)
+        assert closed["status"] == STATUS_FAILED
+        assert closed["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert closed["user_id"] == pseudonym != target
+        assert closed["initiated_by"] == "admin-runner"  # the admin's id stays
+        assert (closed["ip_address"], closed["user_agent"], closed["completed_at"]) == (
+            None,
+            None,
+            None,
+        )
+        assert "memory_scrub_at" in closed["deleted_data_summary"]["postgres"]
+        assert "redis" in closed["deleted_data_summary"]
+        assert target not in repr(closed)
+        # every other row of every table it could reach is byte-identical
+        assert await _everything_but(db_session, request_id) == before
+        assert pseudonym in await erased_pseudonyms(db_session)
+        assert target not in capsys.readouterr().out
+
+        # a second sweep never re-claims it (``failed`` is terminal)
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        assert await _request_snapshot(db_session, request_id) == closed
+        assert await _everything_but(db_session, request_id) == before
+
+        # the re-run: in scope as an erasure that ran; nothing left to change
+        await db_session.commit()
+
+        async def get_db():
+            yield db_session
+
+        with (
+            patch("cli._oneshot.get_db", get_db),
+            patch.object(cli, "configure_logging", lambda level: None),
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
+        ):
+            code = await cli._main(cli._parse(["--request", str(request_id), "--apply", "--yes"]))
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        assert target not in out
+        assert await _request_snapshot(db_session, request_id) == closed
+
+
+class TestARequestWhoseUserVanishedUnrun:
+    """#2286: the user row disappears before the sweep runs the request
+    (removed by hand): nothing was erased, so the request is ``complete``
+    with the note — and its own ids are pseudonymized all the same."""
+
+    @pytest.mark.asyncio
+    async def test_it_is_marked_complete_and_pseudonymized(
+        self, db_session: AsyncSession, bystanders, patched_external_stores
+    ):
+        from datetime import timedelta
+
+        from models.erasure import STATUS_COOLING_OFF
+
+        tag = uuid4().hex[:8]
+        sub, email = f"vanished_{tag}", f"vanished-{tag}@example.com"
+        pseudonym = sha256_hex(sub, salt=_audit_salt())
+        db_session.add(
+            User(
+                email=email,
+                user_id=sub,
+                name="Vanished",
+                role="user",
+                is_initial_admin=False,
+                auth_method="oauth",
+                auth_provider="google",
+            )
+        )
+        await db_session.flush()
+        request = ErasureRequest(
+            user_id=sub,
+            user_email_hash=sha256_hex(email),
+            initiated_by=sub,
+            is_self_service=True,
+            reason_code="self_service",
+            status=STATUS_COOLING_OFF,
+            scheduled_for=utcnow() - timedelta(minutes=1),
+            ip_address="203.0.113.9",
+            user_agent="agent",
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        try:
+            await db_session.execute(delete(User).where(User.user_id == sub))
+            await db_session.commit()
+            before = await _everything_but(db_session, request_id)
+
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+            closed = await _request_snapshot(db_session, request_id)
+            assert closed["status"] == STATUS_COMPLETE
+            assert closed["deleted_data_summary"] == {"note": "user_row_already_absent"}
+            assert closed["completed_at"] is not None
+            assert closed["failure_reason"] is None
+            assert closed["user_id"] == closed["initiated_by"] == pseudonym
+            assert (closed["ip_address"], closed["user_agent"]) == (None, None)
+            assert sub not in repr(closed)
+            assert await _everything_but(db_session, request_id) == before
+
+            # idempotent: the next sweep does not see it again
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+            assert await _request_snapshot(db_session, request_id) == closed
+            assert await _everything_but(db_session, request_id) == before
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == request_id))
+            await db_session.commit()
+
+
+class TestALegacyNoteRowsMemberIsWalkedPast:
+    """#2286: a request the sweep marked ``complete`` with the note before
+    v0.125.0 keeps the raw sub, and its erasure may have run (interrupted
+    after its Postgres commit, when the summary was written only after it).
+    ``erased_pseudonyms`` derives its pseudonym, so a later erasure walks
+    past that member's edit to the author's value."""
+
+    @pytest.mark.asyncio
+    async def test_the_derived_pseudonyms_edit_is_walked_past(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        from models.auth import Context
+        from models.memory import Memory, MemoryRevision
+
+        other = erasure_scenario["other_user_id"]
+        target = erasure_scenario["target_user_id"]
+        absent = f"google-oauth2|absent-{uuid4().hex[:8]}"  # the raw sub on the row
+        absent_p = sha256_hex(absent, salt=_audit_salt())  # what its rows carry
+        context = Context(
+            id=uuid4(),
+            workspace_id=erasure_scenario["workspace_id"],
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=other,
+        )
+        db_session.add(context)
+        await db_session.flush()
+        memory = Memory(
+            id=uuid4(),
+            user_id=other,
+            workspace_id=erasure_scenario["workspace_id"],
+            context_id=context.id,
+            summary="the other member's memory",
+            content="body",
+            type="note",
+            client="test",
+            details={"by": "target"},
+            version=3,
+            embedding_status="success",
+        )
+        db_session.add(memory)
+        await db_session.flush()
+        legacy = ErasureRequest(
+            user_id=absent,
+            user_email_hash="0" * 64,
+            initiated_by="admin-x",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_COMPLETE,
+            completed_at=utcnow(),
+            deleted_data_summary={"note": "user_row_already_absent"},
+        )
+        db_session.add_all(
+            [
+                MemoryRevision(
+                    memory_id=memory.id,
+                    context_id=context.id,
+                    version=2,
+                    kind="updated",
+                    writer="api",
+                    actor_user_id=absent_p,
+                    prior={"details": {"by": "author"}},
+                ),
+                MemoryRevision(
+                    memory_id=memory.id,
+                    context_id=context.id,
+                    version=3,
+                    kind="updated",
+                    writer="api",
+                    actor_user_id=target,
+                    prior={"details": {"by": "absent"}},
+                ),
+                legacy,
+            ]
+        )
+        await db_session.commit()
+        try:
+            with patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()):
+                request = await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    reason_detail="integration test (#2286)",
+                )
+
+            assert request.status == STATUS_COMPLETE
+            postgres = request.deleted_data_summary["postgres"]
+            assert (postgres["details_restored"], postgres["details_restored_unavailable"]) == (
+                1,
+                0,
+            )
+            live = (
+                await db_session.execute(
+                    select(Memory.details)
+                    .where(Memory.id == memory.id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            # not the legacy note row's member's value: the author's, below it
+            assert live == {"by": "author"}
+        finally:
+            await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
+            await db_session.commit()
