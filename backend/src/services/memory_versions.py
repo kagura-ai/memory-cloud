@@ -20,8 +20,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select, tuple_
+from sqlalchemy import ColumnElement, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.util import AliasedClass
 
 from models.memory import (
     REVISION_KIND_UPDATED,
@@ -474,6 +475,28 @@ async def list_revision_rows(
     return rows[:limit], len(rows) > limit
 
 
+def revision_changed_field(
+    row: AliasedClass[MemoryRevision] | type[MemoryRevision],
+    field: str,
+    *,
+    scrubbed: bool = False,
+) -> ColumnElement[bool]:
+    """A revision that changed ``field`` (#2263: the one definition).
+
+    Its prior still holds the overwritten ``field``, or an erasure stripped it
+    and listed it under ``PRIOR_ERASED_KEY``: it changed the field all the same
+    (#2235). ``scrubbed=True`` also matches a row carrying the scrubbed marker
+    for ``field`` — the live value is gone, the row did not necessarily change
+    the field — which is what a version rebuild needs, since it reads such a
+    field as unavailable.
+    """
+    prior = row.prior
+    arms = [prior.has_key(field), prior[PRIOR_ERASED_KEY].has_key(field)]
+    if scrubbed:
+        arms.append(prior[PRIOR_SCRUBBED_KEY].has_key(field))
+    return or_(*arms)
+
+
 async def type_changes_above(
     db: AsyncSession, memory_id: UUID, lowest_version: int
 ) -> list[tuple[int, str | None]]:
@@ -493,17 +516,14 @@ async def type_changes_above(
         event — ``prior.type``, or None where erasure marked the type
         unavailable (never today: erasure marks only ``details``).
     """
-    prior = MemoryRevision.prior
     result = await db.execute(
-        select(MemoryRevision.version, prior["type"].astext.label("type")).where(
+        select(MemoryRevision.version, MemoryRevision.prior["type"].astext.label("type")).where(
             MemoryRevision.memory_id == memory_id,
             MemoryRevision.kind == REVISION_KIND_UPDATED,
             MemoryRevision.version >= lowest_version,
-            or_(
-                prior.has_key("type"),
-                prior[PRIOR_ERASED_KEY].has_key("type"),
-                prior[PRIOR_SCRUBBED_KEY].has_key("type"),
-            ),
+            # the scrubbed arm too: a scrubbed field reads as unavailable in
+            # ``reconstruct_version``, and ``types_at_versions`` must agree
+            revision_changed_field(MemoryRevision, "type", scrubbed=True),
         )
     )
     return [(row.version, row.type) for row in result.all()]
