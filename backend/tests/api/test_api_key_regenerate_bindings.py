@@ -48,6 +48,7 @@ def _old_key(**over) -> SimpleNamespace:
         "agent_id": None,
         "bound_context_id": None,
         "default_context_id": None,  # #2129
+        "connector_id": None,  # #1952
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -104,10 +105,35 @@ async def test_regenerate_carries_agent_binding_forward():
     assert kwargs["agent_id"] == AGENT_ID
     assert kwargs["bound_context_id"] is None
     assert kwargs["workspace_id"] == WORKSPACE_ID
+    assert kwargs["connector_id"] is None
     # No expiry on the old key → None → create_key applies the *agent* default
     # because agent_id is present (not the longer workspace default).
     assert kwargs["expires_days"] is None
     assert old.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_regenerate_carries_the_connector_link_forward():
+    """#1952: the link, not the name, makes a connector key — a regenerated
+    connector key without it would be an ordinary workspace write key that
+    outlives its connector and ignores the seat pause."""
+    connector_id = uuid.uuid4()
+    old = _old_key(name=f"connector:{connector_id}", connector_id=connector_id)
+    manager = _manager()
+
+    await regenerate_api_key(
+        key_id=OLD_PID,
+        request=REQUEST,
+        background_tasks=BackgroundTasks(),
+        user=USER,
+        manager=manager,
+        db=_db(old),
+    )
+
+    kwargs = manager.create_key.await_args.kwargs
+    assert kwargs["connector_id"] == connector_id
+    assert kwargs["name"] == f"connector:{connector_id}"
+    assert kwargs["workspace_id"] == WORKSPACE_ID
 
 
 @pytest.mark.asyncio

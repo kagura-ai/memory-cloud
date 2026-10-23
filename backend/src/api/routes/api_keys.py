@@ -530,6 +530,9 @@ async def regenerate_api_key(
         key_bound_context_id = old_key.bound_context_id
         # #2129: the MCP default is a setting of the key, not of its secret.
         key_default_context_id = old_key.default_context_id
+        # #1952: a connector's key stays its connector's key (the link, not
+        # the name, makes it one).
+        key_connector_id = old_key.connector_id
 
         # Carry the remaining lifetime forward. A key that had no expiry (or
         # whose expiry already passed) leaves expires_days=None so the new key
@@ -562,6 +565,7 @@ async def regenerate_api_key(
             bound_context_id=key_bound_context_id,
             agent_id=key_agent_id,
             default_context_id=key_default_context_id,
+            connector_id=key_connector_id,
         )
 
         await db.commit()

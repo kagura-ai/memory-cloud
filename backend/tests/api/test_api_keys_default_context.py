@@ -368,6 +368,7 @@ async def test_member_regenerate_keeps_the_default_context():
         name="ws-key",
         revoked_at=None,
         default_context_id=CONTEXT_ID,
+        connector_id=None,  # #1952
     )
     new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
     db = MagicMock()
@@ -393,6 +394,48 @@ async def test_member_regenerate_keeps_the_default_context():
         )
 
     assert mgr.create_key.await_args.kwargs["default_context_id"] == CONTEXT_ID
+    assert mgr.create_key.await_args.kwargs["connector_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_member_regenerate_keeps_the_connector_link():
+    """#1952: regenerating a member's newest key — which can be a connector's
+    key — keeps it linked to its connector."""
+    from api.routes import member_credentials as mc
+
+    connector_id = uuid.uuid4()
+    old_key = SimpleNamespace(
+        id=7,
+        public_id="akey_" + "7" * 22,
+        name=f"connector:{connector_id}",
+        revoked_at=None,
+        default_context_id=None,
+        connector_id=connector_id,
+    )
+    new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old_key))
+    )
+    db.commit = AsyncMock()
+    mgr = MagicMock()
+    mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
+    with (
+        patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
+        patch("api.routes.member_credentials.MemberCredentialsService"),
+        patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
+        patch("api.routes.member_credentials.schedule_security_notification"),
+    ):
+        await mc.regenerate_api_key(
+            WORKSPACE_ID,
+            "member-1",
+            SimpleNamespace(client=None, headers={}),
+            BackgroundTasks(),
+            {"user_id": "member-1", "sub": "m"},
+            db,
+        )
+
+    assert mgr.create_key.await_args.kwargs["connector_id"] == connector_id
 
 
 # ------------------------------------------------- member self-mint (#2188)

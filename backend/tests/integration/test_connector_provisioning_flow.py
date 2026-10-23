@@ -420,6 +420,53 @@ async def test_rotate_kmc_key_links_the_replacement_and_revokes_the_old_row(
 
 
 @pytest.mark.asyncio
+async def test_rotate_kmc_key_heals_an_unlinked_backing_row(db_session: AsyncSession):
+    """#1952: a stored key whose row has no link (minted by the name-only code
+    after the f13 backfill ran) still rotates — matched by its hash — and the
+    replacement is linked."""
+    from sqlalchemy import update
+
+    from models.auth import APIKey
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    service = ConnectorProvisioningService(db_session)
+    result = await service.provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db_session.flush()
+    connector_id = result.connector.id
+    await db_session.execute(
+        update(APIKey)
+        .where(APIKey.connector_id == connector_id)
+        .values(connector_id=None)
+        .execution_options(synchronize_session="fetch")
+    )
+
+    rotated = await service.rotate_kmc_key(
+        workspace_id=workspace.id, connector_id=connector_id, user_id=user_id
+    )
+    await db_session.flush()
+
+    rows = (
+        (
+            await db_session.execute(
+                select(APIKey).where(APIKey.workspace_id == workspace.id).order_by(APIKey.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    old, new = rows
+    assert old.connector_id is None and old.revoked_at is not None
+    assert new.connector_id == connector_id and new.revoked_at is None
+    assert rotated.key_name == f"connector:{connector_id}"
+
+
+@pytest.mark.asyncio
 async def test_rotate_kmc_key_fails_when_the_backing_row_is_gone(db_session: AsyncSession):
     """#1952: the backing row is matched by ``key_hash`` AND ``connector_id``;
     a row deleted outside the service is the existing ``ValidationError``."""

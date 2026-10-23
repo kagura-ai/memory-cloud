@@ -71,14 +71,17 @@ async def connectors_suspended_for(db: AsyncSession, workspace_id: UUID) -> bool
     return workspace is not None and connectors_suspended(workspace)
 
 
-async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspace_id: UUID) -> bool:
-    """Whether a connector's write key is refused with its connector (#1944).
+async def connector_key_workspace(
+    db: AsyncSession, connector_id: UUID, workspace_id: UUID
+) -> Workspace | None:
+    """The workspace a connector's write key is checked against (#1944, #1952).
 
     One query: the workspace row joined through its connector. The id is the
-    key's ``api_keys.connector_id`` (#1952). A connector id that resolves to no
-    connector OF THE KEY'S WORKSPACE refuses the key (fail closed, like the
-    agent kill switch) — the FK and the mint-time workspace check make that
-    reachable only with tampered data.
+    key's ``api_keys.connector_id``. ``None`` when that id resolves to no
+    connector OF THE KEY'S WORKSPACE — the FK and the mint-time workspace check
+    make that reachable only with tampered data, and the caller refuses the
+    key (fail closed, like the agent kill switch). Otherwise the caller pauses
+    the key while :func:`connectors_suspended`.
 
     Reads the plan as the session knows it: like every ``effective_*`` reader,
     this expects the per-request session (a ``Workspace`` already in the
@@ -90,8 +93,7 @@ async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspac
         workspace_id: The key's own workspace scope.
 
     Returns:
-        True when the connector is not in the workspace, or the workspace has
-        no connector seats (:func:`connectors_suspended`).
+        The key's workspace when the connector belongs to it, else ``None``.
     """
     result = await db.execute(
         select(Workspace)
@@ -101,8 +103,7 @@ async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspac
             WorkspaceConnector.workspace_id == workspace_id,
         )
     )
-    workspace = result.scalar_one_or_none()
-    return workspace is None or connectors_suspended(workspace)
+    return result.scalar_one_or_none()
 
 
 def resources_suspended(workspace: Workspace) -> bool:

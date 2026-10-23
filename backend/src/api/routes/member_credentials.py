@@ -545,6 +545,8 @@ async def regenerate_api_key(
         auto_hide_minutes=10,
         # #2129: the MCP default is a setting of the key, not of its secret.
         default_context_id=old_key.default_context_id,
+        # #1952: a connector's key stays linked to its connector.
+        connector_id=old_key.connector_id,
     )
 
     await db.commit()

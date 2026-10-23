@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, select, text, update
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1376,10 +1376,15 @@ class ConnectorProvisioningService:
         # stale instead of silently minting a duplicate, and (b) preserve the
         # original owner's user_id on the replacement so rotation by a different
         # admin doesn't transfer key ownership.
+        # #1952: the row must be linked to THIS connector, or not linked at
+        # all — a key minted under the name convention after the f13 backfill
+        # ran (old code still serving during a rollout) is the connector's own
+        # stored key by its hash; rotating it revokes it and the replacement
+        # is linked, so rotation also heals that row.
         old_key_result = await self.db.execute(
             select(APIKey).where(
                 APIKey.workspace_id == workspace_id,
-                APIKey.connector_id == connector_id,  # #1952
+                or_(APIKey.connector_id == connector_id, APIKey.connector_id.is_(None)),
                 APIKey.key_hash == sha256_hex(current_key),
                 APIKey.revoked_at.is_(None),
             )

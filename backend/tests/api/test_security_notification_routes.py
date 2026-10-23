@@ -156,6 +156,7 @@ class TestApiKeyRoutes:
             agent_id=None,
             bound_context_id=None,
             default_context_id=None,  # #2129
+            connector_id=None,  # #1952
         )
         db = MagicMock()
         db.execute = AsyncMock(
@@ -227,6 +228,7 @@ class TestMemberCredentialRoutes:
             name="ws-key",
             revoked_at=None,
             default_context_id=None,
+            connector_id=None,
         )
         db = MagicMock()
         db.execute = AsyncMock(
@@ -257,6 +259,7 @@ class TestMemberCredentialRoutes:
             name="mine",
             revoked_at=None,
             default_context_id=None,
+            connector_id=None,
         )
         db = MagicMock()
         db.execute = AsyncMock(

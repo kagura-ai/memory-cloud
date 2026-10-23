@@ -414,27 +414,38 @@ class APIKeyManager:
         # ``api_keys.connector_id`` FK is the link — the ``connector:{id}``
         # name is display and uniqueness only, so a user key that merely looks
         # like one is an ordinary key. A link whose connector is not in the
-        # key's workspace (tampered data: the FK and the mint check rule it
-        # out) is refused too, like the agent kill switch. ``None`` — not an
-        # exception: the MCP transport turns an exception here into a 503
-        # (#1742). Nothing is stored, so a re-subscription lifts this on the
-        # next call. Only connector keys pay the one extra SELECT, and a
+        # key's workspace (tampered data: the CHECKs, the FK and the mint check
+        # rule it out) is refused too, like the agent kill switch. ``None`` —
+        # not an exception: the MCP transport turns an exception here into a
+        # 503 (#1742). Nothing is stored, so a re-subscription lifts the pause
+        # on the next call. Only connector keys pay the one extra SELECT, and a
         # refused attempt is not usage (this runs before the agent liveness
         # touch and the last_used_at write).
-        is_connector_key = key_record.connector_id is not None
-        if key_record.connector_id is not None:
-            from services.plan_suspension import connector_key_suspended
+        connector_id = key_record.connector_id
+        if connector_id is not None:
+            from services.plan_suspension import connector_key_workspace, connectors_suspended
 
-            if key_record.workspace_id is None or await connector_key_suspended(
-                self.db, key_record.connector_id, key_record.workspace_id
-            ):
+            workspace = (
+                await connector_key_workspace(self.db, connector_id, key_record.workspace_id)
+                if key_record.workspace_id is not None
+                else None
+            )
+            if workspace is None:
+                logger.warning(
+                    "api_key_rejected_connector_workspace_mismatch",
+                    key_prefix=key_record.key_prefix,
+                    workspace_id=str(key_record.workspace_id),
+                    connector_id=str(connector_id),
+                )
+                return None
+            if connectors_suspended(workspace):
                 # ``info``: a paused worker retrying is the expected steady
                 # state while the plan has no seats, not an auth anomaly.
                 logger.info(
                     "api_key_rejected_connectors_suspended",
                     key_prefix=key_record.key_prefix,
                     workspace_id=str(key_record.workspace_id),
-                    connector_id=str(key_record.connector_id),
+                    connector_id=str(connector_id),
                 )
                 return None
 
@@ -497,7 +508,7 @@ class APIKeyManager:
             key_prefix=key_record.key_prefix,
             agent_id=key_record.agent_id,
             agent_enforcement_mode=agent_enforcement_mode,
-            is_connector_key=is_connector_key,
+            is_connector_key=connector_id is not None,
             default_context_id=key_record.default_context_id,
         )
 

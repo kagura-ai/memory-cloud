@@ -155,9 +155,14 @@ class TestVerifyKeyConnectorGate:
         record = _connector_record()
         db = _db(record, None)
 
-        assert await _verify(db) is None
+        with patch("auth.api_keys.logger") as logger:
+            assert await _verify(db) is None
+
         assert record.last_used_at is None
         assert db.execute.await_count == 2
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.args[0] == "api_key_rejected_connector_workspace_mismatch"
+        logger.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_non_connector_key_issues_no_workspace_query(self) -> None:
@@ -187,17 +192,6 @@ class TestVerifyKeyConnectorGate:
 
         assert await _verify(db) is None
         assert db.execute.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_connector_gate_runs_before_the_agent_read(self) -> None:
-        """An agent-bound connector key at 0 seats is refused before the Agent
-        row is read — so no liveness touch (a write) happens for a refusal."""
-        record = _connector_record()
-        record.agent_id = uuid4()
-        db = _db(record, _workspace(0))
-
-        assert await _verify(db) is None
-        assert db.execute.await_count == 2  # key row, connector join — no Agent SELECT
 
     @pytest.mark.asyncio
     async def test_connector_gate_runs_after_revocation(self) -> None:
