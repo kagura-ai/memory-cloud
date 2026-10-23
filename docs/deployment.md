@@ -1697,13 +1697,13 @@ ones, and the `failed` ones whose Postgres step had committed — and uses the
 pseudonym each one stores, except for a request that failed after the Postgres
 step on a version before v0.124.0, whose row still stores the account id: the
 pseudonym is derived with the deployment's salt (the erasure's own
-derivation) and the row is repaired. Two kinds of completed request still
-store the raw account id, and both are skipped and listed (the id itself is
-never printed): one the erasure sweep marked complete without running it
-because the user row was already gone (`never ran`), and one finalized before
-v0.58.1 (`stores the account id`, which predates the revision log anyway). A
-request that failed before its Postgres step erased nothing and is not
-listed. A value another erased member wrote is never put back: the walk goes
+derivation) and the row is repaired. Two kinds of completed request are
+skipped and listed (the id itself is never printed): one the erasure sweep
+marked complete without running it because the user row was already gone
+(`never ran`; it stores the raw account id, or from v0.125.0 its pseudonym),
+and one finalized before v0.58.1 that stores the raw account id (`stores the
+account id`, which predates the revision log anyway). A request that failed
+before its Postgres step erased nothing and is not listed. A value another erased member wrote is never put back: the walk goes
 back past every erased member's edits to the last value a surviving member
 wrote, so the result is the same whichever of two such erasures is processed
 first. For each request, in one transaction:
@@ -1737,9 +1737,36 @@ on the memories the member authored is bounded at its `started_at` plus one
 hour (the sweep's own cutoff for a crashed run), so revision history other
 members wrote there within that hour is stripped and marked too, and later
 history stays. The marker's step is one of `payloads`, `redis`, `audit_row`
-and `finalize` (and `audit_logs` on a request that failed on v0.124.x).
+and `finalize` (and `audit_logs` on a request that failed on v0.124.x), or
+`interrupted: sweep` (below).
 Steps after the Postgres step that never ran are not re-run, except the
 audit-log one (below).
+
+**Requests interrupted after the Postgres step — Issue #2286.** A process
+that dies after the Postgres step committed (a restart, an out-of-memory
+kill, a cancelled task) runs no failure handler: the request stays
+`in_progress` with the account id. From v0.125.0 the Postgres step writes its
+summary (`postgres`, with `memory_scrub_at`) on the request row in its own
+transaction, so the hourly erasure sweep, which picks the request up again
+after an hour and finds the user row gone, can tell such a run from one that
+never started. A request whose Postgres step committed ends `failed` with
+`failure_reason` set to `after_postgres_commit: interrupted: sweep`, is
+pseudonymized like any request that failed after its Postgres step, and keeps
+the Postgres counts; the member's Redis state (sessions, rate limits, security
+notices) is cleared then, best-effort. The command processes it like any
+request that ran (nothing is expected to change: the restore and strip ran in
+the Postgres step). Not done on this path: the patch of the vector payloads of
+memories whose `details` the erasure put back (a restored memory's point may
+keep the member's `location` until it is re-embedded), the `account_erasure`
+audit row and the completion email. A request the sweep finds with no
+`postgres` in its summary never ran: it is marked `complete` with the note
+`user_row_already_absent` as before, and from v0.125.0 its account id, request
+IP and user agent are replaced or cleared too. A request interrupted after its
+Postgres step on v0.124.x or earlier has no `postgres` summary (it was written
+only after the commit then), so the sweep marks it that way (`never ran`); the
+pseudonym derived from such a row's stored value is counted among the erased
+members, so a later erasure never puts their value back, but the command does
+not process or repair the row.
 
 **Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0
 the pseudonymization of the member's own audit rows (`audit_logs.user_id`,

@@ -183,6 +183,8 @@ v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行
 - `erasure_requests.status='failed'` の行は cron で自動再試行されない
 - `failure_reason` を確認し、原因 (例: Qdrant 接続障害) を解消
 - 同じユーザーで `POST /api/v1/admin/users/{user_id}/erase` を再実行 → `ErasureAlreadyInProgressError` (409) が返る場合は失敗行を `cancelled` に手動 update してから再実行
+- `failure_reason` が `after_postgres_commit: ` で始まる行は再試行できない (Postgres の削除は commit 済みで `users` 行がない)。`reprocess_erasures` の対象 ([deployment.md](../deployment.md) の "Requests that failed after the Postgres step")
+- `after_postgres_commit: interrupted: sweep` (v0.125.0, #2286): Postgres の commit 後にプロセスが落ちた (再起動・OOM・タスクの cancel) まま 1 時間経った `in_progress` 行を、cron sweep が `users` 行なしで見つけて `failed` にしたもの。Postgres ステップが同じトランザクションで request 行に書く `deleted_data_summary.postgres` が "実行済み" の印。行は pseudonymize 済み、Redis は sweep が best-effort で削除。復元した memory の vector payload の patch、`account_erasure` audit 行、完了メールは行われない (完了メールが必要なら §7 の手順で手動送信)。`postgres` がなければ実行されていないので従来どおり `complete` + `{"note": "user_row_already_absent"}` (v0.125.0 からは ID も pseudonymize)。v0.124.x 以前に中断した行は summary がないためこちらになる
 
 ```sql
 UPDATE erasure_requests
@@ -279,11 +281,15 @@ Kagura Memory Cloud Operations
 - `erasure_admin_force_started` — admin 強制削除開始
 - `erasure_sweep_executed` — cron sweep 完了 (count 含む)
 - `erasure_execute_failed` — 実行失敗 (request_id + error 含む)
+- `erasure_failed_after_postgres_commit` — Postgres commit 後の失敗 (request_id + step + 例外クラスのみ)
+- `erasure_sweep_user_row_absent` — sweep が `users` 行のない request を閉じた (request_id + `ran_in_postgres`: true なら `interrupted: sweep` の `failed`、false なら `complete` + note。#2286)
+- `erasure_sweep_redis_cleanup_failed` — 上記の中断行の Redis 削除に失敗 (request_id + 例外クラス。キーは TTL で消える)
 - `erasure_email_*` — 手動送信待ちメール
 
 監視 alert (将来):
 
 - `erasure_execute_failed` 発生 → admin に通知
+- `erasure_sweep_user_row_absent` (`ran_in_postgres=true`) 発生 → 中断した erasure。§5.4 を確認
 - `erasure_sweep_executed count > 0` が 24h 続く → SLA 違反警告
 - `email_dispatch_required=true` の未処理ログ件数 → 1 営業日超過で alert
 
