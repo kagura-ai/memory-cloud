@@ -30,7 +30,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -40,7 +40,7 @@ from models.erasure import (
     STATUS_COMPLETE,
     ErasureRequest,
 )
-from services.account_erasure_service import AccountErasureService
+from services.account_erasure_service import AccountErasureService, _audit_salt
 from utils.datetime import utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
@@ -120,6 +120,7 @@ async def erasure_scenario(db_session: AsyncSession):
     )
     db_session.add(prior_audit)
     await db_session.commit()
+    prior_audit_id = prior_audit.id  # read now: the teardown's rollback expires it
 
     yield {
         "target_user_id": target_user_id,
@@ -127,8 +128,27 @@ async def erasure_scenario(db_session: AsyncSession):
         "other_user_id": other_user_id,
         "workspace_id": workspace.id,
         "api_key_id": api_key.id,
-        "prior_audit_id": prior_audit.id,
+        "prior_audit_id": prior_audit_id,
     }
+
+    # #2268: the database outlives a test, so the rows the erasure wrote
+    # under the target's pseudonym (its audit rows, its request) go here;
+    # otherwise a whole-table audit read in a later test sees them.
+    await db_session.rollback()
+    pseudonym = sha256_hex(target_user_id, salt=_audit_salt())
+    await db_session.execute(
+        delete(AuditLog).where(
+            (AuditLog.id == prior_audit_id)
+            | (
+                AuditLog.action.in_(("account_erasure", "account_erasure_reprocess"))
+                & (AuditLog.user_id == pseudonym)
+            )
+        )
+    )
+    await db_session.execute(
+        delete(ErasureRequest).where(ErasureRequest.user_id.in_((target_user_id, pseudonym)))
+    )
+    await db_session.commit()
 
 
 @pytest.fixture
@@ -245,7 +265,10 @@ class TestAdminForceEraseHappyPath:
         # insert — guards against the regression PR-review caught
         # (CSO Gate1 follow-up #1).
         result = await db_session.execute(
-            select(AuditLog).where(AuditLog.action == "account_erasure")
+            select(AuditLog).where(
+                AuditLog.action == "account_erasure",
+                AuditLog.user_metadata["request_id"].as_string() == str(request.id),
+            )
         )
         new_audit = result.scalar_one()
         assert new_audit.user_id != target_user_id
