@@ -1667,7 +1667,6 @@ def _stub_execute_steps(svc: AccountErasureService) -> None:
     svc._delete_postgres = AsyncMock(
         return_value=PostgresErasure({}, RestoreReport(), datetime(2026, 10, 1, 12, 0))
     )
-    svc._pseudonymize_audit_logs = AsyncMock(return_value=0)
     svc._clear_redis = AsyncMock(return_value={})
     svc._write_audit_log = AsyncMock()
     svc._finalize = AsyncMock()

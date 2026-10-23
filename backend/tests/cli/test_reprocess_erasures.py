@@ -13,7 +13,7 @@ import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -293,3 +293,41 @@ def test_no_audit_rows_add_nothing_to_the_report(capsys):
     out = capsys.readouterr().out
     assert "audit" not in out
     assert "audit" not in cli._summary(result)
+
+
+def test_the_audit_subs_select_is_correlated_to_each_audit_row():
+    """#2287 review: ``in_use`` is an EXISTS over ``users`` alone, correlated
+    to the audit row's ``user_id`` — never a cross join, which would mark
+    every sub in use (or none)."""
+    from sqlalchemy.dialects import postgresql
+
+    db = MagicMock()
+    rows = MagicMock()
+    rows.all.return_value = []
+    db.execute = AsyncMock(return_value=rows)
+
+    asyncio.run(cli._audit_subs(db))
+
+    sql = str(db.execute.await_args.args[0].compile(dialect=postgresql.dialect()))
+    assert sql == (
+        "SELECT DISTINCT audit_logs.user_id, EXISTS (SELECT * \nFROM users \n"
+        "WHERE users.user_id = audit_logs.user_id) AS in_use \nFROM audit_logs"
+    )
+
+
+def test_the_dry_run_counts_what_the_apply_would_change():
+    """#2287 review: the plan's count uses the apply's ``orphaned_only``
+    predicate, correlated the same way."""
+    from sqlalchemy.dialects import postgresql
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=2)))
+
+    assert asyncio.run(cli._count_audit_rows(db, "raw-sub")) == 2
+
+    compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+    assert str(compiled).endswith(
+        "WHERE audit_logs.user_id = %(user_id_1)s::VARCHAR AND NOT (EXISTS (SELECT * \n"
+        "FROM users \nWHERE users.user_id = audit_logs.user_id))"
+    )
+    assert compiled.params == {"user_id_1": "raw-sub"}

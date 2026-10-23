@@ -555,8 +555,22 @@ async def test_every_email_given_is_replaced_the_longest_first() -> None:
         assert sha256_hex(email, salt="salt") in values
 
 
+def _exists_subqueries(sql: str) -> list[str]:
+    """The ``EXISTS (...)`` bodies of ``sql``, up to their closing paren."""
+    import re
+
+    return re.findall(r"EXISTS \((SELECT [^()]*)\)", sql)
+
+
 async def test_orphaned_only_never_matches_a_user_row() -> None:
+    """The ``NOT EXISTS`` reads ``users`` alone, correlated to the audit row
+    being matched — a ``FROM users, audit_logs`` cross join would make the
+    re-run skip every row as soon as any live user had an audit row."""
     sql, _ = await _audit_update([], orphaned_only=True)
 
     # in the locking sub-select and in the UPDATE's own WHERE
     assert sql.count("NOT (EXISTS (SELECT") == 2
+    assert _exists_subqueries(sql) == [
+        "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
+        "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",
+    ]
