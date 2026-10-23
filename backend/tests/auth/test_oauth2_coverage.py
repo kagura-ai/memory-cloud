@@ -32,6 +32,7 @@ from auth.exceptions import (
     TokenRefreshError,
 )
 from auth.oauth2 import OAuth2Manager
+from config.settings import get_settings
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -539,7 +540,7 @@ class TestAuthorizationUrlWeb:
     ) -> None:
         """The auth URL is resolved live through the override seam."""
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
-        monkeypatch.setenv("ENVIRONMENT", "development")
+        monkeypatch.setattr(get_settings(), "environment", "development")
         monkeypatch.setenv("OAUTH_ENDPOINT_OVERRIDE_ENABLED", "true")
         monkeypatch.setenv("OAUTH_GOOGLE_AUTH_URL", "http://localhost:9999/auth")
         url = manager.get_authorization_url_web(redirect_uri="http://x/cb", state="s")
@@ -632,7 +633,7 @@ class TestExchangeCodeWeb:
         """The token_uri in client_config flows through the override resolver."""
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
         monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csecret")
-        monkeypatch.setenv("ENVIRONMENT", "development")
+        monkeypatch.setattr(get_settings(), "environment", "development")
         monkeypatch.setenv("OAUTH_ENDPOINT_OVERRIDE_ENABLED", "true")
         monkeypatch.setenv("OAUTH_GOOGLE_TOKEN_URL", "http://localhost:9999/token")
 
@@ -710,7 +711,7 @@ class TestGetUserInfoWeb:
         self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The userinfo endpoint is resolved live through the override seam."""
-        monkeypatch.setenv("ENVIRONMENT", "development")
+        monkeypatch.setattr(get_settings(), "environment", "development")
         monkeypatch.setenv("OAUTH_ENDPOINT_OVERRIDE_ENABLED", "true")
         monkeypatch.setenv("OAUTH_GOOGLE_USERINFO_URL", "http://localhost:9999/userinfo")
         captured: dict[str, Any] = {}
