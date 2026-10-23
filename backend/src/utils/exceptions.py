@@ -5,6 +5,7 @@ Exception hierarchy with error codes and HTTP status codes for API responses.
 Based on: kagura-ai/src/kagura/exceptions.py
 """
 
+from datetime import datetime
 from typing import Any
 
 from config.constants import (
@@ -15,6 +16,7 @@ from config.constants import (
     GATE_QUOTA,
     QUOTA_TYPES,
 )
+from utils.datetime import to_utc_iso
 
 
 class MemoryCloudException(Exception):
@@ -1382,6 +1384,45 @@ class ErasureAlreadyInProgressError(MemoryCloudException):
             error_code="ERASURE-006",
             existing_status=status,
         )
+
+
+class ErasureRetryScheduledError(MemoryCloudException):
+    """The vector store failed at an erasure's first step; the request is
+    rescheduled (503, #2282).
+
+    Nothing was erased (the vector-store delete is the first step), so the
+    request goes back to ``cooling_off`` with ``scheduled_for`` = the retry
+    time and the hourly sweep runs it again. ``attempt`` counts the failed
+    attempts so far (1-based); the service gives up after its maximum and
+    marks the request ``failed`` instead of raising this.
+    """
+
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        attempt: int,
+        max_attempts: int,
+        scheduled_for: datetime,
+        error_class: str,
+    ):
+        when = to_utc_iso(scheduled_for)
+        super().__init__(
+            "The vector store is unavailable; the erasure request is kept and "
+            f"will run again at {when}.",
+            status_code=503,
+            error_code="ERASURE-007",
+            request_id=request_id,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            scheduled_for=when,
+            error_class=error_class,
+        )
+        self.request_id = request_id
+        self.attempt = attempt
+        self.max_attempts = max_attempts
+        self.scheduled_for = scheduled_for
+        self.error_class = error_class
 
 
 # Deployment (5xx)

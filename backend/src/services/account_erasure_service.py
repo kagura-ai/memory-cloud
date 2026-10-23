@@ -38,9 +38,19 @@ sweep, finding the user row gone, can tell such a run from one that never
 started: it marks it ``failed`` with ``INTERRUPTED_AFTER_POSTGRES_COMMIT`` and
 pseudonymizes it like the handler would.
 
-The Qdrant call is best-effort: its internal try/except swallows API
-failures and records the outcome in the summary, so a Qdrant outage
-never blocks the Postgres delete pipeline.
+The vector-store delete (step 1, ``delete_user_points``) is NOT best-effort:
+any failure of either backend (Qdrant, or LanceDB on Kagura Lite) is raised
+as ``QdrantError``, and the erasure stops before anything else is touched.
+Nothing has been erased at that point and the user row exists, so the
+request is rescheduled (#2282): back to ``cooling_off`` with
+``scheduled_for`` = now + ``VECTOR_STORE_RETRY_DELAY`` and the attempt count
+in ``deleted_data_summary.retry``; the hourly sweep runs it again and
+``ErasureRetryScheduledError`` (503) tells the caller. After
+``VECTOR_STORE_MAX_ATTEMPTS`` attempts the request is ``failed`` with
+``vector_store_unavailable after N attempts: ...`` (raw ids kept, like any
+failure before the Postgres commit); a new request is the retry. Any other
+error at step 1 (a configuration error building the client, say) fails the
+request at once, as before.
 """
 
 from __future__ import annotations
@@ -126,9 +136,11 @@ from utils.exceptions import (
     ErasureAlreadyInProgressError,
     ErasureForbiddenError,
     ErasureRequestNotFoundError,
+    ErasureRetryScheduledError,
     ErasureTokenInvalidError,
     InitialAdminCannotBeErasedError,
     NotFoundException,
+    QdrantError,
     ValidationError,
     WorkspaceTransferRequiredError,
 )
@@ -168,6 +180,20 @@ _EMAIL_LINK_SUFFIX = ":email-link"
 # (rollback + Redis cleanup + ``EmailDispatchError``). Future: expose
 # via ``Settings`` if traffic patterns demand tuning.
 CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
+
+# #2282: a vector-store failure at step 1 reschedules the request this far
+# ahead. The sweep is hourly, so the effective gap is up to an hour; the delay
+# only keeps a sweep that is still running from picking the row up again.
+VECTOR_STORE_RETRY_DELAY = timedelta(minutes=15)
+
+# #2282: attempts (the first run included) before a vector-store outage fails
+# the request for good: three retries, roughly three to four hours.
+VECTOR_STORE_MAX_ATTEMPTS = 4
+
+# #2282: the ``step`` a retryable failure must happen at, and the summary key
+# that carries the attempts across runs.
+_STEP_VECTOR_STORE = "vector_store"
+_RETRY_KEY = "retry"
 
 
 @dataclass(frozen=True)
@@ -240,6 +266,30 @@ def _pseudonymized_request_values(pseudonym: str, *, subject_initiated: bool) ->
     if subject_initiated:
         values["initiated_by"] = pseudonym
     return values
+
+
+def _previous_retry(summary: dict[str, Any] | None) -> tuple[dict[str, Any] | None, int]:
+    """The ``retry`` block an earlier attempt left on the request (#2282),
+    and how many attempts failed before this one (0 without a block, or
+    with an unreadable count)."""
+    retry = (summary or {}).get(_RETRY_KEY)
+    if not isinstance(retry, dict):
+        return None, 0
+    attempts = retry.get("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        return retry, 0
+    return retry, attempts
+
+
+def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
+    """``summary.retry`` after a vector-store failure (#2282): counts and the
+    exception class only — no account id, no exception text."""
+    return {
+        "attempts": attempts,
+        "step": _STEP_VECTOR_STORE,
+        "error_class": error_class,
+        "last_attempt_at": to_utc_iso(utcnow()),
+    }
 
 
 class AccountErasureService:
@@ -689,6 +739,11 @@ class AccountErasureService:
             NotFoundException / InitialAdminCannotBeErasedError /
             ErasureAlreadyInProgressError / WorkspaceTransferRequiredError:
             All forwarded from the inline execution path.
+            ErasureRetryScheduledError: The vector store failed at the first
+            step (#2282); nothing was erased and the request is now
+            ``cooling_off`` with ``scheduled_for`` set — the hourly sweep
+            runs it again, and a second force-erase for the user meanwhile
+            answers ``ErasureAlreadyInProgressError``.
         """
         if reason_code == REASON_SELF_SERVICE:
             raise ValidationError("reason_code 'self_service' is not allowed for admin path")
@@ -756,6 +811,10 @@ class AccountErasureService:
 
     async def sweep_pending_erasures(self, *, batch_size: int = 50) -> int:
         """Pick up cooling_off rows whose scheduled_for has passed and execute.
+
+        A request rescheduled after a vector-store failure (#2282) is one of
+        these ``cooling_off`` rows again; when ``_execute`` reschedules it once
+        more, the sweep logs ``erasure_sweep_retry_scheduled`` and goes on.
 
         Also handles two stale-state cleanup paths:
 
@@ -884,6 +943,19 @@ class AccountErasureService:
                     workspace_ids=exc.details.get("workspace_ids"),
                 )
                 continue
+            except ErasureRetryScheduledError as exc:
+                # #2282: the vector store is down; ``_execute`` put the row back
+                # to ``cooling_off`` with a later ``scheduled_for`` (so this
+                # batch, read above, does not run it again). Not a fault yet:
+                # no stack trace; not counted as executed.
+                logger.warning(
+                    "erasure_sweep_retry_scheduled",
+                    request_id=str(request_id),
+                    attempt=exc.attempt,
+                    max_attempts=exc.max_attempts,
+                    scheduled_for=to_utc_iso(exc.scheduled_for),
+                )
+                continue
             except Exception as exc:
                 # #2268 review: the request id and the class only. ``_execute``
                 # logged the failure already (with the account and the text
@@ -995,11 +1067,18 @@ class AccountErasureService:
     async def _execute(self, request: ErasureRequest, target: User) -> None:
         """Run the cross-store erasure for a single request.
 
-        Order: Qdrant -> workspaces -> Postgres (incl. the audit_logs
+        Order: vector store -> workspaces -> Postgres (incl. the audit_logs
         pseudonymize, #2287) -> payloads -> Redis -> audit row -> finalize.
-        Qdrant first so a failure leaves a recoverable Postgres state; Redis
-        last because session/rate-limit data is ephemeral and re-creatable
-        from cookies if anything goes wrong.
+        The vector store first so its failure leaves everything untouched:
+        the user row exists and the request can simply run again — a
+        ``QdrantError`` there reschedules it (#2282, ``ErasureRetryScheduledError``)
+        until ``VECTOR_STORE_MAX_ATTEMPTS``. Redis last because
+        session/rate-limit data is ephemeral and re-creatable from cookies if
+        anything goes wrong.
+
+        Raises:
+            ErasureRetryScheduledError: The vector store failed at step 1 with
+                attempts left; the row is ``cooling_off`` again.
         """
         summary: dict[str, Any] = {}
         # Read before any failure: the handlers below roll back first, which
@@ -1011,6 +1090,12 @@ class AccountErasureService:
         # read now, like ``request_id``
         user_pseudonym = self._pseudonym(target.user_id)
         subject_initiated = request.initiated_by == request.user_id
+        # #2282: earlier vector-store failures of this request. The block is
+        # carried in ``summary`` from the start, so every write of the summary
+        # below (``_finalize``, each failure handler) keeps the history.
+        retry, failed_attempts = _previous_retry(request.deleted_data_summary)
+        if retry is not None:
+            summary[_RETRY_KEY] = retry
         erased_in_postgres = False
         step = "postgres"
         try:
@@ -1032,15 +1117,36 @@ class AccountErasureService:
             # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
             # only its own data below.
 
-            # Step 1: Qdrant (raises on failure -> caught below)
-            summary["qdrant"] = await delete_user_points(target.user_id)
+            # Step 1: the vector store (raises on failure -> caught below).
+            # #2282: a ``QdrantError`` here (either backend, any transport,
+            # timeout or API failure) is the one retryable failure: nothing
+            # has been written yet, so the request goes back to the sweep's
+            # queue while attempts are left; the last one falls through to
+            # the generic handler as ``vector_store_unavailable``.
+            step = _STEP_VECTOR_STORE
+            try:
+                summary["qdrant"] = await delete_user_points(target.user_id)
+            except QdrantError as exc:
+                attempt = failed_attempts + 1
+                summary[_RETRY_KEY] = _retry_block(attempt, type(exc).__name__)
+                if attempt < VECTOR_STORE_MAX_ATTEMPTS:
+                    raise ErasureRetryScheduledError(
+                        request_id=str(request_id),
+                        attempt=attempt,
+                        max_attempts=VECTOR_STORE_MAX_ATTEMPTS,
+                        scheduled_for=utcnow() + VECTOR_STORE_RETRY_DELAY,
+                        error_class=type(exc).__name__,
+                    ) from exc
+                raise
 
             # Step 2: workspace ownership transfer / abort gate
+            step = "workspaces"
             summary["workspaces"] = await self._handle_owned_workspaces(
                 target.user_id, owned_workspaces
             )
 
             # Step 3: Postgres deletes (FK-safe order)
+            step = "postgres"
             erased = await self._delete_postgres(target, request_id=request_id)
             erased_in_postgres = True  # committed: no step below can undo it
             postgres: dict[str, int | str | None] = dict(erased.counts)
@@ -1094,6 +1200,42 @@ class AccountErasureService:
                     error=str(exc),
                 )
 
+        except ErasureRetryScheduledError as exc:
+            # #2282: nothing was erased; the request goes back to the sweep's
+            # queue. The summary is the retry block alone (step 1 is the first
+            # summary write, so there is nothing else to keep, and no
+            # ``postgres`` key can be on the row before that step's commit).
+            # Guarded by ``status = in_progress`` like the sweep's close: a
+            # row moved meanwhile is not overwritten.
+            await self.db.rollback()
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    .where(
+                        ErasureRequest.id == request_id,
+                        ErasureRequest.status == STATUS_IN_PROGRESS,
+                    )
+                    .values(
+                        status=STATUS_COOLING_OFF,
+                        scheduled_for=exc.scheduled_for,
+                        deleted_data_summary={_RETRY_KEY: summary[_RETRY_KEY]},
+                    )
+                ),
+            )
+            await self.db.commit()
+            if not result.rowcount:
+                logger.warning("erasure_retry_request_moved", request_id=str(request_id))
+            else:
+                logger.warning(
+                    "erasure_retry_scheduled",
+                    request_id=str(request_id),
+                    attempt=exc.attempt,
+                    max_attempts=exc.max_attempts,
+                    scheduled_for=to_utc_iso(exc.scheduled_for),
+                    error_class=exc.error_class,
+                )
+            raise
         except BillingContractActiveError as exc:
             # Caller-actionable, like the transfer case below: terminal
             # `failed` with a structured reason; the user creates a new request
@@ -1172,9 +1314,20 @@ class AccountErasureService:
             await self.db.rollback()
             # Use a fresh write to record the failure without depending on
             # the just-rolled-back ORM state.
+            failure_reason = str(exc)
+            if isinstance(exc, QdrantError) and step == _STEP_VECTOR_STORE:
+                # #2282: the retry budget is spent (a retryable failure with
+                # attempts left raised ErasureRetryScheduledError above).
+                # Nothing was erased; a new request is the retry.
+                failure_reason = (
+                    f"vector_store_unavailable after {summary[_RETRY_KEY]['attempts']} "
+                    f"attempts: {exc}"
+                )
             values: dict[str, Any] = {
                 "status": STATUS_FAILED,
-                "failure_reason": str(exc)[:1000],
+                "failure_reason": failure_reason[:1000],
+                # ``summary`` carries the earlier attempts' ``retry`` block
+                # (#2282), so a failed row keeps its history too
                 "deleted_data_summary": summary or None,
             }
             if erased_in_postgres:

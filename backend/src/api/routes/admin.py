@@ -1246,6 +1246,15 @@ async def admin_force_erase_user(
         - 409 if the target owns a shared workspace and no alternate
           admin exists for auto-transfer
 
+    Vector store unavailable (#2282): 503 ``ERASURE-007`` when the
+    vector-store delete (the first step) fails. Nothing was erased; the
+    request is kept as ``cooling_off`` and the hourly sweep runs it again
+    after ``details.scheduled_for``. ``details`` carries ``request_id``,
+    ``attempt``, ``max_attempts``, ``scheduled_for`` and ``error_class``.
+    After the last attempt the request is ``failed``
+    (``vector_store_unavailable after N attempts``) and the error is the
+    vector store's own (502).
+
     This endpoint replaces the older `DELETE /admin/users/{user_id}` for
     new integrations. The old route is kept temporarily for backward
     compatibility but does NOT clean Qdrant or all OAuth artifacts.
