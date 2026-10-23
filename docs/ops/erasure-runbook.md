@@ -42,6 +42,8 @@ GDPR Art.12(3) の「受領後 1 ヶ月以内」応答義務を満たすため�
 
 > Lance backend (Lite): 同エントリポイントが `LanceStore.delete_user_points` に委譲され、`kagura_memories*` 各テーブルへ `user_id = :sub` の SQL delete を発行する(#1336)。確認は Qdrant collection ではなく Lance テーブルの行数で行う。
 
+> **障害時 (v0.125.0, #2282)**: この削除が失敗すると (どちらの backend でも、接続・timeout・API エラーはすべて `QdrantError`) erasure はここで止まる。これが最初のステップなので何も消えておらず `users` 行も残っているため、request は `failed` にならず `cooling_off` に戻り、`scheduled_for` = 15 分後、`deleted_data_summary.retry` に `{attempts, step: "vector_store", error_class, last_attempt_at}` が入る (ID・例外テキストは入らない)。hourly の cron sweep が期限後に再実行するので実際の間隔は最大 1 時間。4 回目 (最初の実行を含む) も失敗すると `failed` + `failure_reason = "vector_store_unavailable after 4 attempts: …"` (ID はそのまま。新しい request を作るのが再試行)。`QdrantError` 以外の例外 (client 生成時の設定エラー等) は従来どおり即 `failed`。待機中の self-service 行はユーザーがアカウント画面から取り消せる (まだ何も消えていない)。恒常的な `QdrantError` (不正な filter 等) も約 3 時間で `failed` になる。
+
 > ⚠️ **Multi-tenant 設計の trade-off**: 共有 workspace 内でユーザーが author の point も削除される。GDPR 上の data subject = author のため意図的な挙動。共有 workspace co-owner には事前同意 (Privacy Policy / ToS) が前提。
 
 ### 2.3 Workspace ownership (Step 3)
@@ -178,8 +180,27 @@ v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行
 }
 ```
 
+503 `ERASURE-007` (v0.125.0, #2282): 最初のステップ (vector store の削除) が失敗した。何も消えておらず、request は `cooling_off` で残り、`details.scheduled_for` 以降に cron sweep が再実行する。その間に同じユーザーへ再度 force-erase すると `ErasureAlreadyInProgressError` (409, `existing_status: "cooling_off"`)。
+
+```json
+{
+  "error": "ERASURE-007",
+  "message": "The vector store is unavailable; the erasure request is kept and will run again at 2026-01-01T00:15:00Z.",
+  "details": {
+    "request_id": "...",
+    "attempt": 1,
+    "max_attempts": 4,
+    "scheduled_for": "2026-01-01T00:15:00Z",
+    "error_class": "QdrantError"
+  }
+}
+```
+
+4 回目の失敗では request は `failed` になり、レスポンスは vector store 自身のエラー (502 `EXT-001`)。
+
 ### 5.4 失敗時の手動再試行
 
+- vector store の障害 (§2.2) は手動再試行不要 (v0.125.0, #2282): request は `cooling_off` に戻り、cron sweep が 15 分以上後に最大 4 回まで自動で再実行する。`deleted_data_summary.retry.attempts` が失敗した回数。4 回とも失敗した行 (`failure_reason` が `vector_store_unavailable after 4 attempts: ` で始まる) は、障害を解消してから新しい request を作る (下記)
 - `erasure_requests.status='failed'` の行は cron で自動再試行されない
 - `failure_reason` を確認し、原因 (例: Qdrant 接続障害) を解消
 - 同じユーザーで `POST /api/v1/admin/users/{user_id}/erase` を再実行 → `ErasureAlreadyInProgressError` (409) が返る場合は失敗行を `cancelled` に手動 update してから再実行
@@ -281,6 +302,9 @@ Kagura Memory Cloud Operations
 - `erasure_admin_force_started` — admin 強制削除開始
 - `erasure_sweep_executed` — cron sweep 完了 (count 含む)
 - `erasure_execute_failed` — 実行失敗 (request_id + error 含む)
+- `erasure_retry_scheduled` — vector store の障害で request を `cooling_off` に戻した (request_id + attempt + max_attempts + scheduled_for + 例外クラス。#2282)
+- `erasure_retry_request_moved` — 上記で戻そうとした request が別の処理で状態を変えていた (何も書いていない。request_id のみ)
+- `erasure_sweep_retry_scheduled` — cron sweep 中の上記 (request_id + attempt + max_attempts + scheduled_for)。sweep は次の request に進み、実行件数には数えない
 - `erasure_failed_after_postgres_commit` — Postgres commit 後の失敗 (request_id + step + 例外クラスのみ)
 - `erasure_sweep_user_row_absent` — sweep が `users` 行のない request を閉じた (request_id + `ran_in_postgres`: true なら `interrupted: sweep` の `failed`、false なら `complete` + note。#2286)
 - `erasure_sweep_redis_cleanup_failed` — 上記の中断行の Redis 削除に失敗 (request_id + 例外クラス。キーは TTL で消える)
@@ -291,6 +315,7 @@ Kagura Memory Cloud Operations
 監視 alert (将来):
 
 - `erasure_execute_failed` 発生 → admin に通知
+- `erasure_retry_scheduled` が続く → vector store の障害。4 回目で `failed` になる (§5.4)
 - `erasure_sweep_user_row_absent` (`ran_in_postgres=true`) 発生 → 中断した erasure。§5.4 を確認
 - `erasure_sweep_executed count > 0` が 24h 続く → SLA 違反警告
 - `email_dispatch_required=true` の未処理ログ件数 → 1 営業日超過で alert
