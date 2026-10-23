@@ -6,7 +6,7 @@
    same workspace whose name is exactly ``connector:`` + a connector id in the
    canonical spelling — revoked rows included. Look-alikes (another
    workspace's connector, junk, a non-canonical spelling) and rows the CHECKs
-   would refuse (agent-bound) stay NULL;
+   would refuse (agent-bound, a default context) stay NULL;
 2. deleting the connector's ``resources`` row removes its linked keys through
    the cascade and leaves the rest;
 3. downgrade drops the column, the CHECKs and the index, names intact;
@@ -165,6 +165,17 @@ def test_f13_round_trip() -> None:
             _insert_key(conn, "f", name, ws=ws, agent=agent_id)
             # (g) an ordinary key.
             _insert_key(conn, "g", "laptop", ws=ws)
+            # (h) the real name on a key with a default context (pre-#1953
+            # shape): ck_api_keys_connector_not_default would refuse the link.
+            dflt_ctx = uuid.uuid4()
+            conn.execute(
+                text(
+                    "INSERT INTO contexts (id, workspace_id, name, created_by) "
+                    "VALUES (:id, :ws, 'f13-dflt', :owner)"
+                ),
+                {"id": dflt_ctx, "ws": ws, "owner": OWNER},
+            )
+            _insert_key(conn, "h", name, ws=ws, dflt=dflt_ctx)
             conn.commit()
 
         _upgrade_to(F13_REVISION)
@@ -189,6 +200,7 @@ def test_f13_round_trip() -> None:
                 "e": None,
                 "f": None,
                 "g": None,
+                "h": None,
             }
 
             # The CHECKs.
@@ -253,7 +265,7 @@ def test_f13_round_trip() -> None:
                     text("SELECT count(*) FROM api_keys WHERE user_id = :uid AND name = :name"),
                     {"uid": OWNER, "name": name},
                 ).scalar_one()
-                == 3
+                == 4
             )
 
         # Re-upgrade: the backfill links exactly the same rows.
@@ -267,13 +279,14 @@ def test_f13_round_trip() -> None:
                 "e": None,
                 "f": None,
                 "g": None,
+                "h": None,
             }
 
             # ON DELETE CASCADE: the connector's resource goes (the path that
             # bypasses delete_connector), its linked keys go with it.
             conn.execute(text("DELETE FROM resources WHERE id = :id"), {"id": resource_pk})
             conn.commit()
-            assert set(_links(conn)) == {"c", "d", "e", "f", "g"}
+            assert set(_links(conn)) == {"c", "d", "e", "f", "g", "h"}
     finally:
         try:
             _upgrade_to("head")
