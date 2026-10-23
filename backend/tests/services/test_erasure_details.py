@@ -519,8 +519,10 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
 
     assert sql.count("replace(") == 2
     assert "user_email=CASE WHEN" in sql
-    # the WHERE is the raw sub, never a pseudonym (that would hash the hash)
-    assert params["user_id_1"] == "raw-sub"
+    # the WHERE is the raw sub, never a pseudonym (that would hash the hash),
+    # through rows locked in id order
+    assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
+    assert {v for k, v in params.items() if k.startswith("user_id_")} == {"raw-sub"}
     assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
     assert sha256_hex("a@example.com", salt="salt") in params.values()
 
@@ -530,4 +532,4 @@ async def test_without_an_email_only_the_sub_is_replaced() -> None:
 
     assert sql.count("replace(") == 1
     assert "user_email" not in sql
-    assert params["user_id_1"] == "raw-sub"
+    assert {v for k, v in params.items() if k.startswith("user_id_")} == {"raw-sub"}

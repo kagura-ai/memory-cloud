@@ -31,7 +31,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -188,6 +188,58 @@ def patched_external_stores():
         yield
 
 
+@pytest_asyncio.fixture
+async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
+    """#2287: audit rows the target's erasure must leave byte-identical — the
+    other member acting on the target (``resource`` names the target's
+    email: out of scope, the row's ``user_id`` is not the target's) and a
+    third account acting on itself."""
+    target_email = erasure_scenario["target_email"]
+    other = erasure_scenario["other_user_id"]
+    rows = [
+        AuditLog(
+            user_email=f"{other}@example.com",
+            user_id=other,
+            action="role_assign",
+            resource=f"user:{target_email}",
+        ),
+        AuditLog(
+            user_email="third@example.com",
+            user_id=f"third_{uuid4().hex[:8]}",
+            action="password_set",
+            resource="user:third@example.com",
+        ),
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    ids = [row.id for row in rows]
+    yield ids
+    await db_session.rollback()
+    await db_session.execute(delete(AuditLog).where(AuditLog.id.in_(ids)))
+    await db_session.commit()
+
+
+async def _audit_rows_snapshot(db_session: AsyncSession, ids) -> dict:
+    """Byte-level ``to_jsonb`` of the ``audit_logs`` rows ``ids``."""
+    rows = (
+        await db_session.execute(
+            text("SELECT t.id, to_jsonb(t) FROM audit_logs AS t WHERE t.id = ANY(:ids)"),
+            {"ids": list(ids)},
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _table_snapshot(db_session: AsyncSession, table: str) -> dict:
+    """Byte-level ``to_jsonb`` of every row of ``table``."""
+    rows = (
+        await db_session.execute(
+            text(f"SELECT t.id, to_jsonb(t) FROM {table} AS t")  # noqa: S608 - fixed names
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -201,6 +253,7 @@ class TestAdminForceEraseHappyPath:
         self,
         db_session: AsyncSession,
         erasure_scenario,
+        other_actors_audit,
         patched_external_stores,
     ):
         target_user_id = erasure_scenario["target_user_id"]
@@ -210,6 +263,7 @@ class TestAdminForceEraseHappyPath:
         workspace_id = erasure_scenario["workspace_id"]
 
         service = AccountErasureService(db_session)
+        others_before = await _audit_rows_snapshot(db_session, other_actors_audit)
 
         request = await service.admin_force_erase(
             target_user_id=target_user_id,
@@ -223,9 +277,14 @@ class TestAdminForceEraseHappyPath:
         assert request.deleted_data_summary is not None
         assert "postgres" in request.deleted_data_summary
         assert request.deleted_data_summary["postgres"]["users"] == 1
-        # The audit-log pseudonymize step ran (count >= 1 because the prior
-        # audit row above was authored by the target).
-        assert request.deleted_data_summary["audit_logs_pseudonymized"] >= 1
+        # The audit-log pseudonymize ran inside the Postgres step (#2287;
+        # count >= 1 because the prior audit row above was authored by the
+        # target).
+        assert request.deleted_data_summary["postgres"]["audit_logs_pseudonymized"] >= 1
+        assert "audit_logs_pseudonymized" not in request.deleted_data_summary
+        # every other actor's audit rows are byte-identical (#2287), the
+        # admin's row about the target included (out of scope)
+        assert await _audit_rows_snapshot(db_session, other_actors_audit) == others_before
 
         # User row is gone.
         result = await db_session.execute(select(User).where(User.user_id == target_user_id))
@@ -286,6 +345,55 @@ class TestAdminForceEraseHappyPath:
         metadata_repr = repr(new_audit.user_metadata)
         assert target_email not in metadata_repr
         assert target_user_id not in metadata_repr
+
+
+class TestAuditLogFailureRollsThePostgresStepBack:
+    """#2287: the audit-log pseudonymize is part of the Postgres step's
+    transaction. When it fails, nothing of the Postgres step is committed:
+    the user row stays, the audit rows keep their values, and the request is
+    ``failed`` without the after-commit marker, keeping its ids so a new
+    request can retry."""
+
+    @pytest.mark.asyncio
+    async def test_an_audit_log_failure_rolls_the_postgres_step_back(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        other_actors_audit,
+        patched_external_stores,
+    ):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        target = erasure_scenario["target_user_id"]
+        tables = ("users", "audit_logs", "api_keys", "memories", "memory_revisions")
+        before = {table: await _table_snapshot(db_session, table) for table in tables}
+
+        with patch.object(
+            AccountErasureService,
+            "_pseudonymize_audit_logs",
+            AsyncMock(side_effect=RuntimeError("audit_logs unavailable")),
+        ):
+            with pytest.raises(RuntimeError):
+                await AccountErasureService(db_session).admin_force_erase(
+                    target_user_id=target,
+                    initiator_user_id="admin-runner",
+                    reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                    reason_detail="integration test (#2287)",
+                )
+
+        request = (
+            await db_session.execute(
+                select(ErasureRequest)
+                .where(ErasureRequest.user_id == target)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert request.status == STATUS_FAILED
+        assert request.failure_reason == "audit_logs unavailable"
+        assert not request.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "postgres" not in (request.deleted_data_summary or {})
+        for table in tables:
+            assert await _table_snapshot(db_session, table) == before[table], table
 
 
 # ---------------------------------------------------------------------------

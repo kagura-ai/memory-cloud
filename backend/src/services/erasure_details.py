@@ -154,7 +154,7 @@ async def pseudonymize_audit_logs(db: AsyncSession, user_id: str, email: str | N
     Out of scope, here as before: rows where another actor (an admin) acted
     on the subject — their ``user_id`` is the admin's, and a ``resource``
     naming the subject's email stays. Rows of every other ``user_id`` are
-    never touched.
+    never touched. The rows are locked in id order first (``locked_ids``).
 
     Returns:
         The rowcount.
@@ -162,16 +162,24 @@ async def pseudonymize_audit_logs(db: AsyncSession, user_id: str, email: str | N
     from services import account_erasure_service
 
     user_pseudonym = erasure_pseudonym(user_id)
-    scrubbed_resource: ColumnElement[Any] = AuditLog.resource
     values: dict[str, Any] = {"user_id": user_pseudonym}
+    resource: ColumnElement[str] = AuditLog.resource.expression
     if email is not None:
         email_pseudonym = sha256_hex(email, salt=account_erasure_service._audit_salt())
-        scrubbed_resource = func.replace(scrubbed_resource, email, email_pseudonym)
+        # the email first (longer, more specific), then the sub
+        resource = func.replace(resource, email, email_pseudonym)
         values["user_email"] = case(
             (AuditLog.user_email == email, email_pseudonym), else_=AuditLog.user_email
         )
-    values["resource"] = func.replace(scrubbed_resource, user_id, user_pseudonym)
-    result = await db.execute(update(AuditLog).where(AuditLog.user_id == user_id).values(values))
+    values["resource"] = func.replace(resource, user_id, user_pseudonym)
+    result = await db.execute(
+        update(AuditLog)
+        .where(
+            AuditLog.id.in_(locked_ids(AuditLog, lambda row: (row.user_id == user_id,))),
+            AuditLog.user_id == user_id,
+        )
+        .values(values)
+    )
     return cast(CursorResult[Any], result).rowcount or 0
 
 
@@ -369,7 +377,7 @@ def scrub_mark_predicate(
 
 
 def locked_ids(
-    model: type[Memory] | type[Context] | type[MemoryRevision],
+    model: type[Memory] | type[Context] | type[MemoryRevision] | type[AuditLog],
     predicate_on: Callable[[Any], Sequence[ColumnElement[bool]]],
 ) -> Select[Any]:
     """Ids of the ``model`` rows ``predicate_on`` matches, locked in id order.
@@ -382,8 +390,8 @@ def locked_ids(
     skipped row would silently keep personal data, so never ``SKIP LOCKED`` /
     ``NOWAIT`` here. Row locks last until the transaction commits, so a later
     statement re-locking a row is free. Used for ``memory_revisions``
-    (``locked_revision_ids``, #2242) and for ``memories`` / ``contexts``
-    (#2263).
+    (``locked_revision_ids``, #2242), for ``memories`` / ``contexts``
+    (#2263) and for ``audit_logs`` (#2287).
     """
     row = aliased(model)
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()

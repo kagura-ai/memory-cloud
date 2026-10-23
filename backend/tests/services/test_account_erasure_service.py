@@ -1953,7 +1953,7 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         assert order.index("commit") > audit[0] and order.count("commit") == 1
         params = order[audit[0]].compile().params
         # WHERE by the raw sub, never by the pseudonym (that would hash the hash)
-        assert params["user_id_1"] == "u-1"
+        assert {v for k, v in params.items() if k.startswith("user_id_")} == {"u-1"}
         assert params["user_id"] == pseudonym
         assert counts["audit_logs_pseudonymized"] == 3
 
