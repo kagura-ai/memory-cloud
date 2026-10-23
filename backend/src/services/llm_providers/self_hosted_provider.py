@@ -167,7 +167,6 @@ class SelfHostedProvider(LLMProvider):
             api_key=self._api_key or _PLACEHOLDER_API_KEY,
             timeout=settings.self_hosted_llm_timeout_seconds,
         )
-        self._verified = False
         # #1569: some OpenAI-compatible servers reject ``response_format``
         # (HTTP 400). Once seen, later calls skip it and rely on the prompt +
         # LLMService's JSON-parse retry instead of paying a 400 per call.
@@ -178,17 +177,19 @@ class SelfHostedProvider(LLMProvider):
         return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     async def _verify(self) -> None:
-        """Health-check the backend once per instance via ``GET /v1/models``.
+        """Health-check the backend via the process-wide cached ``GET /v1/models``.
 
         ``/v1/models`` is the OpenAI-compatible listing endpoint served by
         both Ollama and vLLM, so it is a portable liveness probe (unlike the
         bare root ``GET /`` that only Ollama answers with HTTP 200).
-        """
-        if self._verified:
-            return
 
-        await verify_self_hosted_reachable(self._base_url, self._api_key, label="LLM backend")
-        self._verified = True
+        #2064: shares ``ensure_self_hosted_reachable`` with the embedding path
+        (#2049) instead of a per-instance flag — a provider built per request
+        or per task reuses a recent successful probe (keyed by base URL and
+        key, for ``REACHABILITY_TTL_SECONDS``), a failure is never remembered,
+        and a long-lived provider re-checks once the TTL lapses.
+        """
+        await ensure_self_hosted_reachable(self._base_url, self._api_key, label="LLM backend")
 
     async def complete_json(
         self,

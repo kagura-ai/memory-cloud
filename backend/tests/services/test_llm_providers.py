@@ -20,6 +20,16 @@ from services.llm_providers.self_hosted_provider import SelfHostedProvider
 # ============================================================================
 
 
+@pytest.fixture
+def skip_reachability_probe(monkeypatch):
+    """Skip the self-hosted ``/v1/models`` probe in CI where no backend runs."""
+    probe = AsyncMock()
+    monkeypatch.setattr(
+        "services.llm_providers.self_hosted_provider.ensure_self_hosted_reachable", probe
+    )
+    return probe
+
+
 def _make_openai_usage(prompt=10, completion=5, cached=2):
     """Build a mock OpenAI usage object."""
     usage = MagicMock()
@@ -84,7 +94,7 @@ class TestOpenAIProvider:
         assert usage == Usage(total=60, input=50, output=10, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self):
+    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
         provider = OpenAIProvider(api_key="sk-test")
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content='{"key": "value"}'))]
@@ -177,7 +187,7 @@ class TestAnthropicProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self):
+    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
         provider = AnthropicProvider(api_key="sk-ant-test")
         mock_response = MagicMock()
         mock_response.content = [MagicMock(type="text", text='{"key": "value"}')]
@@ -226,7 +236,7 @@ class TestGeminiProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self):
+    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
         provider = GeminiProvider(api_key="gemini-test")
         mock_response = MagicMock()
         mock_response.text = '{"key": "value"}'
@@ -317,9 +327,8 @@ class TestSelfHostedProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self):
+    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
         provider = SelfHostedProvider(base_url="http://localhost:11434")
-        provider._verified = True  # skip health-check in CI where the backend is absent
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content='{"key": "value"}'))]
         mock_response.usage = MagicMock()
@@ -400,7 +409,7 @@ class TestSelfHostedProviderManagedLane:
         assert provider._client.timeout == 123.0
 
     @pytest.mark.asyncio
-    async def test_model_alias_applied_on_the_wire(self):
+    async def test_model_alias_applied_on_the_wire(self, skip_reachability_probe):
         with patch(
             "services.llm_providers.self_hosted_provider.get_settings",
             return_value=_self_hosted_settings(
@@ -408,7 +417,6 @@ class TestSelfHostedProviderManagedLane:
             ),
         ):
             provider = SelfHostedProvider(base_url="http://localhost:11434")
-        provider._verified = True
         create = AsyncMock(return_value=_chat_response())
         with patch.object(provider._client.chat.completions, "create", create):
             await provider.complete_json("hello", model="qwen3:8b")
@@ -416,13 +424,12 @@ class TestSelfHostedProviderManagedLane:
         assert create.call_args.kwargs["response_format"] == {"type": "json_object"}
 
     @pytest.mark.asyncio
-    async def test_response_format_rejected_retries_without_it(self):
+    async def test_response_format_rejected_retries_without_it(self, skip_reachability_probe):
         with patch(
             "services.llm_providers.self_hosted_provider.get_settings",
             return_value=_self_hosted_settings(),
         ):
             provider = SelfHostedProvider(base_url="http://localhost:11434")
-        provider._verified = True
         create = AsyncMock(
             side_effect=[
                 _bad_request("response_format is not supported by this model"),
@@ -442,7 +449,7 @@ class TestSelfHostedProviderManagedLane:
         assert "response_format" not in create.call_args_list[2].kwargs
 
     @pytest.mark.asyncio
-    async def test_unrelated_400_propagates_without_retry(self):
+    async def test_unrelated_400_propagates_without_retry(self, skip_reachability_probe):
         from openai import BadRequestError
 
         with patch(
@@ -450,7 +457,6 @@ class TestSelfHostedProviderManagedLane:
             return_value=_self_hosted_settings(),
         ):
             provider = SelfHostedProvider(base_url="http://localhost:11434")
-        provider._verified = True
         create = AsyncMock(side_effect=_bad_request("model 'nope' not found"))
         with patch.object(provider._client.chat.completions, "create", create):
             with pytest.raises(BadRequestError):
@@ -483,7 +489,7 @@ class TestOllamaCloudProvider:
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
-    async def test_complete_json_returns_provider_response(self):
+    async def test_complete_json_returns_provider_response(self, skip_reachability_probe):
         from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
 
         provider = OllamaCloudProvider(api_key="test-key")
