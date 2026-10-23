@@ -14,17 +14,22 @@ past erasures by pseudonym (#2243) share one definition:
   function of ONE subject string: the raw sub during erasure, the stored
   salted pseudonym afterwards (``memories.user_id`` and
   ``memory_revisions.actor_user_id`` both carry it once erasure ran), with
-  ``existed_at`` = the erasure's completion on such a re-run. Idempotent: a
-  re-run matches no row.
+  ``existed_at`` = the erasure's ``memory_scrub_at`` (or completion) on such
+  a re-run. Idempotent: a re-run matches no row.
 - ``pseudonymize_revision_actor(db, user_id, pseudonym)`` — takes the raw sub
   only; a re-run by pseudonym never calls it (it would hash the hash).
 - ``restore_editor_details(db, subject, *, actor, dry_run)`` (#2244) — where
   the subject wrote the live ``details`` of a memory someone else authored,
   put back the last value someone else wrote. Like the strip, a function of
   one subject string; ``actor`` is always the pseudonym.
+- ``erase_subject_details(db, subject, ...)`` (#2268) — the restore, then
+  the strip, from one read of the logs under the memory locks: what the live
+  erasure and the re-run call.
 - ``sync_restored_payloads(db, syncs, report)`` (#2266) — the restored
   memories' vector payloads, patched after the caller's commit: no
   vector-store call happens while the subject's memories are locked.
+- ``erased_pseudonyms(db)`` (#2243, #2268) — every member whose erasure ran
+  in Postgres, the restore's ``erased_actors``.
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
@@ -244,11 +249,15 @@ def _authored_by(
     the rows the erasure saw. The memory scrub NULLed the live ``details``
     of every memory the subject authored, so no row written after it can
     hold a value of theirs; without the bound, a re-run would strip and mark
-    the rows surviving members wrote on those memories since. The request's
-    ``completed_at`` is stamped a few statements after the scrub commits
-    (no scrub time is stored), so a row written in between still counts as
-    existing: it holds at most the scrubbed NULL, and erring that way only
-    marks it, never keeps a value of the subject's.
+    the rows surviving members wrote on those memories since. Since #2268
+    the erasure stores ``memory_scrub_at`` (when it locked the subject's
+    memories: every row it saw is older, every later edit waited for its
+    commit). A request from before that has only ``completed_at``, stamped
+    a few statements after the scrub commits, so a row written in between
+    still counts as existing: it holds at most the scrubbed NULL, and erring
+    that way only marks it, never keeps a value of the subject's. A request
+    with neither (failed after its Postgres step before v0.124.0) is not
+    bounded — the same direction.
     """
     authored = row.memory_id.in_(select(Memory.id).where(Memory.user_id == subject))
     if existed_at is None:
@@ -435,11 +444,12 @@ async def strip_subject_details(
         db: The session; the caller owns the transaction.
         subject: The raw sub during erasure, or the stored salted pseudonym
             when re-run over a past erasure (#2243).
-        existed_at: On a re-run by pseudonym, when the erasure completed:
-            the authored arm of both statements then reaches only rows
-            written by then (``_authored_by``), so what surviving members
-            wrote on the scrubbed memories since stays as it is. None during
-            erasure (every row predates it).
+        existed_at: On a re-run by pseudonym, the erasure's
+            ``memory_scrub_at`` (or, before #2268, its completion): the
+            authored arm of both statements then reaches only rows written
+            by then (``_authored_by``), so what surviving members wrote on
+            the scrubbed memories since stays as it is. None during erasure
+            (every row predates it).
         dry_run: Count the rows the two UPDATEs would change; write and
             lock nothing.
         rows: The subject's ``_updated_rows``, read by the caller under the

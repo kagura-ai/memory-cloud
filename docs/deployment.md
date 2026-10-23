@@ -1670,8 +1670,10 @@ backups' retention in mind before `--apply --include-past-window`.
 
 ### Erasures run before v0.123.0 — Issue #2243
 
-**Run this once after upgrading to v0.123.0** if any account was erased on
-v0.113.0 through v0.122.x. An erasure on those versions could leave the erased
+**Run this once after upgrading to v0.124.0** if any account was erased on
+v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks
+double-erasure chains, stores the right bound and repairs failed requests,
+see below). An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
 (the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
 erasures on v0.113.0 through v0.120.x) and as the memory's live value where
@@ -1688,15 +1690,21 @@ python -m src.cli.reprocess_erasures --all                # dry run: one line pe
 python -m src.cli.reprocess_erasures --all --apply --yes  # write; --request <uuid> narrows the run to one erasure
 ```
 
-The command reads the completed erasure requests and uses the pseudonym each
-one stores; it never derives one (no salt, no plaintext needed). Two kinds of
-completed request still store the raw account id, and both are skipped and
-listed (the id itself is never printed): one the erasure sweep marked
-complete without running it because the user row was already gone (`never
-ran`), and one finalized before v0.58.1 (`stores the account id`, which
-predates the revision log anyway). A value another erased member wrote is
-never put back: where it is the one to go back to, the `details` become empty
-instead. For each request, in one transaction:
+The command reads the erasure requests that ran in Postgres — the completed
+ones, and the `failed` ones whose Postgres step had committed — and uses the
+pseudonym each one stores, except for a request that failed after the Postgres
+step on a version before v0.124.0, whose row still stores the account id: the
+pseudonym is derived with the deployment's salt (the erasure's own
+derivation) and the row is repaired. Two kinds of completed request still
+store the raw account id, and both are skipped and listed (the id itself is
+never printed): one the erasure sweep marked complete without running it
+because the user row was already gone (`never ran`), and one finalized before
+v0.58.1 (`stores the account id`, which predates the revision log anyway). A
+request that failed before its Postgres step erased nothing and is not
+listed. A value another erased member wrote is never put back: the walk goes
+back past every erased member's edits to the last value a surviving member
+wrote, so the result is the same whichever of two such erasures is processed
+first. For each request, in one transaction:
 
 1. where the erased member wrote the live `details` of a memory someone else
    authored, the last value someone else wrote is put back — a new version
@@ -1704,8 +1712,24 @@ instead. For each request, in one transaction:
    memory's vector payload (`location`) is patched right after the commit;
 2. their `details` are removed from every revision prior that still holds
    them. On memories they authored (scrubbed by the erasure), only revision
-   rows that existed when the erasure completed are touched — what other
-   members wrote there since stays as it is.
+   rows that existed when the erasure locked them are touched (the summary's
+   `memory_scrub_at`, stored since v0.124.0; for an older request its
+   completion time) — what other members wrote there since stays as it is.
+
+**Requests that failed after the Postgres step.** From v0.124.0, a request
+whose audit-log, Redis, audit-row or finalize step fails after the Postgres
+step committed ends `failed` with `failure_reason` starting
+`after_postgres_commit: ` and the step's name; the member is erased in
+Postgres and their user row is gone, so the request row is pseudonymized like
+a completed one (account id, request IP and user agent replaced or cleared).
+On earlier versions such a row kept the account id. The command lists it as
+`would repair` in the plan and `repaired` on `--apply`: the derived pseudonym
+is stored, the request metadata cleared and the marker added in the same
+transaction as the request's restore and strip. Such a request has no
+completion time (`-` in the report), so its strip on authored memories is not
+bounded. Steps after the Postgres step that never ran are not re-run: if the
+audit-log step failed, the member's earlier audit rows keep their account id
+and email.
 
 A request that changed gets one `account_erasure_reprocess` audit row (counts
 and the request id, under the pseudonyms of its `account_erasure` row).
@@ -1734,11 +1758,12 @@ Two changes reach erasures that run from v0.123.0 on, too:
   way.
 - **A value a member erased earlier is never put back.** Until this command
   has run, a revision prior may still hold such a value (the #2235 leftover).
-  When a new erasure would go back to it, the memory's `details` become empty
-  instead, and the leftover stays in that prior until the command's run for
-  the earlier member strips it. Run the command soon after the upgrade, before
-  relying on the revision history of memories that members erased on
-  v0.113.0 through v0.120.x had edited.
+  From v0.124.0 a new erasure goes back past it to the last value a surviving
+  member wrote (on v0.123.0 the `details` became empty instead); the leftover
+  stays in that prior until the command's run for the earlier member strips
+  it. Run the command soon after the upgrade, before relying on the revision
+  history of memories that members erased on v0.113.0 through v0.120.x had
+  edited.
 
 Time memories (`type: time`) and erasure — Issue #2266:
 
