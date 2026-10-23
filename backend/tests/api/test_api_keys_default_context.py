@@ -394,13 +394,15 @@ async def test_member_regenerate_keeps_the_default_context():
         )
 
     assert mgr.create_key.await_args.kwargs["default_context_id"] == CONTEXT_ID
-    assert mgr.create_key.await_args.kwargs["connector_id"] is None
 
 
 @pytest.mark.asyncio
-async def test_member_regenerate_keeps_the_connector_link():
-    """#1952: regenerating a member's newest key — which can be a connector's
-    key — keeps it linked to its connector."""
+async def test_member_regenerate_refuses_a_connector_key_with_422():
+    """#1952: the member's newest key can be a connector's key, whose secret the
+    connector holds — refused before anything is revoked; rotate through the
+    connector instead."""
+    from fastapi import HTTPException
+
     from api.routes import member_credentials as mc
 
     connector_id = uuid.uuid4()
@@ -412,19 +414,19 @@ async def test_member_regenerate_keeps_the_connector_link():
         default_context_id=None,
         connector_id=connector_id,
     )
-    new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
     db = MagicMock()
     db.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old_key))
     )
     db.commit = AsyncMock()
     mgr = MagicMock()
-    mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
+    mgr.create_key = AsyncMock()
     with (
         patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
         patch("api.routes.member_credentials.MemberCredentialsService"),
         patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
         patch("api.routes.member_credentials.schedule_security_notification"),
+        pytest.raises(HTTPException) as exc_info,
     ):
         await mc.regenerate_api_key(
             WORKSPACE_ID,
@@ -435,7 +437,11 @@ async def test_member_regenerate_keeps_the_connector_link():
             db,
         )
 
-    assert mgr.create_key.await_args.kwargs["connector_id"] == connector_id
+    assert exc_info.value.status_code == 422
+    assert "rotate-kmc-key" in exc_info.value.detail
+    assert old_key.revoked_at is None
+    mgr.create_key.assert_not_awaited()
+    db.commit.assert_not_awaited()
 
 
 # ------------------------------------------------- member self-mint (#2188)

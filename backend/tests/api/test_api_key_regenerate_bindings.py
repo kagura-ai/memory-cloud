@@ -105,7 +105,6 @@ async def test_regenerate_carries_agent_binding_forward():
     assert kwargs["agent_id"] == AGENT_ID
     assert kwargs["bound_context_id"] is None
     assert kwargs["workspace_id"] == WORKSPACE_ID
-    assert kwargs["connector_id"] is None
     # No expiry on the old key → None → create_key applies the *agent* default
     # because agent_id is present (not the longer workspace default).
     assert kwargs["expires_days"] is None
@@ -113,27 +112,31 @@ async def test_regenerate_carries_agent_binding_forward():
 
 
 @pytest.mark.asyncio
-async def test_regenerate_carries_the_connector_link_forward():
-    """#1952: the link, not the name, makes a connector key — a regenerated
-    connector key without it would be an ordinary workspace write key that
-    outlives its connector and ignores the seat pause."""
+async def test_regenerate_refuses_a_connector_key_with_422():
+    """#1952: the connector holds this key's secret (Fernet, on its row), so a
+    plain regenerate would revoke the key the connector uses and mint one it
+    never receives. Refused before anything is revoked; rotate through the
+    connector instead."""
     connector_id = uuid.uuid4()
     old = _old_key(name=f"connector:{connector_id}", connector_id=connector_id)
     manager = _manager()
+    db = _db(old)
 
-    await regenerate_api_key(
-        key_id=OLD_PID,
-        request=REQUEST,
-        background_tasks=BackgroundTasks(),
-        user=USER,
-        manager=manager,
-        db=_db(old),
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await regenerate_api_key(
+            key_id=OLD_PID,
+            request=REQUEST,
+            background_tasks=BackgroundTasks(),
+            user=USER,
+            manager=manager,
+            db=db,
+        )
 
-    kwargs = manager.create_key.await_args.kwargs
-    assert kwargs["connector_id"] == connector_id
-    assert kwargs["name"] == f"connector:{connector_id}"
-    assert kwargs["workspace_id"] == WORKSPACE_ID
+    assert exc_info.value.status_code == 422
+    assert "rotate-kmc-key" in exc_info.value.detail
+    assert old.revoked_at is None
+    manager.create_key.assert_not_awaited()
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

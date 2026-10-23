@@ -17,7 +17,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
-from auth.connector_keys import reject_reserved_key_name
+from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserved_key_name
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -517,6 +517,10 @@ async def regenerate_api_key(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot regenerate a revoked key",
             )
+        # #1952: the connector holds this key's secret; only its own rotation
+        # can hand it the replacement.
+        if old_key.connector_id is not None:
+            raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
 
         # Store old key info. agent_id / bound_context_id are immutable
         # bindings — the replacement must keep them, otherwise regenerating an
@@ -530,9 +534,6 @@ async def regenerate_api_key(
         key_bound_context_id = old_key.bound_context_id
         # #2129: the MCP default is a setting of the key, not of its secret.
         key_default_context_id = old_key.default_context_id
-        # #1952: a connector's key stays its connector's key (the link, not
-        # the name, makes it one).
-        key_connector_id = old_key.connector_id
 
         # Carry the remaining lifetime forward. A key that had no expiry (or
         # whose expiry already passed) leaves expires_days=None so the new key
@@ -565,7 +566,6 @@ async def regenerate_api_key(
             bound_context_id=key_bound_context_id,
             agent_id=key_agent_id,
             default_context_id=key_default_context_id,
-            connector_id=key_connector_id,
         )
 
         await db.commit()

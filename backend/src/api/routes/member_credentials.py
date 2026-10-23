@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager, apply_zero_knowledge_hide
+from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE
 from auth.dependencies import APIKeyOrSessionUser, SessionUser
 from auth.programmatic_workspace_auth import (
     audit_programmatic_workspace_action,
@@ -531,6 +532,10 @@ async def regenerate_api_key(
 
     if not old_key:
         raise HTTPException(status_code=404, detail="API key not found")
+    # #1952: the member's newest key can be a connector's key, whose secret the
+    # connector holds; only its own rotation can hand it the replacement.
+    if old_key.connector_id is not None:
+        raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
 
     # Revoke old key
 
@@ -545,8 +550,6 @@ async def regenerate_api_key(
         auto_hide_minutes=10,
         # #2129: the MCP default is a setting of the key, not of its secret.
         default_context_id=old_key.default_context_id,
-        # #1952: a connector's key stays linked to its connector.
-        connector_id=old_key.connector_id,
     )
 
     await db.commit()
