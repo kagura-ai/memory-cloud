@@ -37,7 +37,7 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import case, delete, select, tuple_, update
+from sqlalchemy import JSON, and_, case, delete, func, null, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,7 +74,7 @@ from models.erasure import (
     VALID_REASON_CODES,
     ErasureRequest,
 )
-from models.memory import Memory, MemoryRevision
+from models.memory import MEMORY_TYPE_TIME, Memory, MemoryRevision
 from services.billing_contract import (
     ensure_no_billing_contract,
     owned_workspaces_under_contract,
@@ -147,6 +147,22 @@ CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
 # rows belonging to the same erased user without revealing the email/sub.
 # Goal is irreversibility, not rainbow-table protection — once the user
 # row is gone there is no plaintext to recover.
+def _trigger_only_details() -> Any:
+    """What the memory scrub leaves in ``details`` (#2266).
+
+    ``{"trigger": <the row's trigger>}`` on a ``type='time'`` row that has
+    one, NULL on every other row. ``details`` is ``json`` (not ``jsonb``), so
+    the object is built with ``json_build_object``.
+    """
+    return case(
+        (
+            and_(Memory.type == MEMORY_TYPE_TIME, Memory.details["trigger"].is_not(None)),
+            func.json_build_object("trigger", Memory.details["trigger"]),
+        ),
+        else_=null(),
+    ).cast(JSON)
+
+
 def _audit_salt() -> str:
     return get_settings().audit_pseudo_salt
 
@@ -1294,8 +1310,8 @@ class AccountErasureService:
         # already wiped the rest). Their Qdrant points were deleted in step 1
         # but the PG rows kept details (coordinates included) and the raw
         # user_id. Pseudonymize the subject link and NULL the details column (PostgreSQL json) —
-        # which also NULLs the generated columns (location_lat/lon,
-        # trigger_from/until) derived from it. Runs AFTER the workspace
+        # which also NULLs the generated columns (location_lat/lon) derived
+        # from it; a time memory keeps only its trigger (#2266). Runs AFTER the workspace
         # cascade so the count reflects only survivors.
         # #2043: the revision log of surviving memories. BEFORE the memory
         # scrub: it still finds the subject's memories by their raw user_id.
@@ -1627,9 +1643,13 @@ class AccountErasureService:
         legal-retention convention: same-user correlation stays possible for
         compliance, the sub is unrecoverable) and ``details`` is NULLed —
         the memory text remains workspace content, but structured personal
-        payload (coordinates, triggers, arbitrary detail keys) is removed
-        at rest. The subject's tombstones are gone already
-        (``_delete_subject_tombstones``).
+        payload (coordinates, arbitrary detail keys) is removed at rest. The
+        subject's tombstones are gone already (``_delete_subject_tombstones``).
+
+        A ``type='time'`` memory keeps ``{"trigger": ...}`` and nothing else
+        (#2266): ``valid_trigger_window_format`` requires its trigger window,
+        which is scheduling metadata of the memory kept like its text. A NULL
+        there failed the whole erasure on the CHECK.
 
         Every statement locks its rows in id order (#2263); all of them are
         held since the erasure's first memory step (the authored and the
@@ -1643,7 +1663,7 @@ class AccountErasureService:
             await self.db.execute(
                 update(Memory)
                 .where(Memory.id.in_(locked_ids(Memory, lambda m: (m.user_id == user_id,))))
-                .values(user_id=self._pseudonym(user_id), details=None)
+                .values(user_id=self._pseudonym(user_id), details=_trigger_only_details())
                 .execution_options(synchronize_session=False)
             ),
         )

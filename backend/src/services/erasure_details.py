@@ -66,6 +66,7 @@ from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import Context
 from models.erasure import STATUS_COMPLETE, ErasureRequest
 from models.memory import (
+    MEMORY_TYPE_TIME,
     REVISION_KIND_UPDATED,
     REVISION_WRITER_ERASURE,
     REVISION_WRITER_ROLLBACK,
@@ -824,6 +825,26 @@ async def _sync_details_payload(
     await db.flush()
 
 
+def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
+    """``value`` as a time memory can hold it (#2266).
+
+    A ``type='time'`` row must keep its trigger window
+    (``valid_trigger_window_format``). Where the value to put back has no
+    ``trigger`` — it is unavailable (None), or the author wrote it before the
+    row became a time memory — the live trigger is merged in. The live one is
+    normalized: every write path runs ``_apply_time_trigger``.
+
+    Returns:
+        The value to write, and whether the live trigger was merged in.
+    """
+    if memory.type != MEMORY_TYPE_TIME:
+        return value, False
+    if isinstance(value, dict) and value.get("trigger"):
+        return value, False
+    live = memory.details.get("trigger") if isinstance(memory.details, dict) else None
+    return {**(value if isinstance(value, dict) else {}), "trigger": live}, True
+
+
 async def restore_editor_details(
     db: AsyncSession,
     subject: str,
@@ -909,7 +930,8 @@ async def restore_editor_details(
     restored: list[Memory] = []
     for target in targets:
         memory = memories[target.memory_id]
-        if memory.details == target.details:
+        value, trigger_kept = _with_live_trigger(memory, target.details)
+        if memory.details == value:
             continue  # the live value is already the one to put back
         if target.unavailable:
             report.unavailable += 1
@@ -918,7 +940,7 @@ async def restore_editor_details(
         report.memory_ids.append(memory.id)
         if dry_run:
             continue
-        memory.details = target.details
+        memory.details = value
         memory.updated_at = utcnow()
         memory.version = memory.version + 1
         record_revision(
@@ -937,6 +959,7 @@ async def restore_editor_details(
             memory_id=str(memory.id),
             from_version=target.from_version,
             unavailable=target.unavailable,
+            trigger_kept=trigger_kept,
         )
     if not restored:
         return report

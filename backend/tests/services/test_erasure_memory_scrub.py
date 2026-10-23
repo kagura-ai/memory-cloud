@@ -5,7 +5,8 @@ their PG memory rows in co-owned/transferred workspaces intact — details
 (coordinates included) plus the raw user_id. The scrub pass pseudonymizes
 ``user_id`` (salted SHA256, the plan_changes/agents convention) and NULLs
 ``details`` — which also NULLs the generated columns (location_lat/lon,
-trigger_from/until) since they derive from details.
+trigger_from/until) since they derive from details — except a time memory's
+``trigger`` (#2266).
 """
 
 import re
@@ -59,7 +60,18 @@ async def test_scrub_surviving_memories_pseudonymizes_and_nulls_details() -> Non
     # 1) Survivors: user_id pseudonymized + details NULLed in one UPDATE,
     #    over the subject's authored rows (raw sub), locked in id order.
     assert str(scrub).startswith("UPDATE memories SET ")
-    assert scrub.params["details"] is None
+    # #2266: a time memory keeps ``{"trigger": ...}`` (its CHECK needs the
+    # window); every other row gets NULL
+    scrub_sql = " ".join(str(scrub).split())
+    assert "details=CAST(CASE WHEN (memories.type = %(type_1)s::VARCHAR" in scrub_sql
+    assert (
+        "THEN json_build_object(%(json_build_object_1)s::VARCHAR, "
+        "memories.details -> %(details_2)s::TEXT) ELSE NULL END AS JSON)"
+    ) in scrub_sql
+    assert scrub.params["type_1"] == "time"
+    assert {scrub.params[k] for k in ("json_build_object_1", "details_1", "details_2")} == {
+        "trigger"
+    }
     assert scrub.params["user_id"] == pseudonym != "google-oauth2|erased"
     assert _memories_locked_in_id_order("memories", str(scrub)) == (
         "memories_1.user_id = %(user_id_1)s::VARCHAR"

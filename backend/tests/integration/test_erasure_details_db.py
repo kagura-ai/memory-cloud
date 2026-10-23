@@ -51,6 +51,7 @@ from services.erasure_details import (
 from services.memory_versions import load_version
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
+from utils.time_trigger import normalize_trigger
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -101,6 +102,7 @@ def _memory(
     session_id: str | None = None,
     deleted: bool = False,
     embedding_status: str = "success",
+    kind: str = "note",
 ) -> Memory:
     return Memory(
         id=uuid.uuid4(),
@@ -109,7 +111,7 @@ def _memory(
         context_id=world["context_id"],
         summary="a memory",
         content="body",
-        type="note",
+        type=kind,
         client="test",
         details=details,
         version=version,
@@ -786,3 +788,99 @@ async def test_a_value_the_subjects_rollback_put_back_keeps_its_prior(
         assert await strip_subject_details(session, pseudonym) == StripCounts(0, 0)
         await session.commit()
     sync.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #2266: time memories keep a trigger window (valid_trigger_window_format)
+# ---------------------------------------------------------------------------
+
+TRIGGER = normalize_trigger({"year": 2027, "month": 1, "day": 1})
+AUTHORS_TRIGGER = normalize_trigger({"year": 2028, "month": 3})
+
+
+@pytest.mark.parametrize(
+    ("prior", "expected", "counts"),
+    [
+        # the value to go back to was erased earlier: only the live trigger
+        ({"erased": ["details"]}, {"trigger": TRIGGER}, (0, 1)),
+        # the subject made the row a time memory in the same edit: the author's
+        # value has no trigger, so the live one is merged in
+        ({"details": AUTHORS}, {**AUTHORS, "trigger": TRIGGER}, (1, 0)),
+        ({"details": None}, {"trigger": TRIGGER}, (1, 0)),
+    ],
+)
+async def test_a_time_memory_keeps_the_live_trigger(
+    async_engine: AsyncEngine,
+    world: dict[str, Any],
+    prior: dict[str, Any],
+    expected: dict[str, Any],
+    counts: tuple[int, int],
+) -> None:
+    subject, author, third = world["subject"], world["author"], world["third"]
+    memory = _memory(world, author, {**SUBJECTS, "trigger": TRIGGER}, 2, kind="time")
+    # another author's time memory the subject never touched
+    bystander = _memory(world, third, {"trigger": AUTHORS_TRIGGER}, 1, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory, bystander], [_edit(world, memory, 2, subject, prior)])
+        everything_else = [memory.id]
+        revisions_before = await _snapshot(session, _REVISIONS_OUTSIDE, everything_else)
+        memories_before = await _snapshot(session, _MEMORIES_OUTSIDE, everything_else)
+        await session.commit()
+        with patch(_QDRANT, AsyncMock()):
+            pseudonym, report = await _erase_memories(session, subject)
+
+        assert (report.restored, report.unavailable) == counts
+        live = await _live(session, memory.id)
+        assert (live.details, live.version) == (expected, 3)
+        assert (live.trigger_from, live.trigger_until) == (TRIGGER["from"], TRIGGER["until"])
+        # the subject's coordinates are gone (the author's, if any, are back)
+        assert live.location_lat == (10.5 if "location" in expected else None)
+        assert (await _log(session, memory.id))[-1] == (
+            memory.id,
+            3,
+            "erasure",
+            pseudonym,
+            _put_back(2),
+            None,
+        )
+        assert await _snapshot(session, _REVISIONS_OUTSIDE, everything_else) == revisions_before
+        assert await _snapshot(session, _MEMORIES_OUTSIDE, everything_else) == memories_before
+
+
+async def test_a_time_memory_gets_the_authors_trigger_back(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """The author's value has a trigger of its own: restored verbatim."""
+    subject, author = world["subject"], world["author"]
+    authors = {"trigger": AUTHORS_TRIGGER, "by": "author"}
+    memory = _memory(world, author, {**SUBJECTS, "trigger": TRIGGER}, 2, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": authors})])
+        with patch(_QDRANT, AsyncMock()):
+            _, report = await _erase_memories(session, subject)
+        assert (report.restored, report.unavailable) == (1, 0)
+        live = await _live(session, memory.id)
+        assert live.details == authors
+        assert live.trigger_from == AUTHORS_TRIGGER["from"]
+
+
+async def test_the_subjects_own_time_memory_keeps_only_its_trigger(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    subject, author = world["subject"], world["author"]
+    own = _memory(world, subject, {**SUBJECTS, "trigger": TRIGGER}, 1, kind="time")
+    own_note = _memory(world, subject, SUBJECTS, 1)
+    others = _memory(world, author, {**AUTHORS, "trigger": AUTHORS_TRIGGER}, 1, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [own, own_note, others], [])
+        memories_before = await _snapshot(session, _MEMORIES_OUTSIDE, [own.id, own_note.id])
+        await session.commit()
+        with patch(_QDRANT, AsyncMock()):
+            pseudonym, _ = await _erase_memories(session, subject)
+        live = await _live(session, own.id)
+        assert (live.user_id, live.details) == (pseudonym, {"trigger": TRIGGER})
+        assert (live.trigger_from, live.location_lat) == (TRIGGER["from"], None)
+        assert (await _live(session, own_note.id)).details is None
+        assert await _snapshot(session, _MEMORIES_OUTSIDE, [own.id, own_note.id]) == (
+            memories_before
+        )
