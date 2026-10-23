@@ -1807,13 +1807,15 @@ erasure. A second run finds nothing: the pseudonymized rows match no request.
 
 **A vector-store outage at the first step — Issue #2282.** The erasure's
 first step deletes the member's vectors (Qdrant, or LanceDB on Kagura Lite);
-when it fails (connection, timeout or API error) nothing has been erased and
-the user row is still there. Before v0.125.0 the request then ended `failed`
+when it fails (connection, timeout or API error) nothing has been erased in
+Postgres and the user row is still there (the delete goes collection by
+collection, so the points of the collections before the failing one may be
+gone already; the re-run deletes the rest). Before v0.125.0 the request then ended `failed`
 and needed a new request. From v0.125.0 it goes back to `cooling_off` with
 `scheduled_for` 15 minutes later and the attempt count in
 `deleted_data_summary.retry` (counts, the step, the exception class and the
-time — no account id, no error text); the hourly erasure sweep runs it again
-once it is due, so the effective gap is up to an hour. After 4 attempts (the
+time — no account id, no error text); the first hourly erasure sweep after
+that time runs it again, so the effective gap is up to an hour. After 4 attempts (the
 first run included, roughly three to four hours of outage) the request ends
 `failed` with `failure_reason` starting `vector_store_unavailable after 4
 attempts:` and keeps its ids; create a new request once the vector store is
@@ -1821,9 +1823,12 @@ back. Any other error at that step (a configuration error building the
 client, say) fails the request at once, as before. An admin force-erase that
 hits the outage answers 503 `ERASURE-007` with `request_id` and
 `scheduled_for` in `details`; the request is kept and the sweep runs it, so
-do not retry the call (a second one answers 409 while the request waits). A
-member whose self-service request is waiting can still cancel it on the
-account page. The logs are `erasure_retry_scheduled` (request id, attempt,
+do not retry the call (a second one answers 409 while the request waits), and
+the member cannot cancel it. A member whose self-service request is waiting
+can still cancel it on the account page; memories whose points were already
+deleted then stay out of search results until they are re-embedded (nothing
+re-queues them by itself; the same holds for a request that failed at this
+step before v0.125.0). The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request
 has not run.

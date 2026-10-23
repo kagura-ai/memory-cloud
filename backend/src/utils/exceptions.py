@@ -1409,7 +1409,7 @@ class ErasureRetryScheduledError(MemoryCloudException):
         when = to_utc_iso(scheduled_for)
         super().__init__(
             "The vector store is unavailable; the erasure request is kept and "
-            f"will run again at {when}.",
+            f"will run again on the first hourly sweep after {when}.",
             status_code=503,
             error_code="ERASURE-007",
             request_id=request_id,

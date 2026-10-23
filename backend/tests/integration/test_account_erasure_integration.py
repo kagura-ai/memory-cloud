@@ -2024,6 +2024,13 @@ class TestAVectorStoreOutageAtStepOne:
         )
         assert await _table_snapshot(db_session, "users") == before_users
 
+        # the subject cannot call an admin erasure off while it waits
+        from utils.exceptions import ErasureRequestNotFoundError
+
+        with pytest.raises(ErasureRequestNotFoundError):
+            await AccountErasureService(db_session).cancel_self_service(user_id=target)
+        assert (await _request_snapshot(db_session, request_id))["status"] == STATUS_COOLING_OFF
+
         # one active request per user: a second force-erase meanwhile is refused
         with pytest.raises(ErasureAlreadyInProgressError):
             await AccountErasureService(db_session).admin_force_erase(
@@ -2039,3 +2046,45 @@ class TestAVectorStoreOutageAtStepOne:
         assert done["status"] == STATUS_COMPLETE
         assert done["initiated_by"] == "admin-runner"
         assert not await _user_exists(db_session, target)
+
+    @pytest.mark.asyncio
+    async def test_a_run_claimed_again_meanwhile_is_not_rescheduled(
+        self, db_session: AsyncSession, async_engine, erasure_scenario, patched_external_stores
+    ):
+        """The run outlived the stale cutoff and a later sweep claimed the row
+        again (a new ``started_at``) before its vector-store call failed: the
+        reschedule is guarded by the run's own claim, so the newer run's row
+        is left alone and the sweep logs a plain failure."""
+        from datetime import timedelta
+
+        from sqlalchemy import update
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from models.erasure import STATUS_IN_PROGRESS
+        from utils.exceptions import QdrantError
+
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        reclaimed_at = utcnow() + timedelta(hours=1)
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def reclaimed_then_down(user_id: str) -> dict[str, int]:
+            async with maker() as other:
+                await other.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .values(started_at=reclaimed_at)
+                )
+                await other.commit()
+            raise QdrantError("timeout")
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=reclaimed_then_down),
+        ):
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_IN_PROGRESS
+        assert row["deleted_data_summary"] is None
+        assert datetime.fromisoformat(row["started_at"]) == reclaimed_at.astimezone(UTC)
+        assert await _user_exists(db_session, erasure_scenario["target_user_id"])

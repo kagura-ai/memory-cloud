@@ -698,6 +698,29 @@ class TestCancelSelfService:
         assert result.cancelled_at is not None
 
     @pytest.mark.asyncio
+    async def test_an_admin_request_cannot_be_cancelled_by_its_subject(self):
+        """#2282: an admin force-erase waiting for a vector-store retry is
+        ``cooling_off`` too; the erased user must not call it off."""
+        svc = _service()
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="admin-1",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_COOLING_OFF,
+        )
+        request.id = uuid4()
+        svc._find_active_request = AsyncMock(return_value=request)
+
+        with pytest.raises(ErasureRequestNotFoundError):
+            await svc.cancel_self_service(user_id="u-1")
+
+        assert request.status == STATUS_COOLING_OFF
+        assert request.cancelled_at is None
+        svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_active_request_raises_not_found(self):
         svc = _service()
         svc._find_active_request = AsyncMock(return_value=None)
@@ -2360,6 +2383,7 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         order = _recording_execute(svc)
         request = _execute_request(self_service=self_service)
         request.ip_address, request.user_agent = "203.0.113.9", "agent"
+        request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
 
         before = utcnow()
         with patch(
@@ -2390,6 +2414,9 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         # guarded: a row moved meanwhile (not in_progress) is left alone
         assert params["status_1"] == STATUS_IN_PROGRESS
         assert "erasure_requests.status = :status_1" in str(stmt)
+        # and by this run's claim: a later sweep's re-claim is not overwritten
+        assert params["started_at_1"] == datetime(2026, 10, 1, 12, 0)
+        assert "erasure_requests.started_at = :started_at_1" in str(stmt)
         assert params["status"] == STATUS_COOLING_OFF
         assert before + timedelta(minutes=15) <= params["scheduled_for"]
         assert params["scheduled_for"] <= after + timedelta(minutes=15)
@@ -2409,6 +2436,7 @@ class TestAVectorStoreOutageReschedulesTheRequest:
             "deleted_data_summary",
             "id_1",
             "status_1",
+            "started_at_1",
         }
         assert "u-1" not in repr(params["deleted_data_summary"])
 
@@ -2578,8 +2606,10 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         assert "postgres" in summary
 
     @pytest.mark.asyncio
-    async def test_a_row_moved_meanwhile_is_logged_and_still_raises(self):
-        from utils.exceptions import ErasureRetryScheduledError, QdrantError
+    async def test_a_row_moved_meanwhile_answers_the_vector_store_error(self):
+        """Nothing was rescheduled, so the caller is not told the request will
+        run again: it gets the vector store's own error."""
+        from utils.exceptions import QdrantError
 
         svc = _service()
         _stub_execute_steps(svc)
@@ -2593,9 +2623,10 @@ class TestAVectorStoreOutageReschedulesTheRequest:
             ),
             patch("services.account_erasure_service.logger") as log,
         ):
-            with pytest.raises(ErasureRetryScheduledError):
+            with pytest.raises(QdrantError) as caught:
                 await svc._execute(request, _user())
 
+        assert str(caught.value) == "Qdrant service error: down"
         events = [c.args[0] for c in log.warning.call_args_list]
         assert "erasure_retry_request_moved" in events
         assert "erasure_retry_scheduled" not in events
