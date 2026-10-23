@@ -328,7 +328,7 @@ async def test_window_is_the_callers_own_principal_even_for_an_owner():
         ),
     ],
 )
-async def test_window_against_now_is_checked_on_the_database_clock(args, words):
+async def test_window_against_now_is_checked_on_the_server_clock(args, words):
     payload, db = await _call(args, now=NOW)
     assert payload["error"] == "validation_error" and words in payload["message"]
     db.service.assert_not_awaited()
