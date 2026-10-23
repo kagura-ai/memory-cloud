@@ -401,6 +401,7 @@ class ConnectorProvisioningService:
                     name=connector_key_name(connector.id),
                     user_id=user_id,
                     workspace_id=workspace_id,
+                    connector_id=connector.id,  # #1952: the FK is the link
                 )
                 kmc_api_key_name = kmc_key_row.name
                 connector.set_kmc_api_key(plaintext_kmc_api_key)
@@ -994,17 +995,16 @@ class ConnectorProvisioningService:
         return result.scalar_one_or_none()
 
     async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
-        """Delete a connector: revoke its KMC write key + drop its resource.
+        """Delete a connector: drop its resource, and with it its KMC write key.
 
-        Revokes the workspace-scoped ``connector:{id}`` API key so the worker's
-        next config fetch fails closed, then deletes the owning ``resources``
-        row (CASCADE removes the connector + its resource token). The
-        write-target context is intentionally preserved (it holds user data).
-        Returns ``False`` if no matching connector exists in the workspace.
+        Deletes the owning ``resources`` row; CASCADE removes the connector,
+        its resource token and — through ``api_keys.connector_id`` (#1952) —
+        its KMC write key row, so the worker's next verify finds no key (401)
+        and its next config fetch finds no connector. The write-target context
+        is intentionally preserved (it holds user data). Returns ``False`` if
+        no matching connector exists in the workspace.
         """
-        from models.auth import APIKey
         from models.resource import Resource
-        from utils.datetime import utcnow
 
         result = await self.db.execute(
             select(WorkspaceConnector).where(
@@ -1016,15 +1016,6 @@ class ConnectorProvisioningService:
         if connector is None:
             return False
 
-        await self.db.execute(
-            update(APIKey)
-            .where(
-                APIKey.workspace_id == workspace_id,
-                APIKey.name == connector_key_name(connector_id),
-                APIKey.revoked_at.is_(None),
-            )
-            .values(revoked_at=utcnow())
-        )
         await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
         return True
 
@@ -1342,8 +1333,9 @@ class ConnectorProvisioningService:
     ) -> KmcKeyRotationResult:
         """Revoke the current KMC write key and mint a replacement.
 
-        Revokes the existing ``connector:{id}`` API key, mints a fresh
-        workspace-scoped key with the given expiry, Fernet-encrypts it on
+        Revokes the connector's current write key (the active
+        ``api_keys.connector_id`` row the stored key hashes to), mints a fresh
+        workspace-scoped key linked to the connector with the given expiry, Fernet-encrypts it on
         the connector row, and bumps ``config_version`` so the worker
         re-fetches on its next poll.
 
@@ -1387,6 +1379,7 @@ class ConnectorProvisioningService:
         old_key_result = await self.db.execute(
             select(APIKey).where(
                 APIKey.workspace_id == workspace_id,
+                APIKey.connector_id == connector_id,  # #1952
                 APIKey.key_hash == sha256_hex(current_key),
                 APIKey.revoked_at.is_(None),
             )
@@ -1415,6 +1408,7 @@ class ConnectorProvisioningService:
             user_id=owner_user_id,
             workspace_id=workspace_id,
             expires_days=expires_days,
+            connector_id=connector_id,  # #1952
         )
         connector.set_kmc_api_key(plaintext_new_key)
         connector.kmc_api_key_expires_at = new_key_row.expires_at

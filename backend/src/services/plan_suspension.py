@@ -72,11 +72,13 @@ async def connectors_suspended_for(db: AsyncSession, workspace_id: UUID) -> bool
 
 
 async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspace_id: UUID) -> bool:
-    """Whether a ``connector:{id}`` API key is paused with its connector (#1944).
+    """Whether a connector's write key is refused with its connector (#1944).
 
-    One query: the workspace row joined through its connector. A name that
-    matches no connector OF THIS WORKSPACE resolves to ``False`` — the key is
-    an ordinary workspace key — without a second lookup.
+    One query: the workspace row joined through its connector. The id is the
+    key's ``api_keys.connector_id`` (#1952). A connector id that resolves to no
+    connector OF THE KEY'S WORKSPACE refuses the key (fail closed, like the
+    agent kill switch) — the FK and the mint-time workspace check make that
+    reachable only with tampered data.
 
     Reads the plan as the session knows it: like every ``effective_*`` reader,
     this expects the per-request session (a ``Workspace`` already in the
@@ -84,11 +86,11 @@ async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspac
 
     Args:
         db: Database session.
-        connector_id: The id parsed from the key name.
+        connector_id: The key's ``api_keys.connector_id``.
         workspace_id: The key's own workspace scope.
 
     Returns:
-        True when the connector exists in the workspace and the workspace has
+        True when the connector is not in the workspace, or the workspace has
         no connector seats (:func:`connectors_suspended`).
     """
     result = await db.execute(
@@ -100,7 +102,7 @@ async def connector_key_suspended(db: AsyncSession, connector_id: UUID, workspac
         )
     )
     workspace = result.scalar_one_or_none()
-    return workspace is not None and connectors_suspended(workspace)
+    return workspace is None or connectors_suspended(workspace)
 
 
 def resources_suspended(workspace: Workspace) -> bool:

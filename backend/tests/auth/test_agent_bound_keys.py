@@ -31,12 +31,13 @@ def _key_record(**overrides):
         "id": 7,
         "key_hash": "0" * 64,
         "key_prefix": "kagura_test_pref",
-        "name": "agent-key",  # #1944: verify_key reads the name
+        "name": "agent-key",
         "user_id": "svc-member",
         "workspace_id": WORKSPACE_ID,
         "bound_context_id": None,
         "agent_id": AGENT_ID,
         "default_context_id": None,  # #2129
+        "connector_id": None,  # #1952
         "revoked_at": None,
         "expires_at": None,
         "last_used_at": None,

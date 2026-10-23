@@ -17,7 +17,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
-from auth.connector_keys import connector_id_from_key_name, reject_reserved_key_name
+from auth.connector_keys import reject_reserved_key_name
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -67,7 +67,7 @@ class APIKeyCreate(BaseModel):
         ..., min_length=1, max_length=100, description="Friendly name for the API key"
     )
 
-    # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
+    # #1944: the ``connector:{id}`` prefix is reserved for connector keys (#1952).
     _name_not_reserved = field_validator("name")(reject_reserved_key_name)
 
     # Issue #1537: omitted → server default (365 days); 0 → never expires
@@ -445,12 +445,9 @@ async def update_api_key(
             field="default_context_id",
         )
     # A connector's shared key never applies one on MCP (its owner is not the
-    # person behind the connector), so it cannot be set either.
-    if (
-        data.default_context_id is not None
-        and target_key.workspace_id is not None
-        and connector_id_from_key_name(target_key.name) is not None
-    ):
+    # person behind the connector), so it cannot be set either
+    # (ck_api_keys_connector_not_default, #1952).
+    if data.default_context_id is not None and target_key.connector_id is not None:
         raise ValidationError(
             "A connector key cannot have a default context",
             field="default_context_id",

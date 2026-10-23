@@ -14,7 +14,6 @@ from uuid import UUID
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.connector_keys import connector_id_from_key_name
 from config.settings import get_settings
 from models.auth import APIKey, Context
 from utils.datetime import utcnow
@@ -61,10 +60,10 @@ class VerifiedKey(NamedTuple):
             (``shadow`` | ``enforce``), read in the same verify-time lookup
             so the binding chokepoints need no second agents query. None for
             unbound keys.
-        is_connector_key: A connector's shared key (``connector:<uuid>`` name
-            on a workspace-scoped key). Its owner is not the person on the
-            other end of the connector, so the MCP handshake withholds the
-            owner's last-used guardrail digest from it.
+        is_connector_key: A connector's shared key (``api_keys.connector_id``
+            set, #1952). Its owner is not the person on the other end of the
+            connector, so the MCP handshake withholds the owner's last-used
+            guardrail digest from it.
         default_context_id: #2129: the key's MCP default context
             (``api_keys.default_context_id``), read from the same row — no
             extra query. ``None`` when unset; never set on a public-bound or
@@ -137,6 +136,7 @@ class APIKeyManager:
         auto_hide_minutes: int = 10,
         agent_id: UUID | None = None,
         default_context_id: UUID | None = None,
+        connector_id: UUID | None = None,
     ) -> tuple[str, APIKey]:
         """Create a new API key.
 
@@ -172,6 +172,12 @@ class APIKeyManager:
             default_context_id: #2129: the key's MCP default context. Stored
                 as given — the caller checks the user can read it. Mutually
                 exclusive with ``bound_context_id`` and ``agent_id``.
+            connector_id: #1952: mint the write key of this connector
+                (``api_keys.connector_id``). Requires ``workspace_id`` and the
+                connector MUST belong to that workspace — enforced here (no
+                cross-table CHECK) and re-asserted at verify. Mutually
+                exclusive with ``bound_context_id``, ``agent_id`` and
+                ``default_context_id``.
 
         Returns:
             ``(plaintext_key, new_api_key_row)`` — the plaintext is only ever
@@ -182,7 +188,9 @@ class APIKeyManager:
             ValueError: If name already exists for user, if both scoping
                 params are supplied, if the bound context is not public, or
                 if the agent binding is malformed (missing/mismatched
-                workspace, unknown agent, or a non-active agent).
+                workspace, unknown agent, or a non-active agent), or if the
+                connector binding is malformed (missing/mismatched workspace,
+                unknown connector, or combined with another binding).
         """
         if workspace_id is not None and bound_context_id is not None:
             raise ValueError(
@@ -224,6 +232,37 @@ class APIKeyManager:
             if agent.status != AGENT_STATUS_ACTIVE:
                 raise ValueError(
                     f"agent is '{agent.status}' — keys can only be minted for active agents"
+                )
+
+        # #1952: connector write key — mirrors ck_api_keys_connector_* and the
+        # agent gates above (cross-table workspace equality checked here).
+        if connector_id is not None:
+            if workspace_id is None:
+                raise ValueError(
+                    "connector keys must be workspace-scoped — a global key "
+                    "cannot carry connector_id"
+                )
+            if (
+                agent_id is not None
+                or bound_context_id is not None
+                or default_context_id is not None
+            ):
+                raise ValueError(
+                    "connector_id cannot be combined with agent_id, "
+                    "bound_context_id or default_context_id"
+                )
+            from models.resource import WorkspaceConnector
+
+            connector_result = await self.db.execute(
+                select(WorkspaceConnector.workspace_id).where(WorkspaceConnector.id == connector_id)
+            )
+            connector_workspace_id = connector_result.scalar_one_or_none()
+            if connector_workspace_id is None:
+                raise ValueError(f"Connector {connector_id} not found")
+            if connector_workspace_id != workspace_id:
+                raise ValueError(
+                    "connector and key workspace mismatch — the connector must "
+                    "belong to the key's workspace"
                 )
 
         # Validate the bound context exists and is public at creation time.
@@ -301,6 +340,7 @@ class APIKeyManager:
             bound_context_id=bound_context_id,  # Issue #626
             agent_id=agent_id,  # Issue #1275
             default_context_id=default_context_id,  # Issue #2129
+            connector_id=connector_id,  # Issue #1952
             expires_at=expires_at,
             visibility_expires_at=visibility_expires_at,  # Migration 034
             plaintext_encrypted=plaintext_encrypted,  # Migration 035
@@ -316,6 +356,7 @@ class APIKeyManager:
             workspace_id=str(workspace_id) if workspace_id else None,
             bound_context_id=str(bound_context_id) if bound_context_id else None,
             agent_id=str(agent_id) if agent_id else None,
+            connector_id=str(connector_id) if connector_id else None,
         )
 
         return api_key, new_key
@@ -368,32 +409,32 @@ class APIKeyManager:
         # #1944: a connector's write key stops with the connector it serves.
         # #1939 pauses connector ingest (REST/MCP ingest, worker config,
         # indexer) while the workspace has no connector seats, but the worker
-        # also holds this workspace key for its legacy ``remember`` fallback.
-        # Resolve the name to a connector OF THIS WORKSPACE (a user-minted
-        # ``connector:<uuid>`` names none and stays an ordinary key) and
-        # refuse while ``connectors_suspended``. ``None`` — not an exception:
-        # the MCP transport turns an exception here into a 503 (#1742). Nothing
-        # is stored, so a re-subscription lifts this on the next call. Only
-        # connector keys pay the one extra SELECT, and a refused attempt is
-        # not usage (this runs before the agent liveness touch and the
-        # last_used_at write).
-        connector_id = connector_id_from_key_name(key_record.name)
-        # The name decides ``is_connector_key`` for the MCP handshake's last-used
-        # digest fallback: a user-minted key that merely looks like a connector
-        # key stays an ordinary key here but is withheld that digest — the safe
-        # direction, since the fallback is about who is behind the credential.
-        is_connector_key = connector_id is not None and key_record.workspace_id is not None
-        if is_connector_key:
+        # also holds this workspace key for its legacy ``remember`` fallback,
+        # so it is refused while ``connectors_suspended``. #1952: the
+        # ``api_keys.connector_id`` FK is the link — the ``connector:{id}``
+        # name is display and uniqueness only, so a user key that merely looks
+        # like one is an ordinary key. A link whose connector is not in the
+        # key's workspace (tampered data: the FK and the mint check rule it
+        # out) is refused too, like the agent kill switch. ``None`` — not an
+        # exception: the MCP transport turns an exception here into a 503
+        # (#1742). Nothing is stored, so a re-subscription lifts this on the
+        # next call. Only connector keys pay the one extra SELECT, and a
+        # refused attempt is not usage (this runs before the agent liveness
+        # touch and the last_used_at write).
+        is_connector_key = key_record.connector_id is not None
+        if key_record.connector_id is not None:
             from services.plan_suspension import connector_key_suspended
 
-            if await connector_key_suspended(self.db, connector_id, key_record.workspace_id):
+            if key_record.workspace_id is None or await connector_key_suspended(
+                self.db, key_record.connector_id, key_record.workspace_id
+            ):
                 # ``info``: a paused worker retrying is the expected steady
                 # state while the plan has no seats, not an auth anomaly.
                 logger.info(
                     "api_key_rejected_connectors_suspended",
                     key_prefix=key_record.key_prefix,
                     workspace_id=str(key_record.workspace_id),
-                    connector_id=str(connector_id),
+                    connector_id=str(key_record.connector_id),
                 )
                 return None
 

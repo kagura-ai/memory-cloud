@@ -2228,7 +2228,7 @@ class CreateAPIKeyRequest(BaseModel):
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
 
-    # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
+    # #1944: the ``connector:{id}`` prefix is reserved for connector keys (#1952).
     _name_not_reserved = field_validator("name")(reject_reserved_key_name)
 
     # Issue #1165: owner-provisioned mints REQUIRE an expiry (the route enforces

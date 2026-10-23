@@ -47,6 +47,7 @@ def _key(**over) -> SimpleNamespace:
         "bound_context_id": None,
         "agent_id": None,
         "default_context_id": None,
+        "connector_id": None,  # #1952
         "created_at": utcnow(),
         "last_used_at": None,
         "revoked_at": None,
@@ -174,7 +175,10 @@ async def test_patch_refuses_a_bound_key_with_422(over):
 
 @pytest.mark.asyncio
 async def test_patch_refuses_a_connector_key_with_422():
-    key = _key(name=f"connector:{uuid.uuid4()}", workspace_id=WORKSPACE_ID)
+    connector_id = uuid.uuid4()
+    key = _key(
+        name=f"connector:{connector_id}", workspace_id=WORKSPACE_ID, connector_id=connector_id
+    )
     db = _db(key)
     with _readable("proj"), pytest.raises(MemoryCloudException) as exc:
         await update_api_key(
@@ -183,6 +187,21 @@ async def test_patch_refuses_a_connector_key_with_422():
 
     assert exc.value.status_code == 422
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_lets_an_unlinked_key_with_the_prefix_take_a_default():
+    """#1952: the link decides, not the name — a legacy key named like a
+    connector key but without ``connector_id`` is an ordinary key."""
+    key = _key(name=f"connector:{uuid.uuid4()}", workspace_id=WORKSPACE_ID)
+    db = _db(key)
+    with _readable("proj"):
+        await update_api_key(
+            key_id=PID, data=APIKeyUpdate(default_context_id=CONTEXT_ID), user=USER, db=db
+        )
+
+    assert key.default_context_id == CONTEXT_ID
+    db.commit.assert_awaited()
 
 
 @pytest.mark.asyncio

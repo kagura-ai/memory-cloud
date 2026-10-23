@@ -2,13 +2,14 @@
 
 #1939 pauses connector ingest when a workspace's ``max_connectors`` drops to 0
 (REST/MCP ingest, the worker config endpoint, the indexer). The worker also
-holds a workspace-scoped API key named ``connector:{connector.id}`` for the
+holds a workspace-scoped API key (named ``connector:{connector.id}``) for the
 legacy ``remember`` fallback, and that key kept writing. ``verify_key`` now
 resolves such a key to its connector row and refuses it (``None`` → 401) while
 the workspace's connector seats are 0 — nothing stored, so re-subscribing
-restores it. Only a key that names a real connector of its own workspace is
-treated as a connector key; a user-minted ``connector:junk`` is an ordinary
-key, and the user-facing create endpoints no longer accept the prefix.
+restores it. #1952: the link is ``api_keys.connector_id``, not the name — a key
+whose name merely carries the prefix is an ordinary key, a link to a connector
+outside the key's workspace is refused (fail closed), and the user-facing
+create endpoints do not accept the prefix.
 """
 
 from __future__ import annotations
@@ -25,11 +26,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
-from auth.connector_keys import (
-    CONNECTOR_KEY_PREFIX,
-    connector_id_from_key_name,
-    connector_key_name,
-)
+from auth.connector_keys import CONNECTOR_KEY_PREFIX, connector_key_name
 from models.auth import User, Workspace
 from models.resource import Resource, WorkspaceConnector
 from utils.hashing import sha256_hex
@@ -41,23 +38,13 @@ CONNECTOR_ID = uuid4()
 
 
 # ---------------------------------------------------------------------------
-# Name parsing
+# Name formatting (display only since #1952)
 # ---------------------------------------------------------------------------
 
 
-def test_connector_id_from_key_name():
+def test_connector_key_name():
     cid = uuid4()
     assert connector_key_name(cid) == f"{CONNECTOR_KEY_PREFIX}{cid}"
-    # The formatter provisioning uses and the parser verify_key uses round-trip.
-    assert connector_id_from_key_name(connector_key_name(cid)) == cid
-    assert connector_id_from_key_name("connector:not-a-uuid") is None
-    # Non-canonical spellings UUID() would accept are not the contract.
-    assert connector_id_from_key_name(f"connector:{{{cid}}}") is None
-    assert connector_id_from_key_name(f"connector:urn:uuid:{cid}") is None
-    assert connector_id_from_key_name(f"connector:{cid.hex}") is None
-    assert connector_id_from_key_name(f"connector:{str(cid).upper()}") is None
-    assert connector_id_from_key_name("my laptop") is None
-    assert connector_id_from_key_name("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +65,12 @@ def _db(*rows: object | None) -> MagicMock:
     return db
 
 
-def _key_record(name: str, *, workspace_id: UUID | None = WORKSPACE_ID) -> SimpleNamespace:
+def _key_record(
+    name: str,
+    *,
+    workspace_id: UUID | None = WORKSPACE_ID,
+    connector_id: UUID | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=1,
         user_id="owner-1",
@@ -87,12 +79,18 @@ def _key_record(name: str, *, workspace_id: UUID | None = WORKSPACE_ID) -> Simpl
         bound_context_id=None,
         agent_id=None,
         default_context_id=None,  # #2129
+        connector_id=connector_id,  # #1952
         key_prefix="kagura_c",
         key_hash=sha256_hex(API_KEY),
         revoked_at=None,
         expires_at=None,
         last_used_at=None,
     )
+
+
+def _connector_record() -> SimpleNamespace:
+    """The connector's own write key: linked by ``connector_id`` (#1952)."""
+    return _key_record(connector_key_name(CONNECTOR_ID), connector_id=CONNECTOR_ID)
 
 
 def _workspace(max_connectors: int) -> SimpleNamespace:
@@ -115,7 +113,7 @@ class TestVerifyKeyConnectorGate:
     async def test_suspended_connector_key_is_refused(self) -> None:
         """Key → its connector's workspace with 0 seats → None, and the refused
         attempt is not recorded as usage."""
-        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record = _connector_record()
         db = _db(record, _workspace(0))
 
         with patch("auth.api_keys.logger") as logger:
@@ -128,7 +126,7 @@ class TestVerifyKeyConnectorGate:
 
     @pytest.mark.asyncio
     async def test_connector_key_on_a_plan_with_seats_is_valid(self) -> None:
-        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record = _connector_record()
         db = _db(record, _workspace(3))
 
         verified = await _verify(db)
@@ -138,13 +136,28 @@ class TestVerifyKeyConnectorGate:
         assert db.execute.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_user_key_that_only_looks_like_a_connector_key_is_ordinary(self) -> None:
-        """``connector:<uuid>`` naming no connector of this workspace: the join
-        finds no row, so the key is an ordinary workspace key even on Free."""
-        record = _key_record(f"connector:{uuid4()}")
+    async def test_a_name_with_the_prefix_but_no_link_is_ordinary(self) -> None:
+        """#1952: the name decides nothing — ``connector:<uuid>`` with
+        ``connector_id`` NULL is an ordinary workspace key even on Free, with
+        no connector query and no connector flag."""
+        record = _key_record(connector_key_name(CONNECTOR_ID))
+        db = _db(record)
+
+        verified = await _verify(db)
+
+        assert verified is not None and verified.is_connector_key is False
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_link_to_another_workspaces_connector_is_refused(self) -> None:
+        """#1952 (fail closed): ``connector_id`` set but the join through the
+        key's own workspace finds no row — tampered data — refuses the key."""
+        record = _connector_record()
         db = _db(record, None)
 
-        assert await _verify(db) is not None
+        assert await _verify(db) is None
+        assert record.last_used_at is None
+        assert db.execute.await_count == 2
 
     @pytest.mark.asyncio
     async def test_non_connector_key_issues_no_workspace_query(self) -> None:
@@ -156,18 +169,30 @@ class TestVerifyKeyConnectorGate:
 
     @pytest.mark.asyncio
     async def test_owner_scoped_key_with_the_prefix_is_not_resolved(self) -> None:
-        """No workspace scope → nothing to pause; no second query."""
-        record = _key_record(f"connector:{CONNECTOR_ID}", workspace_id=None)
+        """No link, no workspace scope → an ordinary key; no second query."""
+        record = _key_record(connector_key_name(CONNECTOR_ID), workspace_id=None)
         db = _db(record)
 
         assert await _verify(db) is not None
         assert db.execute.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_a_link_without_a_workspace_is_refused_without_a_query(self) -> None:
+        """``ck_api_keys_connector_requires_workspace`` rules this row out;
+        verify refuses it anyway rather than treating it as a global key."""
+        record = _key_record(
+            connector_key_name(CONNECTOR_ID), workspace_id=None, connector_id=CONNECTOR_ID
+        )
+        db = _db(record)
+
+        assert await _verify(db) is None
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_connector_gate_runs_before_the_agent_read(self) -> None:
         """An agent-bound connector key at 0 seats is refused before the Agent
         row is read — so no liveness touch (a write) happens for a refusal."""
-        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record = _connector_record()
         record.agent_id = uuid4()
         db = _db(record, _workspace(0))
 
@@ -177,7 +202,7 @@ class TestVerifyKeyConnectorGate:
     @pytest.mark.asyncio
     async def test_connector_gate_runs_after_revocation(self) -> None:
         """A revoked connector key is None for the usual reason, with no extra query."""
-        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record = _connector_record()
         record.revoked_at = NOW
         db = _db(record)
 
@@ -215,7 +240,7 @@ class TestReservedPrefix:
 async def connector_key(
     db_session: AsyncSession, fernet_api_key_secret: str
 ) -> AsyncIterator[dict[str, object]]:
-    """A Free workspace with one connector and its minted ``connector:{id}`` key.
+    """A Free workspace with one connector and its minted write key (#1952 link).
 
     ``create_key`` encrypts the plaintext-for-reveal with the global Fernet
     encryptor, so a test secret is set and the singleton reset around the test.
@@ -255,7 +280,10 @@ async def connector_key(
     await db_session.flush()
     manager = APIKeyManager(db_session)
     plaintext, _row = await manager.create_key(
-        name=f"connector:{connector.id}", user_id=user_id, workspace_id=workspace_id
+        name=connector_key_name(connector.id),
+        user_id=user_id,
+        workspace_id=workspace_id,
+        connector_id=connector.id,
     )
     user_plaintext, _row = await manager.create_key(
         name=f"connector:{uuid4()}", user_id=user_id, workspace_id=workspace_id
@@ -297,6 +325,9 @@ async def connector_key(
         "user_plaintext": user_plaintext,
         "cross_plaintext": cross_plaintext,
         "manager": manager,
+        "user_id": user_id,
+        "other_ws_id": other_ws_id,
+        "other_connector": other_connector,
     }
 
 
@@ -331,6 +362,59 @@ class TestConnectorKeyPauseDB:
         manager: APIKeyManager = connector_key["manager"]  # type: ignore[assignment]
         assert await manager.verify_key(connector_key["user_plaintext"]) is not None  # type: ignore[arg-type]
 
+    async def test_create_key_refuses_another_workspaces_connector(
+        self, db_session, connector_key
+    ) -> None:
+        """#1952: the cross-table workspace equality is checked at mint."""
+        manager: APIKeyManager = connector_key["manager"]  # type: ignore[assignment]
+        workspace: Workspace = connector_key["workspace"]  # type: ignore[assignment]
+        other: WorkspaceConnector = connector_key["other_connector"]  # type: ignore[assignment]
+
+        with pytest.raises(ValueError, match="workspace mismatch"):
+            await manager.create_key(
+                name="cross-link",
+                user_id=connector_key["user_id"],  # type: ignore[arg-type]
+                workspace_id=workspace.id,
+                connector_id=other.id,
+            )
+        with pytest.raises(ValueError, match="not found"):
+            await manager.create_key(
+                name="missing-link",
+                user_id=connector_key["user_id"],  # type: ignore[arg-type]
+                workspace_id=workspace.id,
+                connector_id=uuid4(),
+            )
+        with pytest.raises(ValueError, match="workspace-scoped"):
+            await manager.create_key(
+                name="global-link",
+                user_id=connector_key["user_id"],  # type: ignore[arg-type]
+                connector_id=other.id,
+            )
+
+    async def test_a_tampered_cross_workspace_link_is_refused_at_verify(
+        self, db_session, connector_key
+    ) -> None:
+        """#1952 (fail closed): a row linked to a connector outside its own
+        workspace — only reachable by writing the table directly — is refused
+        even on a plan with seats."""
+        manager: APIKeyManager = connector_key["manager"]  # type: ignore[assignment]
+        workspace: Workspace = connector_key["workspace"]  # type: ignore[assignment]
+        other: WorkspaceConnector = connector_key["other_connector"]  # type: ignore[assignment]
+        plaintext, row = await manager.create_key(
+            name="tampered",
+            user_id=connector_key["user_id"],  # type: ignore[arg-type]
+            workspace_id=workspace.id,
+        )
+        row.connector_id = other.id
+        await db_session.flush()
+
+        workspace.plan_name = "pro"
+        await db_session.flush()
+        db_session.expire(workspace)
+        workspace.__dict__.pop("_plan_tier", None)
+
+        assert await manager.verify_key(plaintext) is None
+
 
 class TestVerifiedKeyConnectorFlag:
     """``VerifiedKey.is_connector_key``: the MCP transport withholds the
@@ -339,7 +423,7 @@ class TestVerifiedKeyConnectorFlag:
 
     @pytest.mark.asyncio
     async def test_connector_key_is_flagged(self) -> None:
-        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record = _connector_record()
         db = _db(record, _workspace(3))
 
         verified = await _verify(db)
