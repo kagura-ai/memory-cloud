@@ -524,6 +524,19 @@ class APIKey(Base):
         nullable=True,
     )
 
+    # #1952: the connector this key is the write key of. The FK is the link;
+    # the ``connector:{id}`` name is display and uniqueness only. CASCADE, not
+    # SET NULL — a key outliving its connector would be an unowned
+    # workspace-wide write key (the ``agent_id`` argument above), and the
+    # ``resources`` / ``workspaces`` cascades remove connectors without going
+    # through ``delete_connector``. Key↔connector workspace equality is
+    # enforced at mint and re-asserted at verify, like the agent binding.
+    connector_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_connectors.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -579,6 +592,28 @@ class APIKey(Base):
         CheckConstraint(
             "default_context_id IS NULL OR agent_id IS NULL",
             name="ck_api_keys_default_not_agent",
+        ),
+        # #1952: a connector's write key (migration f13). Partial like
+        # idx_api_keys_agent — the FK cascade and the rotate lookup read it.
+        # The CHECKs keep it a plain workspace key: workspace-scoped, not
+        # agent-bound, no default context (not public-bound follows from
+        # requires_workspace + ck_api_keys_binding_workspace_exclusion).
+        Index(
+            "idx_api_keys_connector",
+            "connector_id",
+            postgresql_where=text("connector_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "connector_id IS NULL OR workspace_id IS NOT NULL",
+            name="ck_api_keys_connector_requires_workspace",
+        ),
+        CheckConstraint(
+            "connector_id IS NULL OR agent_id IS NULL",
+            name="ck_api_keys_connector_not_agent",
+        ),
+        CheckConstraint(
+            "connector_id IS NULL OR default_context_id IS NULL",
+            name="ck_api_keys_connector_not_default",
         ),
     )
 

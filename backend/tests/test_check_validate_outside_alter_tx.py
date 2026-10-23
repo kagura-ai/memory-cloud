@@ -10,7 +10,7 @@ add commits first, and VALIDATE then takes only SHARE UPDATE EXCLUSIVE.
 Each migration runs under an offline (``--sql``) PostgreSQL context, so the
 captured script carries the ``COMMIT;`` / ``BEGIN;`` alembic emits around an
 autocommit block. The offline context's connection is replaced by a recorder,
-so the reads some of these migrations make (e84's INVALID-index probe, the
+so the reads some of these migrations make (the e84 / f13 INVALID-index probes, the
 a97 / b03 audits, every downgrade's leftover check) land in the script in
 order and find no rows. No database is used.
 
@@ -59,11 +59,12 @@ _CASES = [
     ("f00_2019_llm_log_supersede", "downgrade"),
     ("f12_2244_rev_writer_erasure", "upgrade"),
     ("f12_2244_rev_writer_erasure", "downgrade"),
+    ("f13_1952_api_keys_connector_id", "upgrade"),
 ]
 
 # Runs that read the database before they finish, so a real ``alembic --sql``
 # run cannot carry them, with the result accessor that first fails on the mock
-# bind's None: the a97 / b03 upgrade audits, e84's INVALID-index probe, and
+# bind's None: the a97 / b03 upgrade audits, the e84 / f13 INVALID-index probes, and
 # every downgrade's leftover probe.
 _NEEDS_LIVE_CONNECTION = {
     ("a97_resources_entity", "upgrade"): "fetchall",
@@ -75,6 +76,7 @@ _NEEDS_LIVE_CONNECTION = {
     ("e98_2007_mae_list_changes_since", "downgrade"): "first",
     ("f00_2019_llm_log_supersede", "downgrade"): "first",
     ("f12_2244_rev_writer_erasure", "downgrade"): "scalar",
+    ("f13_1952_api_keys_connector_id", "upgrade"): "first",
 }
 
 _ADD_NOT_VALID = re.compile(r"ADD CONSTRAINT (\w+)\b.*\bNOT VALID;$")
@@ -83,7 +85,7 @@ _PHRASE = "VALIDATE CONSTRAINT"
 
 # VALIDATE literals the walker finds across ``alembic/versions``. A new
 # migration that VALIDATEs bumps it; a drop means the walker lost a shape.
-_KNOWN_SITE_COUNT = 13
+_KNOWN_SITE_COUNT = 14
 
 
 class _NoRows:
@@ -235,6 +237,7 @@ def test_the_validate_walker_finds_the_known_sites():
         "e67_1281_agent_key_workspace.py",
         "f00_2019_llm_log_supersede.py",
         "f12_2244_rev_writer_erasure.py",
+        "f13_1952_api_keys_connector_id.py",
     ):
         assert name in sites, sorted(sites)
     assert sum(len(found) for found in sites.values()) == _KNOWN_SITE_COUNT, sites
