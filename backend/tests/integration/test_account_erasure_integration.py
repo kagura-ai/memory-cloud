@@ -1385,6 +1385,9 @@ class TestARunInterruptedAfterThePostgresCommit:
             ).scalar_one_or_none() is None
         request_id = row.id
         await db_session.rollback()
+        # the sweep runs in another process: nothing of the dead run's session
+        # is cached (its request instance predates the in-transaction write)
+        db_session.expire_all()
         # not stale yet: the sweep leaves a running request alone
         assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
         assert (await _request_snapshot(db_session, request_id))["status"] == STATUS_IN_PROGRESS
@@ -1617,3 +1620,104 @@ class TestALegacyNoteRowsMemberIsWalkedPast:
         finally:
             await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
             await db_session.commit()
+
+
+class TestAFinalizeAfterTheSweepsClose:
+    """#2286 review: a run still alive past the stale cutoff commits its
+    Postgres step; the sweep closes the row as ``interrupted``; then the run
+    reaches ``_finalize``. The row ends ``complete`` with no marker."""
+
+    @pytest.mark.asyncio
+    async def test_the_row_ends_complete_without_the_marker(
+        self, db_session: AsyncSession, patched_external_stores
+    ):
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from models.erasure import (
+            INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            STATUS_FAILED,
+            STATUS_IN_PROGRESS,
+        )
+
+        sub = f"slow_{uuid4().hex[:8]}"  # its user row is gone: Postgres committed
+        pseudonym = sha256_hex(sub, salt=_audit_salt())
+        request = ErasureRequest(
+            user_id=sub,
+            user_email_hash="2" * 64,
+            initiated_by="admin-runner",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_IN_PROGRESS,
+            started_at=utcnow() - timedelta(hours=2),
+            deleted_data_summary={"postgres": {"users": 1, "memory_scrub_at": "x"}},
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        try:
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+            closed = await _request_snapshot(db_session, request_id)
+            assert (closed["status"], closed["failure_reason"]) == (
+                STATUS_FAILED,
+                INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            )
+
+            # the live run, which read the request before the sweep, finishes
+            live = SimpleNamespace(id=request_id, user_id=sub, initiated_by="admin-runner")
+            summary = {"postgres": {"users": 1, "memory_scrub_at": "x"}, "redis": {}}
+            await AccountErasureService(db_session)._finalize(live, summary)
+
+            done = await _request_snapshot(db_session, request_id)
+            assert done["status"] == STATUS_COMPLETE
+            assert done["failure_reason"] is None
+            assert done["completed_at"] is not None
+            assert done["user_id"] == pseudonym
+            assert done["deleted_data_summary"] == summary
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == request_id))
+            await db_session.commit()
+
+
+class TestThePostgresStepMergesTheSummary:
+    """#2286 review: the in-transaction summary write merges into what the
+    row holds, so a key written before the Postgres step (#2282's
+    ``retry``) survives a crash after it."""
+
+    @pytest.mark.asyncio
+    async def test_an_earlier_key_survives(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        from models.erasure import STATUS_IN_PROGRESS
+
+        target_id = erasure_scenario["target_user_id"]
+        request = ErasureRequest(
+            user_id=target_id,
+            user_email_hash=sha256_hex(erasure_scenario["target_email"]),
+            initiated_by="admin-runner",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_IN_PROGRESS,
+            started_at=utcnow(),
+            deleted_data_summary={"retry": {"attempts": 1}},
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        target = (
+            await db_session.execute(select(User).where(User.user_id == target_id))
+        ).scalar_one()
+
+        with patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()):
+            erased = await AccountErasureService(db_session)._delete_postgres(
+                target, request_id=request_id
+            )
+
+        summary = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]
+        assert summary["retry"] == {"attempts": 1}
+        assert summary["postgres"]["users"] == 1
+        assert summary["postgres"]["memory_scrub_at"]
+        assert {k: v for k, v in summary["postgres"].items() if k != "memory_scrub_at"} == (
+            erased.counts
+        )

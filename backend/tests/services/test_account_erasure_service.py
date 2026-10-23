@@ -1427,6 +1427,8 @@ class TestErasureResiduals1365:
         assert params["initiated_by"] != "oauth-sub-123"  # self-service pseudonymized
         assert params["ip_address"] is None
         assert params["user_agent"] is None
+        # #2286: a completed run never keeps a marker the sweep may have set
+        assert "failure_reason" in params and params["failure_reason"] is None
 
     @pytest.mark.asyncio
     async def test_finalize_keeps_admin_initiator_on_force_erase(self):
@@ -2268,7 +2270,15 @@ class TestThePostgresStepRecordsItselfOnTheRequest:
         assert order[i + 1 :] == ["delete", "commit"]
         params = order[i].compile().params
         assert params["id_1"] == request_id  # scoped to the one request row
-        postgres = params["deleted_data_summary"]["postgres"]
+        # merged into the row's summary (``coalesce(summary, '{}') || {...}``),
+        # so a key written before this step survives
+        assert "SET deleted_data_summary=(coalesce(erasure_requests.deleted_data_summary, " in str(
+            order[i]
+        )
+        assert ") || :param_2" in str(order[i])
+        assert {} in params.values()
+        (merged,) = [v for v in params.values() if isinstance(v, dict) and "postgres" in v]
+        postgres = merged["postgres"]
         assert postgres == {**erased.counts, "memory_scrub_at": "2026-10-01T12:00:00Z"}
         assert postgres["users"] == 1 and postgres["audit_logs_pseudonymized"] == 2
 

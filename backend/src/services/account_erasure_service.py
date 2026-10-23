@@ -53,7 +53,8 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import JSON, and_, case, delete, func, null, select, tuple_, update
+from sqlalchemy import JSON, and_, case, delete, func, literal, null, select, tuple_, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -928,6 +929,10 @@ class AccountErasureService:
         """
         request_id = request.id
         user_id = request.user_id
+        # What the row holds: ``postgres`` (written in the Postgres step's
+        # transaction) and any key written before it. Never ``qdrant`` or
+        # ``workspaces``: ``_execute`` keeps those in its local summary until a
+        # later write, and they are lost with the interrupted process.
         summary = dict(request.deleted_data_summary or {})
         ran = isinstance(summary.get("postgres"), dict)
         values = _pseudonymized_request_values(
@@ -1649,15 +1654,21 @@ class AccountErasureService:
         # transaction locks (the user row is locked since the grant revoke);
         # no other writer holds a request row while waiting on these rows.
         # ``_execute`` overwrites the summary later with the fuller one.
+        # Merged into what the row holds (``||``), not replacing it: a key
+        # written before this step (#2282's ``retry``) survives a crash too.
         if request_id is not None:
+            postgres = {**counts, "memory_scrub_at": to_utc_iso(memory_scrub_at)}
             await self.db.execute(
                 update(ErasureRequest)
                 .where(ErasureRequest.id == request_id)
                 .values(
-                    deleted_data_summary={
-                        "postgres": {**counts, "memory_scrub_at": to_utc_iso(memory_scrub_at)}
-                    }
+                    deleted_data_summary=func.coalesce(
+                        ErasureRequest.deleted_data_summary, literal({}, JSONB)
+                    ).op("||")(literal({"postgres": postgres}, JSONB))
                 )
+                # a SQL expression: no in-session sync (it would expire the
+                # loaded request's summary for an async lazy load)
+                .execution_options(synchronize_session=False)
             )
 
         # Finally the user row itself.
@@ -2062,6 +2073,9 @@ class AccountErasureService:
             "status": STATUS_COMPLETE,
             "completed_at": utcnow(),
             "deleted_data_summary": summary,
+            # #2286: a sweep may have closed a run alive past the stale cutoff
+            # as ``interrupted`` meanwhile; the run completed, so no marker
+            "failure_reason": None,
             **_pseudonymized_request_values(
                 self._pseudonym(request.user_id),
                 subject_initiated=request.initiated_by == request.user_id,
