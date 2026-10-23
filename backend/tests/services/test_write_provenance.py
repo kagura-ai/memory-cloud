@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,6 +31,7 @@ from services.write_provenance import (
 )
 
 AGENT = uuid.uuid4()
+_AT = datetime(2026, 10, 23, 12, 0, 0)  # #2135: every revision carries its writer's stamp
 
 
 @pytest.fixture(autouse=True)
@@ -122,7 +124,7 @@ def test_record_revision_stamps_the_row_and_the_memory():
     memory = SimpleNamespace(
         id=uuid.uuid4(), context_id=uuid.uuid4(), version=2, agent_id=None, session_id="old"
     )
-    record_revision(db, memory, kind="updated", actor_user_id="u1", prior={"summary": "a"})
+    record_revision(db, memory, kind="updated", actor_user_id="u1", at=_AT, prior={"summary": "a"})
     (row,) = [c.args[0] for c in db.add.call_args_list]
     assert isinstance(row, MemoryRevision)
     assert (row.agent_id, row.session_id, row.actor_user_id) == (AGENT, "sess-1", "u1")
@@ -139,6 +141,7 @@ def test_explicit_provenance_wins():
         memory,
         kind="created",
         actor_user_id="u1",
+        at=_AT,
         provenance=WriteProvenance(None, "explicit"),
     )
     (row,) = [c.args[0] for c in db.add.call_args_list]
@@ -159,6 +162,7 @@ def test_a_contextless_row_is_neither_logged_nor_stamped():
         memory,
         kind="updated",
         actor_user_id="u1",
+        at=_AT,
         provenance=WriteProvenance(AGENT, "sess-x"),
     )
     db.add.assert_not_called()  # no context, no revision (PR1 rule)
@@ -174,6 +178,7 @@ def test_revision_values_carry_the_provenance_and_writer():
         version=1,
         kind="forgotten",
         actor_user_id="u1",
+        at=_AT,
         writer="rollback",
         provenance=WriteProvenance(AGENT, "s"),
     )

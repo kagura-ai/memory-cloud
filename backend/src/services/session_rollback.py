@@ -1068,6 +1068,10 @@ class _Executor:
 
         (item,) = items
         memory = self.memories[item.memory_id]
+        # #2135: one server-clock stamp per item, so a restored+edited memory
+        # carries two events with one ``at`` (ascending ids) and the row's
+        # ``updated_at`` equals the edit's ``at``.
+        now = utcnow()
         if item.unforget:
             # The point is rebuilt before this UPDATE commits: run() holds the
             # point-writer lock for the whole call (#1798, #2157).
@@ -1089,6 +1093,7 @@ class _Executor:
                 memory,
                 kind=REVISION_KIND_RESTORED,
                 actor_user_id=self.requested_by,
+                at=now,
                 writer=REVISION_WRITER_ROLLBACK,
                 provenance=self.provenance,
             )
@@ -1098,7 +1103,7 @@ class _Executor:
             before = versioned_snapshot(memory)
             for name, value in item.values.items():
                 setattr(memory, name, value)
-            memory.updated_at = utcnow()  # a restore of values is an edit
+            memory.updated_at = now  # a restore of values is an edit
             changed = {name for name in item.values if before[name] != getattr(memory, name)}
             text_changed = bool(changed & _TEXT_FIELDS)
             record_edit(
