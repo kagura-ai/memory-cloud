@@ -217,7 +217,7 @@ def test_create_admin_without_a_secret_exits_before_the_settings(monkeypatch, ca
     assert exc_info.value.code == 1
     assert seen == []
     engine.assert_not_called()
-    assert "API_KEY_SECRET not available" in capsys.readouterr().out
+    assert "API_KEY_SECRET not available" in capsys.readouterr().err
 
 
 def test_reset_password_resolves_the_container_secret_before_the_settings(monkeypatch) -> None:
@@ -305,25 +305,57 @@ class TestGetEnvFromApiContainer:
             assert "cwd" not in c.kwargs
             assert c.kwargs["timeout"] == 10
 
-    def test_stops_at_the_first_hit(self) -> None:
+    def test_the_one_running_container_answers(self) -> None:
         with patch(
             "cli._env_guard.subprocess.run",
-            return_value=_completed("kagura-api", stdout="dev-secret\n"),
-        ) as run:
+            side_effect=[
+                _completed("kagura-api", stdout="dev-secret\n"),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+            ],
+        ):
             assert get_env_from_api_container("API_KEY_SECRET") == "dev-secret"
 
-        assert run.call_count == 1
+    def test_both_colors_with_the_same_value(self) -> None:
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", returncode=1),
+                _completed("kagura-api-blue", stdout="shared\n"),
+                _completed("kagura-api-green", stdout="shared\n"),
+            ],
+        ):
+            assert get_env_from_api_container("API_KEY_SECRET") == "shared"
+
+    def test_colors_that_disagree_are_not_guessed_between(self, capsys) -> None:
+        # During a deploy both colors run; one may predate an .env.prod edit.
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", returncode=1),
+                _completed("kagura-api-blue", stdout="old-value\n"),
+                _completed("kagura-api-green", stdout="new-value\n"),
+            ],
+        ):
+            assert get_env_from_api_container("API_KEY_SECRET") is None
+
+        err = capsys.readouterr().err
+        assert "kagura-api-blue" in err and "kagura-api-green" in err
+        assert "API_KEY_SECRET" in err
+        assert "old-value" not in err and "new-value" not in err
 
     @pytest.mark.parametrize(
         "error",
         [FileNotFoundError("docker"), subprocess.TimeoutExpired(["docker"], 10)],
         ids=["no-docker", "timeout"],
     )
-    def test_docker_errors_fall_through_to_none(self, error) -> None:
+    def test_docker_unavailable_stops_after_one_attempt(self, error) -> None:
+        # No docker binary or a hung daemon: the other names would fail the
+        # same way, so do not wait for each of them.
         with patch("cli._env_guard.subprocess.run", side_effect=error) as run:
             assert get_env_from_api_container("API_KEY_SECRET") is None
 
-        assert run.call_count == len(API_CONTAINERS)
+        assert run.call_count == 1
 
     def test_the_environment_wins_without_asking_docker(self, monkeypatch) -> None:
         monkeypatch.setenv("API_KEY_SECRET", "env-secret")

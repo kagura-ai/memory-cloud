@@ -32,23 +32,27 @@ if TYPE_CHECKING:
 # The ``container_name`` pinned by ``docker-compose.yml`` (the dev stack, the
 # host-side case the README documents) and by
 # ``terraform/single-server/docker-compose.{prod,app}.yml`` (the blue/green
-# colors). Both colors take the same ``env_file``, so whichever is running
-# holds the same values and the active-color marker is not needed.
+# colors).
 API_CONTAINERS: tuple[str, ...] = ("kagura-api", "kagura-api-blue", "kagura-api-green")
 
 
 def get_env_from_api_container(key: str) -> str | None:
-    """Read ``key`` from the first running API container that has it (#2264).
+    """Read ``key`` from the running API container (#2264).
 
     ``docker exec`` by container name needs no compose project, ``-f`` or
     working directory, so the same lookup works for the dev stack and the
-    single-server stack. Any failure (no ``docker`` on ``PATH`` — the CLI runs
-    inside a container —, the container is not running, a timeout) moves on to
-    the next name. Worst case is 10 s per name on a hung Docker daemon.
+    single-server stack. Every name is asked; one that is not running fails
+    at once. Both colors take the same ``env_file``, but each holds the values
+    of its own start: during a deploy, one may predate an ``.env.prod`` edit.
+    When the running containers disagree, nothing is returned (the key is
+    named on stderr, never the values) rather than guessing which color
+    serves. No ``docker`` on ``PATH`` (the CLI runs inside a container) or a
+    timeout stops the lookup: the other names would fail the same way.
 
     Returns:
-        The non-empty value, or ``None`` when no container provided one.
+        The value the running containers agree on, or ``None``.
     """
+    found: dict[str, str] = {}
     for name in API_CONTAINERS:
         try:
             result = subprocess.run(
@@ -57,12 +61,19 @@ def get_env_from_api_container(key: str) -> str | None:
                 text=True,
                 timeout=10,
             )
-        except Exception:
-            continue  # Docker not installed, not running or not answering
+        except (OSError, subprocess.SubprocessError):
+            break  # Docker not installed, not reachable or not answering
         value = result.stdout.strip()
         if result.returncode == 0 and value:
-            return value
-    return None
+            found[name] = value
+    if len(set(found.values())) > 1:
+        print(
+            f"✗ {' and '.join(found)} hold different {key} values; set {key} "
+            "in the environment and run the command again.",
+            file=sys.stderr,
+        )
+        return None
+    return next(iter(found.values()), None)
 
 
 def resolve_api_key_secret() -> str | None:
@@ -89,8 +100,11 @@ def require_api_key_secret() -> str:
     secret = resolve_api_key_secret()
     if secret:
         return secret
-    print("✗ API_KEY_SECRET not available.")
-    print("  Ensure Docker is running: docker compose up -d")
+    print("✗ API_KEY_SECRET not available.", file=sys.stderr)
+    print(
+        f"  Start the API container ({', '.join(API_CONTAINERS)}) or set API_KEY_SECRET.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

@@ -30,7 +30,6 @@ from auth.password_policy import (  # noqa: E402
 )
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
 from cli import _env_guard  # noqa: E402
-from cli._env_guard import require_api_key_secret, require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
@@ -229,7 +228,7 @@ def create_admin(skip_mcp_json: bool = False):
     # key from them, so the other order would encrypt the admin's API key and
     # TOTP secret with this host's default instead of the API's key (#2239).
     # The settings also run the production secret guard before any DB work.
-    require_settings(api_key_secret=require_api_key_secret())
+    _env_guard.require_settings(api_key_secret=_env_guard.require_api_key_secret())
 
     engine = create_engine(get_sync_database_url())
 
