@@ -1768,7 +1768,15 @@ commit then), so the sweep marks it that way (`never ran`). Such a member is
 still counted among the erased members, so a later erasure never puts their
 value back: by the stored pseudonym when the row was closed on v0.125.0 or
 later, by the pseudonym derived from the stored account id when it was closed
-before. The command does not process or repair these rows.
+before. The command does not process or repair these rows (still `never ran`),
+with one exception: on v0.124.x the audit-log step ran after the Postgres
+commit, so such a run may also have left the member's audit rows with their
+account id and email. For a row closed on v0.125.0 or later (it stores the
+pseudonym, `"pseudonymized": true`) the command finds those rows as below and
+pseudonymizes them — the plan lists `would pseudonymize audit rows <request
+id> <n> row(s)` next to the `never ran` line; nothing else is restored,
+stripped or written on the request row. A row closed before v0.125.0 stores
+the account id and is never used for that lookup, so its audit residue stays.
 
 **Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0
 the pseudonymization of the member's own audit rows (`audit_logs.user_id`,

@@ -44,7 +44,11 @@ pseudonym, #2286), and one finalized before v0.58.1 that stores the account
 id (before the revision log of v0.113.0 anyway). A request the sweep found
 interrupted after its Postgres step (``after_postgres_commit: interrupted:
 sweep``, #2286) ran and is processed like any other. A request that failed
-before its Postgres step erased nothing and is not listed.
+before its Postgres step erased nothing and is not listed. On a skipped note
+row the sweep pseudonymized (since v0.125.0) the subject's audit rows that
+still carry the account id are pseudonymized all the same (below): a run
+interrupted on v0.124.x after its Postgres commit, before its audit-log step,
+ends up there.
 
 The subject's own ``audit_logs`` rows that still carry the account id
 (#2287: the audit-log step failed after the Postgres commit, on v0.124.x or
@@ -94,11 +98,15 @@ from models.erasure import (  # noqa: E402
 )
 from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
+    RestoreReport,
+    StripCounts,
+    SubjectDetailsErasure,
     erase_subject_details,
     erased_pseudonyms,
     erasure_pseudonym,
     finalized_erasure,
     is_pseudonym,
+    note_row_pseudonymized,
     payload_counts,
     pseudonymize_audit_logs,
     sync_restored_payloads,
@@ -360,6 +368,7 @@ async def _reprocess_one(
     account_id: str | None = None,
     audit_account_id: str | None = None,
     email_hashes: Collection[str] = (),
+    audit_only: bool = False,
 ) -> RequestChange:
     """Repair the row (``account_id``), restore, then strip, by ``pseudonym``;
     commit (or roll back a dry run); then patch the restored memories'
@@ -375,7 +384,10 @@ async def _reprocess_one(
     ``audit_account_id`` (#2287) is the subject's account id found among the
     orphaned audit subs (``_audit_subs``): their audit rows are pseudonymized
     in the same transaction, the emails recovered by ``email_hashes`` (every
-    request of the account's).
+    request of the account's). ``audit_only`` (#2286, a note row the sweep
+    pseudonymized): that audit scrub alone — the request never reached the
+    Postgres step as far as its row says, so there is nothing to restore or
+    strip by its pseudonym.
     """
     try:
         repaired = account_id is not None
@@ -392,13 +404,17 @@ async def _reprocess_one(
                 )
             if audited:
                 email_recovered = bool(emails)
-        details = await erase_subject_details(
-            db,
-            pseudonym,
-            actor=pseudonym,
-            erased_actors=erased - {pseudonym},
-            existed_at=existed_at,
-            dry_run=dry_run,
+        details = (
+            SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
+            if audit_only
+            else await erase_subject_details(
+                db,
+                pseudonym,
+                actor=pseudonym,
+                erased_actors=erased - {pseudonym},
+                existed_at=existed_at,
+                dry_run=dry_run,
+            )
         )
         restore, strip = details.restore, details.strip
         change = RequestChange(
@@ -497,6 +513,7 @@ async def reprocess_erasures(
             ErasureRequest.user_email_hash,
             finalized_erasure().label("finalized"),
             unrepaired_erasure().label("unrepaired"),
+            note_row_pseudonymized().label("note_pseudonymized"),
         )
         .where(
             (ErasureRequest.status == STATUS_COMPLETE) | unrepaired_erasure() | finalized_erasure()
@@ -581,6 +598,31 @@ async def reprocess_erasures(
             # Both checks before the user_id is used as a subject: only a row
             # an erasure run finalized stores the pseudonym (``finalized_erasure``).
             if not request.finalized:
+                # #2286: a note row the sweep pseudonymized stores a real
+                # pseudonym, so the orphan lookup is sound for it: audit rows
+                # a run interrupted on v0.124.x (before its audit-log step)
+                # left raw are found and scrubbed — nothing else is done.
+                # A legacy note row stores the raw sub: never looked up.
+                account_id = (
+                    audit_account_id(request.id, request.user_id)
+                    if request.note_pseudonymized
+                    else None
+                )
+                if account_id is not None:
+                    change = await _reprocess_one(
+                        db,
+                        request.id,
+                        request.user_id,
+                        request.completed_at,
+                        existed_at,
+                        dry_run,
+                        erased,
+                        audit_account_id=account_id,
+                        email_hashes=email_hashes[request.user_id],
+                        audit_only=True,
+                    )
+                    if change.changes:
+                        result.changed.append(change)
                 result.skipped.append((request.id, SKIPPED_NOT_RUN))
                 continue
             if not is_pseudonym(request.user_id):

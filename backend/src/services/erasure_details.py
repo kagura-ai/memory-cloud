@@ -221,7 +221,7 @@ def _never_ran() -> ColumnElement[bool]:
     return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
 
 
-def _note_row_pseudonymized() -> ColumnElement[bool]:
+def note_row_pseudonymized() -> ColumnElement[bool]:
     """The sweep pseudonymized this note row (since v0.125.0, #2286): its
     ``user_id`` is the pseudonym, not the raw sub."""
     return func.coalesce(ErasureRequest.deleted_data_summary.has_key(NOTE_PSEUDONYMIZED_KEY), False)
@@ -293,7 +293,7 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
     rows = await db.execute(
         select(
             ErasureRequest.user_id,
-            (unrepaired_erasure() | (never_ran & ~_note_row_pseudonymized())).label("derive"),
+            (unrepaired_erasure() | (never_ran & ~note_row_pseudonymized())).label("derive"),
         ).where(finalized_erasure() | unrepaired_erasure() | never_ran)
     )
     pseudonyms: set[str] = set()
