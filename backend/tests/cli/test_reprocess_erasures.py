@@ -177,3 +177,50 @@ def test_the_applied_report_names_already_queued_and_failed_requeues(capsys):
     cli._print_applied(result)
     out = capsys.readouterr().out
     assert "re-queued for embedding 1, already queued 1, NOT re-queued 1" in out
+
+
+def test_a_repaired_request_is_listed_without_a_completion_time(capsys):
+    """#2268: a request that failed after its Postgres step has no completion
+    time (``-``) and is named as repaired; the account id is never printed."""
+    result = cli.ReprocessResult(dry_run=True, scanned=1)
+    result.changed.append(
+        cli.RequestChange(
+            request_id=REQUEST_ID,
+            completed_at=None,
+            details_restored=0,
+            details_restored_unavailable=0,
+            details_stripped=0,
+            scrub_marked=0,
+            repaired=True,
+        )
+    )
+    assert result.changes == 1  # the repair alone is a change
+    cli._print_plan(result)
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if line.startswith(str(REQUEST_ID)))
+    assert row.split()[1:] == ["-", "0", "0", "0", "0"]
+    assert f"would repair  {REQUEST_ID}  failed after its Postgres step" in out
+    assert cli._summary(result).endswith(", 1 request row(s) repaired")
+
+
+@pytest.mark.parametrize(
+    ("summary", "completed_at", "expected"),
+    [
+        (
+            {"postgres": {"memory_scrub_at": "2026-09-01T12:00:00Z"}},
+            datetime(2026, 9, 1, 13, 0, tzinfo=UTC),
+            datetime(2026, 9, 1, 12, 0),
+        ),
+        (
+            {"postgres": {"users": 1}},
+            datetime(2026, 9, 1, 13, 0, tzinfo=UTC),
+            datetime(2026, 9, 1, 13, 0),
+        ),
+        ({"postgres": {"users": 1}}, None, None),
+        (None, None, None),
+    ],
+)
+def test_the_rerun_bound_prefers_the_scrub_time(summary, completed_at, expected):
+    """#2268: ``memory_scrub_at`` when stored, else the completion time, else
+    no bound (a legacy request that failed after its Postgres step)."""
+    assert cli._existed_at(summary, completed_at) == expected

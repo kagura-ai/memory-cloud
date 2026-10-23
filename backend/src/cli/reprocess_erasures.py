@@ -398,6 +398,9 @@ def _print_plan(result: ReprocessResult) -> None:
 
 def _print_applied(result: ReprocessResult) -> None:
     for c in result.changed:
+        if c.repaired:
+            print(f"repaired  {c.request_id}  {REPAIRED}")
+    for c in result.changed:
         if c.details_restored or c.details_restored_unavailable:
             p = c.payload
             skipped = {
