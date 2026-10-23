@@ -27,17 +27,18 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from cli import reprocess_erasures as cli
-from models.auth import AuditLog, Context, Workspace
+from models.auth import AuditLog, Context, User, Workspace
 from models.erasure import ErasureRequest
 from models.memory import Memory, MemoryRevision
 from utils.exceptions import QdrantError
@@ -343,6 +344,8 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
             # #2266: the payload outcome is known only after the commit
             "details_embedding_requeued": 0,
             "request_repaired": False,
+            # #2287: none of the subject's audit rows carried the account id
+            "audit_logs_pseudonymized": 0,
             "tool": "cli.reprocess_erasures",
         }
     sync.assert_awaited_once()
@@ -1018,3 +1021,279 @@ async def test_a_legacy_row_is_bounded_an_hour_after_its_start(
             await session.execute(delete(ErasureRequest).where(ErasureRequest.id == legacy.id))
             await session.execute(delete(Memory).where(Memory.id == own.id))
             await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# #2287: audit rows an erasure's failed audit-log step left behind
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _AuditCase:
+    """A subject ``sub`` (email ``email``) whose own audit rows still carry the
+    account id, next to rows of other accounts that must stay byte-identical."""
+
+    sub: str
+    email: str
+    p: str
+    email_p: str
+    own: list[int]  # the subject's rows: (subject's email), (an admin's email)
+    others: list[int]  # an erased other account, a live account
+    requests: list[uuid.UUID] = field(default_factory=list)
+    users: list[str] = field(default_factory=list)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def audit_case(async_engine: AsyncEngine) -> AsyncIterator[_AuditCase]:
+    tag = uuid.uuid4().hex[:8]
+    sub, email = f"google-oauth2|audit-{tag}", f"subject-{tag}@example.com"
+    other_sub, other_email = f"google-oauth2|gone-{tag}", f"gone-{tag}@example.com"
+    live_sub, live_email = f"google-oauth2|live-{tag}", f"live-{tag}@example.com"
+    rows = [
+        AuditLog(user_email=email, user_id=sub, action="role_assign", resource=f"user:{email}"),
+        # the subject acted, the row carries someone else's email: kept
+        AuditLog(
+            user_email="admin@example.com",
+            user_id=sub,
+            action="member_add",
+            resource=f"user:{email}|{sub}",
+        ),
+        # another account with no user row (never erased by a request here)
+        AuditLog(
+            user_email=other_email,
+            user_id=other_sub,
+            action="role_assign",
+            resource=f"user:{email}",
+        ),
+        # a live account acting on the subject
+        AuditLog(
+            user_email=live_email,
+            user_id=live_sub,
+            action="role_assign",
+            resource=f"user:{email}",
+        ),
+    ]
+    case = _AuditCase(
+        sub=sub,
+        email=email,
+        p=_salted(sub),
+        email_p=_salted(email),
+        own=[],
+        others=[],
+        users=[live_sub],
+    )
+    async with _maker(async_engine)() as session:
+        session.add(User(email=live_email, user_id=live_sub, name="live", role="user"))
+        session.add_all(rows)
+        await session.commit()
+        case.own = [rows[0].id, rows[1].id]
+        case.others = [rows[2].id, rows[3].id]
+    try:
+        with patch("services.account_erasure_service._audit_salt", return_value=_SALT):
+            yield case
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(
+                delete(AuditLog).where(
+                    AuditLog.id.in_(case.own + case.others) | (AuditLog.user_id == case.p)
+                )
+            )
+            await session.execute(
+                delete(ErasureRequest).where(ErasureRequest.id.in_(case.requests))
+            )
+            await session.execute(delete(User).where(User.user_id.in_(case.users)))
+            await session.commit()
+
+
+async def _add_request(
+    engine: AsyncEngine, case: _AuditCase, *, legacy: bool, email: str | None = None
+) -> ErasureRequest:
+    """A request that failed after its Postgres step: ``legacy`` before
+    v0.124.0 (stores the account id), else v0.124.x (the pseudonym and the
+    marker naming the audit-log step)."""
+    from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT
+    from utils.hashing import sha256_hex
+
+    request = _request(
+        case.sub if legacy else case.p, status="failed", summary={"postgres": {"users": 1}}
+    )
+    request.user_email_hash = sha256_hex(email or case.email)
+    if not legacy:
+        request.failure_reason = f"{FAILURE_AFTER_POSTGRES_COMMIT}audit_logs: RuntimeError"
+    async with _maker(engine)() as session:
+        session.add(request)
+        await session.commit()
+    case.requests.append(request.id)
+    return request
+
+
+async def _audit(session: AsyncSession, ids: list[int]) -> dict:
+    return await _snapshot(session, "audit_logs", "t.id = ANY(:x)", x=ids)
+
+
+async def _own_rows(session: AsyncSession, case: _AuditCase) -> list[tuple[str, str, str]]:
+    rows = (
+        await session.execute(
+            select(AuditLog.user_id, AuditLog.user_email, AuditLog.resource)
+            .where(AuditLog.id.in_(case.own))
+            .order_by(AuditLog.id)
+        )
+    ).all()
+    return [tuple(row) for row in rows]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+async def test_audit_rows_left_by_a_failed_audit_step_are_pseudonymized(
+    async_engine: AsyncEngine,
+    audit_case: _AuditCase,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+) -> None:
+    """The subject's rows get the pseudonyms (the email only where it is the
+    subject's); every other account's rows — erased or live, acting on the
+    subject or not — are byte-identical; one audit row counts them; the
+    account id and the email are never printed; a second run is a no-op."""
+    case = audit_case
+    request = await _add_request(async_engine, case, legacy=legacy)
+    async with _maker(async_engine)() as session:
+        others = await _audit(session, case.others)
+
+    code, _ = await _run(async_engine, ["--request", str(request.id)])
+    assert code == 0
+    plan = capsys.readouterr().out
+    assert f"would pseudonymize audit rows  {request.id}  2 row(s)\n" in plan
+
+    code, _ = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"pseudonymized audit rows  {request.id}  2 row(s)\n" in out
+    assert "2 audit row(s) pseudonymized" in out
+    for text_ in (plan, out):
+        assert case.sub not in text_ and case.email not in text_
+
+    async with _maker(async_engine)() as session:
+        assert await _own_rows(session, case) == [
+            (case.p, case.email_p, f"user:{case.email_p}"),
+            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+        ]
+        assert await _audit(session, case.others) == others
+        (audit,) = await _reprocess_audit_rows(session, case.p)
+        assert audit.user_metadata["audit_logs_pseudonymized"] == 2
+        assert audit.user_metadata["request_repaired"] is legacy
+        assert case.sub not in repr(audit.user_metadata)
+        row = await _request_row(session, request.id)
+        assert row.user_id == case.p
+        before = await _snapshots(session, [])
+
+    code, sync = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 completed erasure(s): would change 0, skipped 0" in out
+    assert "audit" not in out
+    sync.assert_not_awaited()
+    async with _maker(async_engine)() as session:
+        assert await _snapshots(session, []) == before
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+async def test_a_re_registered_account_id_keeps_its_audit_rows(
+    async_engine: AsyncEngine,
+    audit_case: _AuditCase,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+) -> None:
+    """The account id belongs to a user again: its audit rows may be the new
+    account's, so none is rewritten; the request is listed. A legacy row is
+    still repaired (the request row must not keep the account id)."""
+    case = audit_case
+    async with _maker(async_engine)() as session:
+        session.add(User(email=case.email, user_id=case.sub, name="again", role="user"))
+        await session.commit()
+    case.users.append(case.sub)
+    request = await _add_request(async_engine, case, legacy=legacy)
+    async with _maker(async_engine)() as session:
+        audit_before = await _snapshot(session, "audit_logs", "t.user_id <> :p", p=case.p)
+
+    code, _ = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"audit  {request.id}  {cli.AUDIT_KEPT}" in out
+    assert "pseudonymized audit rows" not in out
+    assert case.sub not in out and case.email not in out
+    async with _maker(async_engine)() as session:
+        assert (await _snapshot(session, "audit_logs", "t.user_id <> :p", p=case.p)) == audit_before
+        assert (await _request_row(session, request.id)).user_id == case.p
+        if legacy:
+            (audit,) = await _reprocess_audit_rows(session, case.p)
+            assert audit.user_metadata["audit_logs_pseudonymized"] == 0
+
+
+async def test_the_email_is_left_when_it_cannot_be_recovered(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The request's email hash matches none of the rows' emails (the email
+    changed before the request): the account id is replaced, ``user_email``
+    and the email in ``resource`` stay, and the report says so."""
+    case = audit_case
+    request = await _add_request(async_engine, case, legacy=False, email="new@example.com")
+
+    code, _ = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"pseudonymized audit rows  {request.id}  2 row(s), email not recovered" in out
+    async with _maker(async_engine)() as session:
+        assert await _own_rows(session, case) == [
+            (case.p, case.email, f"user:{case.email}"),
+            (case.p, "admin@example.com", f"user:{case.email}|{case.p}"),
+        ]
+
+
+async def test_the_dry_run_counts_audit_rows_and_writes_nothing(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    case = audit_case
+    request = await _add_request(async_engine, case, legacy=True)
+    async with _maker(async_engine)() as session:
+        before = await _snapshots(session, [])
+
+    for argv in (["--all"], ["--request", str(request.id)]):
+        code, sync = await _run(async_engine, argv)
+        assert code == 0
+        sync.assert_not_awaited()
+        out = capsys.readouterr().out
+        assert f"would pseudonymize audit rows  {request.id}  2 row(s)\n" in out
+        assert "dry run — pass --apply to write" in out
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+
+
+async def test_two_requests_of_one_account_pseudonymize_its_rows_once(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Erased, re-created with the same account id, erased again: both
+    requests store the pseudonym. The rows are counted under the older one
+    only, in the plan as when applied."""
+    case = audit_case
+    first = await _add_request(async_engine, case, legacy=False)
+    second = await _add_request(async_engine, case, legacy=False)
+    async with _maker(async_engine)() as session:
+        await session.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == second.id)
+            .values(started_at=COMPLETED_AT + timedelta(days=1))
+        )
+        await session.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == first.id)
+            .values(started_at=COMPLETED_AT)
+        )
+        await session.commit()
+
+    code, _ = await _run(async_engine, ["--all", "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"would pseudonymize audit rows  {first.id}  2 row(s)\n" in out
+    assert f"pseudonymized audit rows  {first.id}  2 row(s)\n" in out
+    assert f"audit rows  {second.id}" not in out
+    async with _maker(async_engine)() as session:
+        assert [row[0] for row in await _own_rows(session, case)] == [case.p, case.p]

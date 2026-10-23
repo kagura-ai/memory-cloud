@@ -41,8 +41,18 @@ request is then processed by it. A request that still stores the raw
 account id otherwise is skipped and counted: one the sweep marked complete
 without running it (the user row was already gone), and one finalized
 before v0.58.1 (before the revision log of v0.113.0 anyway). A request that
-failed before its Postgres step erased nothing and is not listed. Running
-it again changes nothing. The dry run writes and locks nothing and makes no
+failed before its Postgres step erased nothing and is not listed.
+
+The subject's own ``audit_logs`` rows that still carry the account id
+(#2287: the audit-log step failed after the Postgres commit, on v0.124.x or
+before; since v0.125.0 that step is part of the Postgres transaction) are
+pseudonymized in the request's transaction: an ``audit_logs.user_id`` no
+user row has whose pseudonym is the request's is the subject's account id,
+and the email is the one of those rows' ``user_email`` values whose sha256
+is the request's ``user_email_hash`` (left as it is when none is). An
+account id that belongs to a user again (re-registered) is never matched:
+its rows are kept and the request is listed. Running it again changes
+nothing. The dry run writes and locks nothing and makes no
 vector-store call; it prints request ids and counts, never values or
 account ids.
 
@@ -66,12 +76,12 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import func, select, update  # noqa: E402
+from sqlalchemy import exists, func, select, update  # noqa: E402
 from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
-from models.auth import AuditLog  # noqa: E402
+from models.auth import AuditLog, User  # noqa: E402
 from models.erasure import (  # noqa: E402
     FAILURE_AFTER_POSTGRES_COMMIT,
     STATUS_COMPLETE,
@@ -85,10 +95,12 @@ from services.erasure_details import (  # noqa: E402
     finalized_erasure,
     is_pseudonym,
     payload_counts,
+    pseudonymize_audit_logs,
     sync_restored_payloads,
     unrepaired_erasure,
 )
 from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
+from utils.hashing import sha256_hex  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -110,6 +122,8 @@ SKIPPED_NO_ROWS = (
     "pseudonymized, but none carries the derived pseudonym (the salt changed?); "
     "left as it is"
 )
+# #2287: never prints the account id or the email
+AUDIT_KEPT = "rows kept: the account id is in use again"
 # the sweep's crash cutoff (``sweep_pending_erasures``): a run is over by then
 STALE_RUN = timedelta(hours=1)
 
@@ -131,6 +145,10 @@ class RequestChange:
     payload: dict[str, int] = field(default_factory=dict)
     # #2268: the request row stored the account id and gets the pseudonym
     repaired: bool = False
+    # #2287: the subject's audit rows that still carried the account id
+    audit_logs_pseudonymized: int = 0
+    # whether their email was found (``_recover_email``); None: no such rows
+    audit_email_recovered: bool | None = None
 
     @property
     def changes(self) -> int:
@@ -140,6 +158,7 @@ class RequestChange:
             + self.details_stripped
             + self.scrub_marked
             + int(self.repaired)
+            + self.audit_logs_pseudonymized
         )
 
 
@@ -151,6 +170,8 @@ class ReprocessResult:
     scanned: int = 0
     changed: list[RequestChange] = field(default_factory=list)
     skipped: list[tuple[UUID, str]] = field(default_factory=list)
+    # #2287: requests whose account id is in use again: audit rows kept
+    audit_kept: list[UUID] = field(default_factory=list)
 
     @property
     def changes(self) -> int:
@@ -168,6 +189,66 @@ async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
         )
     ).scalar_one_or_none()
     return email or pseudonym
+
+
+@dataclass(frozen=True)
+class AuditSubs:
+    """The ``audit_logs.user_id`` values, keyed by their pseudonym (#2287)."""
+
+    # no user row has them: an erased subject's residue is found here
+    orphans: dict[str, str]
+    # a user row has them: never matched, even when an erasure's pseudonym is theirs
+    in_use: frozenset[str]
+
+
+async def _audit_subs(db: AsyncSession) -> AuditSubs:
+    """Every distinct ``audit_logs.user_id``, keyed by its pseudonym (the salt
+    in use). A request's subject whose audit rows still carry the account id
+    is found by the request's pseudonym among the orphans; an account id in
+    use again (re-registered) is not an orphan, so a live account's rows are
+    never rewritten. Pseudonymized values are orphans too (the hash of a
+    hash) and match nothing; with a salt other than the erasure's, nothing
+    matches either."""
+    rows = await db.execute(
+        select(
+            AuditLog.user_id,
+            exists().where(User.user_id == AuditLog.user_id).label("in_use"),
+        ).distinct()
+    )
+    orphans: dict[str, str] = {}
+    in_use: set[str] = set()
+    for sub, live in rows.all():
+        pseudonym = erasure_pseudonym(sub)
+        if live:
+            in_use.add(pseudonym)
+        else:
+            orphans[pseudonym] = sub
+    return AuditSubs(orphans, frozenset(in_use))
+
+
+async def _count_audit_rows(db: AsyncSession, account_id: str) -> int:
+    return (
+        await db.execute(select(func.count(AuditLog.id)).where(AuditLog.user_id == account_id))
+    ).scalar_one()
+
+
+async def _recover_email(db: AsyncSession, account_id: str, email_hash: str) -> str | None:
+    """The subject's email among the ``user_email`` values of their own audit
+    rows: the one whose unsalted sha256 is the request's ``user_email_hash``
+    (the email at request time). None when no row carries it (the subject
+    never acted under it, or changed it before the request) — then
+    ``user_email`` stays and only the account id is replaced. Rows written
+    under an earlier address keep it."""
+    candidates = (
+        (
+            await db.execute(
+                select(AuditLog.user_email).distinct().where(AuditLog.user_id == account_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return next((email for email in candidates if sha256_hex(email) == email_hash), None)
 
 
 def _existed_at(
@@ -261,6 +342,8 @@ async def _reprocess_one(
     erased: frozenset[str],
     *,
     account_id: str | None = None,
+    audit_account_id: str | None = None,
+    email_hash: str | None = None,
 ) -> RequestChange:
     """Repair the row (``account_id``), restore, then strip, by ``pseudonym``;
     commit (or roll back a dry run); then patch the restored memories'
@@ -273,11 +356,23 @@ async def _reprocess_one(
     (``erased_pseudonyms``): the restore walks past their edits too.
     ``account_id`` is set only for a request ``unrepaired_erasure`` matches:
     its row gets the pseudonym in the same transaction.
+    ``audit_account_id`` (#2287) is the subject's account id found among the
+    orphaned audit subs (``_audit_subs``): their audit rows are pseudonymized
+    in the same transaction, the email recovered by ``email_hash``.
     """
     try:
         repaired = account_id is not None
         if repaired and not dry_run:
             repaired = await _repair(db, request_id, cast(str, account_id), pseudonym)
+        audited, email_recovered = 0, None
+        if audit_account_id is not None:
+            email = await _recover_email(db, audit_account_id, email_hash or "")
+            if dry_run:
+                audited = await _count_audit_rows(db, audit_account_id)
+            else:
+                audited = await pseudonymize_audit_logs(db, audit_account_id, email)
+            if audited:
+                email_recovered = email is not None
         details = await erase_subject_details(
             db,
             pseudonym,
@@ -296,6 +391,8 @@ async def _reprocess_one(
             scrub_marked=strip.scrub_marked,
             embedding_requeued=restore.embedding_requeued,
             repaired=repaired,
+            audit_logs_pseudonymized=audited,
+            audit_email_recovered=email_recovered,
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -314,6 +411,7 @@ async def _reprocess_one(
                     "scrub_marked": change.scrub_marked,
                     "details_embedding_requeued": change.embedding_requeued,
                     "request_repaired": change.repaired,
+                    "audit_logs_pseudonymized": change.audit_logs_pseudonymized,
                     "tool": TOOL,
                 },
             )
@@ -330,6 +428,7 @@ async def _reprocess_one(
         details_stripped=change.details_stripped,
         scrub_marked=change.scrub_marked,
         request_repaired=change.repaired,
+        audit_logs_pseudonymized=change.audit_logs_pseudonymized,
     )
     try:
         await sync_restored_payloads(db, restore.to_sync, restore)
@@ -359,6 +458,10 @@ async def reprocess_erasures(
         dry_run: Count what would change; write nothing, call no vector
             store.
 
+    The subject's audit rows that still carry the account id are
+    pseudonymized in the request's transaction (#2287, ``_audit_subs``),
+    once per account id even when two requests share it.
+
     Returns:
         The requests with changes, the skipped ones, and how many were read.
 
@@ -372,6 +475,7 @@ async def reprocess_erasures(
             ErasureRequest.completed_at,
             ErasureRequest.started_at,
             ErasureRequest.deleted_data_summary,
+            ErasureRequest.user_email_hash,
             finalized_erasure().label("finalized"),
             unrepaired_erasure().label("unrepaired"),
         )
@@ -391,6 +495,7 @@ async def reprocess_erasures(
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
     erased = await erased_pseudonyms(db)
+    audit_subs = await _audit_subs(db)
     await db.rollback()
     if request_id is not None and not requests:
         raise LookupError(
@@ -399,6 +504,19 @@ async def reprocess_erasures(
         )
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
+    audited: set[str] = set()
+
+    def audit_account_id(request_id: UUID, pseudonym: str) -> str | None:
+        """The subject's account id on audit rows, once per account id."""
+        if pseudonym in audit_subs.in_use:
+            result.audit_kept.append(request_id)
+            return None
+        account_id = audit_subs.orphans.get(pseudonym)
+        if account_id is None or account_id in audited:
+            return None
+        audited.add(account_id)
+        return account_id
+
     for request in requests:
         existed_at = _existed_at(
             request.deleted_data_summary, request.completed_at, request.started_at
@@ -421,6 +539,8 @@ async def reprocess_erasures(
                 dry_run,
                 erased,
                 account_id=request.user_id,
+                audit_account_id=audit_account_id(request.id, pseudonym),
+                email_hash=request.user_email_hash,
             )
         else:
             # Both checks before the user_id is used as a subject: only a row
@@ -432,7 +552,15 @@ async def reprocess_erasures(
                 result.skipped.append((request.id, SKIPPED_NOT_PSEUDONYMIZED))
                 continue
             change = await _reprocess_one(
-                db, request.id, request.user_id, request.completed_at, existed_at, dry_run, erased
+                db,
+                request.id,
+                request.user_id,
+                request.completed_at,
+                existed_at,
+                dry_run,
+                erased,
+                audit_account_id=audit_account_id(request.id, request.user_id),
+                email_hash=request.user_email_hash,
             )
         if change.changes:
             result.changed.append(change)
@@ -452,6 +580,11 @@ def _print_plan(result: ReprocessResult) -> None:
         if c.repaired:
             # The plan always runs as a dry run (``_oneshot.run_plan_apply``).
             print(f"would repair  {c.request_id}  {REPAIRED}")
+    for c in result.changed:
+        if c.audit_logs_pseudonymized:
+            print(f"would pseudonymize audit rows  {c.request_id}  {_audit_rows(c)}")
+    for request_id in result.audit_kept:
+        print(f"audit  {request_id}  {AUDIT_KEPT}")
     for request_id, reason in result.skipped:
         print(f"skipped  {request_id}  {reason}")
     verb = "would change" if result.dry_run else "changed"
@@ -465,6 +598,9 @@ def _print_applied(result: ReprocessResult) -> None:
     for c in result.changed:
         if c.repaired:
             print(f"repaired  {c.request_id}  {REPAIRED}")
+    for c in result.changed:
+        if c.audit_logs_pseudonymized:
+            print(f"pseudonymized audit rows  {c.request_id}  {_audit_rows(c)}")
     for c in result.changed:
         if c.details_restored or c.details_restored_unavailable:
             p = c.payload
@@ -492,17 +628,29 @@ def _print_applied(result: ReprocessResult) -> None:
             print(line)
 
 
+def _audit_rows(change: RequestChange) -> str:
+    line = f"{change.audit_logs_pseudonymized} row(s)"
+    if change.audit_email_recovered is False:
+        line += ", email not recovered"
+    return line
+
+
 def _summary(result: ReprocessResult) -> str:
     restored = sum(c.details_restored for c in result.changed)
     unavailable = sum(c.details_restored_unavailable for c in result.changed)
     stripped = sum(c.details_stripped for c in result.changed)
     marked = sum(c.scrub_marked for c in result.changed)
     repaired = sum(c.repaired for c in result.changed)
+    audited = sum(c.audit_logs_pseudonymized for c in result.changed)
     return (
-        f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
-        f"{unavailable} cleared (unavailable), {stripped} revision prior(s) stripped, "
-        f"{marked} marked scrubbed"
-    ) + (f", {repaired} request row(s) repaired" if repaired else "")
+        (
+            f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
+            f"{unavailable} cleared (unavailable), {stripped} revision prior(s) stripped, "
+            f"{marked} marked scrubbed"
+        )
+        + (f", {repaired} request row(s) repaired" if repaired else "")
+        + (f", {audited} audit row(s) pseudonymized" if audited else "")
+    )
 
 
 async def _main(args: argparse.Namespace) -> int:

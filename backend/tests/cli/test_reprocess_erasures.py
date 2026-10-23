@@ -249,3 +249,47 @@ def test_a_legacy_failed_request_is_bounded_an_hour_after_its_start():
 def test_only_an_erasure_that_wrote_the_pseudonym_can_fail_the_probe(summary, wrote):
     """#2268 review: a subject with nothing left is repaired, not skipped."""
     assert cli._wrote_pseudonym(summary) is wrote
+
+
+@pytest.mark.parametrize("recovered", [True, False])
+def test_pseudonymized_audit_rows_are_reported_and_counted(capsys, recovered):
+    """#2287: the subject's audit rows are a change of their own, in the plan,
+    the applied report and the summary; an email that could not be
+    recovered is named. Never the account id or the email."""
+    kept = uuid4()
+
+    def result(dry_run: bool) -> cli.ReprocessResult:
+        r = cli.ReprocessResult(dry_run=dry_run, scanned=2)
+        r.changed.append(
+            cli.RequestChange(
+                request_id=REQUEST_ID,
+                completed_at=None,
+                details_restored=0,
+                details_restored_unavailable=0,
+                details_stripped=0,
+                scrub_marked=0,
+                audit_logs_pseudonymized=2,
+                audit_email_recovered=recovered,
+            )
+        )
+        r.audit_kept.append(kept)
+        return r
+
+    plan = result(True)
+    assert plan.changes == 2
+    cli._print_plan(plan)
+    cli._print_applied(result(False))
+    out = capsys.readouterr().out
+    suffix = "" if recovered else ", email not recovered"
+    assert f"would pseudonymize audit rows  {REQUEST_ID}  2 row(s){suffix}\n" in out
+    assert f"pseudonymized audit rows  {REQUEST_ID}  2 row(s){suffix}\n" in out
+    assert f"audit  {kept}  rows kept: the account id is in use again" in out
+    assert cli._summary(plan).endswith(", 2 audit row(s) pseudonymized")
+
+
+def test_no_audit_rows_add_nothing_to_the_report(capsys):
+    result = _result(dry_run=True)
+    cli._print_plan(result)
+    out = capsys.readouterr().out
+    assert "audit" not in out
+    assert "audit" not in cli._summary(result)
