@@ -434,7 +434,9 @@ class APIKeyManager:
                 logger.warning(
                     "api_key_rejected_connector_workspace_mismatch",
                     key_prefix=key_record.key_prefix,
-                    workspace_id=str(key_record.workspace_id),
+                    workspace_id=(
+                        str(key_record.workspace_id) if key_record.workspace_id else None
+                    ),
                     connector_id=str(connector_id),
                 )
                 return None

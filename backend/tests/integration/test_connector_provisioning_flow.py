@@ -377,6 +377,66 @@ async def test_delete_connector_removes_kmc_key_and_connector(
 
 
 @pytest.mark.asyncio
+async def test_delete_connector_revokes_an_unlinked_key_of_its_name(db_session: AsyncSession):
+    """#1952: a ``connector:{id}`` key the previous image minted after the f13
+    backfill (blue-green / rollback window) has no link, so the cascade cannot
+    reach it — ``delete_connector`` revokes it by name, in the connector's
+    workspace only, and leaves every other row alone."""
+    from models.auth import APIKey
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    _other_user, other_workspace = await _seed_workspace(db_session, plan_name="promax")
+    service = ConnectorProvisioningService(db_session)
+    result = await service.provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db_session.flush()
+    connector_id = result.connector.id
+    name = f"connector:{connector_id}"
+    manager = APIKeyManager(db_session)
+    # The old image's mint: same name, same workspace, no link (another
+    # minter, since the name is unique per active user + workspace).
+    unlinked_plain, unlinked = await manager.create_key(
+        name=name, user_id=f"user-{uuid4().hex}", workspace_id=workspace.id
+    )
+    # Same name in another workspace: not this connector's key.
+    elsewhere_plain, elsewhere = await manager.create_key(
+        name=name, user_id=user_id, workspace_id=other_workspace.id
+    )
+    # Another key of the workspace.
+    laptop_plain, laptop = await manager.create_key(
+        name="laptop", user_id=user_id, workspace_id=workspace.id
+    )
+    unlinked_id, elsewhere_id, laptop_id = unlinked.id, elsewhere.id, laptop.id
+
+    assert await service.delete_connector(workspace.id, connector_id) is True
+    await db_session.flush()
+
+    rows = {
+        row.id: row
+        for row in (
+            await db_session.execute(
+                select(APIKey)
+                .where(APIKey.workspace_id.in_([workspace.id, other_workspace.id]))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    # The linked key went with the cascade; the unlinked one is revoked.
+    assert set(rows) == {unlinked_id, elsewhere_id, laptop_id}
+    assert rows[unlinked_id].revoked_at is not None
+    assert rows[elsewhere_id].revoked_at is None
+    assert rows[laptop_id].revoked_at is None
+    assert await manager.verify_key(unlinked_plain) is None
+    assert await manager.verify_key(elsewhere_plain) is not None
+    assert await manager.verify_key(laptop_plain) is not None
+
+
+@pytest.mark.asyncio
 async def test_rotate_kmc_key_links_the_replacement_and_revokes_the_old_row(
     db_session: AsyncSession,
 ):

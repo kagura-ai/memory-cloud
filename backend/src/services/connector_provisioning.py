@@ -1000,11 +1000,16 @@ class ConnectorProvisioningService:
         Deletes the owning ``resources`` row; CASCADE removes the connector,
         its resource token and — through ``api_keys.connector_id`` (#1952) —
         its KMC write key row, so the worker's next verify finds no key (401)
-        and its next config fetch finds no connector. The write-target context
-        is intentionally preserved (it holds user data). Returns ``False`` if
-        no matching connector exists in the workspace.
+        and its next config fetch finds no connector. A key named after the
+        connector but not linked to it — minted by the previous image while it
+        still served after the f13 backfill (blue-green or rollback window) —
+        cannot be reached by the cascade, so it is revoked by name first. The
+        write-target context is intentionally preserved (it holds user data).
+        Returns ``False`` if no matching connector exists in the workspace.
         """
+        from models.auth import APIKey
         from models.resource import Resource
+        from utils.datetime import utcnow
 
         result = await self.db.execute(
             select(WorkspaceConnector).where(
@@ -1016,6 +1021,17 @@ class ConnectorProvisioningService:
         if connector is None:
             return False
 
+        # #1952: only unlinked rows — linked ones go with the cascade below.
+        await self.db.execute(
+            update(APIKey)
+            .where(
+                APIKey.workspace_id == workspace_id,
+                APIKey.connector_id.is_(None),
+                APIKey.name == connector_key_name(connector_id),
+                APIKey.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
         await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
         return True
 
