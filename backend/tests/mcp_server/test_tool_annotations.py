@@ -303,8 +303,8 @@ def test_open_world_tools_reach_or_open_to_outside_parties():
 
 
 def test_update_context_resource_id_reads_as_inbound():
-    """resource_id names Kagura's own ingestion endpoint; "external ingestion"
-    read to an automated scan as an outbound call on a closed-world tool (#2279)."""
+    """resource_id names Kagura's own ingestion endpoint, not an outbound call
+    (#2279); the tool is open-world for is_public, not for this field (#2290)."""
     tool = _by_name()["update_context"]
     text = tool["inputSchema"]["properties"]["resource_id"]["description"]
     assert "Kagura's own ingestion API" in text

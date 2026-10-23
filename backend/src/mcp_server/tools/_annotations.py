@@ -25,10 +25,12 @@ same arguments changes nothing further (set-to-value updates, deleting a named
 target); creates that mint new ids or tokens are not, and neither is a call that
 restarts a relative expiry. ``openWorldHint`` is true when a tool connects this
 server to an outside system (``setup_connector``, a third-party chat platform) or
-opens a context to parties outside the caller's workspace: published to anyone
-through the public API (``update_context`` ``is_public``) or written by outside
-systems through a resource token (``update_context`` ``resource_id``,
-``setup_resource``) (#2290). The model providers the server calls to process data it already holds
+when the call itself changes who outside the workspace can reach a context:
+publishing it to anyone through the public API (``update_context`` ``is_public``)
+or creating a public context with a token for an outside system to write with
+(``setup_resource``) (#2290). Writing into a context that is already public,
+moving memories between contexts and handing the caller a download link do not
+count: the reach was decided when the context was published. The model providers the server calls to process data it already holds
 (embedding, reranking, analysis labelling) do not make a tool open-world.
 
 These are hints for a client's confirmation UI, and a client is free to ignore
@@ -108,7 +110,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "list_contexts": _read("List Contexts"),
     "list_tags": _read("List Tags"),
     "create_context": _additive("Create Context"),
-    # is_public publishes the context; resource_id opens it to outside writers.
+    # is_public publishes the context; on a public one, resource_id names the
+    # endpoint resource-token holders write to.
     "update_context": _destructive("Update Context", idempotent=True, open_world=True),
     "delete_context": _destructive("Delete Context", idempotent=True),
     # Copies again on every call; delete_source=true soft-deletes the source.
