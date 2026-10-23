@@ -1761,12 +1761,14 @@ keep the member's `location` until it is re-embedded), the `account_erasure`
 audit row and the completion email. A request the sweep finds with no
 `postgres` in its summary never ran: it is marked `complete` with the note
 `user_row_already_absent` as before, and from v0.125.0 its account id, request
-IP and user agent are replaced or cleared too. A request interrupted after its
-Postgres step on v0.124.x or earlier has no `postgres` summary (it was written
-only after the commit then), so the sweep marks it that way (`never ran`); the
-pseudonym derived from such a row's stored value is counted among the erased
-members, so a later erasure never puts their value back, but the command does
-not process or repair the row.
+IP and user agent are replaced or cleared too (the summary then also carries
+`"pseudonymized": true`). A request interrupted after its Postgres step on
+v0.124.x or earlier has no `postgres` summary (it was written only after the
+commit then), so the sweep marks it that way (`never ran`). Such a member is
+still counted among the erased members, so a later erasure never puts their
+value back: by the stored pseudonym when the row was closed on v0.125.0 or
+later, by the pseudonym derived from the stored account id when it was closed
+before. The command does not process or repair these rows.
 
 **Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0
 the pseudonymization of the member's own audit rows (`audit_logs.user_id`,

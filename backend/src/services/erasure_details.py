@@ -79,6 +79,7 @@ from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import AuditLog, Context, User
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
+    NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     STATUS_FAILED,
     ErasureRequest,
@@ -215,8 +216,15 @@ def _ran_in_postgres() -> ColumnElement[bool]:
 
 def _never_ran() -> ColumnElement[bool]:
     """A ``complete`` request without ``postgres`` in its summary: the
-    sweep's ``user_row_already_absent`` rows, its only writer (#2286)."""
+    sweep's ``user_row_already_absent`` rows, its only writer (#2286; the
+    table and the ``postgres`` summary both came with #360)."""
     return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
+
+
+def _note_row_pseudonymized() -> ColumnElement[bool]:
+    """The sweep pseudonymized this note row (since v0.125.0, #2286): its
+    ``user_id`` is the pseudonym, not the raw sub."""
+    return func.coalesce(ErasureRequest.deleted_data_summary.has_key(NOTE_PSEUDONYMIZED_KEY), False)
 
 
 def _failed_after_commit_marked() -> ColumnElement[bool]:
@@ -272,21 +280,20 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
     from its raw sub, which is what the subject's rows carry.
 
     A row the sweep marked ``complete`` with the ``user_row_already_absent``
-    note (``_never_ran``, #2286) gives the pseudonym derived from its
-    ``user_id``, with no shape test. Before v0.125.0 the sweep kept the raw
-    sub on such a row, and it may stand for an erasure that did run —
-    interrupted after its Postgres commit, when the summary was written only
-    after it — whose subject's rows carry that pseudonym. When it really
-    never ran, nothing carries it; on a row written since v0.125.0 the value
-    is already a pseudonym and its hash matches nothing either: both no-ops.
-    The stored value itself is never taken: on a legacy row it can be a raw
-    sub with the pseudonym's shape.
+    note (``_never_ran``, #2286) may stand for an erasure that did run:
+    interrupted after its Postgres commit on a version that wrote the
+    summary only after it. Such a row written before v0.125.0 keeps the raw
+    sub and gives the pseudonym derived from it, with no shape test (the
+    stored value can be a raw sub with the pseudonym's shape); one written
+    since stores the pseudonym (``pseudonymized`` in its summary) and gives
+    it as is. For a request that really never ran either value is one no row
+    carries: a no-op.
     """
     never_ran = _never_ran()
     rows = await db.execute(
         select(
             ErasureRequest.user_id,
-            (unrepaired_erasure() | never_ran).label("derive"),
+            (unrepaired_erasure() | (never_ran & ~_note_row_pseudonymized())).label("derive"),
         ).where(finalized_erasure() | unrepaired_erasure() | never_ran)
     )
     pseudonyms: set[str] = set()

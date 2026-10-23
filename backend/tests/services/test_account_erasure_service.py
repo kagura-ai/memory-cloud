@@ -2136,7 +2136,11 @@ class TestSweepClosesARequestWithoutAUserRow:
         params = _close_values(statements)
         assert params["status"] == STATUS_COMPLETE
         assert params["completed_at"] is not None
-        assert params["deleted_data_summary"] == {"note": "user_row_already_absent"}
+        # flagged: ``erased_pseudonyms`` takes the stored pseudonym as is
+        assert params["deleted_data_summary"] == {
+            "note": "user_row_already_absent",
+            "pseudonymized": True,
+        }
         assert "failure_reason" not in params
         assert params["user_id"] == params["initiated_by"] == pseudonym
         assert (params["ip_address"], params["user_agent"]) == (None, None)
@@ -2169,6 +2173,51 @@ class TestSweepClosesARequestWithoutAUserRow:
         assert call.kwargs == {"request_id": str(request.id), "error_class": "RuntimeError"}
         for c in [*log.warning.call_args_list, *log.error.call_args_list]:
             assert "u-1" not in repr(c), c
+
+    @pytest.mark.asyncio
+    async def test_a_row_moved_since_the_claim_is_logged_as_moved(self):
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"postgres": {"users": 1}}
+        svc, statements = _sweep_with_absent_user(request)
+        executed = svc.db.execute.side_effect
+
+        def moved(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            result = executed(stmt, *args, **kwargs)
+            if len(statements) > 3:
+                result.rowcount = 0  # the guarded UPDATE matched nothing
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=moved)
+
+        with patch("services.account_erasure_service.logger") as log:
+            await svc.sweep_pending_erasures()
+
+        names = [c.args[0] for c in [*log.warning.call_args_list, *log.info.call_args_list]]
+        assert "erasure_sweep_request_moved" in names
+        assert "erasure_sweep_user_row_absent" not in names
+
+    @pytest.mark.asyncio
+    async def test_a_failing_close_does_not_stop_the_batch(self):
+        gone, live = _execute_request(self_service=True), _execute_request(self_service=True)
+        live.user_id = live.initiated_by = "u-2"
+        svc = _service()
+        claimed = MagicMock()
+        claimed.scalars.return_value.all.return_value = [gone, live]
+        fresh = [MagicMock(), MagicMock()]
+        fresh[0].scalar_one_or_none.return_value = gone
+        fresh[1].scalar_one_or_none.return_value = live
+        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), claimed, *fresh])
+        svc._load_user_or_none = AsyncMock(side_effect=[None, _user(user_id="u-2")])
+        svc._close_request_without_user = AsyncMock(side_effect=RuntimeError("u-1 lost"))
+        svc._execute = AsyncMock()
+
+        with patch("services.account_erasure_service.logger") as log:
+            assert await svc.sweep_pending_erasures() == 1
+
+        svc._execute.assert_awaited_once()
+        svc.db.rollback.assert_awaited()
+        (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_close_failed"]
+        assert call.kwargs == {"request_id": str(gone.id), "error_class": "RuntimeError"}
 
 
 class TestThePostgresStepRecordsItselfOnTheRequest:

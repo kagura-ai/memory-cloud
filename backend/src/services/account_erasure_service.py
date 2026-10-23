@@ -81,6 +81,8 @@ from models.auth import (
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
     INTERRUPTED_AFTER_POSTGRES_COMMIT,
+    NOTE_PSEUDONYMIZED_KEY,
+    NOTE_USER_ROW_ABSENT,
     REASON_DETAIL_MAX_CHARS,
     REASON_SELF_SERVICE,
     STATUS_CANCELLED,
@@ -856,7 +858,17 @@ class AccountErasureService:
                 continue  # removed since it was claimed; nothing to run
             target = await self._load_user_or_none(user_id)
             if target is None:
-                await self._close_request_without_user(request)
+                try:
+                    await self._close_request_without_user(request)
+                except Exception as exc:
+                    # one request's close must not stop the batch (the others
+                    # are claimed already); the request id and the class only
+                    await self.db.rollback()
+                    logger.error(
+                        "erasure_sweep_close_failed",
+                        request_id=str(request_id),
+                        error_class=type(exc).__name__,
+                    )
                 continue
             try:
                 await self._execute(request, target)
@@ -902,13 +914,17 @@ class AccountErasureService:
         done. Without ``postgres`` nothing was erased (the row was removed
         some other way, or the run was interrupted before the Postgres
         commit on a version that wrote the summary only after it): the
-        ``complete`` row gets the ``user_row_already_absent`` note.
+        ``complete`` row gets the ``user_row_already_absent`` note, with
+        ``pseudonymized: true`` — ``erased_pseudonyms`` then takes the
+        stored pseudonym as is (a run interrupted on v0.124.x and swept here
+        did erase; its rows carry that pseudonym), where a note row written
+        before keeps the raw sub and is derived.
 
         Either way the row is pseudonymized: the account no longer exists,
         and the raw sub must not outlive it on this row. The UPDATE is
         guarded by ``status = in_progress`` (the claim set it), so a row
-        moved meanwhile is left alone. The log line carries the request id
-        only.
+        moved meanwhile is left alone and only logged as moved. The log
+        lines carry the request id only.
         """
         request_id = request.id
         user_id = request.user_id
@@ -930,14 +946,23 @@ class AccountErasureService:
             values.update(
                 status=STATUS_COMPLETE,
                 completed_at=utcnow(),
-                deleted_data_summary={"note": "user_row_already_absent"},
+                deleted_data_summary={
+                    "note": NOTE_USER_ROW_ABSENT,
+                    NOTE_PSEUDONYMIZED_KEY: True,
+                },
             )
-        await self.db.execute(
-            update(ErasureRequest)
-            .where(ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS)
-            .values(**values)
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS)
+                .values(**values)
+            ),
         )
         await self.db.commit()
+        if not result.rowcount:
+            logger.info("erasure_sweep_request_moved", request_id=str(request_id))
+            return
         logger.warning(
             "erasure_sweep_user_row_absent", request_id=str(request_id), ran_in_postgres=ran
         )

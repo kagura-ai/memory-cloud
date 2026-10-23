@@ -1448,6 +1448,7 @@ class TestARequestWhoseUserVanishedUnrun:
         from datetime import timedelta
 
         from models.erasure import STATUS_COOLING_OFF
+        from services.erasure_details import erased_pseudonyms
 
         tag = uuid4().hex[:8]
         sub, email = f"vanished_{tag}", f"vanished-{tag}@example.com"
@@ -1487,13 +1488,22 @@ class TestARequestWhoseUserVanishedUnrun:
 
             closed = await _request_snapshot(db_session, request_id)
             assert closed["status"] == STATUS_COMPLETE
-            assert closed["deleted_data_summary"] == {"note": "user_row_already_absent"}
+            assert closed["deleted_data_summary"] == {
+                "note": "user_row_already_absent",
+                "pseudonymized": True,
+            }
             assert closed["completed_at"] is not None
             assert closed["failure_reason"] is None
             assert closed["user_id"] == closed["initiated_by"] == pseudonym
             assert (closed["ip_address"], closed["user_agent"]) == (None, None)
             assert sub not in repr(closed)
             assert await _everything_but(db_session, request_id) == before
+            # an erasure interrupted on v0.124.x (no summary yet) closes the
+            # same way, and its rows carry this pseudonym: counted as erased
+            assert pseudonym in await erased_pseudonyms(db_session)
+            assert sha256_hex(pseudonym, salt=_audit_salt()) not in await erased_pseudonyms(
+                db_session
+            )
 
             # idempotent: the next sweep does not see it again
             assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
