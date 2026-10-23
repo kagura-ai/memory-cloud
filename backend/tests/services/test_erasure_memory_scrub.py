@@ -270,7 +270,7 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     ]
     with (
         patch("services.account_erasure_service._audit_salt", return_value="salt"),
-        patch("services.erasure_details._details_edits", new=AsyncMock(return_value=edits)),
+        patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=edits)),
     ):
         counts = await service._erase_memory_revisions("google-oauth2|erased")
 
@@ -397,7 +397,7 @@ async def test_strip_subject_details_takes_one_subject_string() -> None:
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[MagicMock(), MagicMock(rowcount=4), MagicMock(rowcount=1)])
 
-    with patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])) as read:
+    with patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=[])) as read:
         assert await strip_subject_details(db, "pseudo") == StripCounts(4, 1)
     assert read.await_args.args[1] == "pseudo"
 
@@ -425,7 +425,7 @@ async def test_a_re_run_bounds_the_authored_arm_to_rows_the_erasure_saw() -> Non
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[MagicMock(), MagicMock(rowcount=2), MagicMock(rowcount=3)])
 
-    with patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])):
+    with patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=[])):
         assert await strip_subject_details(db, "p", existed_at=existed_at) == StripCounts(2, 3)
 
     _, strip, scrub = (c.args[0] for c in db.execute.await_args_list)
@@ -458,7 +458,7 @@ async def test_a_dry_run_strip_counts_and_writes_nothing() -> None:
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[scalar(5), scalar(2)])
 
-    with patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])):
+    with patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=[])):
         assert await strip_subject_details(db, "p", dry_run=True) == StripCounts(5, 2)
 
     sqls = [

@@ -378,7 +378,7 @@ async def strip_subject_details(
     """
     if not dry_run:
         await lock_subject_memories(db, subject)
-    held = held_details_ids(await _details_edits(db, subject), subject)
+    held = held_details_ids(await _updated_rows(db, subject), subject)
     if dry_run:
         return StripCounts(
             details_stripped=await _count(
@@ -466,20 +466,26 @@ async def pseudonymize_revision_actor(db: AsyncSession, user_id: str, pseudonym:
 
 @dataclass(frozen=True)
 class DetailsEdit:
-    """One ``updated`` revision that changed ``details`` (``revision_edited_details``).
+    """One ``updated`` revision of a memory's log (``_updated_rows``).
 
     Attributes:
         memory_id / version / id: The row's position in its memory's log.
         actor_user_id: Who wrote the edit (raw sub, or a pseudonym once erased).
         writer: One of ``REVISION_WRITERS``.
         details: ``prior.details`` — the value the edit overwrote (None when
-            it was NULL, or when an erasure stripped it).
+            it was NULL, when an erasure stripped it, or when the edit did not
+            change ``details``).
         erased: An earlier erasure stripped ``prior.details`` (it lists
             ``details`` under ``PRIOR_ERASED_KEY``): the value is unavailable.
         undone_by: The session rollback that reversed this edit, if any
             (``MemoryRevision.undone_by``).
-        restored_from: On an ``erasure`` row, ``prior.restored_from``: the
-            lowest version of the block of edits it reverted.
+        restored_from: On a put-back row (``erasure``, and ``rollback`` since
+            #2266), ``prior.restored_from``: the lowest version of the block
+            of edits it reverted.
+        details_changed: The edit changed ``details``
+            (``revision_edited_details``). A row that did not is still in the
+            walk (#2266): it ends a rollback block like any foreign edit, but
+            it wrote no ``details`` value.
     """
 
     memory_id: UUID
@@ -491,6 +497,7 @@ class DetailsEdit:
     erased: bool
     undone_by: int | None = None
     restored_from: int | None = None
+    details_changed: bool = True
 
 
 @dataclass(frozen=True)
@@ -543,26 +550,31 @@ class RestoreReport:
 def _past_put_back(edits: Sequence[DetailsEdit], i: int) -> int:
     """The index past the put-back row ``edits[i]`` and the block it reverted.
 
-    ``edits`` are one memory's details edits, newest first. A put-back row
-    writes no content of its own: it puts back the value from before a
-    block of edits right below it.
+    ``edits`` are one memory's ``updated`` rows, newest first — every one,
+    not only the details edits (#2266): a foreign edit of another field ends
+    a rollback block. A put-back row writes no content of its own: it puts
+    back the value from before a block of edits right below it.
 
-    - A ``rollback`` row (#2044) reverted the contiguous details edits right
-      below it that share the ``undone_by`` of the first of them — a session
-      rollback reverses a memory's whole session block or skips it, and
-      events it skipped carry another rollback's id. With no ``undone_by``
-      there (nothing to tie it to), the row alone is skipped.
-    - An ``erasure`` row (#2244) reverted every edit from its
-      ``restored_from`` version up. Without that key (none is written
-      without it), the row alone is skipped.
+    - A row with ``restored_from`` (every ``erasure`` row, #2244; every
+      ``rollback`` row written since #2266) reverted every edit from that
+      version up.
+    - A ``rollback`` row without it (written before #2266) reverted the
+      contiguous rows right below it that share the ``undone_by`` of the
+      first of them — a session rollback reverses a memory's whole session
+      block or skips it, and a block is the top of the log when it is
+      reverted. Not exact: a rollback record id is reused across calls, so
+      an event the same record skipped earlier can sit right below the
+      block with the same mark. With no ``undone_by`` there (nothing to tie
+      it to), the row alone is skipped.
+    - An ``erasure`` row without it (none is written without it): the row
+      alone is skipped.
     """
     edit = edits[i]
     i += 1
-    if edit.writer == REVISION_WRITER_ERASURE:
-        if edit.restored_from is not None:
-            while i < len(edits) and edits[i].version >= edit.restored_from:
-                i += 1
-    else:
+    if edit.restored_from is not None:
+        while i < len(edits) and edits[i].version >= edit.restored_from:
+            i += 1
+    elif edit.writer == REVISION_WRITER_ROLLBACK:
         mark = edits[i].undone_by if i < len(edits) else None
         if mark is not None:
             while i < len(edits) and edits[i].undone_by == mark:
@@ -575,12 +587,13 @@ def _is_put_back(edit: DetailsEdit) -> bool:
 
 
 def _authored_edits(edits: Sequence[DetailsEdit]) -> list[DetailsEdit]:
-    """The edits whose written value can be live, newest first.
+    """The details edits whose written value can be live, newest first.
 
-    ``edits`` are one memory's details edits, newest first. Each put-back
+    ``edits`` are one memory's ``updated`` rows, newest first. Each put-back
     row is dropped together with the block it reverted (``_past_put_back``),
-    so the newest edit left is the one that wrote the live value, and the
-    prior of each edit left is the value the next one left below it wrote.
+    and so is every row that changed no ``details``, so the newest edit left
+    is the one that wrote the live value, and the prior of each edit left is
+    the value the next one left below it wrote.
     """
     authored: list[DetailsEdit] = []
     i = 0
@@ -588,7 +601,8 @@ def _authored_edits(edits: Sequence[DetailsEdit]) -> list[DetailsEdit]:
         if _is_put_back(edits[i]):
             i = _past_put_back(edits, i)
         else:
-            authored.append(edits[i])
+            if edits[i].details_changed:
+                authored.append(edits[i])
             i += 1
     return authored
 
@@ -601,17 +615,21 @@ def _writer_of_value_below(edits: Sequence[DetailsEdit], i: int) -> DetailsEdit 
     list.
     """
     while i < len(edits):
-        if not _is_put_back(edits[i]):
+        if _is_put_back(edits[i]):
+            i = _past_put_back(edits, i)
+        elif edits[i].details_changed:
             return edits[i]
-        i = _past_put_back(edits, i)
+        else:
+            i += 1  # wrote no details value
     return None
 
 
 def held_details_ids(rows: Iterable[DetailsEdit], subject: str) -> list[int]:
     """The details edits whose prior is a value ``subject`` wrote.
 
-    Pure. ``rows`` are the details edits of memories the subject edited and
-    did not author (``_details_edits``), in any order. An edit's prior is
+    Pure. ``rows`` are the ``updated`` rows of memories the subject edited
+    and did not author (``_updated_rows``), in any order; only details edits
+    can hold a value. An edit's prior is
     the live value right before it, written by the newest authored edit
     below it once put-back rows are dropped with their blocks — the walk of
     ``restore_targets`` (``_authored_edits``). A rollback the subject
@@ -633,8 +651,8 @@ def held_details_ids(rows: Iterable[DetailsEdit], subject: str) -> list[int]:
     for memory_rows in by_memory.values():
         edits = sorted(memory_rows, key=lambda e: (e.version, e.id), reverse=True)
         for i, edit in enumerate(edits):
-            if edit.erased:
-                continue  # stripped already, or an erasure row: no value held
+            if not edit.details_changed or edit.erased:
+                continue  # no details prior, stripped already, or an erasure row
             writer = _writer_of_value_below(edits, i + 1)
             if writer is not None and writer.actor_user_id == subject:
                 held.append(edit.id)
@@ -646,8 +664,8 @@ def restore_targets(
 ) -> list[RestoreTarget]:
     """Where ``subject`` wrote a memory's live ``details``: the value to put back.
 
-    Pure. ``rows`` are the details edits of the candidate memories, in any
-    order. Per memory, newest first by ``(version, id)``, put-back rows are
+    Pure. ``rows`` are the ``updated`` rows of the candidate memories, in
+    any order (``_updated_rows``). Per memory, newest first by ``(version, id)``, put-back rows are
     dropped with the blocks they reverted (``_authored_edits``): what is
     left are the edits whose value was written by their actor, and the
     newest of them wrote the live value. That edit must be the subject's,
@@ -655,7 +673,7 @@ def restore_targets(
     rollback the subject requested put back someone else's value, and an
     erasure row put back the value of the edit below the block it names.
     The walk goes down the subject's trailing run among those edits
-    (non-details edits are not in ``rows``); the prior of the run's lowest
+    (edits of other fields are not among them); the prior of the run's lowest
     edit is the last value someone else wrote — or the creation value, when
     every authored details edit is the subject's.
 
@@ -707,10 +725,13 @@ def restore_targets(
     return targets
 
 
-async def _details_edits(db: AsyncSession, subject: str) -> list[DetailsEdit]:
-    """The details edits of the memories ``subject`` edited and did not author.
+async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
+    """The ``updated`` rows of the memories ``subject`` edited and did not author.
 
     The input of both walks: ``restore_targets`` and ``held_details_ids``.
+    Every ``updated`` row, ``details_changed`` set on those that changed
+    ``details`` (#2266): a rollback block ends at the first row below it
+    that is not part of it, whatever field that row changed.
 
     Index-driven: the subject's rows by ``idx_memory_revisions_actor``, then
     each memory's log by ``idx_memory_revisions_memory``. A legacy row
@@ -730,6 +751,7 @@ async def _details_edits(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 MemoryRevision.prior[PRIOR_ERASED_KEY].has_key("details").label("erased"),
                 MemoryRevision.undone_by,
                 MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].as_integer().label("restored_from"),
+                revision_edited_details(MemoryRevision).label("details_changed"),
             )
             .join(Memory, Memory.id == MemoryRevision.memory_id)
             .where(
@@ -737,7 +759,6 @@ async def _details_edits(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 Memory.user_id != subject,
                 Memory.context_id.is_not(None),
                 MemoryRevision.kind == REVISION_KIND_UPDATED,
-                revision_edited_details(MemoryRevision),
             )
             .order_by(MemoryRevision.memory_id, MemoryRevision.version, MemoryRevision.id)
         )
@@ -753,6 +774,7 @@ async def _details_edits(db: AsyncSession, subject: str) -> list[DetailsEdit]:
             erased=bool(row.erased),
             undone_by=row.undone_by,
             restored_from=row.restored_from,
+            details_changed=bool(row.details_changed),
         )
         for row in rows
     ]
@@ -912,7 +934,7 @@ async def restore_editor_details(
         await lock_subject_memories(db, subject)
     report = RestoreReport()
     targets = restore_targets(
-        await _details_edits(db, subject), subject, erased_actors=erased_actors
+        await _updated_rows(db, subject), subject, erased_actors=erased_actors
     )
     if not targets:
         return report

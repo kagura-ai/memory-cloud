@@ -163,6 +163,8 @@ def test_restore_takes_each_field_from_the_sessions_first_edit_of_it():
     assert item.action == ACTION_RESTORE and not item.unforget
     assert item.values == {"summary": "orig", "tags": ["orig"], "importance": 0.1}
     assert item.kind == "updated"
+    # #2266: the lowest reverted version, stamped as ``restored_from``
+    assert item.from_version == 2
 
 
 def test_restore_after_forget_also_unforgets_the_sessions_tombstone():
@@ -170,6 +172,7 @@ def test_restore_after_forget_also_unforgets_the_sessions_tombstone():
     item = plan_memory(events, state(version=2, deleted=True, deleted_by=ME))
     assert item.unforget and item.unforget_deleted_by == ME
     assert item.values == {"summary": "orig"}
+    assert item.from_version == 2  # the forgotten event is no ``updated`` one
     assert item.as_dict() == {
         "memory_id": str(MID),
         "kind": "forgotten",
@@ -177,6 +180,20 @@ def test_restore_after_forget_also_unforgets_the_sessions_tombstone():
         "fields": ["summary"],
         "unforget": True,
     }
+
+
+def test_only_a_restore_of_values_carries_a_from_version():
+    forget = plan_memory(
+        [ev(1, "created", 1), ev(2, "updated", 2, {"summary": "a"})], state(version=2)
+    )
+    unforget = plan_memory([ev(1, "forgotten", 3)], state(version=3, deleted=True, deleted_by=ME))
+    skip = plan_memory([ev(1, "updated", 3, {"summary": "b"})], state(version=4))
+    assert (forget.action, unforget.action, skip.action) == (
+        ACTION_FORGET,
+        ACTION_UNFORGET,
+        ACTION_SKIP,
+    )
+    assert (forget.from_version, unforget.from_version, skip.from_version) == (None, None, None)
 
 
 def test_combined_prior_keeps_null_and_ignores_marker_keys():

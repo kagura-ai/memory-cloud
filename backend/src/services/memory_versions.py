@@ -239,6 +239,7 @@ def record_edit(
     actor_user_id: str,
     writer: str = REVISION_WRITER_API,
     provenance: WriteProvenance | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> bool:
     """Bump the version and log the edit when it changed a versioned field.
 
@@ -249,6 +250,9 @@ def record_edit(
         actor_user_id: The caller who made the edit.
         writer: ``rollback`` when ``rollback_session`` restores (#2044).
         provenance: The writer's agent and session (default: the request's).
+        extra: Non-versioned keys merged into ``prior`` when the version
+            moves (a rollback's ``restored_from``, #2266). ``prior_values``,
+            ``changed_fields`` and the version rebuild ignore them.
 
     A legacy row without a context still moves its version (so a PATCH's
     ``expected_version`` keeps refusing a stale edit) but logs nothing:
@@ -261,6 +265,8 @@ def record_edit(
     prior = changed_prior(before, memory)
     if not prior:
         return False
+    if extra:
+        prior = {**prior, **extra}
     memory.version = memory.version + 1
     record_revision(
         db,

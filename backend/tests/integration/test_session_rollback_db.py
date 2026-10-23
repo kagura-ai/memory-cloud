@@ -377,6 +377,38 @@ async def test_interleaved_sessions_roll_back_only_the_named_one(
         ("restored", False),
         ("updated", True),
     ]
+    # #2266: the restore row names the block it reverted (the lowest version
+    # among the session's ``updated`` events on the memory); a non-versioned
+    # key, so the row's changed fields read as before
+    from services.memory_versions import changed_fields
+
+    restore_prior = await world.session.scalar(
+        select(MemoryRevision.prior).where(
+            MemoryRevision.memory_id == ids["p1"],
+            MemoryRevision.writer == "rollback",
+            MemoryRevision.kind == "updated",
+        )
+    )
+    lowest = await world.session.scalar(
+        select(func.min(MemoryRevision.version)).where(
+            MemoryRevision.memory_id == ids["p1"],
+            MemoryRevision.session_id == "S1",
+            MemoryRevision.kind == "updated",
+        )
+    )
+    assert restore_prior is not None and lowest is not None
+    assert restore_prior["restored_from"] == lowest
+    assert changed_fields(restore_prior) == ["summary", "tags"]
+    # a forget (the block starts at a ``created`` event) and an un-forget
+    # write no ``restored_from``
+    others = (
+        await world.session.execute(
+            select(MemoryRevision.prior).where(
+                MemoryRevision.writer == "rollback", MemoryRevision.memory_id != ids["p1"]
+            )
+        )
+    ).scalars()
+    assert all("restored_from" not in (prior or {}) for prior in others)
     handled = await world.session.scalar(
         select(func.count()).where(
             MemoryRevision.session_id == "S1",

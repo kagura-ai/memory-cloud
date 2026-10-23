@@ -75,7 +75,7 @@ def restore_details():
             "services.account_erasure_service.restore_editor_details",
             new=AsyncMock(return_value=RestoreReport()),
         ) as mock,
-        patch("services.erasure_details._details_edits", new=AsyncMock(return_value=[])),
+        patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=[])),
         patch(
             "services.account_erasure_service.completed_pseudonyms",
             new=AsyncMock(return_value=frozenset()),

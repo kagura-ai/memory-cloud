@@ -88,6 +88,7 @@ from models.memory import (
     MemorySessionRollback,
 )
 from services.memory_versions import (
+    PRIOR_RESTORED_FROM_KEY,
     _comparable,  # one "is this the same value" rule with the version bump
     prior_erased,
     prior_values,
@@ -438,6 +439,10 @@ class PlanItem:
     unforget: bool = False
     unforget_deleted_by: str | None = None
     event_ids: tuple[int, ...] = ()
+    # #2266: on a restore of values, the lowest version among the session's
+    # ``updated`` events it reverts; the restore row stamps it as
+    # ``restored_from`` so an erasure's walk knows the block exactly.
+    from_version: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -527,7 +532,8 @@ def plan_memory(events: list[SessionEvent], state: MemoryState) -> PlanItem:
         if state.deleted:
             return skip(CAUSE_ALREADY_FORGOTTEN)
         return PlanItem(first.memory_id, kind, ACTION_FORGET, event_ids=ids)
-    values, erased = combined_prior([e for e in events if e.kind == REVISION_KIND_UPDATED])
+    updates = [e for e in events if e.kind == REVISION_KIND_UPDATED]
+    values, erased = combined_prior(updates)
     if erased:
         return skip(CAUSE_PRIOR_ERASED)
     # A field the session changed and changed back needs no write.
@@ -545,6 +551,7 @@ def plan_memory(events: list[SessionEvent], state: MemoryState) -> PlanItem:
             unforget=state.deleted,
             unforget_deleted_by=last.actor_user_id if state.deleted else None,
             event_ids=ids,
+            from_version=min(e.version for e in updates),
         )
     if state.deleted:
         return PlanItem(
@@ -1101,6 +1108,8 @@ class _Executor:
                 actor_user_id=self.requested_by,
                 writer=REVISION_WRITER_ROLLBACK,
                 provenance=self.provenance,
+                # #2266: the block it reverted, like an erasure row's
+                extra={PRIOR_RESTORED_FROM_KEY: item.from_version},
             )
         if item.unforget:
             from services.sleep.undo import re_embed_memory_to_qdrant

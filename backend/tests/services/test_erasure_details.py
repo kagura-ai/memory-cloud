@@ -34,6 +34,7 @@ def _edit(
     row_id: int | None = None,
     undone_by: int | None = None,
     restored_from: int | None = None,
+    details_changed: bool = True,
 ) -> DetailsEdit:
     return DetailsEdit(
         memory_id=memory_id,
@@ -41,11 +42,17 @@ def _edit(
         id=row_id if row_id is not None else version * 10,
         actor_user_id=actor,
         writer=writer,
-        details=None if erased else details,
+        details=None if erased or not details_changed else details,
         erased=erased,
         undone_by=undone_by,
         restored_from=restored_from,
+        details_changed=details_changed,
     )
+
+
+def _other_field(memory_id: UUID, version: int, actor: str) -> DetailsEdit:
+    """An ``updated`` row that changed no ``details`` (#2266: in the walk)."""
+    return _edit(memory_id, version, actor, details_changed=False)
 
 
 def _erasure(memory_id: UUID, version: int, actor: str, restored_from: int) -> DetailsEdit:
@@ -55,9 +62,12 @@ def _erasure(memory_id: UUID, version: int, actor: str, restored_from: int) -> D
     )
 
 
-def _rollback(memory_id: UUID, version: int, actor: str, undid: object) -> DetailsEdit:
-    """A session rollback's put-back row: its prior is the value it undid."""
-    return _edit(memory_id, version, actor, undid, writer="rollback")
+def _rollback(
+    memory_id: UUID, version: int, actor: str, undid: object, restored_from: int | None = None
+) -> DetailsEdit:
+    """A session rollback's put-back row: its prior is the value it undid
+    (and, since #2266, the lowest version of the block it reverted)."""
+    return _edit(memory_id, version, actor, undid, writer="rollback", restored_from=restored_from)
 
 
 def test_latest_edit_by_the_subject_goes_back_to_the_previous_writers_value() -> None:
@@ -357,3 +367,80 @@ def test_a_value_another_erased_member_wrote_is_never_put_back() -> None:
     kept = [_edit(m, 2, OTHER, {"by": "author"}), _edit(m, 3, s1, {"by": "other"})]
     assert restore_targets(kept, s1, erased_actors={s2})[0].details == {"by": "other"}
     assert restore_targets(kept[1:], s1, erased_actors={s2})[0].details == {"by": "other"}
+
+
+# ---------------------------------------------------------------------------
+# #2266: rollback blocks are contiguous in the whole log, not in details edits
+# ---------------------------------------------------------------------------
+
+R = 7  # one rollback record id, reused across calls (session_rollback)
+
+
+def _skipped_then_reverted(m: UUID, restored_from: int | None) -> list[DetailsEdit]:
+    """e1 (the subject's session edit) was skipped ``modified_since`` because
+    a foreign non-details edit f sits above it, and marked with R; the
+    session then wrote e2, and the next call reverted {e2} alone under the
+    same record R. The live value is e1's."""
+    return [
+        _edit(m, 2, SUBJECT, {"by": "author"}, undone_by=R),
+        _other_field(m, 3, OTHER),
+        _edit(m, 4, SUBJECT, {"by": "subject-1"}, undone_by=R),
+        _rollback(m, 5, AUTHOR, {"by": "subject-2"}, restored_from=restored_from),
+    ]
+
+
+def test_a_foreign_row_between_ends_the_rollback_block() -> None:
+    m = uuid4()
+    for restored_from in (4, None):  # stamped, and a legacy row (mark walk)
+        assert restore_targets(_skipped_then_reverted(m, restored_from), SUBJECT) == [
+            RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=2)
+        ], restored_from
+
+
+def test_a_foreign_row_between_keeps_the_subjects_live_value_held() -> None:
+    """A later edit over the value e1 wrote holds it; so does the rollback's
+    prior (e2's value, the subject's)."""
+    m = uuid4()
+    for restored_from in (4, None):
+        rows = [*_skipped_then_reverted(m, restored_from), _edit(m, 6, OTHER, {"by": "subject-1"})]
+        assert held_details_ids(rows, SUBJECT) == [40, 50, 60], restored_from
+
+
+def test_a_stamped_rollback_drops_only_its_block() -> None:
+    """e1 was skipped ``not_permitted`` under R and e2 reverted later under R,
+    with nothing between: the marks are contiguous, but only e2 was in the
+    block. ``restored_from`` says so; a legacy row cannot tell them apart."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, SUBJECT, {"by": "author"}, undone_by=R),
+        _edit(m, 3, SUBJECT, {"by": "subject-1"}, undone_by=R),
+        _rollback(m, 4, AUTHOR, {"by": "subject-2"}, restored_from=3),
+    ]
+    assert restore_targets(rows, SUBJECT) == [
+        RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=2)
+    ]
+    assert held_details_ids([*rows, _edit(m, 5, OTHER, {"by": "subject-1"})], SUBJECT) == [
+        30,
+        40,
+        50,
+    ]
+    legacy = [*rows[:2], _rollback(m, 4, AUTHOR, {"by": "subject-2"})]
+    assert restore_targets(legacy, SUBJECT) == []
+
+
+def test_a_non_details_row_is_never_an_authored_details_edit() -> None:
+    """OTHER's tag edit above the subject's details edit leaves the subject
+    the writer of the live details; it is never the value's writer below."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, AUTHOR, {"by": "creation"}),
+        _edit(m, 3, SUBJECT, {"by": "author"}),
+        _other_field(m, 4, OTHER),
+    ]
+    assert restore_targets(rows, SUBJECT) == [
+        RestoreTarget(memory_id=m, details={"by": "author"}, unavailable=False, from_version=3)
+    ]
+    assert restore_targets(rows, OTHER) == []
+    # the next details edit's prior is the subject's value, past OTHER's row
+    assert held_details_ids([*rows, _edit(m, 5, AUTHOR, {"by": "subject"})], SUBJECT) == [50]
+    assert held_details_ids([*rows, _edit(m, 5, AUTHOR, {"by": "subject"})], OTHER) == []
