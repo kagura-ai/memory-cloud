@@ -141,3 +141,28 @@ class TestReprocessErasuresCommand:
         with pytest.raises(SystemExit) as exc:
             cli._parse(argv)
         assert exc.value.code == 2
+
+
+def test_the_applied_report_names_already_queued_and_failed_requeues(capsys):
+    """#2266: failed patches on rows already queued, and re-queues that failed,
+    are printed (the latter points at the warnings that carry the ids)."""
+    result = cli.ReprocessResult(dry_run=False, scanned=1)
+    result.changed.append(
+        cli.RequestChange(
+            request_id=REQUEST_ID,
+            completed_at=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+            details_restored=3,
+            details_restored_unavailable=0,
+            details_stripped=0,
+            scrub_marked=0,
+            embedding_requeued=1,
+            payload={
+                "details_payload_synced": 1,
+                "details_payload_skipped_requeued": 1,
+                "details_payload_requeue_failed": 1,
+            },
+        )
+    )
+    cli._print_applied(result)
+    out = capsys.readouterr().out
+    assert "re-queued for embedding 1, already queued 1, NOT re-queued 1" in out

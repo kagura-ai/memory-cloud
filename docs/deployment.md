@@ -1740,6 +1740,33 @@ Two changes reach erasures that run from v0.123.0 on, too:
   relying on the revision history of memories that members erased on
   v0.113.0 through v0.120.x had edited.
 
+Time memories (`type: time`) and erasure — Issue #2266:
+
+- **Erasures of a member who authored a time memory failed before v0.124.0.**
+  The erasure emptied the memory's `details`, which a time memory must not
+  have (its trigger window is required), so the request ended `failed` with
+  `valid_trigger_window_format` in its `failure_reason` — after the member's
+  vectors had been deleted. To find them, list the erasure requests with
+  `status = 'failed'` whose `failure_reason` contains
+  `valid_trigger_window_format`. After the upgrade, create a new erasure
+  request for each such account (the member's self-service request, or an
+  admin force-erase): it completes, and its first step finds no vectors left.
+- **What a time memory keeps.** On a time memory the erased member authored,
+  `details` keeps only the trigger's window (`year` / `month` / `day` /
+  `hour` / `minute` / `from` / `until`); the trigger's `text`, the location
+  and every other key are removed. On a time memory another member authored
+  whose `details` go back to an earlier value, that value keeps its own
+  trigger (normalized if it was written before the memory became a time
+  memory); where it has none, or is unavailable, the memory's current window
+  is merged in, without its `text`.
+- **Vector payloads after the commit.** The erasure patches restored
+  memories' payloads after its Postgres commit. A patch that fails re-queues
+  the memory for embedding; the erasure summary counts it under
+  `details_payload_requeued_after_error`. A memory whose re-queue failed too
+  is counted under `details_payload_requeue_failed` and logged
+  (`erasure_details_payload_requeue_failed`, with its memory id): re-queue it
+  by hand (set its `embedding_status` to `pending`).
+
 ### Restoring a deleted context — Issue #1804
 
 Deleting a context soft-deletes it and its memories, and removes their points.

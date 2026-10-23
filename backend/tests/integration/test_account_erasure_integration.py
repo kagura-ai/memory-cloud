@@ -426,6 +426,46 @@ class TestEditorDetailsRestore:
         assert status == "pending"
 
 
+class TestPayloadStepNeverFailsTheRequest:
+    """#2266 review S1: after the Postgres commit, an error that is not the
+    vector store's (here a read in the payload step) re-queues the memory and
+    the erasure still completes — the request cannot be retried by then."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_vector_store_error_requeues_and_completes(
+        self, db_session: AsyncSession, erasure_scenario, edited_by_target, patched_external_stores
+    ):
+        from models.memory import Memory
+
+        with (
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()) as sync,
+            patch(
+                "services.context_routing.resolve_collection_name",
+                new=AsyncMock(side_effect=RuntimeError("context read failed")),
+            ),
+        ):
+            request = await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=erasure_scenario["target_user_id"],
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2266)",
+            )
+
+        assert request.status == STATUS_COMPLETE
+        postgres = request.deleted_data_summary["postgres"]
+        assert postgres["details_payload_requeued_after_error"] == 1
+        assert postgres["details_payload_requeue_failed"] == 0
+        sync.assert_not_awaited()
+        status = (
+            await db_session.execute(
+                select(Memory.embedding_status)
+                .where(Memory.id == edited_by_target)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert status == "pending"
+
+
 class TestSweepAfterAFailure:
     """#2266: one request failing in ``_execute`` (which rolls the session
     back and so expires every loaded instance) must not stop the sweep: the

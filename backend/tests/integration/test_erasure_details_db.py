@@ -233,6 +233,17 @@ async def _snapshot(session: AsyncSession, query: Any, excluded: list[uuid.UUID]
     return {r[0]: r[1] for r in rows}
 
 
+async def _outside(session: AsyncSession, changed: list[uuid.UUID]) -> tuple[dict, dict]:
+    """Byte-level snapshots of every memory and revision row outside ``changed``
+    (committed, so the erasure's own transaction starts after it)."""
+    snapshots = (
+        await _snapshot(session, _MEMORIES_OUTSIDE, changed),
+        await _snapshot(session, _REVISIONS_OUTSIDE, changed),
+    )
+    await session.commit()
+    return snapshots
+
+
 async def test_the_authors_value_comes_back_with_its_own_revision(
     async_engine: AsyncEngine, world: dict[str, Any]
 ) -> None:
@@ -479,8 +490,10 @@ async def test_a_payload_patch_runs_after_the_commit(
 
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        before = await _outside(session, [memory.id])
         with patch(_QDRANT, AsyncMock(side_effect=patch_payload)):
             _, report = await _erase_memories(session, subject)
+        assert await _outside(session, [memory.id]) == before
     assert seen == [AUTHORS]
     assert report.payload_synced == 1
 
@@ -528,12 +541,14 @@ async def test_a_shared_point_is_counted_apart_from_a_tombstone(
                 _edit(world, tombstone, 2, subject, {"details": AUTHORS}),
             ],
         )
+        before = await _outside(session, [shared.id, tombstone.id])
         sync = AsyncMock()
         with (
             patch(_QDRANT, sync),
             patch("services.resource_indexer.unshared_point_id", new=AsyncMock(return_value=None)),
         ):
             _, report = await _erase_memories(session, subject)
+        assert await _outside(session, [shared.id, tombstone.id]) == before
     assert report.restored == 2
     assert _payload(report) == (0, 1, 1, 0, 0, 0)
     sync.assert_not_awaited()
@@ -578,10 +593,12 @@ async def test_a_failed_patch_on_a_requeued_row_is_left_to_the_re_embed(
     memory = _memory(world, author, SUBJECTS, 2, embedding_status=status)
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        before = await _outside(session, [memory.id])
         with patch(_QDRANT, AsyncMock(side_effect=QdrantError("no such point"))):
             _, report = await _erase_memories(session, subject)
         assert _payload(report) == (0, 0, 0, 0, 1, 0)
         assert (await _live(session, memory.id)).embedding_status == "pending"
+        assert await _outside(session, [memory.id]) == before
 
 
 async def test_a_strip_by_pseudonym_keeps_a_later_value_over_an_erasure_row(
@@ -965,30 +982,48 @@ async def test_a_merged_live_trigger_loses_its_text(
     memory = _memory(world, author, {"trigger": labelled}, 2, kind="time")
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        before = await _outside(session, [memory.id])
         with patch(_QDRANT, AsyncMock()):
             await _erase_memories(session, subject)
         live = await _live(session, memory.id)
         assert live.details == {**AUTHORS, "trigger": TRIGGER}
         assert "private" not in repr(live.details)
+        assert await _outside(session, [memory.id]) == before
 
 
+# A trigger the author wrote while the row was a note: never normalized.
+UNNORMALIZED = [
+    # components only, no window: normalized
+    ({"year": 2028, "month": 3}, AUTHORS_TRIGGER),
+    # a date-only window (from/until strings the CHECK's regex rejects) and no
+    # components: cannot be normalized, so the live window goes in instead
+    ({"from": "2027-01-01", "until": "2027-01-31"}, TRIGGER),
+]
+
+
+@pytest.mark.parametrize(("raw_trigger", "expected"), UNNORMALIZED)
 async def test_an_unnormalized_authors_trigger_is_normalized(
-    async_engine: AsyncEngine, world: dict[str, Any]
+    async_engine: AsyncEngine,
+    world: dict[str, Any],
+    raw_trigger: dict[str, Any],
+    expected: dict[str, Any],
 ) -> None:
-    """The author wrote a trigger while the row was a note (never normalized,
-    no window); the subject made it a time memory. Put back as is, it would
-    break the CHECK: it is normalized."""
+    """The subject made the author's note a time memory. Put back as is, the
+    author's trigger would break the CHECK (and fail the erasure after the
+    vectors are gone): it is normalized, or replaced by the live window."""
     subject, author = world["subject"], world["author"]
-    raw = {"trigger": {"year": 2028, "month": 3}, "by": "author"}
+    raw = {"trigger": raw_trigger, "by": "author"}
     memory = _memory(world, author, {"trigger": TRIGGER}, 2, kind="time")
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": raw})])
+        before = await _outside(session, [memory.id])
         with patch(_QDRANT, AsyncMock()):
             _, report = await _erase_memories(session, subject)
         assert report.restored == 1
         live = await _live(session, memory.id)
-        assert live.details == {"by": "author", "trigger": AUTHORS_TRIGGER}
-        assert live.trigger_from == AUTHORS_TRIGGER["from"]
+        assert live.details == {"by": "author", "trigger": expected}
+        assert (live.trigger_from, live.trigger_until) == (expected["from"], expected["until"])
+        assert await _outside(session, [memory.id]) == before
 
 
 async def test_a_time_memory_gets_the_authors_trigger_back(
@@ -1000,12 +1035,14 @@ async def test_a_time_memory_gets_the_authors_trigger_back(
     memory = _memory(world, author, {**SUBJECTS, "trigger": TRIGGER}, 2, kind="time")
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": authors})])
+        before = await _outside(session, [memory.id])
         with patch(_QDRANT, AsyncMock()):
             _, report = await _erase_memories(session, subject)
         assert (report.restored, report.unavailable) == (1, 0)
         live = await _live(session, memory.id)
         assert live.details == authors
         assert live.trigger_from == AUTHORS_TRIGGER["from"]
+        assert await _outside(session, [memory.id]) == before
 
 
 async def test_the_subjects_own_time_memory_keeps_only_its_trigger(
@@ -1028,3 +1065,122 @@ async def test_the_subjects_own_time_memory_keeps_only_its_trigger(
         assert await _snapshot(session, _MEMORIES_OUTSIDE, [own.id, own_note.id]) == (
             memories_before
         )
+
+
+# ---------------------------------------------------------------------------
+# #2266 review: the post-commit payload step never fails the request
+# ---------------------------------------------------------------------------
+
+
+async def test_a_non_vector_store_error_requeues_the_row_and_the_next_one_syncs(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """A read between the patch target and the call fails for the first row
+    (not a ``QdrantError``): that row is re-queued, the second is patched."""
+    subject, author = world["subject"], world["author"]
+    first, second = sorted(
+        (_memory(world, author, SUBJECTS, 2) for _ in range(2)), key=lambda m: m.id
+    )
+    from services.context_routing import resolve_collection_name as real
+
+    calls = 0
+
+    async def flaky(db: AsyncSession, context_id: uuid.UUID) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("context read failed")
+        return await real(db, context_id)
+
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [first, second],
+            [
+                _edit(world, first, 2, subject, {"details": AUTHORS}),
+                _edit(world, second, 2, subject, {"details": AUTHORS}),
+            ],
+        )
+        before = await _outside(session, [first.id, second.id])
+        sync = AsyncMock()
+        with (
+            patch(_QDRANT, sync),
+            patch("services.context_routing.resolve_collection_name", new=flaky),
+        ):
+            _, report = await _erase_memories(session, subject)
+        assert _payload(report) == (1, 0, 0, 0, 0, 1)
+        assert (await _live(session, first.id)).embedding_status == "pending"
+        assert (await _live(session, second.id)).embedding_status == "success"
+        assert (await _live(session, first.id)).details == AUTHORS  # the restore stays
+        assert await _outside(session, [first.id, second.id]) == before
+    assert [c.kwargs["memory_id"] for c in sync.await_args_list] == [second.id]
+
+
+async def test_a_failed_requeue_is_counted_and_the_next_row_still_syncs(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    subject, author = world["subject"], world["author"]
+    first, second = sorted(
+        (_memory(world, author, SUBJECTS, 2) for _ in range(2)), key=lambda m: m.id
+    )
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [first, second],
+            [
+                _edit(world, first, 2, subject, {"details": AUTHORS}),
+                _edit(world, second, 2, subject, {"details": AUTHORS}),
+            ],
+        )
+        sync = AsyncMock(side_effect=[QdrantError("down"), None])
+        with (
+            patch(_QDRANT, sync),
+            patch(
+                "services.content_chunk_writer.requeue_embedding",
+                new=AsyncMock(side_effect=RuntimeError("requeue failed")),
+            ),
+        ):
+            _, report = await _erase_memories(session, subject)
+        assert (report.payload_synced, report.payload_requeue_failed) == (1, 1)
+        assert (await _live(session, second.id)).details == AUTHORS
+
+
+async def test_payload_groups_commit_one_by_one(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """With groups of one, the first row's share lock is released before the
+    second row's patch: another writer can lock it without waiting."""
+    subject, author = world["subject"], world["author"]
+    first, second = sorted(
+        (_memory(world, author, SUBJECTS, 2) for _ in range(2)), key=lambda m: m.id
+    )
+    free: list[bool] = []
+
+    async def patch_payload(**kwargs: Any) -> None:
+        if kwargs["memory_id"] != second.id:
+            return
+        async with _maker(async_engine)() as other:
+            await other.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            row = await other.execute(
+                text("SELECT id FROM memories WHERE id = :id FOR UPDATE NOWAIT"),
+                {"id": first.id},
+            )
+            free.append(row.scalar_one() == first.id)
+            await other.rollback()
+
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [first, second],
+            [
+                _edit(world, first, 2, subject, {"details": AUTHORS}),
+                _edit(world, second, 2, subject, {"details": AUTHORS}),
+            ],
+        )
+        with (
+            patch(_QDRANT, AsyncMock(side_effect=patch_payload)),
+            patch("services.session_rollback.PAYLOAD_SYNC_GROUP", 1),
+        ):
+            _, report = await _erase_memories(session, subject)
+    assert report.payload_synced == 2
+    assert free == [True]

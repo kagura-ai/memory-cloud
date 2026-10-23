@@ -531,3 +531,51 @@ async def test_a_value_another_erased_member_wrote_never_comes_back(
                 delete(ErasureRequest).where(ErasureRequest.id.in_([first.id, second.id]))
             )
             await session.commit()
+
+
+@pytest.mark.parametrize(
+    "raw_trigger",
+    [{"from": "2027-01-01", "until": "2027-01-31"}, {"year": 2028, "month": 3}],
+)
+async def test_a_time_memory_with_an_unnormalized_authors_trigger_is_restored(
+    async_engine: AsyncEngine,
+    world: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    raw_trigger: dict[str, Any],
+) -> None:
+    """#2266 review M1: the author wrote a trigger on a note (never normalized);
+    the erased member made the row a time memory. The re-run restores the
+    author's value with a window the CHECK accepts (normalized, or the live
+    one) and the run succeeds."""
+    from utils.time_trigger import normalize_trigger
+
+    live_trigger = normalize_trigger({"year": 2027, "month": 1, "day": 1})
+    p = _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], {"trigger": live_trigger}, 2)
+    memory.type = "time"
+    request = _request(p, minutes=5)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [_edit(memory, 2, p, {"details": {"trigger": raw_trigger, "by": "author"}}), request]
+        )
+        await session.commit()
+    try:
+        code, _ = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+        assert code == 0
+        async with _maker(async_engine)() as session:
+            row = (
+                await session.execute(
+                    select(Memory.details, Memory.trigger_from).where(Memory.id == memory.id)
+                )
+            ).one()
+        assert row.details["by"] == "author"
+        assert row.trigger_from == row.details["trigger"]["from"]
+        assert len(row.trigger_from) == len("2027-01-01T00:00:00")
+        capsys.readouterr()
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.commit()

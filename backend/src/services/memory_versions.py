@@ -266,6 +266,8 @@ def record_edit(
     prior = changed_prior(before, memory)
     if not prior:
         return False
+    # a None value names nothing: never a ``null`` key in ``prior``
+    extra = {key: value for key, value in (extra or {}).items() if value is not None}
     if extra:
         prior = {**prior, **extra}
     memory.version = memory.version + 1

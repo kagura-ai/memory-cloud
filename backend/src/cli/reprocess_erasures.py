@@ -306,13 +306,23 @@ def _print_applied(result: ReprocessResult) -> None:
                 "shared": p.get("details_payload_skipped_shared", 0),
                 "edited since": p.get("details_payload_skipped_moved", 0),
             }
+            # re-queued: in the restore's transaction, plus after a failed patch;
+            # "already queued" are failed patches on rows the first set covers
             requeued = c.embedding_requeued + p.get("details_payload_requeued_after_error", 0)
-            print(
+            line = (
                 f"payload  {c.request_id}  synced {p.get('details_payload_synced', 0)}, "
                 f"skipped {sum(skipped.values())} "
                 f"({', '.join(f'{k} {v}' for k, v in skipped.items())}), "
                 f"re-queued for embedding {requeued}"
             )
+            if p.get("details_payload_skipped_requeued"):
+                line += f", already queued {p['details_payload_skipped_requeued']}"
+            if p.get("details_payload_requeue_failed"):
+                line += (
+                    f", NOT re-queued {p['details_payload_requeue_failed']} "
+                    "(see the erasure_details_payload_* warnings for the memory ids)"
+                )
+            print(line)
 
 
 def _summary(result: ReprocessResult) -> str:

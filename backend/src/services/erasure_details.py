@@ -571,6 +571,10 @@ class RestoreReport:
             the payload.
         payload_requeued_after_error: Patches that failed on an embedded row:
             the row was re-queued for embedding instead.
+        payload_requeue_failed: Rows whose patch failed and whose re-queue
+            failed too (or whose group could not be read): logged with their
+            ids; the point may keep the erased member's ``location`` until
+            the row is re-embedded.
         memory_ids: The restored memories, in id order.
         to_sync: The restored memories, for ``sync_restored_payloads``.
     """
@@ -584,6 +588,7 @@ class RestoreReport:
     payload_skipped_moved: int = 0
     payload_skipped_requeued: int = 0
     payload_requeued_after_error: int = 0
+    payload_requeue_failed: int = 0
     memory_ids: list[UUID] = field(default_factory=list)
     to_sync: list[PayloadSync] = field(default_factory=list)
 
@@ -598,6 +603,7 @@ def payload_counts(report: RestoreReport) -> dict[str, int]:
         "details_payload_skipped_moved": report.payload_skipped_moved,
         "details_payload_skipped_requeued": report.payload_skipped_requeued,
         "details_payload_requeued_after_error": report.payload_requeued_after_error,
+        "details_payload_requeue_failed": report.payload_requeue_failed,
     }
 
 
@@ -863,9 +869,11 @@ async def sync_restored_payloads(
     Called AFTER the restore's transaction committed, in the same session (a
     fresh transaction), by the live erasure and by the re-run (#2266): no
     vector-store round trip happens while the subject's memories are locked.
-    Reads the rows ``FOR SHARE`` in id order (as ``session_rollback``'s
-    payload step does) and holds them until its commit, so an edit that lands
-    meanwhile waits and then syncs its own payload over this one; per row:
+    Works in groups of ``PAYLOAD_SYNC_GROUP`` rows, one transaction each (as
+    ``session_rollback``'s payload step does): the group's rows are read
+    ``FOR SHARE`` in id order and held until the group commits, so an edit
+    that lands meanwhile waits and then syncs its own payload over this one,
+    and no row waits on more than one group's round trips. Per row:
 
     - a tombstone (or a row gone, or without a context) is skipped: its point
       is gone or going, as ``forget`` leaves it;
@@ -878,11 +886,15 @@ async def sync_restored_payloads(
       (``metadata_patch_target``; a point another live row shares, or a
       patch with nothing left to write, is left as it is).
 
-    A patch that fails with ``QdrantError`` degrades to an embedding re-queue
-    (``requeue_embedding``: the sweep's upsert rewrites the whole payload from
-    the row); a row not ``success`` is queued already. One warning per
-    failure, with ids only. Any other error propagates. Commits at the end
-    (the re-queues).
+    Nothing here fails the caller: the request's Postgres work is committed
+    already, and no later run would find the restore again. A row whose
+    patch fails — for any reason, the vector store or a read in between —
+    degrades to an embedding re-queue (``requeue_embedding``: the sweep's
+    upsert rewrites the whole payload from the row); a row not ``success`` is
+    queued already. A re-queue that fails too is counted
+    (``payload_requeue_failed``) and logged, and the next row goes on. Each
+    row runs in a SAVEPOINT, so a failed statement leaves the group usable.
+    Logs carry ids only, never values.
 
     Semantics: between the restore's commit and the patch — or, when the
     patch fails, until the embedding sweep re-embeds the row — the point may
@@ -895,6 +907,68 @@ async def sync_restored_payloads(
     """
     if not syncs:
         return
+    from services.session_rollback import PAYLOAD_SYNC_GROUP
+
+    versions = {sync.memory_id: sync.version for sync in syncs}
+    ids = sorted(versions)
+    routes: dict[UUID, tuple[str, bool]] = {}
+    for start in range(0, len(ids), PAYLOAD_SYNC_GROUP):
+        group = ids[start : start + PAYLOAD_SYNC_GROUP]
+        try:
+            memories = {
+                memory.id: memory
+                for memory in (
+                    await db.execute(
+                        select(Memory)
+                        .where(Memory.id.in_(group))
+                        .order_by(Memory.id)
+                        .with_for_update(read=True)
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalars()
+            }
+        except Exception as exc:
+            await db.rollback()
+            report.payload_requeue_failed += len(group)
+            logger.warning(
+                "erasure_details_payload_read_failed",
+                memory_ids=[str(i) for i in group],
+                error_class=type(exc).__name__,
+            )
+            continue
+        for memory_id in group:
+            memory = memories.get(memory_id)
+            if memory is None or memory.deleted_at is not None or memory.context_id is None:
+                report.payload_skipped_tombstone += 1
+                continue
+            if memory.version != versions[memory_id]:
+                report.payload_skipped_moved += 1
+                logger.info(
+                    "erasure_details_payload_moved",
+                    memory_id=str(memory_id),
+                    restored_version=versions[memory_id],
+                    version=memory.version,
+                )
+                continue
+            await _sync_one_payload(db, memory, routes, report)
+        try:
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.warning(
+                "erasure_details_payload_commit_failed",
+                memory_ids=[str(i) for i in group],
+                error_class=type(exc).__name__,
+            )
+
+
+async def _sync_one_payload(
+    db: AsyncSession,
+    memory: Memory,
+    routes: dict[UUID, tuple[str, bool]],
+    report: RestoreReport,
+) -> None:
+    """Patch one restored row's point, or re-queue it (``sync_restored_payloads``)."""
     from services.content_chunk_writer import chunk_cascade_needed, requeue_embedding
     from services.context_routing import resolve_collection_name
     from services.memory_service import (
@@ -903,50 +977,27 @@ async def sync_restored_payloads(
         restore_payload_request,
     )
 
-    versions = {sync.memory_id: sync.version for sync in syncs}
-    memories = {
-        memory.id: memory
-        for memory in (
-            await db.execute(
-                select(Memory)
-                .where(Memory.id.in_(list(versions)))
-                .order_by(Memory.id)
-                .with_for_update(read=True)
-                .execution_options(populate_existing=True)
+    memory_id, embedded = memory.id, memory.embedding_status == "success"
+    try:
+        async with db.begin_nested():
+            updates, delete_keys = metadata_payload_patch(
+                restore_payload_request(memory, {"details"}), None, memory.details
             )
-        ).scalars()
-    }
-    routes: dict[UUID, tuple[str, bool]] = {}
-    for memory_id in sorted(versions):
-        memory = memories.get(memory_id)
-        if memory is None or memory.deleted_at is not None or memory.context_id is None:
-            report.payload_skipped_tombstone += 1
-            continue
-        if memory.version != versions[memory_id]:
-            report.payload_skipped_moved += 1
-            logger.info(
-                "erasure_details_payload_moved",
-                memory_id=str(memory_id),
-                restored_version=versions[memory_id],
-                version=memory.version,
+            # Issue #78: date-range filters read the payload's updated_at.
+            updates["updated_at"] = to_utc_iso(memory.updated_at)
+            target = await metadata_patch_target(
+                db, memory.id, memory.point_id, updates, delete_keys
             )
-            continue
-        updates, delete_keys = metadata_payload_patch(
-            restore_payload_request(memory, {"details"}), None, memory.details
-        )
-        # Issue #78: date-range filters read the payload's updated_at.
-        updates["updated_at"] = to_utc_iso(memory.updated_at)
-        target = await metadata_patch_target(db, memory.id, memory.point_id, updates, delete_keys)
-        if target is None:
-            report.payload_skipped_shared += 1
-            continue
-        if memory.context_id not in routes:
-            routes[memory.context_id] = (
-                await resolve_collection_name(db, memory.context_id),
-                await chunk_cascade_needed(db, memory.context_id),
-            )
-        collection, cascade = routes[memory.context_id]
-        try:
+            if target is None:
+                report.payload_skipped_shared += 1
+                return
+            if memory.context_id not in routes:
+                context_id = cast(UUID, memory.context_id)
+                routes[context_id] = (
+                    await resolve_collection_name(db, context_id),
+                    await chunk_cascade_needed(db, context_id),
+                )
+            collection, cascade = routes[cast(UUID, memory.context_id)]
             await update_memory_payload_in_qdrant(
                 memory_id=target.point_id,
                 payload_updates=target.updates,
@@ -954,33 +1005,44 @@ async def sync_restored_payloads(
                 delete_keys=target.delete_keys or None,
                 cascade_chunks=cascade and target.own_point,
             )
-        except QdrantError:
-            requeued = memory.embedding_status == "success" and await requeue_embedding(
-                db, memory.id, reason="erasure_details_payload"
+    except Exception as exc:
+        try:
+            requeued = embedded and await requeue_embedding(
+                db, memory_id, reason="erasure_details_payload"
             )
-            if requeued:
-                report.payload_requeued_after_error += 1
-            else:
-                report.payload_skipped_requeued += 1
-            # a row queued already may have no point yet: not a fault
-            (logger.warning if requeued else logger.info)(
-                "erasure_details_payload_failed",
-                memory_id=str(memory.id),
-                point_id=str(target.point_id),
-                requeued=requeued,
+        except Exception as requeue_exc:
+            report.payload_requeue_failed += 1
+            logger.warning(
+                "erasure_details_payload_requeue_failed",
+                memory_id=str(memory_id),
+                error_class=type(exc).__name__,
+                requeue_error_class=type(requeue_exc).__name__,
             )
-            continue
-        report.payload_synced += 1
-    await db.commit()
+            return
+        if requeued:
+            report.payload_requeued_after_error += 1
+        else:
+            report.payload_skipped_requeued += 1
+        # a row queued already may have no point yet: not a fault
+        (logger.warning if requeued or not isinstance(exc, QdrantError) else logger.info)(
+            "erasure_details_payload_failed",
+            memory_id=str(memory_id),
+            error_class=type(exc).__name__,
+            requeued=requeued,
+        )
+        return
+    report.payload_synced += 1
 
 
 def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
     """``value`` as a time memory can hold it (#2266).
 
     A ``type='time'`` row must keep its trigger window
-    (``valid_trigger_window_format``). A value whose trigger carries a window
-    goes back as it is. A trigger written while the row was not a time memory
-    was never normalized: it is normalized now. Where the value has no usable
+    (``valid_trigger_window_format``). A value's trigger goes back normalized
+    (``normalize_trigger``; one already normalized is unchanged): a trigger
+    written while the row was not a time memory was never normalized, and a
+    ``from`` / ``until`` of any other shape would fail the CHECK. Where the
+    value has no usable
     trigger — it is unavailable (None), or the author wrote it before the row
     became a time memory — the live trigger's window is merged in: only its
     window keys (``trigger_window``), since the erased member may have
@@ -993,9 +1055,10 @@ def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
     if memory.type != MEMORY_TYPE_TIME:
         return value, False
     trigger = value.get("trigger") if isinstance(value, dict) else None
-    if trigger_window(trigger) is not None:
-        return value, False
     if trigger is not None:
+        # normalized or not: a normalized trigger normalizes to itself, and
+        # one written on a non-time row (date-only from/until, missing parts)
+        # gets the window the CHECK needs, or falls through to the live one
         try:
             return {**value, "trigger": normalize_trigger(trigger)}, False
         except TriggerValidationError:

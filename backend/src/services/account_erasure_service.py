@@ -147,11 +147,6 @@ _EMAIL_LINK_SUFFIX = ":email-link"
 CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
 
 
-# Salt used when pseudonymizing audit_log rows for an erased user. A
-# stable per-deployment salt (not per-row) lets ops cross-correlate audit
-# rows belonging to the same erased user without revealing the email/sub.
-# Goal is irreversibility, not rainbow-table protection — once the user
-# row is gone there is no plaintext to recover.
 @dataclass(frozen=True)
 class PostgresErasure:
     """What ``_delete_postgres`` did (#2266).
@@ -188,6 +183,11 @@ def _trigger_only_details() -> Any:
     ).cast(JSON)
 
 
+# Salt used when pseudonymizing audit_log rows for an erased user. A
+# stable per-deployment salt (not per-row) lets ops cross-correlate audit
+# rows belonging to the same erased user without revealing the email/sub.
+# Goal is irreversibility, not rainbow-table protection — once the user
+# row is gone there is no plaintext to recover.
 def _audit_salt() -> str:
     return get_settings().audit_pseudo_salt
 
