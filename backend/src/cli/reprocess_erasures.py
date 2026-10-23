@@ -229,8 +229,14 @@ async def _audit_subs(db: AsyncSession) -> AuditSubs:
 
 
 async def _count_audit_rows(db: AsyncSession, account_id: str) -> int:
+    """What ``pseudonymize_audit_logs(..., orphaned_only=True)`` would change."""
     return (
-        await db.execute(select(func.count(AuditLog.id)).where(AuditLog.user_id == account_id))
+        await db.execute(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.user_id == account_id,
+                ~exists().where(User.user_id == AuditLog.user_id),
+            )
+        )
     ).scalar_one()
 
 
@@ -500,6 +506,20 @@ async def reprocess_erasures(
             ErasureRequest.id,
         )
     )
+    # #2287 review: every request in scope, also under ``--request``: the
+    # account's other requests carry its other emails, and once its audit
+    # rows carry the pseudonym no later run can reach them again
+    email_hashes: dict[str, set[str]] = defaultdict(set)
+    for user_id, email_hash, unrepaired in (
+        await db.execute(
+            select(
+                ErasureRequest.user_id,
+                ErasureRequest.user_email_hash,
+                unrepaired_erasure().label("unrepaired"),
+            ).where(stmt.whereclause)
+        )
+    ).all():
+        email_hashes[erasure_pseudonym(user_id) if unrepaired else user_id].add(email_hash)
     if request_id is not None:
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
@@ -513,13 +533,9 @@ async def reprocess_erasures(
         )
 
     result = ReprocessResult(dry_run=dry_run, scanned=len(requests))
+    # the one request that pseudonymizes an account id's rows recovers every
+    # email of the account (``email_hashes``, by the subject's pseudonym)
     audited: set[str] = set()
-    # every request's email hash, by the pseudonym of its subject: the one
-    # request that pseudonymizes an account id's rows recovers every email
-    email_hashes: dict[str, set[str]] = defaultdict(set)
-    for request in requests:
-        subject = erasure_pseudonym(request.user_id) if request.unrepaired else request.user_id
-        email_hashes[subject].add(request.user_email_hash)
 
     def audit_account_id(request_id: UUID, pseudonym: str) -> str | None:
         """The subject's account id on audit rows, once per account id."""

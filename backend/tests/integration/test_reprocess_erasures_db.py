@@ -1310,6 +1310,41 @@ async def test_two_requests_of_one_account_pseudonymize_its_rows_once(
         ]
 
 
+async def test_request_recovers_every_email_of_the_account(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2287 review: ``--request`` for one of the account's two requests still
+    recovers the email of the other — once the rows carry the pseudonym no
+    later run can reach them, so an email left now would stay raw."""
+    case = audit_case
+    second_email = f"second-{uuid.uuid4().hex[:6]}@example.com"
+    await _add_request(async_engine, case, legacy=False)
+    second = await _add_request(async_engine, case, legacy=False, email=second_email)
+    async with _maker(async_engine)() as session:
+        later = AuditLog(
+            user_email=second_email,
+            user_id=case.sub,
+            action="password_set",
+            resource=f"user:{second_email}",
+        )
+        session.add(later)
+        await session.commit()
+        case.own.append(later.id)
+
+    code, _ = await _run(async_engine, ["--request", str(second.id), "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"pseudonymized audit rows  {second.id}  3 row(s)\n" in out
+    assert case.email not in out and second_email not in out
+    second_p = _salted(second_email)
+    async with _maker(async_engine)() as session:
+        assert await _own_rows(session, case) == [
+            (case.p, case.email_p, f"user:{case.email_p}"),
+            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, second_p, f"user:{second_p}"),
+        ]
+
+
 async def test_an_account_id_registered_during_the_run_keeps_its_rows(
     async_engine: AsyncEngine, audit_case: _AuditCase
 ) -> None:
