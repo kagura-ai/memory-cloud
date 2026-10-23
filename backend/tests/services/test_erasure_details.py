@@ -490,3 +490,44 @@ def test_a_non_details_row_is_never_an_authored_details_edit() -> None:
     # the next details edit's prior is the subject's value, past OTHER's row
     assert held_details_ids([*rows, _edit(m, 5, AUTHOR, {"by": "subject"})], SUBJECT) == [50]
     assert held_details_ids([*rows, _edit(m, 5, AUTHOR, {"by": "subject"})], OTHER) == []
+
+
+# ---------------------------------------------------------------------------
+# #2287: pseudonymize_audit_logs, compiled
+# ---------------------------------------------------------------------------
+
+
+async def _audit_update(email: str | None) -> tuple[str, dict]:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from sqlalchemy.dialects import postgresql
+
+    from services.erasure_details import pseudonymize_audit_logs
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=2))
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        assert await pseudonymize_audit_logs(db, "raw-sub", email) == 2
+    compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+    return str(compiled), compiled.params
+
+
+async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> None:
+    from utils.hashing import sha256_hex
+
+    sql, params = await _audit_update("a@example.com")
+
+    assert sql.count("replace(") == 2
+    assert "user_email=CASE WHEN" in sql
+    # the WHERE is the raw sub, never a pseudonym (that would hash the hash)
+    assert params["user_id_1"] == "raw-sub"
+    assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
+    assert sha256_hex("a@example.com", salt="salt") in params.values()
+
+
+async def test_without_an_email_only_the_sub_is_replaced() -> None:
+    sql, params = await _audit_update(None)
+
+    assert sql.count("replace(") == 1
+    assert "user_email" not in sql
+    assert params["user_id_1"] == "raw-sub"

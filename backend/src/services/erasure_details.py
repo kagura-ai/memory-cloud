@@ -30,6 +30,9 @@ past erasures by pseudonym (#2243) share one definition:
   vector-store call happens while the subject's memories are locked.
 - ``erased_pseudonyms(db)`` (#2243, #2268) — every member whose erasure ran
   in Postgres, the restore's ``erased_actors``.
+- ``pseudonymize_audit_logs(db, user_id, email)`` (#2287) — the subject's
+  own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
+  and by the re-run for rows an erasure on v0.124.x or before left behind.
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
@@ -57,6 +60,7 @@ from sqlalchemy import (
     Select,
     any_,
     bindparam,
+    case,
     func,
     or_,
     select,
@@ -71,7 +75,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.auth import Context
+from models.auth import AuditLog, Context
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
     STATUS_COMPLETE,
@@ -123,6 +127,52 @@ def erasure_pseudonym(value: str) -> str:
     from services import account_erasure_service
 
     return sha256_hex(value, salt=account_erasure_service._audit_salt())
+
+
+async def pseudonymize_audit_logs(db: AsyncSession, user_id: str, email: str | None) -> int:
+    """Pseudonymize the ``audit_logs`` rows ``user_id`` acted in (#2287).
+
+    One UPDATE over ``audit_logs.user_id = user_id`` (the raw sub; never the
+    pseudonym, which would hash the hash). The rows are kept (legal
+    retention); the link to the account is broken:
+
+    - ``user_id`` → ``erasure_pseudonym(user_id)``, so the rows of one erased
+      member still correlate with each other and with their request row.
+    - ``user_email`` → its salted pseudonym only where it equals ``email``.
+      In this codebase ``user_email`` is often the *actor's* email on a row
+      about someone else (``RoleManager.assign_role``,
+      ``SystemAdminService.promote``/``demote``); a blind overwrite would
+      misattribute it.
+    - ``resource`` (conventionally ``user:{email}``): every occurrence of
+      the email (first: longer, more specific), then of the raw sub, is
+      replaced by its pseudonym.
+
+    ``email=None`` (the re-run could not recover the email): ``user_email``
+    and email occurrences in ``resource`` stay as they are; only the sub is
+    replaced.
+
+    Out of scope, here as before: rows where another actor (an admin) acted
+    on the subject — their ``user_id`` is the admin's, and a ``resource``
+    naming the subject's email stays. Rows of every other ``user_id`` are
+    never touched.
+
+    Returns:
+        The rowcount.
+    """
+    from services import account_erasure_service
+
+    user_pseudonym = erasure_pseudonym(user_id)
+    scrubbed_resource: ColumnElement[Any] = AuditLog.resource
+    values: dict[str, Any] = {"user_id": user_pseudonym}
+    if email is not None:
+        email_pseudonym = sha256_hex(email, salt=account_erasure_service._audit_salt())
+        scrubbed_resource = func.replace(scrubbed_resource, email, email_pseudonym)
+        values["user_email"] = case(
+            (AuditLog.user_email == email, email_pseudonym), else_=AuditLog.user_email
+        )
+    values["resource"] = func.replace(scrubbed_resource, user_id, user_pseudonym)
+    result = await db.execute(update(AuditLog).where(AuditLog.user_id == user_id).values(values))
+    return cast(CursorResult[Any], result).rowcount or 0
 
 
 def _ran_in_postgres() -> ColumnElement[bool]:

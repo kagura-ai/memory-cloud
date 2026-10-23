@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -1852,9 +1853,9 @@ class TestFailureAfterThePostgresCommit:
     def _failed_values(svc: AccountErasureService) -> dict:
         return svc.db.execute.await_args.args[0].compile().params
 
-    @pytest.mark.parametrize(
-        "failing", ["_pseudonymize_audit_logs", "_write_audit_log", "_finalize"]
-    )
+    # #2287: the audit-log pseudonymize is part of the Postgres step, not a
+    # step after its commit (``test_the_audit_log_pseudonymization_*`` below)
+    @pytest.mark.parametrize("failing", ["_write_audit_log", "_finalize"])
     @pytest.mark.parametrize("self_service", [True, False])
     @pytest.mark.asyncio
     async def test_the_row_is_pseudonymized_and_marked(self, failing, self_service):
@@ -1910,22 +1911,75 @@ class TestFailureAfterThePostgresCommit:
         assert "user_id" not in params and "initiated_by" not in params
 
 
-@pytest.mark.asyncio
-async def test_the_audit_log_pseudonymization_is_committed_before_the_next_step():
-    """#2268 review: a failure in a later step rolls the session back; the
-    audit rows pseudonymized in step 4 must already be committed."""
+def _delete_postgres_service() -> AccountErasureService:
+    """``_delete_postgres`` with its sweeps stubbed and ``db.execute`` mocked."""
     svc = _service()
-    _stub_execute_steps(svc)
-    order: list[str] = []
-    svc._pseudonymize_audit_logs = AsyncMock(side_effect=lambda *a: order.append("audit_logs") or 0)
-    svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
-    svc._clear_redis = AsyncMock(side_effect=lambda *a: order.append("redis") or {})
+    svc._count_and_delete = AsyncMock(return_value=0)
+    svc._pseudonymize_field = AsyncMock(return_value=0)
+    svc.db.delete = AsyncMock()
+    svc.db.commit = AsyncMock()
+    return svc
 
-    with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
-        await svc._execute(_execute_request(self_service=False), _user())
 
-    assert order[order.index("audit_logs") + 1] == "commit"
-    assert order.index("commit", order.index("audit_logs")) < order.index("redis")
+class TestAuditLogPseudonymizationInThePostgresStep:
+    """#2287: the subject's audit rows are pseudonymized inside
+    ``_delete_postgres``'s transaction — atomic with the erasure, so no
+    failure after the commit can leave the raw sub and email on them."""
+
+    @pytest.mark.asyncio
+    async def test_the_update_runs_before_the_commit_by_the_raw_sub(self):
+        from sqlalchemy.sql.dml import Update
+
+        svc = _delete_postgres_service()
+        order: list[Any] = []
+        svc.db.execute = AsyncMock(
+            side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=3)
+        )
+        svc.db.delete = AsyncMock(side_effect=lambda *a: order.append("delete"))
+        svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+
+        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+            counts = (await svc._delete_postgres(_user())).counts
+            pseudonym = svc._pseudonym("u-1")
+
+        audit = [
+            i
+            for i, stmt in enumerate(order)
+            if isinstance(stmt, Update) and stmt.table.name == "audit_logs"
+        ]
+        assert len(audit) == 1
+        # last statement before the user delete, and before the one commit
+        assert order[audit[0] + 1] == "delete"
+        assert order.index("commit") > audit[0] and order.count("commit") == 1
+        params = order[audit[0]].compile().params
+        # WHERE by the raw sub, never by the pseudonym (that would hash the hash)
+        assert params["user_id_1"] == "u-1"
+        assert params["user_id"] == pseudonym
+        assert counts["audit_logs_pseudonymized"] == 3
+
+    @pytest.mark.asyncio
+    async def test_a_failure_rolls_the_postgres_step_back(self):
+        """Raised inside the Postgres step: nothing was committed, so the
+        request keeps its ids and gets no marker — the user can retry."""
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT
+
+        svc = _delete_postgres_service()
+        svc._handle_owned_workspaces = AsyncMock(return_value={})
+        svc._pseudonymize_audit_logs = AsyncMock(side_effect=RuntimeError("audit down"))
+
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+            patch("services.account_erasure_service.erased_pseudonyms", new=AsyncMock()),
+        ):
+            with pytest.raises(RuntimeError):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        svc.db.delete.assert_not_awaited()
+        svc.db.commit.assert_awaited_once()  # the failure row only
+        params = svc.db.execute.await_args.args[0].compile().params
+        assert params["failure_reason"] == "audit down"
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "user_id" not in params and "initiated_by" not in params
 
 
 @pytest.mark.asyncio

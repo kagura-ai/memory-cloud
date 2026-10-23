@@ -6,12 +6,14 @@ Owns the full lifecycle of an `erasure_requests` row:
     admin:                                   in_progress -> complete
 
 Both paths converge on `_execute`, which performs the multi-step cross-store
-deletion (Qdrant -> workspace transfer -> Postgres -> audit-log pseudonymize ->
-Redis -> finalize) covered by the design pin in #360.
+deletion (Qdrant -> workspace transfer -> Postgres (incl. audit-log
+pseudonymize) -> Redis -> audit row -> finalize) covered by the design pin
+in #360.
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers,
-Postgres deletes, audit pseudonymization, audit-row insert, finalize),
+Postgres deletes with the audit-log pseudonymization, audit-row insert,
+finalize),
 so a failure in step N leaves steps 1..N-1 already persisted. This is
 deliberate — partial progress is recorded in ``deleted_data_summary``
 and is what ops needs for manual reconciliation. On any raise:
@@ -98,6 +100,7 @@ from services.erasure_details import (
     lock_subject_memories,
     locked_ids,
     payload_counts,
+    pseudonymize_audit_logs,
     pseudonymize_revision_actor,
     strip_subject_details,
     sync_restored_payloads,
@@ -867,8 +870,8 @@ class AccountErasureService:
     async def _execute(self, request: ErasureRequest, target: User) -> None:
         """Run the cross-store erasure for a single request.
 
-        Order: Qdrant -> workspaces -> Postgres -> audit_logs pseudonymize ->
-        Redis -> audit row -> finalize. Qdrant first so a failure leaves a
+        Order: Qdrant -> workspaces -> Postgres (incl. audit_logs
+        pseudonymize, #2287) -> Redis -> audit row -> finalize. Qdrant first so a failure leaves a
         recoverable Postgres state; Redis last because session/rate-limit data
         is ephemeral and re-creatable from cookies if anything goes wrong.
         """
@@ -926,14 +929,8 @@ class AccountErasureService:
             await sync_restored_payloads(self.db, erased.restore.to_sync, erased.restore)
             postgres.update(payload_counts(erased.restore))
 
-            # Step 4: pseudonymize existing audit_logs referencing this user
-            step = "audit_logs"
-            summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
-                target.user_id, target.email
-            )
-            # #2268 review: committed on its own, so a failure in a later step
-            # (whose handler rolls back) cannot undo it
-            await self.db.commit()
+            # Step 4 (the audit_logs pseudonymize) runs inside the Postgres
+            # step since #2287: ``counts["audit_logs_pseudonymized"]``.
 
             # Step 5: Redis cleanup (best-effort)
             step = "redis"
@@ -1504,6 +1501,17 @@ class AccountErasureService:
             user_id
         )
 
+        # #2287: the subject's audit rows, inside this transaction — a failure
+        # rolls the whole erasure back with it (the user row stays, the request
+        # keeps its ids and can be retried) instead of leaving the raw sub and
+        # email on the rows after the commit. Last before the user delete, so
+        # nothing this transaction writes to audit_logs could be missed
+        # (nothing does today). No new lock order: these rows are the
+        # subject's alone and every other writer only inserts.
+        counts["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
+            user_id, target.email
+        )
+
         # Finally the user row itself.
         await self.db.delete(target)
         await self.db.commit()
@@ -1820,64 +1828,9 @@ class AccountErasureService:
         return result.rowcount or 0
 
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
-        """Replace user_id/resource (and conditionally user_email) on audit_logs.
-
-        Audit rows are kept (legal retention) but the link to the deleted
-        user is broken. The pseudonyms use a per-deployment salt so
-        cross-row correlation for the SAME erased user is still possible
-        for compliance investigations, but the original sub/email is
-        unrecoverable.
-
-        Column-by-column rules:
-        - ``user_id``: ALWAYS rewritten when the row matches the erased
-          subject's user_id. ``user_id`` is the subject column.
-        - ``user_email``: in this codebase, ``audit_logs.user_email`` is
-          often the *actor's* email, not the subject's (see
-          RoleManager.assign_role and SystemAdminService.promote/demote).
-          A blind overwrite would clobber the actor's identity and
-          misattribute every audit row about the subject. Use a SQL
-          CASE: rewrite only when ``user_email`` equals the erased
-          subject's email; preserve otherwise.
-        - ``resource``: conventionally ``user:{email}`` for user-targeted
-          events. Chain ``func.replace`` to swap any occurrence of the
-          subject's email or raw user_id with their pseudonyms — covers
-          ``user:{email}`` and any future ``user_id``-bearing shape
-          without enumerating every event flavour.
-
-        Caught by Copilot /review iter 2: prior version overwrote
-        user_email indiscriminately, breaking actor attribution.
-        """
-        from sqlalchemy import case, func
-
-        salt = _audit_salt()
-        user_pseudonym = sha256_hex(user_id, salt=salt)
-        email_pseudonym = sha256_hex(email, salt=salt)
-        # Replace email first (longer / more specific), then user_id, so a
-        # row whose resource contains both is fully scrubbed.
-        scrubbed_resource = func.replace(
-            func.replace(AuditLog.resource, email, email_pseudonym),
-            user_id,
-            user_pseudonym,
-        )
-        # Pseudonymize user_email only when it equals the erased subject's
-        # email — preserves actor email on audit rows where actor != subject.
-        conditional_email = case(
-            (AuditLog.user_email == email, email_pseudonym),
-            else_=AuditLog.user_email,
-        )
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(AuditLog)
-                .where(AuditLog.user_id == user_id)
-                .values(
-                    user_id=user_pseudonym,
-                    user_email=conditional_email,
-                    resource=scrubbed_resource,
-                )
-            ),
-        )
-        return result.rowcount or 0
+        """The subject's audit rows (``erasure_details.pseudonymize_audit_logs``),
+        in ``_delete_postgres``'s transaction (#2287)."""
+        return await pseudonymize_audit_logs(self.db, user_id, email)
 
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
