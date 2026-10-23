@@ -16,6 +16,9 @@
    erasure already stripped (#2235).
 5. ``f03_2043_memory_versions`` round trip: existing rows read ``version = 1``;
    the downgrade drops the table and the column.
+6. One clock (#2135): remember / update_memory / forget stamp the row and the
+   event from the server clock, so a window over server-clock times finds the
+   created events even with the database clock an hour ahead.
 
 The vector store, permissions and capacity gate are stubbed. Every seeded row
 is deleted again. Not executed in the local unit run — needs the DB container.
@@ -26,8 +29,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -35,9 +39,10 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from models.auth import Context, Workspace
+from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory, MemoryRevision
-from models.schemas import UpdateMemoryRequest
+from models.schemas import RememberRequest, UpdateMemoryRequest
+from services import session_rollback as sr
 from services.account_erasure_service import AccountErasureService
 from services.erasure_details import (
     StripCounts,
@@ -46,7 +51,10 @@ from services.erasure_details import (
     strip_subject_details,
     subject_memory_ids,
 )
+from services.memory_listing import changes_in_session
 from services.memory_service import MemoryService
+from services.quota_service import DailyReservation
+from services.write_provenance import SessionPrincipal
 from utils.datetime import utcnow
 from utils.exceptions import VersionConflictError
 
@@ -1155,3 +1163,150 @@ def test_f03_round_trip_reads_existing_rows_at_version_one() -> None:
                     conn.execute(text("DELETE FROM memories WHERE user_id = :u"), {"u": user})
             finally:
                 engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# #2135: one clock for every revision's ``at``
+# ---------------------------------------------------------------------------
+
+
+class _SkewedClock:
+    """A server clock one hour behind the database's, ticking 1 s per call.
+
+    Every value it hands out is kept, so a test can prove a stamp came from
+    it rather than from the database's ``now()``.
+    """
+
+    def __init__(self) -> None:
+        self.issued: list[datetime] = []
+        self._next = utcnow() - timedelta(hours=1)
+
+    def __call__(self) -> datetime:
+        value = self._next
+        self._next += timedelta(seconds=1)
+        self.issued.append(value)
+        return value
+
+
+async def test_every_revision_at_is_the_server_clock(async_engine: AsyncEngine) -> None:
+    """remember, update_memory and forget stamp the row and the event from the
+    server clock alone. With that clock an hour behind the database, a window
+    over the server-clock times still finds the created events — before
+    #2135 a created event took the database's ``now()``, fell an hour past
+    the window and the window planned around it."""
+    tag = uuid.uuid4().hex[:8]
+    owner = f"clock-it-{tag}"
+    ws_id, ctx_id = uuid.uuid4(), uuid.uuid4()
+    maker = _maker(async_engine)
+    async with maker() as session:
+        session.add(User(email=f"{owner}@test.example", user_id=owner, name=owner, role="user"))
+        await session.flush()
+        session.add(Workspace(id=ws_id, name=f"ws-{owner}", owner_user_id=owner))
+        await session.flush()
+        session.add(WorkspaceMember(workspace_id=ws_id, user_id=owner, role=WorkspaceRole.OWNER))
+        session.add(Context(id=ctx_id, workspace_id=ws_id, name="clock", created_by=owner))
+        await session.commit()
+    quota = MagicMock(
+        check_memory_quota=AsyncMock(return_value=(True, None)),
+        check_memories_per_day=AsyncMock(return_value=None),
+        reserve_memories_per_day=AsyncMock(
+            return_value=DailyReservation(key="quota:test:memories:day", count=1)
+        ),
+        release_memories_per_day=AsyncMock(return_value=None),
+    )
+    clock = _SkewedClock()
+    try:
+        with (
+            patch("services.memory_service.utcnow", clock),
+            patch("services.memory_service.process_pending_embedding", new=AsyncMock()),
+            patch("services.quota_service.QuotaService", return_value=quota),
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+        ):
+            since = clock._next
+            async with maker() as session:
+                svc = _service(session)
+
+                async def remember(summary: str) -> uuid.UUID:
+                    result = await svc.remember(
+                        RememberRequest(summary=summary, content=summary, type="fact"),
+                        user_id=owner,
+                        client="pytest",
+                        current_context_id=ctx_id,
+                        current_workspace_id=ws_id,
+                    )
+                    return result.memory_id
+
+                edited = await remember("a fact the clock test edits and forgets")
+                kept = await remember("a fact the clock test only creates")
+                await svc._update_in_place(
+                    UpdateMemoryRequest(memory_id=edited, importance=0.9), user_id=owner
+                )
+                await session.commit()
+                memory = await svc.memory_repo.get(edited)
+                assert memory is not None
+                svc._delete_memory_point = AsyncMock()  # type: ignore[method-assign]
+                await svc._soft_delete_memory(owner, memory, str(ws_id), str(ctx_id))
+                await session.commit()
+            until = clock._next
+
+        row, revisions = await _state(async_engine, edited)
+        assert [r.kind for r in revisions] == ["created", "updated", "forgotten"]
+        created, updated, forgotten = revisions
+        assert created.at == row.created_at
+        assert updated.at == row.updated_at
+        assert forgotten.at == row.deleted_at
+        stamps = [r.at for r in revisions]
+        assert all(stamp in clock.issued for stamp in stamps)  # the server clock's values
+        assert stamps == sorted(stamps) and len(set(stamps)) == 3
+        kept_row, (kept_created,) = await _state(async_engine, kept)
+        assert kept_created.at == kept_row.created_at and kept_created.at in clock.issued
+        assert created.at < kept_created.at  # stamps rise in write order
+
+        async with maker() as session:
+            db_now = await session.scalar(text("SELECT now()::timestamp"))
+            assert db_now is not None
+            # No stamp is the database's: each is an hour behind its clock.
+            for stamp in (*stamps, kept_created.at):
+                assert db_now - stamp > timedelta(minutes=50)
+
+            principal = SessionPrincipal(owner, None)
+            page = await changes_in_session(
+                session,
+                context_id=ctx_id,
+                session_id=None,
+                principal=principal,
+                owner_user_id=None,
+                since=since,
+                until=until,
+            )
+            assert [(c.memory_id, c.kind) for c in page.changes] == [
+                (edited, "created"),
+                (kept, "created"),
+                (edited, "updated"),
+                (edited, "forgotten"),
+            ]
+
+            plan = await sr.rollback_session(
+                session,
+                scope=sr.SessionScope(ctx_id, None, principal, since=since, until=until),
+                workspace_id=ws_id,
+                requested_by=owner,
+                dry_run=True,
+                classify=lambda _e: "internal_error",
+                new_correlation_id=lambda: "corr-clock",
+            )
+            by_memory = {item.memory_id: item for item in plan.items}
+            assert set(by_memory) == {edited, kept}
+            assert by_memory[kept].action == sr.ACTION_FORGET  # created in the window
+            # every event of the memory is in the window: nothing "after" it
+            assert by_memory[edited].cause != sr.CAUSE_MODIFIED_SINCE
+            assert plan.events == 4
+    finally:
+        async with maker() as session:
+            await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+            await session.execute(delete(User).where(User.user_id == owner))
+            await session.commit()
