@@ -870,10 +870,11 @@ class AccountErasureService:
     async def _execute(self, request: ErasureRequest, target: User) -> None:
         """Run the cross-store erasure for a single request.
 
-        Order: Qdrant -> workspaces -> Postgres (incl. audit_logs
-        pseudonymize, #2287) -> Redis -> audit row -> finalize. Qdrant first so a failure leaves a
-        recoverable Postgres state; Redis last because session/rate-limit data
-        is ephemeral and re-creatable from cookies if anything goes wrong.
+        Order: Qdrant -> workspaces -> Postgres (incl. the audit_logs
+        pseudonymize, #2287) -> payloads -> Redis -> audit row -> finalize.
+        Qdrant first so a failure leaves a recoverable Postgres state; Redis
+        last because session/rate-limit data is ephemeral and re-creatable
+        from cookies if anything goes wrong.
         """
         summary: dict[str, Any] = {}
         # Read before any failure: the handlers below roll back first, which

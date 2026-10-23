@@ -1673,7 +1673,9 @@ backups' retention in mind before `--apply --include-past-window`.
 **Run this once after upgrading to v0.124.0** if any account was erased on
 v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks
 double-erasure chains, stores the right bound and repairs failed requests,
-see below). An erasure on those versions could leave the erased
+see below; a run on v0.125.0 or later also pseudonymizes audit rows a failed
+audit-log step left, #2287 — run it again after that upgrade if a request
+failed at that step). An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
 (the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
 erasures on v0.113.0 through v0.120.x) and as the memory's live value where
@@ -1734,20 +1736,44 @@ anyway. Such a request has no completion time (`-` in the report); its strip
 on the memories the member authored is bounded at its `started_at` plus one
 hour (the sweep's own cutoff for a crashed run), so revision history other
 members wrote there within that hour is stripped and marked too, and later
-history stays. Steps after the Postgres step that never ran are not re-run:
-if the audit-log step failed, the member's earlier audit rows keep their
-account id and email (a failure in a later step no longer undoes that step,
-which commits on its own since v0.124.0).
+history stays. The marker's step is one of `payloads`, `redis`, `audit_row`
+and `finalize` (and `audit_logs` on a request that failed on v0.124.x).
+Steps after the Postgres step that never ran are not re-run, except the
+audit-log one (below).
+
+**Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0
+the pseudonymization of the member's own audit rows (`audit_logs.user_id`,
+their email in `user_email` and `resource`) is part of the Postgres step: it
+runs in the same transaction, so it cannot fail after the commit — a failure
+rolls the whole step back, the user row stays, and the request ends `failed`
+with its ids, retryable by a new request. Its count moved into the summary's
+`postgres` object (`postgres.audit_logs_pseudonymized`). On v0.124.x and
+earlier it ran after the commit, and a request whose audit-log step failed
+left the member's audit rows with their account id and email. The command
+pseudonymizes them, in the request's transaction, for any request in scope:
+the rows are found by the pseudonym (an `audit_logs.user_id` no user row has,
+whose pseudonym with the deployment's salt is the request's), and the email
+by the request's email hash (the one of those rows' `user_email` values whose
+sha256 is the request's `user_email_hash`). The plan lists `would
+pseudonymize audit rows <request id> <n> row(s)`, the apply report
+`pseudonymized audit rows …`; `email not recovered` means none of the rows
+carries the email the request was made under — then the account id is
+replaced and `user_email` left as it is. An account id that belongs to a user
+again (re-registered) is never matched: its rows may be the new account's, so
+they are kept and the plan prints `audit <request id> rows kept: the account
+id is in use again`. With a salt other than the erasure's, nothing matches
+and the rows stay. Rows where another member (an admin) acted on the erased
+member are not the member's own rows and are not touched, here as during the
+erasure. A second run finds nothing: the pseudonymized rows match no request.
 
 **Before `--apply`, read the `failure_reason` of every `would repair`
 request** directly in the database (`SELECT id, failure_reason FROM
 erasure_requests WHERE id = '<request id>'`) and keep a note of it: it is the
-only record of which step failed — and so whether the member's earlier audit
-rows still carry their account id and email — and the repair replaces it
-(the old text can name the account, so it is not kept).
+only record of which step failed, and the repair replaces it (the old text
+can name the account, so it is not kept).
 
 A request that changed gets one `account_erasure_reprocess` audit row (counts
-and the request id, under the pseudonyms of its `account_erasure` row).
+— the audit rows pseudonymized among them — and the request id, under the pseudonyms of its `account_erasure` row).
 The dry run writes and locks nothing and makes no vector-store call, and its
 report prints request ids and counts, never values. It previews each request
 on its own: where two erased members edited the same memory, applying the
