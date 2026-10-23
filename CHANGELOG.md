@@ -4,6 +4,32 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.124.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.124.0) — 2026-10-23
+
+Erasure completeness and sweep robustness: erasing a member who authored a time memory no longer fails, the erasure patches vector payloads after its commit and never fails a request on them, one failed request no longer stops the sweep, a request that fails after the Postgres step stays pseudonymized and re-processable, double-erasure chains restore the original author's value, and every erasure write locks its rows in id order.
+
+### Fixed
+- **Time memories through erasure** ([#2266](https://github.com/kagura-ai/memory-cloud/issues/2266)): erasing a member who authored a `time` memory failed on the `valid_trigger_window_format` check after their vectors were deleted. Such a memory now keeps only its trigger window (`year`/`month`/`day`/`hour`/`minute`/`from`/`until`); the trigger's `text`, the location and every other key are removed. On a memory another member authored, a restored value's trigger is normalized, or the live window is merged in without its `text`.
+- **Payloads after the erasure commit** ([#2266](https://github.com/kagura-ai/memory-cloud/issues/2266)): restored memories' vector payloads are patched after the Postgres commit, in groups of 50 under share locks, instead of inside the locked transaction. A patch that fails re-queues the memory for embedding and never fails the request. New summary keys `details_payload_synced`, `details_payload_skipped_{tombstone,shared,moved,requeued}`, `details_payload_requeued_after_error`, `details_payload_requeue_failed`.
+- **Sweep after a failed request** ([#2266](https://github.com/kagura-ai/memory-cloud/issues/2266)): one failed erasure request no longer stops the sweep for the requests after it.
+- **Rollback blocks** ([#2266](https://github.com/kagura-ai/memory-cloud/issues/2266)): a session-rollback block ends at the first row outside it, whatever field that row changed, and rollback rows record `restored_from`.
+- **Failures after the Postgres step** ([#2268](https://github.com/kagura-ai/memory-cloud/issues/2268)): a failure in the audit-log, Redis, audit or finalize step ends the request `failed` with `failure_reason = after_postgres_commit: <step>: <ExceptionClass>` (no exception text) and the row pseudonymized like a completed one. The audit-log pseudonymization commits on its own, and logs after the commit carry the request id, step and exception class only.
+- **Double-erasure chains** ([#2268](https://github.com/kagura-ai/memory-cloud/issues/2268)): when two erased members edited the same memory, the restore walks past every erased member's edits to the original author's value, whichever erasure is processed first.
+- **Erasure lock order** ([#2263](https://github.com/kagura-ai/memory-cloud/issues/2263)): every multi-row `memories` / `contexts` write of the erasure locks its rows in id order, including the rows the member deleted, so two erasures, or an erasure and a context restore, cannot deadlock. The member's own tombstones are deleted first; new summary key `memory_tombstones_deleted`, and `revision_details_stripped` / `memory_sessions_scrubbed` no longer count those tombstones.
+- **`update_context` `resource_id` description** ([#2279](https://github.com/kagura-ai/memory-cloud/issues/2279)): the description and the conflict message now say the value names this server's own inbound ingestion endpoint, unique on the server, and that setting it makes no outbound call.
+
+### Changed
+- **`reprocess_erasures`** ([#2268](https://github.com/kagura-ai/memory-cloud/issues/2268)): the command also covers `failed` requests whose Postgres step committed. A request that failed after that step on an earlier version, and still stores the raw account id, is repaired (pseudonym derived with the deployment's salt, `failure_reason` replaced by the marker) and re-processed. The strip on the member's authored memories is bounded at the new `memory_scrub_at` summary time, else the completion time, else `started_at` + 1 hour. The audit row gains `request_repaired`.
+- **One-shot commands** ([#2264](https://github.com/kagura-ai/memory-cloud/issues/2264), [#2268](https://github.com/kagura-ai/memory-cloud/issues/2268)): every one-shot command runs the production secret guard before opening a database session and names the missing variables instead of printing a traceback. `--yes` without `--apply` now exits 2.
+- **Admin CLIs on the host** ([#2264](https://github.com/kagura-ai/memory-cloud/issues/2264)): `create_admin` and `reset_password` read `API_KEY_SECRET` and the provider keys with `docker exec` on the pinned container names (`kagura-api`, `kagura-api-blue`, `kagura-api-green`) and refuse when blue and green disagree. The OAuth E2E override guard reads `ENVIRONMENT` through the settings, so the env file counts.
+- **CI** ([#2272](https://github.com/kagura-ai/memory-cloud/issues/2272)): Playwright 1.64.1; the Playwright jobs run on `ubuntu-latest` again.
+
+### Notes
+- No migration, no new environment variables.
+- Operator action: after upgrading, run `python -m src.cli.reprocess_erasures --all` once inside the API container to plan, then `--all --apply --yes` off-peak. Before `--apply`, read the `failure_reason` of every `would repair` request in the database; the repair replaces it. See `docs/deployment.md`.
+- An erasure request that failed on v0.123.x with `valid_trigger_window_format` in `failure_reason` needs a new erasure request for that account; it completes on v0.124.0.
+- Rollback to v0.123.0 needs no data change. While on v0.123.0, erasures of time-memory authors fail again, and requests v0.124.0 marked `after_postgres_commit` are invisible to v0.123.0's re-process command; re-run `reprocess_erasures --all --apply --yes` after upgrading again.
+
 ## [v0.123.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.123.0) — 2026-10-21
 
 Erasure completeness and production guards: erasing an account now also puts back the `details` an erased member last wrote on memories other members authored, a one-off command applies today's erasure rules to erasures that ran on earlier versions, the erasure's revision-log updates lock their rows in a fixed order, and the production secret guard now also covers database migrations and the admin CLIs.
