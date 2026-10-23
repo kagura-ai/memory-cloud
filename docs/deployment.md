@@ -1668,7 +1668,7 @@ unless `--include-past-window` is given. Until then such a context can still
 be restored with its files; run the plan, read the warning, and keep the
 backups' retention in mind before `--apply --include-past-window`.
 
-### Erasures run before v0.123.0 — Issue #2243
+### Erasures run before v0.124.0 — Issues #2243 and #2268
 
 **Run this once after upgrading to v0.124.0** if any account was erased on
 v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks

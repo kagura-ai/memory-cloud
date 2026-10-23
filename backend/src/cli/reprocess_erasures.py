@@ -116,7 +116,7 @@ STALE_RUN = timedelta(hours=1)
 
 @dataclass
 class RequestChange:
-    """What re-processing one completed erasure request changed (or would)."""
+    """What re-processing one erasure request changed (or would): a completed one, or one that failed after its Postgres step."""
 
     request_id: UUID
     # None on a request that failed after its Postgres step (never completed)
@@ -450,7 +450,8 @@ def _print_plan(result: ReprocessResult) -> None:
         )
     for c in result.changed:
         if c.repaired:
-            print(f"{'would repair' if result.dry_run else 'repaired'}  {c.request_id}  {REPAIRED}")
+            # The plan always runs as a dry run (``_oneshot.run_plan_apply``).
+            print(f"would repair  {c.request_id}  {REPAIRED}")
     for request_id, reason in result.skipped:
         print(f"skipped  {request_id}  {reason}")
     verb = "would change" if result.dry_run else "changed"
@@ -527,8 +528,12 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     scope = parser.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--all", action="store_true", help="every completed erasure request")
-    scope.add_argument("--request", type=UUID, help="one completed erasure request (its id)")
+    scope.add_argument(
+        "--all",
+        action="store_true",
+        help="every completed erasure request, and every request that failed after its Postgres step",
+    )
+    scope.add_argument("--request", type=UUID, help="one such erasure request (its id)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--plan",
