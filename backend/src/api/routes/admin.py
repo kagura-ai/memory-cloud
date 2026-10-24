@@ -1798,33 +1798,52 @@ async def recover_context(
             errors=[no_points],
         )
 
-    # Step 2: Determine workspace_id from first point if not provided
-    first_payload = all_points[0].payload or {}
-    workspace_id = request_body.workspace_id or first_payload.get("workspace_id", "")
-    if not workspace_id:
-        return ContextRecoveryResponse(
-            context_id=context_id,
-            workspace_id="",
-            qdrant_points_found=len(all_points),
-            memories_recovered=0,
-            memories_already_existed=0,
-            context_record_created=False,
-            search_config_restored=False,
-            dry_run=request_body.dry_run,
-            errors=["Cannot determine workspace_id from Qdrant data. Please provide it."],
-        )
+    # Step 2: Determine workspace_id. #1963: a context row that still exists
+    # decides it — a memory must live in its context's workspace
+    # (fk_memories_workspace_context) — and a request naming another one is
+    # refused. Without a row: the request's, else the first point's.
+    requested_workspace_id = request_body.workspace_id
+    if requested_workspace_id:
+        try:
+            requested_workspace_id = str(PyUUID(requested_workspace_id))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
+    context_workspace_id = (
+        await db.execute(select(Context.workspace_id).where(Context.id == PyUUID(context_id)))
+    ).scalar_one_or_none()
+    context_exists = context_workspace_id is not None
 
-    # Validate workspace_id UUID format
-    try:
-        workspace_id = str(PyUUID(workspace_id))
-    except (TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
+    if context_exists:
+        workspace_id = str(context_workspace_id)
+        if requested_workspace_id and requested_workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=400,
+                detail="workspace_id does not match the context's workspace",
+            )
+    else:
+        first_payload = all_points[0].payload or {}
+        workspace_id = requested_workspace_id or first_payload.get("workspace_id", "")
+        if not workspace_id:
+            return ContextRecoveryResponse(
+                context_id=context_id,
+                workspace_id="",
+                qdrant_points_found=len(all_points),
+                memories_recovered=0,
+                memories_already_existed=0,
+                context_record_created=False,
+                search_config_restored=False,
+                dry_run=request_body.dry_run,
+                errors=["Cannot determine workspace_id from Qdrant data. Please provide it."],
+            )
+
+        # Validate workspace_id UUID format
+        try:
+            workspace_id = str(PyUUID(workspace_id))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
 
     if request_body.dry_run:
         # Just report what we found
-        # Check if context record exists
-        existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
-        context_exists = existing_context.scalar_one_or_none() is not None
 
         # Batch-check existing memory records (avoid N+1)
         point_ids = [PyUUID(str(p.id)) for p in all_points]
@@ -1857,8 +1876,7 @@ async def recover_context(
 
     # Step 3: Create Context record if missing
     context_record_created = False
-    existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
-    if existing_context.scalar_one_or_none() is None:
+    if not context_exists:
         raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
         # Sanitize name to match DB constraint ^[a-z0-9_-]+$
         context_name = re.sub(r"[^a-z0-9_-]", "-", raw_name.lower()).strip("-")
@@ -1914,6 +1932,10 @@ async def recover_context(
             continue
 
         payload = point.payload or {}
+        # #1963: a point whose payload names another workspace (or none) is
+        # missed by the workspace-filtered search, so the row goes back
+        # through the embedding sweep, which rewrites the point's payload.
+        point_matches = str(payload.get("workspace_id") or "") == workspace_id
         try:
             new_memory = Memory(
                 id=mem_id,
@@ -1928,7 +1950,7 @@ async def recover_context(
                 importance=payload.get("importance", 0.5),
                 scope=payload.get("scope", "persistent"),
                 tags=payload.get("tags", []),
-                embedding_status="success",  # Already in Qdrant
+                embedding_status="success" if point_matches else "pending",
                 client="admin-recovery",
                 source="admin_recovery",
             )
