@@ -1527,7 +1527,6 @@ async def _mcp_update_search_config(exc: MemoryCloudException) -> dict:
     with (
         patch("db.base.get_db", new=get_db),
         patch("services.permission_service.PermissionService", return_value=perms),
-        patch("services.plan_seats.ensure_context_writable", new=AsyncMock()),
         patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
         patch(
             "services.permission_service.gate_content_chunks_change",
@@ -1566,7 +1565,6 @@ async def _mcp_update_search_config_selector(exc: MemoryCloudException) -> dict:
     with (
         patch("db.base.get_db", new=get_db),
         patch("services.permission_service.PermissionService", return_value=perms),
-        patch("services.plan_seats.ensure_context_writable", new=AsyncMock()),
         patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
         patch(
             "services.permission_service.gate_llm_selector_change",

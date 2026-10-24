@@ -156,9 +156,9 @@ def _recall_post_commit_writes_need_a_session(monkeypatch):
 
 
 # Modules that call the capacity lock directly, and the name each binds. The
-# context resolvers carry it for every context-addressed route (#1948); the
-# workspace-addressed routes that resolve no context keep their own call
-# (#1941). Their tests drive the handlers with a mocked ``db`` / ``perm`` /
+# context resolvers carry it for every context-addressed route (#1948) and MCP
+# tool (#1954, ``_helpers._resolve_context``); the workspace-addressed routes
+# that resolve no context keep their own call (#1941). Their tests drive the handlers with a mocked ``db`` / ``perm`` /
 # service whose session is a bare MagicMock; the same rule as above applies.
 _CAPACITY_GATED_ROUTES = (
     ("services.permission_service", "ensure_not_capacity_locked"),
@@ -175,6 +175,7 @@ _CAPACITY_GATED_ROUTES = (
     ("api.routes.sleep_reports", "ensure_not_capacity_locked"),
     ("api.routes.public_search", "ensure_not_capacity_locked"),
     ("api.routes.resource_ingest", "ensure_not_capacity_locked"),
+    ("mcp_server.tools._helpers", "ensure_not_capacity_locked"),
 )
 
 

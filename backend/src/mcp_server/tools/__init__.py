@@ -28,6 +28,8 @@ from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
     _resolve_context_id,
+    reset_mcp_capacity_policy,
+    set_mcp_capacity_policy,
 )
 
 logger = logging.getLogger(__name__)
@@ -650,7 +652,7 @@ async def execute_tool_call(
     # #1941: a Free workspace over its capacity loses search and saving until
     # it is cleaned up; listing, deleting and usage stay callable. Every tool
     # is classified in ``_capacity_gate`` (a coverage test pins the split).
-    from mcp_server.tools._capacity_gate import capacity_lock_refusal
+    from mcp_server.tools._capacity_gate import capacity_lock_refusal, capacity_policy_for
 
     capacity_refusal = await capacity_lock_refusal(tool_name, args, user_id, workspace_id)
     if capacity_refusal is not None:
@@ -681,6 +683,10 @@ async def execute_tool_call(
             except ValueError as e:
                 return _error_response("invalid_context_id_format", str(e))
 
+    # #1954: the context resolvers check the capacity lock after authorization
+    # for the tools ``_capacity_gate`` classifies as resolver-gated. Reset in
+    # ``finally`` so the policy never outlives this call.
+    capacity_token = set_mcp_capacity_policy(capacity_policy_for(tool_name))
     try:
         result = await handler(args, user_id, workspace_id)
         return _with_manual_help(
@@ -714,6 +720,8 @@ async def execute_tool_call(
         # #1684: stable code + help + correlation_id + retry advice instead of
         # ``{"error": str(e)}``; the exception text stays in the server log.
         return _tool_exception_response(tool_name, e)
+    finally:
+        reset_mcp_capacity_policy(capacity_token)
 
 
 # Backward-compat re-exports for test_mcp_server_e2e.py

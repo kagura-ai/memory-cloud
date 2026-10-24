@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from mcp_server.tools._errors import describe_tool_exception
 from mcp_server.tools._helpers import ToolErrorContent
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import CapacityLockedError
 from utils.logger import get_logger
 
@@ -159,6 +160,47 @@ CAPACITY_LOCK_SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
         "complete_file_upload",
     }
 )
+
+# BLOCKED tools whose handler resolves its target context through a resolver
+# that checks the lock after authorization (#1954): ``_resolve_context`` /
+# ``_resolve_context_for_read`` read the running tool's policy, and
+# update_search_config passes it to ``check_context_write``. A caller who may
+# not reach the context gets the handler's not-found (or its own refusal)
+# instead of the lock.
+CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
+    {
+        "bootstrap",
+        "changes_since",
+        "create_edge",
+        "feedback",
+        "get_sleep_history",
+        "get_state",
+        "list_edges",
+        "merge_contexts",
+        "recall_nearby",
+        "recall_series",
+        "recall_upcoming",
+        "record_measurement",
+        "rollback_session",
+        "set_state",
+        "update_edge",
+        "update_search_config",
+    }
+)
+
+
+def capacity_policy_for(tool_name: str) -> CapacityPolicy:
+    """The capacity policy the context resolvers apply while ``tool_name`` runs.
+
+    BLOCKED only for ``CAPACITY_LOCK_RESOLVER_GATED_TOOLS``. A service-gated
+    tool resolves with ALLOWED (its service checks after authorization — no
+    second COUNT+SUM per call on a lock-candidate workspace), and an ALLOWED
+    tool is never locked.
+    """
+    if tool_name in CAPACITY_LOCK_RESOLVER_GATED_TOOLS:
+        return CapacityPolicy.BLOCKED
+    return CapacityPolicy.ALLOWED
+
 
 # BLOCKED tools with NO service-level second line: the dispatcher is their
 # only enforcement, for argument-derived and session workspaces alike.

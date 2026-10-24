@@ -54,9 +54,25 @@ async def test_read_forwards_contextvar_scope_to_service():
         P.return_value.resolve_context_for_workspace_read = resolver
         await _resolve_context_for_read(AsyncMock(), "u", uuid4())
         assert resolver.await_args.kwargs["key_workspace_id"] == ws
-        # #1948: the dispatcher's table is the MCP capacity decision; the
-        # resolver is not asked to gate again.
-        assert resolver.await_args.kwargs["capacity"] is CapacityPolicy.ALLOWED
+        # #1954: the running tool's policy is forwarded; unset (a handler
+        # called outside the dispatcher) fails closed.
+        assert resolver.await_args.kwargs["capacity"] is CapacityPolicy.BLOCKED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [CapacityPolicy.ALLOWED, CapacityPolicy.BLOCKED])
+async def test_read_forwards_the_running_tools_capacity_policy(policy):
+    from mcp_server.tools._helpers import reset_mcp_capacity_policy, set_mcp_capacity_policy
+
+    token = set_mcp_capacity_policy(policy)
+    try:
+        with patch("services.permission_service.PermissionService") as P:
+            resolver = AsyncMock(return_value=MagicMock(workspace_id=uuid4()))
+            P.return_value.resolve_context_for_workspace_read = resolver
+            await _resolve_context_for_read(AsyncMock(), "u", uuid4())
+    finally:
+        reset_mcp_capacity_policy(token)
+    assert resolver.await_args.kwargs["capacity"] is policy
 
 
 @pytest.mark.asyncio
