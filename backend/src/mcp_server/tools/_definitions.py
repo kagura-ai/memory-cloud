@@ -193,7 +193,7 @@ Manual: guide(["remember_batch"]).""",
             "name": "update_memory",
             "description": """Update a memory in place (memory_id) or upsert by external_id (not found → created; found → replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
 SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
-Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict.
+Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict, edge_exists.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",

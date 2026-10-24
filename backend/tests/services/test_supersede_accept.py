@@ -82,4 +82,4 @@ class TestAcceptRequestValidation:
         from models.schemas import UPDATE_MEMORY_EDIT_FIELDS
         from services import memory_service
 
-        assert memory_service._UPDATE_CONTENT_FIELDS == UPDATE_MEMORY_EDIT_FIELDS
+        assert memory_service.UPDATE_MEMORY_EDIT_FIELDS is UPDATE_MEMORY_EDIT_FIELDS

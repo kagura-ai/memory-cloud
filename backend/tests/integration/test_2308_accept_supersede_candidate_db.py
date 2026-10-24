@@ -294,3 +294,80 @@ async def test_a_different_declared_edge_on_the_pair_is_not_clobbered(db_session
     assert exc.value.existing["edge_type"] == "related_to"
     assert [e.edge_type for e in await _edges(db_session, newer, older)] == ["related_to"]
     assert (await _row(db_session, newer)).supersede_candidate is not None
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_written_after_this_memory_is_not_accepted(db_session, quiet_write):
+    """A neighbour whose embedding finished first can be stored as the earlier
+    memory's candidate; accepting it would hide the newer fact."""
+    owner, ws, ctx = await _scope(db_session)
+    earlier = await _write(db_session, owner, ws, ctx, "the earlier fact", age_days=2)
+    later = await _write(db_session, owner, ws, ctx, "the later fact", age_days=0)
+    await _store(db_session, earlier, _candidate(later))
+
+    with pytest.raises(ValueError, match="written after it"):
+        await _accept(db_session, owner, ws, ctx, earlier)
+    await db_session.rollback()
+
+    assert await _edges(db_session, earlier, later) == []
+    assert (await _row(db_session, earlier)).supersede_candidate is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_is_a_server_error_not_no_candidate(db_session, quiet_write):
+    owner, ws, ctx = await _scope(db_session)
+    older = await _write(db_session, owner, ws, ctx, "the older fact", age_days=1)
+    newer = await _write(db_session, owner, ws, ctx, "the newer fact", age_days=0)
+    await _store(db_session, newer, _candidate(older))
+
+    with (
+        patch(
+            "services.agent_binding_service.filter_memory_rows_by_binding",
+            new=AsyncMock(side_effect=RuntimeError("lookup down")),
+        ),
+        pytest.raises(RuntimeError, match="lookup down"),
+    ):
+        await _accept(db_session, owner, ws, ctx, newer)
+    await db_session.rollback()
+
+    assert await _edges(db_session, newer, older) == []
+
+
+@pytest.mark.asyncio
+async def test_an_edge_kept_as_another_type_is_not_reported_accepted(db_session, quiet_write):
+    """The upsert's declared-link race guard can keep a concurrent declared
+    edge of another type; the accept must not then report success."""
+    from services.edge_service import EdgeWriteResult
+
+    owner, ws, ctx = await _scope(db_session)
+    older = await _write(db_session, owner, ws, ctx, "the older fact", age_days=1)
+    newer = await _write(db_session, owner, ws, ctx, "the newer fact", age_days=0)
+    await _store(db_session, newer, _candidate(older))
+    kept = EdgeWriteResult(operation="created", edge={"edge_type": "related_to"})
+
+    with (
+        patch("services.edge_service.create_declared_edge", new=AsyncMock(return_value=kept)),
+        pytest.raises(SupersedeEdgeConflictError),
+    ):
+        await _accept(db_session, owner, ws, ctx, newer)
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_a_suggestion_left_uncleared_rolls_the_accept_back(db_session, quiet_write):
+    """The clear inside create_declared_edge is best-effort; if it did not run,
+    nothing commits rather than a success with the suggestion still surfacing."""
+    owner, ws, ctx = await _scope(db_session)
+    older = await _write(db_session, owner, ws, ctx, "the older fact", age_days=1)
+    newer = await _write(db_session, owner, ws, ctx, "the newer fact", age_days=0)
+    await _store(db_session, newer, _candidate(older))
+
+    with (
+        patch("services.edge_service.accept_supersede_candidate_if_matching", new=AsyncMock()),
+        pytest.raises(RuntimeError, match="not cleared"),
+    ):
+        await _accept(db_session, owner, ws, ctx, newer)
+    await db_session.rollback()
+
+    assert await _edges(db_session, newer, older) == []
+    assert (await _row(db_session, newer)).supersede_candidate is not None

@@ -127,6 +127,20 @@ async def test_conflicting_arguments_are_a_validation_error(extra):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["null", "no", 1])
+async def test_a_non_boolean_flag_fails_closed(value):
+    """Like create_edge's overwrite: an uncoerced value never writes an edge."""
+    service = MagicMock()
+    service.update_memory = AsyncMock()
+
+    body = await _call(service, {"memory_id": str(uuid4()), "accept_supersede_candidate": value})
+
+    assert body["error"] == "validation_error"
+    assert "accept_supersede_candidate must be a boolean" in body["message"]
+    service.update_memory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_no_candidate_is_a_validation_error_with_the_hint():
     service = MagicMock()
     service.update_memory = AsyncMock(

@@ -484,6 +484,15 @@ async def handle_update_memory(
     verbose = args.get("verbose", False)
     if not isinstance(verbose, bool):
         return _error_response("validation_error", "verbose must be a boolean.")
+    # #2308: fail closed, like create_edge's overwrite — the flag writes a
+    # shadowing edge, so a value the coercion layer left as a string is refused.
+    accept_supersede = args.get("accept_supersede_candidate")
+    if accept_supersede is None:
+        accept_supersede = False
+    elif not isinstance(accept_supersede, bool):
+        return _error_response(
+            "validation_error", "accept_supersede_candidate must be a boolean (true or false)."
+        )
     try:
         request = UpdateMemoryRequest(
             memory_id=UUID(memory_id) if memory_id else None,
@@ -500,7 +509,7 @@ async def handle_update_memory(
             # #1504: rejection path for a supersede suggestion.
             dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
             # #2308: the acceptance path (create_edge is outside the core profile).
-            accept_supersede_candidate=bool(args.get("accept_supersede_candidate", False)),
+            accept_supersede_candidate=accept_supersede,
             # #2043: optimistic concurrency (None = last writer wins).
             expected_version=args.get("expected_version"),
         )
