@@ -1994,7 +1994,9 @@ the number of memories it would bring back.
 The older endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
 from surviving vector-store points, for a context whose rows are gone. It finds
 no points for a context deleted on v0.88.0 or later, and says to use the
-restore above when the context's row is still there.
+restore above when the context's row is still there. When the row exists, the
+recovered memories take its workspace; a `workspace_id` in the request that
+names another workspace answers `400` (#1963).
 
 ## Capacity-over purge rollout — Issue #1969
 
@@ -2774,8 +2776,8 @@ WHERE workspace_id IS NULL AND context_id IS NULL AND deleted_at IS NOT NULL;
 -- embedding so its search point gets the workspace payload)
 SELECT count(*) FROM memories WHERE workspace_id IS NULL;
 
--- audit only: rows whose stored workspace disagrees with their context's.
--- The migration leaves them as they are; decide separately which side is right.
+-- rows whose stored workspace disagrees with their context's. e95 leaves
+-- them as they are; f14 (#1963, below) moves them to the context's workspace.
 SELECT count(*) FROM memories m JOIN contexts c ON c.id = m.context_id
 WHERE m.workspace_id <> c.workspace_id;
 ```
@@ -2838,6 +2840,50 @@ SELECT public_id, workspace_id, user_id, created_at
 A key whose link points at a connector outside its own workspace is refused at
 verification with the warning `api_key_rejected_connector_workspace_mismatch`;
 only a direct write to the table can produce one.
+
+### Migration `f14_1963_memories_ws_ctx_fk` (#1963)
+
+A memory now has to live in its context's workspace: the foreign key
+`fk_memories_workspace_context` ties `memories (workspace_id, context_id)` to
+`contexts (workspace_id, id)` (a new unique index, `ux_contexts_workspace_id_id`).
+A memory without a context is unaffected, and a context with memories can no
+longer move to another workspace (nothing in the application does that).
+
+Rows written before the constraint can still disagree. The migration **moves
+each one to its context's workspace**, so it counts toward that workspace's
+memory limit from then on (it can push a workspace over its limit) and shows up
+wherever its context is read. A repaired row that is live, in a live context,
+is re-queued for embedding, because its search points still carry the old
+workspace. `updated_at` is unchanged. The log lists how many rows moved, how
+many were re-queued, the busiest `old -> new` workspace pairs and sample ids,
+or says there were none. Size it before upgrading:
+
+```sql
+-- rows the migration will move (each to its context's workspace)
+SELECT m.workspace_id AS old_ws, c.workspace_id AS new_ws, count(*)
+  FROM memories m JOIN contexts c ON c.id = m.context_id
+ WHERE m.workspace_id <> c.workspace_id
+ GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+A memory whose context row is missing cannot exist while the `context_id`
+foreign key holds; if one does, the migration refuses before writing any row,
+with the count and up to ten ids. The migration also logs, as a warning, how
+many graph edges name a workspace other than their context's; it does not
+change them (`backend/scripts/audit_edge_context_invariant.py` reviews them).
+
+Locks: the unique index is built `CONCURRENTLY` (no write is blocked). The
+foreign key is added `NOT VALID` (no scan; writers on `memories` and `contexts`
+wait for the `ALTER` itself, at most `lock_timeout` 5 s). The repair runs in
+batches of 500 rows, each committed on its own, and `VALIDATE` scans
+`memories` without blocking reads or writes. A lock timeout, or an
+interrupted index build, fails the migration; run it again and it resumes
+where it stopped. From the `ALTER` on, no writer can create a disagreeing
+row, so nothing needs re-running after the traffic switch.
+
+`POST /api/v1/admin/contexts/recover` follows the same rule: when the
+context's row exists, its workspace is the one the recovered memories get,
+and a request naming another `workspace_id` answers `400`.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
