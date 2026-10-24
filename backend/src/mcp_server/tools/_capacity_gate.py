@@ -1,4 +1,4 @@
-"""Capacity-over lock at the MCP dispatcher (#1941).
+"""Capacity-over lock classification for the MCP tools (#1941, #1954).
 
 Every registered tool is classified here, once, as BLOCKED or ALLOWED while
 the target workspace is over its Free capacity (``services.capacity_lock``).
@@ -10,8 +10,19 @@ cap — listing, deleting, usage, the manuals, export — and loses search and
 saving. A content reader is BLOCKED (the lock exists because reading paid-plan
 data on Free is the paid plan's value); pure metadata is ALLOWED.
 
-The service layer checks again on the memory read/write paths, so a tool that
-reaches ``MemoryService`` is refused even if it were misclassified here.
+Where a BLOCKED tool is checked (#1954; the three sets partition BLOCKED,
+pinned by ``tests/mcp_server/test_capacity_resolver_gate.py``):
+
+* ``CAPACITY_LOCK_SERVICE_GATED_TOOLS`` — by the service the handler calls,
+  after authorization.
+* ``CAPACITY_LOCK_RESOLVER_GATED_TOOLS`` — by the handler's context resolver,
+  after authorization: ``capacity_policy_for`` is BLOCKED for these, and the
+  dispatcher hands it to the resolvers through ``_helpers.mcp_capacity_policy``.
+* ``CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS`` — here, on the caller's session
+  workspace, before the handler (``capacity_lock_refusal``).
+
+A service- or resolver-gated call that names no target in its arguments is
+also checked here on the session workspace, as before #1954.
 """
 
 from __future__ import annotations
@@ -141,10 +152,9 @@ CAPACITY_LOCK_ALLOWED_TOOLS: frozenset[str] = frozenset(
 
 # BLOCKED tools whose handler reaches a service that checks the lock itself,
 # AFTER authorization (MemoryService read/write paths, FileStorageService
-# uploads, ContextService.create_context). For a target named in the
-# arguments the dispatcher leaves these to that post-authorization check, so
-# a caller who may not reach the target gets the handler's not-found and the
-# lock is no existence or billing-state oracle (CSO F3).
+# uploads, ContextService.create_context, AgentBootstrapService.resolve_context).
+# Their resolvers run with ALLOWED (``capacity_policy_for``): the service's
+# check is the one that answers.
 CAPACITY_LOCK_SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "recall",
@@ -158,6 +168,9 @@ CAPACITY_LOCK_SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
         "create_context",
         "init_file_upload",
         "complete_file_upload",
+        # The service resolves the agent's context with BLOCKED (#1954), before
+        # any fail-soft component runs.
+        "get_agent_bootstrap",
     }
 )
 
@@ -188,6 +201,18 @@ CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# BLOCKED tools checked only here, on the caller's session workspace. Their
+# handlers confine the target to that workspace (the analysis tools, the
+# resource / connector tools) or take an id the caller owns (the sleep report
+# tools), so the session workspace answers for whatever id is named — the
+# check runs before authorization without telling anything about another
+# workspace.
+CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS: frozenset[str] = (
+    CAPACITY_LOCK_BLOCKED_TOOLS
+    - CAPACITY_LOCK_SERVICE_GATED_TOOLS
+    - CAPACITY_LOCK_RESOLVER_GATED_TOOLS
+)
+
 
 def capacity_policy_for(tool_name: str) -> CapacityPolicy:
     """The capacity policy the context resolvers apply while ``tool_name`` runs.
@@ -202,45 +227,31 @@ def capacity_policy_for(tool_name: str) -> CapacityPolicy:
     return CapacityPolicy.ALLOWED
 
 
-# BLOCKED tools with NO service-level second line: the dispatcher is their
-# only enforcement, for argument-derived and session workspaces alike.
-# ``bootstrap`` / ``get_agent_bootstrap`` are here although they call
-# load_pinned/recall: their components are fail-soft, so a service refusal
-# would only blank one lane while the others (upcoming, state, …) answered.
-CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS: frozenset[str] = (
-    CAPACITY_LOCK_BLOCKED_TOOLS - CAPACITY_LOCK_SERVICE_GATED_TOOLS
-)
-
 # "This workspace is not a lock candidate" (paid, self-hosted, admin-managed
 # Free), cached per session workspace so a blocked call on such a workspace
 # opens no database session at all. Same shape as ``_RATE_LIMIT_CACHE``. There
 # is no production hook that invalidates on a plan push (the entitlement PUT
 # does not call ``invalidate_rate_limit_cache`` either), so the short TTL
-# bounds how long a workspace that just returned to Free goes unchecked here;
-# the service-level checks are unaffected.
-#
-# Keyed by ``(kind, id)``: ``("ws", workspace_id)`` for a session or named
-# workspace, ``("ctx", context_id)`` for a context named in the arguments — a
-# dispatcher-only tool called with a context of a paid workspace then costs no
-# session either after its first call. A context is cached only when the whole
-# call resolved to no candidate at all.
-_NOT_CANDIDATE_CACHE: dict[tuple[str, UUID], float] = {}
+# bounds how long a workspace that just returned to Free goes unchecked here.
+# Only this pre-authorization check reads it: the resolvers and services check
+# after authorization without a cache (#1954), so a stale answer never reaches
+# them.
+_NOT_CANDIDATE_CACHE: dict[UUID, float] = {}
 _NOT_CANDIDATE_TTL = 30.0  # seconds
 _NOT_CANDIDATE_CACHE_MAX_SIZE = 10_000
 
 
-def _known_not_candidate(target_id: UUID, kind: str = "ws") -> bool:
-    key = (kind, target_id)
-    expires = _NOT_CANDIDATE_CACHE.get(key)
+def _known_not_candidate(workspace_id: UUID) -> bool:
+    expires = _NOT_CANDIDATE_CACHE.get(workspace_id)
     if expires is None:
         return False
     if expires <= time.monotonic():
-        _NOT_CANDIDATE_CACHE.pop(key, None)
+        _NOT_CANDIDATE_CACHE.pop(workspace_id, None)
         return False
     return True
 
 
-def _remember_not_candidate(target_id: UUID, kind: str = "ws") -> None:
+def _remember_not_candidate(workspace_id: UUID) -> None:
     now = time.monotonic()
     if len(_NOT_CANDIDATE_CACHE) >= _NOT_CANDIDATE_CACHE_MAX_SIZE:
         for key in [k for k, v in _NOT_CANDIDATE_CACHE.items() if v <= now]:
@@ -248,7 +259,7 @@ def _remember_not_candidate(target_id: UUID, kind: str = "ws") -> None:
         if len(_NOT_CANDIDATE_CACHE) >= _NOT_CANDIDATE_CACHE_MAX_SIZE:
             oldest = min(_NOT_CANDIDATE_CACHE, key=lambda k: _NOT_CANDIDATE_CACHE[k])
             del _NOT_CANDIDATE_CACHE[oldest]
-    _NOT_CANDIDATE_CACHE[(kind, target_id)] = now + _NOT_CANDIDATE_TTL
+    _NOT_CANDIDATE_CACHE[workspace_id] = now + _NOT_CANDIDATE_TTL
 
 
 def invalidate_capacity_candidate_cache(workspace_id: UUID | None = None) -> None:
@@ -256,10 +267,10 @@ def invalidate_capacity_candidate_cache(workspace_id: UUID | None = None) -> Non
     if workspace_id is None:
         _NOT_CANDIDATE_CACHE.clear()
     else:
-        _NOT_CANDIDATE_CACHE.pop(("ws", workspace_id), None)
+        _NOT_CANDIDATE_CACHE.pop(workspace_id, None)
 
 
-# Arguments naming a context whose workspace is the target. ``source_id`` /
+# Arguments naming a target the handler resolves itself. ``source_id`` /
 # ``target_id`` are NOT here: in create_edge / update_edge they are memory ids,
 # and those tools carry ``context_id`` as well. merge_contexts names its two
 # contexts ``source_context_id`` / ``target_context_id``. A test checks every
@@ -299,6 +310,11 @@ def _argument_targets(args: dict[str, Any]) -> tuple[set[UUID], UUID | None, UUI
     return _target_context_ids(args), _uuid(args.get("workspace_id")), _uuid(args.get("file_id"))
 
 
+def _names_a_target(args: dict[str, Any]) -> bool:
+    context_ids, workspace_arg, file_id = _argument_targets(args)
+    return bool(context_ids) or workspace_arg is not None or file_id is not None
+
+
 async def _candidate_workspaces(db: Any, where: Any) -> list[Any]:
     """Lock-candidate workspaces matching ``where`` — one query, filtered in SQL."""
     from models.auth import Workspace
@@ -310,124 +326,46 @@ async def _candidate_workspaces(db: Any, where: Any) -> list[Any]:
     return list(rows.all())
 
 
-def _argument_target_clause(
-    context_ids: set[UUID], workspace_arg: UUID | None, file_id: UUID | None
-) -> Any:
-    from sqlalchemy import or_
-
-    from models.auth import Context, Workspace
-    from models.file_objects import FileObject
-
-    clauses = []
-    if context_ids:
-        clauses.append(
-            Workspace.id.in_(
-                select(Context.workspace_id).where(
-                    Context.id.in_(context_ids), Context.deleted_at.is_(None)
-                )
-            )
-        )
-    if workspace_arg is not None:
-        clauses.append(Workspace.id == workspace_arg)
-    if file_id is not None:
-        clauses.append(
-            Workspace.id.in_(select(FileObject.workspace_id).where(FileObject.id == file_id))
-        )
-    return or_(*clauses)
-
-
-async def _names_public_context(db: Any, workspace_id: UUID, context_ids: set[UUID]) -> bool:
-    """Whether the call names a live public context of ``workspace_id``."""
-    if not context_ids:
-        return False
-    from sqlalchemy import exists
-
-    from models.auth import Context
-
-    found = await db.scalar(
-        select(
-            exists().where(
-                Context.id.in_(context_ids),
-                Context.workspace_id == workspace_id,
-                Context.is_public.is_(True),
-                Context.deleted_at.is_(None),
-            )
-        )
-    )
-    return bool(found)
-
-
 async def capacity_lock_refusal(
     tool_name: str,
     args: dict[str, Any],
-    user_id: str,
     workspace_id: UUID | None,
 ) -> ToolErrorContent | None:
-    """The ``capacity_locked`` envelope when a blocked tool targets a locked workspace.
+    """The ``capacity_locked`` envelope when a blocked tool runs on a locked session workspace.
 
-    * Target named in the arguments: only for
-      ``CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS``, and only when the caller is a
-      member of that workspace (else the handler's not-found answers). The
-      service-gated tools are left to their post-authorization check.
-    * No target in the arguments: the session workspace (the caller's own) is
+    * A service- or resolver-gated tool whose arguments name its target: no
+      check here — the check after authorization answers, so a caller who may
+      not reach the target gets the handler's not-found (#1954).
+    * Every other blocked call: the session workspace (the caller's own) is
       enforced, skipping the database entirely while it is cached as not a
-      lock candidate.
+      lock candidate. A dispatcher-only tool never looks at the workspace of
+      an id in its arguments.
 
     Fails open on an infrastructure error (like the rate-limit check).
     """
     if tool_name not in CAPACITY_LOCK_BLOCKED_TOOLS:
         return None
-
-    context_ids, workspace_arg, file_id = _argument_targets(args)
-    from_args = bool(context_ids or workspace_arg or file_id)
-    if from_args and tool_name not in CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS:
+    if tool_name not in CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS and _names_a_target(args):
         return None
-    if not from_args and (workspace_id is None or _known_not_candidate(workspace_id)):
-        return None
-    if (
-        from_args
-        and file_id is None
-        and all(_known_not_candidate(cid, "ctx") for cid in context_ids)
-        and (workspace_arg is None or _known_not_candidate(workspace_arg))
-    ):
+    if workspace_id is None or _known_not_candidate(workspace_id):
         return None
 
     from db.base import get_db
     from models.auth import Workspace
-    from services.capacity_lock import capacity_lock_state, is_workspace_member
+    from services.capacity_lock import capacity_lock_state
 
     try:
         # aclosing: an early return / raise releases the session at once
         # instead of leaving the generator (and its connection) to the GC.
         async with aclosing(get_db()) as sessions:
             async for db in sessions:
-                if from_args:
-                    where = _argument_target_clause(context_ids, workspace_arg, file_id)
-                else:
-                    where = Workspace.id == workspace_id
-                workspaces = await _candidate_workspaces(db, where)
+                workspaces = await _candidate_workspaces(db, Workspace.id == workspace_id)
                 if not workspaces:
-                    if not from_args and workspace_id is not None:
-                        _remember_not_candidate(workspace_id)
-                    for cid in context_ids:
-                        _remember_not_candidate(cid, "ctx")
-                    if workspace_arg is not None:
-                        _remember_not_candidate(workspace_arg)
+                    _remember_not_candidate(workspace_id)
                 for ws in workspaces:
                     lock = await capacity_lock_state(db, ws)
-                    if lock is None:
-                        continue
-                    if from_args and ws.id != workspace_id:
-                        if not await is_workspace_member(db, ws.id, user_id):
-                            # A non-member reaches a locked workspace only
-                            # through one of its PUBLIC contexts — refuse that
-                            # in the redacted form (as the REST public and
-                            # graph routes do). Anything else is left to the
-                            # handler's own not-found: no existence oracle.
-                            if await _names_public_context(db, ws.id, context_ids):
-                                raise CapacityLockedError.for_outsider()
-                            continue
-                    raise lock.to_error()
+                    if lock is not None:
+                        raise lock.to_error()
                 return None
     except CapacityLockedError as exc:
         return describe_tool_exception(tool_name, exc).response()

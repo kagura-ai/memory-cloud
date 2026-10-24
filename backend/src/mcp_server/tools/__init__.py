@@ -652,9 +652,11 @@ async def execute_tool_call(
     # #1941: a Free workspace over its capacity loses search and saving until
     # it is cleaned up; listing, deleting and usage stay callable. Every tool
     # is classified in ``_capacity_gate`` (a coverage test pins the split).
+    # #1954: only the session workspace is checked here; a target named in the
+    # arguments is checked after authorization (resolver or service).
     from mcp_server.tools._capacity_gate import capacity_lock_refusal, capacity_policy_for
 
-    capacity_refusal = await capacity_lock_refusal(tool_name, args, user_id, workspace_id)
+    capacity_refusal = await capacity_lock_refusal(tool_name, args, workspace_id)
     if capacity_refusal is not None:
         return capacity_refusal
 
