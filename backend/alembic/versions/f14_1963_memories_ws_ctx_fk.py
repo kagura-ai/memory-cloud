@@ -78,6 +78,7 @@ import logging
 from collections import Counter
 
 import sqlalchemy as sa
+from sqlalchemy.exc import DBAPIError
 
 from alembic import op
 
@@ -216,7 +217,7 @@ def _audit_edges(conn: sa.engine.Connection) -> None:
     """Step 6: count edges outside their context's workspace (audit only, never fatal)."""
     try:
         count = conn.execute(sa.text(EDGE_AUDIT_SQL)).scalar()
-    except sa.exc.DBAPIError as exc:
+    except DBAPIError as exc:
         logger.warning("#1963: edge audit skipped: %s", exc)
         return
     if count:
