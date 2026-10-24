@@ -371,3 +371,96 @@ async def test_a_suggestion_left_uncleared_rolls_the_accept_back(db_session, qui
 
     assert await _edges(db_session, newer, older) == []
     assert (await _row(db_session, newer)).supersede_candidate is not None
+
+
+# ---------------------------------------------------------------- #1803 owner rule
+
+
+async def _pair(db, context, carrier_author, target_author):
+    """``target`` (older) by one account, ``carrier`` (newer, suggesting it) by another."""
+    from tests.integration.test_identity_links_db import _memory
+
+    target = await _memory(db, context, target_author)
+    target.created_at = utcnow() - timedelta(days=1)
+    carrier = await _memory(db, context, carrier_author)
+    carrier.supersede_candidate = _candidate(target.id)
+    await db.commit()
+    return carrier.id, target.id
+
+
+async def _accept_as(db, caller, context, memory_id):
+    return await MemoryService(db).update_memory(
+        UpdateMemoryRequest(memory_id=memory_id, accept_supersede_candidate=True),
+        user_id=caller.user_id,
+        client="pytest",
+        current_context_id=context.id,
+        current_workspace_id=context.workspace_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_member_cannot_accept_a_candidate_that_is_another_members_memory(
+    db_session, quiet_write
+):
+    """Shared context: B's memory suggests A's. Shadowing it would hide A's
+    memory for the whole team; remember(supersedes=) refuses the same target."""
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    a, b, _, context, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, context, b, a)
+
+    with pytest.raises(ValueError, match="another member's memory"):
+        await _accept_as(db_session, b, context, carrier)
+    await db_session.rollback()
+
+    assert await _edges(db_session, carrier, target) == []
+    assert (await _row(db_session, carrier)).supersede_candidate is not None
+
+
+@pytest.mark.asyncio
+async def test_the_owner_of_both_memories_can_accept(db_session, quiet_write):
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    a, _, _, context, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, context, a, a)
+
+    response = await _accept_as(db_session, a, context, carrier)
+
+    assert response.superseded_memory_id == target
+    assert [e.edge_type for e in await _edges(db_session, carrier, target)] == [
+        EDGE_TYPE_SUPERSEDES
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_linked_accounts_memory_in_a_private_context_can_be_accepted(
+    db_session, quiet_write
+):
+    """In a private context the owner is the link set (#1784): the other
+    account's memory counts as the caller's own, as for remember(supersedes=)."""
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    admin, oauth, _, context, _ = await _seed(db_session, private=True, link=True)
+    carrier, target = await _pair(db_session, context, oauth, admin)
+
+    response = await _accept_as(db_session, oauth, context, carrier)
+
+    assert response.superseded_memory_id == target
+    assert [e.edge_type for e in await _edges(db_session, carrier, target)] == [
+        EDGE_TYPE_SUPERSEDES
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_linked_account_does_not_count_in_a_shared_context(db_session, quiet_write):
+    """Outside a private context the link set does not widen the rule."""
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    admin, oauth, _, context, _ = await _seed(db_session, private=False, link=True)
+    carrier, target = await _pair(db_session, context, oauth, admin)
+
+    with pytest.raises(ValueError, match="another member's memory"):
+        await _accept_as(db_session, oauth, context, carrier)
+    await db_session.rollback()
+
+    assert await _edges(db_session, carrier, target) == []

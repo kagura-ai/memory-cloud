@@ -1962,17 +1962,35 @@ class MemoryService:
             )
         target_id = candidate.memory_id
 
+        # #1803, the rule remember(supersedes=) applies in _create_declared_links:
+        # the superseded memory must be the caller's own, or in a private
+        # context one an account linked to the caller wrote. In a shared context
+        # another member's memory is readable (so it can be suggested) but not
+        # the caller's to shadow for the whole team.
+        own_target = (
+            owned_by(Memory.user_id, user_id)
+            if await self._is_private_context(str(memory.context_id))
+            else Memory.user_id == user_id
+        )
+        target = (
+            await self.db.execute(
+                select(Memory.created_at, own_target.label("own")).where(Memory.id == target_id)
+            )
+        ).one_or_none()
+        if target is None or not target.own:
+            raise ValueError(
+                "This memory's supersede_candidate is another member's memory, and "
+                "supersedes takes only your own (as remember(supersedes=) does); "
+                "dismiss the suggestion (dismiss_supersede_candidate=true) or leave both."
+            )
         # The direction is the server's here, not the caller's: a neighbour
         # written AFTER this memory can be stored as its candidate (its
         # embedding finished first; the judge skips that pair), and accepting
         # it would shadow the newer fact behind the older one.
-        target_created_at = (
-            await self.db.execute(select(Memory.created_at).where(Memory.id == target_id))
-        ).scalar_one_or_none()
         if (
-            target_created_at is not None
+            target.created_at is not None
             and memory.created_at is not None
-            and target_created_at > memory.created_at
+            and target.created_at > memory.created_at
         ):
             raise ValueError(
                 "This memory's supersede_candidate was written after it, so accepting "

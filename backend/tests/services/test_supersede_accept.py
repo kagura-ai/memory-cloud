@@ -83,3 +83,43 @@ class TestAcceptRequestValidation:
         from services import memory_service
 
         assert memory_service.UPDATE_MEMORY_EDIT_FIELDS is UPDATE_MEMORY_EDIT_FIELDS
+
+
+class TestOwnershipRuleWiring:
+    """#1803: the accept applies remember(supersedes=)'s owner rule. Behaviour on
+    Postgres (shared, private + linked) is in the integration file; this pins
+    that both writes build the target predicate the same way."""
+
+    @staticmethod
+    def _function(name):
+        import ast
+        from pathlib import Path
+
+        import services.memory_service as memory_service
+
+        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+        return next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+        )
+
+    @staticmethod
+    def _called(fn):
+        import ast
+
+        names = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    names.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    names.add(node.func.attr)
+        return names
+
+    def test_accept_uses_the_declared_link_owner_predicate(self):
+        accept = self._called(self._function("_accept_supersede_candidate"))
+        declared = self._called(self._function("_create_declared_links"))
+        for helper in ("owned_by", "_is_private_context"):
+            assert helper in declared, f"_create_declared_links no longer calls {helper}"
+            assert helper in accept, f"the accept no longer applies the #1803 rule ({helper})"
