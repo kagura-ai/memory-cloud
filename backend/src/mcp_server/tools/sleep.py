@@ -15,11 +15,11 @@ from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.point_writer_lock import hold_point_writer_lock
 from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
-    _check_viewer_permission,
     _ContextNotFoundError,
     _error_response,
     _log_tool_usage,
     _resolve_context,
+    _resolve_context_for_read,
     _resolve_context_id,
     _success_response,
 )
@@ -122,6 +122,70 @@ def _validate_report_id(
         return UUID(str(report_id_str)), None
     except ValueError:
         return None, _error_response("invalid_report_id", "report_id must be a valid UUID.")
+
+
+def _report_not_found(report_uuid: UUID) -> list[TextContent]:
+    """The one reply for a report the caller cannot reach.
+
+    A missing report, another user's report and a report whose context the
+    caller can no longer reach all answer the same, so a refusal does not
+    confirm that the report exists.
+    """
+    return _error_response(
+        "report_not_found",
+        f"Sleep report {report_uuid} not found or not owned by you.",
+    )
+
+
+async def _authorize_report_read(db: Any, user_id: str, report: Any) -> bool:
+    """Whether the caller can still read the context the report belongs to.
+
+    Owning the report is not enough: a run's report and actions describe
+    memories of the report's context, so reading them authorizes against
+    that context like any other read — workspace membership, the context's
+    member list, a workspace-scoped key and the agent-binding read gate. A
+    report with no context has nothing to authorize against and is refused.
+    """
+    if report.context_id is None:
+        return False
+    try:
+        await _resolve_context_for_read(db, user_id, report.context_id)
+    except _ContextNotFoundError:
+        return False
+    return True
+
+
+async def _authorize_report_rollback(
+    db: Any, user_id: str, report: Any
+) -> list[TextContent] | None:
+    """Refusal for rolling back the report's run, or None when allowed.
+
+    Same gate as ``rollback_session``: the write-path context resolution
+    (workspace-scoped key, agent-binding write gate), then the editor or owner
+    role on the report's context. The session's workspace plays no part — a
+    rollback writes to the report's context wherever the session points. A
+    context the caller cannot reach answers like a missing report; a context
+    they can read but not edit is ``permission_denied``.
+    """
+    from auth.workspace_roles import ContextRole
+    from services.session_rollback import context_role
+
+    if report.context_id is None:
+        return _report_not_found(report.id)
+    try:
+        await _resolve_context(db, user_id, report.context_id)
+    except _ContextNotFoundError:
+        return _report_not_found(report.id)
+    role = await context_role(db, user_id, report.context_id)
+    if role not in (ContextRole.OWNER, ContextRole.EDITOR):
+        return _error_response(
+            "permission_denied",
+            "Cannot roll back sleep runs: you need the editor or owner role on this context.",
+            your_role=role.value if role is not None else None,
+            required_role="editor",
+            help="Ask a context owner for the editor role.",
+        )
+    return None
 
 
 async def _re_embed_to_qdrant(
@@ -286,11 +350,8 @@ async def handle_get_sleep_report(
             result = await db.execute(stmt)
             report = result.scalar_one_or_none()
 
-            if not report:
-                return _error_response(
-                    "report_not_found",
-                    f"Sleep report {report_uuid} not found or not owned by you.",
-                )
+            if not report or not await _authorize_report_read(db, user_id, report):
+                return _report_not_found(report_uuid)
 
             actions_stmt = (
                 select(SleepAction)
@@ -761,17 +822,13 @@ async def handle_rollback_sleep_run(
             report = result.scalar_one_or_none()
 
             if not report:
-                return _error_response(
-                    "report_not_found",
-                    f"Sleep report {report_uuid} not found or not owned by you.",
-                )
+                return _report_not_found(report_uuid)
 
-            # Viewers cannot rollback
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "rollback sleep runs"
-            )
-            if perm_error:
-                return perm_error
+            # Authorized against the report's context, not the session's
+            # workspace (same gate as rollback_session).
+            refusal = await _authorize_report_rollback(db, user_id, report)
+            if refusal:
+                return refusal
 
             # #1183: 'degraded' runs (partial judge failures) still executed
             # real merges/promotions — they must stay rollbackable.

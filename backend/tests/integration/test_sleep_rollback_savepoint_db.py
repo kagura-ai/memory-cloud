@@ -144,7 +144,7 @@ async def test_a_failed_undo_is_rolled_back_alone(session: AsyncSession) -> None
     with (
         patch("db.base.get_db", new=_get_db),
         patch(
-            "mcp_server.tools.sleep._check_viewer_permission",
+            "mcp_server.tools.sleep._authorize_report_rollback",
             new=AsyncMock(return_value=None),
         ),
         patch("services.embedding_service.EmbeddingService", return_value=embedding_service),
