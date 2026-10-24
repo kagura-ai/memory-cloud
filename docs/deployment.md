@@ -1996,7 +1996,7 @@ from surviving vector-store points, for a context whose rows are gone. It finds
 no points for a context deleted on v0.88.0 or later, and says to use the
 restore above when the context's row is still there. When the row exists, the
 recovered memories take its workspace; a `workspace_id` in the request that
-names another workspace answers `400` (#1963).
+names another workspace answers `400` `REQ-103` (#1963).
 
 ## Capacity-over purge rollout — Issue #1969
 
@@ -2883,7 +2883,7 @@ row, so nothing needs re-running after the traffic switch.
 
 `POST /api/v1/admin/contexts/recover` follows the same rule: when the
 context's row exists, its workspace is the one the recovered memories get,
-and a request naming another `workspace_id` answers `400`.
+and a request naming another `workspace_id` answers `400` (`REQ-103`).
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 

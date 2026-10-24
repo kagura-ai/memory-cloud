@@ -329,13 +329,15 @@ class TestRecoverIntoTheContextsWorkspace:
         ws_id, ctx_id = await self._workspace_and_context(db_session)
         points = [_point(ws_id)]
 
-        with pytest.raises(HTTPException) as exc:
+        from utils.exceptions import BadRequestError
+
+        with pytest.raises(BadRequestError) as exc:
             await self._recover(
                 db_session, points, context_id=ctx_id, workspace_id=str(uuid4()), dry_run=dry_run
             )
 
-        assert exc.value.status_code == 400
-        assert exc.value.detail == "workspace_id does not match the context's workspace"
+        assert (exc.value.status_code, exc.value.error_code) == (400, "REQ-103")
+        assert exc.value.message == "workspace_id does not match the context's workspace"
         assert await self._stored(db_session, points) == {}
 
     @pytest.mark.asyncio
