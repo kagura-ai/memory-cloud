@@ -5,7 +5,8 @@
  *   - no active request → delete button
  *   - password-auth flow → password step → confirmErasure(token, password)
  *   - OAuth flow (confirm_token null) → "check your email" message
- *   - active cooling-off request → scheduled state + cancel
+ *   - active cooling-off request → scheduled state + cancel (self-service only;
+ *     an admin force-erase waiting for its retry is shown as in progress)
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -184,6 +185,20 @@ describe("DeleteAccountSection", () => {
     expect(await screen.findByText("pendingBody")).toBeInTheDocument();
     expect(screen.getByText("cancelButton")).toBeInTheDocument();
     expect(screen.queryByText("deleteButton")).not.toBeInTheDocument();
+  });
+
+  it("cooling_off of an admin force-erase (#2282): NOT cancellable, shown as in progress", async () => {
+    mockGetActive.mockResolvedValue({
+      ...coolingOffState(),
+      is_self_service: false,
+      scheduled_for: "2026-06-20T00:15:00Z",
+    });
+    render(<DeleteAccountSection />);
+    expect(await screen.findByText("inProgressBody")).toBeInTheDocument();
+    expect(screen.queryByText("cancelButton")).not.toBeInTheDocument();
+    expect(screen.queryByText("deleteButton")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^scheduledBody/)).not.toBeInTheDocument();
+    expect(mockCancel).not.toHaveBeenCalled();
   });
 
   it("in_progress: shows the executing state with NO cancel button", async () => {

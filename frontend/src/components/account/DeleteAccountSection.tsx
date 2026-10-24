@@ -222,6 +222,12 @@ export function DeleteAccountSection() {
 
   const isInitialAdmin = user?.is_initial_admin === true;
   const stage = erasureStage(active);
+  // #2282: an admin force-erase waiting for a vector-store retry is
+  // cooling_off too, but its subject cannot cancel it (the backend refuses):
+  // shown like a running deletion, without the cancel button.
+  const notCancellable =
+    stage === "in_progress" ||
+    (stage === "cooling_off" && active?.is_self_service === false);
   const scheduledLabel =
     active?.scheduled_for &&
     formatDate(active.scheduled_for, user?.timezone ?? "UTC", locale);
@@ -241,8 +247,9 @@ export function DeleteAccountSection() {
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>{t("protectedAccount")}</AlertDescription>
           </Alert>
-        ) : stage === "in_progress" ? (
-          // Deletion is executing — no longer cancellable (backend rejects it).
+        ) : notCancellable ? (
+          // Deletion is executing (or an admin's is waiting for its retry) —
+          // not cancellable (backend rejects it).
           <Alert variant="destructive">
             <AlertTriangle className="h-4 w-4" />
             <AlertTitle className="text-red-800 dark:text-red-300">
