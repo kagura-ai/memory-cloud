@@ -1313,8 +1313,9 @@ class TestFetchActiveMemoriesRealDB:
             workspace_id=ws_id,
             context_id=ctx_id,
         )
-        # Same context but a different workspace_id → excluded by the ws filter
-        # (line 296). context_id is the same valid FK so only ws differs.
+        # Another workspace's row → excluded by the ws filter. It has no
+        # context: a row in ctx_id must carry ws_id
+        # (fk_memories_workspace_context, #1963).
         wrong_ws_id = uuid4()
         db_session.add(Workspace(id=wrong_ws_id, name="ws2", owner_user_id=user))
         await db_session.flush()
@@ -1327,17 +1328,27 @@ class TestFetchActiveMemoriesRealDB:
             client="pytest",
             scope="working",
             workspace_id=wrong_ws_id,
-            context_id=ctx_id,
         )
-        db_session.add_all([in_scope, wrong_ws])
+        # The right workspace, no context → excluded by the context filter only.
+        no_ctx = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="no context",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+            workspace_id=ws_id,
+        )
+        db_session.add_all([in_scope, wrong_ws, no_ctx])
         await db_session.flush()
 
         phase = await self._phase_for_db(db_session)
         rows = await phase._fetch_active_memories(user, str(ws_id), str(ctx_id), limit=500)
+        assert {m.id for m in rows} == {in_scope.id}
 
-        ids = {m.id for m in rows}
-        assert in_scope.id in ids
-        assert wrong_ws.id not in ids  # filtered out by workspace_id (line 296)
+        rows = await phase._fetch_active_memories(user, str(ws_id), None, limit=500)
+        assert {m.id for m in rows} == {in_scope.id, no_ctx.id}  # wrong_ws filtered by ws
 
     async def test_excludes_pinned_rows(self, db_session):
         """#1519: delivery_mode='always' rows never enter dedup candidacy."""

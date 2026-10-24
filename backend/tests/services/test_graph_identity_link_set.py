@@ -607,7 +607,7 @@ class TestMemoryHealthCoversTheSet:
         await _link(db_session, a, b)
         ws, linked = await _private_scope(db_session, b)
         await _join_as_admin(db_session, ws, a)
-        _, elsewhere = await _private_scope(db_session, b)
+        ws_elsewhere, elsewhere = await _private_scope(db_session, b)
         (await db_session.get(Context, elsewhere)).is_private = False
         ws_a, mine_shared = await _private_scope(db_session, a)
         (await db_session.get(Context, mine_shared)).is_private = False
@@ -660,7 +660,8 @@ class TestMemoryHealthCoversTheSet:
 
         # B's rows in B's private context, B's rows in B's shared context, and
         # an unlinked member's rows in A's shared context — for every signal.
-        scopes = [(b, ws, linked), (b, ws, elsewhere), (m, ws_a, mine_shared)]
+        # Each row carries its context's workspace (#1963).
+        scopes = [(b, ws, linked), (b, ws_elsewhere, elsewhere), (m, ws_a, mine_shared)]
         pairs = []
         for account, workspace_id, ctx in scopes:
             src, dst = node(account, workspace_id, ctx), node(account, workspace_id, ctx)

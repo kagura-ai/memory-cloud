@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from config.constants import MAX_EMBEDDING_RETRIES
 from models.auth import AuditLog, Context, Workspace, WorkspaceMember, WorkspaceRole
@@ -606,22 +607,18 @@ async def test_rebuild_point_refuses_a_row_that_owns_no_resource_point(db_sessio
 
 @pytest.mark.asyncio
 async def test_counts_cover_the_rows_the_update_touches(db_session, seed):
+    """The plan's counts are the rows the restore writes. A row naming the
+    context from another workspace used to be the out-of-scope case here;
+    fk_memories_workspace_context (#1963) refuses such a row, which the last
+    step shows."""
     context = seed.context()
     other_workspace = Workspace(id=uuid4(), name="Restore other", owner_user_id=_USER)
     db_session.add_all([context, other_workspace])
     await db_session.flush()
     forgotten = seed.memory(context, deleted_at=utcnow() - timedelta(days=2), deleted_by=_USER)
-    # A row that names the context from another workspace is outside the
-    # restore's scope: neither restored nor counted as left deleted.
-    stray = seed.memory(
-        context,
-        workspace_id=other_workspace.id,
-        deleted_at=utcnow() - timedelta(days=2),
-        deleted_by=_USER,
-    )
-    db_session.add_all([seed.memory(context), seed.memory(context), forgotten, stray])
+    db_session.add_all([seed.memory(context), seed.memory(context), forgotten])
     await db_session.commit()
-    context_id, other_workspace_id, stray_id = context.id, other_workspace.id, stray.id
+    context_id, other_workspace_id = context.id, other_workspace.id
     try:
         await _delete(db_session, context_id)
 
@@ -630,15 +627,28 @@ async def test_counts_cover_the_rows_the_update_touches(db_session, seed):
 
         rows = await _memories(db_session, context_id)
         live = [m for m in rows.values() if m.deleted_at is None]
-        in_scope = [m for m in rows.values() if m.workspace_id == seed.workspace_id]
         assert plan.memories_restored == result.memories_restored == len(live) == 2
         assert all(m.embedding_status == "pending" for m in live)
         assert plan.memories_left_deleted == result.memories_left_deleted == 1
-        assert result.memories_restored + result.memories_left_deleted == len(in_scope)
-        assert rows[stray_id].deleted_at is not None
+        assert result.memories_restored + result.memories_left_deleted == len(rows)
+
+        with pytest.raises(IntegrityError, match="fk_memories_workspace_context"):
+            async with db_session.begin_nested():
+                db_session.add(
+                    Memory(
+                        id=uuid4(),
+                        user_id=_USER,
+                        workspace_id=other_workspace_id,
+                        context_id=context_id,
+                        summary="a summary long enough",
+                        content="c",
+                        type="note",
+                        client="pytest",
+                    )
+                )
+                await db_session.flush()
     finally:
         await db_session.rollback()
-        await db_session.execute(delete(Memory).where(Memory.id == stray_id))
         await db_session.execute(delete(Workspace).where(Workspace.id == other_workspace_id))
         await db_session.commit()
 
