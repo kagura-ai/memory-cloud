@@ -53,6 +53,7 @@ from models.memory import (
     tool_triggered_predicate,
 )
 from models.schemas import (
+    UPDATE_MEMORY_EDIT_FIELDS,
     ExploreHint,
     ExploreRequest,
     ExploreResponse,
@@ -432,22 +433,6 @@ def location_payload_from_details(details: dict | None) -> dict | None:
     if not isinstance(lat, int | float) or not isinstance(lon, int | float):
         return None
     return {"lat": float(lat), "lon": float(lon)}
-
-
-# The request fields ``_update_apply_fields`` writes onto the row. Named here so
-# a dismissal-only update (#1504) can tell "no content changed" from "content
-# changed", and so adding a field to that method forces a change here too.
-_UPDATE_CONTENT_FIELDS = (
-    "summary",
-    "context_summary",
-    "content",
-    "details",
-    "type",
-    "importance",
-    "tags",
-    "context",
-    "delivery_mode",
-)
 
 
 # ---------------------------------------------------------------- #1853 writes
@@ -1793,6 +1778,11 @@ class MemoryService:
         ):
             await self._require_guardrail_author(user_id, memory.context_id)
 
+        if request.accept_supersede_candidate:
+            # #2308: a graph action only — the schema refuses field edits in the
+            # same call, so nothing below (re-embed, versioning) applies.
+            return await self._accept_supersede_candidate(memory, user_id)
+
         # Pre-compute normalized values (avoid double normalization)
         normalized_summary = (
             normalize_for_search(request.summary) if request.summary is not None else None
@@ -1816,7 +1806,7 @@ class MemoryService:
         # timestamp before _update_apply_fields stamps it unconditionally.
         updated_at_before = memory.updated_at
         edits_requested = any(
-            getattr(request, field) is not None for field in _UPDATE_CONTENT_FIELDS
+            getattr(request, field) is not None for field in UPDATE_MEMORY_EDIT_FIELDS
         )
 
         # #2059: whether a stored parallel verdict still hides the pair is a
@@ -1879,6 +1869,24 @@ class MemoryService:
             re_embedded=needs_reembed,
         )
 
+        return await self._in_place_updated(
+            memory, user_id, re_embedded=needs_reembed, dismissed=dismissed_target
+        )
+
+    async def _in_place_updated(
+        self,
+        memory: Any,
+        user_id: str,
+        *,
+        re_embedded: bool,
+        dismissed: UUID | None = None,
+        superseded: UUID | None = None,
+    ) -> UpdateMemoryResponse:
+        """The committed in-place update's audit event and response.
+
+        Shared by the edit path and the #2308 acceptance, so the two cannot
+        drift in what they audit or return.
+        """
         # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
         from services.memory_access_event_writer import emit_memory_access_event
 
@@ -1894,7 +1902,7 @@ class MemoryService:
         return UpdateMemoryResponse(
             memory_id=memory.id,
             operation="updated",
-            re_embedded=needs_reembed,
+            re_embedded=re_embedded,
             scope=memory.scope,
             version=memory.version,  # #2043
             persistence=persistence_info(  # #1505
@@ -1902,7 +1910,8 @@ class MemoryService:
                 pinned=memory.is_pinned,
                 tool_triggered=self._carries_tool_trigger(memory.details),
             ),
-            supersede_candidate_dismissed=dismissed_target,  # #1504
+            supersede_candidate_dismissed=dismissed,  # #1504
+            superseded_memory_id=superseded,  # #2308
             # #1502: lint the memory's CURRENT state, not the patch — a partial
             # update leaves fields untouched, and what matters for recall is
             # what the memory now says.
@@ -1914,6 +1923,134 @@ class MemoryService:
                 tags=memory.tags,
                 memory_id=memory.id,
             ),
+        )
+
+    async def _accept_supersede_candidate(self, memory: Any, user_id: str) -> UpdateMemoryResponse:
+        """#2308: accept ``memory``'s current supersede suggestion.
+
+        The candidate is the one the read path would show for this row as it
+        stands under the edit lock (``_lock_for_edit`` re-read it), resolved by
+        the same ``_resolve_supersede_candidates`` recall and reference use:
+        target live, same context, visible to the caller's binding, not a
+        current ``parallel`` verdict. A suggestion cleared, tombstoned or
+        replaced since the caller read it is therefore never accepted from a
+        stale copy. The edge is written by ``create_declared_edge`` — the
+        function ``create_edge`` uses — which also clears the suggestion, so
+        the duplicate contract and the self-heal are create_edge's own.
+
+        Raises:
+            ValueError: no live suggestion to accept, one written after this
+                memory, or either memory not the caller's own under #1803
+                (nothing written).
+            SupersedeEdgeConflictError: a different declared edge links the
+                pair (nothing written).
+            RuntimeError: the edge or the clearing did not land as asserted;
+                the caller rolls back.
+        """
+        from models.memory import EDGE_TYPE_SUPERSEDES
+        from services.edge_service import create_declared_edge
+        from utils.exceptions import SupersedeEdgeConflictError
+
+        # Not fail-open here: a lookup failure is a server error, not "no
+        # suggestion" — the caller would drop a suggestion that still surfaces.
+        resolved = await self._resolve_supersede_candidates(
+            {memory.id: memory}, user_id=user_id, operation="update", fail_open=False
+        )
+        candidate = resolved.get(memory.id)
+        if candidate is None:
+            raise ValueError(
+                "This memory has no supersede_candidate to accept; recall() or "
+                "reference() it to see its current suggestion."
+            )
+        target_id = candidate.memory_id
+
+        # #1803, the rule remember(supersedes=) applies (_own_memory_predicate):
+        # both ends must be the caller's own — the superseding memory, as
+        # remember's new memory always is, and the superseded one, so a shared
+        # context's member cannot shadow another member's memory for the team.
+        # In a private context an account linked to the caller counts.
+        own = await self._own_memory_predicate(memory.context_id, user_id)
+        rows = {
+            row.id: row
+            for row in (
+                await self.db.execute(
+                    select(Memory.id, Memory.created_at, own.label("own")).where(
+                        Memory.id.in_([memory.id, target_id])
+                    )
+                )
+            ).all()
+        }
+        target = rows.get(target_id)
+        if target is None:
+            # Gone (hard-deleted or erased) since the resolver read it.
+            raise ValueError(
+                "This memory has no supersede_candidate to accept; recall() or "
+                "reference() it to see its current suggestion."
+            )
+        carrier = rows.get(memory.id)
+        if carrier is None or not carrier.own:
+            raise ValueError(
+                "This memory is another member's, and a supersede_candidate is accepted "
+                "only on your own memory (as remember(supersedes=) links only from one); "
+                "leave the suggestion to its author."
+            )
+        if not target.own:
+            raise ValueError(
+                "This memory's supersede_candidate is another member's memory, and "
+                "supersedes takes only your own (as remember(supersedes=) does); "
+                "dismiss the suggestion (dismiss_supersede_candidate=true) or leave both."
+            )
+        # The direction is the server's here, not the caller's: a neighbour
+        # written AFTER this memory can be stored as its candidate (its
+        # embedding finished first; the judge skips that pair), and accepting
+        # it would shadow the newer fact behind the older one.
+        if (
+            target.created_at is not None
+            and memory.created_at is not None
+            and target.created_at > memory.created_at
+        ):
+            raise ValueError(
+                "This memory's supersede_candidate was written after it, so accepting "
+                "would hide the newer memory; dismiss the suggestion instead "
+                "(dismiss_supersede_candidate=true)."
+            )
+
+        result = await create_declared_edge(
+            self.db,
+            # The carrier's author: the caller, or in a private context a linked
+            # account (#1784). Detection looks the pair's edge up under that
+            # owner, so an edge kept under another account would let the next
+            # re-embed resurface the suggestion next to it.
+            user_id=memory.user_id,
+            source_id=memory.id,
+            target_id=target_id,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            # create_edge's defaults for a user assertion (#738).
+            weight=1.0,
+            confidence=1.0,
+            workspace_id=str(memory.workspace_id),
+            context_id=str(memory.context_id),
+            overwrite=False,
+        )
+        if result.operation == "conflict":
+            raise SupersedeEdgeConflictError(
+                source_id=memory.id, target_id=target_id, existing=result.existing
+            )
+        if result.edge is None or result.edge.get("edge_type") != EDGE_TYPE_SUPERSEDES:
+            # The upsert's declared-link race guard kept a declared edge of
+            # another type that landed between the read and the write.
+            raise SupersedeEdgeConflictError(
+                source_id=memory.id, target_id=target_id, existing=result.edge
+            )
+        stored = memory.supersede_candidate
+        if isinstance(stored, dict) and stored.get("memory_id"):
+            # The best-effort clear in create_declared_edge did not run; a
+            # success here would leave the suggestion surfacing next to its edge.
+            raise RuntimeError("supersede suggestion was not cleared on accept")
+        await self.db.commit()
+
+        return await self._in_place_updated(
+            memory, user_id, re_embedded=False, superseded=target_id
         )
 
     async def _parallel_verdict_current(self, memory: Any) -> bool:
@@ -3294,6 +3431,21 @@ class MemoryService:
         )
         return result.scalar_one_or_none() is True
 
+    async def _own_memory_predicate(
+        self, context_id: UUID | str | None, user_id: str
+    ) -> ColumnElement[bool]:
+        """#1803: SQL predicate for "a memory ``user_id`` may name as its own".
+
+        The caller's own memory — and in a private context, whose owner is the
+        link set (#1784), one an account linked to the caller wrote. A shared
+        context keeps the caller's own memories only. Used by the writes that
+        let a caller shadow a memory: remember's declared links and
+        ``supersedes``, and the #2308 supersede accept.
+        """
+        if await self._is_private_context(context_id):
+            return owned_by(Memory.user_id, user_id)
+        return Memory.user_id == user_id
+
     async def _create_declared_links(
         self,
         memory_id: UUID,
@@ -3334,11 +3486,7 @@ class MemoryService:
 
             async def own_target() -> ColumnElement[bool]:
                 if not own_target_cache:
-                    own_target_cache.append(
-                        owned_by(Memory.user_id, user_id)
-                        if await self._is_private_context(context_id)
-                        else Memory.user_id == user_id
-                    )
+                    own_target_cache.append(await self._own_memory_predicate(context_id, user_id))
                 return own_target_cache[0]
 
             # Direct links by memory ID (batch-validate targets exist in same scope)
@@ -3945,6 +4093,7 @@ class MemoryService:
         operation: str,
         trusted_only: bool = False,
         filters: Mapping[str, Any] | None = None,
+        fail_open: bool = True,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
 
@@ -3986,7 +4135,9 @@ class MemoryService:
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
         suggestion is a read-path enhancement and must never blank
-        recall()/reference().
+        recall()/reference(). ``fail_open=False`` (#2308, the accept write
+        path) re-raises that wider error instead, so a failed lookup is not
+        reported as "no suggestion".
         """
         from pydantic import ValidationError as PydanticValidationError
 
@@ -4108,6 +4259,8 @@ class MemoryService:
                     continue  # malformed stored value → drop just this suggestion
             return resolved
         except Exception as e:
+            if not fail_open:
+                raise
             logger.warning("supersede_candidate_resolve_failed", error=str(e))
             return {}
 

@@ -856,6 +856,7 @@ async def test_update_memory_tool_json_carries_the_block(sleep_pass):
             version=2,  # #2043, not under test here
             persistence=persistence_info("persistent"),
             supersede_candidate_dismissed=None,  # #1504, not under test here
+            superseded_memory_id=None,  # #2308, not under test here
             lint=[],  # #1502, not under test here
         )
     )

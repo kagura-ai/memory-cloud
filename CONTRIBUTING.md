@@ -159,14 +159,14 @@ CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag p
 | `frontend` | All triggers | none |
 | `frontend-a11y` | All triggers (`needs: [frontend]`) | none (hermetic `next dev`) |
 | `detect-changes` | All triggers | none |
-| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
+| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis + qdrant |
 | `frontend-a11y-authed` | `detect-changes` (frontend/backend paths) match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
 
-`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. `frontend-a11y-authed` runs the authenticated color-contrast specs against a full stack (migrated DB + seeded admin + API). See `.github/workflows/ci.yml` for exact commands.
+`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. It first runs the backend-unit suite again against Postgres, because the DB-backed tests outside `tests/integration/` (everything that takes the `db_session` fixture) skip in `backend-unit`, then the integration suite (#2297). `frontend-a11y-authed` runs the authenticated color-contrast specs against a full stack (migrated DB + seeded admin + API). See `.github/workflows/ci.yml` for exact commands.
 
 ### Triggering integration tests on a PR
 
-Integration tests run automatically when the PR changes paths matching the `detect-changes` filter (`backend/src/**`, `backend/alembic/versions/**`, `backend/tests/integration/**`, `backend/tests/smoke/test_all_routes.py`, `backend/pyproject.toml`, or `.github/workflows/ci.yml`).
+Integration tests run automatically when the PR changes paths matching the `detect-changes` filter (`backend/src/**`, `backend/alembic/versions/**`, `backend/tests/**`, `backend/pyproject.toml`, `backend/uv.lock`, or `.github/workflows/ci.yml`).
 
 To force-run integration tests on a PR that doesn't touch those paths, add the `force-integration` label.
 

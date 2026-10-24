@@ -92,7 +92,7 @@ recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault:/
 - `confidence.level`: `none` / `low` (or zero results) means the topic is probably not stored in this context — say so and prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content; an adjacent topic can score high too, and `use_rerank=true` separates a near-miss from an exact match.
 - `degraded: true`: the semantic half of the search was unavailable, so an empty or weak result means "search impaired", not "nothing stored" — retry later.
 - `updated_at`: an old value may mean the fact is stale.
-- `supersede_candidate` on a result: that result likely replaces the older candidate. Offer to accept (`create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes", context_id=...)`) or, for a deliberately separate pair, to dismiss (`update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`).
+- `supersede_candidate` on a result: that result likely replaces the older candidate. Offer to accept (`update_memory(memory_id=<result>, accept_supersede_candidate=true, context_id=...)`) or, for a deliberately separate pair, to dismiss (`update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`).
 - `tag_suggestions`: a tag filter matched nothing but similar stored tags exist — another spelling, or a narrower / broader tag (`session-cookie` for `session`). Retry with the suggested tag.
 
 ### 4. Display results

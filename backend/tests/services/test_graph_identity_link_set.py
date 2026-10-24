@@ -729,8 +729,12 @@ class TestMemoryHealthCoversTheSet:
             assert graph["edges_per_memory"] == pytest.approx(round(2 / 3, 4))
             assert graph["weight_violations"] == 0
 
-        # B reads the same context through the link: the same numbers.
+        # B reads the same context through the link: the same numbers. The
+        # report covers a linked account's private context only where the
+        # caller is itself a member (#1874), so B joins A's workspace first.
+        await _join_as_admin(db_session, g["ws"], g["b"])
         b_owned = frozenset(cid for cid, _ in await svc._fetch_owned_contexts(g["b"]))
+        assert g["ctx"] in b_owned
         theirs_view = (await svc._fetch_signals(g["b"], owned_ids=b_owned))["graphs"][g["ctx"]]
         assert theirs_view["edges_by_origin"] == graph["edges_by_origin"]
 

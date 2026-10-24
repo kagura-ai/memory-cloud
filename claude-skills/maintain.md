@@ -100,12 +100,13 @@ Ask for an action per item number. Anything not named stays as it is.
 |--------|------|
 | keep | none |
 | update in place | `update_memory(memory_id=..., context_id=..., summary=..., content=...)` — only the fields that change; `details` is replaced wholesale |
-| supersede | `create_edge(source_id=<newer>, target_id=<older>, edge_type="supersedes", context_id=...)` — for a candidate, the source is the memory_id of the result that carries it and the target is `supersede_candidate.memory_id`. The older one is shadowed out of default recall, not deleted |
+| supersede a candidate | `update_memory(memory_id=<memory_id of the result that carries the candidate>, accept_supersede_candidate=true, context_id=...)` — `supersede_candidate.memory_id` leaves default recall, not deleted |
+| supersede another pair | `create_edge(source_id=<newer>, target_id=<older>, edge_type="supersedes", context_id=...)` |
 | dismiss a candidate | `update_memory(memory_id=<memory_id of the result that carries the candidate>, dismiss_supersede_candidate=true, context_id=...)` |
 | unpin | `update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")` |
 | delete | `forget(memory_ids=[...], context_id=...)`, one call for all |
 
-If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the default core listing and callable once the MCP URL carries `?profile=full` (or `?tools=…`); `describe_tools` confirms they exist.
+If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the core listing, callable once the MCP URL carries `?profile=full` (or `?tools=…`).
 
 ### 5. Apply
 

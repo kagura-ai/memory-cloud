@@ -67,7 +67,8 @@ def test_session_summary_keeps_touched_memories_current_on_the_users_pick():
     # A candidate is accepted or dismissed on the memory that carries it.
     assert "not the one just saved" in step
     assert step.count("<memory_id of the result that carries the candidate>") == 2
-    assert "target_id=<supersede_candidate.memory_id>" in step
+    # #2308: the candidate is accepted on update_memory, which core lists.
+    assert "accept_supersede_candidate=true" in step
     # recall_upcoming returns no importance.
     assert "`reference(memory_id=..., context_id=..., fields=[])`" in step
     assert "`supersede_candidate`" in step

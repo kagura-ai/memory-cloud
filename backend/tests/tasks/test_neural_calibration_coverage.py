@@ -439,13 +439,18 @@ class TestModelDimsWhere:
 
     async def test_legacy_default_matches_null_config(self, db_session):
         """text-embedding-3-small/512 contexts with NO search config still match."""
+        # The legacy default matches every context without a config, so rows
+        # another test file committed can be larger than ours (#2297): make
+        # this context strictly the largest one the database holds.
+        before = await _pick_largest_context_for_model(db_session, "text-embedding-3-small", 512)
+        n_memories = (before[1] if before else 0) + 3
         _, ctx = await _make_context_with_memories(
-            db_session, n_memories=3, add_search_config=False
+            db_session, n_memories=n_memories, add_search_config=False
         )
         picked = await _pick_largest_context_for_model(db_session, "text-embedding-3-small", 512)
         assert picked is not None
         assert picked[0] == ctx.id
-        assert picked[1] == 3
+        assert picked[1] == n_memories
 
     async def test_non_legacy_requires_explicit_config(self, db_session):
         """A non-default model only matches a context with the matching config."""

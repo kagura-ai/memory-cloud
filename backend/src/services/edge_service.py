@@ -203,7 +203,12 @@ async def create_declared_edge(
             and existing.weight == weight
             and existing.confidence == confidence
         ):
-            # Idempotent re-assert: same declared edge, same values.
+            # Idempotent re-assert: same declared edge, same values. A
+            # supersedes edge still confirms a suggestion naming its target
+            # (#2308): with no write here, the self-heal below never ran and the
+            # suggestion kept surfacing next to the edge that answers it.
+            if edge_type == EDGE_TYPE_SUPERSEDES:
+                await accept_supersede_candidate_if_matching(db, src_id=source_id, dst_id=target_id)
             return EdgeWriteResult(operation="unchanged", edge=existing_snapshot)
         return EdgeWriteResult(operation="conflict", edge=None, existing=existing_snapshot)
 

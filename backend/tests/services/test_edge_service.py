@@ -169,6 +169,30 @@ class TestCreateDeclaredEdgeSupersedeSelfHeal:
         assert memory.supersede_candidate is None
 
     @pytest.mark.asyncio
+    async def test_reasserting_an_identical_supersedes_edge_still_clears_the_candidate(self):
+        """#2308: the edge already exists exactly as asserted (``unchanged``),
+        so nothing is written — but the suggestion that edge confirms must
+        still stop surfacing, or an accept that hits the idempotent path
+        leaves it resurfacing on every recall."""
+        src, dst = uuid4(), uuid4()
+        memory = MagicMock()
+        memory.supersede_candidate = {"memory_id": str(dst), "similarity": 0.9}
+        db = self._db_returning(memory)
+        existing = _mock_edge(src, dst, edge_type="supersedes", origin="declared")
+
+        result, repo, *_ = await _run(
+            existing=existing,
+            db=db,
+            source_id=src,
+            target_id=dst,
+            edge_type="supersedes",
+        )
+
+        assert result.operation == "unchanged"
+        repo.create_or_update_edge.assert_not_awaited()
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
     async def test_non_supersedes_edge_does_not_touch_candidate(self):
         """A related_to edge never runs the supersede self-heal query."""
         src, dst = uuid4(), uuid4()

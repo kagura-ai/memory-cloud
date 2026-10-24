@@ -146,7 +146,17 @@ test-e2e-frontend:
 .PHONY: test-integration
 test-integration:
 	@echo "Running integration tests..."
-	cd $(BACKEND_DIR) && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py tests/services/test_known_device_db.py tests/auth/test_oauth2_server_coverage.py::TestShareLockOwner tests/services/test_orphan_vector_sweep.py tests/services/test_context_delete_removes_points.py tests/api/test_account_linking.py -v --timeout=120 --maxfail=3
+	@# Same two runs as the CI backend-integration job (#2297): the DB-backed
+	@# tests outside tests/integration/ first, then the integration suite. Both
+	@# run even when the first fails; the target fails if either did. The app
+	@# engine follows TEST_DATABASE_URL in the first run, as in CI.
+	cd $(BACKEND_DIR) && export REQUIRE_TEST_DATABASE=1 && \
+		DATABASE_URL=$${TEST_DATABASE_URL:-postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test} \
+		pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/cli --ignore=tests/smoke/test_all_routes.py --timeout=300 --maxfail=5; \
+		first=$$?; \
+		pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=3; \
+		second=$$?; \
+		test $$first -eq 0 && test $$second -eq 0
 	@echo "Integration tests complete."
 
 .PHONY: test-urls

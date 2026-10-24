@@ -154,8 +154,8 @@ class TestCheckMemoryQuota:
         assert can_create is True
         assert error is None
 
-    async def test_orphaned_and_deleted_memories_excluded(self, db_session, monkeypatch):
-        """NULL-workspace and soft-deleted rows are not counted toward usage.
+    async def test_other_workspace_and_deleted_memories_excluded(self, db_session, monkeypatch):
+        """Another workspace's rows and soft-deleted rows are not counted toward usage.
 
         A control valid memory is inserted alongside and the limit is patched
         to 2, so a True result distinguishes "filters exclude the noise so
@@ -168,8 +168,10 @@ class TestCheckMemoryQuota:
         await _add_member(db_session, ws.id, user_id)
         # One real, counted memory (the control).
         await _add_memory(db_session, user_id, ws.id)
-        # Orphaned (workspace_id NULL) — never equal to the workspace's id (#1946).
-        await _add_memory(db_session, user_id, None)
+        # The same member's row in another workspace. memories.workspace_id is
+        # NOT NULL (#1951), so an orphaned row can no longer exist (#2297).
+        other = await _make_workspace(db_session, "free")
+        await _add_memory(db_session, user_id, other.id)
         # Soft-deleted — excluded by deleted_at.is_(None).
         await _add_memory(db_session, user_id, ws.id, deleted_at=utcnow())
 
@@ -179,7 +181,7 @@ class TestCheckMemoryQuota:
         monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_two)
         service = QuotaService(db_session)
 
-        # Only the 1 valid memory counts (1 < 2) → allowed. If the orphaned and
+        # Only the 1 valid memory counts (1 < 2) → allowed. If the other-workspace and
         # soft-deleted rows were counted, the total would be 3 >= 2 → denied.
         can_create, error = await service.check_memory_quota(ws.id)
 
@@ -576,7 +578,8 @@ class TestGetQuotaStatus:
         await _add_memory(db_session, user_id, ws.id)
         await _add_memory(db_session, user_id, ws.id)
         # excluded rows
-        await _add_memory(db_session, user_id, None)  # orphaned
+        other = await _make_workspace(db_session, "free")
+        await _add_memory(db_session, user_id, other.id)  # another workspace
         await _add_memory(db_session, user_id, ws.id, deleted_at=utcnow())  # deleted
         service = QuotaService(db_session)
 
