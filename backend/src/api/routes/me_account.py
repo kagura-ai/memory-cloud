@@ -243,9 +243,13 @@ async def cancel_erasure_request(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> ErasureRequestStateResponse:
-    """Cancel a cooling_off request before it executes.
+    """Cancel the user's own pending or cooling_off request before it executes.
 
-    Returns 404 if there is no active request to cancel.
+    Returns 404 if there is no request the user can cancel: none is active,
+    or the active one is an admin force-erase (it can be ``cooling_off`` while
+    it waits for a vector-store retry, #2282). Returns 409 ``ERASURE-006`` if
+    the request started running between the read and the cancel (the sweep
+    claimed it).
     """
     service = AccountErasureService(db)
     record = await service.cancel_self_service(user_id=user["user_id"])

@@ -2088,3 +2088,47 @@ class TestAVectorStoreOutageAtStepOne:
         assert row["deleted_data_summary"] is None
         assert datetime.fromisoformat(row["started_at"]) == reclaimed_at.astimezone(UTC)
         assert await _user_exists(db_session, erasure_scenario["target_user_id"])
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_racing_the_sweeps_claim_does_not_overwrite_it(
+        self, db_session: AsyncSession, async_engine, erasure_scenario, bystanders
+    ):
+        """#2282 review: the cancel is a compare-and-set on the status. The
+        sweep claims the row (``in_progress``) after the cancel read it: the
+        cancel answers 409 and the claimed row, and every other request, stay
+        as they are."""
+        from sqlalchemy import update
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from models.erasure import STATUS_IN_PROGRESS
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        service = AccountErasureService(db_session)
+        read = service._find_active_request
+        claimed_at = utcnow()
+
+        async def read_then_claimed(user_id: str):
+            request = await read(user_id)
+            async with maker() as sweep:
+                await sweep.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .values(status=STATUS_IN_PROGRESS, started_at=claimed_at)
+                )
+                await sweep.commit()
+            return request
+
+        before = await _everything_but(db_session, request_id)
+        with patch.object(service, "_find_active_request", side_effect=read_then_claimed):
+            with pytest.raises(ErasureAlreadyInProgressError) as caught:
+                await service.cancel_self_service(user_id=target)
+
+        assert caught.value.status_code == 409
+        assert caught.value.details == {"existing_status": STATUS_IN_PROGRESS}
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_IN_PROGRESS
+        assert row["cancelled_at"] is None
+        assert datetime.fromisoformat(row["started_at"]) == claimed_at.astimezone(UTC)
+        assert await _everything_but(db_session, request_id) == before

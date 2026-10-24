@@ -693,10 +693,16 @@ class AccountErasureService:
 
         ``in_progress`` rows are NOT cancellable — the orchestrator is
         already running, and racing it would risk an inconsistent half-
-        applied erasure.
+        applied erasure. The cancel is a compare-and-set on the status
+        (``WHERE status IN (pending, cooling_off)``): a sweep that claimed
+        the row between the read and the write (up to once per retry,
+        #2282) wins, and the cancel answers 409 instead of overwriting the
+        running request.
 
         Raises:
             ErasureRequestNotFoundError: No active cancellable request.
+            ErasureAlreadyInProgressError: The row left ``pending`` /
+                ``cooling_off`` after it was read (claimed by the sweep).
         """
         request = await self._find_active_request(user_id)
         if (
@@ -707,9 +713,35 @@ class AccountErasureService:
             raise ErasureRequestNotFoundError(user_id)
 
         cancelled_from = request.status
-        request.status = STATUS_CANCELLED
-        request.cancelled_at = utcnow()
+        request_id = request.id
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(
+                    ErasureRequest.id == request_id,
+                    ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF]),
+                )
+                .values(status=STATUS_CANCELLED, cancelled_at=utcnow())
+                # no in-session evaluation: the loaded row may be stale (that
+                # is the race); the refresh below reads what was written
+                .execution_options(synchronize_session=False)
+            ),
+        )
         await self.db.commit()
+        if not result.rowcount:
+            # moved since the read: report what it is now (the sweep's claim)
+            current = (
+                await self.db.execute(
+                    select(ErasureRequest.status).where(ErasureRequest.id == request_id)
+                )
+            ).scalar_one_or_none()
+            logger.info(
+                "erasure_request_cancel_lost",
+                request_id=str(request_id),
+                status=current,
+            )
+            raise ErasureAlreadyInProgressError(current or STATUS_IN_PROGRESS)
         await self.db.refresh(request)
 
         logger.info(
@@ -1252,9 +1284,15 @@ class AccountErasureService:
                 # it gets the vector store's own error instead
                 logger.warning("erasure_retry_request_moved", request_id=str(request_id))
                 original = exc.__cause__
-                if isinstance(original, QdrantError):
-                    # its own cause stays as it was (the client's error)
-                    raise original from original.__cause__
+                # invariant: step 1 raises this error ``from`` the QdrantError,
+                # so a moved row never falls through to the 503 below (which
+                # would promise a retry nobody scheduled)
+                if not isinstance(original, QdrantError):
+                    raise RuntimeError(
+                        "ErasureRetryScheduledError without a QdrantError cause"
+                    ) from exc
+                # its own cause stays as it was (the client's error)
+                raise original from original.__cause__
             else:
                 logger.warning(
                     "erasure_retry_scheduled",

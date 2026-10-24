@@ -677,6 +677,15 @@ class TestConfirmSelfService:
 # ---------------------------------------------------------------------------
 
 
+def _cancel_update_params(svc: AccountErasureService) -> dict:
+    """The params of the cancel's compare-and-set UPDATE (#2282 review)."""
+    from sqlalchemy.sql.dml import Update
+
+    (stmt,) = [c.args[0] for c in svc.db.execute.await_args_list if isinstance(c.args[0], Update)]
+    assert "erasure_requests.status IN (__[POSTCOMPILE_status_1])" in str(stmt)
+    return stmt.compile().params
+
+
 class TestCancelSelfService:
     @pytest.mark.asyncio
     async def test_cooling_off_request_can_be_cancelled(self):
@@ -694,8 +703,43 @@ class TestCancelSelfService:
 
         result = await svc.cancel_self_service(user_id="u-1")
 
-        assert result.status == STATUS_CANCELLED
-        assert result.cancelled_at is not None
+        assert result is request
+        params = _cancel_update_params(svc)
+        assert params["id_1"] == request.id
+        assert params["status_1"] == [STATUS_PENDING, STATUS_COOLING_OFF]
+        assert params["status"] == STATUS_CANCELLED
+        assert params["cancelled_at"] is not None
+        svc.db.commit.assert_awaited_once()
+        svc.db.refresh.assert_awaited_once_with(request)
+
+    @pytest.mark.asyncio
+    async def test_a_request_claimed_meanwhile_is_not_overwritten(self):
+        """#2282 review: the sweep claimed the row between the read and the
+        cancel's write; the compare-and-set matches nothing and the cancel
+        answers 409 with what the row is now."""
+        from models.erasure import STATUS_IN_PROGRESS
+
+        svc = _service()
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_COOLING_OFF,
+        )
+        request.id = uuid4()
+        svc._find_active_request = AsyncMock(return_value=request)
+        now_status = MagicMock()
+        now_status.scalar_one_or_none.return_value = STATUS_IN_PROGRESS
+        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_status])
+
+        with pytest.raises(ErasureAlreadyInProgressError) as caught:
+            await svc.cancel_self_service(user_id="u-1")
+
+        assert caught.value.status_code == 409
+        assert caught.value.details == {"existing_status": STATUS_IN_PROGRESS}
+        svc.db.refresh.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_an_admin_request_cannot_be_cancelled_by_its_subject(self):
@@ -750,8 +794,8 @@ class TestCancelSelfService:
         svc._find_active_request = AsyncMock(return_value=pending)
 
         result = await svc.cancel_self_service(user_id="u-1")
-        assert result.status == STATUS_CANCELLED
-        assert result.cancelled_at is not None
+        assert result is pending
+        assert _cancel_update_params(svc)["status"] == STATUS_CANCELLED
 
 
 # ---------------------------------------------------------------------------
