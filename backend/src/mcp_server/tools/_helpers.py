@@ -17,6 +17,7 @@ from mcp.types import TextContent
 
 from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
+from services import plan_seats
 from services.capacity_lock import CapacityPolicy
 
 if TYPE_CHECKING:
@@ -763,10 +764,7 @@ async def _get_workspace_member_role(
     # #1943: a member without a seat on the plan is refused (FEAT-001), after
     # membership — the dispatcher's exception mapper renders the same envelope
     # as the other plan pauses.
-    # Resolved at call time on purpose (tests patch/guard ``services.plan_suspension``).
-    from services.plan_suspension import ensure_member_seated
-
-    await ensure_member_seated(db, workspace_id, member)
+    await plan_seats.ensure_member_seated(db, workspace_id, member)
     return member.role
 
 

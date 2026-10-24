@@ -163,8 +163,8 @@ def _recall_post_commit_writes_need_a_session(monkeypatch):
 _CAPACITY_GATED_ROUTES = (
     ("services.permission_service", "ensure_not_capacity_locked"),
     ("services.permission_service", "ensure_member_seated"),
-    ("services.plan_suspension", "ensure_member_seated"),
-    ("services.plan_suspension", "ensure_context_writable"),
+    ("services.plan_seats", "ensure_member_seated"),
+    ("services.plan_seats", "ensure_context_writable"),
     ("services.permission_service", "ensure_context_writable"),
     ("services.context_service", "ensure_member_seated"),
     ("services.file_storage_service", "ensure_context_writable"),

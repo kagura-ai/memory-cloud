@@ -138,7 +138,7 @@ def live(world: World) -> Any:
         patch("db.qdrant.update_memory_payload_in_qdrant", AsyncMock()),
         patch("services.sleep.undo.re_embed_memory_to_qdrant", AsyncMock(return_value=None)),
         # The free plan seats one member; seating is not what this tests.
-        patch("services.plan_suspension.ensure_member_seated", AsyncMock()),
+        patch("services.plan_seats.ensure_member_seated", AsyncMock()),
         patch("services.permission_service.ensure_member_seated", AsyncMock()),
         patch("services.context_service.ensure_member_seated", AsyncMock()),
     ):

@@ -326,7 +326,7 @@ class TestWritableSlot:
             patch("services.capacity_lock.ensure_not_capacity_locked", AsyncMock()),
             patch("services.capacity_lock.ensure_contexts_not_capacity_locked", AsyncMock()),
             patch(
-                "services.plan_suspension.ensure_context_writable",
+                "services.plan_seats.ensure_context_writable",
                 AsyncMock(
                     side_effect=FeatureNotAvailableError(
                         "Feature 'contexts' is paused", gate="plan", feature="contexts"

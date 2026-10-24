@@ -16,6 +16,7 @@ from mcp_server.tools._helpers import (
     _format_validation_error,
     _log_tool_usage,
 )
+from services import plan_seats
 from services.capacity_lock import CapacityPolicy
 
 
@@ -74,11 +75,8 @@ async def handle_update_search_config(
                 )
                 # #1943: search settings change how the context's content is
                 # searched — treated as a content write, not metadata, like the
-                # REST twin. Resolved at call time on purpose (tests patch and
-                # guard the helper at ``services.plan_suspension``).
-                from services.plan_suspension import ensure_context_writable
-
-                await ensure_context_writable(db, ctx_uuid)
+                # REST twin.
+                await plan_seats.ensure_context_writable(db, ctx_uuid)
             except (AuthorizationError, NotFoundException) as perm_err:
                 # The two designed denials only (#1684): a database failure
                 # here reaches the catch-all below instead of being reported

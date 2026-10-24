@@ -32,7 +32,7 @@ from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_suspension import ensure_member_seated
+from services.plan_seats import ensure_member_seated
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,

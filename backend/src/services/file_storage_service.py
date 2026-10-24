@@ -48,7 +48,7 @@ from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
-from services.plan_suspension import ensure_context_writable
+from services.plan_seats import ensure_context_writable
 from storage.factory import get_blob_storage
 from storage.protocol import BlobStorageProtocol
 from utils.datetime import utcnow

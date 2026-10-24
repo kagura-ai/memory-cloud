@@ -24,7 +24,7 @@ from models.auth import Context, ContextMember, Workspace, WorkspaceMember
 from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_suspension import ensure_context_writable, ensure_member_seated
+from services.plan_seats import ensure_context_writable, ensure_member_seated
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -696,7 +696,7 @@ class PermissionService:
                 # the creator, not part of #1957.
                 if await self._seated_member(context.workspace_id, user_id) is None:
                     # The workspace's owner_user_id holder always has a seat
-                    # (plan_suspension.member_seat_suspended makes the same
+                    # (plan_seats.member_seat_suspended makes the same
                     # exception), even through a missing OWNER row (#1108).
                     workspace = await self.db.get(Workspace, context.workspace_id)
                     if workspace is None or workspace.owner_user_id != user_id:

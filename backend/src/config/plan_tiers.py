@@ -893,6 +893,58 @@ def feature_gate_details(plan_name: str | None, feature: str) -> dict[str, Any]:
     }
 
 
+def paused_details(
+    plan_name: str | None, feature: str, limit_attr: str, *, above: int = 0, **extra: Any
+) -> dict[str, Any]:
+    """``FEAT-001`` details for a paused feature, naming the tier that RESUMES it.
+
+    ``FeatureNotAvailableError.for_feature`` names the tier that can CREATE
+    the feature (the registry minimum, e.g. XL for connectors), but existing
+    objects resume on any tier whose limit is above zero (#1551 serve-only),
+    which is usually a lower one. The upgrade path therefore comes from the
+    numeric cap, like the other numeric refusals.
+
+    Args:
+        plan_name: The workspace's plan key.
+        feature: Registry feature key (``connectors`` / ``resources``).
+        limit_attr: ``PlanTier`` field whose positive value resumes it.
+        above: The value the resuming tier must exceed — ``0`` for a feature
+            that is simply off; ``count - 1`` for a cap the workspace is over
+            (#1943: the tier that seats everyone / makes every context writable).
+        extra: Further ``details`` keys (e.g. ``limit`` / ``current``).
+
+    Returns:
+        ``gate`` / ``feature`` / ``required_plan`` / ``required_plan_display``
+        / ``current_plan`` (+ ``extra``), ready to splat into the exception.
+    """
+    required = lowest_tier_with_limit(limit_attr, above)
+    tier = PLAN_TIERS.get(required) if required else None
+    details = feature_gate_details(plan_name, feature)
+    details["required_plan"] = required
+    details["required_plan_display"] = tier.display_name if tier else None
+    details.update(extra)
+    return details
+
+
+def paused_message(plan_name: str | None, feature: str, limit_attr: str, *, above: int = 0) -> str:
+    """Refusal text for a paused feature; names the tier that resumes it.
+
+    Args:
+        plan_name: The workspace's plan key.
+        feature: Registry feature key.
+        limit_attr: ``PlanTier`` field whose positive value resumes it.
+        above: See :func:`paused_details`.
+
+    Returns:
+        The message.
+    """
+    required = lowest_tier_with_limit(limit_attr, above)
+    message = f"Feature '{feature}' is paused on {plan_display_name(plan_name)} plan."
+    if required is not None:
+        message += f" Upgrade to {PLAN_TIERS[required].display_name} plan to resume it."
+    return message
+
+
 def quota_gate_details(
     plan_name: str | None,
     quota_type: str,

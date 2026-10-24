@@ -2,7 +2,7 @@
 
 ``GET /workspaces/{id}/members`` carries ``seat_paused`` per member and
 ``GET /contexts`` carries ``writes_paused`` per context, both read from the
-``plan_suspension`` helpers once per request; a plan with room for everyone
+``plan_seats`` helpers once per request; a plan with room for everyone
 yields all-``False``.
 """
 
