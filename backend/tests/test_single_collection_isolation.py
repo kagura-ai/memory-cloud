@@ -66,6 +66,8 @@ async def test_workspace1(db_session):
         id=uuid4(),
         name="Test Workspace 1",
         owner_user_id="owner1",
+        # Seats every member below: the free plan seats the owner only (#1943).
+        plan_name="pro",
     )
     db_session.add(workspace)
     await db_session.flush()
@@ -90,6 +92,8 @@ async def test_workspace2(db_session):
         id=uuid4(),
         name="Test Workspace 2",
         owner_user_id="owner2",
+        # Seats every member below: the free plan seats the owner only (#1943).
+        plan_name="pro",
     )
     db_session.add(workspace)
     await db_session.flush()
