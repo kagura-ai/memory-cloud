@@ -136,6 +136,31 @@ def _seed(
     )
 
 
+def _edge(conn: Connection, user_a: str, user_b: str, ws: uuid.UUID, ctx: uuid.UUID) -> int:
+    """An edge between a memory of ``user_a`` and one of ``user_b``; returns its id."""
+    return conn.execute(
+        text(
+            "INSERT INTO neural_memory_edges "
+            "(user_id, src_id, dst_id, edge_type, weight, confidence, workspace_id, context_id) "
+            "SELECT a.user_id, a.id, b.id, 'neural_association', 1.0, 1.0, :ws, :ctx "
+            "FROM memories AS a, memories AS b "
+            "WHERE a.user_id = :ua AND b.user_id = :ub AND a.id < b.id "
+            "ORDER BY a.id, b.id LIMIT 1 RETURNING id"
+        ),
+        {"ua": user_a, "ub": user_b, "ws": ws, "ctx": ctx},
+    ).scalar_one()
+
+
+def _edge_rows(conn: Connection, ids: list[int]) -> dict[int, str]:
+    return {
+        row[0]: row[1]
+        for row in conn.execute(
+            text("SELECT e.id, e::text FROM neural_memory_edges AS e WHERE e.id = ANY(:ids)"),
+            {"ids": ids},
+        )
+    }
+
+
 def _rows(conn: Connection, user: str) -> dict[uuid.UUID, str]:
     """Each seeded row as the text of the whole record (every column)."""
     return {
@@ -222,6 +247,11 @@ def test_f14_repairs_cross_rooted_rows_and_enforces_the_fk() -> None:
             _seed(conn, consistent, ws_b, ctx_b, status="pending", deleted=True)
             _seed(conn, no_ctx, ws_b, None, n=2)
             before = {user: _rows(conn, user) for user in (consistent, no_ctx, dead, in_dead_ctx)}
+            # The edges carry their endpoints' workspace: a cross-rooted pair's
+            # edge sits in ws_b, a consistent pair's in ws_a.
+            cross_edge = _edge(conn, bulk, bulk, ws_b, ctx_a)
+            consistent_edge = _edge(conn, consistent, consistent, ws_a, ctx_a)
+            consistent_edge_before = _edge_rows(conn, [consistent_edge])
 
             # An interrupted earlier build left the unique index INVALID.
             conn.execute(text(f"CREATE UNIQUE INDEX {INDEX_NAME} ON contexts (workspace_id, id)"))
@@ -300,9 +330,18 @@ def test_f14_repairs_cross_rooted_rows_and_enforces_the_fk() -> None:
             ).scalar_one()
             assert remaining == 0
 
+            # The cross-rooted pair's edge follows its memories; the other
+            # edge is byte-identical.
+            assert _edge_rows(conn, [cross_edge])[cross_edge].count(str(ws_a)) == 1
+            assert str(ws_b) not in _edge_rows(conn, [cross_edge])[cross_edge]
+            assert _edge_rows(conn, [consistent_edge]) == consistent_edge_before
+
         # The rerun moved only what the failed run left: the last batch.
         moved = [m for m in captured.messages if "cross-rooted memories" in m]
         assert len(moved) == 1 and moved[0].startswith("#1963: moved 104 "), captured.messages
+        assert "#1963: moved 1 neural_memory_edges to their context's workspace" in (
+            captured.messages
+        )
         assert any(f"{ws_b} -> {ws_a}" in m for m in captured.messages), captured.messages
 
         # The FK in force: a cross-rooted insert is refused, a row without a

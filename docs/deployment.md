@@ -2866,16 +2866,19 @@ SELECT m.workspace_id AS old_ws, c.workspace_id AS new_ws, count(*)
  GROUP BY 1, 2 ORDER BY 3 DESC;
 ```
 
+Graph edges follow the same rule: an edge whose workspace differs from its
+context's (the edges of the memories moved above carry the old workspace) is
+moved to the context's workspace too, so the graph keeps finding it. The log
+gives the number of edges moved.
+
 A memory whose context row is missing cannot exist while the `context_id`
 foreign key holds; if one does, the migration refuses before writing any row,
-with the count and up to ten ids. The migration also logs, as a warning, how
-many graph edges name a workspace other than their context's; it does not
-change them (`backend/scripts/audit_edge_context_invariant.py` reviews them).
+with the count and up to ten ids.
 
 Locks: the unique index is built `CONCURRENTLY` (no write is blocked). The
 foreign key is added `NOT VALID` (no scan; writers on `memories` and `contexts`
 wait for the `ALTER` itself, at most `lock_timeout` 5 s). The repair runs in
-batches of 500 rows, each committed on its own, and `VALIDATE` scans
+batches of 500 rows (memories, then edges), each committed on its own, and `VALIDATE` scans
 `memories` without blocking reads or writes. A lock timeout, or an
 interrupted index build, fails the migration; run it again and it resumes
 where it stopped. From the `ALTER` on, no writer can create a disagreeing
