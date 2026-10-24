@@ -464,3 +464,45 @@ async def test_a_linked_account_does_not_count_in_a_shared_context(db_session, q
     await db_session.rollback()
 
     assert await _edges(db_session, carrier, target) == []
+
+
+@pytest.mark.asyncio
+async def test_a_member_cannot_accept_on_another_members_memory(db_session, quiet_write):
+    """The superseding end must be the caller's own too, as remember's new
+    memory always is — an edge kept under the caller would not be the one
+    detection looks up for the carrier's author."""
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    a, b, _, context, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, context, a, b)
+
+    with pytest.raises(ValueError, match="on your own memory"):
+        await _accept_as(db_session, b, context, carrier)
+    await db_session.rollback()
+
+    assert await _edges(db_session, carrier, target) == []
+
+
+@pytest.mark.asyncio
+async def test_a_linked_accounts_carrier_keeps_the_edge_under_its_author(db_session, quiet_write):
+    """Private context: oauth accepts on the admin account's memory. The edge
+    is the carrier author's, which is where detection looks for it, so a
+    re-embed does not bring the suggestion back."""
+    from repositories.neural_edge import NeuralEdgeRepository
+    from tests.integration.test_identity_link_writes_db import _seed
+
+    admin, oauth, _, context, _ = await _seed(db_session, private=True, link=True)
+    carrier, target = await _pair(db_session, context, admin, oauth)
+
+    await _accept_as(db_session, oauth, context, carrier)
+
+    edges = await _edges(db_session, carrier, target)
+    assert [(e.edge_type, e.user_id) for e in edges] == [(EDGE_TYPE_SUPERSEDES, admin.user_id)]
+    found = await NeuralEdgeRepository(db_session).get_edge(
+        admin.user_id,
+        carrier,
+        target,
+        workspace_id=str(context.workspace_id),
+        context_id=str(context.id),
+    )
+    assert found is not None

@@ -85,41 +85,28 @@ class TestAcceptRequestValidation:
         assert memory_service.UPDATE_MEMORY_EDIT_FIELDS is UPDATE_MEMORY_EDIT_FIELDS
 
 
-class TestOwnershipRuleWiring:
-    """#1803: the accept applies remember(supersedes=)'s owner rule. Behaviour on
-    Postgres (shared, private + linked) is in the integration file; this pins
-    that both writes build the target predicate the same way."""
+class TestOwnMemoryPredicate:
+    """#1803: the one owner rule remember(supersedes=) and the accept share.
+    Behaviour on Postgres (shared, private + linked) is in the integration file."""
 
     @staticmethod
-    def _function(name):
-        import ast
-        from pathlib import Path
+    async def _predicate(private: bool) -> str:
+        from unittest.mock import AsyncMock, MagicMock
 
-        import services.memory_service as memory_service
+        from services.memory_service import MemoryService
 
-        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
-        return next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == name
-        )
+        service = MemoryService.__new__(MemoryService)
+        service._is_private_context = AsyncMock(return_value=private)  # type: ignore[method-assign]
+        service.db = MagicMock()
+        return str(await service._own_memory_predicate(uuid4(), "u1"))
 
-    @staticmethod
-    def _called(fn):
-        import ast
+    @pytest.mark.asyncio
+    async def test_a_shared_context_keeps_the_callers_own_memories(self):
+        sql = await self._predicate(False)
+        assert "memories.user_id = " in sql
+        assert "identity_links" not in sql
 
-        names = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name):
-                    names.add(node.func.id)
-                elif isinstance(node.func, ast.Attribute):
-                    names.add(node.func.attr)
-        return names
-
-    def test_accept_uses_the_declared_link_owner_predicate(self):
-        accept = self._called(self._function("_accept_supersede_candidate"))
-        declared = self._called(self._function("_create_declared_links"))
-        for helper in ("owned_by", "_is_private_context"):
-            assert helper in declared, f"_create_declared_links no longer calls {helper}"
-            assert helper in accept, f"the accept no longer applies the #1803 rule ({helper})"
+    @pytest.mark.asyncio
+    async def test_a_private_context_widens_to_the_link_set(self):
+        sql = await self._predicate(True)
+        assert "identity_links" in sql

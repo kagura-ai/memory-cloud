@@ -1938,8 +1938,9 @@ class MemoryService:
         the duplicate contract and the self-heal are create_edge's own.
 
         Raises:
-            ValueError: no live suggestion to accept, or one written after this
-                memory (nothing written).
+            ValueError: no live suggestion to accept, one written after this
+                memory, or either memory not the caller's own under #1803
+                (nothing written).
             SupersedeEdgeConflictError: a different declared edge links the
                 pair (nothing written).
             RuntimeError: the edge or the clearing did not land as asserted;
@@ -1962,22 +1963,37 @@ class MemoryService:
             )
         target_id = candidate.memory_id
 
-        # #1803, the rule remember(supersedes=) applies in _create_declared_links:
-        # the superseded memory must be the caller's own, or in a private
-        # context one an account linked to the caller wrote. In a shared context
-        # another member's memory is readable (so it can be suggested) but not
-        # the caller's to shadow for the whole team.
-        own_target = (
-            owned_by(Memory.user_id, user_id)
-            if await self._is_private_context(str(memory.context_id))
-            else Memory.user_id == user_id
-        )
-        target = (
-            await self.db.execute(
-                select(Memory.created_at, own_target.label("own")).where(Memory.id == target_id)
+        # #1803, the rule remember(supersedes=) applies (_own_memory_predicate):
+        # both ends must be the caller's own — the superseding memory, as
+        # remember's new memory always is, and the superseded one, so a shared
+        # context's member cannot shadow another member's memory for the team.
+        # In a private context an account linked to the caller counts.
+        own = await self._own_memory_predicate(memory.context_id, user_id)
+        rows = {
+            row.id: row
+            for row in (
+                await self.db.execute(
+                    select(Memory.id, Memory.created_at, own.label("own")).where(
+                        Memory.id.in_([memory.id, target_id])
+                    )
+                )
+            ).all()
+        }
+        target = rows.get(target_id)
+        if target is None:
+            # Gone (hard-deleted or erased) since the resolver read it.
+            raise ValueError(
+                "This memory has no supersede_candidate to accept; recall() or "
+                "reference() it to see its current suggestion."
             )
-        ).one_or_none()
-        if target is None or not target.own:
+        carrier = rows.get(memory.id)
+        if carrier is None or not carrier.own:
+            raise ValueError(
+                "This memory is another member's, and a supersede_candidate is accepted "
+                "only on your own memory (as remember(supersedes=) links only from one); "
+                "leave the suggestion to its author."
+            )
+        if not target.own:
             raise ValueError(
                 "This memory's supersede_candidate is another member's memory, and "
                 "supersedes takes only your own (as remember(supersedes=) does); "
@@ -2000,7 +2016,11 @@ class MemoryService:
 
         result = await create_declared_edge(
             self.db,
-            user_id=user_id,
+            # The carrier's author: the caller, or in a private context a linked
+            # account (#1784). Detection looks the pair's edge up under that
+            # owner, so an edge kept under another account would let the next
+            # re-embed resurface the suggestion next to it.
+            user_id=memory.user_id,
             source_id=memory.id,
             target_id=target_id,
             edge_type=EDGE_TYPE_SUPERSEDES,
@@ -3410,6 +3430,21 @@ class MemoryService:
         )
         return result.scalar_one_or_none() is True
 
+    async def _own_memory_predicate(
+        self, context_id: UUID | str | None, user_id: str
+    ) -> ColumnElement[bool]:
+        """#1803: SQL predicate for "a memory ``user_id`` may name as its own".
+
+        The caller's own memory — and in a private context, whose owner is the
+        link set (#1784), one an account linked to the caller wrote. A shared
+        context keeps the caller's own memories only. Used by the writes that
+        let a caller shadow a memory: remember's declared links and
+        ``supersedes``, and the #2308 supersede accept.
+        """
+        if await self._is_private_context(context_id):
+            return owned_by(Memory.user_id, user_id)
+        return Memory.user_id == user_id
+
     async def _create_declared_links(
         self,
         memory_id: UUID,
@@ -3450,11 +3485,7 @@ class MemoryService:
 
             async def own_target() -> ColumnElement[bool]:
                 if not own_target_cache:
-                    own_target_cache.append(
-                        owned_by(Memory.user_id, user_id)
-                        if await self._is_private_context(context_id)
-                        else Memory.user_id == user_id
-                    )
+                    own_target_cache.append(await self._own_memory_predicate(context_id, user_id))
                 return own_target_cache[0]
 
             # Direct links by memory ID (batch-validate targets exist in same scope)

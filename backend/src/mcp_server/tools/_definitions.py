@@ -223,7 +223,7 @@ Manual: guide(["update_memory"]).""",
                     },
                     "accept_supersede_candidate": {
                         "type": "boolean",
-                        "description": "true accepts this memory's current supersede_candidate (requires memory_id, no field edits): the candidate is shadowed out of default recall.",
+                        "description": "true accepts this memory's current supersede_candidate (requires memory_id, no field edits; both memories yours): the candidate is shadowed out of default recall.",
                     },
                     "summary": {
                         "type": "string",
