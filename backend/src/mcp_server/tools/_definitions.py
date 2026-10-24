@@ -193,7 +193,7 @@ Manual: guide(["remember_batch"]).""",
             "name": "update_memory",
             "description": """Update a memory in place (memory_id) or upsert by external_id (not found → created; found → replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
 SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
-Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict.
+Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",
@@ -220,6 +220,10 @@ Manual: guide(["update_memory"]).""",
                     "dismiss_supersede_candidate": {
                         "type": "boolean",
                         "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed.",
+                    },
+                    "accept_supersede_candidate": {
+                        "type": "boolean",
+                        "description": "true accepts this memory's current supersede_candidate (requires memory_id, no field edits): the candidate is shadowed out of default recall.",
                     },
                     "summary": {
                         "type": "string",
@@ -272,7 +276,7 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25); returns ranked summaries, plus content for the top `full`. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
 Query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); reject with update_memory(dismiss_supersede_candidate=true), accept with create_edge(edge_type='supersedes'), outside the core profile (describe_tools(["create_edge"])). folded? {count, memory_ids}: judge-verified older versions.
+Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); accept with update_memory(accept_supersede_candidate=true), reject with dismiss_supersede_candidate=true. folded? {count, memory_ids}: judge-verified older versions.
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -353,7 +357,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])). Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])), links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",

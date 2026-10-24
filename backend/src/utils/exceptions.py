@@ -244,6 +244,26 @@ class VersionConflictError(ConflictError):
         self.current_version = current_version
 
 
+class SupersedeEdgeConflictError(ConflictError):
+    """Accepting a supersede suggestion met a different declared edge (409, #2308).
+
+    ``update_memory(accept_supersede_candidate=true)`` writes the ``supersedes``
+    edge through ``create_declared_edge``, whose duplicate contract (#1321)
+    refuses to retype a declared link on the same pair. Nothing was written;
+    ``existing`` is the serialized declared edge, as ``create_edge``'s
+    ``edge_exists`` reply carries it.
+    """
+
+    def __init__(self, *, source_id: Any, target_id: Any, existing: dict[str, Any] | None) -> None:
+        super().__init__(
+            f"A declared edge already links {source_id} to {target_id} with different "
+            "values, so the suggestion was not accepted. Keep that edge and dismiss the "
+            "suggestion, or replace the edge with create_edge(overwrite=true).",
+            reason="edge_exists",
+        )
+        self.existing = existing
+
+
 # Platform team already connected (#1753)
 #
 # Both stay ``RES-002`` / 409 — the code a client already sees for this

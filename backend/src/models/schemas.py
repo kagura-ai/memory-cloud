@@ -1139,6 +1139,23 @@ def _reject_bool_version(v: Any) -> Any:
 VersionNumber = Annotated[int, Field(ge=1), BeforeValidator(_reject_bool_version)]
 
 
+# The request fields that edit the memory itself (``_update_apply_fields`` writes
+# them onto the row). A dismissal-only update (#1504) keeps the timestamp when
+# none is set, and an acceptance (#2308) refuses to share a call with any of
+# them; adding a field to that method means adding it here.
+UPDATE_MEMORY_EDIT_FIELDS: tuple[str, ...] = (
+    "summary",
+    "context_summary",
+    "content",
+    "details",
+    "type",
+    "importance",
+    "tags",
+    "context",
+    "delivery_mode",
+)
+
+
 class UpdateMemoryRequest(BaseModel):
     """Request schema for update_memory() API.
 
@@ -1196,6 +1213,17 @@ class UpdateMemoryRequest(BaseModel):
             "materially. In-place mode only."
         ),
     )
+    # #2308: the acceptance half for a client that does not list create_edge
+    # (the default core profile). A graph action only: the supersedes edge is
+    # written and the suggestion cleared through create_edge's own path.
+    accept_supersede_candidate: bool = Field(
+        default=False,
+        description=(
+            "Accept the currently-suggested supersede candidate for this memory: "
+            "a declared supersedes edge from this memory to the candidate, which "
+            "leaves default recall. In-place mode only, with no field edits."
+        ),
+    )
     # #2043: optimistic concurrency. The edit applies only while the memory is
     # still at this version; otherwise nothing is written and the caller gets
     # version_conflict with the current version. None = last writer wins.
@@ -1226,6 +1254,28 @@ class UpdateMemoryRequest(BaseModel):
                 "dismiss_supersede_candidate requires memory_id (in-place mode); "
                 "an external_id upsert replaces the memory and its suggestion."
             )
+        # #2308: same reason as the dismissal — an upsert has no suggestion.
+        if has_external_id and self.accept_supersede_candidate:
+            raise ValueError(
+                "accept_supersede_candidate requires memory_id (in-place mode); "
+                "an external_id upsert replaces the memory and its suggestion."
+            )
+        if self.accept_supersede_candidate and self.dismiss_supersede_candidate:
+            raise ValueError(
+                "accept_supersede_candidate and dismiss_supersede_candidate cannot "
+                "both be true: accept the suggestion or reject it."
+            )
+        # #2308: accepting is a graph action. An edit in the same call would
+        # re-embed and version the memory it marks as superseding (and could
+        # move the very similarity the suggestion rests on), so it goes in a
+        # separate call.
+        if self.accept_supersede_candidate:
+            edits = [name for name in UPDATE_MEMORY_EDIT_FIELDS if getattr(self, name) is not None]
+            if edits:
+                raise ValueError(
+                    "accept_supersede_candidate cannot be combined with field edits "
+                    f"({', '.join(edits)}); send the edit in a separate update_memory call."
+                )
         # #2043: the upsert replaces the row under a new memory_id (forget +
         # remember), so there is no version to compare — refuse rather than
         # silently write without the check the caller asked for.
@@ -1273,6 +1323,9 @@ class UpdateMemoryResponse(BaseModel):
     # can confirm WHICH pairing was tombstoned. None when nothing was dismissed
     # (including a dismissal that found no live suggestion — see the service).
     supersede_candidate_dismissed: UUID | None = None
+    # Issue #2308: the memory an accepted suggestion named, now the target of
+    # this memory's supersedes edge. None when the call accepted nothing.
+    superseded_memory_id: UUID | None = None
     # Issue #1502: an edit can degrade recall-ability just as a fresh write can,
     # so the same advisory hints apply here.
     lint: list[WriteLintHint] = Field(default_factory=list)

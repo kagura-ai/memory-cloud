@@ -116,9 +116,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "recall(include_superseded=true) and explore()). Prefer this to a "
         "near-duplicate, which leaves stale and fresh facts competing. If you forget, "
         "the server detects the near-duplicate and surfaces a supersede_candidate on "
-        "a later recall()/reference(): accept it with create_edge(edge_type="
-        "'supersedes') — outside the core profile, describe_tools([\"create_edge\"]) has "
-        "its schema — or reject it with update_memory(dismiss_supersede_candidate=true)."
+        "a later recall()/reference(): accept it with "
+        "update_memory(accept_supersede_candidate=true) or reject it with "
+        "update_memory(dismiss_supersede_candidate=true)."
     ),
     "remember.delivery": (
         "delivery_mode is orthogonal to type. 'on_recall' (default): only via "
@@ -234,10 +234,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "• supersede_candidate {memory_id, summary, similarity, detected_at?, verified?} "
         "— an OLDER near-duplicate this result likely replaces. A suggestion, never "
         "auto-applied; verified: true means the deployment's judge confirmed it is "
-        "an update of the same fact (safe to accept without reading both). Accept: create_edge(source_id=<this memory_id>, "
-        "target_id=<supersede_candidate.memory_id>, edge_type='supersedes'), outside "
-        'the core profile (describe_tools(["create_edge"]) has its schema), shadows '
-        "the old fact out of default recall. Reject a deliberately separate pair: "
+        "an update of the same fact (safe to accept without reading both). Accept: "
+        "update_memory(memory_id, accept_supersede_candidate=true) writes the "
+        "supersedes edge (this memory → the candidate) and shadows the old fact out "
+        "of default recall; create_edge(edge_type='supersedes'), outside the core "
+        'profile (describe_tools(["create_edge"]) has its schema), links any other '
+        "pair. Reject a deliberately separate pair: "
         "update_memory(memory_id, dismiss_supersede_candidate=true). It disappears "
         "once accepted or once the candidate is deleted.\n"
         "• folded {count, memory_ids} — older versions of the same fact that recall "
@@ -410,9 +412,14 @@ GUIDE_TOPICS: dict[str, str] = {
         "dismiss_supersede_candidate=true rejects this memory's current "
         "supersede_candidate (requires memory_id) — for two deliberately separate "
         "memories, so the suggestion stops resurfacing; nothing is deleted or "
-        "shadowed, and detection resumes if their similarity changes materially. To "
-        "accept instead: create_edge(edge_type='supersedes'), outside the core profile "
-        '(describe_tools(["create_edge"]) has its schema). expected_version=N '
+        "shadowed, and detection resumes if their similarity changes materially. "
+        "accept_supersede_candidate=true accepts it instead: a declared supersedes edge "
+        "from this memory to the candidate, which leaves default recall, and the "
+        "suggestion is cleared. It requires memory_id and takes no field edits (send "
+        "those in another call; the version does not move); not with "
+        "dismiss_supersede_candidate. With no live suggestion it is validation_error "
+        "and nothing is written; a different declared edge already on the pair is "
+        "edge_exists. expected_version=N "
         "(memory_id only): apply the edit only while the memory is at version N — the "
         "version reference() returned — so a concurrent edit is never overwritten "
         "unseen; otherwise version_conflict with current_version and nothing is written. "
@@ -422,16 +429,18 @@ GUIDE_TOPICS: dict[str, str] = {
         "Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', "
         "re_embedded, scope, version, persistence?: {scope, committed, promotes_via, "
         "consolidation_archive_min_age_days, detail}, supersede_candidate_dismissed?, "
+        "superseded_memory_id?, "
         "lint?: [{code, hint, subject?}], session_id?, context_id, context_name, "
         "context_display_name, context_is_private, context_is_locked}. re_embedded is "
         "true only when summary, context_summary or content changed. Keys marked ? "
         "are omitted, never null: persistence and lint as in remember() (lint "
         "reflects the memory AFTER the update); supersede_candidate_dismissed is the "
         "rejected candidate's memory_id, absent when nothing was dismissed (also when no "
-        "live suggestion existed). The write "
+        "live suggestion existed); superseded_memory_id is the accepted candidate's. The write "
         "is committed before this returns. version moves by one only when summary, "
         "context_summary, content, details, type, importance or tags changed. Errors "
-        "to branch on: memory_not_found, validation_error, version_conflict."
+        "to branch on: memory_not_found, validation_error, version_conflict, "
+        "edge_exists (accept only)."
     ),
     # --------------------------------------------------------------- reference
     "reference.returns": (
@@ -443,10 +452,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "supersede_candidate is null, or {memory_id, summary, similarity, "
         "detected_at, verified?} of an OLDER near-duplicate this memory likely supersedes — a "
         "suggestion only (verified: true when the deployment's judge confirmed it is an "
-        "update of the same fact). Accept it with create_edge(source_id=<this memory_id>, "
-        'target_id=<supersede_candidate.memory_id>, edge_type="supersedes") — outside '
-        'the core profile, describe_tools(["create_edge"]) has its schema; reject '
-        "a deliberate pair with update_memory(dismiss_supersede_candidate=true)."
+        "update of the same fact). Accept it with "
+        "update_memory(memory_id, accept_supersede_candidate=true); reject a "
+        "deliberate pair with update_memory(dismiss_supersede_candidate=true). "
+        'create_edge(edge_type="supersedes"), outside the core profile '
+        '(describe_tools(["create_edge"]) has its schema), links any pair.'
     ),
     "reference.paging": (
         "Large memories: nothing is cut silently, and the response stays within "

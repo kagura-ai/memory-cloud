@@ -20,12 +20,16 @@ def _all_text(name: str) -> str:
     return "\n".join(parts)
 
 
+# #2308: the accept path every client can call — core lists update_memory,
+# not create_edge.
+CORE_ACCEPT = "update_memory(accept_supersede_candidate=true)"
+
+
 def test_recall_documents_supersede_candidate_and_accept_flow():
     d = _all_text("recall")
     assert "supersede_candidate" in d
-    # The accept action must be spelled out (confirm -> create_edge supersedes).
-    assert "create_edge" in d
-    assert "supersedes" in d
+    # The accept action must be spelled out, on a tool the core profile lists.
+    assert CORE_ACCEPT in d
     # And the "suggestion only" contract (never auto-applied) must be stated.
     assert "SUGGESTION" in d or "suggestion" in d
 
@@ -33,8 +37,28 @@ def test_recall_documents_supersede_candidate_and_accept_flow():
 def test_reference_documents_supersede_candidate_and_accept_flow():
     d = _all_text("reference")
     assert "supersede_candidate" in d
+    assert CORE_ACCEPT in d
+    # create_edge stays documented as the general way to link a pair.
     assert "create_edge" in d
     assert 'edge_type="supersedes"' in d
+
+
+def test_update_memory_offers_the_accept_flag():
+    tool = next(t for t in get_tool_definitions() if t["name"] == "update_memory")
+    prop = tool["inputSchema"]["properties"]["accept_supersede_candidate"]
+    assert prop["type"] == "boolean"
+    assert "memory_id" in prop["description"]
+    assert "superseded_memory_id?" in tool["description"]
+
+
+def test_guide_topics_name_the_core_accept_path():
+    from mcp_server.tools.guide import GUIDE_TOPICS
+
+    for topic in ("remember.supersedes", "update_memory.modes", "reference.returns"):
+        assert "accept_supersede_candidate" in GUIDE_TOPICS[topic], topic
+    assert "superseded_memory_id" in GUIDE_TOPICS["update_memory.returns"]
+    recall_topics = " ".join(text for key, text in GUIDE_TOPICS.items() if key.startswith("recall"))
+    assert "accept_supersede_candidate=true" in recall_topics
 
 
 def test_create_edge_documents_accepting_a_supersede_candidate():

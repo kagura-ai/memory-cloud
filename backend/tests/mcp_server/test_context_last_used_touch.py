@@ -330,6 +330,7 @@ async def test_update_memory_bumps_context():
             version=2,  # #2043, not under test here
             persistence=None,  # #1505 block, not under test here
             supersede_candidate_dismissed=None,  # #1504, not under test here
+            superseded_memory_id=None,  # #2308, not under test here
             lint=[],  # #1502 hints, not under test here
         )
     )

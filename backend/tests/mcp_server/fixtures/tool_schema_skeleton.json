@@ -187,6 +187,9 @@
         "dismiss_supersede_candidate": {
           "type": "boolean"
         },
+        "accept_supersede_candidate": {
+          "type": "boolean"
+        },
         "summary": {
           "type": "string"
         },

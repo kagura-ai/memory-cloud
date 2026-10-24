@@ -256,6 +256,7 @@ def test_recall_keeps_the_signals_an_agent_acts_on():
         "high|moderate|low|none",
         "external source",
         "dismiss_supersede_candidate",
+        "accept_supersede_candidate",  # #2308
         "absent, never null",
     ):
         assert term in text, f"recall lost {term!r}"

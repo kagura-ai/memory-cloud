@@ -50,6 +50,7 @@ from utils.exceptions import (
     ContentSizeExceededError,
     NotFoundException,
     QuotaExceededError,
+    SupersedeEdgeConflictError,
     VersionConflictError,
 )
 from utils.recall_projection import (
@@ -498,6 +499,8 @@ async def handle_update_memory(
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
             # #1504: rejection path for a supersede suggestion.
             dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
+            # #2308: the acceptance path (create_edge is outside the core profile).
+            accept_supersede_candidate=bool(args.get("accept_supersede_candidate", False)),
             # #2043: optimistic concurrency (None = last writer wins).
             expected_version=args.get("expected_version"),
         )
@@ -567,6 +570,12 @@ async def handle_update_memory(
                                 if result.supersede_candidate_dismissed
                                 else {}
                             ),
+                            # #2308: the memory the accepted suggestion named.
+                            **(
+                                {"superseded_memory_id": str(result.superseded_memory_id)}
+                                if result.superseded_memory_id
+                                else {}
+                            ),
                             **_lint_response_field(result.lint),  # #1502
                             **_session_response_field(),  # #2044
                             **_context_response_fields(current_context),
@@ -596,6 +605,14 @@ async def handle_update_memory(
                     "or omit expected_version to overwrite."
                 ),
             )
+        except SupersedeEdgeConflictError as e:
+            # #2308: create_edge's duplicate contract refused to retype a
+            # declared link on the pair; same code and payload as create_edge.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 409, current_context_id, workspace_id
+            )
+            return _error_response("edge_exists", e.message, existing_edge=e.existing)
         except NotFoundException as e:
             # #1323: structured envelope for a missing/inaccessible memory,
             # mirroring handle_reference — previously this fell through to the

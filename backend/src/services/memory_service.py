@@ -52,6 +52,7 @@ from models.memory import (
     tool_triggered_predicate,
 )
 from models.schemas import (
+    UPDATE_MEMORY_EDIT_FIELDS,
     ExploreHint,
     ExploreRequest,
     ExploreResponse,
@@ -432,20 +433,10 @@ def location_payload_from_details(details: dict | None) -> dict | None:
     return {"lat": float(lat), "lon": float(lon)}
 
 
-# The request fields ``_update_apply_fields`` writes onto the row. Named here so
-# a dismissal-only update (#1504) can tell "no content changed" from "content
-# changed", and so adding a field to that method forces a change here too.
-_UPDATE_CONTENT_FIELDS = (
-    "summary",
-    "context_summary",
-    "content",
-    "details",
-    "type",
-    "importance",
-    "tags",
-    "context",
-    "delivery_mode",
-)
+# The request fields ``_update_apply_fields`` writes onto the row, so a
+# dismissal-only update (#1504) can tell "no content changed" from "content
+# changed". One list with the schema's accept-with-edits refusal (#2308).
+_UPDATE_CONTENT_FIELDS = UPDATE_MEMORY_EDIT_FIELDS
 
 
 # ---------------------------------------------------------------- #1853 writes
@@ -1792,6 +1783,11 @@ class MemoryService:
         ):
             await self._require_guardrail_author(user_id, memory.context_id)
 
+        if request.accept_supersede_candidate:
+            # #2308: a graph action only — the schema refuses field edits in the
+            # same call, so nothing below (re-embed, versioning) applies.
+            return await self._accept_supersede_candidate(memory, user_id)
+
         # Pre-compute normalized values (avoid double normalization)
         normalized_summary = (
             normalize_for_search(request.summary) if request.summary is not None else None
@@ -1905,6 +1901,99 @@ class MemoryService:
             # #1502: lint the memory's CURRENT state, not the patch — a partial
             # update leaves fields untouched, and what matters for recall is
             # what the memory now says.
+            lint=await self._lint_write(
+                workspace_id=memory.workspace_id,
+                context_id=memory.context_id,
+                user_id=user_id,
+                summary=memory.summary,
+                tags=memory.tags,
+                memory_id=memory.id,
+            ),
+        )
+
+    async def _accept_supersede_candidate(self, memory: Any, user_id: str) -> UpdateMemoryResponse:
+        """#2308: accept ``memory``'s current supersede suggestion.
+
+        The candidate is the one the read path would show for this row as it
+        stands under the edit lock (``_lock_for_edit`` re-read it), resolved by
+        the same ``_resolve_supersede_candidates`` recall and reference use:
+        target live, same context, visible to the caller's binding, not a
+        current ``parallel`` verdict. A suggestion cleared, tombstoned or
+        replaced since the caller read it is therefore never accepted from a
+        stale copy. The edge is written by ``create_declared_edge`` — the
+        function ``create_edge`` uses — which also clears the suggestion, so
+        the duplicate contract and the self-heal are create_edge's own.
+
+        Raises:
+            ValueError: no live suggestion to accept (nothing written).
+            SupersedeEdgeConflictError: a different declared edge already links
+                the pair (nothing written).
+        """
+        from models.memory import EDGE_TYPE_SUPERSEDES
+        from services.edge_service import create_declared_edge
+        from utils.exceptions import SupersedeEdgeConflictError
+
+        resolved = await self._resolve_supersede_candidates(
+            {memory.id: memory}, user_id=user_id, operation="update"
+        )
+        candidate = resolved.get(memory.id)
+        if candidate is None:
+            raise ValueError(
+                "This memory has no supersede_candidate to accept; recall() or "
+                "reference() it to see its current suggestion."
+            )
+
+        target_id = candidate.memory_id
+        result = await create_declared_edge(
+            self.db,
+            user_id=user_id,
+            source_id=memory.id,
+            target_id=target_id,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            # create_edge's defaults for a user assertion (#738).
+            weight=1.0,
+            confidence=1.0,
+            workspace_id=str(memory.workspace_id),
+            context_id=str(memory.context_id),
+            overwrite=False,
+        )
+        if result.operation == "conflict":
+            raise SupersedeEdgeConflictError(
+                source_id=memory.id, target_id=target_id, existing=result.existing
+            )
+        await self.db.commit()
+
+        logger.info(
+            "memory_updated",
+            memory_id=str(memory.id),
+            user_id=user_id,
+            re_embedded=False,
+            superseded_memory_id=str(target_id),
+        )
+
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="update",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory.id,
+        )
+
+        return UpdateMemoryResponse(
+            memory_id=memory.id,
+            operation="updated",
+            re_embedded=False,
+            scope=memory.scope,
+            version=memory.version,
+            persistence=persistence_info(
+                memory.scope,
+                pinned=memory.is_pinned,
+                tool_triggered=self._carries_tool_trigger(memory.details),
+            ),
+            superseded_memory_id=target_id,
             lint=await self._lint_write(
                 workspace_id=memory.workspace_id,
                 context_id=memory.context_id,
