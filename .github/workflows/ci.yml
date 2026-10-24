@@ -314,14 +314,9 @@ jobs:
             backend-integration:
               - 'backend/src/**'
               - 'backend/alembic/versions/**'
-              - 'backend/tests/integration/**'
-              - 'backend/tests/cli/**'
-              - 'backend/tests/smoke/test_all_routes.py'
-              - 'backend/tests/services/test_password_account_service.py'
-              - 'backend/tests/services/test_known_device_db.py'
-              - 'backend/tests/auth/test_oauth2_server_coverage.py'
-              - 'backend/tests/services/test_orphan_vector_sweep.py'
-              - 'backend/tests/services/test_context_delete_removes_points.py'
+              # Every test directory: DB-backed tests live outside
+              # tests/integration/ too and run in this job (#2297).
+              - 'backend/tests/**'
               - 'backend/pyproject.toml'
               - 'backend/uv.lock'
               - '.github/workflows/ci.yml'
@@ -414,10 +409,12 @@ jobs:
       - name: Install dependencies
         # From the lock, never a fresh resolution: --locked fails when uv.lock
         # is out of date with pyproject.toml (#1706). The venv goes on PATH so
-        # the pytest / alembic / python steps below run unchanged.
+        # the pytest / alembic / python steps below run unchanged. `lite`
+        # matches the backend-unit job, so the DB-backed run below collects
+        # the same suite.
         run: |
           cd backend
-          uv sync --locked --extra dev
+          uv sync --locked --extra dev --extra lite
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       # MinIO for the #994 S3-compatible storage integration test. Started as a
@@ -463,7 +460,26 @@ jobs:
           echo "Qdrant did not become ready within 60s" >&2
           exit 1
 
+      # The backend-unit suite again, now against Postgres: about 1,000 tests
+      # outside tests/integration/ take the db_session fixture and skip in the
+      # unit job, so this is the only place they run (#2297). Runs before the
+      # integration tests on a fresh database — the root conftest drops its
+      # tables at session end — so those still start on an empty schema.
+      - name: Run DB-backed tests outside tests/integration
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
+          # Fail instead of skipping every db_session test (#1885).
+          REQUIRE_TEST_DATABASE: "1"
+          REDIS_URL: redis://localhost:6379
+          QDRANT_URL: http://localhost:6333
+        run: >-
+          cd backend && pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/cli
+          --ignore=tests/smoke/test_all_routes.py
+          --timeout=300 --maxfail=5
+
       - name: Run integration tests
+        # Still runs when the step above failed, so one run reports both.
+        if: ${{ !cancelled() }}
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           # Hard-fail rather than let every db_session test silently skip: the
@@ -478,17 +494,8 @@ jobs:
           MINIO_TEST_ACCESS_KEY: minioadmin
           MINIO_TEST_SECRET_KEY: minioadmin
           MINIO_TEST_BUCKET: kagura-files-test
-        # These tests/services and tests/api files need a live database and skip in the unit job.
         run: >-
           cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py
-          tests/services/test_password_account_service.py
-          tests/services/test_known_device_db.py
-          tests/auth/test_oauth2_server_coverage.py::TestShareLockOwner
-          tests/services/test_orphan_vector_sweep.py
-          tests/services/test_context_delete_removes_points.py
-          tests/api/test_account_linking.py
-          tests/services/test_remember_write_options.py
-          tests/mcp_server/test_remember_batch_tool.py
           -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
