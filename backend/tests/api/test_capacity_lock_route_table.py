@@ -243,7 +243,7 @@ CONTENT_ROUTERS = {
 # BLOCKED rows whose gate is the service's own second line, not a resolver call
 # in the handler (the REST twin of ``CAPACITY_LOCK_SERVICE_GATED_TOOLS``):
 # MemoryService._ensure_capacity, FileStorageService.reserve/confirm,
-# ContextService.create_context.
+# ContextService.create_context, AgentBootstrapService.resolve_context (#1954).
 SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/memory/recall"),
@@ -256,6 +256,7 @@ SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/contexts"),
         ("POST", "/api/v1/files/reserve"),
         ("POST", "/api/v1/files/{file_id}/confirm"),
+        ("POST", "/api/v1/agents/{agent_id}/bootstrap"),
     }
 )
 

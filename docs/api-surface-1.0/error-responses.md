@@ -434,8 +434,12 @@ The lock applies only when the plan is `free` **and** `entitlement_source` is
 `external_billing` (the workspace came back from a subscription); a self-hosted or
 admin-managed Free workspace is never locked. It is computed on every gated call, never
 stored, so deleting down to the cap unlocks the next call. No `feature` and no `quota_type`:
-the refusal is not one feature or one cap. On MCP the dispatcher refuses every blocked tool
-with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
+the refusal is not one feature or one cap. On MCP every blocked tool is refused once the
+caller may reach the target — the lock is checked after authorization, in the context resolver
+or the service the tool calls ([#1954](https://github.com/kagura-ai/memory-cloud/issues/1954)),
+so a context the caller cannot read answers with the usual `context_not_found` instead; a
+blocked tool that names no context is checked on the caller's own workspace. The refusal carries
+`error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context` — which since
 [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
 `delete_file`, the storage page's bulk clear backed by `DELETE /contexts/{id}/files`,
@@ -443,8 +447,8 @@ much to remove, what still works (`list`, `forget`, `delete_context` — which s
 service (recall, reference, explore, pinned loads, remember, edits), uploads, context
 creation, and the graph, analysis (all but cancel), agent-state (all but delete), feedback, workspace
 sleep-report, agent-bootstrap and share-key routes. A caller who is not a member of the locked
-workspace (a share-key or public-context reader) gets the refusal with every number and
-`cleanup_url` set to `null`. Guardrails stay available while locked (MCP `load_guardrails`, REST `/memory/guardrails` and
+workspace (a share-key or public-context reader on REST) gets the refusal with every number and
+`cleanup_url` set to `null`; no MCP tool serves a non-member, so MCP never sends that form. Guardrails stay available while locked (MCP `load_guardrails`, REST `/memory/guardrails` and
 `/memory/guardrails/digest`, `get_context_info`'s guardrails, the session instructions): they are
 small, bounded safety rails, and blocking one door while the others serve the same entries would
 protect nothing. The storage figure (`used_bytes`) is the one `services/storage_counts.py`

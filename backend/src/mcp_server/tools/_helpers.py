@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from collections.abc import Coroutine
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -18,7 +18,7 @@ from mcp.types import TextContent
 from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
 from services import plan_seats
-from services.capacity_lock import CapacityPolicy
+from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -150,6 +150,39 @@ def set_mcp_credential_default_context(context_id: "UUID | None") -> None:
 def get_mcp_credential_default_context() -> "UUID | None":
     """Read the credential's default context; ``None`` = the credential has none."""
     return _mcp_credential_default_context.get()
+
+
+# ============================================================================
+# #1954: per-call capacity policy for the context resolvers
+# ============================================================================
+# The capacity-over lock (#1941) is checked where a tool resolves its target
+# context — after every authorization step, as the REST resolvers do (#1948) —
+# instead of in the dispatcher before any of them. ``execute_tool_call`` sets
+# the tool's policy (``_capacity_gate.capacity_policy_for``) right before the
+# handler runs and resets it afterwards; ``_resolve_context`` /
+# ``_resolve_context_for_read`` and the handlers' own permission calls read it.
+# Unset — a handler called outside the dispatcher, which only tests do — reads
+# as BLOCKED: a missing decision fails closed.
+_mcp_capacity_policy: ContextVar["CapacityPolicy | None"] = ContextVar(
+    "mcp_capacity_policy", default=None
+)
+
+
+def set_mcp_capacity_policy(policy: CapacityPolicy) -> "Token[CapacityPolicy | None]":
+    """Set the running tool's capacity policy; pass the token to ``reset_mcp_capacity_policy``."""
+    return _mcp_capacity_policy.set(policy)
+
+
+def reset_mcp_capacity_policy(token: "Token[CapacityPolicy | None]") -> None:
+    """Restore the policy that was in effect before ``set_mcp_capacity_policy``."""
+    _mcp_capacity_policy.reset(token)
+
+
+def mcp_capacity_policy() -> CapacityPolicy:
+    """The running tool's capacity policy; anything but ALLOWED reads as BLOCKED."""
+    if _mcp_capacity_policy.get() is CapacityPolicy.ALLOWED:
+        return CapacityPolicy.ALLOWED
+    return CapacityPolicy.BLOCKED
 
 
 # ============================================================================
@@ -464,6 +497,9 @@ async def _resolve_context(
 
     Raises:
         _ContextNotFoundError: If context not found or access denied
+        CapacityLockedError: #1954 — the running tool's policy is BLOCKED
+            (``mcp_capacity_policy``) and the context's workspace is over its
+            Free capacity; checked after every authorization step.
     """
     from services.context_service import ContextService
     from utils.exceptions import AuthorizationError, NotFoundException
@@ -539,6 +575,12 @@ async def _resolve_context(
                 context_id, "Context not found or you don't have access to it."
             )
 
+    # #1954: the capacity-over lock, after every authorization step above, so
+    # it never answers for a context the caller could not reach. Membership
+    # was established by ``get_context``: the caller gets the full refusal.
+    if mcp_capacity_policy() is CapacityPolicy.BLOCKED:
+        await ensure_not_capacity_locked(db, context.workspace_id)
+
     return context
 
 
@@ -574,6 +616,12 @@ async def _resolve_context_for_read(
     ``workspace_id`` param) avoids confining OAuth2/session/global-key callers,
     whose handler ``workspace_id`` is the user's *current* workspace, not a key
     scope. A mismatch raises the same uniform ``_ContextNotFoundError``.
+
+    #1954: the capacity policy is the running tool's (``mcp_capacity_policy``,
+    set by the dispatcher from ``_capacity_gate.capacity_policy_for``). With
+    BLOCKED the service checks the capacity-over lock after authorization and
+    raises ``CapacityLockedError`` — the lock answers only for a context the
+    caller may read.
     """
     from services.permission_service import PermissionService
     from utils.exceptions import NotFoundException
@@ -589,9 +637,11 @@ async def _resolve_context_for_read(
             required_role=required_role,
             key_workspace_id=get_mcp_key_workspace_scope(),
             operation=operation,
-            # #1948: the dispatcher's capacity table (``_capacity_gate``) is
-            # the MCP decision; the resolver does not re-gate here.
-            capacity=CapacityPolicy.ALLOWED,
+            # #1954: the running tool's policy (``mcp_capacity_policy``). Kept
+            # at the viewer default ``required_role``, BLOCKED adds only the
+            # lock here — a writer role would pull the #1943 slot check ahead
+            # of the tools' own role gates.
+            capacity=mcp_capacity_policy(),
         )
     except NotFoundException as exc:
         raise _ContextNotFoundError(

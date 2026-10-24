@@ -15,9 +15,8 @@ from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
     _log_tool_usage,
+    mcp_capacity_policy,
 )
-from services import plan_seats
-from services.capacity_lock import CapacityPolicy
 
 
 async def handle_update_search_config(
@@ -69,14 +68,13 @@ async def handle_update_search_config(
             # Permission check (owner/editor)
             perm_service = PermissionService(db)
             try:
-                # dispatcher-gated (update_search_config is a blocked tool)
+                # #1954: BLOCKED (a resolver-gated tool) checks the capacity
+                # lock after the role, then the #1943 writable slot — search
+                # settings change how the context's content is searched, a
+                # content write like the REST twin.
                 await perm_service.check_context_write(
-                    user_id, ctx_uuid, capacity=CapacityPolicy.ALLOWED
+                    user_id, ctx_uuid, capacity=mcp_capacity_policy()
                 )
-                # #1943: search settings change how the context's content is
-                # searched — treated as a content write, not metadata, like the
-                # REST twin.
-                await plan_seats.ensure_context_writable(db, ctx_uuid)
             except (AuthorizationError, NotFoundException) as perm_err:
                 # The two designed denials only (#1684): a database failure
                 # here reaches the catch-all below instead of being reported

@@ -376,7 +376,9 @@ class AgentBootstrapService:
 
         Returns ``(context, binding_info)`` where binding_info is
         ``{context_id, is_default}``. Raises ``BootstrapError`` with
-        ``context_id_required`` / ``context_not_found`` per F2.
+        ``context_id_required`` / ``context_not_found`` per F2, and
+        ``CapacityLockedError`` (#1954) once the caller is authorized for a
+        context whose workspace is over its Free capacity.
         """
         from services.agent_binding_service import AgentBindingService
         from services.permission_service import PermissionService
@@ -410,9 +412,11 @@ class AgentBootstrapService:
                 user_id=principal.user_id,
                 context_id=context_id,
                 key_workspace_id=principal.key_workspace_id,
-                # #1948: the REST route gates the workspace after this (MCP:
-                # the dispatcher), so no second check here.
-                capacity=CapacityPolicy.ALLOWED,
+                # #1954: a bootstrap rehydrates memory content (pinned,
+                # recall, state), and both callers — the REST route and MCP
+                # get_agent_bootstrap — are BLOCKED surfaces: the lock is
+                # checked here, after authorization, for both.
+                capacity=CapacityPolicy.BLOCKED,
                 # #1402: thread the MAE operation so an enforce-mode agent-binding
                 # deny at this pre-gate persists a binding_denied row (in shadow
                 # mode, a would_deny row). Without it bootstrap — the surface that

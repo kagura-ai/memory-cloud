@@ -96,7 +96,7 @@ def gate(monkeypatch):
     """The capacity gate, recording the arguments it was asked about."""
     seen: list[dict] = []
 
-    async def spy(tool_name, args, user_id, workspace_id):
+    async def spy(tool_name, args, workspace_id):
         seen.append(dict(args))
         return None
 
