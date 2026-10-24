@@ -510,7 +510,8 @@ async def _resolve_context(
 
     scope = get_agent_scope()
     if scope is not None:
-        from services.agent_binding_service import ACCESS_WRITE, AgentBindingService
+        from auth.workspace_roles import ACCESS_WRITE
+        from services.agent_binding_service import AgentBindingService
 
         # #1286 (P0-5): deny capture. In shadow mode the request proceeds
         # into the service-layer gates, which may re-evaluate the same

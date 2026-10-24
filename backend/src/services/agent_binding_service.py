@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.agent_scope import AgentScope
 from auth.workspace_roles import ACCESS_READ, Access
-from auth.workspace_roles import ACCESS_WRITE as ACCESS_WRITE  # re-exported for the MCP tools
 from models.agent import (
     _ALL_BINDING_WRITE_POLICIES,
     AGENT_ENFORCEMENT_SHADOW,

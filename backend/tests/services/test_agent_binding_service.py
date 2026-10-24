@@ -15,10 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.agent_scope import AgentScope
+from auth.workspace_roles import ACCESS_READ, ACCESS_WRITE
 from models.agent import Agent, AgentContextBinding
 from services.agent_binding_service import (
-    ACCESS_READ,
-    ACCESS_WRITE,
     DECISION_ALLOWED,
     DECISION_BINDING_DENIED,
     DECISION_WOULD_DENY,

@@ -97,10 +97,24 @@ ACCESS_WRITE: Final[Access] = "write"
 
 
 def access_for_workspace_role(role: WorkspaceRole | str) -> Access:
-    """The access a required workspace role implies: VIEWER reads, any higher role writes."""
+    """The access a required workspace role implies: VIEWER reads, any higher role writes.
+
+    Args:
+        role: The workspace role a check requires (enum or its string value).
+
+    Returns:
+        ``ACCESS_READ`` for viewer, else ``ACCESS_WRITE``.
+    """
     return ACCESS_READ if role == WorkspaceRole.VIEWER else ACCESS_WRITE
 
 
 def access_for_context_role(role: ContextRole | str) -> Access:
-    """The access a required context role implies: VIEWER reads, any higher role writes."""
+    """The access a required context role implies: VIEWER reads, any higher role writes.
+
+    Args:
+        role: The context role a check requires (enum or its string value).
+
+    Returns:
+        ``ACCESS_READ`` for viewer, else ``ACCESS_WRITE``.
+    """
     return ACCESS_READ if role == ContextRole.VIEWER else ACCESS_WRITE

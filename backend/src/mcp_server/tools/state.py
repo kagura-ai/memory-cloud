@@ -115,7 +115,8 @@ async def handle_set_state(
         # write_policy='deny') cannot mutate state in a context whose binding
         # forbids writes. _resolve_context_for_read above only checks the READ
         # side. No-op for non-agent credentials (code-review).
-        from services.agent_binding_service import ACCESS_WRITE, agent_binding_permits
+        from auth.workspace_roles import ACCESS_WRITE
+        from services.agent_binding_service import agent_binding_permits
 
         if not await agent_binding_permits(db, context_id, ACCESS_WRITE):
             return _ContextNotFoundError(context_id, "Context not found.").to_response()

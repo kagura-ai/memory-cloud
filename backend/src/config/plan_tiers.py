@@ -906,7 +906,8 @@ def paused_details(
 
     Args:
         plan_name: The workspace's plan key.
-        feature: Registry feature key (``connectors`` / ``resources``).
+        feature: Registry feature key (``connectors`` / ``resources``, or
+            ``members`` / ``contexts`` for the #1943 seats and slots).
         limit_attr: ``PlanTier`` field whose positive value resumes it.
         above: The value the resuming tier must exceed — ``0`` for a feature
             that is simply off; ``count - 1`` for a cap the workspace is over

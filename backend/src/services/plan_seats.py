@@ -63,7 +63,14 @@ def seat_order() -> tuple[Any, ...]:
 
 
 def seat_limit(workspace: Workspace) -> int:
-    """The seats the plan gives this workspace — at least one; the owner always sits."""
+    """The seats the plan gives this workspace — at least one; the owner always sits.
+
+    Args:
+        workspace: The workspace whose effective member cap is read.
+
+    Returns:
+        ``max(effective_max_members, 1)``.
+    """
     return max(workspace.effective_max_members, 1)
 
 
@@ -142,12 +149,26 @@ async def ensure_member_seated(
 
 
 def live_contexts(workspace_id: UUID) -> ColumnElement[bool]:
-    """The workspace's live (not soft-deleted) contexts, as a WHERE clause."""
+    """The workspace's live (not soft-deleted) contexts, as a WHERE clause.
+
+    Args:
+        workspace_id: The workspace whose contexts are matched.
+
+    Returns:
+        A clause for ``Context`` rows of that workspace with no ``deleted_at``.
+    """
     return and_(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
 
 
 def slot_limit(workspace: Workspace) -> int:
-    """The writable context slots the plan gives this workspace (never negative)."""
+    """The writable context slots the plan gives this workspace (never negative).
+
+    Args:
+        workspace: The workspace whose effective context cap is read.
+
+    Returns:
+        ``max(effective_max_contexts, 0)``.
+    """
     return max(workspace.effective_max_contexts, 0)
 
 

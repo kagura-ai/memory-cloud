@@ -26,6 +26,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import ACCESS_READ, Access
 from config.retention import should_promote_to_persistent
 from db.graph_learning_lock import try_lock_graph_learning
 from db.qdrant import (
@@ -578,7 +579,7 @@ class MemoryService:
         user_id: str,
         context_id: UUID | None,
         *,
-        access: str = "read",
+        access: Access = ACCESS_READ,
         key_workspace_id: UUID | None = None,
         operation: str | None = None,
     ) -> tuple[Context | None, str | None, str | None]:
