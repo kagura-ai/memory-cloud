@@ -1703,6 +1703,14 @@ class ContextRecoveryResponse(BaseModel):
     errors: list[str]
 
 
+def _same_uuid(value: object, uuid_text: str) -> bool:
+    """Whether ``value`` spells the UUID ``uuid_text`` (any case or hyphenation)."""
+    try:
+        return UUID(str(value)) == UUID(uuid_text)
+    except ValueError:
+        return False
+
+
 @router.post("/contexts/recover", response_model=ContextRecoveryResponse)
 async def recover_context(
     request_body: ContextRecoveryRequest,
@@ -1867,8 +1875,14 @@ async def recover_context(
 
     await hold_point_writer_lock(db)
 
-    # Step 3: Create Context record if missing
+    # Step 3: Create Context record if missing. Read again under the lock: a
+    # row hard-deleted since step 2 is recreated rather than leaving the
+    # inserts below without their context. Its workspace cannot have changed
+    # (a context never moves, #1963).
     context_record_created = False
+    context_exists = (
+        await db.execute(select(Context.id).where(Context.id == PyUUID(context_id)))
+    ).scalar_one_or_none() is not None
     if not context_exists:
         raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
         # Sanitize name to match DB constraint ^[a-z0-9_-]+$
@@ -1928,7 +1942,7 @@ async def recover_context(
         # #1963: a point whose payload names another workspace (or none) is
         # missed by the workspace-filtered search, so the row goes back
         # through the embedding sweep, which rewrites the point's payload.
-        point_matches = str(payload.get("workspace_id") or "") == workspace_id
+        point_matches = _same_uuid(payload.get("workspace_id"), workspace_id)
         try:
             new_memory = Memory(
                 id=mem_id,

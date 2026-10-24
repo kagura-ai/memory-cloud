@@ -345,26 +345,28 @@ class TestRecoverIntoTheContextsWorkspace:
         ws_id, ctx_id = await self._workspace_and_context(db_session)
         # One point names the context's workspace, one a stale other one, one none.
         matching, stale, bare = _point(ws_id), _point(str(uuid4())), _point(None)
+        upper = _point(ws_id.upper())  # the same workspace, spelled differently
 
-        dry = await self._recover(db_session, [stale, matching, bare], context_id=ctx_id)
+        dry = await self._recover(db_session, [stale, matching, bare, upper], context_id=ctx_id)
         assert (dry.workspace_id, dry.context_record_created) == (ws_id, False)
 
         response = await self._recover(
             db_session,
-            [stale, matching, bare],
+            [stale, matching, bare, upper],
             context_id=ctx_id,
             workspace_id=ws_id.upper(),
             dry_run=False,
         )
 
         assert response.workspace_id == ws_id
-        assert response.memories_recovered == 3
+        assert response.memories_recovered == 4
         # Stamped with the context's workspace; a point whose payload names
         # another workspace (or none) goes back through the embedding sweep.
-        assert await self._stored(db_session, [stale, matching, bare]) == {
+        assert await self._stored(db_session, [stale, matching, bare, upper]) == {
             matching.id: (ws_id, "success"),
             stale.id: (ws_id, "pending"),
             bare.id: (ws_id, "pending"),
+            upper.id: (ws_id, "success"),
         }
 
     @pytest.mark.asyncio
