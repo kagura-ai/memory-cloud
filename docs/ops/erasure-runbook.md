@@ -201,6 +201,7 @@ v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行
 ### 5.4 失敗時の手動再試行
 
 - vector store の障害 (§2.2) は手動再試行不要 (v0.125.0, #2282): request は `cooling_off` に戻り、cron sweep が 15 分以上後に最大 4 回まで自動で再実行する。`deleted_data_summary.retry.attempts` が失敗した回数。4 回とも失敗した行 (`failure_reason` が `vector_store_unavailable after 4 attempts: ` で始まる) は、障害を解消してから新しい request を作る (下記)
+- 取り消された self-service 行、または 4 回とも失敗した行の本人は、一部の collection で point が削除済みのことがある (§2.2)。本人のアカウントが残る場合は、本人が author の live な memory を手動で再キューして embedding sweep に point を作り直させる (memory 数だけ embedding のコストがかかる。作り直されるのは active な collection の point のみ): `UPDATE memories SET embedding_status = 'pending' WHERE user_id = '<subject-sub>' AND deleted_at IS NULL AND embedding_status = 'success';`
 - `erasure_requests.status='failed'` の行は cron で自動再試行されない
 - `failure_reason` を確認し、原因 (例: Qdrant 接続障害) を解消
 - 同じユーザーで `POST /api/v1/admin/users/{user_id}/erase` を再実行 → `ErasureAlreadyInProgressError` (409) が返る場合は失敗行を `cancelled` に手動 update してから再実行
@@ -304,6 +305,7 @@ Kagura Memory Cloud Operations
 - `erasure_execute_failed` — 実行失敗 (request_id + error 含む)
 - `erasure_retry_scheduled` — vector store の障害で request を `cooling_off` に戻した (request_id + attempt + max_attempts + scheduled_for + 例外クラス。#2282)
 - `erasure_retry_request_moved` — 上記で戻そうとした request が別の処理で状態を変えていた、または後の sweep が再 claim していた (何も書いていない。request_id のみ)。呼び出し元には vector store のエラー (502) が返る
+- `erasure_request_cancel_lost` — ユーザーの取り消しが cron sweep の claim と競合し、行がすでに `in_progress` だった (取り消しは 409 `ERASURE-006`、erasure は実行される。request_id + 現在の status)
 - `erasure_sweep_retry_scheduled` — cron sweep 中の上記 (request_id + attempt + max_attempts + scheduled_for)。sweep は次の request に進み、実行件数には数えない
 - `erasure_failed_after_postgres_commit` — Postgres commit 後の失敗 (request_id + step + 例外クラスのみ)
 - `erasure_sweep_user_row_absent` — sweep が `users` 行のない request を閉じた (request_id + `ran_in_postgres`: true なら `interrupted: sweep` の `failed`、false なら `complete` + note。#2286)
