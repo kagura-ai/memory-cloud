@@ -3,6 +3,7 @@
 Tests the most critical security feature: ensuring workspace/context/user boundaries are enforced.
 """
 
+import os
 from uuid import uuid4
 
 import pytest
@@ -183,6 +184,14 @@ async def pending_embedding_tasks(monkeypatch):
     monkeypatch.setattr(asyncio, "create_task", original_create_task)
 
 
+# remember -> recall round trips embed through the real OpenAI API: CI has no
+# key, so these run only where one is configured (#2297).
+_NEEDS_OPENAI = pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="remember -> recall needs real embeddings: set OPENAI_API_KEY",
+)
+
+
 @pytest.mark.asyncio
 class TestSingleCollectionIsolation:
     """Test 3-level isolation (workspace, context, user) in single collection design.
@@ -191,6 +200,7 @@ class TestSingleCollectionIsolation:
     because process_pending_embedding creates its own DB session via get_db().
     """
 
+    @_NEEDS_OPENAI
     async def test_cross_workspace_isolation(
         self,
         db_session,
@@ -267,6 +277,7 @@ class TestSingleCollectionIsolation:
             f"Workspace1 should have exactly 1 memory, got {workspace1_count}"
         )
 
+    @_NEEDS_OPENAI
     async def test_cross_context_isolation_within_same_workspace(
         self,
         db_session,
@@ -332,6 +343,7 @@ class TestSingleCollectionIsolation:
             "ISOLATION FAIL: Saw context2 memory from context1!"
         )
 
+    @_NEEDS_OPENAI
     async def test_shared_context_members_see_all_memories(
         self, db_session, test_workspace1, test_context1, pending_embedding_tasks
     ):
@@ -392,6 +404,7 @@ class TestSingleCollectionIsolation:
             "User1 should also see user2's memory (shared context)"
         )
 
+    @_NEEDS_OPENAI
     async def test_context_deletion_only_deletes_own_points(
         self,
         db_session,
