@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import select
@@ -27,11 +27,17 @@ from tests.tasks.conftest import mock_get_db_factory
 from utils.datetime import utcnow
 
 
+def _workspace_id(user: str) -> UUID:
+    """The workspace of ``user``'s contexts (``contexts`` fixture): a memory
+    in one of them must carry it (``fk_memories_workspace_context``, #1963)."""
+    return uuid5(NAMESPACE_URL, f"cleanup-workspace:{user}")
+
+
 def _tombstone(
     user: str, deleted_by: str | None, *, age_days: int, context_id: UUID | None = None
 ) -> Memory:
     return Memory(
-        workspace_id=uuid4(),
+        workspace_id=_workspace_id(user),
         id=uuid4(),
         user_id=user,
         summary=f"tombstone {deleted_by}",
@@ -74,7 +80,7 @@ async def _remaining(db_session: AsyncSession, user: str) -> set[UUID]:
 async def contexts(db_session: AsyncSession) -> tuple[str, UUID, UUID]:
     """A live context and a soft-deleted one, both with a real workspace."""
     user = f"cleanup-user-{uuid4()}"
-    ws_id = uuid4()
+    ws_id = _workspace_id(user)
     db_session.add(Workspace(id=ws_id, name="ws", owner_user_id=user))
     await db_session.flush()
     live_id, dead_id = uuid4(), uuid4()
@@ -117,7 +123,7 @@ class TestDefaultWindow:
             _tombstone(user, "some-user-sub", age_days=inside, context_id=dead_id),
         ]
         live = Memory(
-            workspace_id=uuid4(),
+            workspace_id=_workspace_id(user),
             id=uuid4(),
             user_id=user,
             summary="live",

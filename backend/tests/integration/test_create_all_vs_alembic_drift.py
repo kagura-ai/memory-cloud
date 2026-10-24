@@ -26,7 +26,8 @@ For every user-defined table in the ``public`` schema (excluding the
    ordinal-position order (same rationale as section 2 for composite
    UKs).
 4. **Foreign keys** — keyed by constraint name, comparing local columns,
-   referenced table, and referenced columns.
+   referenced table, and referenced columns (both in key position order),
+   and the ON UPDATE / ON DELETE actions.
 5. **Indexes** — keyed by index name, comparing the column list +
    uniqueness + partial-index predicate. **PK auto-indexes are filtered
    out** (already covered by section 2). UK auto-indexes ARE kept,
@@ -221,16 +222,15 @@ class ConstraintRow(TypedDict):
     surface as drift — column order matters for B-tree prefix scans
     even though the uniqueness property itself is set-based.
 
-    For FOREIGN KEY constraints, ``information_schema.constraint_column_usage``
-    returns a Cartesian product per constraint, so positional order is
-    not reliable; ``_introspect_fk`` accepts this as a known limitation
-    (no multi-column FKs in the current schema; see ``_introspect_fk``
-    docstring for the fix plan when needed).
+    FOREIGN KEY columns come from ``pg_constraint.conkey`` / ``confkey``
+    in key position order, local and referenced side paired (#1963: the
+    composite ``fk_memories_workspace_context``), so ``(a, b) -> (x, y)``
+    and ``(a, b) -> (y, x)`` are different rows.
 
     ``update_rule`` / ``delete_rule`` carry the FK referential actions
     (``NO ACTION`` / ``RESTRICT`` / ``CASCADE`` / ``SET NULL`` /
-    ``SET DEFAULT``) from ``information_schema.referential_constraints``;
-    these are ``None`` for PK / UK rows.
+    ``SET DEFAULT``), decoded from ``pg_constraint.confupdtype`` /
+    ``confdeltype``; these are ``None`` for PK / UK rows.
     """
 
     table: str
@@ -354,30 +354,47 @@ _PK_UK_SQL = """
     ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
 """
 
+# One row per FK, columns in key position order: ``conkey`` and
+# ``confkey`` are unnested together, so the n-th local column is paired with
+# the n-th referenced column (information_schema's constraint_column_usage
+# is a per-constraint set with no position).
 _FK_SQL = """
     SELECT
-        tc.table_name AS local_table,
-        tc.constraint_name,
-        kcu.column_name AS local_column,
-        kcu.ordinal_position,
-        ccu.table_name AS foreign_table,
-        ccu.column_name AS foreign_column,
-        rc.update_rule,
-        rc.delete_rule
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-        AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage ccu
-        ON ccu.constraint_name = tc.constraint_name
-        AND ccu.table_schema = tc.table_schema
-    JOIN information_schema.referential_constraints rc
-        ON rc.constraint_name = tc.constraint_name
-        AND rc.constraint_schema = tc.table_schema
-    WHERE tc.table_schema = 'public'
-        AND tc.constraint_type = 'FOREIGN KEY'
-    ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
+        cl.relname AS local_table,
+        con.conname AS constraint_name,
+        fcl.relname AS foreign_table,
+        ARRAY(
+            SELECT la.attname
+            FROM unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(lnum, fnum, ord)
+            JOIN pg_attribute la ON la.attrelid = con.conrelid AND la.attnum = k.lnum
+            ORDER BY k.ord
+        ) AS local_columns,
+        ARRAY(
+            SELECT fa.attname
+            FROM unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(lnum, fnum, ord)
+            JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.fnum
+            ORDER BY k.ord
+        ) AS foreign_columns,
+        con.confupdtype AS update_type,
+        con.confdeltype AS delete_type
+    FROM pg_constraint con
+    JOIN pg_class cl ON cl.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    JOIN pg_class fcl ON fcl.oid = con.confrelid
+    WHERE n.nspname = 'public'
+        AND con.contype = 'f'
+    ORDER BY cl.relname, con.conname
 """
+
+# ``pg_constraint.confupdtype`` / ``confdeltype`` codes, spelled the way
+# information_schema.referential_constraints spells them.
+_FK_ACTIONS: dict[str, str] = {
+    "a": "NO ACTION",
+    "r": "RESTRICT",
+    "c": "CASCADE",
+    "n": "SET NULL",
+    "d": "SET DEFAULT",
+}
 
 # pg_index gives us indkey (column ordinal list), indisunique, and
 # pg_get_expr(indpred, ...) for the partial WHERE clause. pg_indexes
@@ -471,50 +488,23 @@ def _introspect_pk_uk(conn: Connection) -> dict[str, ConstraintRow]:
 def _introspect_fk(conn: Connection) -> dict[str, ConstraintRow]:
     """Return ``{constraint_name: ConstraintRow}`` for FOREIGN KEY constraints.
 
-    **Known limitation (multi-column FK column ordering)**: the underlying
-    ``information_schema.constraint_column_usage`` view returns a Cartesian
-    product of local × foreign columns per constraint. The dedup-then-sort
-    aggregation below loses positional information for multi-column FKs:
-    ``FK(local=(a,b), foreign=(x,y))`` and the hypothetical mismatched
-    ``FK(local=(a,b), foreign=(y,x))`` would produce identical normalized
-    snapshots. Acceptable in this repo today (no multi-column FKs in the
-    current schema as of #613). When a multi-column FK is added, replace
-    this implementation with one that joins ``pg_constraint.conkey`` /
-    ``confkey`` arrays to preserve column position deterministically.
+    Columns keep their key position on both sides (``_FK_SQL``), so a
+    composite FK whose referenced columns are swapped, or whose local
+    columns are, shows up as a ``columns`` / ``foreign_columns`` mismatch.
     """
-    raw: dict[str, dict] = {}
-    rows = conn.execute(text(_FK_SQL))
-    for row in rows:
+    result: dict[str, ConstraintRow] = {}
+    for row in conn.execute(text(_FK_SQL)):
         if row.local_table in _EXCLUDED_TABLES:
             continue
-        entry = raw.setdefault(
-            row.constraint_name,
-            {
-                "table": row.local_table,
-                "foreign_table": row.foreign_table,
-                "local_columns": [],
-                "foreign_columns": [],
-                "update_rule": row.update_rule,
-                "delete_rule": row.delete_rule,
-            },
-        )
-        # Avoid duplicates from constraint_column_usage's cross-join shape.
-        if row.local_column not in entry["local_columns"]:
-            entry["local_columns"].append(row.local_column)
-        if row.foreign_column not in entry["foreign_columns"]:
-            entry["foreign_columns"].append(row.foreign_column)
-
-    result: dict[str, ConstraintRow] = {}
-    for name, entry in raw.items():
-        result[name] = ConstraintRow(
-            table=entry["table"],
-            name=name,
+        result[row.constraint_name] = ConstraintRow(
+            table=row.local_table,
+            name=row.constraint_name,
             kind="FOREIGN KEY",
-            columns=tuple(sorted(entry["local_columns"])),
-            foreign_table=entry["foreign_table"],
-            foreign_columns=tuple(sorted(entry["foreign_columns"])),
-            update_rule=entry["update_rule"],
-            delete_rule=entry["delete_rule"],
+            columns=tuple(row.local_columns),
+            foreign_table=row.foreign_table,
+            foreign_columns=tuple(row.foreign_columns),
+            update_rule=_FK_ACTIONS[row.update_type],
+            delete_rule=_FK_ACTIONS[row.delete_type],
         )
     return result
 
@@ -857,3 +847,47 @@ class TestCreateAllVsAlembicDrift:
             pytest.fail(msg)
         # DB is at alembic head from Phase 2 — the post-condition every
         # other integration test expects. No explicit cleanup needed.
+
+
+def test_fk_introspection_keeps_composite_column_order() -> None:
+    """#1963: a composite FK is compared column by column, in key order.
+
+    Two FKs differing only in the order of their referenced columns must
+    introspect differently, and the diff must report the swap.
+    """
+    engine = _sync_engine()
+    try:
+        with engine.connect() as conn:
+            trans = conn.begin()
+            try:
+                conn.execute(
+                    text(
+                        "CREATE TABLE drift_fk_parent (a int, b int, UNIQUE (a, b), UNIQUE (b, a))"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE TABLE drift_fk_child (x int, y int, "
+                        "CONSTRAINT drift_fk_straight FOREIGN KEY (x, y) "
+                        "REFERENCES drift_fk_parent (a, b) ON DELETE CASCADE, "
+                        "CONSTRAINT drift_fk_swapped FOREIGN KEY (x, y) "
+                        "REFERENCES drift_fk_parent (b, a) ON DELETE CASCADE)"
+                    )
+                )
+                fks = _introspect_fk(conn)
+            finally:
+                trans.rollback()  # DDL is transactional: nothing is left behind
+    finally:
+        engine.dispose()
+
+    straight, swapped = fks["drift_fk_straight"], fks["drift_fk_swapped"]
+    assert (straight["columns"], straight["foreign_columns"]) == (("x", "y"), ("a", "b"))
+    assert (swapped["columns"], swapped["foreign_columns"]) == (("x", "y"), ("b", "a"))
+    assert (straight["update_rule"], straight["delete_rule"]) == ("NO ACTION", "CASCADE")
+
+    drifts = _diff_constraints(
+        {"drift_fk_straight": straight},
+        {"drift_fk_straight": ConstraintRow(**{**swapped, "name": "drift_fk_straight"})},
+    )
+    assert [(d["name"], d["side"]) for d in drifts] == [("drift_fk_straight", "value_mismatch")]
+    assert drifts[0]["detail"].startswith("foreign_columns:")

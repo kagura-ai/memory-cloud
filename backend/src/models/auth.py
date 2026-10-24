@@ -1745,6 +1745,11 @@ class Context(Base):
             unique=True,
             postgresql_where=text("resource_id IS NOT NULL AND deleted_at IS NULL"),
         ),
+        # #1963: the key ``fk_memories_workspace_context`` references, so a
+        # memory's (workspace_id, context_id) must name its context's
+        # workspace. Plain (not partial): an FK target needs a full unique
+        # index. Built CONCURRENTLY in migration f14_1963_memories_ws_ctx_fk.
+        Index("ux_contexts_workspace_id_id", "workspace_id", "id", unique=True),
     )
 
     def __repr__(self) -> str:

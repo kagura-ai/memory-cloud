@@ -43,10 +43,11 @@ async def _ctx_with_memory(db_session):
             "(id, user_id, workspace_id, context_id, summary, content, type, importance, "
             " confidence, scope, "
             " embedding_status, client, source, long_term, access_count) "
-            "VALUES (:id, :u, gen_random_uuid(), :ctx, 's', 'c', 'note', 0.5, 1.0, 'working', "
+            "VALUES (:id, :u, :ws, :ctx, 's', 'c', 'note', 0.5, 1.0, 'working', "
             " 'success', 'test', 'mcp_remember', false, 0)"
         ),
-        {"id": mem, "u": owner, "ctx": ctx},
+        # The context's own workspace (fk_memories_workspace_context, #1963).
+        {"id": mem, "u": owner, "ws": ws, "ctx": ctx},
     )
     return ctx, mem
 
