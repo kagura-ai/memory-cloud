@@ -24,6 +24,28 @@ from services.sleep.prompts import EDGE_DISCOVERY_PROMPT_REVISION
 from services.sleep.undo import ShadowEdgeRevert
 
 
+@pytest.fixture(autouse=True)
+def _report_context_authorized():
+    """The handlers below run with the report's context authorized.
+
+    Both tools authorize against the report's context before touching its
+    actions; that gate has its own tests (``test_sleep_report_authz.py`` and
+    ``tests/integration/test_sleep_report_authz_db.py``). Here it lets every
+    request through, so these tests keep exercising what comes after it.
+    """
+    with (
+        patch(
+            "mcp_server.tools.sleep._authorize_report_read",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "mcp_server.tools.sleep._authorize_report_rollback",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        yield
+
+
 class _Savepoint:
     """``AsyncSession.begin_nested()`` double: an async context manager that
     records whether its block raised (#2065: every rollback undo runs in one)."""
@@ -562,7 +584,7 @@ class TestRollbackSleepRun:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -647,7 +669,7 @@ class TestShadowMergeRollbackEdgeMismatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -708,7 +730,7 @@ class TestShadowMergeRollbackEdgeMismatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -805,7 +827,7 @@ class TestRollbackActionDispatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1016,7 +1038,7 @@ class TestRollbackActionDispatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1082,7 +1104,7 @@ class TestRollbackActionDispatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1144,7 +1166,7 @@ class TestRollbackActionDispatch:
         stack = [
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1261,7 +1283,7 @@ class TestRollbackActionDispatch:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._check_viewer_permission",
+                "mcp_server.tools.sleep._authorize_report_rollback",
                 new_callable=AsyncMock,
                 return_value=None,
             ),

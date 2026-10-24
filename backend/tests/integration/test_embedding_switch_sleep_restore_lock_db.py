@@ -257,7 +257,7 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
             with (
                 patch("db.base.get_db", return_value=get_db()),
                 patch.object(
-                    sleep_tools, "_check_viewer_permission", new=AsyncMock(return_value=None)
+                    sleep_tools, "_authorize_report_rollback", new=AsyncMock(return_value=None)
                 ),
                 patch.object(sleep_tools, "_log_tool_usage", new=AsyncMock()),
                 patch.object(
