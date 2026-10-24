@@ -59,7 +59,7 @@ async def test_read_authorizes_against_the_reports_context():
     with patch("mcp_server.tools.sleep._resolve_context_for_read", new=resolve):
         assert await _authorize_report_read(MagicMock(), _USER, report) is True
     resolve.assert_awaited_once()
-    assert resolve.await_args.args[1:] == (_USER, report.context_id)
+    assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
 
 
 async def test_read_is_refused_when_the_context_is_out_of_reach():
@@ -88,7 +88,8 @@ async def test_rollback_is_allowed_for_owner_and_editor(role):
         patch("services.session_rollback.context_role", new=AsyncMock(return_value=role)),
     ):
         assert await _authorize_report_rollback(MagicMock(), _USER, report) is None
-    assert resolve.await_args.args[1:] == (_USER, report.context_id)
+    resolve.assert_awaited_once()
+    assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
 
 
 @pytest.mark.parametrize("role", [ContextRole.VIEWER, None])
