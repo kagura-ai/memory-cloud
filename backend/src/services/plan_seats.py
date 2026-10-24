@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -67,30 +67,28 @@ def seat_limit(workspace: Workspace) -> int:
     return max(workspace.effective_max_members, 1)
 
 
-async def seated_member_ids(db: AsyncSession, workspace: Workspace) -> set[int]:
-    """The ``WorkspaceMember.id`` of every member who keeps a seat."""
-    rows = await db.scalars(
-        select(WorkspaceMember.id)
-        .where(WorkspaceMember.workspace_id == workspace.id)
-        .order_by(*seat_order())
-        .limit(seat_limit(workspace))
-    )
-    return set(rows.all())
-
-
 async def member_seat_suspended(
     db: AsyncSession, workspace: Workspace, member: WorkspaceMember
 ) -> bool:
     """Whether ``member`` has no seat on the workspace's plan (#1943).
 
-    The owner always has one (no query). Otherwise one ranked SELECT decides —
-    also under a one-seat plan, where the seat goes to whoever ranks first
-    (the owner when it holds a membership row), the same answer the members
-    list gives.
+    The owner always has one (no query). Otherwise one scalar read decides:
+    is ``member`` among the first :func:`seat_limit` rows in
+    :func:`seat_order` — also under a one-seat plan, where the seat goes to
+    whoever ranks first (the owner when it holds a membership row), the same
+    answer the members list gives.
     """
     if member.role == WorkspaceRole.OWNER or member.user_id == workspace.owner_user_id:
         return False
-    return member.id not in await seated_member_ids(db, workspace)
+    seated = (
+        select(WorkspaceMember.id)
+        .where(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(*seat_order())
+        .limit(seat_limit(workspace))
+        .subquery()
+    )
+    has_seat = await db.scalar(select(exists().where(seated.c.id == member.id)))
+    return not has_seat
 
 
 async def _member_count(db: AsyncSession, workspace_id: UUID) -> int:
