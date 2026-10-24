@@ -125,7 +125,7 @@ async def set_agent_state(
             capacity=CapacityPolicy.ALLOWED,
         )
         # #1941/#1948: blocked on a workspace over its Free capacity (MCP
-        # set_state / get_state are blocked at the dispatcher too).
+        # set_state / get_state are blocked at their context resolver, #1954).
         await perm.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
         await service.set_state(context_id, key, body.value, ttl_seconds=body.ttl_seconds)
         return AgentStateKeyResponse(key=key)

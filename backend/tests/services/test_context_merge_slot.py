@@ -1,9 +1,12 @@
 """#1943: ``merge_contexts`` is cleanup, not a content write.
 
 A merge retires its source, so it only ever brings the workspace closer to
-its context cap — it never asks whether the target holds a writable slot
-(the capacity lock treats it the same way: ``CapacityPolicy.ALLOWED``). An
-over-cap owner can therefore consolidate in either direction.
+its context cap — it never asks whether the target holds a writable slot. An
+over-cap owner can therefore consolidate in either direction. (The capacity
+lock is another matter: a merge never lowers the memory count, so the
+``merge_contexts`` tool is BLOCKED, refused by its handler's context resolvers
+(#1954); the service passes ``CapacityPolicy.ALLOWED`` only because a BLOCKED
+owner check would add this slot check.)
 """
 
 from __future__ import annotations
