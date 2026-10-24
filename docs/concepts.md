@@ -153,8 +153,9 @@ version (the truth is gone) or keep returning it (the truth is buried). Since
   deleted — `recall(include_superseded=true)` returns it annotated with
   `superseded_by`, `explore()` still reaches it, and deleting the edge (or
   the superseding memory) restores full visibility. Create it by storing the
-  updated fact with `remember(..., supersedes=<old_memory_id>)`, or
-  explicitly with `create_edge(edge_type="supersedes")`. Without an edge, a
+  updated fact with `remember(..., supersedes=<old_memory_id>)`, by accepting
+  a `supersede_candidate` with `update_memory(accept_supersede_candidate=true)`,
+  or explicitly with `create_edge(edge_type="supersedes")`. Without an edge, a
   judge-verified `supersede_candidate` folds the older version under the newer
   one in recall (`folded`, #2123) — the same effect, reversible, and off
   under `include_superseded=true`.
