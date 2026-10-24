@@ -4,6 +4,29 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.125.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.125.0) — 2026-10-24
+
+Erasure crash safety and consistency: the audit-log step joins the erasure's Postgres transaction, a run interrupted after its commit is closed and pseudonymized by the sweep, a vector-store outage at the first step reschedules the request instead of failing it, connector keys are linked to their connector by foreign key, and revision timestamps come from one clock.
+
+### Fixed
+- **Audit rows inside the erasure transaction** ([#2287](https://github.com/kagura-ai/memory-cloud/issues/2287)): the subject's `audit_logs` rows are pseudonymized as the last statement before the user delete, so a failure rolls the whole Postgres step back (request `failed`, retryable) instead of leaving the account id and email on them. The count moved to `deleted_data_summary.postgres.audit_logs_pseudonymized`; `resource` is cut to the column length. `reprocess_erasures` pseudonymizes audit rows an earlier erasure left behind: it finds them by pseudonym, recovers the email through the requests' email hash for every request of the account, never matches a re-registered account, and lists the rows it kept.
+- **Erasures interrupted after the Postgres commit** ([#2286](https://github.com/kagura-ai/memory-cloud/issues/2286)): the Postgres step records its `postgres` summary on the request row in the same transaction (merged into the existing summary). The hourly sweep, finding a stale `in_progress` request whose user row is gone, marks a run that committed `failed` with `after_postgres_commit: interrupted: sweep` (pseudonymized, counts kept, Redis cleared best-effort) and a run that never started `complete` with the `user_row_already_absent` note, now pseudonymized too. `erased_pseudonyms` includes those rows, `_finalize` clears a stale `failure_reason`, and the re-run scrubs audit residue of pseudonymized note rows. New log events `erasure_sweep_user_row_absent`, `erasure_sweep_redis_cleanup_failed`, `erasure_sweep_request_moved`, `erasure_sweep_close_failed`.
+- **Vector-store outage at the first erasure step** ([#2282](https://github.com/kagura-ai/memory-cloud/issues/2282)): a `QdrantError` from the vector delete no longer fails the request. It returns to `cooling_off` with `scheduled_for` 15 minutes later and `deleted_data_summary.retry` (attempts, step, error class, time; no ids, no error text), and the hourly sweep runs it again; after 4 attempts it ends `failed` with `vector_store_unavailable after 4 attempts: …`. Admin force-erase answers **503 `ERASURE-007`** with `request_id`, `attempt`, `max_attempts`, `scheduled_for` and `error_class`. The subject cannot cancel an admin request, and the account page shows one waiting for its retry as not cancellable. Points of collections deleted before the failing one stay deleted until re-embedded; the runbook shows the manual re-queue.
+- **Cancel vs. the sweep** ([#2282](https://github.com/kagura-ai/memory-cloud/issues/2282)): cancelling a self-service erasure request is a compare-and-set on its status. If the sweep claimed the request first, the cancel answers **409 `ERASURE-006`** and the erasure runs.
+
+### Changed
+- **Connector keys linked by foreign key** ([#1952](https://github.com/kagura-ai/memory-cloud/issues/1952)): migration **f13** adds `api_keys.connector_id` (`ON DELETE CASCADE`, three CHECKs, partial index) and backfills existing `connector:{id}` keys of the same workspace. Key verification, the seat pause, `is_connector_key` and connector deletion follow the link instead of the name. Deleting a connector removes its key row, so the key disappears from the key list instead of showing as revoked. A connector key can no longer be regenerated from the API-keys page or member credentials (**422**; rotate it through the connector), and rotation links a key row left unlinked.
+- **One clock for revision timestamps** ([#2135](https://github.com/kagura-ai/memory-cloud/issues/2135)): `memory_revisions.at` and `memories.created_at` come from the application clock on every path (`remember`, `remember_batch`, rollback restore), so `rollback_session` windows, `changes_since` and `list_revisions` no longer mix the database and application clocks. Items of one `remember_batch` call no longer share a single `at`.
+- **Self-hosted LLM reachability probe** ([#2064](https://github.com/kagura-ai/memory-cloud/issues/2064)): the self-hosted LLM provider uses the process-wide cached probe of the embedding path (keyed by base URL and key, failures never cached), so a provider built per request no longer calls `GET /v1/models` every time.
+
+### Notes
+- Migration **f13** (`api_keys.connector_id`). No new environment variables.
+- Operator action, in this order (details in `docs/deployment.md` and `docs/ops/erasure-runbook.md`):
+  1. Deploy as usual; f13 runs from the new image before traffic moves.
+  2. After the traffic switch, re-run the idempotent f13 backfill `UPDATE` once, so keys the old color minted during the window are linked, then run the orphan query from the same section.
+  3. Before the next account erasure, run `python -m src.cli.reprocess_erasures --all` inside the API container to plan, then `--all --apply --yes`, once.
+- Rolling back to v0.124.1 needs no downgrade (the column stays and old code links keys by name); re-run step 2 after rolling forward again. Replicas must share NTP time, as they already must for `updated_at`.
+
 ## [v0.124.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.124.1) — 2026-10-23
 
 MCP tool annotations: the tools that change who outside the workspace can reach a context now report `openWorldHint: true`.

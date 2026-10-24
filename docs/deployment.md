@@ -1674,8 +1674,9 @@ backups' retention in mind before `--apply --include-past-window`.
 v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks
 double-erasure chains, stores the right bound and repairs failed requests,
 see below; a run on v0.125.0 or later also pseudonymizes audit rows a failed
-audit-log step left, #2287 — run it again after that upgrade if a request
-failed at that step). An erasure on those versions could leave the erased
+audit-log step left, #2287 — run it once on v0.125.0 before the next
+erasure, whatever the earlier runs found; see
+`docs/ops/erasure-runbook.md` §2.5). An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
 (the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
 erasures on v0.113.0 through v0.120.x) and as the memory's live value where
