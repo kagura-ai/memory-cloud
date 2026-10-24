@@ -462,12 +462,16 @@ jobs:
 
       # The backend-unit suite again, now against Postgres: about 1,000 tests
       # outside tests/integration/ take the db_session fixture and skip in the
-      # unit job, so this is the only place they run (#2297). Runs before the
-      # integration tests on a fresh database — the root conftest drops its
-      # tables at session end — so those still start on an empty schema.
+      # unit job, so this is the only place they run (#2297). The selection
+      # matches backend-unit except tests/cli, which the integration step runs
+      # (tests/ci/test_db_backed_tests_in_ci.py).
       - name: Run DB-backed tests outside tests/integration
+        id: db-tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
+          # The app's own engine (get_db, isolated sessions) reads DATABASE_URL;
+          # point it at the same database the fixtures use.
+          DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           # Fail instead of skipping every db_session test (#1885).
           REQUIRE_TEST_DATABASE: "1"
           REDIS_URL: redis://localhost:6379
@@ -477,9 +481,41 @@ jobs:
           --ignore=tests/smoke/test_all_routes.py
           --timeout=300 --maxfail=5
 
+      # Hand the integration step the empty stores it had before #2297: the
+      # step above commits rows and Qdrant points, and its conftest teardown
+      # does not run if the process is killed. Recreate the test database and
+      # drop every Qdrant collection.
+      - name: Reset the test database and Qdrant
+        if: ${{ !cancelled() && (steps.db-tests.outcome == 'success' || steps.db-tests.outcome == 'failure') }}
+        run: |
+          cd backend && python - <<'EOF'
+          import asyncio
+
+          import asyncpg
+          import httpx
+
+
+          async def main() -> None:
+              conn = await asyncpg.connect(
+                  "postgresql://kagura:kagura_dev_password@localhost:5432/postgres"
+              )
+              await conn.execute("DROP DATABASE IF EXISTS kagura_test WITH (FORCE)")
+              await conn.execute("CREATE DATABASE kagura_test")
+              await conn.close()
+
+
+          asyncio.run(main())
+          qdrant = "http://localhost:6333"
+          names = [c["name"] for c in httpx.get(f"{qdrant}/collections").json()["result"]["collections"]]
+          for name in names:
+              httpx.delete(f"{qdrant}/collections/{name}").raise_for_status()
+          print(f"test database recreated, {len(names)} Qdrant collection(s) dropped")
+          EOF
+
       - name: Run integration tests
-        # Still runs when the step above failed, so one run reports both.
-        if: ${{ !cancelled() }}
+        # Still runs when the DB-backed step failed, so one run reports both;
+        # not when an earlier step (install, a service) never let it start.
+        if: ${{ !cancelled() && (steps.db-tests.outcome == 'success' || steps.db-tests.outcome == 'failure') }}
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           # Hard-fail rather than let every db_session test silently skip: the
