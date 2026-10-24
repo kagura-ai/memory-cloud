@@ -13,6 +13,11 @@ The ``*_CHECK_SQL`` constants are derived from ``.value`` via f-string and
 are byte-identical to the migration literals — re-used (Task 3 of #700) in
 ``models/auth.py`` ``CheckConstraint`` blocks so the enum is the single
 source of truth for the DB constraint.
+
+``Access`` (#1956) is the one "is this a read or a write" vocabulary the
+permission chokepoints and the agent-binding evaluation share. It is a
+separate axis from ``services.capacity_lock.CapacityPolicy``, which says
+whether a call is subject to the capacity lock, not what it does.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Final, Literal
 
 __all__ = [
     "WorkspaceRole",
@@ -28,6 +34,11 @@ __all__ = [
     "CONTEXT_ROLE_WEIGHTS",
     "WORKSPACE_ROLE_CHECK_SQL",
     "CONTEXT_ROLE_CHECK_SQL",
+    "Access",
+    "ACCESS_READ",
+    "ACCESS_WRITE",
+    "access_for_workspace_role",
+    "access_for_context_role",
 ]
 
 
@@ -77,3 +88,19 @@ CONTEXT_ROLE_WEIGHTS: Mapping[ContextRole, int] = MappingProxyType(
 WORKSPACE_ROLE_CHECK_SQL: str = f"role IN ({', '.join(repr(r.value) for r in WorkspaceRole)})"
 
 CONTEXT_ROLE_CHECK_SQL: str = f"role IN ({', '.join(repr(r.value) for r in ContextRole)})"
+
+
+# What a call does to a context's content: ``read`` or ``write`` (#1956).
+Access = Literal["read", "write"]
+ACCESS_READ: Final[Access] = "read"
+ACCESS_WRITE: Final[Access] = "write"
+
+
+def access_for_workspace_role(role: WorkspaceRole | str) -> Access:
+    """The access a required workspace role implies: VIEWER reads, any higher role writes."""
+    return ACCESS_READ if role == WorkspaceRole.VIEWER else ACCESS_WRITE
+
+
+def access_for_context_role(role: ContextRole | str) -> Access:
+    """The access a required context role implies: VIEWER reads, any higher role writes."""
+    return ACCESS_READ if role == ContextRole.VIEWER else ACCESS_WRITE
