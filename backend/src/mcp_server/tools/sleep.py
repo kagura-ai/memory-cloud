@@ -145,13 +145,20 @@ async def _authorize_report_read(db: Any, user_id: str, report: Any) -> bool:
     that context like any other read — workspace membership, the context's
     member list, a workspace-scoped key and the agent-binding read gate. A
     report with no context has nothing to authorize against and is refused.
+
+    Once authorized, the capacity lock of the context's workspace applies
+    (``CapacityLockedError``): the dispatcher can only see the session's
+    workspace, since the arguments name a report, not a context.
     """
+    from services.capacity_lock import ensure_not_capacity_locked
+
     if report.context_id is None:
         return False
     try:
-        await _resolve_context_for_read(db, user_id, report.context_id)
+        context = await _resolve_context_for_read(db, user_id, report.context_id)
     except _ContextNotFoundError:
         return False
+    await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
     return True
 
 
@@ -160,20 +167,24 @@ async def _authorize_report_rollback(
 ) -> list[TextContent] | None:
     """Refusal for rolling back the report's run, or None when allowed.
 
-    Same gate as ``rollback_session``: the write-path context resolution
-    (workspace-scoped key, agent-binding write gate), then the editor or owner
-    role on the report's context. The session's workspace plays no part — a
-    rollback writes to the report's context wherever the session points. A
-    context the caller cannot reach answers like a missing report; a context
-    they can read but not edit is ``permission_denied``.
+    The context gate ``rollback_session`` applies: the write-path context
+    resolution (workspace-scoped key, agent-binding write gate), then the
+    editor or owner role on the report's context. The session's workspace
+    plays no part — a rollback writes to the report's context wherever the
+    session points — so its viewer check is not run here. A context the
+    caller cannot reach answers like a missing report; a context they can
+    read but not edit is ``permission_denied``. Once authorized, the capacity
+    lock of the context's workspace applies (``CapacityLockedError``), as in
+    ``_authorize_report_read``.
     """
     from auth.workspace_roles import ContextRole
+    from services.capacity_lock import ensure_not_capacity_locked
     from services.session_rollback import context_role
 
     if report.context_id is None:
         return _report_not_found(report.id)
     try:
-        await _resolve_context(db, user_id, report.context_id)
+        context = await _resolve_context(db, user_id, report.context_id)
     except _ContextNotFoundError:
         return _report_not_found(report.id)
     role = await context_role(db, user_id, report.context_id)
@@ -185,6 +196,7 @@ async def _authorize_report_rollback(
             required_role="editor",
             help="Ask a context owner for the editor role.",
         )
+    await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
     return None
 
 

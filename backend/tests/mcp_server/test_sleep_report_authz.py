@@ -46,6 +46,19 @@ def _report(context_id=None, *, status="completed"):
     )
 
 
+@pytest.fixture(autouse=True)
+def lock():
+    """The capacity lock of the context's workspace (no workspace is locked)."""
+    with patch(
+        "services.capacity_lock.ensure_not_capacity_locked", new=AsyncMock(return_value=None)
+    ) as ensure:
+        yield ensure
+
+
+def _context(report):
+    return SimpleNamespace(id=report.context_id, workspace_id=report.workspace_id)
+
+
 def _denied(context_id):
     return _ContextNotFoundError(context_id, "Context not found or you don't have access to it.")
 
@@ -53,20 +66,42 @@ def _denied(context_id):
 # --- _authorize_report_read -------------------------------------------------
 
 
-async def test_read_authorizes_against_the_reports_context():
+async def test_read_authorizes_against_the_reports_context(lock):
     report = _report(uuid4())
-    resolve = AsyncMock(return_value=SimpleNamespace(id=report.context_id))
+    resolve = AsyncMock(return_value=_context(report))
     with patch("mcp_server.tools.sleep._resolve_context_for_read", new=resolve):
         assert await _authorize_report_read(MagicMock(), _USER, report) is True
     resolve.assert_awaited_once()
     assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
+    # The capacity lock of the report's workspace, not the session's.
+    lock.assert_awaited_once()
+    assert lock.await_args_list[0].args[1] == report.workspace_id
+    assert lock.await_args_list[0].kwargs == {"user_id": _USER}
 
 
-async def test_read_is_refused_when_the_context_is_out_of_reach():
+async def test_read_of_a_locked_workspace_raises_the_lock():
+    from utils.exceptions import CapacityLockedError
+
+    report = _report(uuid4())
+    locked = AsyncMock(side_effect=CapacityLockedError.for_outsider())
+    with (
+        patch(
+            "mcp_server.tools.sleep._resolve_context_for_read",
+            new=AsyncMock(return_value=_context(report)),
+        ),
+        patch("services.capacity_lock.ensure_not_capacity_locked", new=locked),
+        pytest.raises(CapacityLockedError),
+    ):
+        await _authorize_report_read(MagicMock(), _USER, report)
+
+
+async def test_read_is_refused_when_the_context_is_out_of_reach(lock):
     report = _report(uuid4())
     resolve = AsyncMock(side_effect=_denied(report.context_id))
     with patch("mcp_server.tools.sleep._resolve_context_for_read", new=resolve):
         assert await _authorize_report_read(MagicMock(), _USER, report) is False
+    # Authorization first: the lock never answers for an unreachable context.
+    lock.assert_not_awaited()
 
 
 async def test_read_refuses_a_report_without_a_context():
@@ -80,9 +115,9 @@ async def test_read_refuses_a_report_without_a_context():
 
 
 @pytest.mark.parametrize("role", [ContextRole.OWNER, ContextRole.EDITOR])
-async def test_rollback_is_allowed_for_owner_and_editor(role):
+async def test_rollback_is_allowed_for_owner_and_editor(role, lock):
     report = _report(uuid4())
-    resolve = AsyncMock(return_value=SimpleNamespace(id=report.context_id))
+    resolve = AsyncMock(return_value=_context(report))
     with (
         patch("mcp_server.tools.sleep._resolve_context", new=resolve),
         patch("services.session_rollback.context_role", new=AsyncMock(return_value=role)),
@@ -90,10 +125,12 @@ async def test_rollback_is_allowed_for_owner_and_editor(role):
         assert await _authorize_report_rollback(MagicMock(), _USER, report) is None
     resolve.assert_awaited_once()
     assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
+    lock.assert_awaited_once()
+    assert lock.await_args_list[0].args[1] == report.workspace_id
 
 
 @pytest.mark.parametrize("role", [ContextRole.VIEWER, None])
-async def test_rollback_needs_the_editor_role_on_the_reports_context(role):
+async def test_rollback_needs_the_editor_role_on_the_reports_context(role, lock):
     report = _report(uuid4())
     with (
         patch("mcp_server.tools.sleep._resolve_context", new=AsyncMock()),
@@ -105,6 +142,7 @@ async def test_rollback_needs_the_editor_role_on_the_reports_context(role):
     assert data["error"] == "permission_denied"
     assert data["required_role"] == "editor"
     assert data["your_role"] == (role.value if role is not None else None)
+    lock.assert_not_awaited()
 
 
 async def test_rollback_on_an_unreachable_context_answers_like_a_missing_report():
