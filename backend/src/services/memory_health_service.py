@@ -46,7 +46,7 @@ from typing import Any
 from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.workspace_roles import WorkspaceRole
+from auth.workspace_roles import reachable_context_ids
 from models.auth import (
     Context,
     ContextReadAttribution,
@@ -272,12 +272,11 @@ class MemoryHealthService:
             # (Migration 042): owner/admin ignore the whitelist; a viewer with
             # none reads every context; a member with none is suspended; a
             # whitelist ([] included) admits exactly what it names.
-            if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN) or (
-                role == WorkspaceRole.VIEWER and allowed is None
-            ):
+            reachable = reachable_context_ids(role, allowed)
+            if reachable is None:
                 open_workspaces.add(workspace_id)
-            elif allowed:
-                whitelists.append((workspace_id, frozenset(allowed)))
+            elif reachable:
+                whitelists.append((workspace_id, reachable))
         return _CallerScope(
             owners=owners,
             open_workspaces=frozenset(open_workspaces),

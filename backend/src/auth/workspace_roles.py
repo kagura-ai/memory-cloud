@@ -22,10 +22,11 @@ whether a call is subject to the capacity lock, not what it does.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
+from uuid import UUID
 
 __all__ = [
     "WorkspaceRole",
@@ -39,6 +40,8 @@ __all__ = [
     "ACCESS_WRITE",
     "access_for_workspace_role",
     "access_for_context_role",
+    "reachable_context_ids",
+    "reaches_context",
 ]
 
 
@@ -118,3 +121,43 @@ def access_for_context_role(role: ContextRole | str) -> Access:
         ``ACCESS_READ`` for viewer, else ``ACCESS_WRITE``.
     """
     return ACCESS_READ if role == ContextRole.VIEWER else ACCESS_WRITE
+
+
+def reachable_context_ids(
+    role: WorkspaceRole | str, allowed: Iterable[UUID] | None
+) -> frozenset[UUID] | None:
+    """The contexts of a workspace a member's role and context access list open.
+
+    The one rule for ``WorkspaceMember.allowed_context_ids`` (Migration 042):
+
+    * owner / admin: every context; the list is ignored.
+    * member: the list, exactly; ``NULL`` opens nothing (not configured yet).
+    * viewer: the list, exactly; ``NULL`` opens every shared context.
+    * ``[]`` opens nothing for either role.
+    * any other role value opens nothing.
+
+    Privacy is a separate rule on top: a private context stays open only to
+    its creator and the accounts linked to it, whatever this returns.
+
+    Returns:
+        ``None`` for "every context of the workspace", otherwise the set of
+        context ids (possibly empty).
+    """
+    if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+        return None
+    if role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
+        return frozenset()
+    if allowed is None:
+        return None if role == WorkspaceRole.VIEWER else frozenset()
+    return frozenset(allowed)
+
+
+def reaches_context(
+    role: WorkspaceRole | str, allowed: Iterable[UUID] | None, context_id: UUID
+) -> bool:
+    """Whether a member's role and context access list open ``context_id``.
+
+    See ``reachable_context_ids`` for the rule.
+    """
+    reachable = reachable_context_ids(role, allowed)
+    return reachable is None or context_id in reachable

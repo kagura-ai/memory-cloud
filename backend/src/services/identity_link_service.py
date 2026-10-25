@@ -132,7 +132,7 @@ async def opens_contexts_as_self(
     the gate upstream decided. One indexed lookup; only called for a caller
     that has a linked account.
     """
-    from auth.workspace_roles import WorkspaceRole
+    from auth.workspace_roles import reachable_context_ids
     from models.auth import Workspace, WorkspaceMember
 
     row = (
@@ -149,14 +149,12 @@ async def opens_contexts_as_self(
     if row is None:
         return False
     role, allowed = row
-    if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+    reachable = reachable_context_ids(role, allowed)
+    if reachable is None:
         return True
-    if role == WorkspaceRole.VIEWER and allowed is None:
-        return True
-    if allowed is None:
+    if not reachable:
         return False
-    admitted = set(allowed)
-    return all(context_id in admitted for context_id in context_ids)
+    return all(context_id in reachable for context_id in context_ids)
 
 
 async def is_same_owner(db: AsyncSession, user_id: str, other_user_id: str | None) -> bool:
@@ -511,7 +509,7 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     Returns:
         ``{"contexts_handed_over": n, "identity_links_removed": n}``.
     """
-    from auth.workspace_roles import WorkspaceRole
+    from auth.workspace_roles import WorkspaceRole, reaches_context
     from models.auth import Context, WorkspaceMember
     from models.memory import Memory
 
@@ -577,10 +575,8 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
                 names the context, None for an account that could not own it."""
                 if member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
                     return 0
-                if (
-                    member.role == WorkspaceRole.MEMBER
-                    and member.allowed_context_ids is not None
-                    and context_id in member.allowed_context_ids
+                if member.role == WorkspaceRole.MEMBER and reaches_context(
+                    member.role, member.allowed_context_ids, context_id
                 ):
                     return 1
                 return None
