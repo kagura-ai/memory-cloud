@@ -201,12 +201,9 @@ CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-# BLOCKED tools checked only here, on the caller's session workspace — the
-# check runs before authorization and tells nothing about another workspace.
-# The analysis and resource / connector handlers confine their target to the
-# session workspace, so this is the target's workspace. The sleep report tools
-# take a report id (filtered on the caller's user id, not on a workspace) and
-# are checked on the session workspace, exactly as before #1954.
+# BLOCKED tools checked only here, before the handler, on the caller's session
+# workspace, as before #1954: the analysis, resource / connector and sleep
+# report tools.
 CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS: frozenset[str] = (
     CAPACITY_LOCK_BLOCKED_TOOLS
     - CAPACITY_LOCK_SERVICE_GATED_TOOLS

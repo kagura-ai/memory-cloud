@@ -121,7 +121,7 @@ class TestThePartition:
         }
 
     def test_the_dispatcher_only_tools_are_exactly_these(self) -> None:
-        """Each confines its target to the session workspace or takes a caller-owned id."""
+        """Checked on the session workspace before the handler, as before #1954."""
         assert CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS == {
             "analyze_context",
             "get_active_analysis",
@@ -275,6 +275,8 @@ async def _call(tool: str, resolvers: _Resolvers, db: MagicMock, usage: AsyncMoc
         # The usage row (some handlers log the refusal) is not handler work.
         stack.enter_context(patch("utils.usage_logger.log_usage", usage or AsyncMock()))
         # No session workspace: the dispatcher's own check has nothing to look at.
+        # That it also skips a session workspace when a target is named is pinned
+        # in test_capacity_gate.py (test_a_gated_tool_naming_its_target_opens_no_session).
         return await execute_tool_call(tool, dict(RESOLVER_ARGS[tool]), "u1", None)
 
 

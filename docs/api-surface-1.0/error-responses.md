@@ -437,8 +437,9 @@ stored, so deleting down to the cap unlocks the next call. No `feature` and no `
 the refusal is not one feature or one cap. On MCP every blocked tool is refused once the
 caller may reach the target — the lock is checked after authorization, in the context resolver
 or the service the tool calls ([#1954](https://github.com/kagura-ai/memory-cloud/issues/1954)),
-so a context the caller cannot read answers with the usual `context_not_found` instead; a
-blocked tool that names no context is checked on the caller's own workspace. The refusal carries
+so a context the caller cannot read answers with the usual `context_not_found` instead. The
+analysis, resource / connector and sleep-report tools, and a blocked tool that names no context,
+are still checked on the caller's own (session) workspace. The refusal carries
 `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context` — which since
 [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
