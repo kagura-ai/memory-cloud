@@ -811,6 +811,7 @@ class MemoryService:
             ValueError: ``invalid details.tool_trigger:
                 tool_trigger_requires_user_credential`` for an agent credential.
             AuthorizationError: the caller is below context EDITOR.
+            NotFoundException: the caller cannot reach the context.
         """
         from auth.agent_scope import get_agent_scope
         from services.permission_service import PermissionService
@@ -848,11 +849,11 @@ class MemoryService:
         """
         if not memory.is_tool_triggered:
             return True
-        from utils.exceptions import AuthorizationError
+        from utils.exceptions import AuthorizationError, NotFoundException
 
         try:
             await self._require_guardrail_author(user_id, memory.context_id)
-        except (AuthorizationError, ValueError):
+        except (AuthorizationError, NotFoundException, ValueError):
             logger.warning(
                 "forget_guardrail_author_denied", memory_id=str(memory.id), user_id=user_id
             )
@@ -7230,12 +7231,12 @@ class MemoryService:
                 return False
             if guard:
                 if guardrail_ok is None:
-                    from utils.exceptions import AuthorizationError
+                    from utils.exceptions import AuthorizationError, NotFoundException
 
                     try:
                         await self._require_guardrail_author(user_id, context_id)
                         guardrail_ok = True
-                    except (AuthorizationError, ValueError):
+                    except (AuthorizationError, NotFoundException, ValueError):
                         guardrail_ok = False
                 return guardrail_ok
             return True

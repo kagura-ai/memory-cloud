@@ -161,12 +161,17 @@ class TestPermissions:
         assert all(c.kwargs["access"] == "write" for c in perm.can_access_memory.await_args_list)
 
     @pytest.mark.asyncio
-    async def test_guardrails_need_the_author_gate(self) -> None:
+    @pytest.mark.parametrize("refusal", ["role", "reach"])
+    async def test_guardrails_need_the_author_gate(self, refusal) -> None:
         from utils.exceptions import AuthorizationError
 
         service, perm = _service([_row(), _row(guardrail=True), _row(guardrail=True)])
+        # A role too low (403) or a context the caller cannot reach (not
+        # found): either way the guardrail rows are skipped, never an error.
         service._require_guardrail_author = AsyncMock(  # type: ignore[method-assign]
             side_effect=AuthorizationError("no")
+            if refusal == "role"
+            else NotFoundException("Context")
         )
         assert await _run(service, perm) == 1
         service._require_guardrail_author.assert_awaited_once()

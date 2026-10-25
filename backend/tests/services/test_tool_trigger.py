@@ -33,7 +33,7 @@ from models.schemas import (
 )
 from services.capacity_lock import CapacityPolicy
 from services.memory_service import MemoryService
-from utils.exceptions import AuthorizationError
+from utils.exceptions import AuthorizationError, NotFoundException
 
 TT = {"tool": "Bash|PowerShell", "match": r"gh pr merge\b.*--delete-branch", "action": "block"}
 
@@ -409,10 +409,14 @@ async def _forget(service, memory):
 
 
 @pytest.mark.asyncio
-async def test_forget_of_a_guardrail_row_by_non_editor_is_a_silent_zero(service, perm):
+@pytest.mark.parametrize("refusal", [AuthorizationError, NotFoundException])
+async def test_forget_of_a_guardrail_row_by_non_editor_is_a_silent_zero(service, perm, refusal):
     """forget keeps its contract: a target the caller may not delete is skipped
-    (deleted_count=0), never a 403 — so the deny leaks nothing."""
-    perm.check_context_write.side_effect = AuthorizationError()
+    (deleted_count=0), never a 403 or a not-found — so the deny leaks nothing.
+    The context check answers not found for a context the caller cannot reach."""
+    perm.check_context_write.side_effect = (
+        AuthorizationError() if refusal is AuthorizationError else NotFoundException("Context")
+    )
     memory = _memory({"tool_trigger": TT})
     service.memory_repo.get = AsyncMock(return_value=memory)
     result = await _forget(service, memory)
