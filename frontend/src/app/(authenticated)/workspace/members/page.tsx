@@ -150,13 +150,6 @@ export default function WorkspaceMembersPage() {
   const [selectedContextIds, setSelectedContextIds] = useState<string[]>([]);
   const [contextAccessLoading, setContextAccessLoading] = useState(false);
 
-  // Issue #234: Role change confirmation (clears context access)
-  const [pendingRoleChange, setPendingRoleChange] = useState<{
-    member: WorkspaceMember;
-    newRole: string;
-  } | null>(null);
-  const [showRoleChangeDialog, setShowRoleChangeDialog] = useState(false);
-  const [roleChangeLoading, setRoleChangeLoading] = useState(false);
 
   // Role permissions section toggle
   const [showRolePermissions, setShowRolePermissions] = useState(false);
@@ -293,7 +286,7 @@ export default function WorkspaceMembersPage() {
   // Issue #234: Handle context access dialog open
   const handleContextAccessClick = (member: WorkspaceMember) => {
     setContextAccessMember(member);
-    // Set selected contexts (empty array if NULL/unrestricted)
+    // Set selected contexts (empty when no list is set)
     setSelectedContextIds(member.allowed_context_ids || []);
     setShowContextAccessDialog(true);
   };
@@ -536,38 +529,16 @@ export default function WorkspaceMembersPage() {
     }
   };
 
+  // A role change keeps the member's context access list (the server keeps
+  // it), so no confirmation is needed.
   const handleUpdateRole = async (userId: string, newRole: string) => {
     if (!currentWorkspaceId) return;
 
-    // Issue #234: Check if member has context restrictions that will be cleared
-    const member = members.find((m) => m.user_id === userId);
-    if (
-      member &&
-      member.allowed_context_ids !== null &&
-      member.allowed_context_ids !== undefined
-    ) {
-      // Show confirmation dialog
-      setPendingRoleChange({ member, newRole });
-      setShowRoleChangeDialog(true);
-      return;
-    }
-
-    // No restrictions, proceed directly
-    await executeRoleChange(userId, newRole);
-  };
-
-  // Issue #234: Execute role change after confirmation
-  const executeRoleChange = async (userId: string, newRole: string) => {
-    if (!currentWorkspaceId) return;
-
-    setRoleChangeLoading(true);
     try {
       await updateMemberRole(currentWorkspaceId, userId, {
         role: newRole as WorkspaceRole,
       });
       await loadMembers();
-      setShowRoleChangeDialog(false);
-      setPendingRoleChange(null);
     } catch (error: unknown) {
       console.error("Failed to update role:", error);
 
@@ -595,8 +566,6 @@ export default function WorkspaceMembersPage() {
         description: errorMessage,
         variant: "destructive",
       });
-    } finally {
-      setRoleChangeLoading(false);
     }
   };
 
@@ -779,8 +748,26 @@ export default function WorkspaceMembersPage() {
                       <span className="text-gray-400 text-xs">
                         {t("contextAccessNotApplicable")}
                       </span>
+                    ) : (member.allowed_context_ids === null ||
+                        member.allowed_context_ids === undefined) &&
+                      member.role === "viewer" ? (
+                      // A viewer with no list reads every shared context.
+                      <button
+                        onClick={() => handleContextAccessClick(member)}
+                        disabled={
+                          currentWorkspace?.current_user_role !== "owner" &&
+                          currentWorkspace?.current_user_role !== "admin"
+                        }
+                        className="flex items-center gap-1 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Settings className="w-4 h-4" />
+                        <span className="text-xs">
+                          {t("contextAccessAllShared")}
+                        </span>
+                      </button>
                     ) : member.allowed_context_ids === null ||
                       member.allowed_context_ids === undefined ? (
+                      // A member with no list reaches no context.
                       <button
                         onClick={() => handleContextAccessClick(member)}
                         disabled={
@@ -791,7 +778,7 @@ export default function WorkspaceMembersPage() {
                       >
                         <AlertTriangle className="w-4 h-4" />
                         <span className="text-xs font-medium">
-                          {t("contextNotConfigured")}
+                          {t("contextAccessNotSetMember")}
                         </span>
                       </button>
                     ) : (
@@ -1516,64 +1503,6 @@ export default function WorkspaceMembersPage() {
                 </>
               ) : (
                 t("revokeInvitation")
-              )}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Issue #234: Role Change Confirmation Dialog */}
-      <AlertDialog
-        open={showRoleChangeDialog}
-        onOpenChange={setShowRoleChangeDialog}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("roleChangeConfirmTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {pendingRoleChange &&
-                t("roleChangeConfirmDesc", {
-                  name:
-                    pendingRoleChange.member.user_name ||
-                    pendingRoleChange.member.user_email ||
-                    "User",
-                })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="py-4">
-            <p className="text-sm text-amber-600 dark:text-amber-400">
-              {t("roleChangeWarning")}
-            </p>
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel
-              disabled={roleChangeLoading}
-              onClick={() => {
-                setShowRoleChangeDialog(false);
-                setPendingRoleChange(null);
-              }}
-            >
-              {tCommon("cancel")}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (pendingRoleChange) {
-                  executeRoleChange(
-                    pendingRoleChange.member.user_id,
-                    pendingRoleChange.newRole,
-                  );
-                }
-              }}
-              disabled={roleChangeLoading}
-              className="bg-blue-600 hover:bg-blue-700 focus:ring-blue-600"
-            >
-              {roleChangeLoading ? (
-                <>
-                  <InlineSpinner size="sm" className="mr-2" />
-                  {tCommon("loading")}
-                </>
-              ) : (
-                t("confirmRoleChange")
               )}
             </AlertDialogAction>
           </AlertDialogFooter>

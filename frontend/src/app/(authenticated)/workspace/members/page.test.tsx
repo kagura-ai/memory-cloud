@@ -940,3 +940,59 @@ describe("WorkspaceMembersPage role-change refusal (#1644)", () => {
     );
   });
 });
+
+describe("WorkspaceMembersPage context access column", () => {
+  function member(
+    userId: string,
+    role: Role,
+    allowed: string[] | null,
+  ): Record<string, unknown> {
+    return {
+      user_id: userId,
+      user_name: userId,
+      user_email: `${userId}@example.com`,
+      role,
+      joined_at: null,
+      allowed_context_ids: allowed,
+    };
+  }
+
+  it("labels an unset list by role: a member reaches nothing, a viewer every shared context", async () => {
+    setupWithRole("owner", "pro");
+    mockListMembers.mockResolvedValue([
+      member("m-unset", "member", null),
+      member("v-unset", "viewer", null),
+      member("m-list", "member", ["ctx-a"]),
+    ]);
+    render(<WorkspaceMembersPage />);
+
+    expect(await screen.findByText("contextAccessNotSetMember")).toBeTruthy();
+    expect(screen.getByText("contextAccessAllShared")).toBeTruthy();
+    expect(screen.getByText("contextsSelected")).toBeTruthy();
+    expect(screen.getAllByText("contextAccessNotSetMember")).toHaveLength(1);
+    expect(screen.getAllByText("contextAccessAllShared")).toHaveLength(1);
+  });
+
+  it("changes the role of a member with a list at once, with no reset warning", async () => {
+    setupWithRole("owner", "pro");
+    vi.mocked(updateMemberRole).mockResolvedValue(
+      {} as Awaited<ReturnType<typeof updateMemberRole>>,
+    );
+    mockListMembers.mockResolvedValue([member("m-list", "member", ["ctx-a"])]);
+    render(<WorkspaceMembersPage />);
+
+    const select = await screen.findByDisplayValue("member");
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "viewer" } });
+    });
+
+    await waitFor(() =>
+      expect(vi.mocked(updateMemberRole)).toHaveBeenCalledWith(
+        WORKSPACE_ID,
+        "m-list",
+        { role: "viewer" },
+      ),
+    );
+    expect(screen.queryByText("roleChangeConfirmTitle")).toBeNull();
+  });
+});
