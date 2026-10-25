@@ -299,7 +299,8 @@ async def handle_create_edge(
             # plan. After the role gate, so a viewer still gets permission_denied.
             await plan_seats.ensure_context_writable(db, context)
 
-            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            # The edge lives in the context's workspace, whatever the session's is.
+            ws_id = str(context.workspace_id)
             ctx_id = str(current_context_id)
 
             # Shared declared-edge core (#1321 duplicate contract + #1403 supersede
@@ -417,7 +418,8 @@ async def handle_update_edge(
             # plan. After the role gate, so a viewer still gets permission_denied.
             await plan_seats.ensure_context_writable(db, context)
 
-            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            # The edge lives in the context's workspace, whatever the session's is.
+            ws_id = str(context.workspace_id)
             ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
@@ -512,7 +514,8 @@ async def handle_delete_edge(
             if perm_error:
                 return perm_error
 
-            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            # The edge lives in the context's workspace, whatever the session's is.
+            ws_id = str(context.workspace_id)
             ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
