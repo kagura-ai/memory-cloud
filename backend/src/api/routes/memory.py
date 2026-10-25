@@ -149,9 +149,8 @@ async def remember(
                 raw_context_id if isinstance(raw_context_id, UUID) else UUID(str(raw_context_id))
             )
         except (ValueError, AttributeError, TypeError) as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"context_id must be a valid UUID: {raw_context_id!r}",
+            raise ValidationError(
+                f"context_id must be a valid UUID: {raw_context_id!r}", field="context_id"
             ) from e
     try:
         result = await memory_service.remember(
