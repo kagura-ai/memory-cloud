@@ -151,6 +151,7 @@ class TestListContextTagsRoute:
             prefix="auth",
             q="deploy",
             with_tags=["python", "backend"],
+            key_workspace_id=None,
         )
 
 

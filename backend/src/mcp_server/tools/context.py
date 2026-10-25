@@ -1325,10 +1325,11 @@ async def handle_list_tags(
 
     Read-only tag-discovery tool that helps callers reuse existing tag
     spellings before remember()/recall(), mitigating tag drift. Access is
-    gated inside ``ContextService.aggregate_tags`` via ``get_context``,
+    gated inside ``ContextService.aggregate_tags`` via the read resolver,
     which raises ``NotFoundException`` for not-found / private-non-creator /
-    non-member / whitelist-miss — all caught here and reshaped into the
-    uniform ``context_not_found`` MCP error (CWE-639).
+    non-member / whitelist-miss / another workspace under a workspace-scoped
+    key (#963) / an agent binding deny (#1275) — all caught here and
+    reshaped into the uniform ``context_not_found`` MCP error (CWE-639).
     """
     from db.base import get_db
     from utils.datetime import to_utc_iso
@@ -1413,6 +1414,7 @@ async def handle_list_tags(
                     sort=sort,
                     prefix=prefix,
                     with_tags=with_tags,
+                    key_workspace_id=get_mcp_key_workspace_scope(),
                 ),
                 operation_name="list_tags",
             )

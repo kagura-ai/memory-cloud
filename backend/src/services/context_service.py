@@ -1961,6 +1961,7 @@ class ContextService:
         prefix: str = "",
         q: str | None = None,
         with_tags: list[str] | None = None,
+        key_workspace_id: UUID | None = None,
     ) -> dict:
         """Aggregate tags across non-deleted memories in a context (Issue #614).
 
@@ -1995,6 +1996,10 @@ class ContextService:
                 values from the returned tags. AND-combined with ``q``. Bound
                 as a single ``varchar[]`` param (never interpolated). Capped at
                 50 tags, each ≤ 200 chars.
+            key_workspace_id: #963 pure API-key workspace scope, or None.
+                The context is resolved like every other context read
+                (``resolve_context_for_workspace_read``): the key scope and
+                an agent binding (#1275) apply.
 
         Returns:
             ``{"context_name": str, "rows": list[dict]}`` where each row is
@@ -2022,8 +2027,18 @@ class ContextService:
             raise ValidationError(f"min_count must be an integer in [1, 10000]; got {min_count!r}.")
 
         # Uniform 404 disclosure: not-found and access-denied are indistinguishable
-        # (CWE-639) — get_context conflates both into NotFoundException by design.
-        context = await self.get_context(user_id, context_id)
+        # (CWE-639) — the read resolver conflates both into NotFoundException.
+        # The tag list is a cleanup / discovery read, allowed while locked.
+        from services.permission_service import PermissionService
+
+        context = await PermissionService(self.db).resolve_context_for_workspace_read(
+            user_id,
+            context_id,
+            capacity=CapacityPolicy.ALLOWED,
+            key_workspace_id=key_workspace_id,
+            # The audit vocabulary's lane for reads that list a context.
+            operation="list",
+        )
 
         if prefix:
             escaped = prefix.replace("#", "##").replace("%", "#%").replace("_", "#_")

@@ -145,6 +145,7 @@ class TestHandleListTagsHappyPath:
             sort="recent",
             prefix="auth",
             with_tags=["python", "backend"],
+            key_workspace_id=None,
         )
 
     @pytest.mark.asyncio

@@ -867,6 +867,7 @@ async def list_context_tags(
             prefix=prefix,
             q=q,
             with_tags=with_tags,
+            key_workspace_id=user.get("api_key_workspace_id"),  # #963
         )
     except NotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
