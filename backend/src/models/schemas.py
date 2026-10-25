@@ -166,25 +166,16 @@ class RememberRequest(BaseModel):
         description="Memory ID this new memory supersedes (old one is shadowed, not deleted)",
     )
     # #2330: when the fact held / the event happened (ISO 8601 date or
-    # datetime). Sugar for details.observed_at: folded into details below, so
-    # the service reads details only. Validated by MemoryService.
+    # datetime). Sugar for details.observed_at: MemoryService folds it into
+    # details first thing (a disagreeing details.observed_at is a ValueError
+    # there, so every write tool reports the conflict as validation_error)
+    # and reads details only from then on.
     observed_at: str | None = Field(
         default=None,
         max_length=40,
         description="When the fact held or the event happened (ISO 8601 date or datetime); "
         "stored as details.observed_at",
     )
-
-    @model_validator(mode="after")
-    def _fold_observed_at(self) -> "RememberRequest":
-        """Fold ``observed_at`` into ``details`` (#2330); disagreeing values are refused."""
-        if self.observed_at is None:
-            return self
-        details = self.details or {}
-        if "observed_at" in details and details["observed_at"] != self.observed_at:
-            raise ValueError("details.observed_at and observed_at disagree; give one of them")
-        self.details = {**details, "observed_at": self.observed_at}
-        return self
 
     @field_validator("tags")
     @classmethod

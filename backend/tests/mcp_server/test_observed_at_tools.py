@@ -7,7 +7,7 @@ remember and update_memory definitions declare it.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -38,55 +38,72 @@ class TestDefinitions:
 
 
 class TestRememberArgs:
-    def test_folded_into_details(self):
+    def test_reaches_the_service_as_an_argument(self):
         request = remember_request_from_args(
             {**REMEMBER_ARGS, "details": {"k": 1}, "observed_at": "2024-03-07"}
         )
-        assert request.details == {"k": 1, "observed_at": "2024-03-07"}
+        # MemoryService folds it into details (the conflict check lives there).
+        assert request.observed_at == "2024-03-07"
+        assert request.details == {"k": 1}
 
     def test_a_batch_item_takes_it(self):
         parsed = _request_from_item({**REMEMBER_ARGS, "observed_at": "2024-03-07"}, _CTX)
         assert not isinstance(parsed, dict), parsed
-        assert parsed.request.details == {"observed_at": "2024-03-07"}
+        assert parsed.request.observed_at == "2024-03-07"
 
-    def test_a_batch_item_with_disagreeing_values_fails_alone(self):
-        parsed = _request_from_item(
-            {
-                **REMEMBER_ARGS,
-                "details": {"observed_at": "2024-03-08"},
-                "observed_at": "2024-03-07",
-            },
-            _CTX,
-        )
-        assert isinstance(parsed, dict)
-        assert parsed["error"] == "validation_error"
+    def test_a_batch_items_conflict_is_a_validation_error(self):
+        from mcp_server.tools.batch import item_error
+
+        assert item_error(_CONFLICT)["error"] == "validation_error"
+
+
+# What MemoryService raises for a disagreeing pair on every write path.
+_CONFLICT = ValueError(
+    "invalid details.observed_at: details.observed_at and observed_at disagree; give one of them"
+)
 
 
 class TestHandlers:
     @pytest.mark.asyncio
-    async def test_remember_with_disagreeing_values_is_an_invalid_argument(self):
-        """The schema refuses it at dispatch, like any other bad argument (#1323)."""
-        from mcp_server.tools import execute_tool_call
+    async def test_remember_with_disagreeing_values_is_a_validation_error(self):
+        """The same code as update_memory, PATCH and remember_batch (#2330 review):
+        the real service refuses it before touching the database."""
+        from mcp_server.tools.memory import handle_remember
+        from services.memory_service import MemoryService
 
-        with patch(
-            "mcp_server.tools._check_rate_limit",
-            new_callable=AsyncMock,
-            return_value=(True, 0, 100),
-        ):
-            result = await execute_tool_call(
-                "remember",
-                {
-                    "context_id": str(uuid4()),
-                    **REMEMBER_ARGS,
-                    "details": {"observed_at": "2024-03-08"},
-                    "observed_at": "2024-03-07",
-                },
-                "test_user",
-                uuid4(),
-            )
+        result = await _run(
+            handle_remember,
+            {
+                "context_id": str(uuid4()),
+                **REMEMBER_ARGS,
+                "details": {"observed_at": "2024-03-08"},
+                "observed_at": "2024-03-07",
+            },
+            _mock_db(),
+            MemoryService(MagicMock()),
+        )
         payload = _payload(result)
-        assert payload["error"] == "invalid_argument"
+        assert payload["error"] == "validation_error"
         assert "disagree" in payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_update_memory_reports_the_conflict_the_same_way(self):
+        from mcp_server.tools.memory import handle_update_memory
+
+        service = MagicMock()
+        service.update_memory = AsyncMock(side_effect=_CONFLICT)
+        result = await _run(
+            handle_update_memory,
+            {
+                "context_id": str(uuid4()),
+                "memory_id": str(uuid4()),
+                "details": {"observed_at": "2024-03-08"},
+                "observed_at": "2024-03-07",
+            },
+            _mock_db(),
+            service,
+        )
+        assert _payload(result)["error"] == "validation_error"
 
     @pytest.mark.asyncio
     async def test_remember_echoes_the_services_refusal(self):

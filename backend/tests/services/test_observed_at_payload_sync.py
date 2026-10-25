@@ -91,22 +91,68 @@ class TestFold:
 
 
 class TestSchemas:
-    def test_remember_folds_it_into_details(self):
+    def test_remember_keeps_the_argument_for_the_service(self):
+        """The schema does not fold (#2330 review): the service does, so a
+        conflict is the same validation_error on every write tool."""
         request = RememberRequest(
-            summary="Fact with an event time", content="c", type="fact", observed_at="2024-03-07"
+            summary="Fact with an event time",
+            content="c",
+            type="fact",
+            details={"observed_at": "2024-03-08"},
+            observed_at="2024-03-07",
         )
-        assert request.details == {"observed_at": "2024-03-07"}
+        assert request.details == {"observed_at": "2024-03-08"}
+        assert request.observed_at == "2024-03-07"
 
-    def test_remember_refuses_disagreeing_values(self):
-        with pytest.raises(ValidationError, match="disagree"):
-            RememberRequest(
-                summary="Fact with an event time",
-                content="c",
-                type="fact",
-                details={"observed_at": "2024-03-08"},
-                observed_at="2024-03-07",
-            )
 
+async def _prepare(request: RememberRequest) -> None:
+    await MemoryService(MagicMock())._prepare_remember(
+        request,
+        "u",
+        client="test",
+        current_context_id=None,
+        current_workspace_id=None,
+        key_workspace_id=None,
+        _skip_daily_quota=True,
+        tags_normalize=False,
+        dedupe="suggest",
+    )
+
+
+class TestRememberFold:
+    @pytest.mark.asyncio
+    async def test_a_conflict_is_a_value_error_before_anything_else(self):
+        request = RememberRequest(
+            summary="Fact with an event time",
+            content="c",
+            type="fact",
+            details={"observed_at": "2024-03-08"},
+            observed_at="2024-03-07",
+        )
+        with pytest.raises(ValueError, match="invalid details.observed_at: .*disagree"):
+            await _prepare(request)
+
+    @pytest.mark.asyncio
+    async def test_the_argument_lands_in_details(self):
+        request = RememberRequest(
+            summary="Fact with an event time",
+            content="c",
+            type="fact",
+            details={"k": 1},
+            observed_at="2024-03-07",
+        )
+        # Stop right after the fold: context resolution is the next step.
+        with patch.object(
+            MemoryService,
+            "_get_context_isolation_params",
+            AsyncMock(side_effect=RuntimeError("stop")),
+        ):
+            with pytest.raises(RuntimeError, match="stop"):
+                await _prepare(request)
+        assert request.details == {"k": 1, "observed_at": "2024-03-07"}
+
+
+class TestSchemasMore:
     def test_patch_with_only_a_null_observed_at_is_refused(self):
         with pytest.raises(ValidationError, match="at least one field"):
             PatchMemoryRequest(observed_at=None)

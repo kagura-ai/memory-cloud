@@ -1096,6 +1096,10 @@ class MemoryService:
         # shared context the caller is also a member of, a different workspace
         # (the wrong counter). A workspace-scoped key or a binding denial is
         # still refused here, before any counter is touched.
+        # #2330: a top-level observed_at is details.observed_at from here on
+        # (a disagreeing details.observed_at is the same ValueError as on
+        # update / PATCH, so every write path reports it alike).
+        request.details = self._fold_observed_at(request.details, None, request.observed_at)
         capacity_checked = isolation is not None  # remember_many checked the batch
         if isolation is None:
             isolation = await self._get_context_isolation_params(

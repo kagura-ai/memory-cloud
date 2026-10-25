@@ -129,9 +129,11 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     "remember.observed_at": (
         "observed_at is when the fact held or the event happened — the date of the "
-        "material, never the write time. ISO 8601: a date (2024-03-07) or a datetime "
-        "(stored as UTC, 2024-03-07T01:00:00Z; a naive one is read as UTC). Pass it as "
-        "the observed_at argument or as details.observed_at (both given must agree); it "
+        "material, never the write time. ISO 8601 extended form: a date (2024-03-07) or "
+        "a datetime with seconds (2024-03-07T10:00:00+09:00; Z or an offset, a naive one "
+        "is read as UTC), stored as UTC (2024-03-07T01:00:00Z). Pass it as "
+        "the observed_at argument or as details.observed_at (both given must agree, "
+        "else validation_error); it "
         "is stored in details.observed_at, and null removes it. Anything else is "
         "validation_error. update_memory(memory_id, observed_at=...) alone changes only "
         "the event time; a details write without the key drops it."
