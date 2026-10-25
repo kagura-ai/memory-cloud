@@ -883,10 +883,32 @@ async def _check_workspace_membership(
     """
     if not workspace_id:
         return None
+    if _outside_key_workspace(workspace_id):
+        return _workspace_not_accessible(operation, "viewer")
     user_role = await _get_workspace_member_role(db, user_id, workspace_id)
     if user_role is None:
         return _workspace_not_accessible(operation, "viewer")
     return None
+
+
+def _outside_key_workspace(workspace_id: UUID) -> bool:
+    """#963: the request uses a workspace-scoped key for another workspace.
+
+    The file tools take a ``workspace_id`` argument; under such a key only the
+    key's own workspace is reachable, refused before the membership lookup
+    with the non-member answer (the other callers of the two gates pass the
+    session's or a key-resolved context's workspace, so this never changes
+    their outcome).
+    """
+    key_workspace_id = _mcp_key_workspace_scope.get()
+    if key_workspace_id is None or workspace_id == key_workspace_id:
+        return False
+    logger.warning(
+        "workspace_denied: reason=key_workspace_mismatch workspace_id=%s key_workspace_id=%s",
+        str(workspace_id),
+        str(key_workspace_id),
+    )
+    return True
 
 
 def _workspace_not_accessible(operation: str, required_role: str) -> ToolErrorContent:
@@ -894,7 +916,8 @@ def _workspace_not_accessible(operation: str, required_role: str) -> ToolErrorCo
 
     The answer of the membership gates below for a non-member (or a deleted
     workspace); also given under a workspace-scoped API key for any other
-    workspace (#963), so the two cannot be told apart.
+    workspace (#963, ``_outside_key_workspace``), so the two cannot be told
+    apart.
 
     Args:
         operation: Operation description for the message.
@@ -941,7 +964,9 @@ async def _check_viewer_permission(
         Error response if viewer, not a member, or no workspace; None if allowed
     """
     user_role = (
-        await _get_workspace_member_role(db, user_id, workspace_id) if workspace_id else None
+        await _get_workspace_member_role(db, user_id, workspace_id)
+        if workspace_id and not _outside_key_workspace(workspace_id)
+        else None
     )
     if user_role is None:
         # Caller is not a member of this workspace, the workspace is
