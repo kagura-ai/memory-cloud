@@ -854,7 +854,11 @@ class FileStorageService:
                 raise AuthorizationError("Insufficient permissions")
             # "Owning context deleted" is read from the context row itself, so
             # the cleanup fallback never stands in for a refusal of a live one.
-            owning = await self.db.get(Context, file.context_id)
+            owning = (
+                await self.db.execute(
+                    select(Context.deleted_at).where(Context.id == file.context_id)
+                )
+            ).first()
             if owning is not None and owning.deleted_at is None:
                 try:
                     await PermissionService(self.db).check_context_write(
