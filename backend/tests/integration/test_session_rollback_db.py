@@ -1672,3 +1672,28 @@ async def test_a_restore_stamps_its_events_and_the_row_from_one_server_clock(
     row = await w.row(target)
     assert (row["deleted_at"], row["updated_at"]) == (None, stamp)
     assert row["summary"] == "the value before the window"
+
+
+async def test_a_restored_details_edit_brings_back_its_observed_at(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """#2330: the generated column follows the restored details, and the
+    payload patch sets the restored event time."""
+    w = world
+    target = await w.create(w.member, None, details={"observed_at": "2024-03-07"})
+    await w.update(target, w.owner, "OBS", details={"observed_at": "2025-01-01T00:00:00Z"})
+    await w.session.commit()
+
+    done = await _rollback(w, "OBS", SessionPrincipal(w.owner, None), dry_run=False)
+    await w.session.commit()
+    observed = (
+        await w.session.execute(
+            text("SELECT observed_at FROM memories WHERE id = :m"), {"m": target}
+        )
+    ).scalar_one()
+    assert observed == "2024-03-07T00:00:00Z"
+
+    await sr.finish(done, w.session)
+    kwargs = _stubs["payload"].await_args.kwargs
+    assert kwargs["payload_updates"]["observed_at"] == "2024-03-07T00:00:00Z"
+    assert "observed_at" not in (kwargs.get("delete_keys") or [])

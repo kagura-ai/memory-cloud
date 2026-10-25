@@ -1567,6 +1567,28 @@ pre-tokenized FTS text. Semantic + BM25 hybrid fusion is unchanged.
 Configuration: `KAGURA_VECTOR_BACKEND` (`qdrant` | `lance`, default `qdrant`)
 and `KAGURA_LANCE_DB_PATH`. Implementation: `backend/src/db/lance_store.py`.
 
+## Event time (`observed_at`) — Issue #2330
+
+Migration `f16_2330_observed_at` adds the STORED generated column
+`memories.observed_at` (from `details.observed_at`) and the partial index
+`idx_memories_observed_at`. A STORED generated column **rewrites the whole
+`memories` table** under an ACCESS EXCLUSIVE lock held until the migration
+commits: reads and writes of `memories` wait for the rewrite. Check the table's
+size and apply it in a maintenance window. The migration waits at most 5 s for
+the lock (`lock_timeout`); if it gives up, nothing is kept and you run it again.
+
+Vector points written before the migration carry no `observed_at` payload, so
+recall's `observed_after` / `observed_before` filters do not match those
+memories until the payload is added. After the deploy, run once (inside the API
+container, from `backend/`):
+
+```bash
+python -m src.cli.observed_at_backfill                # plan: how many points
+python -m src.cli.observed_at_backfill --apply --yes  # write them
+```
+
+It is idempotent; `--workspace <id>` limits it to one workspace.
+
 ## Orphaned vectors — Issue #1798
 
 Postgres is the system of record; the vector store follows it. Every write

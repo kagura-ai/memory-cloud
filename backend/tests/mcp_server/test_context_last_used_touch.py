@@ -389,6 +389,7 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
         context=None,
         created_at=datetime.now(UTC),
         updated_at=None,
+        observed_at=None,  # #2330
         version=1,  # #2043
         historical=False,  # #2043 PR2: the current version
         client="mcp",

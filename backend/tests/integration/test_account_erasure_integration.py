@@ -511,7 +511,7 @@ class TestEditorDetailsRestore:
             ["api", "erasure"],
         )
         sync.assert_awaited_once()
-        assert sync.await_args.kwargs["delete_keys"] == ["location"]
+        assert sync.await_args.kwargs["delete_keys"] == ["location", "observed_at"]  # #2330
         # #2268: the scrub time, the re-run's bound, before the completion
         scrubbed = datetime.fromisoformat(postgres["memory_scrub_at"])
         assert scrubbed.tzinfo is not None

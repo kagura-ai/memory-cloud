@@ -165,6 +165,26 @@ class RememberRequest(BaseModel):
         default=None,
         description="Memory ID this new memory supersedes (old one is shadowed, not deleted)",
     )
+    # #2330: when the fact held / the event happened (ISO 8601 date or
+    # datetime). Sugar for details.observed_at: folded into details below, so
+    # the service reads details only. Validated by MemoryService.
+    observed_at: str | None = Field(
+        default=None,
+        max_length=40,
+        description="When the fact held or the event happened (ISO 8601 date or datetime); "
+        "stored as details.observed_at",
+    )
+
+    @model_validator(mode="after")
+    def _fold_observed_at(self) -> "RememberRequest":
+        """Fold ``observed_at`` into ``details`` (#2330); disagreeing values are refused."""
+        if self.observed_at is None:
+            return self
+        details = self.details or {}
+        if "observed_at" in details and details["observed_at"] != self.observed_at:
+            raise ValueError("details.observed_at and observed_at disagree; give one of them")
+        self.details = {**details, "observed_at": self.observed_at}
+        return self
 
     @field_validator("tags")
     @classmethod
@@ -470,6 +490,8 @@ class MemoryResponse(TZAwareBaseModel):
     # ``updated_at`` is the last real change (None if never edited since create),
     # so an agent can self-assess whether a fact may be stale without extra calls.
     updated_at: datetime | None = None
+    # #2330: when the fact held (details.observed_at: a date or a UTC datetime).
+    observed_at: str | None = None
     client: str
     tags: list[str]
     context: dict | None
@@ -839,6 +861,10 @@ class ReferenceResponse(TZAwareBaseModel):
     context: dict | None
     created_at: datetime
     updated_at: datetime
+    # #2330: when the fact held (details.observed_at: a date or a UTC
+    # datetime); None when the details carry none. A historical version shows
+    # its own value.
+    observed_at: str | None = None
     # #2043: the version read here — the expected_version of an edit based on it.
     version: int
     # #2043: true when ``version`` is an earlier version (reference with
@@ -1153,6 +1179,7 @@ UPDATE_MEMORY_EDIT_FIELDS: tuple[str, ...] = (
     "tags",
     "context",
     "delivery_mode",
+    "observed_at",
 )
 
 
@@ -1186,6 +1213,12 @@ class UpdateMemoryRequest(BaseModel):
     importance: float | None = Field(None, ge=0.0, le=1.0, description="Updated importance")
     tags: list[str] | None = Field(None, description="Updated tags")
     context: dict | None = Field(None, description="Updated context metadata")
+    # #2330 D7: sugar for details.observed_at. Without ``details`` it edits
+    # only the event time of the stored details (a details edit: versioned).
+    # None = unchanged; clear it by resending details without the key.
+    observed_at: str | None = Field(
+        None, max_length=40, description="Updated event time (ISO 8601 date or datetime)"
+    )
 
     @field_validator("tags")
     @classmethod
@@ -1357,6 +1390,9 @@ class PatchMemoryRequest(BaseModel):
     # PG ARRAY column. Both surfaces are now closed.
     tags: list[str] | None = Field(None, max_length=100)
     details: dict | None = None
+    # #2330 D7: sugar for details.observed_at (see UpdateMemoryRequest).
+    # None = unchanged.
+    observed_at: str | None = Field(None, max_length=40)
     # #2043: apply the patch only while the memory is at this version (409
     # version_conflict otherwise, nothing written). Omitted = last writer wins.
     expected_version: VersionNumber | None = None
@@ -1382,7 +1418,11 @@ class PatchMemoryRequest(BaseModel):
         # service layer already prefers `model_fields_set` for the same
         # reason, so the validator is now consistent with it.
         # expected_version is a precondition, not a field to update.
-        if not (self.model_fields_set - {"expected_version"}):
+        # observed_at: null means "unchanged", so it is not a field to update.
+        fields = self.model_fields_set - {"expected_version"}
+        if self.observed_at is None:
+            fields = fields - {"observed_at"}
+        if not fields:
             raise ValueError("PATCH request must include at least one field to update")
         # Reject explicit `null` for fields that either map to NOT NULL DB
         # columns (`summary`/`content`/`type`/`importance`) — would 500 with a

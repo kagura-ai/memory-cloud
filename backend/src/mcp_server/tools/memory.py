@@ -258,6 +258,7 @@ def remember_request_from_args(args: dict[str, Any]) -> Any:
         linked_memory_ids=args.get("linked_memory_ids"),
         linked_source_uris=args.get("linked_source_uris"),
         supersedes=args.get("supersedes"),  # #1208
+        observed_at=args.get("observed_at"),  # #2330
     )
 
 
@@ -506,6 +507,7 @@ async def handle_update_memory(
             tags=args.get("tags"),
             context=args.get("context"),
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
+            observed_at=args.get("observed_at"),  # #2330 D7
             # #1504: rejection path for a supersede suggestion.
             dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
             # #2308: the acceptance path (create_edge is outside the core profile).
@@ -2310,6 +2312,8 @@ async def handle_reference(
                 "context": result.context,
                 "created_at": to_utc_iso(result.created_at),
                 "updated_at": to_utc_iso(result.updated_at),
+                # #2330: when the fact held; absent when the memory has none.
+                **({"observed_at": result.observed_at} if result.observed_at else {}),
                 "version": result.version,  # #2043: update_memory's expected_version
                 "client": result.client,
                 "source_uri": result.source_uri,

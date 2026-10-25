@@ -96,7 +96,11 @@ Manual: guide(["remember"]).""",
                     },
                     "details": {
                         "type": "object",
-                        "description": "Structured details (JSON object). Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail).",
+                        "description": "Structured details (JSON object). Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail), observed_at (ISO 8601 date, when the fact held).",
+                    },
+                    "observed_at": {
+                        "type": "string",
+                        "description": "When the fact held or the event happened, ISO 8601: a date (2024-03-07) or a UTC datetime. Stored as details.observed_at; never the write time.",
                     },
                     "importance": {
                         "type": "number",
@@ -245,6 +249,10 @@ Manual: guide(["update_memory"]).""",
                         "type": "object",
                         "description": "New structured details (JSON object); replaces the stored details wholesale.",
                     },
+                    "observed_at": {
+                        "type": "string",
+                        "description": "When the fact held, ISO 8601 date or UTC datetime (details.observed_at). With no details: edits only the event time of the stored details.",
+                    },
                     "importance": {
                         "type": "number",
                         "description": "New importance (0.0-1.0).",
@@ -357,7 +365,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])), links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, observed_at?, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])), links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",

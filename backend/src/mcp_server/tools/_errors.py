@@ -53,6 +53,7 @@ from utils.exceptions import (
 )
 from utils.geo_location import LocationValidationError
 from utils.logger import get_logger
+from utils.observed_at import ObservedAtValidationError
 from utils.time_trigger import TriggerValidationError
 from utils.tool_trigger import ToolTriggerValidationError
 
@@ -96,6 +97,7 @@ _CALLER_VALUE_ERRORS: tuple[type[ValueError], ...] = (
     TriggerValidationError,
     LocationValidationError,
     ToolTriggerValidationError,
+    ObservedAtValidationError,
 )
 
 # Envelope keys a forwarded ``details`` block must not overwrite.

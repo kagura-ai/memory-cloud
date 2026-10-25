@@ -713,6 +713,7 @@ class TestEnsureCollection:
             payload_schema={
                 "tags": object(),
                 "location": object(),
+                "observed_at": object(),
                 "chunk_of": object(),
                 "scope": object(),
             },
@@ -732,13 +733,18 @@ class TestEnsureCollection:
             payload_schema={"scope": object()},
         )
         await ensure_kagura_memories_collection()
-        # Every retrofit branch fires: tags (keyword), location (geo, #1332)
-        # and chunk_of (keyword, #2015).
+        # Every retrofit branch fires: tags (keyword), location (geo, #1332),
+        # observed_at (datetime, #2330) and chunk_of (keyword, #2015).
         created = {
             c.kwargs["field_name"]: c.kwargs["field_schema"]
             for c in mock_client.create_payload_index.await_args_list
         }
-        assert created == {"tags": "keyword", "location": "geo", "chunk_of": "keyword"}
+        assert created == {
+            "tags": "keyword",
+            "location": "geo",
+            "observed_at": "datetime",
+            "chunk_of": "keyword",
+        }
         mock_client.create_collection.assert_not_awaited()
 
     async def test_old_collection_no_recreate_flag_raises(self, mock_client, monkeypatch):

@@ -642,8 +642,9 @@ def _requeue_statement(memory_id: Any, *, include_processing: bool) -> Any:
 #: Summary-point payload keys ``build_memory_point`` writes only when the
 #: memory has the value: a payload sync removes them from the chunk points
 #: when the memory no longer does (a cleared location must not keep matching
-#: ``filters.near`` through a chunk).
-_OPTIONAL_PAYLOAD_KEYS = ("context", "location")
+#: ``filters.near`` through a chunk, nor a cleared observed_at
+#: ``filters.observed_after``, #2330).
+_OPTIONAL_PAYLOAD_KEYS = ("context", "location", "observed_at")
 
 
 async def sync_content_chunk_payload(

@@ -291,7 +291,8 @@ async def test_the_authors_value_comes_back_with_its_own_revision(
     assert kwargs["memory_id"] == memory.id
     assert kwargs["payload_updates"]["location"] == {"lat": 10.5, "lon": 20.25}
     assert set(kwargs["payload_updates"]) == {"location", "updated_at"}
-    assert kwargs["delete_keys"] is None
+    # The restored details carry no observed_at, so the key is cleared (#2330).
+    assert kwargs["delete_keys"] == ["observed_at"]
     assert kwargs["cascade_chunks"] is False  # chunks are off for the context
     assert kwargs["collection_name"]
 
@@ -361,7 +362,7 @@ async def test_a_value_an_earlier_erasure_removed_gives_null(
         )
     kwargs = sync.await_args.kwargs
     assert set(kwargs["payload_updates"]) == {"updated_at"}
-    assert kwargs["delete_keys"] == ["location"]
+    assert kwargs["delete_keys"] == ["location", "observed_at"]  # #2330
 
 
 async def test_a_tombstone_is_restored_without_a_payload_call(

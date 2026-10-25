@@ -886,12 +886,17 @@ async def test_sync_copies_the_payload_without_embedding():
         memory.id,
         {"summary": "s", "importance": 0.9, "scope": "persistent"},
         "c",
-        delete_keys=["context", "location"],
+        delete_keys=["context", "location", "observed_at"],
     )
 
 
 async def test_sync_keeps_the_optional_fields_the_memory_has():
-    base = {"summary": "s", "context": {"k": 1}, "location": {"lat": 1.0, "lon": 2.0}}
+    base = {
+        "summary": "s",
+        "context": {"k": 1},
+        "location": {"lat": 1.0, "lon": 2.0},
+        "observed_at": "2024-03-07T00:00:00Z",
+    }
     with (
         patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "sync_chunk_points_payload", AsyncMock(return_value=True)) as sync,

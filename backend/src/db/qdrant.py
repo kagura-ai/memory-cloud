@@ -1754,6 +1754,15 @@ async def ensure_kagura_memories_collection(
                         field_schema="geo",  # type: ignore[arg-type]
                     )
                     logger.info("created_missing_index", field="location", type="geo")
+                if "observed_at" not in existing_fields:
+                    # WHEN axis (#2330): datetime index retrofit for
+                    # filters.observed_after / observed_before.
+                    await client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name="observed_at",
+                        field_schema="datetime",  # type: ignore[arg-type]
+                    )
+                    logger.info("created_missing_index", field="observed_at", type="datetime")
                 if CHUNK_OF_FIELD not in existing_fields:
                     # #2015: content chunk points are selected by chunk_of
                     # (exclusion in search, cascade deletes / payload updates).
@@ -1891,8 +1900,9 @@ async def ensure_kagura_memories_collection(
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
-        # Issue #78: Datetime indexes for date range filtering
-        for dt_field in ("created_at", "updated_at"):
+        # Issue #78: Datetime indexes for date range filtering (#2330: and
+        # the event time observed_at)
+        for dt_field in ("created_at", "updated_at", "observed_at"):
             await client.create_payload_index(
                 collection_name=collection_name,
                 field_name=dt_field,
@@ -1928,6 +1938,7 @@ async def ensure_kagura_memories_collection(
                 "tags",
                 "created_at",
                 "updated_at",
+                "observed_at",
                 CHUNK_OF_FIELD,
             ],
         )

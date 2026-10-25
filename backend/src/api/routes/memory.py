@@ -48,6 +48,7 @@ from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
+from utils.observed_at import observed_at_from_details
 from utils.query_log import query_log_fields
 
 logger = get_logger(__name__)
@@ -841,6 +842,8 @@ class MemoryListItem(BaseModel):
     created_at: str
     updated_at: str
     location: MemoryListItemLocation | None = None
+    # #2330: when the fact held (details.observed_at: a date or a UTC datetime).
+    observed_at: str | None = None
 
 
 class MemoryListResponse(BaseModel):
@@ -1081,6 +1084,7 @@ def _list_memory_item(m: Memory) -> MemoryListItem:
 
     ``location`` (#1334) surfaces the generated columns so the UI can plot pins.
     A half-populated pair serializes as ``None`` rather than a partial point.
+    ``observed_at`` (#2330) is the details form (the writer's precision).
     """
     return MemoryListItem(
         id=str(m.id),
@@ -1095,6 +1099,7 @@ def _list_memory_item(m: Memory) -> MemoryListItem:
             if m.location_lat is not None and m.location_lon is not None
             else None
         ),
+        observed_at=observed_at_from_details(m.details),
     )
 
 

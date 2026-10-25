@@ -127,6 +127,15 @@ GUIDE_TOPICS: dict[str, str] = {
         "e.g. an agent's goal or a standing decision, and keep a context at about "
         "seven pinned memories. 'on_trigger': time-windowed (set by type='time')."
     ),
+    "remember.observed_at": (
+        "observed_at is when the fact held or the event happened — the date of the "
+        "material, never the write time. ISO 8601: a date (2024-03-07) or a datetime "
+        "(stored as UTC, 2024-03-07T01:00:00Z; a naive one is read as UTC). Pass it as "
+        "the observed_at argument or as details.observed_at (both given must agree); it "
+        "is stored in details.observed_at, and null removes it. Anything else is "
+        "validation_error. update_memory(memory_id, observed_at=...) alone changes only "
+        "the event time; a details write without the key drops it."
+    ),
     "remember.returns": (
         "Returns: {status, memory_id, scope, version, persistence?: {scope, committed, "
         "promotes_via, consolidation_archive_min_age_days, detail}, lint?: [{code, "
@@ -427,7 +436,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "(memory_id only): apply the edit only while the memory is at version N — the "
         "version reference() returned — so a concurrent edit is never overwritten "
         "unseen; otherwise version_conflict with current_version and nothing is written. "
-        "Omit it for last-writer-wins."
+        "Omit it for last-writer-wins. observed_at with no details edits only "
+        "details.observed_at of the stored details (a details edit: a new version); "
+        "with details it must match details.observed_at if that is given."
     ),
     "update_memory.returns": (
         "Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', "
@@ -450,9 +461,10 @@ GUIDE_TOPICS: dict[str, str] = {
     "reference.returns": (
         "Returns: {status, memory: {memory_id, summary, context_summary, content, "
         "details, type, scope, importance, tags, context, created_at, updated_at, "
-        "version, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, "
+        "observed_at?, version, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, "
         "importance, weight, created_at}], outgoing_has_more, incoming_links: [...], "
-        "incoming_has_more, supersede_candidate}}. updated_at is a staleness cue. "
+        "incoming_has_more, supersede_candidate}}. updated_at is a staleness cue; "
+        "observed_at (absent when unset) is when the fact held (remember.observed_at). "
         "supersede_candidate is null, or {memory_id, summary, similarity, "
         "detected_at, verified?} of an OLDER near-duplicate this memory likely supersedes — a "
         "suggestion only (verified: true when the deployment's judge confirmed it is an "
@@ -701,6 +713,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "remember.layers",
         "remember.supersedes",
         "remember.delivery",
+        "remember.observed_at",
         "remember.returns",
         "security",
         "persistence",

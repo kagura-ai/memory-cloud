@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from mcp_server.tools._errors import is_caller_value_error
 from utils.geo_location import LocationValidationError
+from utils.observed_at import ObservedAtValidationError
 from utils.time_trigger import TriggerValidationError
 from utils.tool_trigger import TOOL_TRIGGER_ERROR_CODES, ToolTriggerValidationError
 
@@ -79,6 +80,7 @@ class TestIsCallerValueError:
         assert is_caller_value_error(ValueError("bad"))
         assert is_caller_value_error(TriggerValidationError("bad trigger"))
         assert is_caller_value_error(LocationValidationError("bad location"))
+        assert is_caller_value_error(ObservedAtValidationError("bad observed_at"))
         assert is_caller_value_error(
             ToolTriggerValidationError(sorted(TOOL_TRIGGER_ERROR_CODES)[0], "bad")
         )

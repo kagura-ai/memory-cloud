@@ -129,6 +129,8 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.observed_at import column_value as observed_at_column_value
+from utils.observed_at import observed_at_from_details
 from utils.query_log import query_log_fields
 from utils.recall_projection import content_slice, effective_full
 from utils.tag_normalize import (
@@ -294,6 +296,13 @@ def metadata_payload_patch(
             payload_updates["location"] = loc
         else:
             delete_keys.append("location")
+        # WHEN axis (#2330): the same for the event time, so
+        # filters.observed_after/before never match a stale value.
+        observed = observed_at_column_value(effective_details)
+        if observed is not None:
+            payload_updates["observed_at"] = observed
+        else:
+            delete_keys.append("observed_at")
     return payload_updates, delete_keys
 
 
@@ -738,6 +747,59 @@ class MemoryService:
             raise ValueError(f"invalid details.location: {exc}") from exc
 
     @staticmethod
+    def _apply_observed_at(details: dict | None) -> dict | None:
+        """Validate + normalize ``details.observed_at`` (WHEN axis, #2330).
+
+        ``_apply_location``'s sibling: an orthogonal gate on the key's
+        presence, applied only to caller-supplied details so an untouched
+        legacy row never 422s. A ``None`` value removes the key.
+
+        Raises:
+            ValueError: ``invalid details.observed_at: ...`` (the established
+                "bad request" signal inside MemoryService).
+        """
+        from utils.observed_at import ObservedAtValidationError, normalize_observed_at
+
+        try:
+            return normalize_observed_at(details)
+        except ObservedAtValidationError as exc:
+            raise ValueError(f"invalid details.observed_at: {exc}") from exc
+
+    @staticmethod
+    def _fold_observed_at(
+        request_details: dict | None, stored_details: Any, observed_at: str | None
+    ) -> dict | None:
+        """Fold an update's top-level ``observed_at`` into its details (#2330 D7).
+
+        ``update_memory`` / PATCH ``observed_at`` is sugar for
+        ``details.observed_at``. With ``details`` also given it is folded into
+        those (a different ``details.observed_at`` is a conflict); without,
+        the stored details are kept and only the event time changes, so the
+        write is a details edit (versioned, guardrail-gated) all the same.
+        ``None`` leaves the request's details as they are. Called once the row
+        is loaded and locked, before anything reads ``request.details``, so
+        the guardrail gate, versioning and the payload patch all see a
+        details write.
+
+        Returns:
+            The request's details after the fold (None = details not edited).
+
+        Raises:
+            ValueError: ``details.observed_at`` and ``observed_at`` disagree.
+        """
+        if observed_at is None:
+            return request_details
+        if request_details is not None:
+            if "observed_at" in request_details and request_details["observed_at"] != observed_at:
+                raise ValueError(
+                    "invalid details.observed_at: details.observed_at and observed_at "
+                    "disagree; give one of them"
+                )
+            return {**request_details, "observed_at": observed_at}
+        base = stored_details if isinstance(stored_details, dict) else {}
+        return {**base, "observed_at": observed_at}
+
+    @staticmethod
     def _apply_tool_trigger(details: dict | None) -> dict | None:
         """Validate + normalize ``details.tool_trigger`` (tool guardrail marking).
 
@@ -1148,6 +1210,9 @@ class MemoryService:
         # gate — fires on key presence for any type); coordinates must never
         # ride the Qdrant-replicated context JSONB.
         request.details = self._apply_location(request.details)
+        # WHEN axis (#2330): validate/normalize details.observed_at (orthogonal
+        # gate, any type).
+        request.details = self._apply_observed_at(request.details)
         # Tool guardrails: validate/normalize details.tool_trigger (orthogonal
         # gate, any type). Marking a memory as a guardrail is a protection
         # change every member's client hook acts on, so it also needs context
@@ -1799,6 +1864,10 @@ class MemoryService:
         # field is applied, so a refused edit writes nothing.
         memory = await self._lock_for_edit(memory.id)
         check_expected_version(memory, request.expected_version)
+        # #2330 D7: a top-level observed_at is a details write from here on.
+        request.details = self._fold_observed_at(
+            request.details, memory.details, request.observed_at
+        )
 
         # Tool guardrails: any edit of a guardrail row, or a details write that
         # adds / changes / removes tool_trigger, needs context EDITOR or above
@@ -2360,6 +2429,7 @@ class MemoryService:
         # location predates the contract (its generated columns are NULL).
         if request.details is not None:
             effective_details = self._apply_location(effective_details)
+            effective_details = self._apply_observed_at(effective_details)
             # Tool guardrails: same caller-supplied-only rule (the role gate
             # ran in _update_in_place before any field was touched).
             effective_details = self._apply_tool_trigger(effective_details)
@@ -2576,6 +2646,7 @@ class MemoryService:
         # No context guard here: PatchMemoryRequest has no context field.
         if "details" in provided_fields:
             effective_details = self._apply_location(effective_details)
+            effective_details = self._apply_observed_at(effective_details)
             # Tool guardrails: same caller-supplied-only rule (the role gate
             # ran in patch_memory before any field was touched).
             effective_details = self._apply_tool_trigger(effective_details)
@@ -2679,6 +2750,12 @@ class MemoryService:
                 payload_updates["location"] = loc
             else:
                 delete_keys.append("location")
+            # WHEN axis (#2330): the same for the event time.
+            observed = observed_at_column_value(effective_details)
+            if observed is not None:
+                payload_updates["observed_at"] = observed
+            else:
+                delete_keys.append("observed_at")
 
         if not (payload_updates or delete_keys):
             return
@@ -2748,6 +2825,7 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             updated_at=memory.updated_at or memory.created_at,
+            observed_at=observed_at_from_details(memory.details),  # #2330
             version=memory.version,  # #2043
             client=memory.client,
             source_uri=memory.source_uri,
@@ -2824,7 +2902,16 @@ class MemoryService:
         # "details" in the set and a body that simply omits `details` does
         # not. Cheaper than `model_dump(exclude_unset=True)` for large
         # `details` payloads — no deep serialization, just a name set.
-        provided_fields = request.model_fields_set
+        provided_fields = set(request.model_fields_set)
+        # #2330 D7: a top-level observed_at is a details patch from here on.
+        # ``{"details": null}`` with it keeps only the event time.
+        if request.observed_at is not None:
+            request.details = self._fold_observed_at(
+                request.details,
+                {} if "details" in provided_fields else memory.details,
+                request.observed_at,
+            )
+            provided_fields.add("details")
 
         # Tool guardrails: mirrors _update_in_place — any patch of a guardrail
         # row (including ``{"details": null}``, which drops the marking) or a
@@ -2963,6 +3050,8 @@ class MemoryService:
             importance=request.importance if request.importance is not None else 0.5,
             tags=request.tags or [],
             context=request.context,
+            # #2330: RememberRequest folds it into details (conflict = 422).
+            observed_at=request.observed_at,
             **({"delivery_mode": delivery_mode} if delivery_mode is not None else {}),
         )
 
@@ -3314,6 +3403,7 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             updated_at=snapshot_updated_at,
+            observed_at=observed_at_from_details(memory.details),  # #2330
             version=snapshot_version,
             client=memory.client,
             source_uri=memory.source_uri,
@@ -3400,6 +3490,9 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             updated_at=historical.at or memory.created_at,
+            # #2330: the value at that version, from its rebuilt details
+            # (None when erasure removed them), never the live column.
+            observed_at=observed_at_from_details(values["details"]),
             version=historical.version,
             historical=True,
             current_version=memory.version,
@@ -9697,6 +9790,11 @@ def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[
             "lat": memory.location_lat,
             "lon": memory.location_lon,
         }
+    # WHEN axis (#2330): the event time for filters.observed_after/before.
+    # Same payload-source invariant as location: the f16 generated column is
+    # the PG-validated source (always the 20-char UTC form).
+    if memory.observed_at is not None:
+        payload["observed_at"] = memory.observed_at
     return payload, sparse_indices, sparse_values
 
 
