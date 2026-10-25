@@ -152,6 +152,8 @@ async def record_feedback(
             required_role=ContextRole.VIEWER,
             operation="feedback",
             capacity=CapacityPolicy.BLOCKED,
+            # #963: a workspace-scoped key stays in its own workspace.
+            key_workspace_id=user.get("api_key_workspace_id"),
         )
         # #1943: rating is a content write (VIEWER may do it, so the resolver
         # saw a read); a context without a writable slot on the plan refuses it.

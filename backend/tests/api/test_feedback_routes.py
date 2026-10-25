@@ -84,6 +84,8 @@ async def test_record_feedback_success_uses_read_gate(service, perm, context_id,
         # #1286 (P0-5): deny-capture audit identity — a binding/rbac deny at
         # this gate persists an operation="feedback" row.
         operation="feedback",
+        # #963: the pure key scope (None: not a workspace-scoped key).
+        key_workspace_id=None,
     )
     # user_id is taken from the authenticated principal, not the body.
     service.record_feedback.assert_awaited_once()

@@ -1801,7 +1801,11 @@ async def get_memory_usage_stats(
 
     perm_service = PermissionService(db)
     await perm_service.check_context_access(
-        user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+        user["user_id"],
+        context_id,
+        capacity=CapacityPolicy.ALLOWED,
+        # #963: a workspace-scoped key stays in its own workspace.
+        key_workspace_id=user.get("api_key_workspace_id"),
     )
 
     if sort_by not in VALID_SORT_FIELDS:
@@ -1903,7 +1907,11 @@ async def find_duplicates(
 
     perm_service = PermissionService(db)
     await perm_service.check_context_access(
-        user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+        user["user_id"],
+        context_id,
+        capacity=CapacityPolicy.ALLOWED,
+        # #963: a workspace-scoped key stays in its own workspace.
+        key_workspace_id=user.get("api_key_workspace_id"),
     )
 
     collection_name = KAGURA_MEMORIES_COLLECTION
