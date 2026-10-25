@@ -111,13 +111,10 @@ async def handle_record_measurement(
             context = await _resolve_context_for_read(db, user_id, context_id)
         except _ContextNotFoundError as exc:
             return exc.to_response()
-        # ... and is not a read-only viewer (write gate, mirrors set_state).
-        # workspace_id is often None under OAuth2 / session-cookie MCP auth —
-        # fall back to the resolved context's workspace so the gate always
-        # fires against the authoritative workspace.
-        effective_workspace_id = workspace_id or context.workspace_id
+        # ... and is not a read-only viewer (write gate, mirrors set_state), on
+        # the context's own workspace, whatever the session's is.
         perm_error = await _check_viewer_permission(
-            db, user_id, effective_workspace_id, "record measurement"
+            db, user_id, context.workspace_id, "record measurement"
         )
         if perm_error:
             return perm_error

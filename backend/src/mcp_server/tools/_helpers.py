@@ -873,23 +873,28 @@ async def _check_viewer_permission(
 ) -> list[TextContent] | None:
     """Check if user is a viewer (read-only). Returns error response if so, None otherwise.
 
+    A write tool that targets a context passes that context's own workspace
+    (``context.workspace_id`` from the resolver), never the session's: the
+    role that counts is the one in the workspace the write lands in.
+
     Args:
         db: Database session
         user_id: User ID
-        workspace_id: Workspace ID (None = skip check)
+        workspace_id: Workspace the write lands in. ``None`` is refused: there
+            is no role to check, so the write is not allowed.
         operation: Operation description for error message
 
     Returns:
-        Error response if viewer, None if allowed
+        Error response if viewer, not a member, or no workspace; None if allowed
     """
-    if not workspace_id:
-        return None
-
-    user_role = await _get_workspace_member_role(db, user_id, workspace_id)
+    user_role = (
+        await _get_workspace_member_role(db, user_id, workspace_id) if workspace_id else None
+    )
     if user_role is None:
-        # Caller is not a member of this workspace, OR the workspace is
+        # Caller is not a member of this workspace, the workspace is
         # soft-deleted (`_get_workspace_member_role` filters Workspace.deleted_at
-        # IS NULL). Either way: deny writes (fail-closed).
+        # IS NULL), or no workspace was given. Every case: deny writes
+        # (fail-closed).
         return _error_response(
             "permission_denied",
             f"Cannot {operation}: workspace not accessible.",

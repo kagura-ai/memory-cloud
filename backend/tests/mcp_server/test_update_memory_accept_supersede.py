@@ -39,7 +39,7 @@ def _result(**overrides):
 
 
 @contextlib.contextmanager
-def _patched(service, *, role=None):
+def _patched(service, *, role="member"):
     db = AsyncMock()
 
     async def mock_get_db():
@@ -65,7 +65,7 @@ def _patched(service, *, role=None):
         yield db
 
 
-async def _call(service, args, *, role=None, workspace_id=None):
+async def _call(service, args, *, role="member", workspace_id=None):
     with _patched(service, role=role):
         result = await handle_update_memory(
             {"context_id": str(uuid4()), **args}, user_id="u1", workspace_id=workspace_id

@@ -41,6 +41,7 @@ def _patched(service, context=None, forgotten=False):
             "mcp_server.tools.memory._resolve_context",
             new=AsyncMock(return_value=context or _context()),
         ),
+        patch("mcp_server.tools.memory._check_viewer_permission", new=AsyncMock(return_value=None)),
         patch("mcp_server.tools.memory._log_tool_usage", new=log),
         patch("mcp_server.tools.memory._touch_context_last_used", new=touch),
         patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),

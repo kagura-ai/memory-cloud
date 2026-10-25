@@ -306,14 +306,15 @@ async def handle_remember_batch(
         context_id: UUID | None = None
         try:
             context_id = _resolve_context_id(args["context_id"])
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "create memories"
-            )
-            if perm_error:
-                return perm_error
             # operation="remember": the items are remembers, and the memory-access
             # audit vocabulary (MAE_OPERATIONS) has no batch entry.
             context = await _resolve_context(db, user_id, context_id, operation="remember")
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, context.workspace_id, "create memories"
+            )
+            if perm_error:
+                return perm_error
             # Read now: a failing item rolls the session back, which expires
             # this instance (reading it afterwards would be a lazy load outside
             # the async greenlet).

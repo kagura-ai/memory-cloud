@@ -302,15 +302,15 @@ async def handle_remember(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
 
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "create memories"
-            )
-            if perm_error:
-                return perm_error
-
             current_context = await _resolve_context(
                 db, user_id, current_context_id, operation="remember"
             )
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, current_context.workspace_id, "create memories"
+            )
+            if perm_error:
+                return perm_error
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -524,15 +524,15 @@ async def handle_update_memory(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
 
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "update memories"
-            )
-            if perm_error:
-                return perm_error
-
             current_context = await _resolve_context(
                 db, user_id, current_context_id, operation="update"
             )
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, current_context.workspace_id, "update memories"
+            )
+            if perm_error:
+                return perm_error
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -1505,15 +1505,15 @@ async def handle_forget(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
 
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "delete memories"
-            )
-            if perm_error:
-                return perm_error
-
             current_context = await _resolve_context(
                 db, user_id, current_context_id, operation="forget"
             )
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, current_context.workspace_id, "delete memories"
+            )
+            if perm_error:
+                return perm_error
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -1725,15 +1725,15 @@ async def _handle_forget_many(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
 
-            perm_error = await _check_viewer_permission(
-                db, user_id, workspace_id, "delete memories"
-            )
-            if perm_error:
-                return perm_error
-
             current_context = await _resolve_context(
                 db, user_id, current_context_id, operation="forget"
             )
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, current_context.workspace_id, "delete memories"
+            )
+            if perm_error:
+                return perm_error
             # A rollback below expires the ORM row; keep what the reply and
             # the touch read from it.
             context_fields = {

@@ -288,7 +288,10 @@ async def handle_create_edge(
             current_context_id = _resolve_context_id(args["context_id"])
             context = await _resolve_context(db, user_id, current_context_id)
 
-            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "create edges")
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, context.workspace_id, "create edges"
+            )
             if perm_error:
                 return perm_error
 
@@ -403,7 +406,10 @@ async def handle_update_edge(
             current_context_id = _resolve_context_id(args["context_id"])
             context = await _resolve_context(db, user_id, current_context_id)
 
-            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "update edges")
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, context.workspace_id, "update edges"
+            )
             if perm_error:
                 return perm_error
 
@@ -499,7 +505,10 @@ async def handle_delete_edge(
             current_context_id = _resolve_context_id(args["context_id"])
             context = await _resolve_context(db, user_id, current_context_id)
 
-            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "delete edges")
+            # The member role on the context's own workspace, not the session's.
+            perm_error = await _check_viewer_permission(
+                db, user_id, context.workspace_id, "delete edges"
+            )
             if perm_error:
                 return perm_error
 
