@@ -56,6 +56,7 @@ from auth.workspace_roles import (
     WorkspaceRole,
 )
 from db.base import Base
+from models.json_types import NullableJSON
 from utils.datetime import utcnow
 from utils.public_id import PublicIdPrefix, public_id_column
 from utils.redirect_uri import any_redirect_uri_matches
@@ -434,7 +435,7 @@ class AuditLog(Base):
     # Details (SHA256 hashes, NOT plaintext!)
     old_value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     new_value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    user_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    user_metadata: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Context
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)

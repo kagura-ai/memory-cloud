@@ -26,10 +26,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 # Status values — kept in sync with the CHECK constraint in
 # alembic/versions/c01_360_erasure_requests.py and the AccountErasureService
@@ -156,7 +157,9 @@ class ErasureRequest(Base):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    deleted_data_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    deleted_data_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        NullableJSONB, nullable=True
+    )
 
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)

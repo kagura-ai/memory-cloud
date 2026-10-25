@@ -67,6 +67,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
+from models.json_types import NullableJSONB
 from utils.public_id import PublicIdPrefix, public_id_column
 
 
@@ -158,7 +159,7 @@ class ResourceEvent(Base):
         Integer, nullable=True
     )  # Issue #262: NULL = delete all versions
     payload: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True
+        NullableJSONB, nullable=True
     )  # NULL for delete operations
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -521,7 +522,7 @@ class WorkspaceConnector(Base):
     # the same platform team to install two distinct apps safely.
     external_team_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Ingest channel selection (Slack channel id list, v1 = ids only).
-    channel_ids: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
+    channel_ids: Mapped[list[Any] | None] = mapped_column(NullableJSONB, nullable=True)
     oauth_tokens_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Fernet ciphertext of the BYO LLM config bundle ({provider, model, api_key}).
     llm_config_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -539,11 +540,13 @@ class WorkspaceConnector(Base):
     # endpoint to return (resource-ingest write path, worker #91 Option A).
     # NULL on legacy rows → the worker falls back to the kmc/remember path.
     resource_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(
+        NullableJSONB, nullable=True
+    )
     # Optional for rolling compatibility: NULL rows predate #1348 and cause the
     # worker endpoint to omit the additive runtime block, preserving worker
     # defaults. Admin writes are validated and normalized before storage.
-    runtime_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    runtime_config: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONB, nullable=True)
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"

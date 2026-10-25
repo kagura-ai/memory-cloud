@@ -21,10 +21,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 
 class Bm25IdfDriftLog(Base):
@@ -68,7 +69,9 @@ class Bm25IdfDriftLog(Base):
     m_memory_points: Mapped[int] = mapped_column(Integer, nullable=False)
     r_resource_points: Mapped[int] = mapped_column(Integer, nullable=False)
     num_terms: Mapped[int] = mapped_column(Integer, nullable=False)
-    top_divergent_terms: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    top_divergent_terms: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        NullableJSONB, nullable=True
+    )
 
     # Response-shape attributes — populated by api/routes/bm25_drift.py to
     # avoid N+1 lookups, not DB-backed. Survives ORM column inference thanks

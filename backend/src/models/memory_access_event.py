@@ -40,10 +40,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 # CHECK constraints are derived from these module-level tuples byte-identically
 # to the alembic migration literal (the house drift-pin convention; pinned by
@@ -143,7 +144,7 @@ class MemoryAccessEvent(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # HMAC-SHA256 of the query text (dedicated audit key); raw query NEVER stored.
     query_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    event_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    event_metadata: Mapped[dict | None] = mapped_column(NullableJSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(f"operation IN ({_in_list(MAE_OPERATIONS)})", name="valid_mae_operation"),
