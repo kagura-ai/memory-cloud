@@ -20,7 +20,8 @@ gate is the source of truth for the restriction; a regression test
 introspection to bound principals.
 
 Owner isolation: every query ANDs ``APIKey.user_id == user_id``. A caller can only
-ever see their own bindings. ``describe_binding`` returns a uniform
+ever see their own bindings. Under a workspace-scoped API key (#963) only the
+bindings to contexts of that key's workspace are shown. ``describe_binding`` returns a uniform
 ``binding_not_found`` for both "does not exist" and "exists but not yours", so
 ``key_id`` cannot be used as an existence oracle.
 
@@ -38,11 +39,24 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._errors import _tool_exception_response
-from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
+from mcp_server.tools._helpers import (
+    _error_response,
+    _log_tool_usage,
+    _success_response,
+    get_mcp_key_workspace_scope,
+)
 from utils.datetime import to_utc_iso
 from utils.public_id import PublicIdPrefix, public_id_pattern
 
 _KEY_ID_RE = re.compile(public_id_pattern(PublicIdPrefix.API_KEY))
+
+
+def _key_scope_conditions() -> list[Any]:
+    """#963: under a workspace-scoped key, bindings in that workspace only."""
+    from models.auth import Context
+
+    key_workspace_id = get_mcp_key_workspace_scope()
+    return [] if key_workspace_id is None else [Context.workspace_id == key_workspace_id]
 
 
 def _binding_dict(api_key: Any, display_name: str | None, name: str | None) -> dict[str, Any]:
@@ -62,7 +76,8 @@ async def handle_list_my_bindings(
     """List the calling user's active public-bound API keys (read-only).
 
     Returns ``bindings: [{key_id, name, context_id, context_name, created_at}]``
-    for every non-revoked key the caller owns that is bound to a public context.
+    for every non-revoked key the caller owns that is bound to a public context
+    (of the key's own workspace, under a workspace-scoped key).
     ``key_prefix`` is intentionally omitted here (it is a ``describe_binding``
     detail). Secrets are never returned.
     """
@@ -81,6 +96,7 @@ async def handle_list_my_bindings(
                     APIKey.user_id == user_id,
                     APIKey.bound_context_id.is_not(None),
                     APIKey.revoked_at.is_(None),
+                    *_key_scope_conditions(),
                 )
                 .order_by(APIKey.created_at.desc())
             )
@@ -157,6 +173,7 @@ async def handle_describe_binding(
                 APIKey.user_id == user_id,
                 APIKey.bound_context_id.is_not(None),
                 APIKey.revoked_at.is_(None),
+                *_key_scope_conditions(),
             ]
             if key_id is not None:
                 conditions.append(APIKey.public_id == key_id)
