@@ -49,6 +49,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 # --- Recipient pubkey lifecycle ------------------------------------------------
 # A registered pubkey starts ``pending`` (TOFU trust root, #1128 gate1) and an
@@ -359,7 +360,7 @@ class SecretAccessLog(Base):
     action: Mapped[str] = mapped_column(String(16), nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     # Non-secret request metadata (tool/source/ip/ua). NEVER the secret value.
-    req_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    req_meta: Mapped[dict | None] = mapped_column(NullableJSONB, nullable=True)
     prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     entry_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

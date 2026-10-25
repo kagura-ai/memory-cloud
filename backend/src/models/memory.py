@@ -38,6 +38,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.elements import ColumnElement
 
 from db.base import Base
+from models.json_types import NullableJSON
 
 # Delivery mode constants (Issue #886, design memory 242cb28a) — an ORTHOGONAL
 # delivery attribute on Memory, deliberately NOT a new memory ``type``. It
@@ -261,14 +262,14 @@ class Memory(Base):
 
     # Layer 3: 完全詳細
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # メタデータ（LLM判断）
     type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     importance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
-    context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    context: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Working/Persistent メモリ
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="working", index=True)
@@ -381,9 +382,7 @@ class Memory(Base):
     # ``null`` the default writes (#2022), so ``supersede_candidate IS NULL``
     # counts the rows without a suggestion. A non-NULL value is always an object
     # — a candidate, a dismissal tombstone, or both.
-    supersede_candidate: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON(none_as_null=True), nullable=True
-    )
+    supersede_candidate: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field
@@ -1124,7 +1123,9 @@ class NeuralMemoryEdge(Base):
 
     # Metadata (flexible JSONB for future extensions)
     # Note: 'metadata' is reserved in SQLAlchemy, use edge_metadata
-    edge_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, nullable=True)
+    edge_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata", NullableJSON, nullable=True
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

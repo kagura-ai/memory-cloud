@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 # Service-layer validation tuples so #495 pipeline can raise ValueError
 # instead of catching IntegrityError after the DB round-trip. The DB
@@ -150,7 +151,7 @@ class MemoryAnalysis(Base):
         server_default=text("'byok'"),
     )
 
-    quality: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    quality: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONB, nullable=True)
     overview: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Issue #496: human-readable cancellation reason when status='cancelled'.

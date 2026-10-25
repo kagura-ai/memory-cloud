@@ -104,10 +104,11 @@ from sqlalchemy import (
     String,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 # Public list of allowed ``caller`` values. Imported by the writer
 # service for input validation (defense in depth — the DB CHECK is the
@@ -253,7 +254,7 @@ class LLMCallLog(Base):
     # is reserved by the SQLAlchemy Declarative API; the SQL column
     # name follows the attribute name (which is the goal — the
     # migration creates a column literally called ``call_metadata``).
-    call_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    call_metadata: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(

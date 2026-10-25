@@ -2936,6 +2936,230 @@ switch.
 context's row exists, its workspace is the one the recovered memories get,
 and a request naming another `workspace_id` answers `400` (`REQ-103`).
 
+### Migration `f15_2026_json_none_as_null` (#2026)
+
+Every nullable JSON column now stores "no value" as SQL `NULL` for new writes.
+Before, a Python `None` was written as the JSON value `null`, so `WHERE col IS
+NULL` missed those rows. The application reads both forms the same way, so
+nothing depends on which one a row holds. The exceptions are
+`resource_events.event_metadata` and `indexer_state.metrics`: they have a
+`'{}'` default and keep storing a JSON `null` that a caller wrote explicitly.
+
+The migration rewrites the JSON nulls already stored in the small tables:
+`sleep_reports` (the six `*_result` columns), `sleep_actions.details`,
+`measurements.details`, `memory_analyses.quality`,
+`bm25_idf_drift_log.top_divergent_terms`,
+`erasure_requests.deleted_data_summary` and `workspace_connectors`
+(`channel_ids`, `pii_guardrail_config`, `runtime_config`). Objects, values that
+only look like a null (the string `"null"`, `[null]`, `{"a": null}`) and values
+that are already SQL `NULL` are not touched, and neither is `updated_at`.
+SQLAlchemy writes exactly `null`; a `json` value with whitespace around the
+null (only hand-written SQL makes one) is not matched either.
+
+It does **not** rewrite `memories` (see the optional procedure below).
+
+Steps and locks, table by table:
+
+1. One scan collects the ids of the rows to rewrite. It takes no row locks.
+   The log gives the count.
+2. The rows are rewritten in batches of 1000, each committed on its own. A
+   batch locks only its own rows, in id order (`FOR NO KEY UPDATE`, which does
+   not block foreign-key checks), and skips a row a request is holding instead
+   of waiting for it. It re-checks each value, so a value written after the
+   scan is never overwritten. Progress is logged every 100 batches, and the
+   per-table line (values rewritten per column, rows not rewritten) is
+   written even when the walk fails.
+
+The migration sets `lock_timeout` 5 s (for the table locks) and
+`statement_timeout = 0` for its own session. A lock timeout fails the
+migration; run it again and it resumes, because rows already rewritten no
+longer match. The session temp table and the `SET`s need a session-pinned
+connection: a direct connection or the Cloud SQL proxy, not a
+transaction-pooling pgbouncer. An offline upgrade (`alembic upgrade --sql`)
+emits the statements below instead of the walk, all inside the script's one
+transaction, which holds every row it rewrites until `COMMIT`: use it only in
+a maintenance window.
+
+**Re-run the rewrite once after `deploy.sh` has stopped the old color.** The
+migration runs from the new image before traffic moves, and the old color
+keeps writing JSON `null` until it is stopped, from requests and from its
+scheduler (Sleep writes `sleep_reports` and `sleep_actions`). Rows it writes
+after the scan keep it, and so do rows the walk skipped. Both forms read the
+same, so nothing breaks in the meantime. Run each statement on its own
+(autocommit, not inside `BEGIN`). Each one is idempotent and rewrites only the
+leftovers, once per row. If one hits the lock timeout, run it again:
+
+```sql
+SET lock_timeout = '5s';
+
+UPDATE sleep_reports SET
+  edge_discovery_result = CASE WHEN pg_column_size(edge_discovery_result) < 16 AND edge_discovery_result::text = 'null' THEN NULL ELSE edge_discovery_result END,
+  dedup_result = CASE WHEN pg_column_size(dedup_result) < 16 AND dedup_result::text = 'null' THEN NULL ELSE dedup_result END,
+  merge_retention_result = CASE WHEN pg_column_size(merge_retention_result) < 16 AND merge_retention_result::text = 'null' THEN NULL ELSE merge_retention_result END,
+  importance_result = CASE WHEN pg_column_size(importance_result) < 16 AND importance_result::text = 'null' THEN NULL ELSE importance_result END,
+  consolidation_result = CASE WHEN pg_column_size(consolidation_result) < 16 AND consolidation_result::text = 'null' THEN NULL ELSE consolidation_result END,
+  reindex_result = CASE WHEN pg_column_size(reindex_result) < 16 AND reindex_result::text = 'null' THEN NULL ELSE reindex_result END
+WHERE (pg_column_size(edge_discovery_result) < 16 AND edge_discovery_result::text = 'null')
+   OR (pg_column_size(dedup_result) < 16 AND dedup_result::text = 'null')
+   OR (pg_column_size(merge_retention_result) < 16 AND merge_retention_result::text = 'null')
+   OR (pg_column_size(importance_result) < 16 AND importance_result::text = 'null')
+   OR (pg_column_size(consolidation_result) < 16 AND consolidation_result::text = 'null')
+   OR (pg_column_size(reindex_result) < 16 AND reindex_result::text = 'null');
+
+UPDATE sleep_actions SET
+  details = CASE WHEN pg_column_size(details) < 16 AND details::text = 'null' THEN NULL ELSE details END
+WHERE (pg_column_size(details) < 16 AND details::text = 'null');
+
+UPDATE measurements SET
+  details = CASE WHEN pg_column_size(details) < 16 AND details::text = 'null' THEN NULL ELSE details END
+WHERE (pg_column_size(details) < 16 AND details::text = 'null');
+
+UPDATE memory_analyses SET
+  quality = CASE WHEN pg_column_size(quality) < 16 AND quality::text = 'null' THEN NULL ELSE quality END
+WHERE (pg_column_size(quality) < 16 AND quality::text = 'null');
+
+UPDATE bm25_idf_drift_log SET
+  top_divergent_terms = CASE WHEN pg_column_size(top_divergent_terms) < 16 AND top_divergent_terms::text = 'null' THEN NULL ELSE top_divergent_terms END
+WHERE (pg_column_size(top_divergent_terms) < 16 AND top_divergent_terms::text = 'null');
+
+UPDATE erasure_requests SET
+  deleted_data_summary = CASE WHEN pg_column_size(deleted_data_summary) < 16 AND deleted_data_summary::text = 'null' THEN NULL ELSE deleted_data_summary END
+WHERE (pg_column_size(deleted_data_summary) < 16 AND deleted_data_summary::text = 'null');
+
+UPDATE workspace_connectors SET
+  channel_ids = CASE WHEN pg_column_size(channel_ids) < 16 AND channel_ids::text = 'null' THEN NULL ELSE channel_ids END,
+  pii_guardrail_config = CASE WHEN pg_column_size(pii_guardrail_config) < 16 AND pii_guardrail_config::text = 'null' THEN NULL ELSE pii_guardrail_config END,
+  runtime_config = CASE WHEN pg_column_size(runtime_config) < 16 AND runtime_config::text = 'null' THEN NULL ELSE runtime_config END
+WHERE (pg_column_size(channel_ids) < 16 AND channel_ids::text = 'null')
+   OR (pg_column_size(pii_guardrail_config) < 16 AND pii_guardrail_config::text = 'null')
+   OR (pg_column_size(runtime_config) < 16 AND runtime_config::text = 'null');
+```
+
+**Columns that keep historical JSON null.** New rows store SQL `NULL` (apart
+from the two exception columns), but older rows can hold JSON `null` in:
+
+- `memories.details` and `memories.context` (not rewritten, see below), and
+  `memories.supersede_candidate` (rewritten by e99 for #2022; rows written
+  during that deploy can still hold JSON `null`)
+- `audit_logs.user_metadata`
+- `llm_call_log.call_metadata`
+- `memory_access_events.event_metadata` (a trigger blocks UPDATE)
+- `secret_access_log.req_meta` (a trigger blocks UPDATE; the hash chain
+  hashes both forms the same)
+- `resource_events.payload` (a delete event is `op = 'delete'`, not a NULL
+  payload)
+- `neural_memory_edges.metadata`
+- `resource_events.event_metadata` and `indexer_state.metrics` (the exception
+  columns: an explicit `None` is still stored as JSON `null`)
+
+To count "no value" in these columns, match both forms. Check
+`pg_column_size` first, so that the scan does not detoast the large values:
+
+```sql
+SELECT count(*) FROM llm_call_log
+ WHERE call_metadata IS NULL
+    OR (pg_column_size(call_metadata) < 16 AND call_metadata::text = 'null');
+```
+
+A SQL merge into one of them needs `NULLIF(col, 'null'::jsonb)` (for a `json`
+column, `NULLIF(col::jsonb, 'null'::jsonb)`) before `||`, because
+`'null'::jsonb || '{...}'` is an array, not an object.
+
+**Optional: normalizing `memories`.** Nothing requires this: every reader
+treats both forms the same. It only makes `IS NULL` counts on
+`memories.details` / `context` exact. It is expensive. `details` is in a
+partial-index predicate and `context` in an index expression, so nearly every
+rewritten row is a non-HOT update into every index of the table. Since
+`remember()` stored JSON `null` in both whenever they were omitted, expect the
+count to be close to the whole table. Measured on 200k rows (192k rewritten,
+a 362 MB table, PostgreSQL 16, local disk):
+
+| | |
+|---|---|
+| WAL | 1.8 GB, about 10 KB per rewritten row (about 5x the table) |
+| heap | +18% (more if a long transaction or `hot_standby_feedback` holds back pruning; up to 2x) |
+| indexes | about 2x until vacuumed |
+| time | 36 s warm, about 0.2 ms per row; several times that on cold network storage |
+
+Size it first:
+
+```sql
+SELECT count(*) FROM memories
+ WHERE (pg_column_size(details) < 16 AND details::text = 'null')
+    OR (pg_column_size(context) < 16 AND context::text = 'null')
+    OR (pg_column_size(supersede_candidate) < 16 AND supersede_candidate::text = 'null');
+```
+
+Before running it, check:
+
+- free disk for about 10 KB × that count of WAL: in `pg_wal`, in the WAL
+  archive, and for the retention of any replication slot;
+- the replicas' lag tolerance (replaying the pruning can also cancel long
+  queries on a standby);
+- no long-running or idle-in-transaction sessions, which keep the dead row
+  versions from being pruned.
+
+Run it at a quiet time, outside the Sleep and purge windows, from `psql`
+in autocommit mode (not inside `BEGIN`). The `DO` block commits after every
+batch of 1000, locks rows in id order and skips rows a request holds, so it
+can be stopped and started again at any time. The final `VACUUM (ANALYZE)`
+restores the visibility map that the rewrite clears, so index-only scans work
+again:
+
+```sql
+SET lock_timeout = '5s';
+SET statement_timeout = 0;
+DO $$
+DECLARE
+  after_id uuid := '00000000-0000-0000-0000-000000000000';
+  batch_last uuid;
+  n bigint;
+  total bigint := 0;
+BEGIN
+  LOOP
+    WITH ids AS (
+      SELECT id FROM memories
+       WHERE id > after_id
+         AND ((pg_column_size(details) < 16 AND details::text = 'null')
+           OR (pg_column_size(context) < 16 AND context::text = 'null')
+           OR (pg_column_size(supersede_candidate) < 16
+               AND supersede_candidate::text = 'null'))
+       ORDER BY id LIMIT 1000
+    ), locked AS (
+      SELECT m.id FROM memories AS m JOIN ids USING (id)
+       ORDER BY m.id FOR NO KEY UPDATE OF m SKIP LOCKED
+    ), rewritten AS (
+      UPDATE memories AS m SET
+        details = CASE WHEN pg_column_size(m.details) < 16
+                        AND m.details::text = 'null' THEN NULL ELSE m.details END,
+        context = CASE WHEN pg_column_size(m.context) < 16
+                        AND m.context::text = 'null' THEN NULL ELSE m.context END,
+        supersede_candidate = CASE WHEN pg_column_size(m.supersede_candidate) < 16
+                        AND m.supersede_candidate::text = 'null'
+                        THEN NULL ELSE m.supersede_candidate END
+        FROM locked WHERE m.id = locked.id
+         AND ((pg_column_size(m.details) < 16 AND m.details::text = 'null')
+           OR (pg_column_size(m.context) < 16 AND m.context::text = 'null')
+           OR (pg_column_size(m.supersede_candidate) < 16
+               AND m.supersede_candidate::text = 'null'))
+      RETURNING 1
+    )
+    SELECT (SELECT id FROM ids ORDER BY id DESC LIMIT 1),
+           (SELECT count(*) FROM rewritten)
+      INTO batch_last, n;
+    EXIT WHEN batch_last IS NULL;
+    total := total + n;
+    after_id := batch_last;
+    COMMIT;
+    RAISE NOTICE 'memories: % rows rewritten so far', total;
+  END LOOP;
+  RAISE NOTICE 'memories: done, % rows rewritten', total;
+END $$;
+VACUUM (ANALYZE) memories;
+```
+
+Downgrade is a no-op: every version of the code reads both forms the same.
+
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
 A tier's `features` set is env-overridable too. `PLAN_<KEY>_FEATURES` is a

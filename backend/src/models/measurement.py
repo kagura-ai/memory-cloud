@@ -19,10 +19,11 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, func, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 
 class Measurement(Base):
@@ -55,7 +56,7 @@ class Measurement(Base):
     measured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     value: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    details: Mapped[Any | None] = mapped_column(NullableJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

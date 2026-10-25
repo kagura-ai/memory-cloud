@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Any, Literal
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -24,6 +23,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSON
 
 # Allowed values for the sleep_reports cost-grade dimensions (#523).
 # Mirror the ``LLM_PRICING_UNIT_TYPES`` pattern: the DB CHECK constraint is
@@ -107,13 +107,17 @@ class SleepReport(Base):
     )
 
     # Per-phase results (JSON)
-    edge_discovery_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    dedup_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    edge_discovery_result: Mapped[dict[str, Any] | None] = mapped_column(
+        NullableJSON, nullable=True
+    )
+    dedup_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     # #1209: merge_retention phase (purge window) results.
-    merge_retention_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    importance_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    reindex_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    merge_retention_result: Mapped[dict[str, Any] | None] = mapped_column(
+        NullableJSON, nullable=True
+    )
+    importance_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
+    consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
+    reindex_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Cost tracking — legacy roll-up totals (#101).
     # Issue #471 split per-(phase, provider, model) LLM usage into the
@@ -257,7 +261,7 @@ class SleepAction(Base):
     action_type: Mapped[str] = mapped_column(String(30), nullable=False)
     memory_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     target_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
