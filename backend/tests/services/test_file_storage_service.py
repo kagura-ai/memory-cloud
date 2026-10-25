@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from services.file_storage_service import FileStorageService, FilesPurged, ReserveResult
+from services.file_storage_service import FilesPurged, FileStorageService, ReserveResult
 from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import (
     ConflictError,
