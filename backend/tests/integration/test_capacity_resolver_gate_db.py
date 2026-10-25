@@ -8,8 +8,9 @@ came from billing and holds more memories than its (patched, small) limit:
 
 * the owner naming one of its contexts gets the same ``capacity_locked``
   envelope the dispatcher used to build, byte for byte;
-* a member who may not read the context (a private one it did not create)
-  and a non-member get the handler's not-found (or update_search_config's
+* a member who may not read the context (a private one it did not create),
+  a non-member (also on a public context) and a key scoped to another
+  workspace get the handler's not-found (or update_search_config's
   permission_denied) — never the lock or the workspace's numbers (D1);
 * a member without a plan seat gets ``feature_not_available`` (#1943);
 * the same call on a paid workspace is not refused;
@@ -263,6 +264,48 @@ async def test_a_non_member_gets_not_found(scenario, tool) -> None:
     )
     body = json.loads(result[0].text)
     assert body["error"] == _turned_away(tool), body
+    assert "over_memories" not in body and "cleanup_url" not in body
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("tool", TOOLS)
+async def test_a_non_member_naming_a_public_context_gets_not_found(scenario, db_session, tool):
+    """The redacted outsider refusal the dispatcher used to send is gone: no
+    MCP tool serves a non-member, so the not-found answers."""
+    s = scenario
+    public = _context(s["ws"], s["owner_id"], f"cr-public-{uuid4().hex[:8]}")
+    public.is_public = True
+    db_session.add(public)
+    await db_session.commit()
+    result = await _call(tool, _args(tool, public, s["second"]), s["outsider_id"], s["other_ws"].id)
+    body = json.loads(result[0].text)
+    assert body["error"] == _turned_away(tool), body
+    assert "gate" not in body and "over_memories" not in body
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("tool", ["get_state", "create_edge"])
+async def test_a_key_scoped_to_another_workspace_gets_not_found(scenario, db_session, tool):
+    """#963: a key scoped to workspace A, whose user is also a member of W,
+    naming a W context — the lock used to show W's numbers through it."""
+    from mcp_server.tools._helpers import set_mcp_key_workspace_scope
+
+    s = scenario
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=s["other_ws"].id, user_id=s["owner_id"], role=WorkspaceRole.MEMBER
+        )
+    )
+    await db_session.commit()
+    set_mcp_key_workspace_scope(s["other_ws"].id)
+    try:
+        result = await _call(
+            tool, _args(tool, s["shared"], s["second"]), s["owner_id"], s["other_ws"].id
+        )
+    finally:
+        set_mcp_key_workspace_scope(None)
+    body = json.loads(result[0].text)
+    assert body["error"] == "context_not_found", body
     assert "over_memories" not in body and "cleanup_url" not in body
 
 
