@@ -109,6 +109,9 @@ async def test_forget_by_query_log_has_no_raw_query():
     service.db.commit = AsyncMock()
 
     with (
+        patch(
+            "services.permission_service.PermissionService.ensure_memory_write_role", AsyncMock()
+        ),
         patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
         patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
         patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,

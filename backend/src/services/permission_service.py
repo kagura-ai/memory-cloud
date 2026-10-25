@@ -558,6 +558,42 @@ class PermissionService:
         )
         return member is not None
 
+    async def is_read_only_member(self, user_id: str, workspace_id: UUID) -> bool:
+        """True when the caller's role in ``workspace_id`` is ``viewer``.
+
+        Memory writes need the member role or higher on the workspace that owns
+        the target context (``docs/concepts.md``: a viewer has read-only
+        access). The check is on the role alone: a caller without a membership
+        row is ``False`` here, and the reach checks around it decide that case.
+        """
+        member = await self.workspace_service.get_member(
+            workspace_id,
+            user_id,
+            raise_if_not_found=False,
+        )
+        return member is not None and member.role == WorkspaceRole.VIEWER
+
+    async def ensure_memory_write_role(self, user_id: str, workspace_id: UUID) -> None:
+        """Refuse a memory write by a workspace viewer.
+
+        Call it after the caller's reach to the context is established, so a
+        refusal never answers for a context the caller cannot see. It applies
+        to a private context the viewer created as well: the workspace role
+        makes the account read-only in the whole workspace, the same rule
+        ``rollback_session`` applies.
+
+        Raises:
+            AuthorizationError: 403 (``AUTH-101``) for a workspace viewer.
+        """
+        if await self.is_read_only_member(user_id, workspace_id):
+            logger.info(
+                "memory_write_denied",
+                reason="viewer_read_only",
+                workspace_id=str(workspace_id),
+                user_id=user_id,
+            )
+            raise AuthorizationError(reason="viewer_read_only")
+
     # ========================================================================
     # Context-level Permissions
     # ========================================================================
@@ -1058,6 +1094,9 @@ class PermissionService:
         Access rules:
         1. Private context (is_private=true): Only creator can access
         2. Shared context (is_private=false): Workspace members can access
+        3. ``access="write"``: the caller's role on the memory's workspace must
+           be member or higher — a workspace viewer is refused, on its own
+           memories and in a private context it created too.
 
         Issue #1275 (RFC-0002 P0-2): this is the memory-id-addressed access
         chokepoint (reference / update / forget-by-id / explore authorize the
@@ -1157,19 +1196,29 @@ class PermissionService:
                 extra_metadata=metadata,
             )
 
+        def _read_only(member: WorkspaceMember | None) -> bool:
+            # A write needs the member role or higher on the memory's
+            # workspace: a viewer reads and cannot create, change or delete,
+            # its own memories and private contexts included (see
+            # ``ensure_memory_write_role``).
+            return (
+                access == ACCESS_WRITE
+                and member is not None
+                and member.role == WorkspaceRole.VIEWER
+            )
+
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.
-        async def _seat_held() -> None:
+        if user_id == memory_user_id:
             # #1943: a member without a seat on the plan is refused here too —
             # the REST memory-id routes (reference / patch / explore) authorize
             # through this method alone. An author with no membership row keeps
             # the pre-existing pass on their own memories; the context-level
             # paths (#1957) refuse that caller, so the two surfaces differ here
             # by design, not by accident.
-            await self._seated_member(workspace_id, user_id)
-
-        if user_id == memory_user_id:
-            await _seat_held()
+            if _read_only(await self._seated_member(workspace_id, user_id)):
+                await _emit_rbac_denied()
+                return False
             return await _binding_ok()
 
         # Check if context is shared
@@ -1194,12 +1243,19 @@ class PermissionService:
                 except (AuthorizationError, NotFoundException):
                     await _emit_rbac_denied()
                     return False
+                # The creator of a private context passes the RBAC core as its
+                # owner whatever its workspace role; the role still decides a write.
+                if access == ACCESS_WRITE and await self.is_read_only_member(user_id, workspace_id):
+                    await _emit_rbac_denied()
+                    return False
                 return await _binding_ok()
             await _emit_rbac_denied()
             return False
 
-        # Shared context: workspace membership and the seat (#1943), then the binding.
-        if await self._seated_member(workspace_id, user_id) is None:
+        # Shared context: workspace membership and the seat (#1943), the member
+        # role for a write, then the binding.
+        member = await self._seated_member(workspace_id, user_id)
+        if member is None or _read_only(member):
             await _emit_rbac_denied()
             return False
         return await _binding_ok()

@@ -565,7 +565,9 @@ async def patch_memory(
              (1MB) — same envelope as ``remember`` / ``update_memory``.
 
     Permission: same envelope as ``forget`` — ``PermissionService.
-    can_access_memory`` (workspace member for shared, creator for private).
+    can_access_memory`` with write access (workspace member for shared,
+    creator for private, and the member role or higher on the memory's
+    workspace: a workspace viewer gets the 404).
 
     Embedding regeneration: triggered only when ``summary`` or ``content``
     changes. Runs on the same async-task pipeline as the ``remember`` path
@@ -693,9 +695,10 @@ async def forget_bulk(
     with ``cursor`` set to the returned ``next_cursor``.
 
     Permissions are ``/forget``'s: write access to the context (uniform 404
-    otherwise), then the per-memory delete check — a memory the caller may
-    not delete is skipped and not counted. Allowed while the workspace is over
-    its Free capacity: deleting is how it gets back under the cap.
+    otherwise; 403 for a workspace viewer, who can read it), then the
+    per-memory delete check — a memory the caller may not delete is skipped
+    and not counted. Allowed while the workspace is over its Free capacity:
+    deleting is how it gets back under the cap.
     """
     logger.info(
         "forget_bulk_request",

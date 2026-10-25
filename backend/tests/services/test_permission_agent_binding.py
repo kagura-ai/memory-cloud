@@ -283,7 +283,13 @@ class TestMemoryServiceDeclaredContextGate:
         context = SimpleNamespace(id=uuid.uuid4(), workspace_id=WORKSPACE_ID)
         svc = self._service(context)
         patcher, instance = _patch_binding_service(False, "binding_denied")
-        with patcher:
+        with (
+            patcher,
+            patch(
+                "services.permission_service.PermissionService.ensure_memory_write_role",
+                new=AsyncMock(),
+            ),
+        ):
             ctx, ws, cid = await svc._get_context_isolation_params("u", context.id, access="write")
         assert ctx is context
         instance.evaluate_context_access.assert_not_awaited()

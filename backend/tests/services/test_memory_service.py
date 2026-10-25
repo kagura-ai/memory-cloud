@@ -1605,9 +1605,15 @@ class TestGetContextIsolationParamsKeyWorkspaceConfinement:
     async def test_matching_key_scope_allows(self, service):
         ws, ctx_id = uuid4(), uuid4()
         service.context_service.get_context = AsyncMock(return_value=self._ctx(ws))
-        with patch(
-            "services.agent_binding_service.agent_binding_permits",
-            new=AsyncMock(return_value=True),
+        with (
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "services.permission_service.PermissionService.ensure_memory_write_role",
+                new=AsyncMock(),
+            ),
         ):
             _ctx, ws_str, cid_str = await service._get_context_isolation_params(
                 "u", ctx_id, access="write", key_workspace_id=ws
@@ -2627,6 +2633,10 @@ class TestAccessEventEmission:
                 "services.permission_service.PermissionService.can_access_memory",
                 AsyncMock(return_value=True),
             ),
+            patch(
+                "services.permission_service.PermissionService.ensure_memory_write_role",
+                AsyncMock(),
+            ),
             patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
             patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
             patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
@@ -2694,6 +2704,10 @@ class TestAccessEventEmission:
         service.db.commit = AsyncMock()
 
         with (
+            patch(
+                "services.permission_service.PermissionService.ensure_memory_write_role",
+                AsyncMock(),
+            ),
             patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
             patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
             patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,

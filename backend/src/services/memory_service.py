@@ -26,7 +26,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.workspace_roles import ACCESS_READ, Access
+from auth.workspace_roles import ACCESS_READ, ACCESS_WRITE, Access
 from config.retention import should_promote_to_persistent
 from db.graph_learning_lock import try_lock_graph_learning
 from db.qdrant import (
@@ -603,12 +603,16 @@ class MemoryService:
             operation: MAE operation vocabulary value threaded into the
                 binding gate for #1286 deny capture, or ``None`` (log-only).
 
+        On a WRITE path the caller's role on the context's workspace must also
+        be member or higher (``PermissionService.ensure_memory_write_role``).
+
         Returns:
             Tuple of (context_object, workspace_id_str, context_id_str)
 
         Raises:
             NotFoundException: If context not found, key-workspace-confined, or
                 the binding denies it.
+            AuthorizationError: 403 on a write by a workspace viewer.
         """
         if not context_id:
             return None, None, None
@@ -624,6 +628,14 @@ class MemoryService:
             self.db, context_id, access, operation=operation, user_id=user_id
         ):
             raise NotFoundException("Context", str(context_id))
+
+        if access == ACCESS_WRITE:
+            # A write needs the member role or higher on the context's own
+            # workspace. Last, after every reach check above, so the 403 only
+            # answers for a context the caller can read.
+            from services.permission_service import PermissionService
+
+            await PermissionService(self.db).ensure_memory_write_role(user_id, context.workspace_id)
 
         return context, str(context.workspace_id), str(context_id)
 
@@ -782,10 +794,10 @@ class MemoryService:
     async def _require_guardrail_author(self, user_id: str, context_id: UUID | str | None) -> None:
         """Authorize a guardrail write: context EDITOR or above, user credential only.
 
-        Memory writes otherwise authorize on workspace *membership*, which lets
-        a workspace VIEWER edit ``details`` in a shared context. A tool guardrail
-        is injected into every member's agent session by client hooks (with a
-        deny capability for ``action="block"``), so marking, changing, removing
+        Memory writes otherwise need the member role on the context's
+        workspace, with no context role. A tool guardrail is injected into
+        every member's agent session by client hooks (with a deny capability
+        for ``action="block"``), so marking, changing, removing
         or deleting one is held to the role-aware chokepoint
         ``PermissionService.check_context_write`` (workspace owner/admin, a
         ContextMember editor/owner, or the creator of a private context).
@@ -1771,7 +1783,7 @@ class MemoryService:
 
         # Tool guardrails: any edit of a guardrail row, or a details write that
         # adds / changes / removes tool_trigger, needs context EDITOR or above
-        # (membership alone is what can_access_memory checked). Before any
+        # (can_access_memory checked the member role only). Before any
         # field is applied, so a deny leaves the row untouched.
         if self._touches_tool_trigger(
             memory.details, request.details, details_supplied=request.details is not None
