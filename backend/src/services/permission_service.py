@@ -42,6 +42,18 @@ logger = get_logger(__name__)
 CallerId = NewType("CallerId", str)
 MemoryAuthorId = NewType("MemoryAuthorId", str)
 
+
+def _below_member(member: WorkspaceMember | None) -> bool:
+    """A membership row whose role is under ``member`` (a viewer): read-only.
+
+    Compared by weight, so a role string outside the known set counts as
+    read-only too. ``None`` (no row) is not decided here.
+    """
+    return member is not None and ORG_ROLE_WEIGHTS.get(member.role, 0) < ORG_ROLE_WEIGHTS.get(
+        WorkspaceRole.MEMBER, 0
+    )
+
+
 # Re-exported from auth.workspace_roles for backward compatibility.
 # New code should import directly from auth.workspace_roles.
 # ORG_ROLE_WEIGHTS keeps the old name (used by external callers).
@@ -571,7 +583,7 @@ class PermissionService:
             user_id,
             raise_if_not_found=False,
         )
-        return member is not None and member.role == WorkspaceRole.VIEWER
+        return _below_member(member)
 
     async def ensure_memory_write_role(self, user_id: str, workspace_id: UUID) -> None:
         """Refuse a memory write by a workspace viewer.
@@ -756,7 +768,8 @@ class PermissionService:
                 # and the MCP resolver already do. The shortcut still skips the
                 # role and whitelist rules below — that is #165's contract for
                 # the creator, not part of #1957.
-                if await self._seated_member(context.workspace_id, user_id) is None:
+                creator_member = await self._seated_member(context.workspace_id, user_id)
+                if creator_member is None:
                     # The workspace's owner_user_id holder always has a seat
                     # (plan_seats.member_seat_suspended makes the same
                     # exception), even through a missing OWNER row (#1108).
@@ -769,6 +782,13 @@ class PermissionService:
                             user_id=user_id,
                         )
                         raise AuthorizationError("Insufficient permissions")
+                elif _below_member(creator_member):
+                    # A workspace viewer is read-only in the whole workspace,
+                    # a private context it created included: it reads there
+                    # and writes nowhere (the rule rollback_session applies).
+                    if required != ContextRole.VIEWER:
+                        raise AuthorizationError("Insufficient permissions")
+                    return context, ContextRole.VIEWER
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
             # link widens ownership only: the caller still passes the
@@ -1236,11 +1256,7 @@ class PermissionService:
             # workspace: a viewer reads and cannot create, change or delete,
             # its own memories and private contexts included (see
             # ``ensure_memory_write_role``).
-            return (
-                access == ACCESS_WRITE
-                and member is not None
-                and member.role == WorkspaceRole.VIEWER
-            )
+            return access == ACCESS_WRITE and _below_member(member)
 
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.
@@ -1274,13 +1290,10 @@ class PermissionService:
                 # cannot change or delete them.
                 needed = ContextRole.EDITOR if access == ACCESS_WRITE else ContextRole.VIEWER
                 try:
+                    # EDITOR refuses a workspace viewer, the private context's
+                    # creator included.
                     await self._check_context_access_rbac(user_id, context_id, needed)
                 except (AuthorizationError, NotFoundException):
-                    await _emit_rbac_denied()
-                    return False
-                # The creator of a private context passes the RBAC core as its
-                # owner whatever its workspace role; the role still decides a write.
-                if access == ACCESS_WRITE and await self.is_read_only_member(user_id, workspace_id):
                     await _emit_rbac_denied()
                     return False
                 return await _binding_ok()

@@ -204,6 +204,8 @@ class TestContextAccess:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
+        # The creator's own membership: a member (a viewer creator only reads).
+        service._seated_member = AsyncMock(return_value=MagicMock(role="member"))
 
         assert await service.can_manage_context("user1", ctx_id) is True
 
