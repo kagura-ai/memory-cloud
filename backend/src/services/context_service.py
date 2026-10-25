@@ -1526,10 +1526,10 @@ class ContextService:
         from models.memory import NeuralMemoryEdge
         from services.file_storage_service import FileStorageService
 
-        _, visible, released = await FileStorageService(self.db)._purge_live_files(
-            [context.id], deleted_at
+        purged = await FileStorageService(self.db).purge_live_context_files(
+            [context.id], deleted_at=deleted_at
         )
-        for ws_id, size in released.items():
+        for ws_id, size in purged.released.items():
             self._storage_release_pending[ws_id] = (
                 self._storage_release_pending.get(ws_id, 0) + size
             )
@@ -1543,7 +1543,7 @@ class ContextService:
                 )
             )
         )
-        return visible
+        return purged.visible
 
     async def _detach_context(self, context: Context, *, actor: str, deleted_at: datetime) -> None:
         """Drop the context from member whitelists, cancel its running analyses,

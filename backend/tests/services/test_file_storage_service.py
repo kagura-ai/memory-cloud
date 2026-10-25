@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from services.file_storage_service import FileStorageService, ReserveResult
+from services.file_storage_service import FileStorageService, FilesPurged, ReserveResult
 from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import (
     ConflictError,
@@ -975,6 +975,34 @@ class TestPurgeFilesForContexts:
         released = await service.purge_files_for_contexts([uuid4(), uuid4()])
 
         assert released == {ws_a: 40, ws_b: 7}
+
+
+class TestPurgeLiveContextFiles:
+    """#1971: the public purge reports rows, uploaded rows and bytes per workspace."""
+
+    @pytest.mark.asyncio
+    async def test_empty_context_ids_is_a_noop(self, service, db):
+        assert await service.purge_live_context_files([]) == FilesPurged()
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_counts_every_status_and_stamps_deleted_at(self, service, db, workspace_id):
+        stamp = datetime(2026, 10, 1, 4, 0)
+        uploaded = _make_file_object(workspace_id, status="uploaded", size_bytes=100)
+        reserved = _make_file_object(workspace_id, status="reserved", size_bytes=40)
+        failed = _make_file_object(workspace_id, status="failed", size_bytes=9)
+        for f in (uploaded, reserved, failed):
+            f.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [uploaded, reserved, failed]
+        db.execute.side_effect = [select_result, MagicMock()]
+
+        purged = await service.purge_live_context_files([uuid4()], deleted_at=stamp)
+
+        assert purged == FilesPurged(rows=3, visible=1, released={workspace_id: 140})
+        assert {f.deleted_at for f in (uploaded, reserved, failed)} == {stamp}
+        assert reserved.status == "failed"
+        db.commit.assert_not_awaited()
 
 
 _UNIQUE_VIOLATION = (

@@ -208,12 +208,12 @@ async def backfill_deleted_context_files(
         # The same rows and accounting as a #1960 context deletion, stamped
         # with the context's own deleted_at so restore_context brings them
         # back with the context (inside the file restore window).
-        rows, _visible, released = await files._purge_live_files(
-            [context.context_id], context.deleted_at
+        purged = await files.purge_live_context_files(
+            [context.context_id], deleted_at=context.deleted_at
         )
         await db.commit()
-        result.files_soft_deleted += len(rows)
-        for ws_id, size in released.items():
+        result.files_soft_deleted += purged.rows
+        for ws_id, size in purged.released.items():
             result.released_bytes[ws_id] = result.released_bytes.get(ws_id, 0) + size
             # Neither a decrement nor a delete (see reseed_storage_counter):
             # the counter is rewritten from the aggregate, which already
@@ -225,9 +225,9 @@ async def backfill_deleted_context_files(
             "deleted_context_files_backfilled",
             context_id=str(context.context_id),
             workspace_id=str(context.workspace_id),
-            files=len(rows),
+            files=purged.rows,
             uploaded_bytes=context.uploaded_bytes,
-            released_bytes=sum(released.values()),
+            released_bytes=sum(purged.released.values()),
             past_restore_window=context.past_restore_window,
         )
     return result

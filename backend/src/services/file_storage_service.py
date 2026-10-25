@@ -33,7 +33,7 @@ from __future__ import annotations
 import mimetypes
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -110,6 +110,19 @@ class ContextFilesRestore:
 def context_files_past_restore_window(context: Context) -> bool:
     """True when the context was deleted :data:`FILE_RESTORE_WINDOW` or longer ago."""
     return context.deleted_at is not None and context.deleted_at <= utcnow() - FILE_RESTORE_WINDOW
+
+
+@dataclass(frozen=True)
+class FilesPurged:
+    """What :meth:`FileStorageService.purge_live_context_files` soft-deleted (#1971)."""
+
+    #: Live rows soft-deleted, every status (uploaded, cancelled reservations, failed).
+    rows: int = 0
+    #: The uploaded rows among them: the files a list shows.
+    visible: int = 0
+    #: Redis bytes to release per workspace (uploaded committed + reserved),
+    #: after the caller's commit.
+    released: dict[UUID, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -942,8 +955,7 @@ class FileStorageService:
         for each surviving workspace AFTER its commit succeeds (Redis follows
         the DB, R5).
         """
-        _, _, released = await self._purge_live_files(context_ids, deleted_at)
-        return released
+        return (await self.purge_live_context_files(context_ids, deleted_at=deleted_at)).released
 
     async def purge_context_files(
         self, context_id: UUID, *, deleted_at: datetime | None = None
@@ -956,8 +968,8 @@ class FileStorageService:
         reservations and lingering ``failed`` rows go too, release their bytes, but
         are not counted — not a separate read a concurrent upload could make disagree.
         """
-        _, visible, released = await self._purge_live_files([context_id], deleted_at)
-        return visible, sum(released.values())
+        purged = await self.purge_live_context_files([context_id], deleted_at=deleted_at)
+        return purged.visible, sum(purged.released.values())
 
     async def purge_workspace_scoped_files(
         self, workspace_id: UUID, *, deleted_at: datetime | None = None
@@ -977,17 +989,34 @@ class FileStorageService:
         )
         return visible, sum(released.values())
 
-    async def _purge_live_files(
-        self, context_ids: Sequence[UUID], deleted_at: datetime | None
-    ) -> tuple[list[FileObject], int, dict[UUID, int]]:
-        """Soft-delete the live rows: ``(rows, visible rows among them, Redis bytes per workspace)``."""
+    async def purge_live_context_files(
+        self, context_ids: Sequence[UUID], *, deleted_at: datetime | None = None
+    ) -> FilesPurged:
+        """Soft-delete every live file bound to ``context_ids``, with the counts (#1971).
+
+        The one entry point for a context-bound file purge: same rows and
+        per-status accounting as :meth:`purge_files_for_contexts` (see there),
+        which, like :meth:`purge_context_files`, reports a subset of this.
+        ``deleted_at`` stamps the rows (defaults to now); a context deletion
+        passes the context's own timestamp so a restore finds them. Does not
+        commit; release ``released`` from Redis after the caller's commit.
+
+        Args:
+            context_ids: The contexts whose files go (empty: nothing done).
+            deleted_at: The soft-delete stamp, naive UTC.
+
+        Returns:
+            Rows soft-deleted, the uploaded rows among them, and the Redis
+            bytes to release per workspace.
+        """
         if not context_ids:
-            return [], 0, {}
-        return await self._purge_live_rows(
+            return FilesPurged()
+        files, visible, released = await self._purge_live_rows(
             FileObject.context_id.in_(list(context_ids)),
             deleted_at,
             context_count=len(set(context_ids)),
         )
+        return FilesPurged(rows=len(files), visible=visible, released=released)
 
     async def _purge_live_rows(
         self, where: ColumnElement[bool], deleted_at: datetime | None, *, context_count: int
