@@ -229,8 +229,8 @@ async def test_the_candidate_is_read_under_the_edit_lock(db_session, quiet_write
 
     authorize = MemoryService._update_load_authorized
 
-    async def authorize_then_clear(self, memory_id, user_id):
-        memory = await authorize(self, memory_id, user_id)
+    async def authorize_then_clear(self, memory_id, user_id, **scope):
+        memory = await authorize(self, memory_id, user_id, **scope)
         assert memory.supersede_candidate is not None
         await self.db.execute(
             update(Memory).where(Memory.id == memory_id).values(supersede_candidate=None)
