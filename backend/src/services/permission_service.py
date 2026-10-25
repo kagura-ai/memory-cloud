@@ -1214,21 +1214,12 @@ class PermissionService:
                 ``get_mcp_key_workspace_scope()``), or ``None`` for a caller
                 that is not using a workspace-scoped key. A memory of another
                 workspace is refused (``False``) before any other check, the
-                same answer ``check_context_access`` gives for its context.
+                same answer ``check_context_access`` gives for its context
+                (an agent credential's deny is audited as ``rbac_denied``).
 
         Returns:
             True if user can access, False otherwise
         """
-        if key_workspace_id is not None and workspace_id != key_workspace_id:
-            logger.warning(
-                "memory_access_denied",
-                reason="key_workspace_mismatch",
-                memory_id=str(memory_id) if memory_id is not None else None,
-                memory_workspace_id=str(workspace_id),
-                key_workspace_id=str(key_workspace_id),
-                user_id=str(user_id),
-            )
-            return False
 
         async def _binding_ok() -> bool:
             # The subtractive agent-binding gate applies to EVERY caller,
@@ -1284,6 +1275,21 @@ class PermissionService:
             # its own memories and private contexts included (see
             # ``ensure_memory_write_role``).
             return access == ACCESS_WRITE and _below_member(member)
+
+        # #963: a workspace-scoped key reaches its own workspace only — first,
+        # before any membership or binding lookup, and audited like an RBAC
+        # deny for agent traffic.
+        if key_workspace_id is not None and workspace_id != key_workspace_id:
+            logger.warning(
+                "memory_access_denied",
+                reason="key_workspace_mismatch",
+                memory_id=str(memory_id) if memory_id is not None else None,
+                memory_workspace_id=str(workspace_id),
+                key_workspace_id=str(key_workspace_id),
+                user_id=str(user_id),
+            )
+            await _emit_rbac_denied()
+            return False
 
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.

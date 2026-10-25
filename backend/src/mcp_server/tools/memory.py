@@ -2263,10 +2263,6 @@ async def handle_reference(
                         record_access=record_access,
                         version=request.version,
                         key_workspace_id=get_mcp_key_workspace_scope(),
-                        # A memory of another context is not found (as
-                        # list_revisions), so the reply's context fields are
-                        # the memory's own.
-                        context_id=current_context_id,
                     ),
                     operation_name="reference",
                 )

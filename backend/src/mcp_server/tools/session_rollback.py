@@ -38,7 +38,6 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
     execute_with_timeout,
-    get_mcp_key_workspace_scope,
 )
 from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -289,7 +288,6 @@ async def handle_rollback_session(
                     # call commits what it finished instead of timing out and
                     # replaying the same batch (v0.113.0 review F2).
                     time_budget=timeout * _TIME_BUDGET_SHARE,
-                    key_workspace_id=get_mcp_key_workspace_scope(),
                 ),
                 timeout=timeout,
                 operation_name="rollback_session",
