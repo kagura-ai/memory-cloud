@@ -40,6 +40,19 @@ from sqlalchemy.sql.elements import ColumnElement
 from db.base import Base
 from models.json_types import NullableJSON
 
+# Generated expression of ``Memory.observed_at`` (#2330). Copied byte for byte
+# into migration f16_2330_observed_at; tests/utils/test_observed_at.py pins
+# both and the regex literals of utils/observed_at.py against it. ``->>``,
+# ``~``, ``||`` and ``CASE`` are IMMUTABLE, as a STORED column requires.
+OBSERVED_AT_SQL = (
+    "CASE WHEN details->>'observed_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
+    "THEN (details->>'observed_at') || 'T00:00:00Z' "
+    "WHEN details->>'observed_at' ~ "
+    "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "
+    "THEN details->>'observed_at' "
+    "ELSE NULL END"
+)
+
 # Delivery mode constants (Issue #886, design memory 242cb28a) — an ORTHOGONAL
 # delivery attribute on Memory, deliberately NOT a new memory ``type``. It
 # controls *when* a memory is surfaced, independent of *what* it is about:
@@ -478,6 +491,23 @@ class Memory(Base):
         index=False,
     )
 
+    # WHEN axis (#2330): the time the fact held or the event happened, derived
+    # from details.observed_at (validated by MemoryService._apply_observed_at
+    # on every write path: a date YYYY-MM-DD or a UTC datetime
+    # YYYY-MM-DDTHH:MM:SSZ). TEXT for the trigger_from reason (a ::timestamp
+    # cast is only STABLE). A date is padded to the start of its day
+    # (T00:00:00Z), so every value has the same 20-char shape and lexical
+    # order == chronological order under any collation. Anything else (raw
+    # SQL, a legacy value) is NULL, never an INSERT error. The regex literals
+    # equal utils/observed_at.py's (parity test). Partial btree
+    # (context_id, observed_at) WHERE observed_at IS NOT NULL AND deleted_at
+    # IS NULL is created in migration f16_2330_observed_at.
+    observed_at: Mapped[str | None] = mapped_column(
+        String(32),
+        Computed(OBSERVED_AT_SQL, persisted=True),
+        index=False,
+    )
+
     # Constraints
     __table_args__ = (
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),
@@ -647,6 +677,15 @@ class Memory(Base):
         # rows without a location (both columns NULL from the regex guard)
         # pass; the explicit IS NULL arms make that reading unmissable while
         # a present-but-out-of-range value is a definite FALSE.
+        # WHEN axis (#2330) partial btree serving list's observed_after /
+        # observed_before range per context. Created in migration
+        # f16_2330_observed_at; the predicate text must stay byte-identical.
+        Index(
+            "idx_memories_observed_at",
+            "context_id",
+            "observed_at",
+            postgresql_where=text("observed_at IS NOT NULL AND deleted_at IS NULL"),
+        ),
         CheckConstraint(
             "(location_lat IS NULL OR (location_lat >= -90 AND location_lat <= 90)) "
             "AND (location_lon IS NULL OR (location_lon >= -180 AND location_lon <= 180))",
