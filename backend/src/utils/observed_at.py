@@ -15,10 +15,14 @@ Forms:
 - **Column / payload value**: always the 20-char datetime; a date is padded to
   ``T00:00:00Z`` (the start of that day, UTC). One fixed width keeps lexical
   order equal to chronological order under any collation.
-- **Accepted input**: anything ``date.fromisoformat`` (10 chars) or
-  ``datetime.fromisoformat`` parses. A naive datetime is UTC, an aware one is
-  converted to UTC, fractional seconds are dropped. Anything else is rejected
-  (a 422 / ``validation_error``, never a silent NULL). ``None`` removes the key.
+- **Accepted input**: ISO 8601 extended forms only — a date ``YYYY-MM-DD``
+  or a datetime ``YYYY-MM-DDTHH:MM:SS`` with optional fractional seconds and
+  an optional ``Z`` / ``±HH:MM`` offset. A naive datetime is UTC, an aware one
+  is converted to UTC, fractional seconds are dropped. Anything else — basic
+  forms such as ``20240307``, week dates, a space separator, a time without
+  seconds — is rejected (a 422 / ``validation_error``, never a silent NULL),
+  so a stored date is always ``YYYY-MM-DD`` and an exact date filter finds
+  it. ``None`` removes the key.
 
 One normaliser, four readers: :func:`normalize_observed_at` (every write path,
 via ``MemoryService._apply_observed_at``), :func:`column_value` (the Qdrant
@@ -38,8 +42,14 @@ DATE_RE = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 DATETIME_RE = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 MAX_INPUT_CHARS = 40
 
+# Readers use ``fullmatch``: ``$`` alone would also accept a trailing newline,
+# which the SQL regex (``$`` = end of string) does not.
 _DATE = re.compile(DATE_RE)
 _DATETIME = re.compile(DATETIME_RE)
+# The input forms accepted on write (before the calendar check).
+_INPUT_DATETIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?"
+)
 
 _FORMAT_HINT = (
     "observed_at must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)"
@@ -71,9 +81,11 @@ def canonical_observed_at(value: Any) -> str:
     if not text or len(text) > MAX_INPUT_CHARS:
         raise ObservedAtValidationError(_FORMAT_HINT)
     try:
-        if len(text) == 10:
+        if _DATE.fullmatch(text):
             day = date.fromisoformat(text)
             return f"{day.year:04d}-{day.month:02d}-{day.day:02d}"
+        if not _INPUT_DATETIME.fullmatch(text):
+            raise ValueError(text)
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
@@ -128,9 +140,9 @@ def column_value(details: Any) -> str | None:
     value = details.get("observed_at")
     if not isinstance(value, str):
         return None
-    if _DATE.match(value):
+    if _DATE.fullmatch(value):
         return value + "T00:00:00Z"
-    if _DATETIME.match(value):
+    if _DATETIME.fullmatch(value):
         return value
     return None
 
@@ -144,7 +156,7 @@ def observed_at_from_details(details: Any) -> str | None:
     if not isinstance(details, dict):
         return None
     value = details.get("observed_at")
-    if isinstance(value, str) and (_DATE.match(value) or _DATETIME.match(value)):
+    if isinstance(value, str) and (_DATE.fullmatch(value) or _DATETIME.fullmatch(value)):
         return value
     return None
 

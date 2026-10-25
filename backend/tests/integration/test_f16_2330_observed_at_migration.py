@@ -134,6 +134,18 @@ def _seed(conn: Connection, owner: str, ws_id: str, ctx_id: str, details: dict) 
     return mem_id
 
 
+def _load_migration():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f16_2330_observed_at.py"
+    spec = importlib.util.spec_from_file_location("f16_2330_observed_at", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _leave_db_at_head() -> None:
     with _alembic_at_test_db():
         command.upgrade(_get_alembic_config(), "head")
@@ -167,7 +179,11 @@ class TestF16ObservedAtMigration:
                 ("2024-03-07", "2024-03-07", "2024-03-07T00:00:00Z"),
                 ("2024-03-07T10:00:00Z", "2024-03-07T10:00:00Z", "2024-03-07T10:00:00Z"),
                 ("2024-03-07T10:00:00+09:00", "2024-03-07T01:00:00Z", "2024-03-07T01:00:00Z"),
-                ("2024-03-07 10:00:00.5", "2024-03-07T10:00:00Z", "2024-03-07T10:00:00Z"),
+                ("2024-03-07T10:00:00.5", "2024-03-07T10:00:00Z", "2024-03-07T10:00:00Z"),
+                ("2024-03-07\n", "2024-03-07", "2024-03-07T00:00:00Z"),
+                # Not an accepted input form: left as it is, column NULL.
+                ("2024-03-07 10:00:00.5", "2024-03-07 10:00:00.5", None),
+                ("20240307", "20240307", None),
                 ("March 7", "March 7", None),
             ]
             engine = _sync_engine()
@@ -221,6 +237,28 @@ class TestF16ObservedAtMigration:
                 assert "(context_id, observed_at)" in indexdef
                 assert "observed_at IS NOT NULL" in indexdef
                 assert "deleted_at IS NULL" in indexdef
+            engine.dispose()
+        finally:
+            _leave_db_at_head()
+
+    def test_lock_timeout_does_not_outlive_the_migration(self) -> None:
+        """The 5 s cap is reset at the end of upgrade / downgrade, so later
+        migrations of the same run (one transaction) do not inherit it."""
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        try:
+            _reset_and_upgrade_to(PRE_F16_REV)
+            engine = _sync_engine()
+            module = _load_migration()
+            with engine.begin() as conn:
+                default = conn.execute(text("SHOW lock_timeout")).scalar_one()
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    module.upgrade()
+                    assert conn.execute(text("SHOW lock_timeout")).scalar_one() == default
+                    module.downgrade()
+                    assert conn.execute(text("SHOW lock_timeout")).scalar_one() == default
             engine.dispose()
         finally:
             _leave_db_at_head()

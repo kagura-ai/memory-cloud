@@ -40,7 +40,7 @@ class TestCanonical:
             ("2024-03-07T10:00:00+09:00", "2024-03-07T01:00:00Z"),
             ("2024-03-07T01:00:00-05:00", "2024-03-07T06:00:00Z"),
             ("2024-03-07T10:00:00.987654Z", "2024-03-07T10:00:00Z"),
-            ("2024-03-07 10:00", "2024-03-07T10:00:00Z"),
+            ("2024-03-07T10:00:00.5+09:00", "2024-03-07T01:00:00Z"),
             ("  2024-03-07  ", "2024-03-07"),
             ("0999-01-01T00:00:00Z", "0999-01-01T00:00:00Z"),  # four-digit year
         ],
@@ -55,6 +55,27 @@ class TestCanonical:
     def test_rejected(self, value):
         with pytest.raises(ObservedAtValidationError):
             canonical_observed_at(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "20240307",  # basic form: would be stored as a datetime and miss a date filter
+            "20240307T100000Z",
+            "2024-W10-4",  # week date
+            "2024-067",  # ordinal date
+            "2024-03-07 10:00:00",  # space separator
+            "2024-03-07T10:00Z",  # no seconds
+            "2024-03-07T10",
+            "2024-03-07T10:00:00+0900",  # basic offset
+            "2024-03-07T10:00:00+09",
+        ],
+    )
+    def test_only_the_extended_forms_are_accepted(self, value):
+        with pytest.raises(ObservedAtValidationError):
+            canonical_observed_at(value)
+
+    def test_trailing_newline_is_stripped_on_input(self):
+        assert canonical_observed_at("2024-03-07\n") == "2024-03-07"
 
     def test_an_offset_past_year_one_is_rejected_not_raised_raw(self):
         with pytest.raises(ObservedAtValidationError):
@@ -90,7 +111,17 @@ class TestReaders:
 
     @pytest.mark.parametrize(
         "details",
-        [None, [], {}, {"observed_at": None}, {"observed_at": "2024/03/07"}, {"observed_at": 1}],
+        [
+            None,
+            [],
+            {},
+            {"observed_at": None},
+            {"observed_at": "2024/03/07"},
+            {"observed_at": 1},
+            # The SQL regex ($ = end of string) gives NULL for these too.
+            {"observed_at": "2024-03-07\n"},
+            {"observed_at": "2024-03-07T10:00:00Z\n"},
+        ],
     )
     def test_column_value_none_for_anything_else(self, details):
         assert column_value(details) is None
@@ -104,7 +135,14 @@ class TestReaders:
 
     @pytest.mark.parametrize(
         "details",
-        [None, "x", {}, {"observed_at": "2024-03-07T10:00:00+09:00"}, {"observed_at": 5}],
+        [
+            None,
+            "x",
+            {},
+            {"observed_at": "2024-03-07T10:00:00+09:00"},
+            {"observed_at": 5},
+            {"observed_at": "2024-03-07\n"},
+        ],
     )
     def test_from_details_none_for_legacy_values(self, details):
         assert observed_at_from_details(details) is None
@@ -152,8 +190,12 @@ class TestSqlParity:
         for value in (
             "2024-03-07",
             "2024-03-07T10:00:00+09:00",
-            "2024-03-07 10:00:00.5",
+            "2024-03-07T10:00:00.5",
             "0999-01-01T00:00:00Z",
+            "2024-03-07\n",  # stripped on both sides
         ):
             assert module._canonical(value) == canonical_observed_at(value)
-        assert module._canonical("March 7") is None
+        for value in ("March 7", "20240307", "2024-03-07 10:00:00.5", "2024-W10-4"):
+            assert module._canonical(value) is None
+            with pytest.raises(ObservedAtValidationError):
+                canonical_observed_at(value)

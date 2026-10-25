@@ -34,7 +34,7 @@ query behind it, and the operator runs it again (nothing is kept). It does
 not shorten the rewrite itself.
 
 Qdrant points written before this revision carry no ``observed_at`` payload;
-``python -m cli.observed_at_backfill`` adds it (docs/deployment.md).
+``python -m src.cli.observed_at_backfill`` adds it (docs/deployment.md).
 
 Downgrade drops the index and the column (``details`` keeps the values).
 
@@ -46,6 +46,7 @@ is varchar(32).
 """
 
 import logging
+import re
 from datetime import UTC, date, datetime
 
 import sqlalchemy as sa
@@ -89,6 +90,10 @@ REWRITE_SQL = (
 )
 
 _MAX_INPUT_CHARS = 40
+_DATE_INPUT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_DATETIME_INPUT = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?"
+)
 
 
 def _canonical(value: str) -> str | None:
@@ -101,9 +106,11 @@ def _canonical(value: str) -> str | None:
     if not text or len(text) > _MAX_INPUT_CHARS:
         return None
     try:
-        if len(text) == 10:
+        if _DATE_INPUT.fullmatch(text):
             day = date.fromisoformat(text)
             return f"{day.year:04d}-{day.month:02d}-{day.day:02d}"
+        if not _DATETIME_INPUT.fullmatch(text):
+            return None
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
@@ -160,9 +167,13 @@ def upgrade() -> None:
         ["context_id", "observed_at"],
         postgresql_where=sa.text("observed_at IS NOT NULL AND deleted_at IS NULL"),
     )
+    # env.py runs the whole upgrade in one transaction: without this the
+    # 5 s cap would also apply to every later migration of the same run (e99).
+    op.execute(sa.text("RESET lock_timeout"))
 
 
 def downgrade() -> None:
     op.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     op.drop_index("idx_memories_observed_at", table_name="memories")
     op.drop_column("memories", "observed_at")
+    op.execute(sa.text("RESET lock_timeout"))
