@@ -1354,3 +1354,44 @@ def test_getting_started_and_troubleshooting_carry_the_codex_hook_paragraphs() -
     section = section[: section.index("\n## ", 1)]
     assert "hooks stay idle" in section and "/hooks" in section
     assert "```toml" not in section
+
+
+# ---------------------------------------------------------------------------
+# #2334: the session index renders the same way under Codex
+# ---------------------------------------------------------------------------
+
+
+def _index_cache(codex_env: CodexEnv, n: int, summary_len: int = 40) -> list[dict[str, Any]]:
+    rows = [
+        {"memory_id": memory_id(100 + k), "summary": f"row {k:02d} " + "x" * (summary_len - 7)}
+        for k in range(n)
+    ]
+    codex_env.write_cache(
+        [],
+        fetched_at=datetime.now(UTC) - timedelta(seconds=5),
+        extra={"index": rows, "index_total_available": n},
+    )
+    return rows
+
+
+def test_session_index_is_rendered_for_codex(codex_env: CodexEnv, run_codex: RunCodex) -> None:
+    rows = _index_cache(codex_env, 5)
+    result = run_codex(session_start())
+    _assert_contract(result, "SessionStart")
+    lines = result.specific["additionalContext"].split("\n")
+    assert lines[0].startswith("Memory index (5 rows, newest first;")
+    assert lines[1:] == [f"- {r['summary']} (mem: {r['memory_id'][:8]})" for r in rows]
+
+
+def test_session_index_is_cut_to_the_codex_token_budget(
+    codex_env: CodexEnv, run_codex: RunCodex, hook_module: ModuleType
+) -> None:
+    rows = _index_cache(codex_env, 300, summary_len=80)
+    result = run_codex(session_start())
+    context = result.specific["additionalContext"]
+    assert hook_module.approx_tokens(context) <= 2000
+    lines = context.split("\n")
+    shown = lines[1:-1]
+    assert 0 < len(shown) < 300
+    assert shown[0] == f"- {rows[0]['summary']} (mem: {rows[0]['memory_id'][:8]})"
+    assert lines[-1] == f"- {300 - len(shown)} more — recall to search"

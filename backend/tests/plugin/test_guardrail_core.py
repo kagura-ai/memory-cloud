@@ -772,6 +772,8 @@ def test_cache_written_by_project_response_reads_back_identically(
         "version",
         "pinned",
         "tool_triggered",
+        "index",
+        "index_total_available",
     ]
     first = cache["tool_triggered"][0]
     assert list(first) == [
