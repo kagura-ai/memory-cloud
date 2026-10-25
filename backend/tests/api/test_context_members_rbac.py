@@ -608,7 +608,10 @@ class TestListContextMembersMerge:
         #   fallback_viewer — Pass 3 fallback (workspace viewer, no explicit)
         workspace_members = [
             self._ws_member(ADMIN_USER_ID, "admin"),
-            self._ws_member("explicit_editor", "member", allowed_context_ids=None),
+            self._ws_member("explicit_editor", "member", allowed_context_ids=[CONTEXT_ID]),
+            # A member whose list does not reach the context: its row grants
+            # nothing, so it is not listed.
+            self._ws_member("unreached_editor", "member", allowed_context_ids=None),
             self._ws_member("viewer_override", "viewer"),
             self._ws_member("fallback_viewer", "viewer"),
         ]
@@ -619,6 +622,7 @@ class TestListContextMembersMerge:
             self._ctx_member("explicit_editor", "editor"),
             # Viewer with ineffective explicit editor row — must be dropped by Pass 2
             self._ctx_member("viewer_override", "editor"),
+            self._ctx_member("unreached_editor", "editor"),
         ]
         users = [
             self._user(ADMIN_USER_ID, "admin@example.com"),
@@ -669,6 +673,9 @@ class TestListContextMembersMerge:
             assert "viewer_override" in by_user
             assert by_user["viewer_override"]["role"] == "viewer"
             assert by_user["viewer_override"]["is_workspace_admin"] is True
+
+            # A context member row outside the member's context access list
+            assert "unreached_editor" not in by_user
 
             # Pass 3 fallback — viewer without explicit row
             assert "fallback_viewer" in by_user

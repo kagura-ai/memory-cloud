@@ -824,12 +824,19 @@ class WorkspaceService:
         member.role = cast(WorkspaceRole, new_role)
         member.updated_at = func.now()
 
-        # Issue #234: Clear allowed_context_ids on role change
-        # Previous restrictions may not be appropriate for the new role
-        if old_role != new_role and member.allowed_context_ids is not None:
-            member.allowed_context_ids = None
+        # The context access list survives a role change: owner/admin ignore
+        # it, and a later change back to member/viewer finds the last list
+        # set. One translation keeps a change from widening reach: a member
+        # with no list reaches nothing, while a viewer with no list reaches
+        # every shared context, so member → viewer stores [] instead.
+        if (
+            old_role == WorkspaceRole.MEMBER
+            and new_role == WorkspaceRole.VIEWER
+            and member.allowed_context_ids is None
+        ):
+            member.allowed_context_ids = []
             logger.info(
-                "cleared_allowed_context_ids_on_role_change",
+                "context_access_kept_closed_on_role_change",
                 workspace_id=str(workspace_id),
                 user_id=user_id,
                 old_role=old_role,
@@ -855,7 +862,9 @@ class WorkspaceService:
         Args:
             workspace_id: Workspace ID
             user_id: User ID
-            allowed_context_ids: Whitelist of context IDs (None = no restriction)
+            allowed_context_ids: The context access list: ``None`` = not set
+                (a member reaches no context, a viewer every shared one),
+                ``[]`` = no context, a list = exactly these contexts.
 
         Returns:
             Updated membership
@@ -886,10 +895,13 @@ class WorkspaceService:
         await self.db.commit()
         await self.db.refresh(member)
 
-        count = len(allowed_context_ids) if allowed_context_ids else "unrestricted"
         logger.info(
-            f"Updated member context access in workspace {workspace_id}: "
-            f"{user_id} -> {count} contexts"
+            "member_context_access_updated",
+            workspace_id=str(workspace_id),
+            user_id=user_id,
+            context_count=(
+                len(allowed_context_ids) if allowed_context_ids is not None else "not_set"
+            ),
         )
         return member
 
@@ -1072,13 +1084,17 @@ class WorkspaceService:
             "total_memories": total_memories,
         }
 
-    async def get_context_stats(self, workspace_id: UUID) -> dict[str, Any]:
+    async def get_context_stats(
+        self, workspace_id: UUID, *, context_ids: set[UUID] | None = None
+    ) -> dict[str, Any]:
         """Get per-context statistics for workspace.
 
         Issue #249: Context usage overview for workspace page.
 
         Args:
             workspace_id: Workspace ID
+            context_ids: Only these contexts (the ones the caller can open);
+                ``None`` = every context of the workspace.
 
         Returns:
             Dict with context-level statistics:
@@ -1108,6 +1124,7 @@ class WorkspaceService:
             .where(
                 Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
+                *(() if context_ids is None else (Context.id.in_(context_ids),)),
             )
             .group_by(Context.id, Context.name, Context.display_name)
             .order_by(func.count(Memory.id).desc())
@@ -1116,9 +1133,8 @@ class WorkspaceService:
         result = await self.db.execute(stmt)
         context_rows = result.all()
 
-        # Get member count for each context
-        # Note: All workspace members have access to all contexts by default
-        # unless Issue #234 context access restriction is applied
+        # The workspace's member count (every row reports it; per-context
+        # reach is not computed here).
         member_count_stmt = select(func.count(WorkspaceMember.id)).where(
             WorkspaceMember.workspace_id == workspace_id
         )
@@ -1179,7 +1195,7 @@ class WorkspaceService:
                     "context_name": row.display_name or row.name,
                     "memory_count": memory_count,
                     "last_activity": row.last_activity,
-                    "member_count": org_member_count,  # All members have access
+                    "member_count": org_member_count,  # workspace-wide
                     "api_calls_week": usage_stats["api_calls_week"],
                     "active_users_week": usage_stats["active_users_week"],
                     "avg_response_time_ms": usage_stats["avg_response_time_ms"],

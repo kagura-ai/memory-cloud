@@ -2270,13 +2270,17 @@ class WorkspaceMember(Base):
         - owner: Full access, billing management, can delete workspace
         - admin: Manage members and contexts, bypass context permissions
         - member: Access assigned contexts only
-        - viewer: Read-only access to all contexts
+        - viewer: Read-only access to the contexts it reaches
 
-    Context Access (allowed_context_ids):
-        - NULL: No restriction (current behavior, full access per role)
+    Context Access (allowed_context_ids), see auth.workspace_roles.reaches_context:
+        - NULL: Not set — a member reaches no context; a viewer reaches every
+          shared context
         - []: No context access
         - [uuid, ...]: Only these contexts accessible
         - Note: owner/admin roles always have full access (field is ignored)
+        - A private context stays open only to its creator (and accounts
+          linked to it), whatever the list says
+        - The value is kept across role changes
 
     Constraints:
         - (workspace_id, user_id) must be unique
@@ -2304,8 +2308,9 @@ class WorkspaceMember(Base):
         server_default=WorkspaceRole.MEMBER.value,
     )
 
-    # Context access restriction (Issue #234)
-    # NULL = no restriction, [] = no access, [uuid, ...] = whitelist
+    # Context access restriction (Issue #234, Migration 042)
+    # NULL = not set (member: no context, viewer: every shared context),
+    # [] = no access, [uuid, ...] = exactly these contexts.
     # Only applies to member/viewer roles (owner/admin always have full access)
     allowed_context_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=True, default=None

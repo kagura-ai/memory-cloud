@@ -20,7 +20,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
-from auth.workspace_roles import ContextRole, WorkspaceRole
+from auth.workspace_roles import ContextRole, WorkspaceRole, reaches_context
 from config.constants import (
     CONTEXT_DESCRIPTION_MAX_LENGTH,
     CONTEXT_SUMMARY_MAX_LENGTH,
@@ -384,22 +384,15 @@ async def list_contexts(
         workspace_members_result = await db.execute(workspace_members_stmt)
         workspace_members = workspace_members_result.scalars().all()
 
-        # Calculate count for each context
+        # Count, per context, the workspace members who reach it
+        # (``reaches_context``: owner/admin always, otherwise the member's
+        # context access list).
         for context in contexts_list:
-            count = 0
-            for om in workspace_members:
-                if om.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
-                    # Owners/admins always have access
-                    count += 1
-                elif om.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
-                    # Check allowed_context_ids
-                    if om.allowed_context_ids is None:
-                        # No restriction - has access
-                        count += 1
-                    elif context.id in om.allowed_context_ids:
-                        # Whitelisted - has access
-                        count += 1
-            member_counts[context.id] = count
+            member_counts[context.id] = sum(
+                1
+                for om in workspace_members
+                if reaches_context(om.role, om.allowed_context_ids, context.id)
+            )
 
     # Issue #187: Batch memory count + last activity (single query, no N+1)
     memory_stats: dict[UUID, tuple[int, datetime | None]] = {}
@@ -1357,38 +1350,40 @@ async def list_context_members(
     from models.auth import User
 
     # 1. Owners/Admins (automatic full access)
-    # 2. Viewers with allowed_context_ids that includes this context (or null)
-    # 3. Members with allowed_context_ids that includes this context (or null)
+    # 2. Viewers who reach this context (``reaches_context``)
+    # 3. Members who reach this context and hold a context membership row
     org_stmt = select(WorkspaceMember).where(WorkspaceMember.workspace_id == context.workspace_id)
     workspace_result = await db.execute(org_stmt)
     all_workspace_members = workspace_result.scalars().all()
 
     # Filter workspace members by effective access. Mirrors check_context_access:
-    #   - owner/admin: always have access (bypass at L327-329)
-    #   - viewer: access via allowed_context_ids=None (all) or whitelist match (L332-347)
-    #   - member: NO implicit access here — they require an explicit ContextMember
-    #     row (check_context_access:349-361), surfaced via Pass 2 from
-    #     explicit_members. Separately, get_accessible_contexts treats
-    #     allowed_context_ids=None for members as suspended (Migration 042),
-    #     which is consistent with the "explicit membership required" rule.
+    #   - owner/admin: always have access
+    #   - viewer: access when its context access list reaches the context
+    #   - member: NO implicit access here — it needs an explicit ContextMember
+    #     row in a context it reaches, surfaced via Pass 2 from explicit_members.
     accessible_members = []
     for om in all_workspace_members:
         if om.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
             accessible_members.append(om)
-        elif om.role == WorkspaceRole.VIEWER:
-            if om.allowed_context_ids is None:
-                accessible_members.append(om)
-            elif context_id in om.allowed_context_ids:
-                accessible_members.append(om)
+        elif om.role == WorkspaceRole.VIEWER and reaches_context(
+            om.role, om.allowed_context_ids, context_id
+        ):
+            accessible_members.append(om)
         # workspace member: skip — explicit ContextMember row is authoritative
 
-    # Filter explicit ContextMember rows to current workspace members only.
-    # Issue #362 Guard 3 now prevents new cross-workspace adds, but legacy
-    # orphan rows (created before the guard) may still exist. Surfacing them
-    # would leak user emails/names across workspaces to any viewer of this
-    # context, so drop them at the read path as well.
-    workspace_user_ids = {om.user_id for om in all_workspace_members}
-    explicit_members = [cm for cm in explicit_members_raw if cm.user_id in workspace_user_ids]
+    # Filter explicit ContextMember rows to current workspace members who
+    # reach this context. Issue #362 Guard 3 prevents new cross-workspace
+    # adds, but legacy orphan rows (created before the guard) may still exist;
+    # surfacing them would leak user emails/names across workspaces to any
+    # viewer of this context. A row of a member whose context access list does
+    # not reach the context grants nothing (check_context_access), so it is
+    # not listed either.
+    reaching_user_ids = {
+        om.user_id
+        for om in all_workspace_members
+        if reaches_context(om.role, om.allowed_context_ids, context_id)
+    }
+    explicit_members = [cm for cm in explicit_members_raw if cm.user_id in reaching_user_ids]
 
     # Get user info for all accessible members
     all_user_ids = list(
