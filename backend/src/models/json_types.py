@@ -22,11 +22,14 @@ NOT NULL JSON columns are out of scope: some of them store JSON ``null`` as a
 legitimate value (``agent_states.value``).
 
 Rows written before the switch may still hold JSON ``null``. f15 rewrote the
-small tables and ``memories``; in the large or append-only logs (audit_logs,
-llm_call_log, memory_access_events, secret_access_log, resource_events,
-neural_memory_edges) historical JSON null stays, so a SQL count on those
-columns matches both forms, with the size check first so a scan does not
-detoast large values::
+small tables only. Historical JSON null stays in ``memories.details`` /
+``context`` (rewriting them is a non-HOT update into every index of the
+table; docs/deployment.md has an optional procedure), in the large or
+append-only logs (audit_logs, llm_call_log, memory_access_events,
+secret_access_log, resource_events, neural_memory_edges), and the two
+exception columns still store it for an explicit ``None``. A SQL count on
+those columns matches both forms, with the size check first so a scan does
+not detoast large values::
 
     col IS NULL OR (pg_column_size(col) < 16 AND col::text = 'null')
 
