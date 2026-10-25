@@ -740,7 +740,6 @@ async def test_mcp_handler_uses_the_credential_principal(world: World) -> None:
         try:
             with (
                 patch("db.base.get_db", fake_get_db),
-                patch.object(tool, "_check_viewer_permission", AsyncMock(return_value=None)),
                 patch.object(
                     tool,
                     "_resolve_context",
@@ -1318,7 +1317,6 @@ async def test_mcp_handler_window_is_the_callers_own_even_for_an_owner(world: Wo
     async def call(user_id: str, **args: Any) -> dict[str, Any]:
         with (
             patch("db.base.get_db", fake_get_db),
-            patch.object(tool, "_check_viewer_permission", AsyncMock(return_value=None)),
             patch.object(
                 tool,
                 "_resolve_context",

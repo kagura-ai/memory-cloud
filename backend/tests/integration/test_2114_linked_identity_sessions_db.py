@@ -149,7 +149,6 @@ async def _rollback(
     try:
         with (
             patch("db.base.get_db", fake_get_db),
-            patch.object(tool, "_check_viewer_permission", AsyncMock(return_value=None)),
             patch.object(
                 tool,
                 "_resolve_context",
