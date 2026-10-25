@@ -885,17 +885,37 @@ async def _check_workspace_membership(
         return None
     user_role = await _get_workspace_member_role(db, user_id, workspace_id)
     if user_role is None:
-        return _error_response(
-            "permission_denied",
-            f"Cannot {operation}: workspace not accessible.",
-            your_role="not_a_member",
-            required_role="viewer",
-            help=(
-                "Verify the workspace is active and you are a member "
-                "(any role — viewer is sufficient for read access)."
-            ),
-        )
+        return _workspace_not_accessible(operation, "viewer")
     return None
+
+
+def _workspace_not_accessible(operation: str, required_role: str) -> ToolErrorContent:
+    """``permission_denied`` for a workspace the caller cannot use.
+
+    The answer of the membership gates below for a non-member (or a deleted
+    workspace); also given under a workspace-scoped API key for any other
+    workspace (#963), so the two cannot be told apart.
+
+    Args:
+        operation: Operation description for the message.
+        required_role: ``"viewer"`` for a read tool, ``"member"`` for a write.
+    """
+    if required_role == "viewer":
+        help_text = (
+            "Verify the workspace is active and you are a member "
+            "(any role — viewer is sufficient for read access)."
+        )
+    else:
+        help_text = (
+            "Verify the workspace is active and you are a member with at least 'member' role."
+        )
+    return _error_response(
+        "permission_denied",
+        f"Cannot {operation}: workspace not accessible.",
+        your_role="not_a_member",
+        required_role=required_role,
+        help=help_text,
+    )
 
 
 async def _check_viewer_permission(
@@ -928,13 +948,7 @@ async def _check_viewer_permission(
         # soft-deleted (`_get_workspace_member_role` filters Workspace.deleted_at
         # IS NULL), or no workspace was given. Every case: deny writes
         # (fail-closed).
-        return _error_response(
-            "permission_denied",
-            f"Cannot {operation}: workspace not accessible.",
-            your_role="not_a_member",
-            required_role="member",
-            help="Verify the workspace is active and you are a member with at least 'member' role.",
-        )
+        return _workspace_not_accessible(operation, "member")
     from services.permission_service import is_below_member_role
 
     if is_below_member_role(user_role):

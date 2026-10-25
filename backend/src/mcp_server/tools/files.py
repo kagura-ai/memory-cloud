@@ -27,6 +27,8 @@ from mcp_server.tools._helpers import (
     _check_workspace_membership,
     _error_response,
     _success_response,
+    _workspace_not_accessible,
+    get_mcp_key_workspace_scope,
 )
 from services.file_storage_service import FileStorageService
 from utils.datetime import to_utc_iso
@@ -97,23 +99,42 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
 async def _resolve_workspace(
     workspace_id_arg: Any,
     fallback: UUID | None,
+    *,
+    operation: str,
+    required_role: str,
 ) -> tuple[UUID | None, list[TextContent] | None]:
     """Resolve the workspace_id from the tool args, falling back to the
     authenticated workspace_id if not specified.
+
+    #963: under a workspace-scoped API key the target must be the key's own
+    workspace. Any other workspace is refused before the membership check,
+    with the answer that check gives a non-member (``operation`` and
+    ``required_role`` fill it in).
 
     Returns ``(workspace_id, error)`` — exactly one is non-None.
     """
     if workspace_id_arg is None:
         if fallback is None:
             return None, _error_response("workspace_required", "No active workspace.")
-        return fallback, None
-    try:
-        return UUID(str(workspace_id_arg)), None
-    except (ValueError, TypeError):
-        return None, _error_response(
-            "validation_error",
-            f"workspace_id must be a UUID, got {workspace_id_arg!r}",
+        ws = fallback
+    else:
+        try:
+            ws = UUID(str(workspace_id_arg))
+        except (ValueError, TypeError):
+            return None, _error_response(
+                "validation_error",
+                f"workspace_id must be a UUID, got {workspace_id_arg!r}",
+            )
+    key_workspace_id = get_mcp_key_workspace_scope()
+    if key_workspace_id is not None and ws != key_workspace_id:
+        logger.warning(
+            "file_workspace_denied",
+            reason="key_workspace_mismatch",
+            workspace_id=str(ws),
+            key_workspace_id=str(key_workspace_id),
         )
+        return None, _workspace_not_accessible(operation, required_role)
+    return ws, None
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +173,9 @@ async def handle_init_file_upload(
         except (ValueError, TypeError):
             return _error_response("validation_error", "context_id must be a UUID")
 
-    ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
+    ws, err = await _resolve_workspace(
+        args.get("workspace_id"), workspace_id, operation="upload files", required_role="member"
+    )
     if err is not None:
         return err
 
@@ -207,7 +230,12 @@ async def handle_complete_file_upload(
     if missing:
         return _error_response("missing_fields", f"Missing required fields: {sorted(missing)}")
 
-    ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
+    ws, err = await _resolve_workspace(
+        args.get("workspace_id"),
+        workspace_id,
+        operation="confirm file uploads",
+        required_role="member",
+    )
     if err is not None:
         return err
 
@@ -261,7 +289,9 @@ async def handle_get_file_download_url(
     if "file_id" not in args:
         return _error_response("missing_fields", "Missing required field: file_id")
 
-    ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
+    ws, err = await _resolve_workspace(
+        args.get("workspace_id"), workspace_id, operation="download files", required_role="viewer"
+    )
     if err is not None:
         return err
 
@@ -318,7 +348,9 @@ async def handle_delete_file(
     if "file_id" not in args:
         return _error_response("missing_fields", "Missing required field: file_id")
 
-    ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
+    ws, err = await _resolve_workspace(
+        args.get("workspace_id"), workspace_id, operation="delete files", required_role="member"
+    )
     if err is not None:
         return err
 
@@ -356,7 +388,9 @@ async def handle_list_files(
 
     Optional args: ``workspace_id``, ``limit`` (default 50).
     """
-    ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
+    ws, err = await _resolve_workspace(
+        args.get("workspace_id"), workspace_id, operation="list files", required_role="viewer"
+    )
     if err is not None:
         return err
 

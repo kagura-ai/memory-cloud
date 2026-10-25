@@ -24,7 +24,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.file_storage_service import FileStorageService
 from services.permission_service import PermissionService
-from utils.exceptions import DuplicateFileError
+from utils.exceptions import AuthorizationError, DuplicateFileError
 from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
@@ -139,8 +139,21 @@ async def _enforce_workspace_membership(
     (reserve / confirm / delete). Read paths (download-url, list)
     pass ``"viewer"`` so workspace viewers — who are intentionally
     read-only members per the repo's role semantics — can read file
-    metadata and download URLs (Copilot loop 4 finding on PR #551).
+    metadata and download URLs (PR #551).
+
+    #963: a workspace-scoped API key (``user["api_key_workspace_id"]``)
+    reaches its own workspace only. Any other ``workspace_id`` is refused
+    before the membership lookup, with the refusal a non-member gets.
     """
+    key_workspace_id = user.get("api_key_workspace_id")
+    if key_workspace_id is not None and workspace_id != key_workspace_id:
+        logger.warning(
+            "file_workspace_denied",
+            reason="key_workspace_mismatch",
+            workspace_id=str(workspace_id),
+            key_workspace_id=str(key_workspace_id),
+        )
+        raise AuthorizationError("Insufficient permissions", reason="not_a_member")
     permissions = PermissionService(db)
     await permissions.check_workspace_access(
         user_id=str(user.get("user_id", "")),
