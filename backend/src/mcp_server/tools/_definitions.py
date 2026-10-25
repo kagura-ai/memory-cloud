@@ -284,7 +284,7 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25); returns ranked summaries, plus content for the top `full`. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
 Query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); accept with update_memory(accept_supersede_candidate=true), reject with dismiss_supersede_candidate=true. folded? {count, memory_ids}: judge-verified older versions.
+Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, observed_at?, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate: an older near-duplicate (a suggestion); accept with update_memory(accept_supersede_candidate=true), reject with dismiss_supersede_candidate=true. folded? {count, memory_ids}: judge-verified older versions.
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -325,7 +325,7 @@ Manual: guide(["recall"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Filter object; keys AND together: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector-ingested memories), near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
+                        "description": "Filter object; keys ANDed: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector memories), near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
                     },
                     "context_id": {
                         "type": "string",
@@ -2012,7 +2012,7 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, url
             "name": "list",
             "readOnly": True,
             "description": """List a context's live memories that match exact filters — every match, no ranking, stable pages, e.g. {"type": "task", "details.status": "open"}. recall() is for meaning.
-Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, observed_at?, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["list"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2024,12 +2024,12 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": 'Exact-match filters, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
+                        "description": 'Exact-match filters, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
                     },
                     "order_by": {
                         "type": "string",
-                        "enum": ["updated_at", "created_at", "importance"],
-                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at). id breaks ties.",
+                        "enum": ["updated_at", "created_at", "importance", "observed_at"],
+                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at; observed_at puts memories without one last). id breaks ties.",
                     },
                     "direction": {
                         "type": "string",

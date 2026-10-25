@@ -29,6 +29,7 @@ def _memory(memory_id):
         client="api",
         tags=[],
         context=None,
+        details=None,  # #2330
         source_uri=None,
         source_type="manual",
         reference_count=0,

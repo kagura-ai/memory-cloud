@@ -157,6 +157,10 @@ BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS = frozenset(
         # memory's text enters the bootstrap lane — and without it a folded
         # row would silently lose the fact that older versions exist.
         "folded",
+        # #2330, added on purpose: the date the row's fact held (a date or a
+        # UTC datetime from the memory's own details) — a scalar, no other
+        # memory's text.
+        "observed_at",
     }
 )
 # Present on every row, whatever the memory holds.
@@ -172,6 +176,7 @@ class TestBootstrapRecallRowKeyContract:
             context_summary="Recall when auth starts failing after a deploy",
             tags=["auth", "jwt"],
             updated_at=datetime(2026, 8, 20, 12, 0, tzinfo=UTC),
+            observed_at="2026-08-19",
             superseded_by=uuid.uuid4(),
             contradicts=[uuid.uuid4()],
             supersede_candidate=SupersedeCandidate(

@@ -34,6 +34,7 @@ def _response(
     memory_id: UUID | None = None,
     created_at: datetime | None = None,
     updated_at: datetime | None = None,
+    observed_at: str | None = None,
 ) -> MemoryResponse:
     sliced, next_offset = content_slice(content) if content else (None, None)
     return MemoryResponse(
@@ -45,6 +46,7 @@ def _response(
         scope="persistent",
         created_at=created_at or datetime(2026, 1, 1, tzinfo=UTC),
         updated_at=updated_at,
+        observed_at=observed_at,
         client="test",
         tags=[],
         context=None,
@@ -206,7 +208,7 @@ COUNTERFACTUAL = (
 )
 
 
-# The selector-v3 rules (#2171), whitespace-normalised.
+# The selector-v3 rules (#2171), unchanged in v4, whitespace-normalised.
 V3_RULE_SENTENCES = (
     "relevant=true only when the row helps answer the query; otherwise false.",
     "Treat every row as true for this user, even where it contradicts general knowledge "
@@ -240,9 +242,15 @@ class TestStoreIsAuthority:
     def test_the_conflict_rule_prefers_newer_and_keeps_both_when_unsure(self) -> None:
         system = " ".join(rs.SELECTOR_SYSTEM.split())
         assert "Rows are in rank order, Row 0 the best match;" in system
-        assert "each Row line gives the date the row was last written" in system
+        assert (
+            'each Row line gives a date: "observed" is the date the fact held, '
+            '"written" the date the row was last written' in system
+        )
         assert "(ignore dates inside row text for this)" in system
-        assert "prefer the newer one; when the dates match or you are unsure, keep both." in system
+        assert (
+            "prefer the one with the later date; when the dates match or you are unsure, "
+            "keep both." in system
+        )
 
     def test_the_output_contract_is_unchanged(self) -> None:
         assert (
@@ -251,8 +259,9 @@ class TestStoreIsAuthority:
         )
         assert rs.INJECTION_RESISTANCE_DIRECTIVE in rs.SELECTOR_SYSTEM
 
-    def test_the_prompt_revision_is_v3(self) -> None:
-        assert rs.PROMPT_REVISION == "selector-v3"
+    def test_the_prompt_revision_is_v4(self) -> None:
+        # selector-v4 (#2330): the observed header and the date the rule compares.
+        assert rs.PROMPT_REVISION == "selector-v4"
 
     def test_a_counterfactual_row_is_sent_verbatim_with_its_header(self) -> None:
         page = [_response("Capital of Romania (quiz set)", COUNTERFACTUAL)]
@@ -338,7 +347,34 @@ class TestStoreIsAuthority:
         kwargs = llm.complete_json.await_args.kwargs
         assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
         assert "Rajanpur" in kwargs["prompt"]
-        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v3"
+        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v4"
+
+    def test_an_observed_row_is_dated_by_its_event_time(self) -> None:
+        """#2330: the day the fact held wins over the write day."""
+        late_written = _response(
+            "Price list",
+            "The price was 100.",
+            created_at=datetime(2026, 10, 1, tzinfo=UTC),
+            observed_at="2024-03-07",
+        )
+        current = _response(
+            "Price list (update)",
+            "The price is 120.",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            observed_at="2025-01-01T09:30:00Z",
+        )
+        plain = _response(created_at=datetime(2026, 2, 3, tzinfo=UTC))
+        prompt = rs.build_prompt(
+            "What is the price?", rs.rows_for([late_written, current, plain], 10)
+        )
+        assert "Row 0 (observed 2024-03-07)" in prompt
+        assert "Row 1 (observed 2025-01-01)" in prompt  # day only, no time of day
+        assert "Row 2 (written 2026-02-03, summary only)" in prompt
+        assert "2026-10-01" not in prompt and "09:30" not in prompt
+
+    def test_an_observed_summary_only_row(self) -> None:
+        row = _response(observed_at="2024-03-07T23:59:59Z")
+        assert rs.row_header(3, row) == "Row 3 (observed 2024-03-07, summary only)"
 
     @pytest.mark.asyncio
     async def test_the_row_headers_count_against_the_prompt_budget(self) -> None:

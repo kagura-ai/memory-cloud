@@ -57,6 +57,7 @@ from utils.geo_location import (
     point_in_polygon,
 )
 from utils.logger import get_logger
+from utils.observed_at import parse_observed_bound
 from utils.tokenizer import build_fulltext_query, tokenize_for_search
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -189,6 +190,52 @@ def _build_date_clauses(filters: dict[str, Any]) -> list[str]:
         normalized = to_utc_iso(parse_iso8601_to_aware(value, key).astimezone(UTC))
         out.append(f"{col} {op} {_sql_str(normalized)}")
     return out
+
+
+ObservedBounds = tuple[str | None, str | None]
+
+
+def extract_observed_bounds(filters: dict[str, Any] | None) -> ObservedBounds | None:
+    """``filters.observed_after`` / ``observed_before`` for the LanceDB legs (#2330).
+
+    Returns the two bounds in the column's 20-char UTC form (None for an
+    absent one), or None when neither is given. A bad value raises (the
+    ``extract_near_filter`` contract: fail closed, 4xx).
+    """
+    if not filters:
+        return None
+    after = filters.get("observed_after")
+    before = filters.get("observed_before")
+    if after is None and before is None:
+        return None
+    return (
+        parse_observed_bound(after, "observed_after")[0] if after is not None else None,
+        parse_observed_bound(before, "observed_before")[0] if before is not None else None,
+    )
+
+
+def filter_results_by_observed(
+    results: list[dict[str, Any]], bounds: ObservedBounds
+) -> list[dict[str, Any]]:
+    """Post-hoc ``filters.observed_after/before`` for the LanceDB legs (#2330).
+
+    LanceDB keeps the event time only in ``payload_json`` (no Arrow column),
+    so the Qdrant ``observed_at`` range is enforced here: after inclusive,
+    before exclusive, string comparison of the fixed-width UTC form. Rows
+    without the payload never match (must semantics).
+    """
+    after, before = bounds
+    kept: list[dict[str, Any]] = []
+    for row in results:
+        value = (row.get("payload") or {}).get("observed_at")
+        if not isinstance(value, str):
+            continue
+        if after is not None and value < after:
+            continue
+        if before is not None and value >= before:
+            continue
+        kept.append(row)
+    return kept
 
 
 def filter_results_by_near(
@@ -564,6 +611,7 @@ class LanceVectorStore:
         score_threshold = extract_score_threshold(filters)
         near = extract_near_filter(filters)
         within = extract_within_filter(filters)
+        observed = extract_observed_bounds(filters)
 
         def _run() -> list[dict]:
             tbl = self._open(collection_name)
@@ -581,7 +629,9 @@ class LanceVectorStore:
             # server-side and has no such gap). Overfetch narrows, but does
             # not close, that parity gap.
             fetch_limit = (
-                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if (near or within) else limit
+                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP)
+                if (near or within or observed)
+                else limit
             )
             return q.limit(fetch_limit).to_list()
 
@@ -614,7 +664,10 @@ class LanceVectorStore:
             results = filter_results_by_near(results, near)
         if within is not None:
             results = filter_results_by_within(results, within)
-        if near is not None or within is not None:
+        # #2330: the event time, post-hoc like the geo conditions.
+        if observed is not None:
+            results = filter_results_by_observed(results, observed)
+        if near is not None or within is not None or observed is not None:
             results = results[:limit]
         return results
 
@@ -640,6 +693,7 @@ class LanceVectorStore:
         )
         near = extract_near_filter(filters)
         within = extract_within_filter(filters)
+        observed = extract_observed_bounds(filters)
 
         # Shared expanded-query pipeline (identical to
         # db.qdrant.search_memories_fulltext) so both backends tokenize the same.
@@ -656,7 +710,9 @@ class LanceVectorStore:
             # #1332/#1335: widen the BM25 window when a hard geo predicate
             # will post-filter it (see search_semantic).
             fetch_limit = (
-                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if (near or within) else limit
+                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP)
+                if (near or within or observed)
+                else limit
             )
             return q.limit(fetch_limit).to_list()
 
@@ -679,7 +735,10 @@ class LanceVectorStore:
             results = filter_results_by_near(results, near)
         if within is not None:
             results = filter_results_by_within(results, within)
-        if near is not None or within is not None:
+        # #2330: the event time, post-hoc like the geo conditions.
+        if observed is not None:
+            results = filter_results_by_observed(results, observed)
+        if near is not None or within is not None or observed is not None:
             results = results[:limit]
         return results
 

@@ -1725,7 +1725,8 @@
           "enum": [
             "updated_at",
             "created_at",
-            "importance"
+            "importance",
+            "observed_at"
           ]
         },
         "direction": {

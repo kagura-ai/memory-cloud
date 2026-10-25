@@ -55,6 +55,7 @@ def _source(target_id: uuid.UUID, *, age_days: int = 0, judged: bool = False) ->
         client="test",
         tags=[],
         context=None,
+        details=None,  # #2330
         source_uri="docs/a",
         source_type=SOURCE_TYPE_MANUAL,
         workspace_id=WS,

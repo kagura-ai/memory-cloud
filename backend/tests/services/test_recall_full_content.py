@@ -59,6 +59,7 @@ def _mem(
         client="test",
         tags=[],
         context=None,
+        details=None,  # #2330
         source_uri=None,
         source_type=source_type,
         version=1,

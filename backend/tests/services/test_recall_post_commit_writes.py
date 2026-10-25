@@ -41,6 +41,7 @@ def _memory(**overrides) -> SimpleNamespace:
         "client": "test",
         "tags": [],
         "context": None,
+        "details": None,  # #2330
         "source_uri": None,
         "source_type": None,
         "version": 1,  # #2043
@@ -135,6 +136,7 @@ class TestRecallOrder:
             client="test",
             tags=[],
             context=None,
+            details=None,  # #2330
             source_uri=None,
             source_type=None,
         )

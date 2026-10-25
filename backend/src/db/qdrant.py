@@ -54,6 +54,7 @@ from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_po
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
+from utils.observed_at import parse_observed_bound
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
 from utils.tag_normalize import TAG_GROUPS_FILTER_KEY
@@ -484,6 +485,11 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
     return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
+# The recall filter keys of the event time (#2330) and their Qdrant range
+# operator: after inclusive, before exclusive.
+OBSERVED_FILTER_OPERATORS = {"observed_after": "gte", "observed_before": "lt"}
+
+
 def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
     """Build FieldConditions for date range filtering (Issue #78).
 
@@ -517,6 +523,18 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
             )
         dt = parse_iso8601_to_aware(value, filter_key)
         conditions.append(FieldCondition(key=field, range=DatetimeRange(**{operator: dt})))
+
+    # WHEN axis (#2330): the event time. A date means the start of that day
+    # (UTC); after is inclusive, before exclusive (``lt``, unlike the
+    # created/updated rows above). Points without the payload never match.
+    for filter_key, operator in OBSERVED_FILTER_OPERATORS.items():
+        value = filters.get(filter_key)
+        if value is None:
+            continue
+        _, bound = parse_observed_bound(value, filter_key)
+        conditions.append(
+            FieldCondition(key="observed_at", range=DatetimeRange(**{operator: bound}))
+        )
 
     return conditions
 

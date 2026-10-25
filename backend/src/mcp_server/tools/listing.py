@@ -40,6 +40,7 @@ from services.memory_listing import (
     list_memories,
 )
 from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso
+from utils.observed_at import observed_at_from_details
 from utils.response_budget import (
     BudgetArgumentError,
     fit_items,
@@ -63,6 +64,10 @@ def _memory_item(m: Any, *, include_details: bool) -> dict[str, Any]:
         "updated_at": to_utc_iso(m.updated_at),
         "version": m.version,  # #2043
     }
+    # #2330: when the fact held, the details form; absent when unset.
+    observed_at = observed_at_from_details(m.details)
+    if observed_at is not None:
+        item["observed_at"] = observed_at
     if include_details:
         item["details"] = m.details
     return item

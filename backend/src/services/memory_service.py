@@ -5544,6 +5544,8 @@ class MemoryService:
                     scope=memory.scope,
                     created_at=memory.created_at,
                     updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
+                    # #2330: when the fact held, the details form.
+                    observed_at=observed_at_from_details(memory.details),
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,

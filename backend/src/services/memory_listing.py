@@ -45,12 +45,15 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
+from utils.observed_at import parse_observed_bound
 from utils.tag_normalize import mechanical_variant_key
 
 ORDER_COLUMNS = {
     "updated_at": func.coalesce(Memory.updated_at, Memory.created_at),
     "created_at": Memory.created_at,
     "importance": Memory.importance,
+    # #2330: the event time; rows without one go last in both directions.
+    "observed_at": Memory.observed_at,
 }
 DIRECTIONS = ("asc", "desc")
 MAX_LIMIT = 100
@@ -78,6 +81,12 @@ _TIME_FILTERS = {
     "updated_after": (Memory.updated_at, ">="),
     "updated_before": (Memory.updated_at, "<"),
 }
+# #2330: the event time, compared in the column's 20-char UTC text form (a
+# date bound means the start of that day).
+_OBSERVED_FILTERS = {
+    "observed_after": (Memory.observed_at, ">="),
+    "observed_before": (Memory.observed_at, "<"),
+}
 _KNOWN_FILTERS = {
     "type",
     "scope",
@@ -90,6 +99,7 @@ _KNOWN_FILTERS = {
     "source_uri_prefix",
     "trust_tier",
     *_TIME_FILTERS,
+    *_OBSERVED_FILTERS,
 }
 _RECALL_ONLY = {"near", "within"}
 
@@ -211,8 +221,10 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
     space insensitive — the plural tolerance recall has is not applied here;
     under ``all`` same-fold tags with other numbers stay apart, as in recall:
     ``_all_tag_groups_predicates``);
-    importance {gte, lte, gt, lt}; created_/updated_ after/before (ISO 8601,
-    after inclusive, before exclusive); source_uri_prefix; trust_tier='trusted';
+    importance {gte, lte, gt, lt}; created_/updated_/observed_ after/before (ISO
+    8601, after inclusive, before exclusive; an observed_* date means the start
+    of that day, UTC, and a memory without an event time never matches);
+    source_uri_prefix; trust_tier='trusted';
     ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
     JSON type, and for a number the same spelling). ``near`` / ``within`` are
     recall_nearby's job and are refused by name. ``updated_after`` / ``updated_before`` read the
@@ -272,6 +284,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
         elif key in _TIME_FILTERS:
             column, op = _TIME_FILTERS[key]
             out.append(column.op(op)(_naive_utc(value, key)))
+        elif key in _OBSERVED_FILTERS:
+            column, op = _OBSERVED_FILTERS[key]
+            out.append(column.op(op)(parse_observed_bound(value, key)[0]))
         elif key == "source_uri_prefix":
             if not isinstance(value, str) or not value:
                 raise ValueError("source_uri_prefix must be a non-empty string")
@@ -333,8 +348,9 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
     Not applied: ``trust_tier`` (the resolver's ``trusted_only`` covers it),
     ``analysis_cluster`` (a pool membership, not a row property), ``near`` /
     ``within`` / ``score_threshold`` / ``client`` (query shape), and the time
-    windows — a target is older than its source by construction, so
-    ``created_after`` would drop almost every suggestion.
+    windows (``created_*``, ``updated_*``, ``observed_*``) — a target is older
+    than its source by construction, so ``created_after`` would drop almost
+    every suggestion.
 
     Never raises on a filter recall tolerated: a value recall could not have
     applied is ignored here rather than refused.
@@ -430,9 +446,20 @@ async def list_memories(
     # database round trip; other callers may still pass the raw dict.
     where.extend(predicates if predicates is not None else compile_memory_filters(filters))
     column = ORDER_COLUMNS[order_by]
-    order = (
-        (column.asc(), Memory.id.asc()) if direction == "asc" else (column.desc(), Memory.id.desc())
-    )
+    if order_by == "observed_at":
+        # #2330: the only nullable sort key — NULLS LAST both ways (Postgres
+        # puts NULLs first on DESC by default).
+        order = (
+            (column.asc().nulls_last(), Memory.id.asc())
+            if direction == "asc"
+            else (column.desc().nulls_last(), Memory.id.desc())
+        )
+    else:
+        order = (
+            (column.asc(), Memory.id.asc())
+            if direction == "asc"
+            else (column.desc(), Memory.id.desc())
+        )
     total = (await db.execute(select(func.count()).select_from(Memory).where(*where))).scalar_one()
     rows = (
         (

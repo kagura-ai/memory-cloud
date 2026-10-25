@@ -48,6 +48,7 @@ def _mem(age_days: int, **overrides) -> SimpleNamespace:
         "client": "test",
         "tags": [],
         "context": None,
+        "details": None,  # #2330
         "source_uri": None,
         "source_type": None,
         "version": 1,

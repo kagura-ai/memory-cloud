@@ -113,8 +113,9 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
 
     What an agent needs to judge a hit and fetch it: id, the head of the
     summary (``summary_cut: true`` when it was shortened), type, importance,
-    score, created_at and updated_at (null on a memory never edited), plus the
-    rare annotations it must act on. tags, context_summary and scope stay in
+    score, created_at and updated_at (null on a memory never edited),
+    observed_at when the memory has one, plus the rare annotations it must act
+    on. tags, context_summary and scope stay in
     ``verbosity="full"``.
     """
     summary, cut = compact_summary(r.summary)
@@ -131,8 +132,16 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
             "updated_at": to_utc_iso(r.updated_at),
         }
     )
+    _add_observed_at(item, r)
     _add_recall_annotations(item, r)
     return item
+
+
+def _add_observed_at(item: dict[str, Any], r: Any) -> None:
+    """#2330: when the fact held (a date or a UTC datetime); absent when unset."""
+    observed_at = getattr(r, "observed_at", None)
+    if observed_at:
+        item["observed_at"] = observed_at
 
 
 def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:
@@ -202,6 +211,7 @@ def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
             "updated_at": to_utc_iso(r.updated_at),
         }
     )
+    _add_observed_at(item, r)
     # #2043: the version to pass as update_memory's expected_version. Full
     # only: compact is the judge-and-fetch pass, and an edit reads the memory
     # (reference, which carries it) first. Absent when the row did not say.
