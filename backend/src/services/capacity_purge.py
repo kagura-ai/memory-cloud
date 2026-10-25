@@ -74,17 +74,78 @@ PURGE_MAX_WORKSPACES_PER_RUN = 5
 NOTICE_KEY_TTL_SECONDS = 45 * 24 * 3600
 
 
-def purge_at(locked_since: datetime | None) -> datetime | None:
-    """When the data is deleted if the lock holds — ``None`` while not locked.
+def purge_at(
+    locked_since: datetime | None,
+    *,
+    first_notice_at: datetime | None,
+    final_notice_at: datetime | None,
+    now: datetime,
+) -> datetime | None:
+    """The run that deletes the data if the lock holds — ``None`` while not locked.
 
-    The :data:`SWEEP_HOUR_UTC` run on calendar day 30 of the stamp: the first
-    run :func:`purge_due` says yes to, whatever time of day the stamp was
-    written. Naive UTC. The usage payload, the banner and the countdown mails
-    all show this value.
+    The :data:`SWEEP_HOUR_UTC` run on the first calendar day :func:`purge_due`
+    says yes to, whatever time of day the stamp or the mails were written:
+    the latest of
+
+    * calendar day 30 of the stamp,
+    * :data:`MIN_WARNING_DAYS` days after the lock's first notice,
+    * the day after its final (day-29) notice,
+
+    and never before the next run. A notice not sent yet is projected onto
+    the run that sends it: the first one onto the next run, the final one onto
+    the day-29 run or the next run, whichever is later (#1971). On time —
+    first mail on day 0, the rest on schedule — that is day 30, and the day-29
+    mail says "1 day left"; a stamp more than 23 days old at its first mail
+    is purged later, and this is the date the mails, the usage payload and the
+    banner show. Naive UTC.
+
+    Args:
+        locked_since: ``workspaces.capacity_locked_since``.
+        first_notice_at: ``workspaces.capacity_purge_first_notice_at``.
+        final_notice_at: ``workspaces.capacity_purge_final_notice_at``.
+        now: The clock (naive UTC); decides which run is the next one.
     """
     if locked_since is None:
         return None
-    return datetime.combine(locked_since.date() + PURGE_AFTER, time(SWEEP_HOUR_UTC))
+    return _purge_run(
+        locked_since, first_notice_at=first_notice_at, final_notice_at=final_notice_at, now=now
+    )
+
+
+def _purge_run(
+    locked_since: datetime,
+    *,
+    first_notice_at: datetime | None,
+    final_notice_at: datetime | None,
+    now: datetime,
+) -> datetime:
+    """:func:`purge_at` for a running lock clock."""
+    sweep = time(SWEEP_HOUR_UTC)
+    next_run = now.date() if now.time() < sweep else now.date() + timedelta(days=1)
+    stamp_day = locked_since.date()
+    first = first_notice_at.date() if first_notice_at is not None else next_run
+    final = (
+        final_notice_at.date()
+        if final_notice_at is not None
+        else max(stamp_day + timedelta(days=FINAL_NOTICE_DAY), next_run)
+    )
+    day = max(
+        stamp_day + PURGE_AFTER,
+        first + timedelta(days=MIN_WARNING_DAYS),
+        final + timedelta(days=1),
+        next_run,
+    )
+    return datetime.combine(day, sweep)
+
+
+def workspace_purge_at(ws: Workspace, *, now: datetime) -> datetime | None:
+    """:func:`purge_at` for a workspace row."""
+    return purge_at(
+        ws.capacity_locked_since,
+        first_notice_at=ws.capacity_purge_first_notice_at,
+        final_notice_at=ws.capacity_purge_final_notice_at,
+        now=now,
+    )
 
 
 @dataclass(frozen=True)
@@ -332,8 +393,7 @@ async def send_due_purge_notices(
                 skipped += 1
                 continue
         since = ws.capacity_locked_since
-        deadline = purge_at(since)
-        if since is None or deadline is None:
+        if since is None:
             skipped += 1
             continue
         stage = notice_stage(_days_between(since, now))
@@ -379,6 +439,14 @@ async def send_due_purge_notices(
             await _release_claim(redis, key, ws_id)
             failed += 1
             continue
+        # After the record: this mail is the first / final notice the purge
+        # date counts from (#1971).
+        deadline = _purge_run(
+            since,
+            first_notice_at=ws.capacity_purge_first_notice_at,
+            final_notice_at=ws.capacity_purge_final_notice_at,
+            now=now,
+        )
         try:
             delivered = await email.send_capacity_purge_notice(
                 to_email=to_email,

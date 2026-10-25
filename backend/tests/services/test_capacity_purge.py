@@ -1,7 +1,7 @@
 """#1969: the capacity purge — clock arithmetic and the countdown notices (mocked DB)."""
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,9 +30,14 @@ from services.capacity_purge import (
 from services.context_service import CAPACITY_PURGE_ACTOR, WorkspacePurgeReport
 
 
+def _on_time(since: datetime, now: datetime | None = None) -> datetime | None:
+    """``purge_at`` for a lock whose day-0 mail went out in the stamping run."""
+    return purge_at(since, first_notice_at=since, final_notice_at=None, now=now or since)
+
+
 def test_purge_at_is_thirty_days_after_lock_start() -> None:
     since = datetime(2026, 10, 1, 4, 0)
-    assert purge_at(since) == datetime(2026, 10, 31, 4, 0)
+    assert _on_time(since) == datetime(2026, 10, 31, 4, 0)
     assert PURGE_AFTER == timedelta(days=30)
 
 
@@ -47,13 +52,129 @@ def test_purge_at_is_thirty_days_after_lock_start() -> None:
 def test_purge_at_is_the_sweep_that_purges(since) -> None:
     """The date the owner is shown is the 04:00 UTC run on calendar day 30 —
     the run ``purge_due`` first says yes to — not stamp + 30 x 24 hours."""
-    deadline = purge_at(since)
+    deadline = _on_time(since)
     assert deadline == datetime(2026, 10, 31, SWEEP_HOUR_UTC, 0)
     final = deadline - timedelta(days=1)  # the day-29 "1 day left" mail
     assert purge_due(since, deadline, final_notice_at=final, first_notice_at=since)
     assert not purge_due(
         since, deadline - timedelta(days=1), final_notice_at=final, first_notice_at=since
     )
+    # Recorded on schedule, the final notice does not move it.
+    assert purge_at(since, first_notice_at=since, final_notice_at=final, now=final) == deadline
+
+
+@pytest.mark.parametrize(
+    ("first_age", "purge_day"),
+    [
+        (0, 30),  # on time
+        (23, 30),  # first mail on day 23: exactly a week before day 30
+        (24, 31),  # one day later: the week moves the purge by a day
+        (25, 32),
+        (29, 36),  # the first mail is the day-29 one
+        (35, 42),  # past day 30: a week after it, never a past date
+    ],
+)
+def test_purge_at_waits_a_week_after_a_late_first_notice(first_age, purge_day) -> None:
+    """#1971: the first notice must precede the purge by ``MIN_WARNING_DAYS``,
+    so a stamp more than 23 days old at its first mail is purged later than
+    stamp + 30 days — and that later date is the one shown."""
+    since = datetime(2026, 10, 1, 4, 0, 5)
+    first = since + timedelta(days=first_age)
+    final = first if first_age >= 29 else None
+    deadline = purge_at(since, first_notice_at=first, final_notice_at=final, now=first)
+    assert deadline == datetime(2026, 10, 1, SWEEP_HOUR_UTC) + timedelta(days=purge_day)
+
+
+def test_purge_at_projects_unsent_notices_onto_the_next_run() -> None:
+    """No notice yet: the first goes out on the next run (today's if it has not
+    run yet), the final one on the day-29 run or the next one if that is later."""
+    since = datetime(2026, 9, 1, 4, 0, 5)  # 40 days old, never notified
+    before_run = datetime(2026, 10, 11, 3, 0)
+    after_run = datetime(2026, 10, 11, 12, 0)
+    kwargs = {"first_notice_at": None, "final_notice_at": None}
+    assert purge_at(since, now=before_run, **kwargs) == datetime(2026, 10, 18, 4, 0)
+    assert purge_at(since, now=after_run, **kwargs) == datetime(2026, 10, 19, 4, 0)
+
+
+def test_purge_at_is_never_before_the_next_run() -> None:
+    """Warned and expired, but not purged yet (the per-run cap): the next run."""
+    since = datetime(2026, 9, 1, 4, 0, 5)
+    deadline = purge_at(
+        since,
+        first_notice_at=since,
+        final_notice_at=datetime(2026, 9, 30, 4, 0, 5),
+        now=datetime(2026, 10, 11, 12, 0),
+    )
+    assert deadline == datetime(2026, 10, 12, 4, 0)
+
+
+def _simulate(start_day: int, failures: frozenset[int] = frozenset()):
+    """Daily runs of the notice pass then the purge decision, as in
+    ``run_capacity_purge_sweep``: the notices are on from ``start_day`` and the
+    mails of the ``failures`` days fail (claim released, nothing recorded).
+    Yields ``(since, day, (first, final) before the run, the same after it, due)``."""
+    since = datetime(2026, 9, 1, 4, 0, 5)
+    first = final = None
+    claimed: set[int] = set()
+    for day in range(0, 80):
+        run = datetime(2026, 9, 1, 4, 0, 40) + timedelta(days=day)
+        before = (first, final)
+        stage = notice_stage(day)
+        if day >= start_day and stage is not None and stage not in claimed:
+            if day not in failures:
+                claimed.add(stage)
+                first = first or run
+                if stage == NOTICE_DAYS[-1]:
+                    final = run
+        due = purge_due(since, run, final_notice_at=final, first_notice_at=first)
+        yield since, day, before, (first, final), due
+        if due:
+            return
+
+
+@pytest.mark.parametrize("start_day", [0, 1, 7, 20, 23, 24, 26, 28, 29, 30, 31, 45])
+def test_purge_at_is_the_first_run_purge_due_says_yes_to(start_day) -> None:
+    """Property (#1971): once the notices are on, ``purge_at`` asked at any time
+    names the very run on which ``purge_due`` first says yes — no earlier
+    run is due, and that one is."""
+    runs = list(_simulate(start_day))
+    since, purge_day, *_, due = runs[-1]
+    assert due
+    expected = datetime.combine(since.date() + timedelta(days=purge_day), time(SWEEP_HOUR_UTC))
+    for _, day, before, after, _ in runs:
+        if day < start_day:
+            continue
+        asked_before = datetime(2026, 9, 1, 3, 0) + timedelta(days=day)
+        first, final = before
+        assert (
+            purge_at(since, first_notice_at=first, final_notice_at=final, now=asked_before)
+            == expected
+        ), day
+        if day < purge_day:
+            asked_after = datetime(2026, 9, 1, 12, 0) + timedelta(days=day)
+            first, final = after
+            assert (
+                purge_at(since, first_notice_at=first, final_notice_at=final, now=asked_after)
+                == expected
+            ), day
+
+
+@pytest.mark.parametrize("failures", [frozenset({0}), frozenset({29}), frozenset({29, 30, 31})])
+def test_purge_at_is_a_lower_bound_when_a_mail_fails(failures) -> None:
+    """A failed mail moves the purge later; the date shown before the failure
+    is never after the run that really purges."""
+    runs = list(_simulate(0, failures))
+    since, purge_day, *_ = runs[-1]
+    real = datetime.combine(since.date() + timedelta(days=purge_day), time(SWEEP_HOUR_UTC))
+    for _, day, before, _, _ in runs:
+        first, final = before
+        shown = purge_at(
+            since,
+            first_notice_at=first,
+            final_notice_at=final,
+            now=datetime(2026, 9, 1, 3, 0) + timedelta(days=day),
+        )
+        assert shown is not None and shown <= real
 
 
 @pytest.mark.parametrize(
@@ -96,7 +217,10 @@ def test_purge_needs_the_first_notice_a_week_earlier(first_notice_at, due) -> No
 
 
 def test_purge_at_none_when_not_locked() -> None:
-    assert purge_at(None) is None
+    assert (
+        purge_at(None, first_notice_at=None, final_notice_at=None, now=datetime(2026, 10, 1))
+        is None
+    )
 
 
 def test_notice_days_are_the_policy_series() -> None:
@@ -209,7 +333,7 @@ async def test_sends_day_zero_notice_once() -> None:
     assert kwargs["days_left"] == 30 and kwargs["locale"] == "en"
     assert kwargs["to_email"] == "owner@example.test"
     assert kwargs["purge_at"] == now + timedelta(days=30)
-    assert kwargs["purge_at"] == purge_at(ws.capacity_locked_since)
+    assert kwargs["purge_at"] == _on_time(ws.capacity_locked_since)
     assert kwargs["over_memories"] == 2 and kwargs["over_bytes"] == 0
     assert kwargs["contexts_url"].endswith("/workspace/contexts")
     assert redis.keys[notice_key(ws.id, now, 0)] == NOTICE_KEY_TTL_SECONDS
@@ -259,12 +383,42 @@ async def test_stage_counts_calendar_days_not_elapsed_time() -> None:
 async def test_last_notice_says_one_day_left() -> None:
     since = datetime(2026, 10, 1, 4, 0, 30)
     ws = _ws(since)
+    ws.capacity_purge_first_notice_at = since  # the day-0 mail
     email = _email(return_value=True)
     with _locked():
         await send_due_purge_notices(
             _db([ws]), now=datetime(2026, 10, 30, 4, 0, 0), redis=_Redis(), email=email
         )
     assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 1
+
+
+@pytest.mark.parametrize(
+    ("age", "days_left"),
+    [
+        (25, 7),  # stage 23 mail on day 25: purge on day 32
+        (29, 7),  # first mail is the day-29 one
+        (35, 7),  # stamp past day 30: a week from now, not a past date with 0 left
+    ],
+)
+@pytest.mark.asyncio
+async def test_late_first_notice_names_the_real_purge_date(age, days_left) -> None:
+    """#1971: notices switched on when the stamp is already old — the mail names
+    the run that will purge (a week after this first mail), not stamp + 30."""
+    since = datetime(2026, 9, 1, 4, 0, 30)
+    now = datetime(2026, 9, 1, 4, 0, 50) + timedelta(days=age)
+    ws = _ws(since)
+    email = _email(return_value=True)
+    with _locked():
+        await send_due_purge_notices(_db([ws]), now=now, redis=_Redis(), email=email)
+    kwargs = email.send_capacity_purge_notice.call_args.kwargs
+    assert kwargs["days_left"] == days_left
+    assert kwargs["purge_at"] == datetime.combine(now.date() + timedelta(days=7), time(4))
+    assert kwargs["purge_at"] == purge_at(
+        since,
+        first_notice_at=ws.capacity_purge_first_notice_at,
+        final_notice_at=ws.capacity_purge_final_notice_at,
+        now=now,
+    )
 
 
 @pytest.mark.parametrize(

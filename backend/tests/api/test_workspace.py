@@ -8,6 +8,7 @@ Tests:
 - Member role updates (Issue #254)
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -553,17 +554,23 @@ class TestWorkspaceUsageCurrent:
         assert response.capacity_lock.cleanup_url.endswith("/workspace/settings/plan")
         assert response.capacity_lock.purge_at is None  # not stamped by the sweep yet
 
+    @pytest.mark.parametrize(
+        ("first_notice_at", "expected_purge_at"),
+        [
+            (datetime(2026, 10, 1, 4, 0, 9), "2026-10-31T04:00:00Z"),  # day-0 mail
+            (datetime(2026, 10, 27, 4, 0, 9), "2026-11-03T04:00:00Z"),  # first mail on day 26
+        ],
+    )
     @pytest.mark.parametrize("purge_enabled", [True, False])
     @pytest.mark.asyncio
     async def test_capacity_lock_carries_purge_at_when_stamped(
-        self, mock_db, mock_user, mock_workspace, purge_enabled
+        self, mock_db, mock_user, mock_workspace, purge_enabled, first_notice_at, expected_purge_at
     ):
         """#1969: the banner reads the deletion date from the lock payload — the
         04:00 UTC sweep on calendar day 30 of the stamp, ISO-8601 with ``Z`` —
         only once ``CAPACITY_PURGE_ENABLED`` is on: no date for a deletion that
-        will not happen."""
-        from datetime import datetime
-
+        will not happen. #1971: the run that really purges — a first notice
+        sent late moves it to a week after that notice."""
         from config.settings import get_settings
         from services.capacity_lock import CapacityLock
 
@@ -579,18 +586,21 @@ class TestWorkspaceUsageCurrent:
             cleanup_url="https://app.example.test/workspace/settings/plan",
         )
         mock_workspace.capacity_locked_since = datetime(2026, 10, 1, 4, 0, 7)
+        mock_workspace.capacity_purge_first_notice_at = first_notice_at
+        mock_workspace.capacity_purge_final_notice_at = None
         mock_db.execute.side_effect = self._build_execute_side_effects(mock_workspace)
         with (
             patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota,
             patch("services.capacity_lock.capacity_lock_state", new=AsyncMock(return_value=lock)),
             patch("config.settings.get_settings", return_value=settings),
+            patch("api.routes.workspace.utcnow", return_value=datetime(2026, 10, 27, 12, 0)),
         ):
             mock_quota.return_value.get_effective_quotas = AsyncMock(
                 return_value=self._make_effective_quotas()
             )
             response = await get_workspace_usage_current(user=mock_user, db=mock_db)
         assert response.capacity_lock is not None
-        expected = "2026-10-31T04:00:00Z" if purge_enabled else None
+        expected = expected_purge_at if purge_enabled else None
         assert response.capacity_lock.purge_at == expected
         assert response.model_dump(mode="json")["capacity_lock"]["purge_at"] == expected
 

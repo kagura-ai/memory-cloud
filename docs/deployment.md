@@ -2048,11 +2048,12 @@ deploy apart, in this order:
 3. **Purge**: `CAPACITY_PURGE_ENABLED=true`. A workspace is purged by the
    04:00 UTC run on calendar day 30 of its stamp, provided its day-29 mail
    went out on an earlier calendar day and its first mail at least 7 calendar
-   days before the run. That is the date shown in the mails
+   days before the run. The date shown in the mails
    and, once this flag is on, in the web banner and as
    `capacity_lock.purge_at` on `GET /api/v1/workspace/usage/current` (null
-   while the flag is off). Because of the stamp stage, the first purge
-   happens no earlier than 30 days after stage 1 ran. At most 5 workspaces
+   while the flag is off) is that run: day 30 when the first mail went out
+   by day 23, otherwise a week after the first mail. Because of the stamp
+   stage, the first purge happens no earlier than 30 days after stage 1 ran. At most 5 workspaces
    are purged per run, oldest stamp first; the rest wait for the next run.
    The lock is checked again just before the purge. Before deleting
    anything, the purge commits an `audit_logs` row
@@ -2073,8 +2074,9 @@ deploy apart, in this order:
    day-29 mail that fails or is sent late (a missed run catches up with it)
    moves the purge to the run after the day it went out; and notices turned
    on late (stage 2 enabled when stamps are already weeks old) give every
-   owner at least a week between the first mail and the deletion, even if
-   that is later than the date the mails show.
+   owner at least a week between the first mail and the deletion. The mails
+   and the banner name that later date: a stamp 35 days old at its first
+   mail gets a "7 days left" mail, not a past date.
 
    **Memories outside live contexts go too.** The lock counts every live
    memory of the workspace. After the contexts, the purge tombstones every
@@ -2088,17 +2090,20 @@ deploy apart, in this order:
 Before stage 3, list what the next runs will purge:
 
 ```sql
-SELECT id, capacity_locked_since, capacity_locked_since::date + 30 AS purge_date,
+SELECT id, capacity_locked_since,
+       GREATEST(capacity_locked_since::date + 30,
+                capacity_purge_first_notice_at::date + 7,
+                capacity_purge_final_notice_at::date + 1) AS purge_date,
        capacity_purge_first_notice_at, capacity_purge_final_notice_at
 FROM workspaces
 WHERE deleted_at IS NULL AND capacity_locked_since IS NOT NULL
 ORDER BY capacity_locked_since;
 ```
 
-A row whose `purge_date` is on or before a run's date (UTC), whose
-`capacity_purge_final_notice_at` is on an earlier date and whose
-`capacity_purge_first_notice_at` is at least 7 days before that date is purged
-on that run, unless it is within capacity by then.
+A row with both `capacity_purge_first_notice_at` and
+`capacity_purge_final_notice_at` set whose `purge_date` is on or before a run's
+date (UTC) is purged on that run, unless it is within capacity by then. A row
+with a notice column still empty is not purged yet.
 
 **Re-subscribe or owner cleanup during a purge.** Before each context and
 after every 1,000-memory chunk, the purge reads the workspace row again and
