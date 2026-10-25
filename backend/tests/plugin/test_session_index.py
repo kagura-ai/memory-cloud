@@ -150,7 +150,7 @@ def test_rows_are_flattened_and_capped(plugin_env: PluginEnv, run_hook: RunHook)
 def test_fetched_index_is_cached_and_printed(
     plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
 ) -> None:
-    server_rows = [{**r, "summary_cut": True} for r in index_rows(3)]
+    server_rows = [{**r, "summary_cut": True, "authored_by_caller": False} for r in index_rows(3)]
     stub_server.set_guardrails(
         [], extra={"index": server_rows, "index_total_available": 3, "index_truncated": False}
     )
@@ -160,11 +160,13 @@ def test_fetched_index_is_cached_and_printed(
     cache = json.loads(plugin_env.cache_path.read_text(encoding="utf-8"))
     assert cache["format"] == 1
     assert cache["index"] == [
-        {"memory_id": r["memory_id"], "summary": r["summary"]} for r in server_rows
+        {"memory_id": r["memory_id"], "summary": r["summary"], "authored_by_caller": False}
+        for r in server_rows
     ]
     assert cache["index_total_available"] == 3
     lines = _context(result).split("\n")
     assert lines[0].startswith("Memory index (3 rows")
+    assert lines[1].endswith(", by another member)")
     assert len(lines) == 4
 
 
@@ -177,3 +179,32 @@ def test_server_without_the_lane_caches_null(
     cache = json.loads(plugin_env.cache_path.read_text(encoding="utf-8"))
     assert cache["index"] is None and cache["index_total_available"] is None
     assert "Memory index" not in result.stdout
+
+
+def test_foreign_rows_carry_the_by_another_member_label(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    rows = [
+        {"memory_id": memory_id(1), "summary": "mine", "authored_by_caller": True},
+        {"memory_id": memory_id(2), "summary": "theirs", "authored_by_caller": False},
+        {"memory_id": memory_id(3), "summary": "unknown"},
+    ]
+    _fresh(plugin_env, rows, 3)
+    lines = _context(run_hook(payload("SessionStart", source="startup"))).split("\n")
+    assert lines[1:] == [
+        f"- mine (mem: {memory_id(1)[:8]})",
+        f"- theirs (mem: {memory_id(2)[:8]}, by another member)",
+        f"- unknown (mem: {memory_id(3)[:8]})",
+    ]
+
+
+def test_rows_dropped_by_the_hook_never_count_as_more(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    """The heading and the "more" line count served rows only: a malformed row
+    the hook skips is not one more to recall."""
+    rows = index_rows(2) + [{"memory_id": 5, "summary": "bad"}]
+    _fresh(plugin_env, rows, 3)
+    lines = _context(run_hook(payload("SessionStart", source="startup"))).split("\n")
+    assert lines[0].startswith("Memory index (2 rows")
+    assert len(lines) == 3 and "more" not in lines[-1]

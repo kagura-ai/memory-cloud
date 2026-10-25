@@ -1383,6 +1383,19 @@ def test_session_index_is_rendered_for_codex(codex_env: CodexEnv, run_codex: Run
     assert lines[1:] == [f"- {r['summary']} (mem: {r['memory_id'][:8]})" for r in rows]
 
 
+def test_session_index_labels_foreign_rows_for_codex(
+    codex_env: CodexEnv, run_codex: RunCodex
+) -> None:
+    rows = [{"memory_id": memory_id(7), "summary": "theirs", "authored_by_caller": False}]
+    codex_env.write_cache(
+        [],
+        fetched_at=datetime.now(UTC) - timedelta(seconds=5),
+        extra={"index": rows, "index_total_available": 1},
+    )
+    lines = run_codex(session_start()).specific["additionalContext"].split("\n")
+    assert lines[1] == f"- theirs (mem: {memory_id(7)[:8]}, by another member)"
+
+
 def test_session_index_is_cut_to_the_codex_token_budget(
     codex_env: CodexEnv, run_codex: RunCodex, hook_module: ModuleType
 ) -> None:
