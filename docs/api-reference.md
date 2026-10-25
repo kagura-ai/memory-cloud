@@ -79,6 +79,7 @@ Store a new memory with 3-layer architecture (summary, context_summary, details)
 | `context_summary` | string | No | Contextual explanation (max 2000 chars) |
 | `details` | object | No | Structured metadata (JSON) |
 | `importance` | float | No | Importance score 0.0-1.0 (default: 0.5) |
+| `observed_at` | string | No | When the fact held or the event happened ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)): an ISO 8601 date (`2024-03-07`) or datetime, stored in UTC as `details.observed_at`. If `details.observed_at` is also given, the two must agree. An invalid value is `422` |
 
 **Response:**
 
@@ -272,7 +273,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 |-------|------|----------|-------------|
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
-| `filters` | object | No | `context_id` (UUID) names the context to search — required. Also filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
+| `filters` | object | No | `context_id` (UUID) names the context to search — required. Also filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). Event time ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)): `observed_after` (inclusive) / `observed_before` (exclusive) on `details.observed_at`, ISO 8601 date or datetime; a date means the start of that day (UTC) and a memory without one never matches. **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
 | `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
 | `full` | integer | No | How many of the top results carry `content` (default `0` — summaries only — on REST; `0`-`100`, never more than `k`; the MCP `recall` tool defaults to 3). Each is cut at 1,500 characters; a cut one carries `content_truncated: true` and `content_next_offset` (the `content_offset` that continues it in `reference`). Results past the first `full` carry no `content` key. The share-key `/recall` ignores it and returns summaries only. |
 
@@ -341,12 +342,15 @@ Retrieve complete details (Layer 3) of a specific memory by ID.
   "importance": 0.9,
   "created_at": "2025-11-20T15:00:00Z",
   "updated_at": "2025-11-20T15:00:00Z",
+  "observed_at": null,
   "version": 1,
   "historical": false,
   "current_version": null,
   "unavailable_fields": null
 }
 ```
+
+`observed_at` ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)) is `details.observed_at` (a date or a UTC datetime, when the fact held), or `null`; an earlier version shows its own value.
 
 `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) is 1 when the memory is created and moves by one with each edit that changes `summary`, `context_summary`, `content`, `details`, `type`, `importance` or `tags`; `remember` and `recall` results carry it too. Pass it as `expected_version` to `PATCH` below.
 
@@ -391,7 +395,7 @@ A memory's revision log, newest first ([#2043](https://github.com/kagura-ai/memo
 
 ### PATCH /api/v1/memory/{memory_id}
 
-Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, `details`; omitted fields keep their value, `tags` replaces the list and `"details": null` clears it. The response is the updated memory in the `reference` shape, `version` included.
+Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, `details`, `observed_at`; omitted fields keep their value, `tags` replaces the list and `"details": null` clears it. `observed_at` ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)) sets `details.observed_at`: alone, it keeps the rest of the stored details (a new version); with `details` it must match `details.observed_at` if that is given; `null` means unchanged. The response is the updated memory in the `reference` shape, `version` included.
 
 `expected_version` (optional, integer ≥ 1) makes the patch conditional: it applies only while the memory is still at that version. Otherwise nothing is written and the call answers `409`:
 

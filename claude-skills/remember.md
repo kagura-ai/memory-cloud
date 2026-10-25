@@ -39,7 +39,7 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 
 **Updating a fact.** When the material changes a fact that may already be stored (a new owner, a new value, a moved date), search before writing: `recall(context_id=..., query="<the subject>", k=3, full=0)` (no `context_id` on a default context). When a row states the same fact with another value, write the new one with `supersedes=<that memory_id>` (or edit that row with `update_memory`). Never store the new value next to the old one without either.
 
-**When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as a date only, `YYYY-MM-DD` (`"2024-03-07"`, no time or offset, so exact filters and sorting work) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `list(filters={"details.observed_at": ...})` matches it exactly.
+**When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as a date only, `YYYY-MM-DD` (`"2024-03-07"`, no time or offset, so exact filters and sorting work) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `observed_at="2024-03-07"` as an argument stores the same thing. `recall` / `list` filter it with `observed_after` / `observed_before`, `list(order_by="observed_at")` sorts by it, and `list(filters={"details.observed_at": ...})` matches it exactly.
 
 **Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
 

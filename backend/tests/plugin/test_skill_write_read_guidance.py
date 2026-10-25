@@ -101,8 +101,11 @@ def test_recall_time_and_count_questions(relative):
     assert "`total`" in text and "`next_cursor`" in text and "`has_more`" in text
     assert "k=20, full=0)" in text
     assert '{"details.observed_at": "2024-03-07"}' in text
-    assert "Sort the rows by that date yourself" in text
-    assert "else the later `created_at`, is current" in text
+    # #2330: the server filters and orders by the event time.
+    assert '"observed_after": "2024-03-01", "observed_before": "2024-04-01"' in text
+    assert 'order_by="observed_at", direction="asc")' in text
+    assert "Sort the rows by that date yourself" not in text
+    assert "the later `observed_at`, else the later `created_at`, is current" in text
     assert "`include_superseded=true`" in text
     assert "the store is the authority; never drop a row" in text
 
@@ -117,6 +120,13 @@ def test_the_guidance_uses_real_tool_parameters():
     tools = {t["name"]: t for t in get_tool_definitions()}
     listing = tools["list"]["inputSchema"]["properties"]
     assert "created_at" in listing["order_by"]["enum"]
+    assert "observed_at" in listing["order_by"]["enum"]  # #2330
+    assert "observed_after/before" in listing["filters"]["description"]
+    assert (
+        "observed_after/before"
+        in tools["recall"]["inputSchema"]["properties"]["filters"]["description"]
+    )
+    assert "observed_at" in tools["remember"]["inputSchema"]["properties"]
     assert "include_details" in listing
     assert "details.<key>" in listing["filters"]["description"]
     for key in ("total", "has_more", "next_cursor"):
