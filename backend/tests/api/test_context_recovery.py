@@ -1,7 +1,7 @@
 """Tests for admin context recovery endpoint (Issue #86)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -381,3 +381,37 @@ class TestRecoverIntoTheContextsWorkspace:
 
         assert (response.workspace_id, response.context_record_created) == (ws_id, True)
         assert await self._stored(db_session, [point]) == {point.id: (ws_id, "pending")}
+
+    @pytest.mark.asyncio
+    async def test_a_context_created_meanwhile_elsewhere_is_refused(self, db_session):
+        """#1963: the context is read again before the writes; one another
+        recovery created in another workspace since is a 400, not an FK 500."""
+        from models.auth import Context
+        from utils.exceptions import BadRequestError
+
+        ws_id, _ = await self._workspace_and_context(db_session)
+        other_ws_id, _ = await self._workspace_and_context(db_session)
+        new_ctx = str(uuid4())
+        point = _point(ws_id)
+
+        async def created_meanwhile(db):
+            db.add(
+                Context(
+                    id=UUID(new_ctx),
+                    workspace_id=UUID(other_ws_id),
+                    name=f"ctx-{uuid4().hex[:8]}",
+                    created_by="other-admin",
+                )
+            )
+            await db.flush()
+
+        with (
+            patch("db.point_writer_lock.hold_point_writer_lock", side_effect=created_meanwhile),
+            pytest.raises(BadRequestError) as exc,
+        ):
+            await self._recover(
+                db_session, [point], context_id=new_ctx, workspace_id=ws_id, dry_run=False
+            )
+
+        assert exc.value.error_code == "REQ-103"
+        assert await self._stored(db_session, [point]) == {}

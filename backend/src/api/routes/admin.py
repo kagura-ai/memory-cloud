@@ -1875,14 +1875,20 @@ async def recover_context(
 
     await hold_point_writer_lock(db)
 
-    # Step 3: Create Context record if missing. Read again under the lock: a
-    # row hard-deleted since step 2 is recreated rather than leaving the
-    # inserts below without their context. Its workspace cannot have changed
-    # (a context never moves, #1963).
+    # Step 3: Create Context record if missing. Read again just before the
+    # writes (the lock above is shared and only keeps the orphan sweep out):
+    # a row hard-deleted since step 2 is recreated, and a row another
+    # recovery created meanwhile in another workspace is refused like any
+    # mismatch, rather than failing the inserts on the foreign keys (#1963).
     context_record_created = False
-    context_exists = (
-        await db.execute(select(Context.id).where(Context.id == PyUUID(context_id)))
-    ).scalar_one_or_none() is not None
+    context_workspace_id = (
+        await db.execute(select(Context.workspace_id).where(Context.id == PyUUID(context_id)))
+    ).scalar_one_or_none()
+    context_exists = context_workspace_id is not None
+    if context_exists and str(context_workspace_id) != workspace_id:
+        raise BadRequestError(
+            "workspace_id does not match the context's workspace", error_code="REQ-103"
+        )
     if not context_exists:
         raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
         # Sanitize name to match DB constraint ^[a-z0-9_-]+$
