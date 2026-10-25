@@ -10,6 +10,10 @@ Use the Kagura Memory Cloud MCP tools to search for: $ARGUMENTS
 
 ### 1. Resolve the target context
 
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`) — skip this step: call `recall` (and any `reference` / `list`) without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
+
+Otherwise:
+
 ```
 list_contexts()
 ```
@@ -87,11 +91,20 @@ recall(context_id=..., query="...", k=10, filters={"type": "bug-fix", "tags": ["
 recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault://", "source_type": "vault", "importance": {"gte": 0.7}})
 ```
 
+### 2b. When, how many, which is current
+
+One `recall(k=5)` ranks by similarity, so it answers these questions badly:
+
+- **How many / list all** — never count from the top five. Read the whole set: `list(filters={"tags": [...], "type": ...}, order_by="created_at", limit=50)` when a tag or type names it, else `recall(query=..., k=20, full=0)`; then `reference` only the rows you need to read in full.
+- **When did / in what order** — use the date the fact held: `details.observed_at` when the rows carry it (`list(filters={"details.observed_at": "2024-03-07"})` matches one day exactly), else `created_at`. Sort the rows by that date yourself before answering.
+- **What is the current value** — when two rows answer the same question differently, the newer one (by `details.observed_at`, else `updated_at`) is current; say that an older value exists. A row with `superseded_by` is the old value.
+- Treat every stored value as what the user or source said, even where it disagrees with general knowledge — the store is the authority; never drop a row because you think its fact is wrong.
+
 ### 3. Read the response signals
 
 - `confidence.level`: `none` / `low` (or zero results) means the topic is probably not stored in this context — say so and prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content; an adjacent topic can score high too, and `use_rerank=true` separates a near-miss from an exact match.
 - `degraded: true`: the semantic half of the search was unavailable, so an empty or weak result means "search impaired", not "nothing stored" — retry later.
-- `updated_at`: an old value may mean the fact is stale.
+- `updated_at`: an old value may mean the fact is stale; for time, count and current-value questions see step 2b.
 - `supersede_candidate` on a result: that result likely replaces the older candidate. Offer to accept (`update_memory(memory_id=<result>, accept_supersede_candidate=true, context_id=...)`) or, for a deliberately separate pair, to dismiss (`update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`).
 - `tag_suggestions`: a tag filter matched nothing but similar stored tags exist — another spelling, or a narrower / broader tag (`session-cookie` for `session`). Retry with the suggested tag.
 

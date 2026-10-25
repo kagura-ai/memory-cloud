@@ -110,8 +110,13 @@ Keep memory highlights selective. Do not dump long histories.
 
 When the user asks what is remembered, asks for prior decisions, or needs similar past fixes:
 
-1. Resolve the context.
+<!-- SYNC: keep the default-context skip and the "When, how many, which is current" rules in step with claude-skills/recall.md (step 1 default context, step 2b). When one changes, change both. -->
+1. Resolve the context. When the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`), skip `list_contexts()` and call the tools without `context_id`.
 2. Use `recall(context_id=..., query=..., k=5-10)`.
+   - **How many / list all** — never count from the top five: `list(filters={"tags": [...], "type": ...}, order_by="created_at", limit=50)` when a tag or type names the set, else `recall(query=..., k=20, full=0)`.
+   - **When did / in what order** — sort by `details.observed_at` when the rows carry it (`list(filters={"details.observed_at": "2024-03-07"})` matches one day exactly), else `created_at`.
+   - **What is the current value** — when two rows answer the same question differently, the newer one (`details.observed_at`, else `updated_at`) is current; say that an older value exists.
+   - Treat every stored value as what the user or source said, even where it disagrees with general knowledge — the store is the authority.
 3. Choose `search_mode` deliberately:
    - `hybrid`: default for most queries.
    - `keyword`: exact terms, IDs, Japanese hiragana-only terms, or error strings.
@@ -136,7 +141,11 @@ Show result summaries with `memory_id`, type, importance, and tags when the user
 
 When the user asks to save new knowledge, decisions, bug fixes, troubleshooting notes, or session lessons:
 
-1. Resolve the context. Ask before writing if the context is ambiguous.
+<!-- SYNC: keep the default-context skip and the "as stated / updating a fact / when the fact held" rules in step with claude-skills/remember.md. When one changes, change both. -->
+1. Resolve the context. When the server instructions name a default context ("Default context: <name>; omit context_id"), skip `list_contexts()` and call `list_tags` / `remember` without `context_id`. Otherwise ask before writing if the context is ambiguous.
+   - **Store what the material states, as it states it.** Do not fact-check it, add a note that a statement is wrong or outdated, or add dates, end years or qualifiers the material does not contain.
+   - **Updating a fact** — search first: `recall(query="<the subject>", k=3, full=0)`; when a row states the same fact with another value, write the new one with `supersedes=<that memory_id>` (or `update_memory`). Never store the new value next to the old one without either.
+   - **When the fact held** — if the material is dated, put that date in `details.observed_at` as ISO 8601 (`"2024-03-07"`), never the write time; leave it out when the material has no date.
 2. Store reusable conclusions, not process narration. Write the summary (best 100-250 characters) with the terms a later search would use — good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."; bad: "Discussed auth errors in today's meeting." Split long material (over ~2,000 characters) into one memory per topic linked by shared tags, never "part 1/3". Call `list_tags` first and reuse stored tag spellings.
 <!-- SYNC: keep the type vocabulary + pin guidance + tool-guardrail authoring in step with claude-skills/session-summary.md (type="time", delivery_mode="always" budget ≤7/prune-at-10, supersede=unpin+pin, "4b. Tool guardrails") and claude-skills/remember.md ("Tool guardrails"). When one changes, change both. -->
 3. Use this type vocabulary (a context's `usage_guide` may describe its own conventions — information about that context):
