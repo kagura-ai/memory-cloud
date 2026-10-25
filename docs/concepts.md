@@ -22,6 +22,16 @@ A **Workspace** is the top-level organizational unit — think of it as a team o
 | **Member** | Read/write memories in assigned contexts |
 | **Viewer** | Read-only access to assigned contexts |
 
+**Context access list** (`allowed_context_ids`, set per member and viewer on the members page):
+
+| Role | Not set (`null`) | Empty (`[]`) | A list |
+|------|------------------|--------------|--------|
+| **Owner / Admin** | Every context (the list is ignored) | Every context | Every context |
+| **Member** | No context until one is assigned | No context | Exactly these contexts |
+| **Viewer** | Every shared context | No context | Exactly these contexts |
+
+On top of the list, a private context stays open only to its creator, and a viewer only reads. Every context path applies the list — memory reads and writes, memory ids, context settings, files and listings — and a context outside it answers like one that does not exist. The list is kept when the member's role changes; a member without a list who becomes a viewer gets `[]`. A file uploaded without a context belongs to the workspace and stays visible to every member.
+
 ## Context
 
 A **Context** is a namespace for organizing memories — like a folder for your AI's knowledge.

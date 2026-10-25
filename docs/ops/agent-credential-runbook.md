@@ -46,9 +46,9 @@ item, which is not implemented yet.
 A workload identity is built on the existing member/key principal model, with an optional
 Agent Registry attachment:
 
-1. A `workspace_members` row with role `member` or `viewer`, optionally narrowed by
-   `allowed_context_ids` (enforced for member/viewer reads in
-   `backend/src/services/permission_service.py`). The target identity must already exist as a
+1. A `workspace_members` row with role `member` or `viewer`, whose
+   `allowed_context_ids` decides which contexts it reaches (a member needs a list; a viewer
+   without one reaches every shared context — see [Core Concepts](../concepts.md#workspace)). The target identity must already exist as a
    workspace member before a credential can be minted for it.
 2. An owner-minted `api_keys` row for that member with **mandatory expiry**. Keys have the
    form `kagura_<random>` (`API_KEY_PREFIX`, `backend/src/auth/api_keys.py`); only the SHA-256
