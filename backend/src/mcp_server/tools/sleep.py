@@ -199,10 +199,10 @@ async def _authorize_report_rollback(
     write path (workspace-scoped key, agent-binding write gate) and the
     binding's type/source filter. Then the gate ``rollback_session``
     applies, against the report's context: the editor or owner role there,
-    and not a viewer of the context's workspace (the creator of a private
-    context is its owner whatever their workspace role). The session's
-    workspace plays no part — a rollback writes to the report's context
-    wherever the session points.
+    and not a viewer of the context's workspace (a creator who is a
+    workspace viewer has the viewer role on its private context). The
+    session's workspace plays no part — a rollback writes to the report's
+    context wherever the session points.
 
     A context the caller cannot reach answers like a missing report; a
     context they can read but not edit is ``permission_denied``. The

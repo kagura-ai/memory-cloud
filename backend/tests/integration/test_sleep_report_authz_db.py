@@ -561,8 +561,8 @@ async def test_soft_deleted_workspace_gets_not_found(
 async def test_private_context_creator_who_is_a_workspace_viewer_cannot_roll_back(
     db_session: AsyncSession, worlds: list[World]
 ) -> None:
-    """The creator owns a private context whatever their workspace role; a
-    workspace viewer still may not roll back, as with rollback_session."""
+    """A creator who is a workspace viewer has the viewer role on its private
+    context, so it may not roll back, as with rollback_session."""
     world = await _build(
         db_session, bob_role=WorkspaceRole.VIEWER, private=True, allowed_context=None
     )
