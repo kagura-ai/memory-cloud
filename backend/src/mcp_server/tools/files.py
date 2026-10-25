@@ -127,7 +127,8 @@ async def handle_init_file_upload(
     """Reserve quota and return a presigned PUT URL.
 
     Required args: ``filename``, ``content_type``, ``size_bytes``, ``sha256``.
-    Optional: ``workspace_id`` (overrides the authenticated workspace).
+    Optional: ``workspace_id`` (the workspace to act in; defaults to the session's,
+    and a workspace-scoped API key reaches only its own workspace).
     """
     required = {"filename", "content_type", "size_bytes", "sha256"}
     missing = required - args.keys()
