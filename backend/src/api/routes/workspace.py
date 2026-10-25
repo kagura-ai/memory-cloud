@@ -428,15 +428,18 @@ async def get_workspace_usage_current(
 
         from config.settings import get_settings
         from services.capacity_lock import capacity_lock_state
-        from services.capacity_purge import workspace_purge_at
+        from services.capacity_purge import mail_provider_configured, workspace_purge_at
 
         lock = await capacity_lock_state(db, workspace)
-        # No deletion date while the purge is off: it would not happen then.
-        # The date counts the countdown mails too: notices that started late
-        # move it (#1971).
+        # No deletion date while the purge cannot run: it needs the purge flag,
+        # the countdown mails and a provider that delivers them (#1971). The
+        # date counts those mails too: notices that started late move it.
+        settings = get_settings()
         deletion = (
             workspace_purge_at(workspace, now=utcnow())
-            if get_settings().capacity_purge_enabled
+            if settings.capacity_purge_enabled
+            and settings.capacity_purge_notice_enabled
+            and mail_provider_configured(settings)
             else None
         )
         lock_info = (

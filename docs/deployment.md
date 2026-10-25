@@ -2048,12 +2048,14 @@ deploy apart, in this order:
 3. **Purge**: `CAPACITY_PURGE_ENABLED=true`. A workspace is purged by the
    04:00 UTC run on calendar day 30 of its stamp, provided its day-29 mail
    went out on an earlier calendar day and its first mail at least 7 calendar
-   days before the run. The date shown in the mails
-   and, once this flag is on, in the web banner and as
-   `capacity_lock.purge_at` on `GET /api/v1/workspace/usage/current` (null
-   while the flag is off) is that run: day 30 when the first mail went out
-   by day 23, otherwise a week after the first mail. Because of the stamp
-   stage, the first purge happens no earlier than 30 days after stage 1 ran. At most 5 workspaces
+   days before the run. The date shown in the mails, in the web banner and
+   as `capacity_lock.purge_at` on `GET /api/v1/workspace/usage/current` is
+   that run: day 30 when the mails went out on schedule from day 23 or
+   earlier, otherwise later (a week after the first mail, or the day after a
+   late day-29 mail), and never before the next run. The banner and the API
+   show no date while the purge cannot run (this flag or stage 2 off, or no
+   real mail provider). Because of the stamp stage, the first purge happens
+   no earlier than 30 days after stage 1 ran. At most 5 workspaces
    are purged per run, oldest stamp first; the rest wait for the next run.
    The lock is checked again just before the purge. Before deleting
    anything, the purge commits an `audit_logs` row
@@ -2103,7 +2105,9 @@ ORDER BY capacity_locked_since;
 A row with both `capacity_purge_first_notice_at` and
 `capacity_purge_final_notice_at` set whose `purge_date` is on or before a run's
 date (UTC) is purged on that run, unless it is within capacity by then. A row
-with a notice column still empty is not purged yet.
+with a notice column still empty is not purged yet, and its `purge_date` is
+too early (`GREATEST` skips the empty column): the banner shows a date a week
+after the next run instead.
 
 **Re-subscribe or owner cleanup during a purge.** Before each context and
 after every 1,000-memory chunk, the purge reads the workspace row again and

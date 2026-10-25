@@ -203,9 +203,11 @@ class CapacityLockInfo(BaseModel):
         description=(
             "When the workspace's memories, contexts and files are deleted if it is still "
             "over capacity (#1969): the 04:00 UTC daily sweep 30 days after that sweep first "
-            "saw it over, or later when the owner's first countdown mail went out less than "
-            "7 days before that (#1971), ISO-8601 UTC. Null until that sweep has run, and "
-            "while the purge is disabled on this deployment (CAPACITY_PURGE_ENABLED)."
+            "saw it over, or the later sweep the purge really waits for (#1971): 7 days after "
+            "the owner's first countdown mail and a day after the last one, never before the "
+            "next sweep. ISO-8601 UTC. Null until that sweep has run, and while this "
+            "deployment cannot purge (CAPACITY_PURGE_ENABLED or CAPACITY_PURGE_NOTICE_ENABLED "
+            "off, or no mail provider that delivers)."
         ),
     )
 

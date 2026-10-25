@@ -96,6 +96,21 @@ def test_purge_at_projects_unsent_notices_onto_the_next_run() -> None:
     assert purge_at(since, now=after_run, **kwargs) == datetime(2026, 10, 19, 4, 0)
 
 
+@pytest.mark.parametrize(
+    ("now", "shown"),
+    [
+        (datetime(2026, 10, 31, 4, 0, 20), datetime(2026, 10, 31, 4, 0)),  # run in progress
+        (datetime(2026, 10, 31, 4, 59), datetime(2026, 10, 31, 4, 0)),
+        (datetime(2026, 10, 31, 5, 0), datetime(2026, 11, 1, 4, 0)),  # run over, not purged
+    ],
+)
+def test_purge_at_counts_the_run_in_progress(now, shown) -> None:
+    """A read during the day-30 run names that run, not tomorrow's."""
+    since = datetime(2026, 10, 1, 4, 0, 5)
+    final = datetime(2026, 10, 30, 4, 0, 9)
+    assert purge_at(since, first_notice_at=since, final_notice_at=final, now=now) == shown
+
+
 def test_purge_at_is_never_before_the_next_run() -> None:
     """Warned and expired, but not purged yet (the per-run cap): the next run."""
     since = datetime(2026, 9, 1, 4, 0, 5)
@@ -144,12 +159,12 @@ def test_purge_at_is_the_first_run_purge_due_says_yes_to(start_day) -> None:
     for _, day, before, after, _ in runs:
         if day < start_day:
             continue
-        asked_before = datetime(2026, 9, 1, 3, 0) + timedelta(days=day)
         first, final = before
-        assert (
-            purge_at(since, first_notice_at=first, final_notice_at=final, now=asked_before)
-            == expected
-        ), day
+        for hour, minute in ((3, 0), (4, 0), (4, 30)):  # before or during the day's run
+            asked = datetime(2026, 9, 1, hour, minute) + timedelta(days=day)
+            assert (
+                purge_at(since, first_notice_at=first, final_notice_at=final, now=asked) == expected
+            ), (day, hour, minute)
         if day < purge_day:
             asked_after = datetime(2026, 9, 1, 12, 0) + timedelta(days=day)
             first, final = after

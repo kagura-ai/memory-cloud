@@ -59,6 +59,9 @@ PURGE_AFTER = timedelta(days=30)
 #: Hour (UTC) of the daily sweep (``tasks/capacity_purge_tasks.py``); the
 #: deletion date shown to the owner is that run on calendar day 30.
 SWEEP_HOUR_UTC = 4
+#: How long after :data:`SWEEP_HOUR_UTC` the day's run counts as possibly in
+#: progress for :func:`purge_at` (a run that purges must not show tomorrow).
+SWEEP_WINDOW = timedelta(hours=1)
 #: Days after the stamp on which the owner gets a "N days left" mail (policy #13).
 NOTICE_DAYS: tuple[int, ...] = (0, 7, 14, 23, 27, 29)
 #: The last of them; the purge waits until a calendar day after it went out.
@@ -91,7 +94,8 @@ def purge_at(
     * :data:`MIN_WARNING_DAYS` days after the lock's first notice,
     * the day after its final (day-29) notice,
 
-    and never before the next run. A notice not sent yet is projected onto
+    and never before the next run (today's until :data:`SWEEP_WINDOW` past
+    the hour, as it may still be running). A notice not sent yet is projected onto
     the run that sends it: the first one onto the next run, the final one onto
     the day-29 run or the next run, whichever is later (#1971). On time —
     first mail on day 0, the rest on schedule — that is day 30, and the day-29
@@ -121,7 +125,10 @@ def _purge_run(
 ) -> datetime:
     """:func:`purge_at` for a running lock clock."""
     sweep = time(SWEEP_HOUR_UTC)
-    next_run = now.date() if now.time() < sweep else now.date() + timedelta(days=1)
+    # Until SWEEP_WINDOW past the hour, today's run may still be in progress:
+    # counting it as the next run errs early, never late.
+    in_window = now < datetime.combine(now.date(), sweep) + SWEEP_WINDOW
+    next_run = now.date() if in_window else now.date() + timedelta(days=1)
     stamp_day = locked_since.date()
     first = first_notice_at.date() if first_notice_at is not None else next_run
     final = (

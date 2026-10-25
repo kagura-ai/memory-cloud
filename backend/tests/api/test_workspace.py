@@ -561,20 +561,43 @@ class TestWorkspaceUsageCurrent:
             (datetime(2026, 10, 27, 4, 0, 9), "2026-11-03T04:00:00Z"),  # first mail on day 26
         ],
     )
-    @pytest.mark.parametrize("purge_enabled", [True, False])
+    @pytest.mark.parametrize(
+        ("purge_enabled", "notice_enabled", "email_provider"),
+        [
+            (True, True, "resend"),
+            (False, True, "resend"),
+            (True, False, "resend"),  # no countdown mails: the purge never runs
+            (True, True, "logging"),  # the sweep skips both stages
+        ],
+    )
     @pytest.mark.asyncio
     async def test_capacity_lock_carries_purge_at_when_stamped(
-        self, mock_db, mock_user, mock_workspace, purge_enabled, first_notice_at, expected_purge_at
+        self,
+        mock_db,
+        mock_user,
+        mock_workspace,
+        purge_enabled,
+        notice_enabled,
+        email_provider,
+        first_notice_at,
+        expected_purge_at,
     ):
         """#1969: the banner reads the deletion date from the lock payload — the
         04:00 UTC sweep on calendar day 30 of the stamp, ISO-8601 with ``Z`` —
-        only once ``CAPACITY_PURGE_ENABLED`` is on: no date for a deletion that
-        will not happen. #1971: the run that really purges — a first notice
-        sent late moves it to a week after that notice."""
+        only when the purge can run: no date for a deletion that will not
+        happen. #1971: the run that really purges — a first notice sent late
+        moves it to a week after that notice — and "can run" also needs the
+        countdown mails and a provider that delivers them."""
         from config.settings import get_settings
         from services.capacity_lock import CapacityLock
 
-        settings = get_settings().model_copy(update={"capacity_purge_enabled": purge_enabled})
+        settings = get_settings().model_copy(
+            update={
+                "capacity_purge_enabled": purge_enabled,
+                "capacity_purge_notice_enabled": notice_enabled,
+                "email_provider": email_provider,
+            }
+        )
 
         lock = CapacityLock(
             memory_count=1012,
@@ -600,7 +623,8 @@ class TestWorkspaceUsageCurrent:
             )
             response = await get_workspace_usage_current(user=mock_user, db=mock_db)
         assert response.capacity_lock is not None
-        expected = expected_purge_at if purge_enabled else None
+        can_purge = purge_enabled and notice_enabled and email_provider == "resend"
+        expected = expected_purge_at if can_purge else None
         assert response.capacity_lock.purge_at == expected
         assert response.model_dump(mode="json")["capacity_lock"]["purge_at"] == expected
 
