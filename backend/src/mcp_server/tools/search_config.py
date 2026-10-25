@@ -80,8 +80,15 @@ async def handle_update_search_config(
                     # #963: a workspace-scoped key stays in its own workspace.
                     key_workspace_id=get_mcp_key_workspace_scope(),
                 )
-            except (AuthorizationError, NotFoundException) as perm_err:
-                # The two designed denials only (#1684): a database failure
+            except NotFoundException:
+                # A missing context and one the caller cannot reach answer
+                # alike (#383).
+                return _error_response(
+                    "context_not_found",
+                    f"Context {ctx_uuid} not found or access denied.",
+                )
+            except AuthorizationError as perm_err:
+                # The designed denials only (#1684): a database failure
                 # here reaches the catch-all below instead of being reported
                 # as permission_denied with the driver's text.
                 return _error_response("permission_denied", str(perm_err))

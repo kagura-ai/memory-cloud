@@ -5,10 +5,10 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages access control at workspace and context levels.
 """
 
-from typing import NewType, cast
+from typing import Any, NewType, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import (
@@ -20,6 +20,8 @@ from auth.workspace_roles import (
     WorkspaceRole,
     access_for_context_role,
     access_for_workspace_role,
+    reachable_context_ids,
+    reaches_context,
 )
 from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
@@ -64,6 +66,28 @@ def _below_member(member: WorkspaceMember | None) -> bool:
     return member is not None and is_below_member_role(member.role)
 
 
+def reach_filter(member: WorkspaceMember) -> Any | None:
+    """The SQL twin of ``reaches_context`` for a listing of ``Context`` rows.
+
+    ``None`` means no filter (every context of the workspace), otherwise a
+    clause on ``Context.id`` — ``false()`` when the member reaches nothing.
+    Privacy is not part of it; callers add their own privacy filter.
+    """
+    reachable = reachable_context_ids(member.role, member.allowed_context_ids)
+    if reachable is None:
+        return None
+    if not reachable:
+        return false()
+    return Context.id.in_(reachable)
+
+
+def _reach_denied_reason(member: WorkspaceMember) -> str:
+    """The log reason for a context outside the member's reach."""
+    if member.allowed_context_ids is None:
+        return "member_suspended"
+    return "not_in_whitelist"
+
+
 # Re-exported from auth.workspace_roles for backward compatibility.
 # New code should import directly from auth.workspace_roles.
 # ORG_ROLE_WEIGHTS keeps the old name (used by external callers).
@@ -87,8 +111,12 @@ class PermissionService:
 
     Access hierarchy:
     - Workspace owner/admin: Bypass context checks (full access to all contexts)
-    - Workspace viewer: Read-only access to all contexts
-    - Workspace member: Requires explicit context membership
+    - Workspace viewer: Read-only access to the contexts it reaches
+    - Workspace member: In the contexts it reaches, requires explicit context
+      membership for context settings
+
+    What a member or viewer reaches is its context access list
+    (``auth.workspace_roles.reaches_context``).
 
     Attributes:
         db: AsyncSession for database access
@@ -411,38 +439,16 @@ class PermissionService:
             )
             raise NotFoundException("Context", str(context_id)) from None
 
-        # Apply the same allowed_context_ids semantics that get_accessible_contexts
-        # and check_context_access enforce for the lower-privilege roles. Without
-        # this, a restricted member/viewer could read /graph/stats and other
-        # UUID-addressed endpoints for contexts they cannot list. Workspace
-        # owner/admin bypass these restrictions by design (line 427-429).
-        #
-        # Per Migration 042 the NULL/[] semantics differ by role:
-        #   - member, allowed_context_ids IS NULL → suspended (no access)
-        #   - viewer, allowed_context_ids IS NULL → no restriction (all)
-        #   - either, allowed_context_ids = [<ids>] → whitelist enforced
-        #   - either, allowed_context_ids = []     → explicit no access
-        if (
-            workspace_member.role == WorkspaceRole.MEMBER
-            and workspace_member.allowed_context_ids is None
+        # The member's context access list (``reaches_context``, Migration
+        # 042): owner/admin reach every context; a member or viewer reaches
+        # what the list names, and with no list a viewer reaches every shared
+        # context and a member none.
+        if not reaches_context(
+            workspace_member.role, workspace_member.allowed_context_ids, context_id
         ):
             logger.warning(
                 "context_read_denied",
-                reason="member_suspended",
-                context_id=str(context_id),
-                context_workspace_id=str(context.workspace_id),
-                user_id=user_id,
-            )
-            raise NotFoundException("Context", str(context_id))
-
-        if (
-            workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER)
-            and workspace_member.allowed_context_ids is not None
-            and context_id not in workspace_member.allowed_context_ids
-        ):
-            logger.warning(
-                "context_read_denied",
-                reason="not_in_whitelist",
+                reason=_reach_denied_reason(workspace_member),
                 context_id=str(context_id),
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
@@ -638,8 +644,16 @@ class PermissionService:
 
         Access hierarchy:
         1. Workspace owner/admin → Full access (bypass context membership)
-        2. Workspace viewer → Read-only access (bypass context membership)
-        3. Workspace member → Requires explicit context membership
+        2. Workspace viewer → Read-only access in the contexts it reaches
+        3. Workspace member → In the contexts it reaches, an explicit context
+           membership decides the role
+
+        What a member or viewer reaches is its context access list
+        (``auth.workspace_roles.reaches_context``, Migration 042). A context
+        the caller cannot reach — no membership, another account's private
+        context, outside the list — is the uniform ``NotFoundException``, as
+        in ``resolve_context_for_workspace_read`` (#383). A 403 answers only
+        for a context the caller reaches, with too low a role.
 
         Issue #1275 (RFC-0002 P0-2): after the RBAC decision allows, the
         purely subtractive agent-binding intersection is applied for
@@ -664,9 +678,10 @@ class PermissionService:
             ContextMember row keeps its own role.
 
         Raises:
-            NotFoundException: 404 if the context does not exist, or the
-                agent binding subtracts access (#1275).
-            AuthorizationError: 403 if user doesn't have required access.
+            NotFoundException: 404 if the context does not exist, the caller
+                cannot reach it, or the agent binding subtracts access (#1275).
+            AuthorizationError: 403 if the caller reaches the context but its
+                role is too low.
                 Message is the uniform ``"Insufficient permissions"`` —
                 per-deny-path messages were intentionally stripped to remove
                 a CWE-639 enumeration vector. Use structured logs / sentry
@@ -730,8 +745,8 @@ class PermissionService:
         exactly this decision.
 
         #1784: a private context is also open to an account linked to its
-        creator — as that account: its own workspace membership, whitelist
-        and role decide what it may do there.
+        creator — as that account: its own workspace membership, context
+        access list and role decide what it may do there.
         """
         from sqlalchemy import select
 
@@ -765,19 +780,31 @@ class PermissionService:
             required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
         )
 
+        def _not_found(reason: str) -> NotFoundException:
+            # #383: a context the caller cannot reach is the same not-found as
+            # one that does not exist; the reason goes to the log only.
+            logger.warning(
+                "context_access_denied",
+                reason=reason,
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            return NotFoundException("Context")
+
         linked_owner = False
         if context.is_private:
             if context.created_by == user_id:
-                # Creator has full access to their private context — once they
-                # are a seated member (#1957). Membership and the seat are read
-                # only after the caller is known to be the creator, so a
-                # non-creator still learns nothing here (#394 ordering). A
-                # creator with no membership row is not expected (removing a
-                # member hands their contexts to the owner, #275); it is logged
-                # and refused like any non-member, as ``ContextService.get_context``
-                # and the MCP resolver already do. The shortcut still skips the
-                # role and whitelist rules below — that is #165's contract for
-                # the creator, not part of #1957.
+                # The creator of a private context owns it — once they are a
+                # seated member (#1957) whose context access list reaches it
+                # (``reaches_context``: creating a context does not widen the
+                # list). Membership and the seat are read only after the
+                # caller is known to be the creator, so a non-creator still
+                # learns nothing here (#394 ordering). A creator with no
+                # membership row is not expected (removing a member hands
+                # their contexts to the owner, #275); it is logged and refused
+                # like any non-member, as ``ContextService.get_context`` and
+                # the MCP resolver do.
                 creator_member = await self._seated_member(context.workspace_id, user_id)
                 if creator_member is None:
                     # The workspace's owner_user_id holder always has a seat
@@ -791,21 +818,26 @@ class PermissionService:
                             workspace_id=str(context.workspace_id),
                             user_id=user_id,
                         )
-                        raise AuthorizationError("Insufficient permissions")
-                elif _below_member(creator_member):
-                    # A workspace viewer is read-only in the whole workspace,
-                    # a private context it created included: it reads there
-                    # and writes nowhere (the rule rollback_session applies).
-                    if required != ContextRole.VIEWER:
-                        raise AuthorizationError("Insufficient permissions")
-                    return context, ContextRole.VIEWER
+                        raise _not_found("private_creator_without_membership")
+                else:
+                    if not reaches_context(
+                        creator_member.role, creator_member.allowed_context_ids, context_id
+                    ):
+                        raise _not_found(_reach_denied_reason(creator_member))
+                    if _below_member(creator_member):
+                        # A workspace viewer is read-only in the whole
+                        # workspace, a private context it created included: it
+                        # reads there and writes nowhere (the rule
+                        # rollback_session applies).
+                        if required != ContextRole.VIEWER:
+                            raise AuthorizationError("Insufficient permissions")
+                        return context, ContextRole.VIEWER
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
             # link widens ownership only: the caller still passes the
-            # membership, whitelist and role rules below as itself.
+            # membership, context access and role rules below as itself.
             if not await is_same_owner(self.db, user_id, context.created_by):
-                # Others cannot access private contexts
-                raise AuthorizationError("Insufficient permissions")
+                raise _not_found("private_non_creator")
             linked_owner = True
 
         # Shared context, or a linked account's private one: workspace membership,
@@ -813,20 +845,22 @@ class PermissionService:
         # owner/admin bypass (the owner always has a seat; no query for them).
         workspace_member = await self._seated_member(context.workspace_id, user_id)
         if not workspace_member:
-            raise AuthorizationError("Insufficient permissions")
+            raise _not_found("not_a_member")
 
-        # Workspace owner/admin → bypass context checks (full access)
-        # Note: allowed_context_ids is ignored for owner/admin
+        # Workspace owner/admin → every context (the list is ignored).
         if workspace_member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
             # Treat as context owner
             return context, ContextRole.OWNER
 
-        # Issue #234: Check allowed_context_ids whitelist for member/viewer
-        if workspace_member.allowed_context_ids is not None:
-            if context_id not in workspace_member.allowed_context_ids:
-                raise AuthorizationError("Insufficient permissions")
+        # Member / viewer: the context access list decides whether the context
+        # is reachable at all (Migration 042); the roles below decide what the
+        # caller may do in a context it reaches.
+        if not reaches_context(
+            workspace_member.role, workspace_member.allowed_context_ids, context_id
+        ):
+            raise _not_found(_reach_denied_reason(workspace_member))
 
-        # Workspace viewer → read-only access (bypass context checks)
+        # Workspace viewer → read-only access (no context membership needed)
         if workspace_member.role == WorkspaceRole.VIEWER:
             # Check if viewer role meets requirement
             if required != ContextRole.VIEWER:
@@ -834,11 +868,8 @@ class PermissionService:
             return context, ContextRole.VIEWER
 
         if linked_owner:
-            # A member with no whitelist is suspended (Migration 042): the
-            # link does not lift that. One whose whitelist names this context
-            # passed the check above and owns it like the linked creator.
-            if workspace_member.allowed_context_ids is None:
-                raise AuthorizationError("Insufficient permissions")
+            # A member whose list names the linked creator's private context
+            # owns it like the creator.
             return context, ContextRole.OWNER
 
         # Workspace member → requires explicit context membership
@@ -1017,89 +1048,33 @@ class PermissionService:
         """The pre-#1275 membership-driven listing (see get_accessible_contexts)."""
         from sqlalchemy import select
 
-        # Check workspace membership (viewer is the floor — the per-role
-        # branches below decide what each role can actually see).
+        # Check workspace membership (viewer is the floor — the reach filter
+        # below decides what each role can actually see).
         workspace_member = await self.check_workspace_access(
             user_id, workspace_id, required_role=WorkspaceRole.VIEWER
         )
 
         # Private contexts are creator-only across every workspace role
-        # (matches check_context_access:401-410 — even an owner/admin gets 403
+        # (matches check_context_access — even an owner/admin gets not-found
         # when trying to open another user's private context). Filter the
         # listing to non-private contexts plus the caller's own private ones
-        # so the list shape matches the per-context access check; otherwise
-        # the listing leaks the existence of private contexts that 403 on
-        # click-through.
+        # so the list shape matches the per-context access check.
         # #1784: the caller's own includes those of an account linked to it.
         privacy_filter = (Context.is_private.is_(False)) | owned_by(Context.created_by, user_id)
 
-        # Workspace owner/admin → all accessible contexts (ignore
-        # allowed_context_ids; privacy still applies).
-        if workspace_member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
-            stmt = (
-                select(Context)
-                .where(
-                    Context.workspace_id == workspace_id,
-                    Context.deleted_at.is_(None),
-                    privacy_filter,
-                )
-                .order_by(Context.created_at.desc())
-            )
-            result = await self.db.execute(stmt)
-            return list(result.scalars().all())
-
-        # Issue #234: Workspace viewer with allowed_context_ids restriction
-        if workspace_member.role == WorkspaceRole.VIEWER:
-            if workspace_member.allowed_context_ids is not None:
-                # Only whitelisted contexts
-                if not workspace_member.allowed_context_ids:
-                    return []  # Empty whitelist = no access
-                stmt = (
-                    select(Context)
-                    .where(
-                        Context.workspace_id == workspace_id,
-                        Context.deleted_at.is_(None),
-                        Context.id.in_(workspace_member.allowed_context_ids),
-                        privacy_filter,
-                    )
-                    .order_by(Context.created_at.desc())
-                )
-            else:
-                # No restriction → all shared contexts (+ caller's own private)
-                stmt = (
-                    select(Context)
-                    .where(
-                        Context.workspace_id == workspace_id,
-                        Context.deleted_at.is_(None),
-                        privacy_filter,
-                    )
-                    .order_by(Context.created_at.desc())
-                )
-            result = await self.db.execute(stmt)
-            return list(result.scalars().all())
-
-        # Workspace member → contexts based on allowed_context_ids
-        # Migration 042: NULL = suspended (not configured)
-        if workspace_member.allowed_context_ids is None:
-            # NULL = suspended state (context not configured)
-            # User must configure via Context Access dialog
-            return []
-
-        # Empty array = no access
-        if not workspace_member.allowed_context_ids:
-            return []
-
-        # Show only whitelisted contexts (filtered to non-private + own private)
-        stmt = (
-            select(Context)
-            .where(
-                Context.workspace_id == workspace_id,
-                Context.deleted_at.is_(None),
-                Context.id.in_(workspace_member.allowed_context_ids),
-                privacy_filter,
-            )
-            .order_by(Context.created_at.desc())
-        )
+        # The context access list (``reach_filter``, Migration 042):
+        # owner/admin see every context, a viewer with no list every shared
+        # one, otherwise exactly the listed ones ([] or a member with no list:
+        # none). Privacy still applies on top.
+        reach = reach_filter(workspace_member)
+        conditions = [
+            Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
+            privacy_filter,
+        ]
+        if reach is not None:
+            conditions.append(reach)
+        stmt = select(Context).where(*conditions).order_by(Context.created_at.desc())
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
@@ -1160,6 +1135,9 @@ class PermissionService:
         Access rules:
         1. Private context (is_private=true): Only creator can access
         2. Shared context (is_private=false): Workspace members can access
+        Either way the memory's context must be one the caller reaches: its
+        context access list (``reaches_context``) applies to the memory's
+        author as well.
         3. ``access="write"``: the caller's role on the memory's workspace must
            be member or higher — a workspace viewer is refused, on its own
            memories and in a private context it created too.
@@ -1291,16 +1269,32 @@ class PermissionService:
             await _emit_rbac_denied()
             return False
 
-        # Owner can always access their own memories (RBAC), but the binding
-        # still subtracts.
+        def _reaches(member: WorkspaceMember | None) -> bool:
+            # The memory's own context must be one the caller reaches as a
+            # seated member: its context access list (``reaches_context``)
+            # decides, for the author of the memory too — writing a memory
+            # does not widen what the account reaches.
+            if member is not None and reaches_context(
+                member.role, member.allowed_context_ids, context_id
+            ):
+                return True
+            logger.info(
+                "memory_access_denied",
+                reason=("not_a_member" if member is None else _reach_denied_reason(member)),
+                memory_id=str(memory_id) if memory_id is not None else None,
+                context_id=str(context_id),
+                user_id=str(user_id),
+            )
+            return False
+
+        # The author of a memory reaches it wherever its context is reachable
+        # (no context membership needed); the binding still subtracts.
         if user_id == memory_user_id:
             # #1943: a member without a seat on the plan is refused here too —
             # the REST memory-id routes (reference / patch / explore) authorize
-            # through this method alone. An author with no membership row keeps
-            # the pre-existing pass on their own memories; the context-level
-            # paths (#1957) refuse that caller, so the two surfaces differ here
-            # by design, not by accident.
-            if _read_only(await self._seated_member(workspace_id, user_id)):
+            # through this method alone.
+            member = await self._seated_member(workspace_id, user_id)
+            if not _reaches(member) or _read_only(member):
                 await _emit_rbac_denied()
                 return False
             return await _binding_ok()
@@ -1333,10 +1327,10 @@ class PermissionService:
             await _emit_rbac_denied()
             return False
 
-        # Shared context: workspace membership and the seat (#1943), the member
-        # role for a write, then the binding.
+        # Shared context: workspace membership and the seat (#1943), the
+        # context access list, the member role for a write, then the binding.
         member = await self._seated_member(workspace_id, user_id)
-        if member is None or _read_only(member):
+        if not _reaches(member) or _read_only(member):
             await _emit_rbac_denied()
             return False
         return await _binding_ok()

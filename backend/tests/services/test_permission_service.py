@@ -156,15 +156,37 @@ class TestContextAccess:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
-        # #1957: the creator shortcut reads membership (and the seat) now.
+        # #1957: the creator shortcut reads membership (and the seat) now; the
+        # member's context access list must reach the context.
         service.workspace_service.get_member = AsyncMock(
-            return_value=SimpleNamespace(id=1, role=WorkspaceRole.MEMBER, allowed_context_ids=None)
+            return_value=SimpleNamespace(
+                id=1, role=WorkspaceRole.MEMBER, allowed_context_ids=[ctx_id]
+            )
         )
 
         context, role = await service.check_context_access(
             "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
         )
         assert role == "owner"
+
+    @pytest.mark.asyncio
+    async def test_context_access_private_creator_outside_its_list(self, service, mock_db):
+        """A member creator whose list does not reach its private context: not found."""
+        ctx_id = uuid4()
+        mock_ctx = MagicMock(
+            id=ctx_id, is_private=True, created_by="user1", workspace_id=uuid4(), deleted_at=None
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_ctx
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        for allowed in (None, [], [uuid4()]):
+            service.workspace_service.get_member = AsyncMock(
+                return_value=SimpleNamespace(
+                    id=1, role=WorkspaceRole.MEMBER, allowed_context_ids=allowed
+                )
+            )
+            with pytest.raises(NotFoundException):
+                await service.check_context_access("user1", ctx_id, capacity=CapacityPolicy.ALLOWED)
 
     @pytest.mark.asyncio
     async def test_context_access_private_non_creator(self, service, mock_db):
@@ -181,9 +203,9 @@ class TestContextAccess:
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with pytest.raises(AuthorizationError) as exc_info:
+        with pytest.raises(NotFoundException) as exc_info:
             await service.check_context_access("user1", ctx_id, capacity=CapacityPolicy.ALLOWED)
-        assert exc_info.value.status_code == 403
+        assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_context_not_found(self, service, mock_db):
@@ -205,7 +227,9 @@ class TestContextAccess:
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
         # The creator's own membership: a member (a viewer creator only reads).
-        service._seated_member = AsyncMock(return_value=MagicMock(role="member"))
+        service._seated_member = AsyncMock(
+            return_value=MagicMock(role="member", allowed_context_ids=[ctx_id])
+        )
 
         assert await service.can_manage_context("user1", ctx_id) is True
 
@@ -231,14 +255,63 @@ class TestMemoryAccessControl:
 
     @pytest.mark.asyncio
     async def test_owner_can_access_own_memory(self, service):
-        """Memory owner always has access."""
-        result = await service.can_access_memory(
-            user_id=CallerId("user1"),
-            memory_user_id=MemoryAuthorId("user1"),
-            workspace_id=uuid4(),
-            context_id=uuid4(),
+        """The author reads its memory in a context its list reaches."""
+        ctx_id = uuid4()
+        service.workspace_service.get_member = AsyncMock(
+            return_value=MagicMock(role=WorkspaceRole.MEMBER, allowed_context_ids=[ctx_id])
         )
+        with patch(
+            "services.agent_binding_service.agent_binding_permits", AsyncMock(return_value=True)
+        ):
+            result = await service.can_access_memory(
+                user_id=CallerId("user1"),
+                memory_user_id=MemoryAuthorId("user1"),
+                workspace_id=uuid4(),
+                context_id=ctx_id,
+            )
         assert result is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("shared", [True, False])
+    @pytest.mark.parametrize(
+        ("role", "allowed"),
+        [
+            (WorkspaceRole.MEMBER, None),
+            (WorkspaceRole.MEMBER, []),
+            (WorkspaceRole.MEMBER, "other"),
+            (WorkspaceRole.VIEWER, []),
+            (WorkspaceRole.VIEWER, "other"),
+            (None, None),
+        ],
+    )
+    async def test_a_memory_outside_the_callers_reach_is_refused(
+        self, service, shared, role, allowed
+    ):
+        """Author or not, a memory in a context the list does not reach is refused."""
+        ctx_id = uuid4()
+        member = (
+            None
+            if role is None
+            else MagicMock(
+                role=role, allowed_context_ids=[uuid4()] if allowed == "other" else allowed
+            )
+        )
+        service.workspace_service.get_member = AsyncMock(return_value=member)
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=True)
+        binding = AsyncMock(return_value=True)
+        with (
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+            patch("services.agent_binding_service.agent_binding_permits", binding),
+        ):
+            result = await service.can_access_memory(
+                user_id=CallerId("user1"),
+                memory_user_id=MemoryAuthorId("user1" if shared else "user2"),
+                workspace_id=uuid4(),
+                context_id=ctx_id,
+            )
+        assert result is False
+        binding.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_owner_private_context_denied(self, service):
@@ -262,16 +335,23 @@ class TestMemoryAccessControl:
 
         mock_ctx_svc = MagicMock()
         mock_ctx_svc.is_context_shared = AsyncMock(return_value=True)
+        ctx_id = uuid4()
         service.workspace_service.get_member = AsyncMock(
-            return_value=MagicMock(role=WorkspaceRole.MEMBER)
+            return_value=MagicMock(role=WorkspaceRole.MEMBER, allowed_context_ids=[ctx_id])
         )
 
-        with patch("services.context_service.ContextService", return_value=mock_ctx_svc):
+        with (
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                AsyncMock(return_value=True),
+            ),
+        ):
             result = await service.can_access_memory(
                 user_id=CallerId("user2"),
                 memory_user_id=MemoryAuthorId("user1"),
                 workspace_id=uuid4(),
-                context_id=uuid4(),
+                context_id=ctx_id,
             )
         assert result is True
 
@@ -478,7 +558,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         viewer = MagicMock()
         viewer.role = WorkspaceRole.VIEWER
-        viewer.allowed_context_ids = None  # no restriction (all contexts)
+        viewer.allowed_context_ids = None  # not set: every shared context
         service = self._service_with_member(viewer, ctx)
 
         result = await service.resolve_context_for_workspace_read(

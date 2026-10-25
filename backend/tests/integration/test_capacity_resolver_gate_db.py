@@ -242,7 +242,7 @@ async def test_the_owner_gets_the_same_lock_envelope(scenario, tool) -> None:
 
 
 def _turned_away(tool: str) -> str:
-    return "permission_denied" if tool == "update_search_config" else "context_not_found"
+    return "context_not_found"
 
 
 @pytest.mark.asyncio(loop_scope="session")

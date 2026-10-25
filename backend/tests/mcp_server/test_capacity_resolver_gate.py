@@ -318,14 +318,13 @@ async def test_a_resolver_gated_tool_refuses_a_locked_workspace(tool: str) -> No
 @pytest.mark.parametrize("tool", sorted(CONTEXT_NAMED_TOOLS))
 async def test_a_caller_the_resolver_turns_away_never_sees_the_lock(tool: str) -> None:
     """D1: a context the caller cannot reach answers with the handler's own
-    refusal (context_not_found, or update_search_config's permission_denied),
-    never ``capacity_locked``, and the lock is never consulted."""
+    refusal (context_not_found), never ``capacity_locked``, and the lock is
+    never consulted."""
     resolvers = _Resolvers(deny=True)
     result = await _call(tool, resolvers, _fake_db())
 
     body = json.loads(result[0].text)
-    expected = "permission_denied" if tool == "update_search_config" else "context_not_found"
-    assert body["error"] == expected, body
+    assert body["error"] == "context_not_found", body
     resolvers.lock.assert_not_awaited()
 
 

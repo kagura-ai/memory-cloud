@@ -20,7 +20,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
-from auth.workspace_roles import WorkspaceRole
+from auth.workspace_roles import WorkspaceRole, reaches_context
 from config.plan_tiers import (
     has_feature,
     lowest_tier_with_limit,
@@ -416,7 +416,8 @@ class ContextService:
         """Get context by ID.
 
         Issue #115 Phase B: Verifies context access via workspace membership.
-        Issue #234: Respects allowed_context_ids whitelist for member/viewer.
+        Issue #234: Applies the member's context access list
+        (``auth.workspace_roles.reaches_context``).
 
         Args:
             user_id: User ID (for access verification via workspace membership)
@@ -447,24 +448,19 @@ class ContextService:
         # seat is refused after membership (the owner always has one).
         await ensure_member_seated(self.db, context.workspace_id, workspace_member)
 
-        # Issue #165: Privacy check - private contexts are creator-only
+        # Issue #165: Privacy check - private contexts are creator-only.
+        # #1784: an account linked to the creator is checked as itself below.
         if context.is_private and context.created_by != user_id:
             if not await is_same_owner(self.db, user_id, context.created_by):
                 raise NotFoundException("Context", str(context_id))
-            # #1784: an account linked to the creator is checked as itself. A
-            # member with no whitelist is suspended (Migration 042), and the
-            # link does not lift that — same rule as check_context_access.
-            if (
-                workspace_member.role == WorkspaceRole.MEMBER
-                and workspace_member.allowed_context_ids is None
-            ):
-                raise NotFoundException("Context", str(context_id))
 
-        # Issue #234: Check allowed_context_ids whitelist for member/viewer
-        if workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
-            if workspace_member.allowed_context_ids is not None:
-                if context_id not in workspace_member.allowed_context_ids:
-                    raise NotFoundException("Context", str(context_id))
+        # The member's context access list (Migration 042), for every caller
+        # below admin — the creator of a private context included: owning a
+        # context does not widen what the account reaches.
+        if not reaches_context(
+            workspace_member.role, workspace_member.allowed_context_ids, context_id
+        ):
+            raise NotFoundException("Context", str(context_id))
 
         return context
 

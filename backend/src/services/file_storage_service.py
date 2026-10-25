@@ -827,11 +827,12 @@ class FileStorageService:
         """Soft-delete and immediately release the quota.
 
         Issue #1136: deleting a context-bound file requires write access to its
-        context. If the owning context is gone (soft-deleted → NotFoundException),
-        fall back to the caller's workspace gate so files in a deleted context can
-        still be cleaned up — otherwise their quota would be stuck until the
-        workspace itself is deleted. An AuthorizationError on a *live* context is
-        re-raised: a non-editor cannot delete a file scoped away from them.
+        context. If the owning context row is gone or soft-deleted, fall back to
+        the caller's workspace gate so files in a deleted context can still be
+        cleaned up — otherwise their quota would be stuck until the workspace
+        itself is deleted. For a *live* context every refusal stands: a context
+        the caller cannot reach (or an agent binding subtracts) is the file's
+        not-found, a role too low is the 403.
 
         R5 contract: ``deleted_at`` is set and ``workspace_storage_usage``
         is decremented in one DB transaction. ``release_storage_bytes``
@@ -851,12 +852,20 @@ class FileStorageService:
         if file.context_id is not None:
             if not actor_user_id:
                 raise AuthorizationError("Insufficient permissions")
-            try:
-                await PermissionService(self.db).check_context_write(
-                    actor_user_id, file.context_id, capacity=CapacityPolicy.ALLOWED
-                )
-            except NotFoundException:
-                pass  # owning context deleted → workspace gate (already enforced) suffices
+            # "Owning context deleted" is read from the context row itself, so
+            # the cleanup fallback never stands in for a refusal of a live one.
+            owning = await self.db.get(Context, file.context_id)
+            if owning is not None and owning.deleted_at is None:
+                try:
+                    await PermissionService(self.db).check_context_write(
+                        actor_user_id, file.context_id, capacity=CapacityPolicy.ALLOWED
+                    )
+                except NotFoundException as exc:
+                    # A context the caller cannot reach: the file is not found,
+                    # as on download.
+                    raise NotFoundException("file", str(file_id)) from exc
+            # Owning context deleted → the workspace gate (already enforced)
+            # suffices.
 
         # Reserved rows: ``reserve_upload`` already incremented the Redis
         # counter, but no committed-bytes are tracked in

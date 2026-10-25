@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.agent_scope import AgentScope, set_agent_scope
+from auth.workspace_roles import WorkspaceRole
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
 from utils.exceptions import NotFoundException
@@ -43,12 +44,18 @@ def _clean_scope():
     set_agent_scope(None)
 
 
-def _perm(*, member: object | None = None) -> PermissionService:
+# The workspace owner's membership row: it reaches every context of the
+# workspace and has a seat without a query.
+_OWNER_ROW = SimpleNamespace(role=WorkspaceRole.OWNER, allowed_context_ids=None)
+
+
+def _perm(*, member: object | None = _OWNER_ROW) -> PermissionService:
     """A service on a bare mock session.
 
     ``can_access_memory`` reads the caller's membership row for the seat check
-    (#1943); the default stands in for an author with no row, which keeps the
-    pre-#1943 semantics these tests pin.
+    (#1943) and the context access list; the default is the workspace owner's
+    row, so the binding gate alone decides in these tests. ``member=None``
+    stands in for a caller with no membership row.
     """
     perm = PermissionService(MagicMock())
     perm.workspace_service.get_member = AsyncMock(return_value=member)  # type: ignore[method-assign]
@@ -574,7 +581,7 @@ class TestCanAccessMemoryDenyCapture:
     async def test_non_member_rbac_deny_emits_rbac_denied(self):
         ws = uuid.uuid4()
         set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=ws))
-        perm = _perm()  # no membership row → rbac_denied
+        perm = _perm(member=None)  # no membership row → rbac_denied
         with (
             patch(
                 "services.context_service.ContextService.is_context_shared",

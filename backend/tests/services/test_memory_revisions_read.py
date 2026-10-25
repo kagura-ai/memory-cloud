@@ -589,7 +589,7 @@ class TestReferenceVersionRealBindingGate:
             patch("auth.agent_scope.get_agent_scope", return_value=scope),
             patch(
                 "services.permission_service.PermissionService._seated_member",
-                new=AsyncMock(return_value=object()),
+                new=AsyncMock(return_value=SimpleNamespace(role="owner", allowed_context_ids=None)),
             ),
             patch(
                 "services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()
@@ -924,7 +924,7 @@ class TestListRevisionsRealBindingGate:
             patch("auth.agent_scope.get_agent_scope", return_value=scope),
             patch(
                 "services.permission_service.PermissionService._seated_member",
-                new=AsyncMock(return_value=object()),
+                new=AsyncMock(return_value=SimpleNamespace(role="owner", allowed_context_ids=None)),
             ),
             patch(
                 "services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()
