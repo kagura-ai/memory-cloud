@@ -512,11 +512,13 @@ async def create_graph_edge(
                 field="target_id",
             )
 
-        # Write authz: member-or-higher workspace role (blocks read-only viewers),
-        # matching the MCP create_edge / remember / patch access model rather than
-        # the stricter context-role EDITOR gate. resolve_context_for_workspace_read
-        # collapses every deny reason to a uniform 404 (no existence leak) — except
-        # a member of the owning workspace without a seat on its plan (#1943).
+        # Write authz: member-or-higher role on the context's own workspace (a
+        # viewer is read-only), with no context-role EDITOR gate — the rule the
+        # MCP create_edge / remember tools and the memory service write paths
+        # apply too. resolve_context_for_workspace_read collapses every deny
+        # reason, a viewer's included, to a uniform 404 (no existence leak) —
+        # except a member of the owning workspace without a seat on its plan
+        # (#1943).
         context = await PermissionService(db).resolve_context_for_workspace_read(
             user_id,
             body.context_id,
