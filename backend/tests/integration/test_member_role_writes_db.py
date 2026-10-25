@@ -274,7 +274,17 @@ def _write_calls(w: World, ctx: UUID, memory_id: UUID) -> list[tuple[str, dict]]
             "update_memory",
             {"context_id": c, "memory_id": str(memory_id), "dismiss_supersede_candidate": True},
         ),
+        ("remember", {"context_id": c, **item, "dedupe": "off", "supersedes": str(memory_id)}),
+        (
+            "update_memory",
+            {"context_id": c, "external_id": "ext-viewer-1", **item},
+        ),
+        (
+            "update_memory",
+            {"context_id": c, "memory_id": str(memory_id), "accept_supersede_candidate": True},
+        ),
         ("forget", {"context_id": c, "memory_id": str(memory_id)}),
+        ("forget", {"context_id": c, "query": "failover runbook"}),
         ("forget", {"context_id": c, "memory_ids": [str(memory_id)]}),
         (
             "create_edge",
@@ -502,11 +512,12 @@ async def _rest(
     import httpx
 
     from api.main import app
+    from api.routes import agent_state as agent_state_routes
     from api.routes import context_search_config as search_config_routes
     from api.routes import contexts as context_routes
     from api.routes import feedback as feedback_routes
     from api.routes import memory as memory_routes
-    from auth.dependencies import get_user_from_api_key_or_session
+    from auth.dependencies import get_user_from_api_key_or_session, require_session_auth
 
     opened: list[AsyncSession] = []
 
@@ -520,18 +531,22 @@ async def _rest(
             await session.rollback()
             raise
 
-    app.dependency_overrides[get_user_from_api_key_or_session] = lambda: {
+    principal = {
         "user_id": user_id,
         "current_workspace_id": current,
         "api_key_workspace_id": key,
         "auth_type": "api_key" if key else "session",
     }
+    app.dependency_overrides[get_user_from_api_key_or_session] = lambda: principal
+    if key is None:
+        app.dependency_overrides[require_session_auth] = lambda: principal
     # The dependency the routes hold (``live`` patches the ``db.base`` name).
     for route_get_db in {
         memory_routes.get_db,
         search_config_routes.get_db,
         context_routes.get_db,
         feedback_routes.get_db,
+        agent_state_routes.get_db,
     }:
         app.dependency_overrides[route_get_db] = _db
     try:
@@ -646,3 +661,145 @@ async def test_rest_context_routes_keep_a_scoped_key_in_its_workspace(live) -> N
         duplicates.text,
     )
     assert own.status_code == 200, own.text
+
+
+async def test_rest_context_writes_refuse_a_viewer_in_its_own_private_context(live) -> None:
+    """A workspace viewer is read-only in a private context it created: agent
+    state, search settings and deleting the context are refused (403)."""
+    w: World = live
+    async with _rest(w, w.viewer, current=w.w) as c:
+        state = await c.put(f"/api/v1/contexts/{w.viewer_private}/state/k", json={"value": "v"})
+        reset = await c.post(f"/api/v1/contexts/{w.viewer_private}/search-config/reset")
+        deleted = await c.delete(f"/api/v1/contexts/{w.viewer_private}")
+    assert (state.status_code, reset.status_code, deleted.status_code) == (403, 403, 403), (
+        state.text,
+        reset.text,
+        deleted.text,
+    )
+    w.session.expunge_all()
+    ctx = (
+        await w.session.execute(select(Context).where(Context.id == w.viewer_private))
+    ).scalar_one()
+    assert ctx.deleted_at is None
+
+
+# ------------------------------------------------------ linked identities
+
+
+async def test_linked_accounts_write_by_their_own_role(live) -> None:
+    """#1784: a linked account acts in the linked creator's private context
+    as itself — a member writes there, a viewer only reads."""
+    from services.identity_link_service import IdentityLinkService
+
+    w: World = live
+    owner_private = Context(
+        id=uuid4(),
+        workspace_id=w.w,
+        name=f"op-{uuid4().hex[:6]}",
+        created_by=w.owner,
+        is_private=True,
+    )
+    member_private = Context(
+        id=uuid4(),
+        workspace_id=w.w,
+        name=f"mp-{uuid4().hex[:6]}",
+        created_by=w.member,
+        is_private=True,
+    )
+    w.session.add_all([owner_private, member_private])
+    await w.session.flush()
+    owner_private_id, member_private_id = owner_private.id, member_private.id
+    note = _memory(w.w, member_private_id, w.member, "The member's private note")
+    w.session.add(note)
+    editor_row = (
+        await w.session.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == w.w, WorkspaceMember.user_id == w.editor
+            )
+        )
+    ).scalar_one()
+    editor_row.allowed_context_ids = [w.ctx, owner_private_id]
+    await w.session.commit()
+    note_id = note.id
+    links = IdentityLinkService(w.session)
+    await links.link(w.owner, w.editor)  # the editor's account is a member of W
+    await links.link(w.member, w.viewer)  # the viewer's account is a viewer of W
+
+    item = {"summary": "Written as the linked member", "content": "x", "type": "note"}
+    wrote = await _tool(
+        "remember", {"context_id": str(owner_private_id), **item, "dedupe": "off"}, w.editor, w.w
+    )
+    assert wrote.get("status") == "success", wrote
+
+    refused = await _tool(
+        "remember",
+        {"context_id": str(member_private_id), **item, "dedupe": "off"},
+        w.viewer,
+        w.w,
+    )
+    assert refused.get("error") == "permission_denied", refused
+    changed = await _tool(
+        "update_memory",
+        {"context_id": str(member_private_id), "memory_id": str(note_id), "importance": 0.1},
+        w.viewer,
+        w.w,
+    )
+    assert changed.get("error") == "permission_denied", changed
+    read = await _tool(
+        "reference",
+        {"context_id": str(member_private_id), "memory_id": str(note_id)},
+        w.viewer,
+        w.w,
+    )
+    assert read.get("status") == "success", read
+    assert (await _row(w, note_id)).importance == pytest.approx(0.9)
+
+
+# ------------------------------------------------------------ agent bindings
+
+
+async def test_an_agent_binding_still_decides_writes(live) -> None:
+    """A ``direct`` binding writes; a context bound read-only answers
+    context_not_found, not the role refusal."""
+    from auth.agent_scope import AgentScope, get_agent_scope, set_agent_scope
+    from models.agent import Agent
+    from services.agent_binding_service import AgentBindingService
+
+    w: World = live
+    second = Context(
+        id=uuid4(),
+        workspace_id=w.w,
+        name=f"c2-{uuid4().hex[:6]}",
+        created_by=w.owner,
+        is_private=False,
+    )
+    w.session.add(second)
+    await w.session.flush()
+    agent = Agent(workspace_id=w.w, name=f"agent-{uuid4().hex[:6]}", owner_user_id=w.owner)
+    w.session.add(agent)
+    await w.session.flush()
+    bindings = AgentBindingService(w.session)
+    await bindings.create_binding(
+        agent=agent, context_id=w.ctx, created_by=w.owner, write_policy="direct", is_default=True
+    )
+    await bindings.create_binding(
+        agent=agent, context_id=second.id, created_by=w.owner, write_policy="deny"
+    )
+    await w.session.commit()
+    agent_id, second_id = agent.id, second.id
+
+    item = {"summary": "Written by the bound agent", "content": "x", "type": "note"}
+    previous = get_agent_scope()
+    set_agent_scope(AgentScope(agent_id=agent_id, enforcement_mode="enforce", workspace_id=w.w))
+    try:
+        wrote = await _tool(
+            "remember", {"context_id": str(w.ctx), **item, "dedupe": "off"}, w.owner, w.w
+        )
+        denied = await _tool(
+            "remember", {"context_id": str(second_id), **item, "dedupe": "off"}, w.owner, w.w
+        )
+    finally:
+        set_agent_scope(previous)
+    assert wrote.get("status") == "success", wrote
+    assert denied.get("error") == "context_not_found", denied
+    assert await _live_count(w, second_id) == 0
