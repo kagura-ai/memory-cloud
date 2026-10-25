@@ -22,8 +22,8 @@ The large or append-only logs (``audit_logs.user_metadata``,
 ``llm_call_log.call_metadata``, ``memory_access_events.event_metadata``,
 ``secret_access_log.req_meta``, ``resource_events.payload``,
 ``neural_memory_edges.metadata``) are left as they are: new rows store SQL
-NULL, historical rows keep JSON null, and a SQL count or merge on them uses
-``col IS NULL OR col::text = 'null'`` (docs/deployment.md). Two of them cannot
+NULL, historical rows keep JSON null, and a SQL count or merge on them matches
+both forms (docs/deployment.md gives the guarded query). Two of them cannot
 be rewritten anyway: an append-only trigger blocks UPDATE on
 ``memory_access_events`` and ``secret_access_log``.
 
@@ -41,8 +41,10 @@ hold every row lock until the end):
 1. **Collect** the ids of the rows with a JSON null in any listed column into a
    session temp table, in one lock-free scan.
 2. **Rewrite** them in id order, BATCH_SIZE per statement: each batch locks its
-   rows in id order (#1985) with ``SKIP LOCKED``, so the walk never waits on a
-   row a request holds (a skipped row stays JSON null, which reads the same,
+   rows in id order (#1985) with ``FOR NO KEY UPDATE`` (the lock the UPDATE
+   takes anyway; it does not conflict with the ``FOR KEY SHARE`` a foreign-key
+   check on a child row takes) and ``SKIP LOCKED``, so the walk never waits on
+   a row a request holds (a skipped row stays JSON null, which reads the same,
    and the rerun below fixes it), and the UPDATE repeats the predicate, so a
    value committed after the collection is never overwritten. Each listed
    column is set to NULL only where it is JSON null; ``updated_at`` is not
@@ -52,7 +54,8 @@ hold every row lock until the end):
 migration, and running it again resumes (the rewritten rows no longer match).
 ``statement_timeout`` is 0 for the session: the collecting scan reads the
 whole table. The log gives, per table, the values rewritten per column and the
-rows skipped.
+collected rows not rewritten (skipped because a request held them, or changed
+or deleted since the scan).
 
 Cost: the ``memories`` scan reads the whole table once, and each rewritten row
 is a non-HOT update (``details`` is in a partial-index predicate and
@@ -165,33 +168,32 @@ def batch_sql(table: str, pk_type: str, columns: tuple[str, ...], *, first: bool
     holds) and rewritten.
 
     Returns the batch's last id (NULL once done), the rows rewritten, how many
-    of them had each column JSON null (``c0``, ``c1``, ...), and the rows that
-    still matched but were skipped.
+    of them had each column JSON null (``c0``, ``c1``, ...), and the collected
+    rows not rewritten (held by a request, or changed or deleted since the
+    scan).
     """
     after = "" if first else f"WHERE id > CAST(:after AS {pk_type})"
     flags = ", ".join(f"{_is_null(c)} AS c{i}" for i, c in enumerate(columns))
     sets = ", ".join(f"{c} = CASE WHEN {_is_null(c)} THEN NULL ELSE t.{c} END" for c in columns)
+    returned = ", ".join(f"locked.c{i}" for i in range(len(columns)))
     counts = ", ".join(
-        f"(SELECT count(*) FROM locked JOIN rewritten USING (id) WHERE locked.c{i}) AS c{i}"
-        for i in range(len(columns))
+        f"(SELECT count(*) FILTER (WHERE c{i}) FROM rewritten) AS c{i}" for i in range(len(columns))
     )
     return (
         "WITH ids AS ("
         f"  SELECT id FROM {_IDS} {after} ORDER BY id LIMIT :batch_size"
-        "), matching AS ("
-        f"  SELECT t.id FROM {table} AS t JOIN ids ON ids.id = t.id WHERE {_any_null(columns)}"
         "), locked AS ("
         f"  SELECT t.id, {flags} FROM {table} AS t JOIN ids ON ids.id = t.id"
         f"  WHERE {_any_null(columns)}"
-        "  ORDER BY t.id FOR UPDATE OF t SKIP LOCKED"
+        "  ORDER BY t.id FOR NO KEY UPDATE OF t SKIP LOCKED"
         "), rewritten AS ("
         f"  UPDATE {table} AS t SET {sets}"
         f"  FROM locked WHERE t.id = locked.id AND {_any_null(columns)}"
-        "  RETURNING t.id"
+        f"  RETURNING t.id, {returned}"
         ") "
         "SELECT (SELECT id FROM ids ORDER BY id DESC LIMIT 1) AS last_id, "
         "(SELECT count(*) FROM rewritten) AS rewritten, "
-        "(SELECT count(*) FROM matching) - (SELECT count(*) FROM locked) AS skipped, "
+        "(SELECT count(*) FROM ids) - (SELECT count(*) FROM rewritten) AS skipped, "
         f"{counts}"
     )
 
@@ -217,7 +219,7 @@ def _normalize(conn: sa.engine.Connection, table: str, pk_type: str, columns: tu
             if row.last_id is None:
                 break
             rewritten += row.rewritten
-            skipped += max(row.skipped, 0)
+            skipped += row.skipped
             for i in range(len(columns)):
                 per_column[i] += row._mapping[f"c{i}"]
             after = row.last_id
@@ -226,7 +228,8 @@ def _normalize(conn: sa.engine.Connection, table: str, pk_type: str, columns: tu
 
     detail = ", ".join(f"{c}={n}" for c, n in zip(columns, per_column, strict=True))
     logger.info(
-        "#2026: %s: set JSON null to SQL NULL on %d rows (%s); %d rows skipped (held by a request)",
+        "#2026: %s: set JSON null to SQL NULL on %d rows (%s); "
+        "%d rows not rewritten (held by a request, or changed since the scan)",
         table,
         rewritten,
         detail,

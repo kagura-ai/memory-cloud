@@ -3016,11 +3016,13 @@ append-only, so the migration leaves them as they are. New rows store SQL
   payload)
 - `neural_memory_edges.metadata`
 
-To count "no value" in these columns, match both forms:
+To count "no value" in these columns, match both forms. Check
+`pg_column_size` first, so that the scan does not detoast the large values:
 
 ```sql
 SELECT count(*) FROM llm_call_log
- WHERE call_metadata IS NULL OR call_metadata::text = 'null';
+ WHERE call_metadata IS NULL
+    OR (pg_column_size(call_metadata) < 16 AND call_metadata::text = 'null');
 ```
 
 A SQL merge into one of them needs `NULLIF(col, 'null'::jsonb)` (for a `json`

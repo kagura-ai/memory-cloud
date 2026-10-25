@@ -421,7 +421,7 @@ def test_f15_rewrites_json_null_only_and_resumes() -> None:
         assert memory_lines == [
             "#2026: memories: set JSON null to SQL NULL on 304 rows "
             "(details=304, context=303, supersede_candidate=303); "
-            "1 rows skipped (held by a request)"
+            "1 rows not rewritten (held by a request, or changed since the scan)"
         ]
         connector_line = next(
             m for m in captured.messages if m.startswith("#2026: workspace_connectors:")
@@ -448,7 +448,8 @@ def test_f15_rewrites_json_null_only_and_resumes() -> None:
         _upgrade_to(F15_REVISION)
         assert [m for m in captured.messages if m.startswith("#2026: memories:")] == [
             "#2026: memories: set JSON null to SQL NULL on 0 rows "
-            "(details=0, context=0, supersede_candidate=0); 0 rows skipped (held by a request)"
+            "(details=0, context=0, supersede_candidate=0); "
+            "0 rows not rewritten (held by a request, or changed since the scan)"
         ]
     finally:
         migration_logger.removeFilter(captured)

@@ -52,6 +52,9 @@ NULLABLE = sorted(
 def test_nullable_json_column_uses_a_shared_type(column: Column) -> None:
     assert column.type is NullableJSON or column.type is NullableJSONB
     assert isinstance(column.type, JSON) and column.type.none_as_null is True
+    # A default would fire on an explicit None (left out of the INSERT): such a
+    # column belongs in EXCEPTIONS with the plain type instead.
+    assert column.default is None and column.server_default is None
 
 
 def test_the_shared_types_store_none_as_sql_null() -> None:

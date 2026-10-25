@@ -24,9 +24,16 @@ legitimate value (``agent_states.value``).
 Rows written before the switch may still hold JSON ``null``. f15 rewrote the
 small tables and ``memories``; in the large or append-only logs (audit_logs,
 llm_call_log, memory_access_events, secret_access_log, resource_events,
-neural_memory_edges) historical JSON null stays, so a SQL count or merge on
-those columns must use ``col IS NULL OR col::text = 'null'`` (and
-``NULLIF(col, 'null'::jsonb)`` before ``||``).
+neural_memory_edges) historical JSON null stays, so a SQL count on those
+columns matches both forms, with the size check first so a scan does not
+detoast large values::
+
+    col IS NULL OR (pg_column_size(col) < 16 AND col::text = 'null')
+
+and a merge with ``||`` goes through ``NULLIF(col, 'null'::jsonb)`` on a
+``jsonb`` column, ``NULLIF(col::jsonb, 'null'::jsonb)`` on a ``json`` one
+(``json`` has neither ``=`` nor ``||``): ``'null'::jsonb || '{...}'`` is an
+array.
 """
 
 from sqlalchemy import JSON
