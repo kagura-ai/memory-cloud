@@ -668,7 +668,7 @@ class MemoryRepository(BaseRepository[Memory]):
 
     async def list_session_index(
         self, workspace_id: UUID, context_id: UUID, limit: int
-    ) -> tuple[list, int]:
+    ) -> tuple[list, int | None]:
         """A small context's whole live trusted set (``load_guardrails``' index lane, #2334).
 
         Live means not soft-deleted and not shadowed by a ``supersedes`` edge
@@ -676,13 +676,13 @@ class MemoryRepository(BaseRepository[Memory]):
         trust gate is ``list_tool_triggered``'s, hard-wired. When at most
         ``limit`` rows match they come back newest first
         (``coalesce(updated_at, created_at) DESC, id DESC``) with their count;
-        above it no rows are returned, only the exact count — the caller
-        serves ``index: null`` then. The probe query carries no ORDER BY, so
-        a large context costs a ``LIMIT limit + 1`` scan and one COUNT, never
-        a sort of the whole context.
+        above it nothing is returned and no COUNT runs (no consumer reads the
+        size of a context it gets no index for). The probe query carries no
+        ORDER BY, so a large context costs one ``LIMIT limit + 1`` scan, never
+        a COUNT or a sort of the whole context.
 
         Returns:
-            ``(rows, total)`` — every row when ``total <= limit``, else ``[]``.
+            ``(rows, len(rows))`` when at most ``limit`` rows match, else ``([], None)``.
         """
         from sqlalchemy import exists
         from sqlalchemy.orm import aliased
@@ -716,10 +716,7 @@ class MemoryRepository(BaseRepository[Memory]):
         if len(rows) <= limit:
             rows.sort(key=lambda r: (r.updated_at or r.created_at, r.id), reverse=True)
             return rows, len(rows)
-        total = (
-            await self.db.execute(select(func.count(Memory.id)).where(*conditions))
-        ).scalar_one()
-        return [], total
+        return [], None
 
     async def list_pinned(
         self, workspace_id: UUID, context_id: UUID, limit: int, *, trusted_only: bool = False

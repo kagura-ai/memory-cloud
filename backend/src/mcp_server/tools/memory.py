@@ -987,8 +987,16 @@ def _guardrail_index_payload(item: Any) -> dict[str, Any]:
         "summary": item.summary,
         **({"summary_cut": True} if item.summary_cut else {}),
         "type": item.type,
+        "authored_by_caller": item.authored_by_caller,
         "updated_at": to_utc_iso(item.updated_at),
     }
+
+
+# The index lane's keys at their longest (``null`` is longer than ``[]``).
+_INDEX_KEYS_RESERVE = max(
+    len(',"index":[],"index_truncated":false'),
+    len(',"index":null,"index_truncated":false'),
+)
 
 
 def _fit_index_lane(
@@ -998,7 +1006,7 @@ def _fit_index_lane(
 
     The pinned and tool-triggered lanes are fitted first and keep priority;
     the index keeps the newest rows that fit and ``index_truncated`` says
-    when rows were cut (``index_total_available`` stays the real count).
+    when rows were cut (``index_total_available`` keeps the count before the cut).
     """
     if index is None:
         return {**envelope, "index": None, "index_truncated": False}
@@ -1078,7 +1086,7 @@ async def handle_load_guardrails(
                 ("tool_triggered", "pinned"),
                 # Room for the index lane's keys, so the guardrail lanes are
                 # fitted against the same envelope the index is added to.
-                max_chars - len(',"index":[],"index_truncated":false'),
+                max_chars - _INDEX_KEYS_RESERVE,
             )
             envelope["pinned_truncated"] = result.pinned_truncated or cut["pinned"]
             envelope["tool_triggered_truncated"] = (

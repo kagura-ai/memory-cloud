@@ -6885,11 +6885,12 @@ class MemoryService:
         # #2334: the index lane — the whole live set of a small context.
         index_max = settings.session_index_max_memories
         index_rows: list = []
-        index_total: int | None = None
+        index_served = False
         if index_max > 0:
-            index_rows, index_total = await self.memory_repo.list_session_index(
+            index_rows, index_count = await self.memory_repo.list_session_index(
                 ws_uuid, ctx_uuid, index_max
             )
+            index_served = index_count is not None
 
         from services.agent_binding_service import filter_memory_rows_by_binding
 
@@ -6923,10 +6924,11 @@ class MemoryService:
             self._guardrail_item(m, user_id, tool_trigger=m.tool_trigger, l2=False)
             for m in tool_rows
         ]
+        # Unlike the guardrail lanes, the index count is AFTER the binding
+        # filter: a client prints "N more" from it, and a row this credential
+        # may not read must not count as one it could recall.
         index_items = (
-            [self._guardrail_index_item(m) for m in index_rows]
-            if index_total is not None and index_total <= index_max
-            else None
+            [self._guardrail_index_item(m, user_id) for m in index_rows] if index_served else None
         )
         version = guardrail_version(
             [
@@ -6969,11 +6971,11 @@ class MemoryService:
             tool_triggered_total_available=tool_total,
             tool_triggered_truncated=tool_truncated,
             index=index_items,
-            index_total_available=index_total,
+            index_total_available=len(index_items) if index_items is not None else None,
         )
 
     @staticmethod
-    def _guardrail_index_item(row: Any) -> GuardrailIndexItem:
+    def _guardrail_index_item(row: Any, user_id: str) -> GuardrailIndexItem:
         """One index-lane pointer row: the 80-character summary head of
         ``bootstrap(format="index")`` (same ``compact_summary`` cut)."""
         from utils.recall_projection import INDEX_SUMMARY_CHARS, compact_summary
@@ -6984,6 +6986,7 @@ class MemoryService:
             summary=head,
             summary_cut=cut,
             type=row.type,
+            authored_by_caller=row.user_id == user_id,
             updated_at=row.updated_at or row.created_at,
         )
 

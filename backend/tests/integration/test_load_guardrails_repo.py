@@ -400,7 +400,8 @@ async def test_session_index_is_the_live_trusted_set_newest_first(env, db_sessio
 @pytest.mark.asyncio(loop_scope="session")
 async def test_session_index_above_the_cap_is_a_count_only(env, db_session):
     rows, total = await MemoryRepository(db_session).list_session_index(env["ws_id"], env["ctx"], 5)
-    assert rows == [] and total == 6
+    # No COUNT above the cap: nothing reads the size of an unserved index.
+    assert rows == [] and total is None
 
 
 @pytest.mark.asyncio(loop_scope="session")

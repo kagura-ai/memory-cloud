@@ -387,7 +387,12 @@ def _index_item(summary="the deploy runs from the release branch", cut=False):
     from models.schemas import GuardrailIndexItem
 
     return GuardrailIndexItem(
-        memory_id=uuid4(), summary=summary, summary_cut=cut, type="decision", updated_at=NOW
+        memory_id=uuid4(),
+        summary=summary,
+        summary_cut=cut,
+        type="decision",
+        authored_by_caller=True,
+        updated_at=NOW,
     )
 
 
@@ -403,7 +408,7 @@ async def test_index_lane_rows_and_counts_reach_the_envelope():
     assert [r["memory_id"] for r in body["index"]] == [str(r.memory_id) for r in rows]
     plain, cut = body["index"]
     # summary_cut is present only when the head was cut (omit-empty convention).
-    assert set(plain) == {"memory_id", "summary", "type", "updated_at"}
+    assert set(plain) == {"memory_id", "summary", "type", "authored_by_caller", "updated_at"}
     assert cut["summary_cut"] is True
     assert plain["updated_at"] == "2026-09-22T09:00:00Z"
     assert body["index_total_available"] == 2
@@ -415,14 +420,39 @@ async def test_index_lane_rows_and_counts_reach_the_envelope():
 @pytest.mark.asyncio
 async def test_index_is_null_above_the_cap():
     service = MagicMock(
-        load_guardrails=AsyncMock(return_value=_response(index=None, index_total_available=500))
+        load_guardrails=AsyncMock(return_value=_response(index=None, index_total_available=None))
     )
     with _patched(service):
         result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
     body = json.loads(result[0].text)
     assert body["index"] is None
-    assert body["index_total_available"] == 500
+    assert body["index_total_available"] is None
     assert body["index_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_null_index_with_saturated_lanes_stays_within_max_chars():
+    """The reserve for the index keys covers ``"index":null`` (the longer form):
+    with a tool lane that fills the budget (context_summary dropped, so its
+    reserve is spent; flags already true, so no false -> true flip gives back
+    slack), the reply never passes max_chars at any item size."""
+    over = []
+    for pad in range(600):
+        tool = [
+            _item(summary="s" * (200 + pad), context_summary="c" * 2_000, tool_trigger=TT)
+            for _ in range(40)
+        ]
+        response = _response(tool=tool, index=None, truncated=True, tool_triggered_truncated=True)
+        service = MagicMock(load_guardrails=AsyncMock(return_value=response))
+        with _patched(service):
+            result = await handle_load_guardrails(
+                {"context_id": str(uuid4()), "max_chars": 10_000}, "u", uuid4()
+            )
+        body = json.loads(result[0].text)
+        assert body["index"] is None and body["index_truncated"] is False
+        if len(result[0].text) > 10_000:
+            over.append((pad, len(result[0].text)))
+    assert over == []
 
 
 @pytest.mark.asyncio

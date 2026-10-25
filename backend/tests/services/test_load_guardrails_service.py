@@ -368,8 +368,16 @@ def _index_row(**o):
     m.updated_at = o.get("updated_at", None)
     m.context_id = uuid4()
     m.source_type = "manual"
-    m.user_id = "u1"
+    m.user_id = o.get("user_id", "u1")
     return m
+
+
+@pytest.mark.asyncio
+async def test_index_rows_carry_authored_by_caller(service, emit):
+    mine, theirs = _index_row(), _index_row(user_id="u2")
+    service.memory_repo.list_session_index = AsyncMock(return_value=([mine, theirs], 2))
+    result = await _call(service, user_id="u1")
+    assert [i.authored_by_caller for i in result.index] == [True, False]
 
 
 @pytest.mark.asyncio
@@ -404,16 +412,17 @@ async def test_index_rows_are_80_char_heads_with_summary_cut(service, emit):
         "summary",
         "summary_cut",
         "type",
+        "authored_by_caller",
         "updated_at",
     }
 
 
 @pytest.mark.asyncio
-async def test_index_is_null_above_the_cap_with_the_real_count(service, emit):
-    service.memory_repo.list_session_index = AsyncMock(return_value=([], 61))
+async def test_index_is_null_above_the_cap_and_no_count_is_reported(service, emit):
+    service.memory_repo.list_session_index = AsyncMock(return_value=([], None))
     result = await _call(service)
     assert result.index is None
-    assert result.index_total_available == 61
+    assert result.index_total_available is None
 
 
 @pytest.mark.asyncio
@@ -444,5 +453,5 @@ async def test_index_rows_go_through_the_binding_filter(service, emit):
     with patch("services.agent_binding_service.filter_memory_rows_by_binding", new=_flt):
         result = await _call(service)
     assert [i.memory_id for i in result.index] == [kept.id]
-    # The total is the context's (pre-binding) count, as on the other lanes.
-    assert result.index_total_available == 2
+    # The index count is AFTER the filter: a denied row is not "one more".
+    assert result.index_total_available == 1
