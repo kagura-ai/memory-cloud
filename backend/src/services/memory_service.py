@@ -3132,7 +3132,9 @@ class MemoryService:
             self.db, memory.id, before_id=before_id, limit=limit
         )
         caller_ids = await linked_user_ids(self.db, user_id)
-        unreadable = await self._unreadable_edits(memory, user_id, rows)
+        unreadable = await self._unreadable_edits(
+            memory, user_id, rows, key_workspace_id=key_workspace_id
+        )
         revisions = []
         for row in rows:
             readable = row.version not in unreadable
@@ -3149,7 +3151,14 @@ class MemoryService:
             next_cursor=str(rows[-1].id) if has_more and rows else None,
         )
 
-    async def _unreadable_edits(self, memory: Memory, user_id: str, rows: list[Any]) -> set[int]:
+    async def _unreadable_edits(
+        self,
+        memory: Memory,
+        user_id: str,
+        rows: list[Any],
+        *,
+        key_workspace_id: UUID | None = None,
+    ) -> set[int]:
         """The versions of the ``updated`` events in ``rows`` that connect a
         version the caller may not read (#2169).
 
@@ -3179,7 +3188,11 @@ class MemoryService:
         async def readable(memory_type: str | None) -> bool:
             if memory_type not in verdicts:
                 verdicts[memory_type] = await self._can_read_memory(
-                    memory, user_id, memory_id=memory.id, memory_type=memory_type
+                    memory,
+                    user_id,
+                    memory_id=memory.id,
+                    memory_type=memory_type,
+                    key_workspace_id=key_workspace_id,
                 )
             return verdicts[memory_type]
 
@@ -3230,7 +3243,9 @@ class MemoryService:
             memory_id, user_id, key_workspace_id=key_workspace_id
         )
         if version is not None and version != memory.version:
-            return await self._reference_historical(memory, user_id, version)
+            return await self._reference_historical(
+                memory, user_id, version, key_workspace_id=key_workspace_id
+            )
 
         # Snapshot ``updated_at`` before bumping access stats. #1317 removed
         # the column's ``onupdate=func.now()``, so ``update_access_stats`` no
@@ -3337,7 +3352,12 @@ class MemoryService:
         )
 
     async def _reference_historical(
-        self, memory: Memory, user_id: str, version: int
+        self,
+        memory: Memory,
+        user_id: str,
+        version: int,
+        *,
+        key_workspace_id: UUID | None = None,
     ) -> ReferenceResponse:
         """``reference(version=N)`` for an earlier version (#2043)."""
         from services.memory_versions import load_version
@@ -3355,7 +3375,11 @@ class MemoryService:
         if historical_type is None or (
             historical_type != memory.type
             and not await self._can_read_memory(
-                memory, user_id, memory_id=memory.id, memory_type=historical_type
+                memory,
+                user_id,
+                memory_id=memory.id,
+                memory_type=historical_type,
+                key_workspace_id=key_workspace_id,
             )
         ):
             raise NotFoundException("Memory", str(memory.id))
