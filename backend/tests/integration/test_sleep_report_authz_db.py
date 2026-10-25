@@ -24,12 +24,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.agent_scope import AgentScope, set_agent_scope
 from auth.workspace_roles import ContextRole
 from mcp_server.tools._helpers import set_mcp_key_workspace_scope
+from models.agent import Agent, AgentContextBinding
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory, NeuralMemoryEdge
 from models.sleep import SleepAction, SleepReport
@@ -68,7 +69,7 @@ async def _build(
     *,
     bob_role: str | None,
     context_role: ContextRole | None = None,
-    allowed_context: bool = True,
+    allowed_context: bool | None = True,
     private: bool = False,
     with_context: bool = True,
 ) -> World:
@@ -101,7 +102,10 @@ async def _build(
                 workspace_id=w.id,
                 user_id=bob,
                 role=bob_role,
-                allowed_context_ids=[context.id] if allowed_context else [],
+                # None: the column's NULL (no access list).
+                allowed_context_ids=(
+                    None if allowed_context is None else [context.id] if allowed_context else []
+                ),
             )
         )
     if context_role is not None:
@@ -208,6 +212,7 @@ async def worlds(db_session: AsyncSession) -> AsyncIterator[list[World]]:
         )
         await db_session.execute(delete(Memory).where(Memory.workspace_id == world.w))
         await db_session.execute(delete(SleepReport).where(SleepReport.user_id == world.bob))
+        await db_session.execute(delete(Agent).where(Agent.workspace_id == world.w))
         await db_session.execute(delete(Workspace).where(Workspace.id.in_([world.w, world.p])))
         await db_session.execute(delete(User).where(User.user_id.in_(users)))
     await db_session.commit()
@@ -430,3 +435,142 @@ async def test_editor_and_owner_still_read_and_roll_back(
     assert rescored is not None and rescored.importance == pytest.approx(0.4)
     assert archived is not None and archived.deleted_at is None
     assert await world.db.get(NeuralMemoryEdge, world.edge_id) is None
+
+
+async def _bind_agent(world: World, mode: str = "enforce", **binding: Any) -> AgentScope:
+    """An agent of Bob's bound to C with ``binding``, as the request's credential."""
+    agent = Agent(
+        id=uuid4(),
+        workspace_id=world.w,
+        name=f"agent-{uuid4().hex[:6]}",
+        owner_user_id=world.bob,
+        status="active",
+        enforcement_mode=mode,
+    )
+    world.db.add(agent)
+    await world.db.flush()
+    world.db.add(
+        AgentContextBinding(
+            id=uuid4(),
+            agent_id=agent.id,
+            context_id=world.context_id,
+            created_by=world.bob,
+            **binding,
+        )
+    )
+    await world.db.commit()
+    return AgentScope(agent_id=agent.id, enforcement_mode=mode, workspace_id=world.w)
+
+
+async def _as_agent(world: World, scope: AgentScope, tool: str) -> str:
+    set_mcp_key_workspace_scope(world.w)
+    set_agent_scope(scope)
+    try:
+        return await _call(world, tool, world.w)
+    finally:
+        set_agent_scope(None)
+        set_mcp_key_workspace_scope(None)
+
+
+async def _editor_world(db_session: AsyncSession, worlds: list[World]) -> World:
+    world = await _build(db_session, bob_role=WorkspaceRole.MEMBER, context_role=ContextRole.EDITOR)
+    worlds.append(world)
+    return world
+
+
+async def test_agent_binding_with_a_type_filter_gets_not_found(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    """The run's memories are notes; the binding allows decisions only."""
+    world = await _editor_world(db_session, worlds)
+    scope = await _bind_agent(
+        world, can_read=True, write_policy="direct", allowed_memory_types=["decision"]
+    )
+    for tool in ("get_sleep_report", "rollback_sleep_run"):
+        expected = await _not_found_reply(world, tool)
+        assert await _as_agent(world, scope, tool) == expected, tool
+    await _untouched(world)
+
+
+async def test_agent_binding_with_a_source_filter_gets_not_found(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    world = await _editor_world(db_session, worlds)
+    scope = await _bind_agent(world, can_read=True, write_policy="direct", allowed_source_types=[])
+    for tool in ("get_sleep_report", "rollback_sleep_run"):
+        expected = await _not_found_reply(world, tool)
+        assert await _as_agent(world, scope, tool) == expected, tool
+    await _untouched(world)
+
+
+async def test_shadow_mode_type_filter_proceeds(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    world = await _editor_world(db_session, worlds)
+    scope = await _bind_agent(
+        world,
+        "shadow",
+        can_read=True,
+        write_policy="direct",
+        allowed_memory_types=["decision"],
+    )
+    with patch("mcp_server.tools.sleep.logger") as log:
+        report = json.loads(await _as_agent(world, scope, "get_sleep_report"))
+        assert report["status"] == "success"
+        data = json.loads(await _as_agent(world, scope, "rollback_sleep_run"))
+    assert data["status"] == "rolled_back", data
+    events = [c.args[0] for c in log.warning.call_args_list]
+    assert events.count("agent_binding_row_filter_would_deny") == 2
+
+
+async def test_read_only_agent_binding_reads_but_cannot_roll_back(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    world = await _editor_world(db_session, worlds)
+    scope = await _bind_agent(world, can_read=True, write_policy="deny")
+    report = json.loads(await _as_agent(world, scope, "get_sleep_report"))
+    assert report["status"] == "success"
+    expected = await _not_found_reply(world, "rollback_sleep_run")
+    assert await _as_agent(world, scope, "rollback_sleep_run") == expected
+    await _untouched(world)
+
+
+async def test_agent_with_a_full_binding_reads_and_rolls_back(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    world = await _editor_world(db_session, worlds)
+    scope = await _bind_agent(world, can_read=True, write_policy="direct")
+    report = json.loads(await _as_agent(world, scope, "get_sleep_report"))
+    assert report["status"] == "success"
+    data = json.loads(await _as_agent(world, scope, "rollback_sleep_run"))
+    assert data["status"] == "rolled_back", data
+    assert data["rollback_summary"]["edges_deleted"] == 1
+
+
+async def test_soft_deleted_workspace_gets_not_found(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    world = await _editor_world(db_session, worlds)
+    await db_session.execute(
+        update(Workspace).where(Workspace.id == world.w).values(deleted_at=utcnow())
+    )
+    await db_session.commit()
+    await _assert_hidden(world, world.w, world.p, None)
+
+
+async def test_private_context_creator_who_is_a_workspace_viewer_cannot_roll_back(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    """The creator owns a private context whatever their workspace role; a
+    workspace viewer still may not roll back, as with rollback_session."""
+    world = await _build(
+        db_session, bob_role=WorkspaceRole.VIEWER, private=True, allowed_context=None
+    )
+    worlds.append(world)
+    report = json.loads(await _call(world, "get_sleep_report", world.p))
+    assert report["status"] == "success"
+    for ws in (world.w, world.p, None):
+        data = json.loads(await _call(world, "rollback_sleep_run", ws))
+        assert data["error"] == "permission_denied", (ws, data)
+        assert data["your_role"] == "viewer"
+    await _untouched(world)
