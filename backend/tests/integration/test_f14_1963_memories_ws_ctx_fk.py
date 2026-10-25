@@ -144,7 +144,7 @@ def _edge(conn: Connection, user_a: str, user_b: str, ws: uuid.UUID, ctx: uuid.U
             "(user_id, src_id, dst_id, edge_type, weight, confidence, workspace_id, context_id) "
             "SELECT a.user_id, a.id, b.id, 'neural_association', 1.0, 1.0, :ws, :ctx "
             "FROM memories AS a, memories AS b "
-            "WHERE a.user_id = :ua AND b.user_id = :ub AND a.id < b.id "
+            "WHERE a.user_id = :ua AND b.user_id = :ub AND (a.user_id <> b.user_id OR a.id < b.id) "
             "ORDER BY a.id, b.id LIMIT 1 RETURNING id"
         ),
         {"ua": user_a, "ub": user_b, "ws": ws, "ctx": ctx},
@@ -249,6 +249,15 @@ def test_f14_repairs_cross_rooted_rows_and_enforces_the_fk() -> None:
             before = {user: _rows(conn, user) for user in (consistent, no_ctx, dead, in_dead_ctx)}
             # The edges carry their endpoints' workspace: a cross-rooted pair's
             # edge sits in ws_b, a consistent pair's in ws_a.
+            # The bulk rows exhausted their embedding retries; a re-queue
+            # gives them a fresh budget.
+            conn.execute(
+                text(
+                    "UPDATE memories SET embedding_retry_count = 3, embedding_error = 'boom' "
+                    "WHERE user_id = :u"
+                ),
+                {"u": bulk},
+            )
             cross_edge = _edge(conn, bulk, bulk, ws_b, ctx_a)
             consistent_edge = _edge(conn, consistent, consistent, ws_a, ctx_a)
             consistent_edge_before = _edge_rows(conn, [consistent_edge])
@@ -310,6 +319,13 @@ def test_f14_repairs_cross_rooted_rows_and_enforces_the_fk() -> None:
             assert _state(conn, live) == {(ws_a, "pending")}
             assert _state(conn, last) == {(ws_a, "pending")}
             assert _state(conn, bulk) == {(ws_a, "pending")}
+            assert conn.execute(
+                text(
+                    "SELECT DISTINCT embedding_retry_count, embedding_error FROM memories "
+                    "WHERE user_id = :u"
+                ),
+                {"u": bulk},
+            ).all() == [(0, None)]
             # Soft-deleted rows, or rows in a soft-deleted context, move and
             # keep everything else.
             for user in (dead, in_dead_ctx):
@@ -376,6 +392,20 @@ def test_f14_repairs_cross_rooted_rows_and_enforces_the_fk() -> None:
         assert "#1963: no cross-rooted memories" in captured.messages
         with engine.begin() as conn:
             assert _fk(conn) == (True, "a", "c")
+
+        # A rerun with the FK already validated (as after a failed edge
+        # step) skips the memory steps and still moves stray edges.
+        with engine.begin() as conn:
+            stray_edge = _edge(conn, in_dead_ctx, no_ctx, ws_b, ctx_a_deleted)
+            conn.execute(text("UPDATE alembic_version SET version_num = :v"), {"v": PRIOR_HEAD})
+        captured.messages.clear()
+        _upgrade_to(F14_REVISION)
+        assert "#1963: no cross-rooted memories" not in captured.messages
+        assert "#1963: moved 1 neural_memory_edges to their context's workspace" in (
+            captured.messages
+        )
+        with engine.begin() as conn:
+            assert str(ws_a) in _edge_rows(conn, [stray_edge])[stray_edge]
     finally:
         migration_logger.removeFilter(captured)
         try:
