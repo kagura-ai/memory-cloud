@@ -58,7 +58,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
         {
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
-Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. Store facts as the source states them: do not fact-check or annotate them. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
+Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
 Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars — split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {

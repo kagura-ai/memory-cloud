@@ -37,9 +37,9 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 
 **Store what the material states, as it states it.** Do not fact-check it, add a note that a statement is wrong or outdated, or add dates, end years or qualifiers the material does not contain — the stored value is what the user or source said, and a later reader treats the store as the authority. When the material itself corrects an earlier statement, store the correction as it is worded there.
 
-**Updating a fact.** When the material changes a fact that may already be stored (a new owner, a new value, a moved date), search before writing: `recall(query="<the subject>", k=3, full=0)`. When a row states the same fact with another value, write the new one with `supersedes=<that memory_id>` (or edit that row with `update_memory`). Never store the new value next to the old one without either.
+**Updating a fact.** When the material changes a fact that may already be stored (a new owner, a new value, a moved date), search before writing: `recall(context_id=..., query="<the subject>", k=3, full=0)` (no `context_id` on a default context). When a row states the same fact with another value, write the new one with `supersedes=<that memory_id>` (or edit that row with `update_memory`). Never store the new value next to the old one without either.
 
-**When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as ISO 8601 (`"2024-03-07"`) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `list(filters={"details.observed_at": ...})` matches it exactly.
+**When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as a date only, `YYYY-MM-DD` (`"2024-03-07"`, no time or offset, so exact filters and sorting work) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `list(filters={"details.observed_at": ...})` matches it exactly.
 
 **Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
 
