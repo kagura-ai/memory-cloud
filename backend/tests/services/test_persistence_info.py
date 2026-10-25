@@ -790,7 +790,6 @@ def _patched_write_handler(service):
 
     with (
         patch("db.base.get_db", new=mock_get_db),
-        patch("mcp_server.tools.memory._check_viewer_permission", new=AsyncMock(return_value=None)),
         patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=MagicMock())),
         patch("mcp_server.tools.memory._touch_context_last_used", new=AsyncMock()),
         patch("mcp_server.tools.memory._context_response_fields", return_value={}),

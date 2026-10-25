@@ -30,7 +30,6 @@ from mcp.types import TextContent
 from mcp_server.tools._constants import get_tool_timeout
 from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
-    _check_viewer_permission,
     _context_response_fields,
     _ContextNotFoundError,
     _error_response,
@@ -228,15 +227,12 @@ async def handle_rollback_session(
         context_id: UUID | None = None
         try:
             context_id = _resolve_context_id(args["context_id"])
-            # The write path: workspace-key scope and the agent-binding write
-            # gate, uniform context_not_found on a deny.
-            context = await _resolve_context(db, user_id, context_id)
-            # The member role on the context's own workspace, not the session's.
-            perm_error = await _check_viewer_permission(
-                db, user_id, context.workspace_id, "roll back sessions"
+            # The write path: workspace-key scope, the agent-binding write gate
+            # (uniform context_not_found on a deny) and the member role on the
+            # context's own workspace (permission_denied).
+            context = await _resolve_context(
+                db, user_id, context_id, write_role="roll back sessions"
             )
-            if perm_error:
-                return perm_error
             role = await context_role(db, user_id, context_id)
             if role not in (ContextRole.OWNER, ContextRole.EDITOR):
                 return _error_response(

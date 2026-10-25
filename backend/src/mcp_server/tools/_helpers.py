@@ -474,12 +474,31 @@ class _ContextNotFoundError(Exception):
         )
 
 
+class _WriteRoleRefusedError(_ContextNotFoundError):
+    """The caller reaches the context but may not write in it (a viewer).
+
+    A ``_ContextNotFoundError`` so every handler's existing resolver ``except``
+    answers it; its response is the ``permission_denied`` refusal of
+    ``_check_viewer_permission``, not a not-found.
+    """
+
+    def __init__(self, context_id: UUID, refusal: list[TextContent]):
+        super().__init__(context_id, "Write refused for this context.")
+        self.refusal = refusal
+
+    def to_response(self) -> ToolErrorContent:
+        if isinstance(self.refusal, ToolErrorContent):
+            return self.refusal
+        return ToolErrorContent(self.refusal)
+
+
 async def _resolve_context(
     db: "AsyncSession",
     user_id: str,
     context_id: UUID,
     *,
     operation: str | None = None,
+    write_role: str | None = None,
 ) -> Any:
     """Resolve and validate context access.
 
@@ -491,12 +510,19 @@ async def _resolve_context(
             (threaded by the memory write tools: remember / update / forget).
             ``None`` for callers outside that vocabulary — their binding
             denies stay log-only here.
+        write_role: The operation phrase of a write ("create memories") to
+            check the member role for, on the context's own workspace, after
+            every reach check and before the capacity lock, so a viewer is
+            told it is read-only rather than that the workspace is locked.
+            ``None`` skips it (the caller checks the role itself).
 
     Returns:
         Context object
 
     Raises:
         _ContextNotFoundError: If context not found or access denied
+        _WriteRoleRefusedError: ``write_role`` is set and the caller is a
+            viewer of the context's workspace (``permission_denied``)
         CapacityLockedError: #1954 — the running tool's policy is BLOCKED
             (``mcp_capacity_policy``) and the context's workspace is over its
             Free capacity; checked after every authorization step.
@@ -574,6 +600,13 @@ async def _resolve_context(
             raise _ContextNotFoundError(
                 context_id, "Context not found or you don't have access to it."
             )
+
+    # The member role for a write, on the context's own workspace (never the
+    # session's), once the caller is known to reach the context.
+    if write_role is not None:
+        refusal = await _check_viewer_permission(db, user_id, context.workspace_id, write_role)
+        if refusal:
+            raise _WriteRoleRefusedError(context_id, refusal)
 
     # #1954: the capacity-over lock, after every authorization step above, so
     # it never answers for a context the caller could not reach. Membership

@@ -263,7 +263,6 @@ def _patched_write(service):
     db = AsyncMock()
     with (
         patch("db.base.get_db", new=_get_db_yielding(db)),
-        patch("mcp_server.tools.memory._check_viewer_permission", new=AsyncMock(return_value=None)),
         patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=MagicMock())),
         patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()) as log,
         patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),

@@ -47,7 +47,6 @@ async def _call(args: dict[str, Any], **patches: Any) -> tuple[dict[str, Any], M
         service = AsyncMock(return_value=defaults["result"])
     with (
         patch("db.base.get_db", get_db),
-        patch.object(tool, "_check_viewer_permission", AsyncMock(return_value=None)),
         patch.object(
             tool,
             "_resolve_context",

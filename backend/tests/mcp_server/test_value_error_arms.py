@@ -105,7 +105,6 @@ def _memory_patches(db, service):
     ctx = MagicMock(id=uuid4(), workspace_id=uuid4(), is_private=False)
     return (
         patch("db.base.get_db", new=get_db),
-        patch("mcp_server.tools.memory._check_viewer_permission", new=AsyncMock(return_value=None)),
         patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=ctx)),
         patch("mcp_server.tools.memory._resolve_context_for_read", new=AsyncMock(return_value=ctx)),
         patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
@@ -115,7 +114,7 @@ def _memory_patches(db, service):
 
 async def _run(handler, args, db, service):
     p = _memory_patches(db, service)
-    with p[0], p[1], p[2], p[3], p[4], p[5]:
+    with p[0], p[1], p[2], p[3], p[4]:
         return await handler(args, "user-1", uuid4())
 
 

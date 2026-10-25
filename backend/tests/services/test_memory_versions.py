@@ -531,7 +531,6 @@ async def test_mcp_update_memory_answers_version_conflict() -> None:
     with ExitStack() as stack:
         for target, value in (
             ("db.base.get_db", get_db),
-            ("mcp_server.tools.memory._check_viewer_permission", AsyncMock(return_value=None)),
             ("mcp_server.tools.memory._resolve_context", AsyncMock(return_value=MagicMock())),
             ("mcp_server.tools.memory._log_tool_usage", AsyncMock()),
             ("services.memory_service.MemoryService", MagicMock(return_value=service)),

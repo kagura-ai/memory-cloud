@@ -27,7 +27,6 @@ from mcp_server.tools._arg_coercion import (
 )
 from mcp_server.tools._errors import is_caller_value_error
 from mcp_server.tools._helpers import (
-    _check_viewer_permission,
     _context_response_fields,
     _ContextNotFoundError,
     _dumps,
@@ -308,13 +307,11 @@ async def handle_remember_batch(
             context_id = _resolve_context_id(args["context_id"])
             # operation="remember": the items are remembers, and the memory-access
             # audit vocabulary (MAE_OPERATIONS) has no batch entry.
-            context = await _resolve_context(db, user_id, context_id, operation="remember")
-            # The member role on the context's own workspace, not the session's.
-            perm_error = await _check_viewer_permission(
-                db, user_id, context.workspace_id, "create memories"
+            # write_role: the member role on the context's own workspace, not
+            # the session's.
+            context = await _resolve_context(
+                db, user_id, context_id, operation="remember", write_role="create memories"
             )
-            if perm_error:
-                return perm_error
             # Read now: a failing item rolls the session back, which expires
             # this instance (reading it afterwards would be a lazy load outside
             # the async greenlet).

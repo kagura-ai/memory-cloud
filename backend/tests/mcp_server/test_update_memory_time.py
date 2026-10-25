@@ -29,7 +29,6 @@ async def test_handle_update_memory_time_value_error_returns_validation_error():
 
     with (
         patch("db.base.get_db", new=mock_get_db),
-        patch("mcp_server.tools.memory._check_viewer_permission", new=AsyncMock(return_value=None)),
         patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=MagicMock())),
         patch("services.memory_service.MemoryService", return_value=mock_service),
         patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),

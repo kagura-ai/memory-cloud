@@ -129,10 +129,6 @@ class TestUpdateMemoryNotFoundEnvelope:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.memory._check_viewer_permission",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
                 "mcp_server.tools.memory._resolve_context",
                 new=AsyncMock(return_value=mock_ctx),
             ),
@@ -183,10 +179,6 @@ class TestRememberQuotaExceededEnvelope:
 
         with (
             patch("db.base.get_db", new=mock_get_db),
-            patch(
-                "mcp_server.tools.memory._check_viewer_permission",
-                new=AsyncMock(return_value=None),
-            ),
             patch(
                 "mcp_server.tools.memory._resolve_context",
                 new=AsyncMock(return_value=mock_ctx),

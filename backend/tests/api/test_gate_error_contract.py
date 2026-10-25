@@ -1357,10 +1357,6 @@ async def _mcp_remember(exc: MemoryCloudException) -> dict:
     service = MagicMock(remember=AsyncMock(side_effect=exc))
     with (
         patch("db.base.get_db", new=get_db),
-        patch(
-            "mcp_server.tools.memory._check_viewer_permission",
-            new=AsyncMock(return_value=None),
-        ),
         patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=context)),
         patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
         patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
