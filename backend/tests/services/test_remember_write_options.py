@@ -1034,7 +1034,15 @@ async def test_another_members_candidate_is_not_resolved_by_supersedes(db_sessio
     ws, ctx = await _scope(db_session, owner)  # shared
     db_session.add(User(email=f"{member}@test.example", user_id=member, role="user"))
     await db_session.flush()
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=member, role=WorkspaceRole.MEMBER))
+    # A member whose context access list names the context.
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=ws.id,
+            user_id=member,
+            role=WorkspaceRole.MEMBER,
+            allowed_context_ids=[ctx.id],
+        )
+    )
     theirs = _existing(owner, ws, ctx, summary="the owner wrote this")
     mine = _existing(member, ws, ctx, summary="the member wrote this")
     db_session.add_all([theirs, mine])

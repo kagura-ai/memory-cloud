@@ -112,6 +112,26 @@ async def test_workspace2(db_session):
     return workspace
 
 
+async def _open_to_members(db_session, context) -> None:
+    """Add the context to the access list of every workspace member (the
+    members of these fixtures reach each context they create)."""
+    from sqlalchemy import func, update
+
+    await db_session.execute(
+        update(WorkspaceMember)
+        .where(
+            WorkspaceMember.workspace_id == context.workspace_id,
+            WorkspaceMember.role == WorkspaceRole.MEMBER,
+        )
+        .values(
+            allowed_context_ids=func.array_append(
+                func.coalesce(WorkspaceMember.allowed_context_ids, []), context.id
+            )
+        )
+    )
+    await db_session.commit()
+
+
 @pytest_asyncio.fixture
 async def test_context1(db_session, test_workspace1):
     """Create test context 1 in workspace1 (shared so all members can access)."""
@@ -125,6 +145,7 @@ async def test_context1(db_session, test_workspace1):
     )
     db_session.add(context)
     await db_session.commit()
+    await _open_to_members(db_session, context)
     return context
 
 
@@ -141,6 +162,7 @@ async def test_context2(db_session, test_workspace1):
     )
     db_session.add(context)
     await db_session.commit()
+    await _open_to_members(db_session, context)
     return context
 
 
@@ -157,6 +179,7 @@ async def test_context_ws2(db_session, test_workspace2):
     )
     db_session.add(context)
     await db_session.commit()
+    await _open_to_members(db_session, context)
     return context
 
 
