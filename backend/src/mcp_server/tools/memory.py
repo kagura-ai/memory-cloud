@@ -36,6 +36,7 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     _viewer_read_only_response,
     execute_with_timeout,
+    get_mcp_key_workspace_scope,
 )
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
@@ -537,6 +538,7 @@ async def handle_update_memory(
                     client="mcp",
                     current_context_id=current_context_id,
                     current_workspace_id=workspace_id,
+                    key_workspace_id=get_mcp_key_workspace_scope(),
                 ),
                 operation_name="update_memory",
             )
@@ -1514,6 +1516,7 @@ async def handle_forget(
                     request,
                     user_id=user_id,
                     current_context_id=current_context_id,
+                    key_workspace_id=get_mcp_key_workspace_scope(),
                     # forget(query=...) recalls from the session workspace.
                     current_workspace_id=workspace_id,
                 ),
@@ -1760,6 +1763,7 @@ async def _handle_forget_many(
                             ForgetRequest(memory_id=memory_uuid),
                             user_id=user_id,
                             current_context_id=current_context_id,
+                            key_workspace_id=get_mcp_key_workspace_scope(),
                             current_workspace_id=workspace_id,
                         ),
                         timeout=remaining,
@@ -2258,6 +2262,11 @@ async def handle_reference(
                         user_id=user_id,
                         record_access=record_access,
                         version=request.version,
+                        key_workspace_id=get_mcp_key_workspace_scope(),
+                        # A memory of another context is not found (as
+                        # list_revisions), so the reply's context fields are
+                        # the memory's own.
+                        context_id=current_context_id,
                     ),
                     operation_name="reference",
                 )

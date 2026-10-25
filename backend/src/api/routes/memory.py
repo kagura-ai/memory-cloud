@@ -201,7 +201,11 @@ async def reference(
     logger.info("reference_request", user_id=user["user_id"], memory_id=str(request.memory_id))
 
     result = await memory_service.reference(
-        request.memory_id, user_id=user["user_id"], version=request.version
+        request.memory_id,
+        user_id=user["user_id"],
+        version=request.version,
+        # #963: a workspace-scoped key reads its own workspace's memories only.
+        key_workspace_id=user.get("api_key_workspace_id"),
     )
 
     return result
@@ -594,6 +598,7 @@ async def patch_memory(
             memory_id=memory_id,
             request=request,
             user_id=user["user_id"],
+            key_workspace_id=user.get("api_key_workspace_id"),  # #963
         )
     except ValueError as e:
         # MemoryService raises ValueError as its "bad request" signal (e.g. a
@@ -632,6 +637,7 @@ async def list_memory_revisions(
         user_id=user["user_id"],
         before_id=int(cursor) if cursor else None,
         limit=limit,
+        key_workspace_id=user.get("api_key_workspace_id"),  # #963
     )
 
 
@@ -667,9 +673,8 @@ async def forget(
         request,
         user_id=user["user_id"],
         current_context_id=None,  # Issue #246: current_context_id removed
-        # Issue #963/#1281 item 2: pure key scope. Inert while current_context_id
-        # is None (the isolation helper short-circuits), wired for symmetry so the
-        # confinement holds the moment forget regains a declared context.
+        # Issue #963/#1281 item 2: pure key scope — a memory_id of another
+        # workspace is not deleted (deleted_count=0).
         key_workspace_id=user.get("api_key_workspace_id"),
         current_workspace_id=user.get("current_workspace_id"),
     )
@@ -779,7 +784,11 @@ async def explore(
         depth=request.depth,
     )
 
-    result = await memory_service.explore(request, user_id=user["user_id"])
+    result = await memory_service.explore(
+        request,
+        user_id=user["user_id"],
+        key_workspace_id=user.get("api_key_workspace_id"),  # #963
+    )
 
     return result
 

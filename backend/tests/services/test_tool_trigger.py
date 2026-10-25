@@ -394,6 +394,8 @@ async def test_patch_explicit_null_details_on_a_guardrail_row_requires_editor(se
 
 
 async def _forget(service, memory):
+    # forget(memory_id) with a declared context deletes that context's memories.
+    memory.context_id = service._mock_context.id
     with (
         patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()),
         patch("services.memory_service.resolve_collection_name", new=AsyncMock(return_value="c")),

@@ -76,6 +76,7 @@ def test_revisions_page_and_cursor() -> None:
         "user_id": "u1",
         "before_id": 42,
         "limit": 5,
+        "key_workspace_id": None,
     }
 
 
@@ -88,6 +89,7 @@ def test_revisions_defaults() -> None:
         "user_id": "u1",
         "before_id": None,
         "limit": 20,
+        "key_workspace_id": None,
     }
 
 
@@ -128,7 +130,11 @@ def test_reference_passes_version_and_maps_an_unknown_one_to_422() -> None:
         )
     assert response.status_code == 422
     assert response.json()["details"]["current_version"] == 3
-    assert service.reference.await_args.kwargs == {"user_id": "u1", "version": 9}
+    assert service.reference.await_args.kwargs == {
+        "user_id": "u1",
+        "version": 9,
+        "key_workspace_id": None,
+    }
 
 
 def test_reference_a_historical_type_the_filter_denies_is_the_live_denials_404() -> None:

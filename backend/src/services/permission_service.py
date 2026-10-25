@@ -1153,6 +1153,7 @@ class PermissionService:
         memory_id: UUID | None = None,
         memory_type: str | None = None,
         memory_source_type: str | None = None,
+        key_workspace_id: UUID | None = None,
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -1208,10 +1209,26 @@ class PermissionService:
                 maintenance callers leave it ``None``.
             memory_source_type: The fetched row's own ``source_type`` (#1299),
                 same threading rule.
+            key_workspace_id: #963 pure API-key workspace scope (REST
+                ``user["api_key_workspace_id"]``, MCP
+                ``get_mcp_key_workspace_scope()``), or ``None`` for a caller
+                that is not using a workspace-scoped key. A memory of another
+                workspace is refused (``False``) before any other check, the
+                same answer ``check_context_access`` gives for its context.
 
         Returns:
             True if user can access, False otherwise
         """
+        if key_workspace_id is not None and workspace_id != key_workspace_id:
+            logger.warning(
+                "memory_access_denied",
+                reason="key_workspace_mismatch",
+                memory_id=str(memory_id) if memory_id is not None else None,
+                memory_workspace_id=str(workspace_id),
+                key_workspace_id=str(key_workspace_id),
+                user_id=str(user_id),
+            )
+            return False
 
         async def _binding_ok() -> bool:
             # The subtractive agent-binding gate applies to EVERY caller,

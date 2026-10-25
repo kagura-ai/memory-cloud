@@ -27,6 +27,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _validate_memory_id,
     execute_with_timeout,
+    get_mcp_key_workspace_scope,
 )
 from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException
@@ -96,6 +97,7 @@ async def handle_list_revisions(
                         before_id=before_id,
                         limit=limit,
                         context_id=context_id,
+                        key_workspace_id=get_mcp_key_workspace_scope(),
                     ),
                     operation_name="list_revisions",
                 )

@@ -617,7 +617,13 @@ async def _handled_exists(db: AsyncSession, scope: SessionScope) -> bool:
 
 
 async def _read_batch(
-    db: AsyncSession, scope: SessionScope, user_id: str, workspace_id: UUID, *, lock: bool
+    db: AsyncSession,
+    scope: SessionScope,
+    user_id: str,
+    workspace_id: UUID,
+    *,
+    lock: bool,
+    key_workspace_id: UUID | None = None,
 ) -> _Batch:
     """The next batch's plan: the newest memories first, ≤ the event cap.
 
@@ -690,7 +696,9 @@ async def _read_batch(
             )
         ).all()
     )
-    permitted = await _permitted(db, user_id, workspace_id, scope.context_id, memories)
+    permitted = await _permitted(
+        db, user_id, workspace_id, scope.context_id, memories, key_workspace_id=key_workspace_id
+    )
 
     items: list[PlanItem] = []
     for memory_id in chosen:
@@ -745,8 +753,14 @@ async def _permitted(
     workspace_id: UUID,
     context_id: UUID,
     memories: dict[UUID, Any],
+    *,
+    key_workspace_id: UUID | None = None,
 ) -> dict[UUID, bool]:
-    """forget's per-memory write check, once per (author, type, source) group."""
+    """forget's per-memory write check, once per (author, type, source) group.
+
+    ``key_workspace_id`` is the #963 pure key scope (None without a
+    workspace-scoped key), checked against ``workspace_id``.
+    """
     from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
     perm = PermissionService(db)
@@ -766,6 +780,7 @@ async def _permitted(
                 operation="update",
                 memory_type=memory.type,
                 memory_source_type=memory.source_type,
+                key_workspace_id=key_workspace_id,
             )
         result[memory_id] = decided[group]
     return result
@@ -1261,6 +1276,7 @@ async def rollback_session(
     classify: Callable[[BaseException], str],
     new_correlation_id: Callable[[], str],
     time_budget: float | None = None,
+    key_workspace_id: UUID | None = None,
 ) -> RollbackResult:
     """Plan (``dry_run``) or execute the next batch of one session's rollback.
 
@@ -1269,7 +1285,8 @@ async def rollback_session(
     (window mode). Nothing is committed here: the caller commits,
     then runs ``finish(result)``. With ``time_budget`` (seconds, from the
     start of this call) no further item is started once it is spent; the rest
-    is left for the next call (``remaining``).
+    is left for the next call (``remaining``). ``key_workspace_id`` is the
+    #963 pure key scope, applied to each memory's write check.
 
     Raises:
         SessionNotFoundError: no event of the session exists in the context.
@@ -1291,7 +1308,14 @@ async def rollback_session(
     # answering no_writes_in_window forever: an omitted until would keep
     # continuing it and never reach the caller's newer writes.
 
-    batch = await _read_batch(db, scope, requested_by, workspace_id, lock=not dry_run)
+    batch = await _read_batch(
+        db,
+        scope,
+        requested_by,
+        workspace_id,
+        lock=not dry_run,
+        key_workspace_id=key_workspace_id,
+    )
     if not batch.items:
         if record is not None and record.status in _FINAL_STATUSES:
             raise AlreadyRolledBackError(record.id, record.status)
