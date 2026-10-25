@@ -458,7 +458,7 @@ class ContextService:
         # below admin — the creator of a private context included: owning a
         # context does not widen what the account reaches.
         if not reaches_context(
-            workspace_member.role, workspace_member.allowed_context_ids, context_id
+            workspace_member.role, workspace_member.allowed_context_ids, context.id
         ):
             raise NotFoundException("Context", str(context_id))
 

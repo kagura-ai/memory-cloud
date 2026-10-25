@@ -43,6 +43,12 @@ class TestReachesContext:
         for list_name, allowed in LISTS.items():
             assert reaches_context(role, allowed, X) is EXPECTED[WorkspaceRole(role)][list_name]
 
+    def test_a_string_id_is_compared_as_its_uuid(self) -> None:
+        assert reaches_context(WorkspaceRole.MEMBER, [X], str(X)) is True
+        assert reaches_context(WorkspaceRole.MEMBER, [X], str(X).upper()) is True
+        assert reaches_context(WorkspaceRole.MEMBER, [X], str(Y)) is False
+        assert reaches_context(WorkspaceRole.MEMBER, [X], "not-a-uuid") is False
+
     def test_reachable_ids_shape(self) -> None:
         assert reachable_context_ids(WorkspaceRole.OWNER, []) is None
         assert reachable_context_ids(WorkspaceRole.VIEWER, None) is None

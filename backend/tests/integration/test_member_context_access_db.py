@@ -478,20 +478,46 @@ async def test_remember_follows_the_list(live, case) -> None:
         _ws_of(w, caller),
     )
     try:
+        async with _rest(w, caller) as c:
+            rest = await c.post(
+                "/api/v1/memory/remember",
+                json={
+                    "summary": f"rest note by {caller} in {ctx}",
+                    "content": "x",
+                    "type": "note",
+                    "context": {"context_id": str(w.ctx[ctx])},
+                },
+            )
         if _writes(caller, ctx):
             assert body.get("status") == "success", body
+            assert rest.status_code == 200, rest.text
         elif _reach(caller, ctx):
             assert body.get("error") == "permission_denied", body
+            assert rest.status_code == 403, rest.text
         else:
             assert body.get("error") == "context_not_found", body
+            assert rest.status_code == 404, rest.text
     finally:
         await s.rollback()
         await s.execute(
             delete(Memory).where(
-                Memory.context_id == w.ctx[ctx], Memory.summary == f"note by {caller} in {ctx}"
+                Memory.context_id == w.ctx[ctx],
+                Memory.summary.in_(
+                    [f"note by {caller} in {ctx}", f"rest note by {caller} in {ctx}"]
+                ),
             )
         )
         await s.commit()
+
+
+async def test_rest_remember_refuses_a_context_id_that_is_not_a_uuid(live) -> None:
+    w: World = live
+    async with _rest(w, "mA") as c:
+        r = await c.post(
+            "/api/v1/memory/remember",
+            json={"summary": "bad id", "content": "x", "context": {"context_id": "not-a-uuid"}},
+        )
+    assert r.status_code == 422, r.text
 
 
 @pytest.mark.parametrize("case", CASES, ids=_id)

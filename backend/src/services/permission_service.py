@@ -444,7 +444,7 @@ class PermissionService:
         # what the list names, and with no list a viewer reaches every shared
         # context and a member none.
         if not reaches_context(
-            workspace_member.role, workspace_member.allowed_context_ids, context_id
+            workspace_member.role, workspace_member.allowed_context_ids, context.id
         ):
             logger.warning(
                 "context_read_denied",
@@ -821,7 +821,7 @@ class PermissionService:
                         raise _not_found("private_creator_without_membership")
                 else:
                     if not reaches_context(
-                        creator_member.role, creator_member.allowed_context_ids, context_id
+                        creator_member.role, creator_member.allowed_context_ids, context.id
                     ):
                         raise _not_found(_reach_denied_reason(creator_member))
                     if _below_member(creator_member):
@@ -856,7 +856,7 @@ class PermissionService:
         # is reachable at all (Migration 042); the roles below decide what the
         # caller may do in a context it reaches.
         if not reaches_context(
-            workspace_member.role, workspace_member.allowed_context_ids, context_id
+            workspace_member.role, workspace_member.allowed_context_ids, context.id
         ):
             raise _not_found(_reach_denied_reason(workspace_member))
 

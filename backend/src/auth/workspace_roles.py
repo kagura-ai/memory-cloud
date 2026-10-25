@@ -153,11 +153,19 @@ def reachable_context_ids(
 
 
 def reaches_context(
-    role: WorkspaceRole | str, allowed: Iterable[UUID] | None, context_id: UUID
+    role: WorkspaceRole | str, allowed: Iterable[UUID] | None, context_id: UUID | str
 ) -> bool:
     """Whether a member's role and context access list open ``context_id``.
 
-    See ``reachable_context_ids`` for the rule.
+    See ``reachable_context_ids`` for the rule. A string id is compared as the
+    UUID it spells; one that spells no UUID reaches nothing.
     """
     reachable = reachable_context_ids(role, allowed)
-    return reachable is None or context_id in reachable
+    if reachable is None:
+        return True
+    if not isinstance(context_id, UUID):
+        try:
+            context_id = UUID(str(context_id))
+        except ValueError:
+            return False
+    return context_id in reachable

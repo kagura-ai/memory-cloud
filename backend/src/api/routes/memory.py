@@ -139,7 +139,20 @@ async def remember(
     # Issue #82: Pass current context ID for context-based collection
     # Issue #146: Pass current workspace ID for workspace-scoped API keys
     # Issue #273: Use context_id from request.context dict (if provided)
-    context_id = request.context.get("context_id") if request.context else None
+    raw_context_id = request.context.get("context_id") if request.context else None
+    context_id: UUID | None = None
+    if raw_context_id is not None:
+        # Parsed up front, as /recall does: a non-UUID is a 422, and the
+        # service compares the id as a UUID.
+        try:
+            context_id = (
+                raw_context_id if isinstance(raw_context_id, UUID) else UUID(str(raw_context_id))
+            )
+        except (ValueError, AttributeError, TypeError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"context_id must be a valid UUID: {raw_context_id!r}",
+            ) from e
     try:
         result = await memory_service.remember(
             request,
