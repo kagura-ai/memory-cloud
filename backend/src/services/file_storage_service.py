@@ -982,12 +982,12 @@ class FileStorageService:
         on. Same rows and accounting as :meth:`purge_context_files`:
         ``(uploaded rows soft-deleted, Redis bytes to release)``. Does not commit.
         """
-        _, visible, released = await self._purge_live_rows(
+        purged = await self._purge_live_rows(
             (FileObject.workspace_id == workspace_id) & FileObject.context_id.is_(None),
             deleted_at,
             context_count=0,
         )
-        return visible, sum(released.values())
+        return purged.visible, sum(purged.released.values())
 
     async def purge_live_context_files(
         self, context_ids: Sequence[UUID], *, deleted_at: datetime | None = None
@@ -1011,16 +1011,15 @@ class FileStorageService:
         """
         if not context_ids:
             return FilesPurged()
-        files, visible, released = await self._purge_live_rows(
+        return await self._purge_live_rows(
             FileObject.context_id.in_(list(context_ids)),
             deleted_at,
             context_count=len(set(context_ids)),
         )
-        return FilesPurged(rows=len(files), visible=visible, released=released)
 
     async def _purge_live_rows(
         self, where: ColumnElement[bool], deleted_at: datetime | None, *, context_count: int
-    ) -> tuple[list[FileObject], int, dict[UUID, int]]:
+    ) -> FilesPurged:
         """Soft-delete the live rows matching ``where`` (see :meth:`purge_files_for_contexts`)."""
         # FOR UPDATE locks the rows we are about to cancel so a concurrent
         # confirm_upload (which now also loads its row FOR UPDATE) cannot slip
@@ -1064,7 +1063,7 @@ class FileStorageService:
                 file_count=len(files),
                 workspaces=[str(w) for w in released],
             )
-        return files, visible, released
+        return FilesPurged(rows=len(files), visible=visible, released=released)
 
     async def restore_context_files(self, context: Context) -> ContextFilesRestore:
         """Bring back the files a context deletion purged (#1960), if still here.
