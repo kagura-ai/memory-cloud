@@ -196,6 +196,8 @@ class TestTheDispatcher:
             if tool == "init_file_upload"
             else {"source_context_id": str(uuid4()), "target_context_id": str(uuid4())}
             if tool == "merge_contexts"
+            else {"report_id": str(uuid4())}
+            if tool in ("get_sleep_report", "rollback_sleep_run")
             else {"context_id": str(uuid4())}
         )
         with patch("db.base.get_db", _get_db):
@@ -294,7 +296,11 @@ class TestArgumentNames:
             if d["name"] in CAPACITY_LOCK_BLOCKED_TOOLS
         }
         names = (
-            gate._CONTEXT_ARGS + gate._CONTEXT_LIST_ARGS + gate._WORKSPACE_ARGS + gate._FILE_ARGS
+            gate._CONTEXT_ARGS
+            + gate._CONTEXT_LIST_ARGS
+            + gate._WORKSPACE_ARGS
+            + gate._FILE_ARGS
+            + gate._REPORT_ARGS
         )
         for name in names:
             assert any(name in p for p in props.values()), name

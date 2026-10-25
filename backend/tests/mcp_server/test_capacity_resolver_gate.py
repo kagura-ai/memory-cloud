@@ -107,6 +107,7 @@ class TestThePartition:
             "create_edge",
             "feedback",
             "get_sleep_history",
+            "get_sleep_report",
             "get_state",
             "list_edges",
             "merge_contexts",
@@ -115,6 +116,7 @@ class TestThePartition:
             "recall_upcoming",
             "record_measurement",
             "rollback_session",
+            "rollback_sleep_run",
             "set_state",
             "update_edge",
             "update_search_config",
@@ -127,10 +129,8 @@ class TestThePartition:
             "get_active_analysis",
             "get_analysis",
             "get_cluster",
-            "get_sleep_report",
             "ingest_events",
             "list_analyses",
-            "rollback_sleep_run",
             "setup_connector",
             "setup_resource",
         }
@@ -152,6 +152,12 @@ class TestThePartition:
 CTX = uuid4()
 OTHER_CTX = uuid4()
 WS = uuid4()
+REPORT = uuid4()
+
+# Resolver-gated tools that name a Sleep report, not a context: the handler
+# looks the report up, then resolves its context (section (b2) below).
+REPORT_TOOLS = frozenset({"get_sleep_report", "rollback_sleep_run"})
+CONTEXT_NAMED_TOOLS = CAPACITY_LOCK_RESOLVER_GATED_TOOLS - REPORT_TOOLS
 
 # Minimal valid arguments: each call gets as far as its context resolver.
 RESOLVER_ARGS: dict[str, dict[str, Any]] = {
@@ -180,7 +186,8 @@ RESOLVER_ARGS: dict[str, dict[str, Any]] = {
 
 
 def test_every_resolver_gated_tool_has_arguments_here() -> None:
-    assert set(RESOLVER_ARGS) == CAPACITY_LOCK_RESOLVER_GATED_TOOLS
+    assert set(RESOLVER_ARGS) == CONTEXT_NAMED_TOOLS
+    assert REPORT_TOOLS <= CAPACITY_LOCK_RESOLVER_GATED_TOOLS
 
 
 def _context(context_id=CTX) -> SimpleNamespace:
@@ -281,7 +288,7 @@ async def _call(tool: str, resolvers: _Resolvers, db: MagicMock, usage: AsyncMoc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", sorted(CAPACITY_LOCK_RESOLVER_GATED_TOOLS))
+@pytest.mark.parametrize("tool", sorted(CONTEXT_NAMED_TOOLS))
 async def test_a_resolver_gated_tool_refuses_a_locked_workspace(tool: str) -> None:
     """The envelope is byte-identical to the one the dispatcher built, and the
     handler stops at its resolver: nothing is read or written after it."""
@@ -303,7 +310,7 @@ async def test_a_resolver_gated_tool_refuses_a_locked_workspace(tool: str) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", sorted(CAPACITY_LOCK_RESOLVER_GATED_TOOLS))
+@pytest.mark.parametrize("tool", sorted(CONTEXT_NAMED_TOOLS))
 async def test_a_caller_the_resolver_turns_away_never_sees_the_lock(tool: str) -> None:
     """D1: a context the caller cannot reach answers with the handler's own
     refusal (context_not_found, or update_search_config's permission_denied),
@@ -314,6 +321,59 @@ async def test_a_caller_the_resolver_turns_away_never_sees_the_lock(tool: str) -
     body = json.loads(result[0].text)
     expected = "permission_denied" if tool == "update_search_config" else "context_not_found"
     assert body["error"] == expected, body
+    resolvers.lock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# (b2) the Sleep report tools: the lock of the report's workspace
+# ---------------------------------------------------------------------------
+
+
+def _report_db() -> MagicMock:
+    """A session whose first query finds the caller's report in ``CTX``."""
+    db = _fake_db()
+    report = SimpleNamespace(
+        id=REPORT, user_id="u1", context_id=CTX, workspace_id=WS, status="completed"
+    )
+    db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=report))
+    )
+    return db
+
+
+async def _call_report_tool(tool: str, resolvers: _Resolvers, db: MagicMock):
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for p in resolvers.patches(db):
+            stack.enter_context(p)
+        stack.enter_context(patch("utils.usage_logger.log_usage", AsyncMock()))
+        return await execute_tool_call(tool, {"report_id": str(REPORT)}, "u1", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(REPORT_TOOLS))
+async def test_a_report_tool_refuses_a_locked_workspace_after_the_report_lookup(tool) -> None:
+    db = _report_db()
+    resolvers = _Resolvers()
+    result = await _call_report_tool(tool, resolvers, db)
+
+    expected = describe_tool_exception(tool, _locked()).response()
+    assert [c.text for c in result] == [c.text for c in expected], result[0].text
+    assert resolvers.policies and all(p is CapacityPolicy.BLOCKED for p in resolvers.policies)
+    # Only the report lookup ran before the refusal.
+    assert db.execute.await_count == 1
+    for name in ("scalar", "scalars", "get", "flush", "commit"):
+        assert getattr(db, name).await_count == 0, f"{tool}: db.{name} after the refusal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(REPORT_TOOLS))
+async def test_a_report_tool_turned_away_answers_report_not_found(tool) -> None:
+    resolvers = _Resolvers(deny=True)
+    result = await _call_report_tool(tool, resolvers, _report_db())
+    body = json.loads(result[0].text)
+    assert body["error"] == "report_not_found", body
     resolvers.lock.assert_not_awaited()
 
 

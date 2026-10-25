@@ -49,7 +49,8 @@ def _report(context_id=None, *, status="completed"):
 
 @pytest.fixture(autouse=True)
 def lock():
-    """The capacity lock of the context's workspace (no workspace is locked)."""
+    """A direct capacity-lock call from the gates (there is none: the context
+    resolvers apply the lock after authorization, #1954)."""
     with patch(
         "services.capacity_lock.ensure_not_capacity_locked", new=AsyncMock(return_value=None)
     ) as ensure:
@@ -92,23 +93,20 @@ async def test_read_authorizes_against_the_reports_context(lock):
         assert await _authorize_report_read(MagicMock(), _USER, report) is True
     resolve.assert_awaited_once()
     assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
-    # The capacity lock of the report's workspace, not the session's.
-    lock.assert_awaited_once()
-    assert lock.await_args_list[0].args[1] == report.workspace_id
-    assert lock.await_args_list[0].kwargs == {"user_id": _USER}
+    lock.assert_not_awaited()
 
 
-async def test_read_of_a_locked_workspace_raises_the_lock():
+async def test_the_resolvers_capacity_lock_propagates():
+    """The read resolver raises the lock of the report's workspace after
+    authorization; the gate lets it through to the dispatcher."""
     from utils.exceptions import CapacityLockedError
 
     report = _report(uuid4())
-    locked = AsyncMock(side_effect=CapacityLockedError.for_outsider())
     with (
         patch(
             "mcp_server.tools.sleep._resolve_context_for_read",
-            new=AsyncMock(return_value=_context(report)),
+            new=AsyncMock(side_effect=CapacityLockedError.for_outsider()),
         ),
-        patch("services.capacity_lock.ensure_not_capacity_locked", new=locked),
         pytest.raises(CapacityLockedError),
     ):
         await _authorize_report_read(MagicMock(), _USER, report)
@@ -119,7 +117,6 @@ async def test_read_is_refused_when_the_context_is_out_of_reach(lock):
     resolve = AsyncMock(side_effect=_denied(report.context_id))
     with patch("mcp_server.tools.sleep._resolve_context_for_read", new=resolve):
         assert await _authorize_report_read(MagicMock(), _USER, report) is False
-    # Authorization first: the lock never answers for an unreachable context.
     lock.assert_not_awaited()
 
 
@@ -144,8 +141,7 @@ async def test_rollback_is_allowed_for_owner_and_editor(role, lock, viewer_check
         assert await _authorize_report_rollback(MagicMock(), _USER, report) is None
     resolve.assert_awaited_once()
     assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
-    lock.assert_awaited_once()
-    assert lock.await_args_list[0].args[1] == report.workspace_id
+    lock.assert_not_awaited()
     # The viewer check runs on the context's workspace, never the session's.
     viewer_check.assert_awaited_once()
     assert viewer_check.await_args_list[0].args[2] == report.workspace_id

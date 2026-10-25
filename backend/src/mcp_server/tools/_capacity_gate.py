@@ -179,7 +179,8 @@ CAPACITY_LOCK_SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
 # ``_resolve_context_for_read`` read the running tool's policy, and
 # update_search_config passes it to ``check_context_write``. A caller who may
 # not reach the context gets the handler's not-found (or its own refusal)
-# instead of the lock.
+# instead of the lock. get_sleep_report / rollback_sleep_run name a report
+# (``report_id``) and resolve the report's context the same way.
 CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "bootstrap",
@@ -187,6 +188,7 @@ CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
         "create_edge",
         "feedback",
         "get_sleep_history",
+        "get_sleep_report",
         "get_state",
         "list_edges",
         "merge_contexts",
@@ -195,6 +197,7 @@ CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
         "recall_upcoming",
         "record_measurement",
         "rollback_session",
+        "rollback_sleep_run",
         "set_state",
         "update_edge",
         "update_search_config",
@@ -202,8 +205,7 @@ CAPACITY_LOCK_RESOLVER_GATED_TOOLS: frozenset[str] = frozenset(
 )
 
 # BLOCKED tools checked only here, before the handler, on the caller's session
-# workspace, as before #1954: the analysis, resource / connector and sleep
-# report tools.
+# workspace, as before #1954: the analysis and resource / connector tools.
 CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS: frozenset[str] = (
     CAPACITY_LOCK_BLOCKED_TOOLS
     - CAPACITY_LOCK_SERVICE_GATED_TOOLS
@@ -280,6 +282,8 @@ _CONTEXT_ARGS = (
 _CONTEXT_LIST_ARGS = ("context_ids",)
 _WORKSPACE_ARGS = ("workspace_id",)
 _FILE_ARGS = ("file_id",)
+# A Sleep report: the handler resolves the report's context.
+_REPORT_ARGS = ("report_id",)
 
 
 def _uuid(value: object) -> UUID | None:
@@ -309,6 +313,8 @@ def _argument_targets(args: dict[str, Any]) -> tuple[set[UUID], UUID | None, UUI
 
 def _names_a_target(args: dict[str, Any]) -> bool:
     context_ids, workspace_arg, file_id = _argument_targets(args)
+    if any(_uuid(args.get(key)) is not None for key in _REPORT_ARGS):
+        return True
     return bool(context_ids) or workspace_arg is not None or file_id is not None
 
 

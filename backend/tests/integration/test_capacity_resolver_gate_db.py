@@ -224,7 +224,9 @@ async def _call(tool: str, args: dict, user_id: str, workspace_id):
         return await execute_tool_call(tool, args, user_id, workspace_id)
 
 
-TOOLS = sorted(CAPACITY_LOCK_RESOLVER_GATED_TOOLS)
+# The Sleep report tools name a report, not a context: their DB-backed cases
+# are in test_sleep_report_authz_db.py.
+TOOLS = sorted(CAPACITY_LOCK_RESOLVER_GATED_TOOLS - {"get_sleep_report", "rollback_sleep_run"})
 
 
 @pytest.mark.asyncio(loop_scope="session")

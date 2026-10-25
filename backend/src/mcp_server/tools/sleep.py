@@ -177,22 +177,16 @@ async def _authorize_report_read(db: Any, user_id: str, report: Any) -> bool:
     binding's type/source filter (``_row_filtered_for_agent``). A report
     with no context has nothing to authorize against and is refused.
 
-    Once authorized, the capacity lock of the context's workspace applies
-    (``CapacityLockedError``): the dispatcher can only see the session's
-    workspace, since the arguments name a report, not a context.
+    The resolver also applies the capacity lock of the context's workspace,
+    after authorization (``CapacityLockedError``, #1954).
     """
-    from services.capacity_lock import ensure_not_capacity_locked
-
     if report.context_id is None:
         return False
     try:
-        context = await _resolve_context_for_read(db, user_id, report.context_id)
+        await _resolve_context_for_read(db, user_id, report.context_id)
     except _ContextNotFoundError:
         return False
-    if await _row_filtered_for_agent(db, user_id, report.context_id, "get_sleep_report"):
-        return False
-    await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
-    return True
+    return not await _row_filtered_for_agent(db, user_id, report.context_id, "get_sleep_report")
 
 
 async def _authorize_report_rollback(
@@ -211,12 +205,11 @@ async def _authorize_report_rollback(
     wherever the session points.
 
     A context the caller cannot reach answers like a missing report; a
-    context they can read but not edit is ``permission_denied``. Once
-    authorized, the capacity lock of the context's workspace applies
-    (``CapacityLockedError``), as in ``_authorize_report_read``.
+    context they can read but not edit is ``permission_denied``. The
+    resolvers also apply the capacity lock of the context's workspace, after
+    authorization (``CapacityLockedError``, #1954).
     """
     from auth.workspace_roles import ContextRole
-    from services.capacity_lock import ensure_not_capacity_locked
     from services.session_rollback import context_role
 
     if report.context_id is None:
@@ -243,7 +236,6 @@ async def _authorize_report_rollback(
     )
     if viewer_refusal:
         return viewer_refusal
-    await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
     return None
 
 

@@ -574,3 +574,59 @@ async def test_private_context_creator_who_is_a_workspace_viewer_cannot_roll_bac
         assert data["error"] == "permission_denied", (ws, data)
         assert data["your_role"] == "viewer"
     await _untouched(world)
+
+
+async def _dispatch(world: World, tool: str, session_workspace: UUID | None) -> str:
+    """Through the dispatcher, so the tool runs under its capacity policy."""
+    from mcp_server.tools import execute_tool_call
+
+    async def get_db():
+        yield world.db
+
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch("mcp_server.tools._check_rate_limit", AsyncMock(return_value=(True, 0, 1000))),
+    ):
+        (block,) = await execute_tool_call(
+            tool, {"report_id": str(world.report_id)}, world.bob, session_workspace
+        )
+    return block.text
+
+
+async def test_the_capacity_lock_of_the_reports_workspace_applies_after_authorization(
+    db_session: AsyncSession, worlds: list[World]
+) -> None:
+    """W over its Free capacity: an editor gets the lock from both tools even
+    with the session on unlocked P; a caller who cannot reach the context gets
+    the not-found, never the lock."""
+    from mcp_server.tools._capacity_gate import invalidate_capacity_candidate_cache
+    from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+
+    world = await _editor_world(db_session, worlds)
+    await db_session.execute(
+        update(Workspace)
+        .where(Workspace.id == world.w)
+        .values(plan_name="free", entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING)
+    )
+    await db_session.commit()
+    invalidate_capacity_candidate_cache()
+    tools = ("get_sleep_report", "rollback_sleep_run")
+    with (
+        patch.object(Workspace, "effective_memory_limit", property(lambda self: 1)),
+        # Free's member cap would pause Bob's seat first.
+        patch.object(Workspace, "effective_max_members", property(lambda self: 5)),
+    ):
+        for tool in tools:
+            body = json.loads(await _dispatch(world, tool, world.p))
+            assert body["error"] == "capacity_locked", (tool, body)
+        await db_session.execute(
+            update(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == world.w, WorkspaceMember.user_id == world.bob)
+            .values(allowed_context_ids=[])
+        )
+        await db_session.commit()
+        for tool in tools:
+            expected = await _not_found_reply(world, tool)
+            assert await _dispatch(world, tool, world.p) == expected, tool
+    invalidate_capacity_candidate_cache()
+    await _untouched(world)
