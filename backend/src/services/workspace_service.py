@@ -17,7 +17,7 @@ from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, Workspac
 from models.memory import Memory
 from services.billing_contract import ensure_no_billing_contract
 from services.memory_counts import count_live_memories
-from services.plan_suspension import seat_order
+from services.plan_seats import seat_order
 from services.quota_service import QuotaService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow

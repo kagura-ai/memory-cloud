@@ -22,6 +22,7 @@ from sqlalchemy import (
     Double,  # #1331: WHERE-axis generated coordinate columns
     Float,
     ForeignKey,  # Migration 062: For context_id FK
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -651,6 +652,21 @@ class Memory(Base):
             "(location_lat IS NULL OR (location_lat >= -90 AND location_lat <= 90)) "
             "AND (location_lon IS NULL OR (location_lon >= -180 AND location_lon <= 180))",
             name="valid_location_range",
+        ),
+        # #1963: a memory lives in its context's workspace. The composite FK
+        # targets ``ux_contexts_workspace_id_id`` and sits beside the
+        # single-column ``context_id`` FK; both are ON DELETE CASCADE (a
+        # NO ACTION one would fire before the other cascades and refuse a
+        # context hard delete). ON UPDATE NO ACTION: a context with memories
+        # never moves to another workspace. MATCH SIMPLE, so a row without a
+        # context stays legal. Two FK paths to ``contexts`` mean every join
+        # between the two models needs an explicit ON clause. Created in
+        # migration f14_1963_memories_ws_ctx_fk.
+        ForeignKeyConstraint(
+            ["workspace_id", "context_id"],
+            ["contexts.workspace_id", "contexts.id"],
+            name="fk_memories_workspace_context",
+            ondelete="CASCADE",
         ),
     )
 

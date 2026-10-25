@@ -26,6 +26,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import ACCESS_READ, Access
 from config.retention import should_promote_to_persistent
 from db.graph_learning_lock import try_lock_graph_learning
 from db.qdrant import (
@@ -84,6 +85,7 @@ from models.schemas import (
     WriteLintHint,
 )
 from repositories.memory import AccessStats, MemoryRepository
+from services import plan_seats
 from services.capacity_lock import CapacityPolicy
 from services.content_chunk_writer import (
     chunk_cascade_needed,
@@ -562,7 +564,7 @@ class MemoryService:
         user_id: str,
         context_id: UUID | None,
         *,
-        access: str = "read",
+        access: Access = ACCESS_READ,
         key_workspace_id: UUID | None = None,
         operation: str | None = None,
     ) -> tuple[Context | None, str | None, str | None]:
@@ -889,7 +891,6 @@ class MemoryService:
             ensure_contexts_not_capacity_locked,
             ensure_not_capacity_locked,
         )
-        from services.plan_suspension import ensure_context_writable
 
         if workspace_id is not None:
             await ensure_not_capacity_locked(self.db, workspace_id, user_id=user_id)
@@ -897,7 +898,7 @@ class MemoryService:
             # One query for every context, deduplicated per workspace (#1941).
             await ensure_contexts_not_capacity_locked(self.db, context_ids, user_id=user_id)
         if write_context_id is not None:
-            await ensure_context_writable(self.db, write_context_id)
+            await plan_seats.ensure_context_writable(self.db, write_context_id)
 
     async def remember(
         self,

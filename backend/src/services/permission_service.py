@@ -12,9 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import (
+    ACCESS_READ,
+    ACCESS_WRITE,
     CONTEXT_ROLE_WEIGHTS,
+    Access,
     ContextRole,
     WorkspaceRole,
+    access_for_context_role,
+    access_for_workspace_role,
 )
 from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
@@ -24,7 +29,7 @@ from models.auth import Context, ContextMember, Workspace, WorkspaceMember
 from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_suspension import ensure_context_writable, ensure_member_seated
+from services.plan_seats import ensure_context_writable, ensure_member_seated
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -428,7 +433,7 @@ class PermissionService:
         # None). ``required_role`` semantics: viewer = read helper default;
         # writers pass admin/owner. WorkspaceRole is a StrEnum, so the
         # comparison holds for both str and enum callers.
-        access = "read" if required_role == WorkspaceRole.VIEWER else "write"
+        access = access_for_workspace_role(required_role)
         decision = await self._apply_agent_binding_filter(
             context_id, access=access, user_id=user_id, operation=operation
         )
@@ -446,13 +451,13 @@ class PermissionService:
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id)
             # #1943: a content write into a context without a writable slot.
-            if access == "write":
+            if access == ACCESS_WRITE:
                 await ensure_context_writable(self.db, context)
 
         return context
 
     async def _apply_agent_binding_filter(
-        self, context_id: UUID, *, access: str, user_id: str, operation: str | None = None
+        self, context_id: UUID, *, access: Access, user_id: str, operation: str | None = None
     ) -> str | None:
         """Deny with the uniform 404 when the agent binding subtracts access.
 
@@ -612,7 +617,7 @@ class PermissionService:
         required = (
             required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
         )
-        access = "read" if required == ContextRole.VIEWER else "write"
+        access = access_for_context_role(required)
         await self._apply_agent_binding_filter(
             context_id, access=access, user_id=user_id, operation=operation
         )
@@ -625,7 +630,7 @@ class PermissionService:
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
             # #1943: a content write into a context without a writable slot.
-            if access == "write":
+            if access == ACCESS_WRITE:
                 await ensure_context_writable(self.db, context)
 
         return context, effective_role
@@ -696,7 +701,7 @@ class PermissionService:
                 # the creator, not part of #1957.
                 if await self._seated_member(context.workspace_id, user_id) is None:
                     # The workspace's owner_user_id holder always has a seat
-                    # (plan_suspension.member_seat_suspended makes the same
+                    # (plan_seats.member_seat_suspended makes the same
                     # exception), even through a missing OWNER row (#1108).
                     workspace = await self.db.get(Workspace, context.workspace_id)
                     if workspace is None or workspace.owner_user_id != user_id:
@@ -1042,7 +1047,7 @@ class PermissionService:
         memory_user_id: MemoryAuthorId,
         workspace_id: UUID,
         context_id: UUID,
-        access: str = "read",
+        access: Access = ACCESS_READ,
         operation: str | None = None,
         memory_id: UUID | None = None,
         memory_type: str | None = None,
@@ -1183,7 +1188,7 @@ class PermissionService:
                 # A write needs what a write into the context needs: a
                 # workspace viewer reads a linked account's memories and
                 # cannot change or delete them.
-                needed = ContextRole.EDITOR if access == "write" else ContextRole.VIEWER
+                needed = ContextRole.EDITOR if access == ACCESS_WRITE else ContextRole.VIEWER
                 try:
                     await self._check_context_access_rbac(user_id, context_id, needed)
                 except (AuthorizationError, NotFoundException):

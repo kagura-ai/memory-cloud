@@ -281,8 +281,7 @@ def test_vocabulary_is_stable() -> None:
 def test_paused_refusal_names_the_tier_that_resumes_it(feature, limit_attr):
     """Existing objects resume on any tier with a positive cap (#1551), which
     is lower than the tier that can create them — the upgrade path must say so."""
-    from config.plan_tiers import PLAN_TIERS, lowest_tier_with_limit
-    from services.plan_suspension import paused_details, paused_message
+    from config.plan_tiers import PLAN_TIERS, lowest_tier_with_limit, paused_details, paused_message
 
     exc = FeatureNotAvailableError(
         paused_message("free", feature, limit_attr), **paused_details("free", feature, limit_attr)

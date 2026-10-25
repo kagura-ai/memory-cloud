@@ -34,7 +34,7 @@ from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService, TagSortMode
 from services.identity_link_service import linked_user_ids
-from services.plan_suspension import writes_paused_context_ids
+from services.plan_seats import writes_paused_context_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger

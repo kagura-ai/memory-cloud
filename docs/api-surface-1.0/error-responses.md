@@ -246,6 +246,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `EXT-ANA-001` | `ExternalServiceError` subclass — services/analysis/llm_caller.py:83 | 502 | Entire OpenAI fallback chain exhausted (`details.upstream_provider_error=true`, `attempted_models`). |
 | `REQ-101` | `BadRequestError` — services/system_admin_service.py:111 | 400 | User is already a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-101` to the `REQ-*` (BadRequestError) family — resolves the `ADMIN-001` (403 protection) vs `ADMIN-1xx` (400 precondition) collision; `ADMIN-*` now uniformly means admin-protection. |
 | `REQ-102` | `BadRequestError` — services/system_admin_service.py:184 | 400 | User is not a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-102` → `REQ-102` (same rationale). |
+| `REQ-103` | `BadRequestError` — api/routes/admin.py (`POST /admin/contexts/recover`) | 400 | The request's `workspace_id` names another workspace than the existing context's (#1963). |
 | `SLEEP-001` | `MemoryCloudException` — api/routes/admin_sleep.py:234 | 500 | Admin user id missing from session (defensive). ✅ **#992 Phase 2**: renamed from snake_case `admin_user_id_missing` to the `NAMESPACE-NNN` convention. |
 | `SLEEP-002` | `MemoryCloudException` — api/routes/admin_sleep.py:255 | 409 | A sleep run is already in progress for this user. ✅ **#992 Phase 2**: renamed from `sleep_run_in_progress`. |
 | `SLEEP-003` | `MemoryCloudException` — api/routes/admin_sleep.py:278 | 404 | No eligible contexts for sleep maintenance. ✅ **#992 Phase 2**: renamed from `sleep_target_not_found`. |
@@ -434,8 +435,13 @@ The lock applies only when the plan is `free` **and** `entitlement_source` is
 `external_billing` (the workspace came back from a subscription); a self-hosted or
 admin-managed Free workspace is never locked. It is computed on every gated call, never
 stored, so deleting down to the cap unlocks the next call. No `feature` and no `quota_type`:
-the refusal is not one feature or one cap. On MCP the dispatcher refuses every blocked tool
-with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
+the refusal is not one feature or one cap. On MCP every blocked tool is refused once the
+caller may reach the target — the lock is checked after authorization, in the context resolver
+or the service the tool calls ([#1954](https://github.com/kagura-ai/memory-cloud/issues/1954)),
+so a context the caller cannot read answers with the usual `context_not_found` instead. The
+analysis, resource / connector and sleep-report tools, and a blocked tool that names no context,
+are still checked on the caller's own (session) workspace. The refusal carries
+`error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context` — which since
 [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
 `delete_file`, the storage page's bulk clear backed by `DELETE /contexts/{id}/files`,
@@ -443,8 +449,8 @@ much to remove, what still works (`list`, `forget`, `delete_context` — which s
 service (recall, reference, explore, pinned loads, remember, edits), uploads, context
 creation, and the graph, analysis (all but cancel), agent-state (all but delete), feedback, workspace
 sleep-report, agent-bootstrap and share-key routes. A caller who is not a member of the locked
-workspace (a share-key or public-context reader) gets the refusal with every number and
-`cleanup_url` set to `null`. Guardrails stay available while locked (MCP `load_guardrails`, REST `/memory/guardrails` and
+workspace (a share-key or public-context reader on REST) gets the refusal with every number and
+`cleanup_url` set to `null`; no MCP tool serves a non-member, so MCP never sends that form. Guardrails stay available while locked (MCP `load_guardrails`, REST `/memory/guardrails` and
 `/memory/guardrails/digest`, `get_context_info`'s guardrails, the session instructions): they are
 small, bounded safety rails, and blocking one door while the others serve the same entries would
 protect nothing. The storage figure (`used_bytes`) is the one `services/storage_counts.py`

@@ -22,20 +22,20 @@ would change the count and fail the test:
   * ``m_outsider`` — authored by a NON-member, rooted in a ws_a context: must
                      be counted. Catches a regression that re-adds the dropped
                      ``Memory.user_id.in_(member_ids)`` filter (#822 finding 2).
-  * ``m_cross_ws`` — stamped ``Memory.workspace_id == ws_b`` but rooted in a
-                     ws_a context: must be counted. Catches a regression that
-                     scopes by ``Memory.workspace_id`` instead of
-                     ``Context.workspace_id`` (#822 finding 1). It used to be a
-                     NULL-workspace row; e95 (#1951) made the column NOT NULL,
-                     and ``memories`` has no compound FK, so a cross-rooted row
-                     is the remaining way to tell the two scopes apart.
+  * ``m_no_ctx``   — stamped ``Memory.workspace_id == ws_a`` with no context:
+                     must NOT be counted. Catches a regression that scopes by
+                     ``Memory.workspace_id`` instead of ``Context.workspace_id``
+                     (#822 finding 1). It used to be a NULL-workspace row, then
+                     (after e95, #1951) a row stamped ws_b in a ws_a context;
+                     f14 (#1963) makes the schema refuse that, and a row without
+                     a context is what still tells the two scopes apart.
   * ``m_deleted_ctx`` — rooted in a *soft-deleted* ws_a context: must NOT be
                      counted. Catches dropping ``Context.deleted_at.is_(None)``.
   * ``m_other_ws`` — the cross-rooted leak case (#614/#383): authored by
                      ``multi_user`` (a member of ws_a) but rooted in ws_b. Must
                      NOT appear in ws_a's timeline.
 
-So ws_a's timeline must count exactly the 3 live ws_a-context memories.
+So ws_a's timeline must count exactly the 2 live ws_a-context memories.
 """
 
 from uuid import uuid4
@@ -49,7 +49,7 @@ from models.memory import Memory
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 
-EXPECTED_WS_A_COUNT = 3
+EXPECTED_WS_A_COUNT = 2
 TIMELINE_DAYS = 30
 
 
@@ -125,9 +125,7 @@ async def cross_rooted_scenario(db_session):
         [
             _make_memory(multi_user, ws_a.id, ctx_a.id),  # m_member   → counts
             _make_memory(outsider, ws_a.id, ctx_a.id),  # m_outsider → counts (no member filter)
-            _make_memory(
-                multi_user, ws_b.id, ctx_a.id
-            ),  # m_cross_ws → counts (ctx scope, not ws_id)
+            _make_memory(multi_user, ws_a.id, None),  # m_no_ctx → excluded (ctx scope, not ws_id)
             _make_memory(multi_user, ws_a.id, ctx_a_deleted.id),  # m_deleted_ctx → excluded
             _make_memory(multi_user, ws_b.id, ctx_b.id),  # m_other_ws → must NOT leak
         ]
@@ -139,12 +137,12 @@ async def cross_rooted_scenario(db_session):
 
 @pytest.mark.asyncio
 async def test_timeline_counts_only_live_workspace_contexts(cross_rooted_scenario, db_session):
-    """ws_a's timeline counts exactly its 3 live ws_a-context memories.
+    """ws_a's timeline counts exactly its 2 live ws_a-context memories.
 
-    The single count of 3 (not 2, not 4, not 5) simultaneously pins: the
-    cross-workspace memory is excluded, the non-member memory is included, the
-    cross-rooted (``ws_b``-stamped) memory is included, and the soft-deleted
-    context's memory is excluded. A regression to membership scoping,
+    The single count of 2 simultaneously pins: the cross-workspace memory is
+    excluded, the non-member memory is included, the ws_a-stamped memory
+    without a context is excluded, and the soft-deleted context's memory is
+    excluded. A regression to membership scoping,
     ``Memory.workspace_id`` scoping, or dropping the deleted-context filter all
     move this number.
     """
@@ -170,7 +168,7 @@ async def test_timeline_returns_zero_filled_window(cross_rooted_scenario, db_ses
     assert len(daily) == TIMELINE_DAYS
     assert [d["date"] for d in daily] == sorted(d["date"] for d in daily)
     assert sum(d["count"] for d in daily) == EXPECTED_WS_A_COUNT
-    # All three live memories were created today → bucketed into the last day.
+    # Both live memories were created today → bucketed into the last day.
     assert daily[-1]["count"] == EXPECTED_WS_A_COUNT
     assert daily[-1]["date"] == result["period_end"]
 

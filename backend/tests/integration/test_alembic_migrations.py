@@ -660,6 +660,7 @@ class TestE05SleepModeDefaultMigration:
 
 
 E94_REV = "e94_1869_summary_emb_idx"
+E95_REV = "e95_1951_memories_ws_not_null"
 
 
 class TestE95MemoriesWorkspaceIdNotNull:
@@ -827,9 +828,9 @@ class TestE95MemoriesWorkspaceIdNotNull:
     def test_existing_workspace_is_not_rewritten(self):
         """A row whose workspace disagrees with its context's keeps its value.
 
-        Cross-rooted rows are possible because ``memories`` has no compound FK
-        on (workspace_id, context_id); the migration must not "repair" them —
-        the audit query for them lives in ``docs/deployment.md``.
+        e95 fills NULLs only; a cross-rooted row is f14's to repair (#1963,
+        tests/integration/test_f14_1963_memories_ws_ctx_fk.py), so this stops
+        at e95 and goes on to head afterwards.
         """
         self._reset_and_upgrade_to_e94()
         owner = "owner-1951-cross"
@@ -842,18 +843,23 @@ class TestE95MemoriesWorkspaceIdNotNull:
             self._seed_memory(conn, mem_id, owner, ws_b, ctx_a, embedding_status="success")
         engine.dispose()
 
-        self._upgrade_head()
+        try:
+            with _alembic_at_test_db():
+                command.upgrade(_get_alembic_config(), E95_REV)
 
-        engine = _sync_engine()
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT workspace_id, embedding_status FROM memories WHERE id = :id"),
-                {"id": mem_id},
-            ).one()
-            assert str(row.workspace_id) == ws_b
-            # Untouched rows are not re-queued either.
-            assert row.embedding_status == "success"
-        engine.dispose()
+            engine = _sync_engine()
+            with engine.begin() as conn:
+                row = conn.execute(
+                    text("SELECT workspace_id, embedding_status FROM memories WHERE id = :id"),
+                    {"id": mem_id},
+                ).one()
+                assert str(row.workspace_id) == ws_b
+                # Untouched rows are not re-queued either.
+                assert row.embedding_status == "success"
+            engine.dispose()
+        finally:
+            # Leave the DB at head for the rest of the session, pass or fail.
+            self._upgrade_head()
 
     def test_downgrade_restores_nullable(self):
         self._reset_and_upgrade_to_e94()

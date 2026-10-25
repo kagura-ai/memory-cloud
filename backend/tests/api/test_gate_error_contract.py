@@ -55,12 +55,13 @@ from config.plan_tiers import (
     PlanName,
     feature_gate_details,
     lowest_tier_with_limit,
+    paused_details,
+    paused_message,
     quota_gate_details,
     required_plan_display_name,
 )
 from models.schemas import PatchMemoryRequest, RememberRequest, UpdateMemoryRequest
 from services.connector_provisioning import ConnectorProvisioningService
-from services.plan_suspension import paused_details, paused_message
 from utils.exceptions import (
     AuthorizationError,
     EmbeddingSpendCapExceeded,
@@ -268,7 +269,7 @@ REFUSALS: list[Refusal] = [
     # so the client can say "remove N".
     Refusal(
         id="plan/members-seat",
-        site="services.plan_suspension:ensure_member_seated",
+        site="services.plan_seats:ensure_member_seated",
         exc=FeatureNotAvailableError(
             paused_message(_FREE, "members", "max_members_per_workspace", above=1),
             **paused_details(
@@ -279,7 +280,7 @@ REFUSALS: list[Refusal] = [
     ),
     Refusal(
         id="plan/contexts-slot",
-        site="services.plan_suspension:ensure_context_writable",
+        site="services.plan_seats:ensure_context_writable",
         exc=FeatureNotAvailableError(
             paused_message(_FREE, "contexts", "max_contexts_per_workspace", above=1),
             **paused_details(
@@ -1526,7 +1527,6 @@ async def _mcp_update_search_config(exc: MemoryCloudException) -> dict:
     with (
         patch("db.base.get_db", new=get_db),
         patch("services.permission_service.PermissionService", return_value=perms),
-        patch("services.plan_suspension.ensure_context_writable", new=AsyncMock()),
         patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
         patch(
             "services.permission_service.gate_content_chunks_change",
@@ -1565,7 +1565,6 @@ async def _mcp_update_search_config_selector(exc: MemoryCloudException) -> dict:
     with (
         patch("db.base.get_db", new=get_db),
         patch("services.permission_service.PermissionService", return_value=perms),
-        patch("services.plan_suspension.ensure_context_writable", new=AsyncMock()),
         patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
         patch(
             "services.permission_service.gate_llm_selector_change",

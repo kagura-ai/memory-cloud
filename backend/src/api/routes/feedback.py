@@ -31,7 +31,7 @@ from services.feedback_service import (
     FeedbackService,
 )
 from services.permission_service import PermissionService
-from services.plan_suspension import ensure_context_writable
+from services.plan_seats import ensure_context_writable
 from utils.exceptions import (
     AuthorizationError,
     InternalError,

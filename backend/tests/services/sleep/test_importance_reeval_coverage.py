@@ -366,8 +366,9 @@ class TestFetchCandidates:
         db_session.add(Context(id=other_ctx, workspace_id=ws_id, name="ctx-b"))
         await db_session.flush()
 
-        in_ctx = _mem_kwargs(user_id=user_id, context_id=ctx)
-        out_ctx = _mem_kwargs(user_id=user_id, context_id=other_ctx)
+        # #1963: a row in a context carries that context's workspace.
+        in_ctx = _mem_kwargs(user_id=user_id, workspace_id=ws_id, context_id=ctx)
+        out_ctx = _mem_kwargs(user_id=user_id, workspace_id=ws_id, context_id=other_ctx)
         db_session.add(Memory(**in_ctx))
         db_session.add(Memory(**out_ctx))
         await db_session.flush()

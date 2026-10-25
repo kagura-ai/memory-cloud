@@ -44,6 +44,7 @@ from utils.datetime import to_utc_iso
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
+    BadRequestError,
     BonusBelowZeroError,
     InsufficientReasonError,
     NotFoundException,
@@ -1702,6 +1703,14 @@ class ContextRecoveryResponse(BaseModel):
     errors: list[str]
 
 
+def _same_uuid(value: object, uuid_text: str) -> bool:
+    """Whether ``value`` spells the UUID ``uuid_text`` (any case or hyphenation)."""
+    try:
+        return UUID(str(value)) == UUID(uuid_text)
+    except ValueError:
+        return False
+
+
 @router.post("/contexts/recover", response_model=ContextRecoveryResponse)
 async def recover_context(
     request_body: ContextRecoveryRequest,
@@ -1798,9 +1807,18 @@ async def recover_context(
             errors=[no_points],
         )
 
-    # Step 2: Determine workspace_id from first point if not provided
+    # Step 2: Determine workspace_id. #1963: a context row that still exists
+    # decides it — a memory must live in its context's workspace
+    # (fk_memories_workspace_context) — and a request naming another one is
+    # refused. Without a row: the request's, else the first point's.
+    context_workspace_id = (
+        await db.execute(select(Context.workspace_id).where(Context.id == PyUUID(context_id)))
+    ).scalar_one_or_none()
+    context_exists = context_workspace_id is not None
     first_payload = all_points[0].payload or {}
-    workspace_id = request_body.workspace_id or first_payload.get("workspace_id", "")
+    workspace_id = request_body.workspace_id or (
+        str(context_workspace_id) if context_exists else first_payload.get("workspace_id", "")
+    )
     if not workspace_id:
         return ContextRecoveryResponse(
             context_id=context_id,
@@ -1820,11 +1838,13 @@ async def recover_context(
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
 
+    if context_exists and workspace_id != str(context_workspace_id):
+        raise BadRequestError(
+            "workspace_id does not match the context's workspace", error_code="REQ-103"
+        )
+
     if request_body.dry_run:
         # Just report what we found
-        # Check if context record exists
-        existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
-        context_exists = existing_context.scalar_one_or_none() is not None
 
         # Batch-check existing memory records (avoid N+1)
         point_ids = [PyUUID(str(p.id)) for p in all_points]
@@ -1855,10 +1875,21 @@ async def recover_context(
 
     await hold_point_writer_lock(db)
 
-    # Step 3: Create Context record if missing
+    # Step 3: Create Context record if missing. Read again just before the
+    # writes (the lock above is shared and only keeps the orphan sweep out):
+    # a row hard-deleted since step 2 is recreated, and a row another
+    # recovery created meanwhile in another workspace is refused like any
+    # mismatch, rather than failing the inserts on the foreign keys (#1963).
     context_record_created = False
-    existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
-    if existing_context.scalar_one_or_none() is None:
+    context_workspace_id = (
+        await db.execute(select(Context.workspace_id).where(Context.id == PyUUID(context_id)))
+    ).scalar_one_or_none()
+    context_exists = context_workspace_id is not None
+    if context_exists and str(context_workspace_id) != workspace_id:
+        raise BadRequestError(
+            "workspace_id does not match the context's workspace", error_code="REQ-103"
+        )
+    if not context_exists:
         raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
         # Sanitize name to match DB constraint ^[a-z0-9_-]+$
         context_name = re.sub(r"[^a-z0-9_-]", "-", raw_name.lower()).strip("-")
@@ -1914,6 +1945,10 @@ async def recover_context(
             continue
 
         payload = point.payload or {}
+        # #1963: a point whose payload names another workspace (or none) is
+        # missed by the workspace-filtered search, so the row goes back
+        # through the embedding sweep, which rewrites the point's payload.
+        point_matches = _same_uuid(payload.get("workspace_id"), workspace_id)
         try:
             new_memory = Memory(
                 id=mem_id,
@@ -1928,7 +1963,7 @@ async def recover_context(
                 importance=payload.get("importance", 0.5),
                 scope=payload.get("scope", "persistent"),
                 tags=payload.get("tags", []),
-                embedding_status="success",  # Already in Qdrant
+                embedding_status="success" if point_matches else "pending",
                 client="admin-recovery",
                 source="admin_recovery",
             )

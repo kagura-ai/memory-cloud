@@ -26,6 +26,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
+from services import plan_seats
 
 # Matches the measurements.metric column length (VARCHAR(64)). Enforced in the
 # handlers too so an overlong metric returns a structured error, not a DB 500.
@@ -123,18 +124,15 @@ async def handle_record_measurement(
 
         # #1943: a content write — the context must hold a writable slot on the
         # plan. After the role gate, so a viewer still gets permission_denied.
-        # Resolved at call time: tests patch and guard the helper at
-        # ``services.plan_suspension``.
-        from services.plan_suspension import ensure_context_writable
-
-        await ensure_context_writable(db, context)
+        await plan_seats.ensure_context_writable(db, context)
 
         # Issue #1275: recording is a WRITE against the context — apply the
         # subtractive binding gate so a read-only-bound agent (can_read=true,
         # write_policy='deny') cannot append measurements in a context whose
         # binding forbids writes. _resolve_context_for_read above only checks
         # the READ side. No-op for non-agent credentials.
-        from services.agent_binding_service import ACCESS_WRITE, agent_binding_permits
+        from auth.workspace_roles import ACCESS_WRITE
+        from services.agent_binding_service import agent_binding_permits
 
         if not await agent_binding_permits(db, context_id, ACCESS_WRITE):
             return _ContextNotFoundError(context_id, "Context not found.").to_response()

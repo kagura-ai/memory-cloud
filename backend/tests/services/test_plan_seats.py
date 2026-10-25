@@ -25,16 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from config.constants import GATE_PLAN
 from models.auth import Context, User, Workspace, WorkspaceMember
-from services.plan_suspension import (
-    SUSPENDED_CONTEXTS,
-    SUSPENDED_MEMBERS,
+from services.plan_seats import (
     context_writes_suspended,
     ensure_context_writable,
     ensure_member_seated,
     member_seat_suspended,
-    suspended_features,
     writes_paused_context_ids,
 )
+from services.plan_suspension import SUSPENDED_CONTEXTS, SUSPENDED_MEMBERS, suspended_features
 from utils.datetime import utcnow
 from utils.exceptions import FeatureNotAvailableError
 

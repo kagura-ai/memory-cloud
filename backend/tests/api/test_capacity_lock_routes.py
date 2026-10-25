@@ -397,7 +397,10 @@ class TestShareKeys:
 
 class TestAgentBootstrap:
     @pytest.mark.asyncio
-    async def test_bootstrap_is_refused_after_context_resolution(self, monkeypatch) -> None:
+    async def test_the_service_refusal_stops_the_bootstrap(self, monkeypatch) -> None:
+        """#1954: ``AgentBootstrapService.resolve_context`` checks the lock after
+        authorization (``tests/services/test_agent_bootstrap_service.py`` pins
+        its BLOCKED); the route only lets the refusal through."""
         from api.routes.agents import BootstrapRequest, agent_bootstrap
 
         ws = uuid4()
@@ -408,24 +411,19 @@ class TestAgentBootstrap:
                 SimpleNamespace(id=uuid4(), name="bot", workspace_id=ws),
             )
         )
-        inst.resolve_context = AsyncMock(
-            return_value=(SimpleNamespace(id=uuid4(), workspace_id=ws), {"context_id": "c"})
-        )
+        inst.resolve_context = AsyncMock(side_effect=_locked())
         inst.build_envelope = AsyncMock()
         monkeypatch.setattr(
             "services.agent_bootstrap_service.AgentBootstrapService",
             MagicMock(return_value=inst),
         )
         db = MagicMock(commit=AsyncMock(), rollback=AsyncMock())
-        with _lock("agents", "ensure_not_capacity_locked") as ensure:
-            with pytest.raises(CapacityLockedError):
-                await agent_bootstrap(
-                    agent_id=uuid4(), body=BootstrapRequest(), user={"user_id": "u1"}, db=db
-                )
+        with pytest.raises(CapacityLockedError):
+            await agent_bootstrap(
+                agent_id=uuid4(), body=BootstrapRequest(), user={"user_id": "u1"}, db=db
+            )
         inst.resolve_context.assert_awaited_once()
         inst.build_envelope.assert_not_awaited()
-        assert ensure.await_args.args[1] == ws
-        assert ensure.await_args.kwargs == {"user_id": "u1"}
 
 
 # ---------------------------------------------------------------------------

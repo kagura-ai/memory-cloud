@@ -156,15 +156,16 @@ def _recall_post_commit_writes_need_a_session(monkeypatch):
 
 
 # Modules that call the capacity lock directly, and the name each binds. The
-# context resolvers carry it for every context-addressed route (#1948); the
-# workspace-addressed routes that resolve no context keep their own call
-# (#1941). Their tests drive the handlers with a mocked ``db`` / ``perm`` /
-# service whose session is a bare MagicMock; the same rule as above applies.
+# context resolvers carry it for every context-addressed route (#1948) and MCP
+# tool (#1954, ``_helpers._resolve_context``); the workspace-addressed routes
+# that resolve no context keep their own call (#1941). Their tests drive the
+# handlers with a mocked ``db`` / ``perm`` / service whose session is a bare
+# MagicMock; the same rule as above applies.
 _CAPACITY_GATED_ROUTES = (
     ("services.permission_service", "ensure_not_capacity_locked"),
     ("services.permission_service", "ensure_member_seated"),
-    ("services.plan_suspension", "ensure_member_seated"),
-    ("services.plan_suspension", "ensure_context_writable"),
+    ("services.plan_seats", "ensure_member_seated"),
+    ("services.plan_seats", "ensure_context_writable"),
     ("services.permission_service", "ensure_context_writable"),
     ("services.context_service", "ensure_member_seated"),
     ("services.file_storage_service", "ensure_context_writable"),
@@ -173,9 +174,9 @@ _CAPACITY_GATED_ROUTES = (
     ("api.routes.feedback", "ensure_context_writable"),
     ("api.routes.analyses", "ensure_not_capacity_locked"),
     ("api.routes.sleep_reports", "ensure_not_capacity_locked"),
-    ("api.routes.agents", "ensure_not_capacity_locked"),
     ("api.routes.public_search", "ensure_not_capacity_locked"),
     ("api.routes.resource_ingest", "ensure_not_capacity_locked"),
+    ("mcp_server.tools._helpers", "ensure_not_capacity_locked"),
 )
 
 

@@ -1,7 +1,7 @@
 """Tests for admin context recovery endpoint (Issue #86)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -263,3 +263,155 @@ class TestRestoreContextRoute:
             resp = client.post(f"/api/v1/admin/contexts/{uuid4()}/restore", json={})
 
         assert resp.status_code == 409
+
+
+def _point(workspace_id: str | None, summary: str = "recovered") -> MagicMock:
+    point = MagicMock()
+    point.id = str(uuid4())
+    point.payload = {"user_id": "user1", "summary": summary}
+    if workspace_id is not None:
+        point.payload["workspace_id"] = workspace_id
+    return point
+
+
+class TestRecoverIntoTheContextsWorkspace:
+    """#1963: recovered memories take the existing context's workspace.
+
+    DB-backed: ``fk_memories_workspace_context`` refuses a memory stamped with
+    any other workspace, so the route must pick the context's own.
+    """
+
+    @staticmethod
+    async def _workspace_and_context(db_session) -> tuple[str, str]:
+        from models.auth import Context, Workspace
+
+        owner = f"recover-{uuid4().hex[:8]}"
+        workspace = Workspace(id=uuid4(), name=f"ws-{uuid4().hex[:8]}", owner_user_id=owner)
+        db_session.add(workspace)
+        await db_session.flush()
+        context = Context(
+            id=uuid4(), workspace_id=workspace.id, name=f"ctx-{uuid4().hex[:8]}", created_by=owner
+        )
+        db_session.add(context)
+        await db_session.flush()
+        return str(workspace.id), str(context.id)
+
+    @staticmethod
+    async def _recover(db_session, points, **request):
+        client = AsyncMock()
+        client.scroll.return_value = (points, None)
+        # The route commits; flush keeps the rows inside the fixture's
+        # transaction, which rolls them back.
+        db_session.commit = AsyncMock(side_effect=db_session.flush)
+        with patch("db.qdrant.get_qdrant_client", return_value=client):
+            return await recover_context(
+                request_body=ContextRecoveryRequest(**request),
+                user=_mock_admin_user(),
+                db=db_session,
+            )
+
+    @staticmethod
+    async def _stored(db_session, points) -> dict[str, tuple[str, str]]:
+        from sqlalchemy import select
+
+        from models.memory import Memory
+
+        rows = await db_session.execute(
+            select(Memory.id, Memory.workspace_id, Memory.embedding_status).where(
+                Memory.id.in_([p.id for p in points])
+            )
+        )
+        return {str(r.id): (str(r.workspace_id), r.embedding_status) for r in rows}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dry_run", [True, False])
+    async def test_a_different_workspace_is_refused(self, db_session, dry_run):
+        ws_id, ctx_id = await self._workspace_and_context(db_session)
+        points = [_point(ws_id)]
+
+        from utils.exceptions import BadRequestError
+
+        with pytest.raises(BadRequestError) as exc:
+            await self._recover(
+                db_session, points, context_id=ctx_id, workspace_id=str(uuid4()), dry_run=dry_run
+            )
+
+        assert (exc.value.status_code, exc.value.error_code) == (400, "REQ-103")
+        assert exc.value.message == "workspace_id does not match the context's workspace"
+        assert await self._stored(db_session, points) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_contexts_workspace_wins_over_the_points(self, db_session):
+        ws_id, ctx_id = await self._workspace_and_context(db_session)
+        # One point names the context's workspace, one a stale other one, one none.
+        matching, stale, bare = _point(ws_id), _point(str(uuid4())), _point(None)
+        upper = _point(ws_id.upper())  # the same workspace, spelled differently
+
+        dry = await self._recover(db_session, [stale, matching, bare, upper], context_id=ctx_id)
+        assert (dry.workspace_id, dry.context_record_created) == (ws_id, False)
+
+        response = await self._recover(
+            db_session,
+            [stale, matching, bare, upper],
+            context_id=ctx_id,
+            workspace_id=ws_id.upper(),
+            dry_run=False,
+        )
+
+        assert response.workspace_id == ws_id
+        assert response.memories_recovered == 4
+        # Stamped with the context's workspace; a point whose payload names
+        # another workspace (or none) goes back through the embedding sweep.
+        assert await self._stored(db_session, [stale, matching, bare, upper]) == {
+            matching.id: (ws_id, "success"),
+            stale.id: (ws_id, "pending"),
+            bare.id: (ws_id, "pending"),
+            upper.id: (ws_id, "success"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_missing_context_is_created_in_the_requested_workspace(self, db_session):
+        ws_id, _ctx_id = await self._workspace_and_context(db_session)
+        new_ctx = str(uuid4())
+        point = _point(str(uuid4()))  # the request decides, not the payload
+
+        response = await self._recover(
+            db_session, [point], context_id=new_ctx, workspace_id=ws_id, dry_run=False
+        )
+
+        assert (response.workspace_id, response.context_record_created) == (ws_id, True)
+        assert await self._stored(db_session, [point]) == {point.id: (ws_id, "pending")}
+
+    @pytest.mark.asyncio
+    async def test_a_context_created_meanwhile_elsewhere_is_refused(self, db_session):
+        """#1963: the context is read again before the writes; one another
+        recovery created in another workspace since is a 400, not an FK 500."""
+        from models.auth import Context
+        from utils.exceptions import BadRequestError
+
+        ws_id, _ = await self._workspace_and_context(db_session)
+        other_ws_id, _ = await self._workspace_and_context(db_session)
+        new_ctx = str(uuid4())
+        point = _point(ws_id)
+
+        async def created_meanwhile(db):
+            db.add(
+                Context(
+                    id=UUID(new_ctx),
+                    workspace_id=UUID(other_ws_id),
+                    name=f"ctx-{uuid4().hex[:8]}",
+                    created_by="other-admin",
+                )
+            )
+            await db.flush()
+
+        with (
+            patch("db.point_writer_lock.hold_point_writer_lock", side_effect=created_meanwhile),
+            pytest.raises(BadRequestError) as exc,
+        ):
+            await self._recover(
+                db_session, [point], context_id=new_ctx, workspace_id=ws_id, dry_run=False
+            )
+
+        assert exc.value.error_code == "REQ-103"
+        assert await self._stored(db_session, [point]) == {}

@@ -1994,7 +1994,9 @@ the number of memories it would bring back.
 The older endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
 from surviving vector-store points, for a context whose rows are gone. It finds
 no points for a context deleted on v0.88.0 or later, and says to use the
-restore above when the context's row is still there.
+restore above when the context's row is still there. When the row exists, the
+recovered memories take its workspace; a `workspace_id` in the request that
+names another workspace answers `400` `REQ-103` (#1963).
 
 ## Capacity-over purge rollout — Issue #1969
 
@@ -2774,8 +2776,8 @@ WHERE workspace_id IS NULL AND context_id IS NULL AND deleted_at IS NOT NULL;
 -- embedding so its search point gets the workspace payload)
 SELECT count(*) FROM memories WHERE workspace_id IS NULL;
 
--- audit only: rows whose stored workspace disagrees with their context's.
--- The migration leaves them as they are; decide separately which side is right.
+-- rows whose stored workspace disagrees with their context's. e95 leaves
+-- them as they are; f14 (#1963, below) moves them to the context's workspace.
 SELECT count(*) FROM memories m JOIN contexts c ON c.id = m.context_id
 WHERE m.workspace_id <> c.workspace_id;
 ```
@@ -2838,6 +2840,92 @@ SELECT public_id, workspace_id, user_id, created_at
 A key whose link points at a connector outside its own workspace is refused at
 verification with the warning `api_key_rejected_connector_workspace_mismatch`;
 only a direct write to the table can produce one.
+
+### Migration `f14_1963_memories_ws_ctx_fk` (#1963)
+
+A memory now has to live in its context's workspace: the foreign key
+`fk_memories_workspace_context` ties `memories (workspace_id, context_id)` to
+`contexts (workspace_id, id)` (a new unique index, `ux_contexts_workspace_id_id`).
+A memory without a context is unaffected, and a context with memories can no
+longer move to another workspace (nothing in the application does that).
+
+Rows written before the constraint can still disagree. The migration **moves
+each one to its context's workspace**, so it counts toward that workspace's
+memory limit from then on and shows up wherever its context is read. A
+repaired row that is live, in a live context, is re-queued for embedding with
+a fresh retry budget, because its search points still carry the old
+workspace. `updated_at` is unchanged. The log lists how many rows moved, how
+many were re-queued, the busiest `old -> new` workspace pairs and sample ids,
+or says there were none.
+
+A move can push a workspace over its memory limit. For a Free workspace whose
+entitlement comes from the billing service (`plan_name = free`,
+`entitlement_source = external_billing`) that means the capacity lock at once
+(content reads and writes refused with `CAPACITY-001`, #1941) and the start of
+the 30-day purge clock with its owner mails (see "Capacity-over purge
+rollout" above). Size it before upgrading, and look at each receiving
+workspace's live count against its plan's memory limit:
+
+```sql
+-- rows the migration will move (each to its context's workspace)
+SELECT m.workspace_id AS old_ws, c.workspace_id AS new_ws, count(*)
+  FROM memories m JOIN contexts c ON c.id = m.context_id
+ WHERE m.workspace_id <> c.workspace_id
+ GROUP BY 1, 2 ORDER BY 3 DESC;
+
+-- receiving workspaces: live rows moving in, live rows today, plan
+SELECT w.id, w.plan_name, w.entitlement_source, mv.moving_in,
+       (SELECT count(*) FROM memories x
+         WHERE x.workspace_id = w.id AND x.deleted_at IS NULL) AS live_now
+  FROM (SELECT c.workspace_id AS ws, count(*) AS moving_in
+          FROM memories m JOIN contexts c ON c.id = m.context_id
+         WHERE m.workspace_id <> c.workspace_id AND m.deleted_at IS NULL
+         GROUP BY 1) mv
+  JOIN workspaces w ON w.id = mv.ws
+ ORDER BY mv.moving_in DESC;
+
+-- graph edges the migration will move
+SELECT count(*) FROM neural_memory_edges e JOIN contexts c ON c.id = e.context_id
+ WHERE e.workspace_id <> c.workspace_id;
+```
+
+Graph edges follow the same rule: an edge whose workspace differs from its
+context's (the edges of the memories moved above carry the old workspace) is
+moved to the context's workspace too, so the graph keeps finding it. The log
+gives the number of edges moved. These batches take row locks only, not the
+per-user graph lock, so a Sleep or graph batch run that touches the same
+edges can make one side fail; rerun the migration if it is the one.
+
+A memory whose context row is missing cannot exist while the `context_id`
+foreign key holds; if one does, the migration refuses before writing any row,
+with the count and up to ten ids.
+
+Steps and locks, in order:
+
+1. The unique index is built `CONCURRENTLY`: no write is blocked, and there is
+   no timeout. It waits for every older transaction in the database,
+   long-running and idle-in-transaction sessions included; if it seems stuck,
+   look in `pg_stat_activity` for it waiting on a `virtualxid` and end the
+   session it waits for.
+2. The foreign key is added `NOT VALID` (no scan). The `ALTER` locks
+   `memories`, then `contexts`, each wait capped by `lock_timeout` 5 s, so
+   writers on `memories` can stall for up to about 10 s.
+3. The rows to move are collected in one scan of `memories`, then moved in
+   batches of 500, each committed on its own and locking only its own rows.
+4. `VALIDATE` scans `memories` without blocking reads or writes.
+5. Edges: one scan of `neural_memory_edges`, then batches of 500 as above.
+
+The migration sets `statement_timeout = 0` for its own session while the
+index build, the scans and `VALIDATE` run, so a role-level timeout does not
+cut them off. A lock timeout, a deadlock or an interrupted index build fails
+the migration; run it again and it resumes where it stopped (a rerun after
+`VALIDATE` only repeats the edge step). From the `ALTER` on, no writer can
+create a disagreeing row, so nothing needs re-running after the traffic
+switch.
+
+`POST /api/v1/admin/contexts/recover` follows the same rule: when the
+context's row exists, its workspace is the one the recovered memories get,
+and a request naming another `workspace_id` answers `400` (`REQ-103`).
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 

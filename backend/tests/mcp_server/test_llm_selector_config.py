@@ -103,7 +103,6 @@ async def _call_update(args: dict, *, stored: bool, owner: bool):
     with (
         patch("db.base.get_db", new=fake_get_db),
         patch("services.permission_service.PermissionService", return_value=perms),
-        patch("services.plan_suspension.ensure_context_writable", AsyncMock()),
         patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
         patch("mcp_server.tools.search_config._log_tool_usage", AsyncMock()),
     ):

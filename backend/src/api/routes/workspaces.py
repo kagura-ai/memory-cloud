@@ -38,7 +38,7 @@ from models.auth import Context, ExternalAPIKey, User, Workspace
 from models.schemas import OpenAIKeyStatusResponse
 from services.email_service import get_email_service
 from services.permission_service import PermissionService
-from services.plan_suspension import seat_limit
+from services.plan_seats import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id

@@ -23,6 +23,7 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
+from services import plan_seats
 from services.edge_service import (
     VALID_EDGE_TYPES,
     accept_supersede_candidate_if_matching,
@@ -293,11 +294,7 @@ async def handle_create_edge(
 
             # #1943: a content write — the context must hold a writable slot on the
             # plan. After the role gate, so a viewer still gets permission_denied.
-            # Resolved at call time: tests patch and guard the helper at
-            # ``services.plan_suspension``.
-            from services.plan_suspension import ensure_context_writable
-
-            await ensure_context_writable(db, context)
+            await plan_seats.ensure_context_writable(db, context)
 
             ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)
@@ -412,11 +409,7 @@ async def handle_update_edge(
 
             # #1943: a content write — the context must hold a writable slot on the
             # plan. After the role gate, so a viewer still gets permission_denied.
-            # Resolved at call time: tests patch and guard the helper at
-            # ``services.plan_suspension``.
-            from services.plan_suspension import ensure_context_writable
-
-            await ensure_context_writable(db, context)
+            await plan_seats.ensure_context_writable(db, context)
 
             ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)

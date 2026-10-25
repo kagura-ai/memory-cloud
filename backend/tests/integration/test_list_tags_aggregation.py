@@ -5,7 +5,8 @@ correctness properties are pinned:
 
 1. Intra-array duplicates (``tags=["python","python"]``) collapse to 1 count.
 2. Soft-deleted memories (``deleted_at IS NOT NULL``) are excluded.
-3. Cross-workspace memories with the same ``context_id`` do NOT leak in.
+3. Rows of other scopes do NOT leak in; a cross-workspace row with the
+   caller's ``context_id`` is refused by the schema (#1963).
 4. Empty / untagged context returns ``[]`` (200-equivalent).
 5. ``min_count`` filter (HAVING clause).
 6. ``prefix`` filter treats ``%`` / ``_`` as literal characters.
@@ -24,6 +25,7 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -212,18 +214,38 @@ class TestAggregateTagsCTE:
         tags = {r["tag"] for r in rows}
         assert tags == {"live"}
 
-    async def test_workspace_id_filter_blocks_cross_workspace_leak(self, db_session, now):
-        """The ``workspace_id`` predicate must reject a memory rooted in another
-        workspace, even when its ``context_id`` matches the caller's context.
+    async def test_schema_refuses_a_cross_workspace_row(self, db_session, now):
+        """#1963: a memory in (ws_b, ctx_a) cannot be stored at all.
 
-        ``memories`` has no compound FK tying ``workspace_id`` to
-        ``contexts.workspace_id`` — a row with mismatched (ws, ctx) is
-        representable at the schema level. The CTE's
-        ``WHERE workspace_id = :workspace_id`` is what prevents leakage.
+        ``fk_memories_workspace_context`` ties ``memories (workspace_id,
+        context_id)`` to ``contexts (workspace_id, id)``, so the leak the CTE's
+        ``WHERE workspace_id = :workspace_id`` used to be the only guard
+        against is now refused by the schema.
+        """
+        user_a = f"u_wsfk_a_{uuid4().hex[:6]}"
+        user_b = f"u_wsfk_b_{uuid4().hex[:6]}"
+        _ws_a, ctx_a = await _seed_workspace_context(db_session, user_id=user_a)
+        ws_b, _ctx_b = await _seed_workspace_context(db_session, user_id=user_b)
+
+        with pytest.raises(IntegrityError, match="fk_memories_workspace_context"):
+            async with db_session.begin_nested():
+                db_session.add(
+                    _memory(
+                        ws_id=ws_b.id,
+                        ctx_id=ctx_a.id,
+                        user_id=user_b,
+                        tags=["leaked"],
+                        created_at=now,
+                    )
+                )
+                await db_session.flush()
+
+    async def test_scope_filter_keeps_other_rows_out(self, db_session, now):
+        """Only the caller's (workspace, context) rows are aggregated.
 
         Setup: caller in ws_a queries ctx_a. We seed:
           (1) a legitimate memory in (ws_a, ctx_a) tagged 'legit'
-          (2) a "leaked" memory in (ws_b, ctx_a) tagged 'leaked'
+          (2) a memory in ws_a without a context tagged 'no-context'
           (3) an unrelated memory in (ws_b, ctx_b) tagged 'unrelated'
         Only 'legit' should be returned.
         """
@@ -241,14 +263,11 @@ class TestAggregateTagsCTE:
                     tags=["legit"],
                     created_at=now,
                 ),
-                # Cross-rooted: ws_b but context_id=ctx_a.id. The schema's FK only
-                # requires ``contexts.id`` to exist; (ws, ctx) consistency is a
-                # runtime invariant, not a DB constraint.
                 _memory(
-                    ws_id=ws_b.id,
-                    ctx_id=ctx_a.id,
-                    user_id=user_b,
-                    tags=["leaked"],
+                    ws_id=ws_a.id,
+                    ctx_id=None,
+                    user_id=user_a,
+                    tags=["no-context"],
                     created_at=now,
                 ),
                 _memory(
@@ -266,7 +285,7 @@ class TestAggregateTagsCTE:
 
         tags = {r["tag"] for r in rows}
         assert tags == {"legit"}, (
-            "workspace_id filter failed — 'leaked' or 'unrelated' appeared in caller's view"
+            "scope filter failed — 'no-context' or 'unrelated' appeared in caller's view"
         )
 
     async def test_min_count_filter(self, db_session, now):

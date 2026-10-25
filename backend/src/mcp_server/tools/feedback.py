@@ -23,6 +23,7 @@ from mcp_server.tools._helpers import (
     _success_response,
 )
 from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
+from services import plan_seats
 from utils.exceptions import NotFoundException
 
 # Length caps reuse the model's single source of truth (query is VARCHAR(1024);
@@ -77,11 +78,8 @@ async def handle_feedback(
         except _ContextNotFoundError as exc:
             return exc.to_response()
         # #1943: feedback is a content write — the context must hold a writable
-        # slot on the plan (no role gate here: feedback has none). Resolved at
-        # call time: tests patch and guard the helper at ``services.plan_suspension``.
-        from services.plan_suspension import ensure_context_writable
-
-        await ensure_context_writable(db, context)
+        # slot on the plan (no role gate here: feedback has none).
+        await plan_seats.ensure_context_writable(db, context)
 
         try:
             row = await FeedbackService(db).record_feedback(

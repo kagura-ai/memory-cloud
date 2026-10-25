@@ -32,7 +32,7 @@ from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_suspension import ensure_member_seated
+from services.plan_seats import ensure_member_seated
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -1002,7 +1002,10 @@ class ContextService:
 
         # Owner-only: merge is a privileged operation
         perm_service = PermissionService(self.db)
-        # MCP-only entry: the dispatcher's capacity table blocks merge_contexts.
+        # MCP-only entry. merge_contexts is BLOCKED (a merge never lowers the
+        # memory count): the handler's context resolvers check the capacity
+        # lock (#1954). ALLOWED here because a BLOCKED owner check would also
+        # run the #1943 writable-slot check, which a merge must not.
         await perm_service.check_context_owner(
             user_id, source_context_id, capacity=CapacityPolicy.ALLOWED
         )
@@ -1010,8 +1013,7 @@ class ContextService:
             user_id, target_context_id, capacity=CapacityPolicy.ALLOWED
         )
         # #1943: no writable-slot check here — a merge retires the source, so
-        # it only ever brings the workspace closer to its context cap (the
-        # capacity lock treats it as cleanup too: ``ALLOWED`` above).
+        # it only ever brings the workspace closer to its context cap.
 
         # Same workspace required
         if source.workspace_id != target.workspace_id:

@@ -328,6 +328,43 @@ class TestContextResolution:
         assert isinstance(resolver.await_args.kwargs.get("binding_decision_out"), list)
 
     @pytest.mark.asyncio
+    async def test_resolve_context_checks_the_capacity_lock(self):
+        """#1954: both callers (REST bootstrap, MCP get_agent_bootstrap) are
+        BLOCKED surfaces, so the resolver checks the lock after authorization,
+        and the refusal is not turned into context_not_found."""
+        from services.capacity_lock import CapacityPolicy
+        from utils.exceptions import CapacityLockedError
+
+        locked = CapacityLockedError(
+            memory_count=3,
+            memory_limit=2,
+            over_memories=1,
+            used_bytes=0,
+            storage_limit_bytes=1,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+        )
+        svc = AgentBootstrapService(MagicMock())
+        resolver = AsyncMock(side_effect=locked)
+        with (
+            patch(
+                "services.agent_binding_service.AgentBindingService.get_binding_for_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                new=resolver,
+            ),
+            pytest.raises(CapacityLockedError),
+        ):
+            await svc.resolve_context(
+                agent=_agent(),
+                params=BootstrapParams(agent_id=AGENT_ID, context_id=CONTEXT_ID),
+                principal=self._principal(),
+            )
+        assert resolver.await_args.kwargs["capacity"] is CapacityPolicy.BLOCKED
+
+    @pytest.mark.asyncio
     async def test_resolve_context_stamps_allowed_decision(self):
         """#1402: on an enforce-mode allow, the principal carries
         policy_decision='allowed' so the bootstrap success MAE row is no longer

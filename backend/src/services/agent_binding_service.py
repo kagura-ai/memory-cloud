@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.agent_scope import AgentScope
+from auth.workspace_roles import ACCESS_READ, Access
 from models.agent import (
     _ALL_BINDING_WRITE_POLICIES,
     AGENT_ENFORCEMENT_SHADOW,
@@ -47,10 +48,6 @@ DECISION_WOULD_DENY = "would_deny"
 # (can_access_memory collapses RBAC and binding into one bool — the rbac
 # branches stamp this so the two deny causes stay distinguishable in audit).
 DECISION_RBAC_DENIED = "rbac_denied"
-
-# Access kinds the chokepoints evaluate.
-ACCESS_READ = "read"
-ACCESS_WRITE = "write"
 
 # Audit action vocabulary (security-mutation lane, extends the P0-1 set).
 AUDIT_BINDING_CREATED = "agent_binding_created"
@@ -426,7 +423,7 @@ def _validate_write_policy(value: Any) -> str:
 async def agent_binding_permits(
     db: AsyncSession,
     context_id: uuid.UUID,
-    access: str,
+    access: Access,
     *,
     operation: str | None = None,
     user_id: str | None = None,
@@ -683,7 +680,7 @@ class AgentBindingService:
         self,
         scope: AgentScope,
         context_id: uuid.UUID,
-        access: str,
+        access: Access,
         *,
         operation: str | None = None,
         user_id: str | None = None,
@@ -805,7 +802,7 @@ class AgentBindingService:
         self,
         scope: AgentScope,
         context_id: uuid.UUID,
-        access: str,
+        access: Access,
         decision: str,
         *,
         operation: str | None,
