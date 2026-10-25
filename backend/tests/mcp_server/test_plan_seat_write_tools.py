@@ -1,8 +1,8 @@
 """#1943: the MCP content-write tools ask for a writable slot — after the role gate.
 
 An AST scan of each handler: the slot check (``ensure_context_writable``) is
-present and comes after ``_check_viewer_permission`` (feedback has no role
-gate, so after its resolver), and the read / delete tools never call it. A
+present and comes after ``_check_viewer_permission`` or the resolver that
+runs it (``write_role=``; feedback has no role gate, so after its resolver), and the read / delete tools never call it. A
 refactor that drops the call or moves it ahead of authorization fails here,
 instead of silently leaving an MCP write ungated — or letting a viewer learn a
 context's slot state before being told it cannot write.
@@ -20,8 +20,9 @@ from mcp_server.tools import edge, feedback, measurement, state
 WRITE_TOOLS = {
     state.handle_set_state: "_check_viewer_permission",
     measurement.handle_record_measurement: "_check_viewer_permission",
-    edge.handle_create_edge: "_check_viewer_permission",
-    edge.handle_update_edge: "_check_viewer_permission",
+    # The resolver checks the role (write_role=) before the slot.
+    edge.handle_create_edge: "_resolve_context",
+    edge.handle_update_edge: "_resolve_context",
     feedback.handle_feedback: "_resolve_context_for_read",
 }
 READ_TOOLS = (

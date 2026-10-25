@@ -64,7 +64,7 @@ def _patched(service, *, role="member"):
     with (
         patch("db.base.get_db", new=mock_get_db),
         patch("mcp_server.tools.memory._resolve_context", new=resolve),
-        patch("mcp_server.tools.edge._resolve_context", new=AsyncMock(return_value=context)),
+        patch("mcp_server.tools.edge._resolve_context", new=resolve),
         patch("mcp_server.tools.memory._context_response_fields", return_value={}),
         patch("mcp_server.tools.memory._touch_context_last_used", new=AsyncMock()),
         patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),

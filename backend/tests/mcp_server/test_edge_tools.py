@@ -78,11 +78,6 @@ async def _run_create_edge(args, mock_repo, user_id, workspace_id, context_id):
             return_value=mock_ctx,
         ),
         patch(
-            "mcp_server.tools.edge._check_viewer_permission",
-            new_callable=AsyncMock,
-            return_value=None,
-        ),
-        patch(
             "mcp_server.tools.edge._log_tool_usage",
             new_callable=AsyncMock,
         ),
@@ -152,11 +147,6 @@ class TestUpdateEdgeResponsePayload:
                 return_value=mock_ctx,
             ),
             patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
                 "mcp_server.tools.edge._log_tool_usage",
                 new_callable=AsyncMock,
             ),
@@ -209,11 +199,6 @@ class TestUpdateEdgeResponsePayload:
                 "mcp_server.tools.edge._resolve_context",
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
-            ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
             ),
             patch(
                 "mcp_server.tools.edge._log_tool_usage",
@@ -377,11 +362,6 @@ class TestUpdateEdgeWeightNoDefault:
                 "mcp_server.tools.edge._resolve_context",
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
-            ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
             ),
             patch(
                 "mcp_server.tools.edge._log_tool_usage",
@@ -806,11 +786,6 @@ class TestSupersedeAcceptanceTelemetry:
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
             ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
             patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
             patch(
                 "mcp_server.tools.edge.accept_supersede_candidate_if_matching",
@@ -849,11 +824,6 @@ class TestSupersedeAcceptanceTelemetry:
                 "mcp_server.tools.edge._resolve_context",
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
-            ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
             ),
             patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
             patch(
