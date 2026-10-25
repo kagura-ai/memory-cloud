@@ -3556,6 +3556,7 @@
       "importance": "Importance",
       "createdAt": "Created At",
       "updatedAt": "Updated At",
+      "observedAt": "Observed At",
       "tags": "Tags",
       "metadata": "Metadata",
       "close": "Close",

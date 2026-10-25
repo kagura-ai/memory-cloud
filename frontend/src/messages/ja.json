@@ -3556,6 +3556,7 @@
       "importance": "重要度",
       "createdAt": "作成日時",
       "updatedAt": "更新日時",
+      "observedAt": "観測日時",
       "tags": "タグ",
       "metadata": "メタデータ",
       "close": "閉じる",

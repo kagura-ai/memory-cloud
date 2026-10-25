@@ -37,6 +37,7 @@ import type {
   SupersedeCandidate,
 } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
+import { formatObservedAt } from "./observedAt";
 import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
@@ -265,6 +266,18 @@ export function MemoryDetailDialog({
                 </Badge>
               </div>
             </div>
+
+            {/* #2330: when the fact held — shown only when the memory has one. */}
+            {memory.observed_at && (
+              <div>
+                <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                  {t("observedAt")}
+                </label>
+                <div className="mt-1 text-sm" data-testid="memory-observed-at">
+                  {formatObservedAt(memory.observed_at, user?.timezone, locale)}
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">

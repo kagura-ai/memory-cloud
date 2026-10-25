@@ -387,3 +387,33 @@ describe("MemoryDetailDialog — notFound mode (Issue #434)", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });
+
+describe("MemoryDetailDialog — observed_at (#2330)", () => {
+  function renderWith(memory: MemoryReference) {
+    render(
+      <MemoryDetailDialog
+        memory={memory}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+  }
+
+  it("is hidden when the memory has none", () => {
+    renderWith(makeRef());
+    expect(screen.queryByTestId("memory-observed-at")).toBeNull();
+    expect(screen.queryByText("observedAt")).toBeNull();
+  });
+
+  it("shows a date-only value as the stored day, with no timezone shift", () => {
+    mockUseAuth.mockReturnValue({
+      user: { id: "user-a", timezone: "America/Los_Angeles" },
+    });
+    renderWith(makeRef({ observed_at: "2024-03-07" }));
+    expect(screen.getByText("observedAt")).toBeTruthy();
+    expect(screen.getByTestId("memory-observed-at").textContent).toBe(
+      "2024-03-07",
+    );
+  });
+});

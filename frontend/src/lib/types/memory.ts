@@ -31,6 +31,8 @@ export interface MemoryListItem {
   importance: number;
   created_at: string;
   updated_at: string;
+  // #2330: when the fact held — a date (YYYY-MM-DD) or a UTC datetime.
+  observed_at?: string | null;
   // Always present on the wire (FastAPI serializes null without
   // response_model_exclude_none) — non-optional so the type matches the
   // actual contract.
@@ -82,6 +84,8 @@ export interface MemoryReference {
   context: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  // #2330: when the fact held — a date (YYYY-MM-DD) or a UTC datetime.
+  observed_at?: string | null;
   client: string;
   source_uri?: string | null;
   source_type?: string | null;
