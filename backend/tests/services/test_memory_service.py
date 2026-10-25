@@ -2755,6 +2755,7 @@ class TestFlooredUnscoredRerankCandidates:
                 client="test",
                 tags=[],
                 context=None,
+                details=None,  # #2330
                 source_uri=None,
                 source_type=None,
                 version=1,

@@ -133,6 +133,13 @@ class TestBuildResponses:
         assert [r.content for r in responses] == [m.content for m in mems[:3]] + [None, None]
         assert all(r.content_truncated is None for r in responses)
 
+    async def test_a_row_carries_the_observed_at_of_its_details(self):
+        """#2330: the details form (writer precision); None without one."""
+        dated, plain = _mem(0), _mem(1)
+        dated.details = {"observed_at": "2024-03-07"}
+        responses = await _build([dated, plain], k=2, full=0)
+        assert [r.observed_at for r in responses] == ["2024-03-07", None]
+
     @pytest.mark.parametrize(("full", "with_content"), [(0, 0), (1, 1), (10, 4)])
     async def test_explicit_full(self, full, with_content):
         responses = await _build([_mem(i) for i in range(4)], k=4, full=full)
