@@ -174,9 +174,8 @@ async def create_share_key(
 
     The caller must OWN ``context_id`` — enforced via
     ``check_context_access(..., OWNER)``, which raises a uniform 404 if the
-    context does not exist, and 403 if the caller lacks owner access (whether
-    they are a non-member or a member without owner rights — the 403 does not
-    distinguish, to avoid leaking membership). This prevents minting a share
+    context does not exist or the caller cannot reach it, and 403 if the
+    caller reaches it without owner rights. This prevents minting a share
     key for a context the user cannot administer.
     """
     user_id = get_user_id(user)

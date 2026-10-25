@@ -1374,7 +1374,7 @@ async def list_context_members(
     # Filter explicit ContextMember rows to current workspace members who
     # reach this context. Issue #362 Guard 3 prevents new cross-workspace
     # adds, but legacy orphan rows (created before the guard) may still exist;
-    # surfacing them would leak user emails/names across workspaces to any
+    # surfacing them would show user emails/names across workspaces to any
     # viewer of this context. A row of a member whose context access list does
     # not reach the context grants nothing (check_context_access), so it is
     # not listed either.

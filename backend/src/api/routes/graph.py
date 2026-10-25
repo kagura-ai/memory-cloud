@@ -166,12 +166,9 @@ async def get_graph_stats(
         - Private context (``is_private = true``): only the private-context
           creator can access the graph for that context. The creator-only
           rule matches ``can_access_memory`` (returns ``False`` for
-          non-creators) and ``check_context_access`` (raises 403 for
-          non-creators). This endpoint deliberately **remaps that denial
-          to 404**, unifying with the cross-workspace-probe shape so
-          neither path leaks existence — an intentional divergence from
-          ``check_context_access``'s 403 status code, not from its
-          authorization semantics.
+          non-creators) and ``check_context_access`` (not found for
+          non-creators). This endpoint answers that denial with the same
+          404 as a cross-workspace probe.
         - Cross-workspace probes and private-context access by non-creators
           both surface as 404 (CWE-639 / OWASP A01 uniform disclosure)
           to avoid existence leakage.
