@@ -60,6 +60,7 @@ from models.schemas import (
     FoldedVersions,
     ForgetRequest,
     ForgetResponse,
+    GuardrailIndexItem,
     GuardrailItem,
     LinkedMemoryRef,
     LoadGuardrailsResponse,
@@ -6974,6 +6975,15 @@ class MemoryService:
         )
         pinned_truncated = pinned_total > pinned_cap
         tool_truncated = tool_total > guardrail_cap
+        # #2334: the index lane — the whole live set of a small context.
+        index_max = settings.session_index_max_memories
+        index_rows: list = []
+        index_served = False
+        if index_max > 0:
+            index_rows, index_count = await self.memory_repo.list_session_index(
+                ws_uuid, ctx_uuid, index_max
+            )
+            index_served = index_count is not None
 
         from services.agent_binding_service import filter_memory_rows_by_binding
 
@@ -6983,6 +6993,11 @@ class MemoryService:
         tool_rows, tool_filtered = await filter_memory_rows_by_binding(
             self.db, list(tool_rows), operation="load_guardrails", user_id=user_id
         )
+        index_filtered = 0
+        if index_rows:
+            index_rows, index_filtered = await filter_memory_rows_by_binding(
+                self.db, list(index_rows), operation="load_guardrails", user_id=user_id
+            )
         if pinned_truncated or tool_truncated:
             # Never a silent truncation: a client hook fails open on it.
             logger.warning(
@@ -7002,6 +7017,12 @@ class MemoryService:
             self._guardrail_item(m, user_id, tool_trigger=m.tool_trigger, l2=False)
             for m in tool_rows
         ]
+        # Unlike the guardrail lanes, the index count is AFTER the binding
+        # filter: a client prints "N more" from it, and a row this credential
+        # may not read must not count as one it could recall.
+        index_items = (
+            [self._guardrail_index_item(m, user_id) for m in index_rows] if index_served else None
+        )
         version = guardrail_version(
             [
                 [str(i.memory_id), i.summary, i.importance, i.delivery_mode, i.tool_trigger]
@@ -7014,14 +7035,14 @@ class MemoryService:
         from services.agent_binding_service import ROW_FILTER_KIND
         from services.memory_access_event_writer import emit_memory_access_event
 
-        filtered = pinned_filtered + tool_filtered
+        filtered = pinned_filtered + tool_filtered + index_filtered
         await emit_memory_access_event(
             operation="load_guardrails",
             outcome="success",
             workspace_id=ws_uuid,
             user_id=user_id,
             context_id=ctx_uuid,
-            result_count=len(pinned_items) + len(tool_items),
+            result_count=len(pinned_items) + len(tool_items) + len(index_items or ()),
             extra_metadata=(
                 {"filter_kind": ROW_FILTER_KIND, "binding_row_filtered_count": filtered}
                 if filtered
@@ -7042,6 +7063,24 @@ class MemoryService:
             pinned_truncated=pinned_truncated,
             tool_triggered_total_available=tool_total,
             tool_triggered_truncated=tool_truncated,
+            index=index_items,
+            index_total_available=len(index_items) if index_items is not None else None,
+        )
+
+    @staticmethod
+    def _guardrail_index_item(row: Any, user_id: str) -> GuardrailIndexItem:
+        """One index-lane pointer row: the 80-character summary head of
+        ``bootstrap(format="index")`` (same ``compact_summary`` cut)."""
+        from utils.recall_projection import INDEX_SUMMARY_CHARS, compact_summary
+
+        head, cut = compact_summary(row.summary, INDEX_SUMMARY_CHARS)
+        return GuardrailIndexItem(
+            memory_id=row.id,
+            summary=head,
+            summary_cut=cut,
+            type=row.type,
+            authored_by_caller=row.user_id == user_id,
+            updated_at=row.updated_at or row.created_at,
         )
 
     async def _delete_memory_point(self, user_id: str, memory: Memory) -> None:

@@ -125,6 +125,7 @@ class PluginEnv:
         context_id: str | None = None,
         fmt: int = 1,
         mode: int = 0o600,
+        extra: dict[str, Any] | None = None,
     ) -> Path:
         if fetched_at is None:
             fetched_at = datetime.now(UTC) - timedelta(minutes=1)
@@ -139,6 +140,7 @@ class PluginEnv:
             cache["version"] = version
         cache["pinned"] = pinned or []
         cache["tool_triggered"] = items
+        cache.update(extra or {})
         self.guardrails_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.cache_path.write_text(
             json.dumps(cache, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8"
@@ -381,6 +383,7 @@ class StubServer:
         truncated: bool = False,
         fmt: int = 1,
         status: str = "success",
+        extra: dict[str, Any] | None = None,
     ) -> None:
         self.response = load_guardrails_response(
             tool_triggered,
@@ -389,6 +392,7 @@ class StubServer:
             truncated=truncated,
             fmt=fmt,
             status=status,
+            extra=extra,
         )
 
     def start(self) -> StubServer:
@@ -443,10 +447,12 @@ def load_guardrails_response(
     truncated: bool = False,
     fmt: int = 1,
     status: str = "success",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A JSON-RPC ``tools/call`` envelope carrying a ``load_guardrails`` result.
 
-    Items carry the full server item shape (extra fields the cache must drop).
+    Items carry the full server item shape (extra fields the cache must drop);
+    ``extra`` adds or replaces top-level result keys (e.g. the #2334 index lane).
     """
 
     def full(entry: dict[str, Any], *, with_trigger: bool) -> dict[str, Any]:
@@ -486,6 +492,7 @@ def load_guardrails_response(
         "context_is_private": False,
         "context_is_locked": False,
     }
+    result.update(extra or {})
     return {
         "jsonrpc": "2.0",
         "id": 1,

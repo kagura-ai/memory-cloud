@@ -4685,6 +4685,24 @@
         ],
         "type": "object"
       },
+      "GuardrailIndexItem": {
+        "properties": {
+          "authored_by_caller": {},
+          "memory_id": {},
+          "summary": {},
+          "summary_cut": {},
+          "type": {},
+          "updated_at": {}
+        },
+        "required": [
+          "authored_by_caller",
+          "memory_id",
+          "summary",
+          "type",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "GuardrailItem": {
         "properties": {
           "authored_by_caller": {},
@@ -5165,6 +5183,33 @@
           },
           "format": {
             "type": "integer"
+          },
+          "index": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/GuardrailIndexItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "index_total_available": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "index_truncated": {
+            "default": false,
+            "type": "boolean"
           },
           "pinned": {
             "items": {

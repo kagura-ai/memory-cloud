@@ -841,6 +841,17 @@ class Settings(BaseSettings):
         description="Max tool-triggered memories returned by load_guardrails",
     )
 
+    # #2334: load_guardrails' index lane. A context with at most this many
+    # live trusted memories gets every one of them as an 80-character pointer
+    # row, so a session-start hook shows what is stored before the agent
+    # searches; above it the lane is null. 0 turns the lane off.
+    session_index_max_memories: int = Field(
+        default=60,
+        ge=0,
+        le=1000,
+        description="Max live memories for which load_guardrails returns the whole index (0 = off)",
+    )
+
     # #1621: hookless clients (ChatGPT web, Claude Desktop / Chat, Codex cloud)
     # receive a digest of the tool-triggered lane in the MCP server
     # ``instructions`` when the endpoint URL (``?guardrails=<context_id>``) or

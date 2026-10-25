@@ -116,6 +116,8 @@ def test_request_shape_and_cache_bytes(
         "version",
         "pinned",
         "tool_triggered",
+        "index",
+        "index_total_available",
     ]
     assert (
         cache["format"] == 1

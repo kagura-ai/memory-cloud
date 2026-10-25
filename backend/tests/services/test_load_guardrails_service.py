@@ -36,6 +36,7 @@ def service():
     svc.memory_repo = MagicMock()
     svc.memory_repo.list_pinned = AsyncMock(return_value=([], 0))
     svc.memory_repo.list_tool_triggered = AsyncMock(return_value=([], 0))
+    svc.memory_repo.list_session_index = AsyncMock(return_value=([], 0))
     svc._mock_context = ctx
     return svc
 
@@ -147,7 +148,7 @@ async def test_settings_defaults_are_clamped_like_a_caller_cap(service, emit):
     """An omitted cap falls back to the settings value — which is operator
     input too. 0 must not become ``LIMIT 0`` and 5000 must not exceed the
     hard maximum; both lanes go through the same clamp."""
-    settings = MagicMock(pinned_load_cap=0, guardrail_load_cap=5000)
+    settings = MagicMock(pinned_load_cap=0, guardrail_load_cap=5000, session_index_max_memories=60)
     with patch("config.settings.get_settings", return_value=settings):
         result = await _call(service)
     assert service.memory_repo.list_pinned.await_args.args[2] == 1
@@ -353,3 +354,104 @@ async def test_requires_a_context(service, emit):
     service._get_context_isolation_params = AsyncMock(return_value=(None, None, None))
     with pytest.raises(ValueError, match="requires current_context_id"):
         await _call(service)
+
+
+# ------------------------------------------------------------- index lane (#2334)
+
+
+def _index_row(**o):
+    m = MagicMock(spec=[])  # L1 only: no context_summary / content / details
+    m.id = o.get("id", uuid4())
+    m.summary = o.get("summary", "the deploy runs from the release branch")
+    m.type = o.get("type", "decision")
+    m.created_at = o.get("created_at", utcnow())
+    m.updated_at = o.get("updated_at", None)
+    m.context_id = uuid4()
+    m.source_type = "manual"
+    m.user_id = o.get("user_id", "u1")
+    return m
+
+
+@pytest.mark.asyncio
+async def test_index_rows_carry_authored_by_caller(service, emit):
+    mine, theirs = _index_row(), _index_row(user_id="u2")
+    service.memory_repo.list_session_index = AsyncMock(return_value=([mine, theirs], 2))
+    result = await _call(service, user_id="u1")
+    assert [i.authored_by_caller for i in result.index] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_index_lane_serves_every_row_of_a_small_context(service, emit):
+    rows = [_index_row(summary=f"fact {n}") for n in range(3)]
+    service.memory_repo.list_session_index = AsyncMock(return_value=(rows, 3))
+    result = await _call(service)
+    service.memory_repo.list_session_index.assert_awaited_once_with(
+        service._mock_context.workspace_id, service._mock_context.id, 60
+    )
+    assert [i.summary for i in result.index] == ["fact 0", "fact 1", "fact 2"]
+    assert result.index_total_available == 3
+    assert result.index_truncated is False
+    # Not part of the guardrail set's version, not an L2/L3 read.
+    assert emit.await_args.kwargs["result_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_index_rows_are_80_char_heads_with_summary_cut(service, emit):
+    created = utcnow()
+    long_row = _index_row(summary="word " * 40, created_at=created)
+    short_row = _index_row(summary="short", updated_at=created)
+    service.memory_repo.list_session_index = AsyncMock(return_value=([long_row, short_row], 2))
+    result = await _call(service)
+    cut, kept = result.index
+    assert len(cut.summary) <= 80 and cut.summary_cut is True
+    assert kept.summary == "short" and kept.summary_cut is False
+    # updated_at falls back to created_at
+    assert cut.updated_at.replace(tzinfo=None) == created
+    assert set(type(cut).model_fields) == {
+        "memory_id",
+        "summary",
+        "summary_cut",
+        "type",
+        "authored_by_caller",
+        "updated_at",
+    }
+
+
+@pytest.mark.asyncio
+async def test_index_is_null_above_the_cap_and_no_count_is_reported(service, emit):
+    service.memory_repo.list_session_index = AsyncMock(return_value=([], None))
+    result = await _call(service)
+    assert result.index is None
+    assert result.index_total_available is None
+
+
+@pytest.mark.asyncio
+async def test_index_setting_zero_turns_the_lane_off(service, emit):
+    settings = MagicMock(pinned_load_cap=100, guardrail_load_cap=50, session_index_max_memories=0)
+    with patch("config.settings.get_settings", return_value=settings):
+        result = await _call(service)
+    service.memory_repo.list_session_index.assert_not_awaited()
+    assert result.index is None and result.index_total_available is None
+
+
+@pytest.mark.asyncio
+async def test_index_does_not_change_the_version(service, emit):
+    first = await _call(service)
+    service.memory_repo.list_session_index = AsyncMock(return_value=([_index_row()], 1))
+    second = await _call(service)
+    assert first.version == second.version
+
+
+@pytest.mark.asyncio
+async def test_index_rows_go_through_the_binding_filter(service, emit):
+    kept, dropped = _index_row(), _index_row()
+    service.memory_repo.list_session_index = AsyncMock(return_value=([kept, dropped], 2))
+
+    async def _flt(db, rows, *, operation, user_id):
+        return [r for r in rows if r is not dropped], sum(r is dropped for r in rows)
+
+    with patch("services.agent_binding_service.filter_memory_rows_by_binding", new=_flt):
+        result = await _call(service)
+    assert [i.memory_id for i in result.index] == [kept.id]
+    # The index count is AFTER the filter: a denied row is not "one more".
+    assert result.index_total_available == 1

@@ -10,6 +10,10 @@ Save the following to memory: $ARGUMENTS
 
 ### 1. Resolve the target context
 
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`) — skip this step: call `list_tags` and `remember` without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
+
+Otherwise:
+
 ```
 list_contexts()
 ```
@@ -30,6 +34,12 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
   - `note`: Status updates, milestone notes, roadmap changes
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
 - Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most. **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`); no spelling variants of the same tag.
+
+**Store what the material states, as it states it.** Do not fact-check it, add a note that a statement is wrong or outdated, or add dates, end years or qualifiers the material does not contain — the stored value is what the user or source said, and a later reader treats the store as the authority. When the material itself corrects an earlier statement, store the correction as it is worded there.
+
+**Updating a fact.** When the material changes a fact that may already be stored (a new owner, a new value, a moved date), search before writing: `recall(context_id=..., query="<the subject>", k=3, full=0)` (no `context_id` on a default context). When a row states the same fact with another value, write the new one with `supersedes=<that memory_id>` (or edit that row with `update_memory`). Never store the new value next to the old one without either.
+
+**When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as a date only, `YYYY-MM-DD` (`"2024-03-07"`, no time or offset, so exact filters and sorting work) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `list(filters={"details.observed_at": ...})` matches it exactly.
 
 **Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
 
@@ -53,7 +63,8 @@ remember(
   type="decision",
   importance=0.9,
   tags=["auth", "architecture"],
-  context_summary="Why this matters and when to reference it."
+  context_summary="Why this matters and when to reference it.",
+  details={"observed_at": "2024-03-07"}  # only when the material is dated
 )
 ```
 

@@ -146,6 +146,10 @@ def test_rest_body_matches_the_mcp_envelope_fields():
         "pinned_truncated",
         "tool_triggered_total_available",
         "tool_triggered_truncated",
+        # #2334: the index lane (the MCP handler fits it into max_chars).
+        "index",
+        "index_total_available",
+        "index_truncated",
     }
     item = body["tool_triggered"][0]
     assert set(item) == {
