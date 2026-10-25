@@ -935,15 +935,22 @@ async def _check_viewer_permission(
             required_role="member",
             help="Verify the workspace is active and you are a member with at least 'member' role.",
         )
-    if user_role == "viewer":
-        return _error_response(
-            "permission_denied",
-            f"Viewers have read-only access. Cannot {operation}.",
-            your_role="viewer",
-            required_role="member",
-            help="Contact your workspace owner to upgrade your role to 'member' for write access.",
-        )
+    from services.permission_service import is_below_member_role
+
+    if is_below_member_role(user_role):
+        return _viewer_read_only_response(operation, your_role=str(user_role))
     return None
+
+
+def _viewer_read_only_response(operation: str, *, your_role: str = "viewer") -> ToolErrorContent:
+    """``permission_denied`` for a write by a workspace viewer (read-only)."""
+    return _error_response(
+        "permission_denied",
+        f"Viewers have read-only access. Cannot {operation}.",
+        your_role=your_role,
+        required_role="member",
+        help="Contact your workspace owner to upgrade your role to 'member' for write access.",
+    )
 
 
 # ============================================================================

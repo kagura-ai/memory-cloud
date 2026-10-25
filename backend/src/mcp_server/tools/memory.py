@@ -34,6 +34,7 @@ from mcp_server.tools._helpers import (
     _session_response_field,
     _touch_context_last_used,
     _validate_memory_id,
+    _viewer_read_only_response,
     execute_with_timeout,
 )
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
@@ -43,6 +44,7 @@ from services.memory_service import (
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
+from services.permission_service import VIEWER_READ_ONLY_REASON
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     AuthorizationError,
@@ -437,7 +439,7 @@ async def handle_remember(
                 db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
             )
             return _error_response("validation_error", str(e))
-        except AuthorizationError:
+        except AuthorizationError as e:
             # Tool guardrails: details.tool_trigger needs context EDITOR or
             # above — membership (already proven by the context resolution
             # above) is not enough. Uniform message: no deny sub-reason.
@@ -445,6 +447,8 @@ async def handle_remember(
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 403, args.get("context_id"), workspace_id
             )
+            if e.reason == VIEWER_READ_ONLY_REASON:
+                return _viewer_read_only_response("create memories")
             return _guardrail_author_denied("mark a memory as a tool guardrail")
         except Exception:
             await db.rollback()
@@ -658,13 +662,15 @@ async def handle_update_memory(
                 db, user_id, "update_memory", start_time, 422, args.get("context_id"), workspace_id
             )
             return _error_response("validation_error", str(e))
-        except AuthorizationError:
+        except AuthorizationError as e:
             # Tool guardrails: editing a guardrail row, or adding / removing
             # details.tool_trigger, needs context EDITOR or above.
             await db.rollback()
             await _log_tool_usage(
                 db, user_id, "update_memory", start_time, 403, args.get("context_id"), workspace_id
             )
+            if e.reason == VIEWER_READ_ONLY_REASON:
+                return _viewer_read_only_response("update memories")
             return _guardrail_author_denied("change a tool guardrail")
         except Exception:
             await db.rollback()

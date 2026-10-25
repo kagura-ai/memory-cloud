@@ -56,6 +56,7 @@ from services.memory_service import (
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
+from services.permission_service import VIEWER_READ_ONLY_REASON
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -160,6 +161,8 @@ def item_error(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, QuotaExceededError):
         return {"error": "quota_exceeded", "message": str(exc)}
     if isinstance(exc, AuthorizationError):
+        if exc.reason == VIEWER_READ_ONLY_REASON:
+            return {"error": "forbidden", "message": "viewers have read-only access"}
         return {
             "error": "forbidden",
             "message": "marking a memory as a tool guardrail needs the context editor role",

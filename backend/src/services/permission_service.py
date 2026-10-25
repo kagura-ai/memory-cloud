@@ -5,7 +5,7 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages access control at workspace and context levels.
 """
 
-from typing import NewType
+from typing import NewType, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -43,15 +43,25 @@ CallerId = NewType("CallerId", str)
 MemoryAuthorId = NewType("MemoryAuthorId", str)
 
 
+# ``AuthorizationError.reason`` of a write refused for the viewer role, so a
+# caller can tell it from the other 403s (a guardrail needs context EDITOR).
+VIEWER_READ_ONLY_REASON = "viewer_read_only"
+
+
+def is_below_member_role(role: object) -> bool:
+    """A workspace role under ``member`` (a viewer, or a value outside the
+    known set): read-only. Compared by weight, never by the role's name."""
+    weight = ORG_ROLE_WEIGHTS.get(cast(WorkspaceRole, role), 0)
+    return weight < ORG_ROLE_WEIGHTS.get(WorkspaceRole.MEMBER, 0)
+
+
 def _below_member(member: WorkspaceMember | None) -> bool:
     """A membership row whose role is under ``member`` (a viewer): read-only.
 
     Compared by weight, so a role string outside the known set counts as
     read-only too. ``None`` (no row) is not decided here.
     """
-    return member is not None and ORG_ROLE_WEIGHTS.get(member.role, 0) < ORG_ROLE_WEIGHTS.get(
-        WorkspaceRole.MEMBER, 0
-    )
+    return member is not None and is_below_member_role(member.role)
 
 
 # Re-exported from auth.workspace_roles for backward compatibility.
@@ -600,11 +610,11 @@ class PermissionService:
         if await self.is_read_only_member(user_id, workspace_id):
             logger.info(
                 "memory_write_denied",
-                reason="viewer_read_only",
+                reason=VIEWER_READ_ONLY_REASON,
                 workspace_id=str(workspace_id),
                 user_id=user_id,
             )
-            raise AuthorizationError(reason="viewer_read_only")
+            raise AuthorizationError(reason=VIEWER_READ_ONLY_REASON)
 
     # ========================================================================
     # Context-level Permissions
