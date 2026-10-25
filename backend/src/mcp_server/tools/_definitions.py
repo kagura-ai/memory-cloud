@@ -1254,7 +1254,7 @@ Returns: {status, report: {report_id, context_id, status, started_at, completed_
             "name": "rollback_sleep_run",
             "description": """Reverse every recorded action of a finished Sleep Maintenance run. DESTRUCTIVE — use with care. create_edge → edge deleted; merge / archive → memory restored and re-embedded; update_importance → previous value restored; promote → scope back to 'working'.
 
-Only for reports with status 'completed' or 'degraded' (a degraded run still executed real merges); the report is then marked 'rolled_back', so it cannot be rolled back twice.
+Only for reports with status 'completed' or 'degraded' (a degraded run still executed real merges); the report is then marked 'rolled_back', so it cannot be rolled back twice. Editor role on the report's context.
 
 Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, importance_kept, promotions_kept, archives_restored, chunks_requeued, points_requeued, errors}}. importance_kept / promotions_kept count actions left standing by design (the memory was pinned with delivery_mode='always', forgotten, or removed since the run) — not errors. chunks_requeued / points_requeued count restored memories queued to rebuild their content chunks / their vector — not errors. merges_unreversible counts merges NOT reversed because a later writer changed or removed the edge; such a run returns error partial_rollback, and a rollback is complete only when it is 0. Re-embedding is best-effort — check rollback_summary.errors.""",
             "inputSchema": {

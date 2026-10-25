@@ -15,6 +15,7 @@ from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.point_writer_lock import hold_point_writer_lock
 from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
+    _check_viewer_permission,
     _ContextNotFoundError,
     _error_response,
     _log_tool_usage,
@@ -137,14 +138,44 @@ def _report_not_found(report_uuid: UUID) -> list[TextContent]:
     )
 
 
+async def _row_filtered_for_agent(db: Any, user_id: str, context_id: UUID, tool: str) -> bool:
+    """Whether an agent binding's type/source filter on the context refuses the tool.
+
+    A Sleep run's actions span memories of every type and source of the
+    context, so a binding that limits either one cannot be honoured action
+    by action — a partial undo would leave half-reversed merges. An
+    enforce-mode binding with such a filter refuses the whole report; in
+    shadow mode the would-deny is logged and the request proceeds, like the
+    other row-filter lanes. No agent credential, or a binding without a
+    filter, is never refused here.
+    """
+    from auth.agent_scope import get_agent_scope
+    from models.agent import AGENT_ENFORCEMENT_SHADOW
+    from services.agent_binding_service import binding_row_filters_for_contexts
+
+    scope = get_agent_scope()
+    if scope is None or not await binding_row_filters_for_contexts(db, scope, [context_id]):
+        return False
+    shadow = scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW
+    logger.warning(
+        "agent_binding_row_filter_would_deny" if shadow else "agent_binding_row_filter_denied",
+        agent_id=str(scope.agent_id),
+        operation=tool,
+        context_id=str(context_id),
+        user_id=user_id,
+    )
+    return not shadow
+
+
 async def _authorize_report_read(db: Any, user_id: str, report: Any) -> bool:
     """Whether the caller can still read the context the report belongs to.
 
     Owning the report is not enough: a run's report and actions describe
     memories of the report's context, so reading them authorizes against
     that context like any other read — workspace membership, the context's
-    member list, a workspace-scoped key and the agent-binding read gate. A
-    report with no context has nothing to authorize against and is refused.
+    member list, a workspace-scoped key, the agent-binding read gate and the
+    binding's type/source filter (``_row_filtered_for_agent``). A report
+    with no context has nothing to authorize against and is refused.
 
     Once authorized, the capacity lock of the context's workspace applies
     (``CapacityLockedError``): the dispatcher can only see the session's
@@ -158,6 +189,8 @@ async def _authorize_report_read(db: Any, user_id: str, report: Any) -> bool:
         context = await _resolve_context_for_read(db, user_id, report.context_id)
     except _ContextNotFoundError:
         return False
+    if await _row_filtered_for_agent(db, user_id, report.context_id, "get_sleep_report"):
+        return False
     await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
     return True
 
@@ -167,15 +200,20 @@ async def _authorize_report_rollback(
 ) -> list[TextContent] | None:
     """Refusal for rolling back the report's run, or None when allowed.
 
-    The context gate ``rollback_session`` applies: the write-path context
-    resolution (workspace-scoped key, agent-binding write gate), then the
-    editor or owner role on the report's context. The session's workspace
-    plays no part — a rollback writes to the report's context wherever the
-    session points — so its viewer check is not run here. A context the
-    caller cannot reach answers like a missing report; a context they can
-    read but not edit is ``permission_denied``. Once authorized, the capacity
-    lock of the context's workspace applies (``CapacityLockedError``), as in
-    ``_authorize_report_read``.
+    Everything the read needs (``_authorize_report_read``'s read resolver:
+    a live workspace, membership, the context's access list), then the
+    write path (workspace-scoped key, agent-binding write gate) and the
+    binding's type/source filter. Then the gate ``rollback_session``
+    applies, against the report's context: the editor or owner role there,
+    and not a viewer of the context's workspace (the creator of a private
+    context is its owner whatever their workspace role). The session's
+    workspace plays no part — a rollback writes to the report's context
+    wherever the session points.
+
+    A context the caller cannot reach answers like a missing report; a
+    context they can read but not edit is ``permission_denied``. Once
+    authorized, the capacity lock of the context's workspace applies
+    (``CapacityLockedError``), as in ``_authorize_report_read``.
     """
     from auth.workspace_roles import ContextRole
     from services.capacity_lock import ensure_not_capacity_locked
@@ -184,8 +222,11 @@ async def _authorize_report_rollback(
     if report.context_id is None:
         return _report_not_found(report.id)
     try:
+        await _resolve_context_for_read(db, user_id, report.context_id)
         context = await _resolve_context(db, user_id, report.context_id)
     except _ContextNotFoundError:
+        return _report_not_found(report.id)
+    if await _row_filtered_for_agent(db, user_id, report.context_id, "rollback_sleep_run"):
         return _report_not_found(report.id)
     role = await context_role(db, user_id, report.context_id)
     if role not in (ContextRole.OWNER, ContextRole.EDITOR):
@@ -196,6 +237,12 @@ async def _authorize_report_rollback(
             required_role="editor",
             help="Ask a context owner for the editor role.",
         )
+    # The context's workspace, never None: this check is not skipped.
+    viewer_refusal = await _check_viewer_permission(
+        db, user_id, context.workspace_id, "roll back sleep runs"
+    )
+    if viewer_refusal:
+        return viewer_refusal
     await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
     return None
 
@@ -251,7 +298,7 @@ async def handle_get_sleep_history(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            await _resolve_context_for_read(db, user_id, current_context_id)
 
             stmt = (
                 select(SleepReport)

@@ -26,6 +26,7 @@ from mcp_server.tools.sleep import (
     _authorize_report_read,
     _authorize_report_rollback,
     _report_not_found,
+    _row_filtered_for_agent,
     handle_get_sleep_report,
     handle_rollback_sleep_run,
 )
@@ -53,6 +54,24 @@ def lock():
         "services.capacity_lock.ensure_not_capacity_locked", new=AsyncMock(return_value=None)
     ) as ensure:
         yield ensure
+
+
+@pytest.fixture(autouse=True)
+def viewer_check():
+    """Rollback's viewer check on the context's workspace (caller is no viewer),
+    and the read resolver the rollback runs first (the context is readable).
+    Tests that need either one to refuse patch it themselves."""
+    with (
+        patch(
+            "mcp_server.tools.sleep._check_viewer_permission",
+            new=AsyncMock(return_value=None),
+        ) as check,
+        patch(
+            "mcp_server.tools.sleep._resolve_context_for_read",
+            new=AsyncMock(return_value=SimpleNamespace(workspace_id=uuid4())),
+        ),
+    ):
+        yield check
 
 
 def _context(report):
@@ -115,7 +134,7 @@ async def test_read_refuses_a_report_without_a_context():
 
 
 @pytest.mark.parametrize("role", [ContextRole.OWNER, ContextRole.EDITOR])
-async def test_rollback_is_allowed_for_owner_and_editor(role, lock):
+async def test_rollback_is_allowed_for_owner_and_editor(role, lock, viewer_check):
     report = _report(uuid4())
     resolve = AsyncMock(return_value=_context(report))
     with (
@@ -127,6 +146,126 @@ async def test_rollback_is_allowed_for_owner_and_editor(role, lock):
     assert resolve.await_args_list[0].args[1:] == (_USER, report.context_id)
     lock.assert_awaited_once()
     assert lock.await_args_list[0].args[1] == report.workspace_id
+    # The viewer check runs on the context's workspace, never the session's.
+    viewer_check.assert_awaited_once()
+    assert viewer_check.await_args_list[0].args[2] == report.workspace_id
+
+
+async def test_rollback_refuses_a_workspace_viewer_who_owns_the_context(lock):
+    """The creator of a private context is its owner whatever their workspace
+    role; a workspace viewer is still refused, as rollback_session does."""
+    report = _report(uuid4())
+    refusal = [MagicMock(text="viewer refusal")]
+    with (
+        patch(
+            "mcp_server.tools.sleep._resolve_context", new=AsyncMock(return_value=_context(report))
+        ),
+        patch(
+            "services.session_rollback.context_role",
+            new=AsyncMock(return_value=ContextRole.OWNER),
+        ),
+        patch(
+            "mcp_server.tools.sleep._check_viewer_permission",
+            new=AsyncMock(return_value=refusal),
+        ) as check,
+    ):
+        assert await _authorize_report_rollback(MagicMock(), _USER, report) is refusal
+    assert check.await_args_list[0].args[2] == report.workspace_id
+    lock.assert_not_awaited()
+
+
+async def test_rollback_runs_the_read_resolver_first():
+    """A context the read resolver refuses (a deleted workspace, a member
+    without an access list) answers like a missing report before the write
+    path is consulted."""
+    report = _report(uuid4())
+    write = AsyncMock()
+    with (
+        patch(
+            "mcp_server.tools.sleep._resolve_context_for_read",
+            new=AsyncMock(side_effect=_denied(report.context_id)),
+        ),
+        patch("mcp_server.tools.sleep._resolve_context", new=write),
+    ):
+        refusal = await _authorize_report_rollback(MagicMock(), _USER, report)
+    assert refusal is not None
+    assert refusal[0].text == _report_not_found(report.id)[0].text
+    write.assert_not_awaited()
+
+
+@pytest.mark.parametrize("gate", ["read", "rollback"])
+async def test_a_binding_type_or_source_filter_answers_like_a_missing_report(gate, lock):
+    report = _report(uuid4())
+    with (
+        patch(
+            "mcp_server.tools.sleep._resolve_context", new=AsyncMock(return_value=_context(report))
+        ),
+        patch(
+            "mcp_server.tools.sleep._row_filtered_for_agent", new=AsyncMock(return_value=True)
+        ) as filtered,
+        patch(
+            "services.session_rollback.context_role",
+            new=AsyncMock(return_value=ContextRole.OWNER),
+        ),
+    ):
+        if gate == "read":
+            assert await _authorize_report_read(MagicMock(), _USER, report) is False
+        else:
+            refusal = await _authorize_report_rollback(MagicMock(), _USER, report)
+            assert refusal is not None
+            assert refusal[0].text == _report_not_found(report.id)[0].text
+    assert filtered.await_args_list[0].args[2] == report.context_id
+    lock.assert_not_awaited()
+
+
+# --- _row_filtered_for_agent ------------------------------------------------
+
+
+def _row_filter():
+    from services.agent_binding_service import BindingRowFilter
+
+    return BindingRowFilter(allowed_memory_types=frozenset({"decision"}), allowed_source_types=None)
+
+
+async def test_row_filter_is_a_no_op_without_an_agent_credential():
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+    lookup = AsyncMock()
+    with patch("services.agent_binding_service.binding_row_filters_for_contexts", new=lookup):
+        assert await _row_filtered_for_agent(MagicMock(), _USER, uuid4(), "t") is False
+    lookup.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("mode", "filters", "refused", "event"),
+    [
+        ("enforce", True, True, "agent_binding_row_filter_denied"),
+        ("shadow", True, False, "agent_binding_row_filter_would_deny"),
+        ("enforce", False, False, None),
+    ],
+)
+async def test_row_filter_refuses_in_enforce_and_logs_in_shadow(mode, filters, refused, event):
+    from auth.agent_scope import AgentScope, set_agent_scope
+
+    context_id = uuid4()
+    found = {context_id: _row_filter()} if filters else {}
+    set_agent_scope(AgentScope(agent_id=uuid4(), enforcement_mode=mode, workspace_id=uuid4()))
+    try:
+        with (
+            patch(
+                "services.agent_binding_service.binding_row_filters_for_contexts",
+                new=AsyncMock(return_value=found),
+            ),
+            patch("mcp_server.tools.sleep.logger") as log,
+        ):
+            assert await _row_filtered_for_agent(MagicMock(), _USER, context_id, "t") is refused
+    finally:
+        set_agent_scope(None)
+    if event is None:
+        log.warning.assert_not_called()
+    else:
+        assert log.warning.call_args.args[0] == event
 
 
 @pytest.mark.parametrize("role", [ContextRole.VIEWER, None])

@@ -59,8 +59,10 @@ UNAUDITED_READ_SITES = {
     # Measurement series live in their own table, not in memories.
     ("measurement.py", "handle_record_measurement"),
     ("measurement.py", "handle_recall_series"),
-    # A Sleep run's own report and actions, not memory rows.
+    # A Sleep run's own reports and actions, not memory rows.
+    ("sleep.py", "handle_get_sleep_history"),
     ("sleep.py", "_authorize_report_read"),
+    ("sleep.py", "_authorize_report_rollback"),
 }
 
 

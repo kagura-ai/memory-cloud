@@ -172,7 +172,7 @@ class TestGetSleepHistory:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._resolve_context",
+                "mcp_server.tools.sleep._resolve_context_for_read",
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
             ),
@@ -200,7 +200,7 @@ class TestGetSleepHistory:
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
-                "mcp_server.tools.sleep._resolve_context",
+                "mcp_server.tools.sleep._resolve_context_for_read",
                 new_callable=AsyncMock,
                 return_value=mock_ctx,
             ),
