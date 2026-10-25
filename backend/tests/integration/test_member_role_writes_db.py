@@ -624,8 +624,7 @@ async def test_a_workspace_scoped_key_stays_in_its_workspace_in_the_context_tool
     search = await _tool(
         "update_search_config", {"context_id": c, "semantic_weight": 0.5}, w.owner, w.a, key=w.a
     )
-    # The tool's answer for a context it cannot reach.
-    assert search.get("error") == "permission_denied", search
+    assert search.get("error") == "context_not_found", search
 
     w.session.expunge_all()
     ctx = (await w.session.execute(select(Context).where(Context.id == w.ctx))).scalar_one()

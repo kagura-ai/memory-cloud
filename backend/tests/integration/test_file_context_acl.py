@@ -207,8 +207,9 @@ async def test_reserve_to_context_requires_write_access(scenario):
         await svc.reserve_upload(
             workspace_id=ws, created_by=VIEWER, context_id=scenario["shared"], **common
         )
-    # OTHER (scoped member) cannot write to the private context they don't own.
-    with pytest.raises(AuthorizationError):
+    # OTHER (scoped member) cannot reach the private context they don't own:
+    # it is not found, like a context that does not exist.
+    with pytest.raises(NotFoundException):
         await svc.reserve_upload(
             workspace_id=ws, created_by=OTHER, context_id=scenario["private"], **common
         )
@@ -336,7 +337,7 @@ async def test_delete_denied_for_non_writer_allowed_after_context_deleted(scenar
     db.add(f)
     await db.flush()
 
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(NotFoundException):
         await svc.delete_file(workspace_id=ws, file_id=f.id, actor_user_id=OTHER)
 
     # Soft-delete the owning context → check_context_write raises NotFoundException

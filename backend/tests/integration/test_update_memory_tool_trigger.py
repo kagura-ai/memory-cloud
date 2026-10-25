@@ -69,15 +69,23 @@ async def guard_env(db_session):
             weekly_api_limit=2500,
         )
     )
+    ctx_id = uuid.uuid4()
     db_session.add_all(
         [
             WorkspaceMember(workspace_id=ws_id, user_id=owner, role=WorkspaceRole.OWNER),
-            WorkspaceMember(workspace_id=ws_id, user_id=member, role=WorkspaceRole.MEMBER),
+            # The member's context access list names the context, so the
+            # guardrail gate below is what decides.
+            WorkspaceMember(
+                workspace_id=ws_id,
+                user_id=member,
+                role=WorkspaceRole.MEMBER,
+                allowed_context_ids=[ctx_id],
+            ),
         ]
     )
     await db_session.flush()
     ctx = Context(
-        id=uuid.uuid4(),
+        id=ctx_id,
         workspace_id=ws_id,
         name="guard-upd",
         created_by=owner,

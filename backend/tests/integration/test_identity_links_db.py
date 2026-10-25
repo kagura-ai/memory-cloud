@@ -465,7 +465,7 @@ class TestPrivateContextAcrossLinkedAccounts:
         context = await _private_context(db_session, workspace, admin)
         permissions = PermissionService(db_session)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await permissions.check_context_access(
                 oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
@@ -497,7 +497,7 @@ class TestPrivateContextAcrossLinkedAccounts:
 
         await service.unlink(admin.user_id, oauth.user_id)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await PermissionService(db_session).check_context_access(
                 oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
@@ -516,7 +516,7 @@ class TestPrivateContextAcrossLinkedAccounts:
         await IdentityLinkService(db_session).link(admin.user_id, outsider.user_id)
         permissions = PermissionService(db_session)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await permissions.check_context_access(
                 outsider.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
@@ -535,7 +535,7 @@ class TestPrivateContextAcrossLinkedAccounts:
         await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
         permissions = PermissionService(db_session)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await permissions.check_context_access(
                 stranger.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
@@ -743,7 +743,7 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
     async def test_a_member_whose_whitelist_omits_the_context_is_refused(self, db_session):
         oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=False)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await PermissionService(db_session).check_context_access(
                 oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
@@ -754,7 +754,7 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
         oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=None)
         permissions = PermissionService(db_session)
 
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundException):
             await permissions.check_context_access(
                 oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
             )
