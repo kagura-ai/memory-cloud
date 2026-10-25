@@ -18,11 +18,14 @@ def _client(service: MagicMock, user: dict[str, Any] | None = None) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from api.main import memory_cloud_exception_handler
     from api.routes.memory import get_memory_service, router
     from auth.dependencies import get_user_from_api_key_or_session
+    from utils.exceptions import MemoryCloudException
 
     app = FastAPI()
     app.include_router(router, prefix="/api/v1/memory")
+    app.add_exception_handler(MemoryCloudException, memory_cloud_exception_handler)  # type: ignore[arg-type]
     app.dependency_overrides[get_user_from_api_key_or_session] = lambda: user or {"user_id": "u1"}
     app.dependency_overrides[get_memory_service] = lambda: service
     return TestClient(app)
@@ -33,7 +36,7 @@ def test_forget_by_query_is_a_validation_error() -> None:
     with _client(service) as client:
         response = client.post("/api/v1/memory/forget", json={"query": "failover", "k": 5})
     assert response.status_code == 422
-    assert "context_id" in response.json()["detail"]
+    assert "context_id" in response.json()["message"]
     service.forget.assert_not_awaited()
 
 

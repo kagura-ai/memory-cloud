@@ -46,7 +46,7 @@ from services.identity_link_service import owned_by
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryCloudException, NotFoundException
+from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
 
@@ -672,13 +672,11 @@ async def forget(
     logger.info("forget_request", user_id=user["user_id"], memory_id=str(request.memory_id))
 
     if request.memory_id is None and request.query:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Forgetting by query needs a context_id, which this endpoint does not "
-                "take. Delete by memory_id here, or use POST /api/v1/memory/forget-bulk "
-                "with a context_id and filters."
-            ),
+        raise ValidationError(
+            "Forgetting by query needs a context_id, which this endpoint does not "
+            "take. Delete by memory_id here, or use POST /api/v1/memory/forget-bulk "
+            "with a context_id and filters.",
+            field="query",
         )
 
     # Issue #82: Pass current context ID for context-based collection
