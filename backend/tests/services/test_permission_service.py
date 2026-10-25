@@ -251,6 +251,8 @@ class TestMemoryAccessControl:
         svc = PermissionService(MagicMock())
         # #1943: the seat check reads the caller's membership row; no row here.
         svc.workspace_service.get_member = AsyncMock(return_value=None)
+        # The workspace row (owner_user_id, #1108): someone else's.
+        svc.db.get = AsyncMock(return_value=MagicMock(owner_user_id="the-owner"))
         return svc
 
     @pytest.mark.asyncio

@@ -1294,6 +1294,13 @@ class PermissionService:
             # the REST memory-id routes (reference / patch / explore) authorize
             # through this method alone.
             member = await self._seated_member(workspace_id, user_id)
+            if member is None:
+                # The workspace's owner_user_id holder reaches its workspace
+                # even through a missing OWNER row (#1108), as in the RBAC
+                # core's private-context creator branch.
+                workspace = await self.db.get(Workspace, workspace_id)
+                if workspace is not None and workspace.owner_user_id == user_id:
+                    return await _binding_ok()
             if not _reaches(member) or _read_only(member):
                 await _emit_rbac_denied()
                 return False

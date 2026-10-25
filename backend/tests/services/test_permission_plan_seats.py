@@ -347,10 +347,27 @@ class TestCanAccessMemory:
         seat.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_the_owner_user_id_holder_reads_its_memory_without_a_row(self, service) -> None:
+        """The #1108 desync: the workspace's owner_user_id holder with no OWNER
+        row still reaches its own memories, as in the RBAC core."""
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id=USER))
+        with patch(
+            "services.agent_binding_service.agent_binding_permits", AsyncMock(return_value=True)
+        ):
+            assert (
+                await service.can_access_memory(
+                    user_id=USER, memory_user_id=USER, workspace_id=WS, context_id=CTX
+                )
+                is True
+            )
+
+    @pytest.mark.asyncio
     async def test_an_author_who_left_the_workspace_is_refused(self, service) -> None:
         """Writing a memory does not keep the context reachable: an author with
         no membership row reaches nothing in the workspace."""
         service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id="someone-else"))
         with (
             _seat(_refused()) as seat,
             patch(
