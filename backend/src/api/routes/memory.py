@@ -661,11 +661,25 @@ async def forget(
             "memory_ids": ["uuid"]
         }
 
+    Status codes:
+        422: ``query`` without ``memory_id``. Forgetting by query searches
+             one context, and this endpoint takes no ``context_id``.
+
     Example:
         POST /api/v1/memory/forget
         Authorization: Bearer <session_token>
     """
     logger.info("forget_request", user_id=user["user_id"], memory_id=str(request.memory_id))
+
+    if request.memory_id is None and request.query:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Forgetting by query needs a context_id, which this endpoint does not "
+                "take. Delete by memory_id here, or use POST /api/v1/memory/forget-bulk "
+                "with a context_id and filters."
+            ),
+        )
 
     # Issue #82: Pass current context ID for context-based collection
     # Issue #246: current_context_id removed - use None
