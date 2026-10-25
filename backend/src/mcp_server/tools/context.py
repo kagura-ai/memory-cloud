@@ -25,6 +25,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_for_read,
     _resolve_context_id,
     execute_with_timeout,
+    get_mcp_key_workspace_scope,
     mcp_capacity_policy,
 )
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
@@ -679,15 +680,24 @@ async def handle_update_context(
             # Mirrors handle_delete_context. Uses exc.message (not str(exc))
             # so AuthorizationError's CWE-639 uniform-message contract holds.
             try:
+                # #963: a workspace-scoped key stays in its own workspace.
+                key_workspace_id = get_mcp_key_workspace_scope()
                 if requested_fields & _OWNER_ONLY_CONTEXT_FIELDS:
                     # Owner-only fields → require context owner
                     context = await perm_service.check_context_owner(
-                        user_id, ctx_uuid, capacity=mcp_capacity_policy()
+                        user_id,
+                        ctx_uuid,
+                        capacity=mcp_capacity_policy(),
+                        key_workspace_id=key_workspace_id,
                     )
                 else:
                     # display_name/description → require editor access
                     context, _ = await perm_service.check_context_access(
-                        user_id, ctx_uuid, required_role="editor", capacity=mcp_capacity_policy()
+                        user_id,
+                        ctx_uuid,
+                        required_role="editor",
+                        capacity=mcp_capacity_policy(),
+                        key_workspace_id=key_workspace_id,
                     )
             except NotFoundException:
                 await db.rollback()
@@ -1129,10 +1139,14 @@ async def handle_delete_context(
 
     async for db in get_db():
         try:
-            # Owner-only: verify before delete
+            # Owner-only: verify before delete. #963: a workspace-scoped key
+            # stays in its own workspace.
             perm_service = PermissionService(db)
             await perm_service.check_context_owner(
-                user_id, context_id, capacity=mcp_capacity_policy()
+                user_id,
+                context_id,
+                capacity=mcp_capacity_policy(),
+                key_workspace_id=get_mcp_key_workspace_scope(),
             )
 
             service = ContextService(db)

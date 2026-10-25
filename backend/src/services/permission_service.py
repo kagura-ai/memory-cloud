@@ -606,6 +606,7 @@ class PermissionService:
         *,
         capacity: CapacityPolicy,
         operation: str | None = None,
+        key_workspace_id: UUID | None = None,
     ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
 
@@ -628,6 +629,11 @@ class PermissionService:
             user_id: User ID
             context_id: Context ID
             required_role: Minimum required role (owner/editor/viewer)
+            key_workspace_id: Issue #963 — the caller's pure API-key workspace
+                scope, or ``None`` when the request did not use a
+                workspace-scoped key. A context of another workspace is the
+                uniform ``NotFoundException``, as in
+                ``resolve_context_for_workspace_read``.
 
         Returns:
             Tuple of (Context, effective_role). The effective_role is always a
@@ -645,7 +651,7 @@ class PermissionService:
                 breadcrumbs for the deny reason.
         """
         context, effective_role = await self._check_context_access_rbac(
-            user_id, context_id, required_role
+            user_id, context_id, required_role, key_workspace_id=key_workspace_id
         )
 
         # ContextRole is a str-comparable enum here only via its value set;
@@ -692,6 +698,8 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         required_role: ContextRole | str = ContextRole.VIEWER,
+        *,
+        key_workspace_id: UUID | None = None,
     ) -> tuple[Context, ContextRole]:
         """The RBAC decision core of ``check_context_access``.
 
@@ -714,6 +722,19 @@ class PermissionService:
         context = result.scalar_one_or_none()
 
         if not context:
+            raise NotFoundException("Context")
+
+        # Issue #963: a workspace-scoped key reaches its own workspace only.
+        # Before every membership read, with the not-found answer above.
+        if key_workspace_id is not None and context.workspace_id != key_workspace_id:
+            logger.warning(
+                "context_access_denied",
+                reason="key_workspace_mismatch",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                key_workspace_id=str(key_workspace_id),
+                user_id=user_id,
+            )
             raise NotFoundException("Context")
 
         # Issue #165: Private context check (creator-only access)
@@ -811,7 +832,12 @@ class PermissionService:
         return context, ContextRole(context_member.role)
 
     async def check_context_write(
-        self, user_id: str, context_id: UUID, *, capacity: CapacityPolicy
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        capacity: CapacityPolicy,
+        key_workspace_id: UUID | None = None,
     ) -> Context:
         """Check if user can write to context (editor or owner).
 
@@ -819,6 +845,7 @@ class PermissionService:
             user_id: User ID
             context_id: Context ID
             capacity: #1948 — see ``CapacityPolicy``.
+            key_workspace_id: #963 pure key scope — see ``check_context_access``.
 
         Returns:
             Context
@@ -832,11 +859,17 @@ class PermissionService:
             context_id,
             required_role=ContextRole.EDITOR,
             capacity=capacity,
+            key_workspace_id=key_workspace_id,
         )
         return context
 
     async def check_context_owner(
-        self, user_id: str, context_id: UUID, *, capacity: CapacityPolicy
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        capacity: CapacityPolicy,
+        key_workspace_id: UUID | None = None,
     ) -> Context:
         """Check if user is context owner.
 
@@ -844,6 +877,7 @@ class PermissionService:
             user_id: User ID
             context_id: Context ID
             capacity: #1948 — see ``CapacityPolicy``.
+            key_workspace_id: #963 pure key scope — see ``check_context_access``.
 
         Returns:
             Context
@@ -857,6 +891,7 @@ class PermissionService:
             context_id,
             required_role=ContextRole.OWNER,
             capacity=capacity,
+            key_workspace_id=key_workspace_id,
         )
         return context
 

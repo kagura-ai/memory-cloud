@@ -15,6 +15,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
     _log_tool_usage,
+    get_mcp_key_workspace_scope,
     mcp_capacity_policy,
 )
 
@@ -73,7 +74,11 @@ async def handle_update_search_config(
                 # settings change how the context's content is searched, a
                 # content write like the REST twin.
                 await perm_service.check_context_write(
-                    user_id, ctx_uuid, capacity=mcp_capacity_policy()
+                    user_id,
+                    ctx_uuid,
+                    capacity=mcp_capacity_policy(),
+                    # #963: a workspace-scoped key stays in its own workspace.
+                    key_workspace_id=get_mcp_key_workspace_scope(),
                 )
             except (AuthorizationError, NotFoundException) as perm_err:
                 # The two designed denials only (#1684): a database failure

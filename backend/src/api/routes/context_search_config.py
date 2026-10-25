@@ -182,7 +182,13 @@ async def get_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
+        await perm_service.check_context_write(
+            user_id,
+            context_id,
+            capacity=CapacityPolicy.ALLOWED,
+            # #963: a workspace-scoped key stays in its own workspace.
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
 
         repo = ContextSearchConfigRepository(db)
         config = await repo.create_or_get(context_id)
@@ -265,7 +271,13 @@ async def update_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
+        await perm_service.check_context_write(
+            user_id,
+            context_id,
+            capacity=CapacityPolicy.BLOCKED,
+            # #963: a workspace-scoped key stays in its own workspace.
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
         # #1941/#1948: search settings are writes the MCP twin
         # (update_search_config) refuses on a capacity-locked workspace — the
         # write check above carries CapacityPolicy.BLOCKED.
@@ -370,7 +382,13 @@ async def reset_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
+        await perm_service.check_context_write(
+            user_id,
+            context_id,
+            capacity=CapacityPolicy.BLOCKED,
+            # #963: a workspace-scoped key stays in its own workspace.
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
 
         repo = ContextSearchConfigRepository(db)
         # #2015: a reset turns content_chunks_enabled off. While it is on that

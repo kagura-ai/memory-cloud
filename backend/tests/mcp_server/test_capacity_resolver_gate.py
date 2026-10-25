@@ -238,7 +238,7 @@ class _Resolvers:
             raise _locked()
         return _context(context_id)
 
-    async def check_write(self, _self, _user_id, context_id, *, capacity):
+    async def check_write(self, _self, _user_id, context_id, *, capacity, key_workspace_id=None):
         self.policies.append(capacity)
         if self.deny:
             raise NotFoundException("Context", str(context_id))
