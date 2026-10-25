@@ -64,6 +64,7 @@ from utils.recall_projection import (
 from utils.response_budget import (
     DEFAULT_MAX_CHARS,
     BudgetArgumentError,
+    fit_items,
     fit_lanes,
     json_chars,
     omit_field_to_fit,
@@ -979,6 +980,33 @@ def _guardrail_item_payload(item: Any) -> dict[str, Any]:
     }
 
 
+def _guardrail_index_payload(item: Any) -> dict[str, Any]:
+    """Project one ``GuardrailIndexItem`` onto the MCP envelope (``summary_cut`` only when cut)."""
+    return {
+        "memory_id": str(item.memory_id),
+        "summary": item.summary,
+        **({"summary_cut": True} if item.summary_cut else {}),
+        "type": item.type,
+        "updated_at": to_utc_iso(item.updated_at),
+    }
+
+
+def _fit_index_lane(
+    envelope: dict[str, Any], index: list[dict[str, Any]] | None, max_chars: int
+) -> dict[str, Any]:
+    """Add the index lane (#2334) into what the guardrail lanes left of ``max_chars``.
+
+    The pinned and tool-triggered lanes are fitted first and keep priority;
+    the index keeps the newest rows that fit and ``index_truncated`` says
+    when rows were cut (``index_total_available`` stays the real count).
+    """
+    if index is None:
+        return {**envelope, "index": None, "index_truncated": False}
+    shell = {**envelope, "index": [], "index_truncated": False}
+    kept = fit_items(index, max_chars - json_chars(shell))
+    return {**envelope, "index": index[:kept], "index_truncated": kept < len(index)}
+
+
 async def handle_load_guardrails(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -1044,10 +1072,13 @@ async def handle_load_guardrails(
                     "pinned_truncated": result.pinned_truncated,
                     "tool_triggered_total_available": result.tool_triggered_total_available,
                     "tool_triggered_truncated": result.tool_triggered_truncated,
+                    "index_total_available": result.index_total_available,
                     **_context_response_fields(current_context),
                 },
                 ("tool_triggered", "pinned"),
-                max_chars,
+                # Room for the index lane's keys, so the guardrail lanes are
+                # fitted against the same envelope the index is added to.
+                max_chars - len(',"index":[],"index_truncated":false'),
             )
             envelope["pinned_truncated"] = result.pinned_truncated or cut["pinned"]
             envelope["tool_triggered_truncated"] = (
@@ -1055,6 +1086,13 @@ async def handle_load_guardrails(
             )
             envelope["truncated"] = (
                 envelope["pinned_truncated"] or envelope["tool_triggered_truncated"]
+            )
+            envelope = _fit_index_lane(
+                envelope,
+                None
+                if result.index is None
+                else [_guardrail_index_payload(i) for i in result.index],
+                max_chars,
             )
             return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:

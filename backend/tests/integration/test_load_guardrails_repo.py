@@ -361,3 +361,80 @@ async def test_denied_context_is_the_uniform_not_found(env, db_session):
         await MemoryService(db_session).load_guardrails(
             env["outsider"], current_context_id=env["ctx"], current_workspace_id=env["ws_id"]
         )
+
+
+# --------------------------------------------------------------------------- #
+# repo: list_session_index (#2334)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_session_index_is_the_live_trusted_set_newest_first(env, db_session):
+    # An edit moves a row to the top: the order is coalesce(updated_at, created_at).
+    await db_session.execute(
+        text("UPDATE memories SET updated_at = '2099-01-01T00:00:00' WHERE id = :id"),
+        {"id": env["early"]},
+    )
+    rows, total = await MemoryRepository(db_session).list_session_index(
+        env["ws_id"], env["ctx"], 60
+    )
+    ids = [r.id for r in rows]
+    assert total == len(rows) == 6
+    assert set(ids) == {
+        env["high"],
+        env["early"],
+        env["late"],
+        env["plain"],
+        env["pinned_only"],
+        env["both"],
+    }
+    assert ids[0] == env["early"]
+    assert ids[-2:] == [env["both"], env["late"]]
+    # Connector rows, soft-deleted rows and other contexts stay out.
+    assert not {env["connector"], env["gone"], env["external"]} & set(ids)
+    # L1 + identifiers only.
+    assert not hasattr(rows[0], "content")
+    assert not hasattr(rows[0], "context_summary")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_session_index_above_the_cap_is_a_count_only(env, db_session):
+    rows, total = await MemoryRepository(db_session).list_session_index(env["ws_id"], env["ctx"], 5)
+    assert rows == [] and total == 6
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_session_index_external_tier_context_is_empty(env, db_session):
+    rows, total = await MemoryRepository(db_session).list_session_index(
+        env["ws_id"], env["ctx_ext"], 60
+    )
+    assert rows == [] and total == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_session_index_hides_a_row_a_live_memory_supersedes(env, db_session):
+    from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+
+    db_session.add(
+        NeuralMemoryEdge(
+            user_id=env["uid"],
+            src_id=env["late"],
+            dst_id=env["early"],
+            workspace_id=env["ws_id"],
+            context_id=env["ctx"],
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            weight=1.0,
+            origin=EDGE_ORIGIN_DECLARED,
+        )
+    )
+    await db_session.flush()
+    repo = MemoryRepository(db_session)
+    rows, total = await repo.list_session_index(env["ws_id"], env["ctx"], 60)
+    assert env["early"] not in {r.id for r in rows} and total == 5
+    # A deleted superseder stops shadowing (recall's self-healing rule).
+    await db_session.execute(
+        text("UPDATE memories SET deleted_at = now() WHERE id = :id"), {"id": env["late"]}
+    )
+    rows, total = await repo.list_session_index(env["ws_id"], env["ctx"], 60)
+    ids = {r.id for r in rows}
+    assert env["early"] in ids and env["late"] not in ids and total == 5

@@ -653,6 +653,74 @@ class MemoryRepository(BaseRepository[Memory]):
         ).scalar_one()
         return rows[:limit], total
 
+    # #2334: the index lane is L1 only (summary) plus the identifier columns
+    # the binding filter matches on — never context_summary, content or details.
+    _INDEX_COLUMNS = (
+        Memory.id,
+        Memory.summary,
+        Memory.type,
+        Memory.created_at,
+        Memory.updated_at,
+        Memory.context_id,
+        Memory.source_type,
+        Memory.user_id,
+    )
+
+    async def list_session_index(
+        self, workspace_id: UUID, context_id: UUID, limit: int
+    ) -> tuple[list, int]:
+        """A small context's whole live trusted set (``load_guardrails``' index lane, #2334).
+
+        Live means not soft-deleted and not shadowed by a ``supersedes`` edge
+        whose superseding memory is still alive (recall's default view). The
+        trust gate is ``list_tool_triggered``'s, hard-wired. When at most
+        ``limit`` rows match they come back newest first
+        (``coalesce(updated_at, created_at) DESC, id DESC``) with their count;
+        above it no rows are returned, only the exact count — the caller
+        serves ``index: null`` then. The probe query carries no ORDER BY, so
+        a large context costs a ``LIMIT limit + 1`` scan and one COUNT, never
+        a sort of the whole context.
+
+        Returns:
+            ``(rows, total)`` — every row when ``total <= limit``, else ``[]``.
+        """
+        from sqlalchemy import exists
+        from sqlalchemy.orm import aliased
+
+        from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+
+        superseder = aliased(Memory)
+        shadowed = exists(
+            select(NeuralMemoryEdge.id)
+            .join(superseder, superseder.id == NeuralMemoryEdge.src_id)
+            .where(
+                NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+                NeuralMemoryEdge.dst_id == Memory.id,
+                superseder.deleted_at.is_(None),
+            )
+        )
+        conditions = [
+            Memory.workspace_id == workspace_id,
+            Memory.context_id == context_id,
+            Memory.deleted_at.is_(None),
+            Memory.context_id.in_(
+                select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+            ),
+            Memory.source_type != SOURCE_TYPE_CONNECTOR,
+            ~shadowed,
+        ]
+        result = await self.db.execute(
+            select(*self._INDEX_COLUMNS).where(*conditions).limit(limit + 1)
+        )
+        rows = list(result.all())
+        if len(rows) <= limit:
+            rows.sort(key=lambda r: (r.updated_at or r.created_at, r.id), reverse=True)
+            return rows, len(rows)
+        total = (
+            await self.db.execute(select(func.count(Memory.id)).where(*conditions))
+        ).scalar_one()
+        return [], total
+
     async def list_pinned(
         self, workspace_id: UUID, context_id: UUID, limit: int, *, trusted_only: bool = False
     ) -> tuple[list, int]:

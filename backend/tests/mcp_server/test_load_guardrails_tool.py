@@ -376,3 +376,91 @@ async def test_max_chars_raises_the_budget_and_is_validated():
     assert len(result[0].text) <= 100_000
     assert len(body["pinned"]) > 30
     assert json.loads(bad[0].text)["error"] == "validation_error"
+
+
+# --------------------------------------------------------------------------
+# #2334: the index lane
+# --------------------------------------------------------------------------
+
+
+def _index_item(summary="the deploy runs from the release branch", cut=False):
+    from models.schemas import GuardrailIndexItem
+
+    return GuardrailIndexItem(
+        memory_id=uuid4(), summary=summary, summary_cut=cut, type="decision", updated_at=NOW
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_lane_rows_and_counts_reach_the_envelope():
+    rows = [_index_item(), _index_item(summary="a head…", cut=True)]
+    service = MagicMock(
+        load_guardrails=AsyncMock(return_value=_response(index=rows, index_total_available=2))
+    )
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert [r["memory_id"] for r in body["index"]] == [str(r.memory_id) for r in rows]
+    plain, cut = body["index"]
+    # summary_cut is present only when the head was cut (omit-empty convention).
+    assert set(plain) == {"memory_id", "summary", "type", "updated_at"}
+    assert cut["summary_cut"] is True
+    assert plain["updated_at"] == "2026-09-22T09:00:00Z"
+    assert body["index_total_available"] == 2
+    assert body["index_truncated"] is False
+    # The index never sets the guardrail lanes' truncation flag.
+    assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_index_is_null_above_the_cap():
+    service = MagicMock(
+        load_guardrails=AsyncMock(return_value=_response(index=None, index_total_available=500))
+    )
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert body["index"] is None
+    assert body["index_total_available"] == 500
+    assert body["index_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_index_is_cut_first_and_the_guardrail_lanes_keep_priority():
+    """Pinned and tool-triggered items fit the default budget on their own; the
+    index fills what they leave, keeps its newest rows and says it was cut."""
+    tool = [_item(summary="s" * 400, tool_trigger=TT) for _ in range(10)]
+    pinned = [_item(summary="p" * 300, context_summary="c" * 100) for _ in range(10)]
+    rows = [_index_item(summary=f"{n:03d} " + "x" * 75) for n in range(60)]
+    service = MagicMock(
+        load_guardrails=AsyncMock(
+            return_value=_response(pinned, tool, index=rows, index_total_available=60)
+        )
+    )
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert len(result[0].text) <= 20_000
+    assert len(body["tool_triggered"]) == 10 and len(body["pinned"]) == 10
+    assert "context_summary_omitted" not in body
+    assert 0 < len(body["index"]) < 60
+    assert [r["summary"][:3] for r in body["index"]] == [
+        f"{n:03d}" for n in range(len(body["index"]))
+    ]
+    assert body["index_truncated"] is True
+    assert body["index_total_available"] == 60
+    assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_index_fits_whole_under_a_larger_budget():
+    rows = [_index_item(summary="y" * 80) for _ in range(60)]
+    service = MagicMock(
+        load_guardrails=AsyncMock(return_value=_response(index=rows, index_total_available=60))
+    )
+    with _patched(service):
+        result = await handle_load_guardrails(
+            {"context_id": str(uuid4()), "max_chars": 100_000}, "u", uuid4()
+        )
+    body = json.loads(result[0].text)
+    assert len(body["index"]) == 60 and body["index_truncated"] is False

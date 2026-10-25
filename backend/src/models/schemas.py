@@ -589,6 +589,23 @@ class GuardrailItem(TZAwareBaseModel):
     updated_at: datetime
 
 
+class GuardrailIndexItem(TZAwareBaseModel):
+    """One pointer row of ``load_guardrails``' index lane (#2334).
+
+    The whole live trusted set of a small context, newest first: ``summary``
+    is the 80-character head (``summary_cut`` when text was dropped — the full
+    text is one ``reference(memory_id)`` away). ``updated_at`` falls back to
+    ``created_at``. Kept flat so a later timestamp (e.g. an observation time)
+    is one more optional field.
+    """
+
+    memory_id: UUID
+    summary: str
+    summary_cut: bool = False
+    type: str
+    updated_at: datetime
+
+
 class LoadGuardrailsRequest(BaseModel):
     """Request for the deterministic guardrail-set read (``POST /memory/guardrails``).
 
@@ -637,6 +654,13 @@ class LoadGuardrailsResponse(BaseModel):
     pinned_truncated: bool
     tool_triggered_total_available: int
     tool_triggered_truncated: bool
+    # #2334: the index lane — every live trusted memory when the context holds
+    # at most ``settings.session_index_max_memories``; ``None`` above it (and
+    # ``index_total_available`` still says how many there are). Both ``None``
+    # when the setting is 0. Not part of ``version``.
+    index: list[GuardrailIndexItem] | None = None
+    index_total_available: int | None = None
+    index_truncated: bool = False
 
 
 class RelatedTagItem(TZAwareBaseModel):
