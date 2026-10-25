@@ -9,7 +9,8 @@ to A, held by that owner:
   by id and by ids): a W memory is not found for the A key and nothing
   changes; an A memory works with the same key; a session and an unscoped key
   keep reaching W;
-* in MCP those tools address memories of the declared context only;
+* in MCP a memory of another context of the key's workspace stays
+  reachable (cross-context recall returns such ids);
 * file tools and routes: a ``workspace_id`` of W is refused for the A key the
   way a non-member is refused, and nothing changes; A and a session still work;
 * the tag list (REST and MCP): W's contexts are not found for the A key, and
@@ -428,26 +429,34 @@ async def test_mcp_the_key_works_in_its_own_workspace(live) -> None:
     assert (await _row(w, w.mem["a_del"])).deleted_at is not None
 
 
-async def test_mcp_id_tools_address_the_declared_context_only(live) -> None:
-    """No key: a W memory of context ``w`` with context ``w2`` declared."""
+async def test_mcp_id_tools_reach_another_context_of_the_workspace(live) -> None:
+    """A memory of context ``w`` with ``w2`` declared (cross-context recall
+    returns such ids): reachable without a key and with the W key."""
     w: World = live
     w2, mid = str(w.ctx["w2"]), str(w.mem["w"])
-    for tool in ("reference", "explore", "list_revisions"):
-        body = await _tool(tool, {"context_id": w2, "memory_id": mid}, w.owner, w.ws["w"])
-        assert body.get("error") == "memory_not_found", (tool, body)
+    for key in (None, w.ws["w"]):
+        for tool in ("reference", "explore"):
+            body = await _tool(
+                tool, {"context_id": w2, "memory_id": mid}, w.owner, w.ws["w"], key=key
+            )
+            assert body.get("status") == "success", (key, tool, body)
     upd = await _tool(
         "update_memory",
         {"context_id": w2, "memory_id": mid, "importance": 0.2},
         w.owner,
         w.ws["w"],
+        key=w.ws["w"],
     )
-    assert upd.get("error") == "memory_not_found", upd
+    assert upd.get("status") == "success", upd
     fgt = await _tool(
-        "forget", {"context_id": w2, "memory_id": str(w.mem["w_del"])}, w.owner, w.ws["w"]
+        "forget",
+        {"context_id": w2, "memory_id": str(w.mem["w_del"])},
+        w.owner,
+        w.ws["w"],
+        key=w.ws["w"],
     )
-    assert fgt.get("deleted_count") == 0, fgt
-    await _untouched(w, "w", "w_del")
-    # The memory's own context, no key, any session workspace: unchanged.
+    assert fgt.get("deleted_count") == 1, fgt
+    # No key, any session workspace: unchanged.
     for session_ws in (w.ws["w"], w.ws["a"], None):
         ref = await _tool(
             "reference", {"context_id": str(w.ctx["w"]), "memory_id": mid}, w.owner, session_ws

@@ -735,3 +735,65 @@ class TestMcpPreGateDenyCapture:
         kw = instance.evaluate_context_access.await_args.kwargs
         assert kw["operation"] == "recall"
         assert kw["user_id"] == "u"
+
+
+class TestCanAccessMemoryKeyScope:
+    """#963: a workspace-scoped key reaches memories of its own workspace only,
+    refused before any membership or binding lookup; an agent credential's
+    deny is audited as ``rbac_denied`` like the other RBAC denies."""
+
+    @pytest.mark.asyncio
+    async def test_another_workspace_is_refused_before_any_lookup(self):
+        perm = _perm(member=SimpleNamespace(role="owner"))
+        patcher, instance = _patch_binding_service(True, "allowed")
+        with patcher:
+            ok = await perm.can_access_memory(
+                user_id="u",
+                memory_user_id="u",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                key_workspace_id=uuid.uuid4(),
+            )
+        assert ok is False
+        perm.workspace_service.get_member.assert_not_awaited()
+        instance.evaluate_context_access.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_its_own_workspace_is_unchanged(self):
+        perm = _perm()
+        ok = await perm.can_access_memory(
+            user_id="u",
+            memory_user_id="u",
+            workspace_id=WORKSPACE_ID,
+            context_id=uuid.uuid4(),
+            key_workspace_id=WORKSPACE_ID,
+        )
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_an_agent_deny_is_audited(self):
+        key_ws = uuid.uuid4()
+        set_agent_scope(
+            AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=key_ws)
+        )
+        perm = _perm()
+        mid = uuid.uuid4()
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            ok = await perm.can_access_memory(
+                user_id="u",
+                memory_user_id="u",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                operation="forget",
+                memory_id=mid,
+                key_workspace_id=key_ws,
+            )
+        assert ok is False
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["policy_decision"] == "rbac_denied"
+        assert kw["operation"] == "forget"
+        assert kw["workspace_id"] == key_ws
+        assert kw["extra_metadata"]["requested_memory_id"] == str(mid)
