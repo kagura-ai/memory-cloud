@@ -341,6 +341,22 @@ async def test_a_viewer_is_read_only_in_a_private_context_it_created(live) -> No
     assert row.deleted_at is None and row.content == ORIGINAL_CONTENT
     assert await _live_count(w, w.viewer_private) == 1
 
+    # The context tools refuse it as well: the creator is a viewer here.
+    renamed = await _tool(
+        "update_context",
+        {"context_id": str(w.viewer_private), "display_name": "renamed"},
+        w.viewer,
+        w.w,
+    )
+    assert renamed.get("error") == "permission_denied", renamed
+    search = await _tool(
+        "update_search_config",
+        {"context_id": str(w.viewer_private), "semantic_weight": 0.5},
+        w.viewer,
+        w.w,
+    )
+    assert search.get("error") == "permission_denied", search
+
     # Reading it still works.
     body = await _tool(
         "reference",
@@ -369,6 +385,31 @@ async def test_a_memory_addressed_by_id_is_checked_on_its_own_workspace(live) ->
 
     row = await _row(w, w.real)
     assert row.deleted_at is None and row.content == ORIGINAL_CONTENT
+
+
+class _LockReached(Exception):
+    pass
+
+
+async def test_a_viewer_is_told_it_is_read_only_before_the_capacity_lock(live) -> None:
+    """The role is checked before the capacity lock, which a viewer could not
+    act on anyway."""
+    w: World = live
+    with patch(
+        "mcp_server.tools._helpers.ensure_not_capacity_locked",
+        AsyncMock(side_effect=_LockReached()),
+    ):
+        for tool, args in _write_calls(w, w.ctx, w.real):
+            if tool in ("remember", "remember_batch", "update_memory", "forget"):
+                body = await _tool(tool, args, w.viewer, w.w)
+                assert body.get("error") == "permission_denied", (tool, body)
+        body = await _tool(
+            "rollback_session",
+            {"context_id": str(w.ctx), "session_id": "s-1", "dry_run": True},
+            w.viewer,
+            w.w,
+        )
+        assert body.get("error") == "permission_denied", body
 
 
 async def test_the_viewer_check_refuses_a_missing_workspace(live) -> None:
@@ -462,6 +503,8 @@ async def _rest(
 
     from api.main import app
     from api.routes import context_search_config as search_config_routes
+    from api.routes import contexts as context_routes
+    from api.routes import feedback as feedback_routes
     from api.routes import memory as memory_routes
     from auth.dependencies import get_user_from_api_key_or_session
 
@@ -484,7 +527,12 @@ async def _rest(
         "auth_type": "api_key" if key else "session",
     }
     # The dependency the routes hold (``live`` patches the ``db.base`` name).
-    for route_get_db in {memory_routes.get_db, search_config_routes.get_db}:
+    for route_get_db in {
+        memory_routes.get_db,
+        search_config_routes.get_db,
+        context_routes.get_db,
+        feedback_routes.get_db,
+    }:
         app.dependency_overrides[route_get_db] = _db
     try:
         async with httpx.AsyncClient(
@@ -579,11 +627,22 @@ async def test_a_workspace_scoped_key_stays_in_its_workspace_in_the_context_tool
     assert unscoped.get("status") == "success", unscoped
 
 
-async def test_rest_search_config_routes_keep_a_scoped_key_in_its_workspace(live) -> None:
+async def test_rest_context_routes_keep_a_scoped_key_in_its_workspace(live) -> None:
     w: World = live
     async with _rest(w, w.owner, current=w.a, key=w.a) as c:
         got = await c.get(f"/api/v1/contexts/{w.ctx}/search-config")
         reset = await c.post(f"/api/v1/contexts/{w.ctx}/search-config/reset")
         own = await c.get(f"/api/v1/contexts/{w.a_ctx}/search-config")
+        feedback = await c.post(
+            f"/api/v1/contexts/{w.ctx}/feedback",
+            json={"memory_id": str(w.real), "helpful": True},
+        )
+        stats = await c.get(f"/api/v1/contexts/{w.ctx}/memory-stats")
+        duplicates = await c.get(f"/api/v1/contexts/{w.ctx}/duplicates")
     assert (got.status_code, reset.status_code) == (404, 404), (got.text, reset.text)
+    assert (feedback.status_code, stats.status_code, duplicates.status_code) == (404, 404, 404), (
+        feedback.text,
+        stats.text,
+        duplicates.text,
+    )
     assert own.status_code == 200, own.text
