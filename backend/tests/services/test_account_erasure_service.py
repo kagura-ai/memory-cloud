@@ -2337,12 +2337,14 @@ class TestThePostgresStepRecordsItselfOnTheRequest:
         assert order[i + 1 :] == ["delete", "commit"]
         params = order[i].compile().params
         assert params["id_1"] == request_id  # scoped to the one request row
-        # merged into the row's summary (``coalesce(summary, '{}') || {...}``),
-        # so a key written before this step survives
-        assert "SET deleted_data_summary=(coalesce(erasure_requests.deleted_data_summary, " in str(
-            order[i]
-        )
-        assert ") || :param_2" in str(order[i])
+        # merged into the row's summary (``coalesce(nullif(summary, 'null'),
+        # '{}') || {...}``), so a key written before this step survives and a
+        # legacy JSON-null summary merges like SQL NULL (#2026)
+        assert (
+            "SET deleted_data_summary=(coalesce(nullif(erasure_requests.deleted_data_summary, "
+            "CAST(:param_1 AS JSONB)), :param_2) || :param_3)"
+        ) in str(order[i])
+        assert params["param_1"] == "null"
         assert {} in params.values()
         (merged,) = [v for v in params.values() if isinstance(v, dict) and "postgres" in v]
         postgres = merged["postgres"]

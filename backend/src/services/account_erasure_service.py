@@ -65,7 +65,19 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import JSON, and_, case, delete, func, literal, null, select, tuple_, update
+from sqlalchemy import (
+    JSON,
+    ColumnElement,
+    and_,
+    case,
+    delete,
+    func,
+    literal,
+    null,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -292,6 +304,18 @@ def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
         "error_class": error_class,
         "last_attempt_at": to_utc_iso(utcnow()),
     }
+
+
+def _merged_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
+    """``deleted_data_summary || keys`` in SQL, keeping what the row holds.
+
+    A summary still stored as the JSON value ``null`` (written before #2026
+    made the column store SQL NULL) is treated like SQL NULL: ``'null' ||
+    {...}`` is a JSON *array*, which would hide ``postgres`` from
+    ``has_key`` (``erasure_details._ran_in_postgres``).
+    """
+    stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
+    return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
 
 
 class AccountErasureService:
@@ -1876,11 +1900,7 @@ class AccountErasureService:
             await self.db.execute(
                 update(ErasureRequest)
                 .where(ErasureRequest.id == request_id)
-                .values(
-                    deleted_data_summary=func.coalesce(
-                        ErasureRequest.deleted_data_summary, literal({}, JSONB)
-                    ).op("||")(literal({"postgres": postgres}, JSONB))
-                )
+                .values(deleted_data_summary=_merged_summary({"postgres": postgres}))
                 # a SQL expression: no in-session sync (it would expire the
                 # loaded request's summary for an async lazy load)
                 .execution_options(synchronize_session=False)

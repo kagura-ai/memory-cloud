@@ -2927,6 +2927,108 @@ switch.
 context's row exists, its workspace is the one the recovered memories get,
 and a request naming another `workspace_id` answers `400` (`REQ-103`).
 
+### Migration `f15_2026_json_none_as_null` (#2026)
+
+Every nullable JSON column now stores "no value" as SQL `NULL`. Before, a
+Python `None` was written as the JSON value `null`, so `WHERE col IS NULL`
+missed those rows (the application reads both forms the same way). The
+exceptions are `resource_events.event_metadata` and `indexer_state.metrics`:
+they have a `'{}'` default and keep storing a JSON `null` that a caller wrote
+explicitly.
+
+The migration rewrites the JSON nulls already stored in `memories` (`details`,
+`context`, `supersede_candidate`), `sleep_reports` (the six `*_result`
+columns), `sleep_actions.details`, `measurements.details`,
+`memory_analyses.quality`, `bm25_idf_drift_log.top_divergent_terms`,
+`erasure_requests.deleted_data_summary` and `workspace_connectors`
+(`channel_ids`, `pii_guardrail_config`, `runtime_config`). Object values and
+values that are already SQL `NULL` are not touched, and neither is
+`updated_at`. The log gives, per table, how many values were rewritten in each
+column and how many rows were skipped.
+
+Size it before upgrading (the `memories` count is the one that matters):
+
+```sql
+SELECT count(*) FROM memories
+ WHERE (pg_column_size(details) < 16 AND details::text = 'null')
+    OR (pg_column_size(context) < 16 AND context::text = 'null')
+    OR (pg_column_size(supersede_candidate) < 16 AND supersede_candidate::text = 'null');
+```
+
+Steps and locks, table by table:
+
+1. One scan collects the ids of the rows to rewrite. It takes no row locks.
+2. The rows are rewritten in batches of 1000, each committed on its own. A
+   batch locks only its own rows, in id order, and skips a row a request is
+   holding instead of waiting for it. It re-checks each value, so a value
+   written after the scan is never overwritten.
+
+The migration sets `lock_timeout` 5 s (for the table locks) and
+`statement_timeout = 0` for its own session. A lock timeout fails the
+migration; run it again and it resumes, because rows already rewritten no
+longer match. On `memories` every rewritten row is a non-HOT update, so it
+writes to all of the table's indexes. Expect extra WAL, replica lag and
+autovacuum work in proportion to the count above, and deploy at a quiet time.
+
+**Re-run the rewrite once after the traffic switch.** The migration runs from
+the new image before traffic moves, so until the switch the old image keeps
+writing JSON `null`. Rows it writes after the scan keep it, and so do rows the
+walk skipped. Both forms read the same, so nothing breaks in the meantime.
+Each statement below is idempotent and changes only the leftover values. On
+`memories` each one is a full scan of the table, and it rewrites only the few
+leftovers. The `pg_column_size` test comes first so that the scan never
+detoasts a large value: a JSON `null` is stored in 5 bytes as `json` and 9 as
+`jsonb`.
+
+```sql
+UPDATE memories SET details = NULL WHERE pg_column_size(details) < 16 AND details::text = 'null';
+UPDATE memories SET context = NULL WHERE pg_column_size(context) < 16 AND context::text = 'null';
+UPDATE memories SET supersede_candidate = NULL WHERE pg_column_size(supersede_candidate) < 16 AND supersede_candidate::text = 'null';
+UPDATE sleep_reports SET edge_discovery_result = NULL WHERE pg_column_size(edge_discovery_result) < 16 AND edge_discovery_result::text = 'null';
+UPDATE sleep_reports SET dedup_result = NULL WHERE pg_column_size(dedup_result) < 16 AND dedup_result::text = 'null';
+UPDATE sleep_reports SET merge_retention_result = NULL WHERE pg_column_size(merge_retention_result) < 16 AND merge_retention_result::text = 'null';
+UPDATE sleep_reports SET importance_result = NULL WHERE pg_column_size(importance_result) < 16 AND importance_result::text = 'null';
+UPDATE sleep_reports SET consolidation_result = NULL WHERE pg_column_size(consolidation_result) < 16 AND consolidation_result::text = 'null';
+UPDATE sleep_reports SET reindex_result = NULL WHERE pg_column_size(reindex_result) < 16 AND reindex_result::text = 'null';
+UPDATE sleep_actions SET details = NULL WHERE pg_column_size(details) < 16 AND details::text = 'null';
+UPDATE measurements SET details = NULL WHERE pg_column_size(details) < 16 AND details::text = 'null';
+UPDATE memory_analyses SET quality = NULL WHERE pg_column_size(quality) < 16 AND quality::text = 'null';
+UPDATE bm25_idf_drift_log SET top_divergent_terms = NULL WHERE pg_column_size(top_divergent_terms) < 16 AND top_divergent_terms::text = 'null';
+UPDATE erasure_requests SET deleted_data_summary = NULL WHERE pg_column_size(deleted_data_summary) < 16 AND deleted_data_summary::text = 'null';
+UPDATE workspace_connectors SET channel_ids = NULL WHERE pg_column_size(channel_ids) < 16 AND channel_ids::text = 'null';
+UPDATE workspace_connectors SET pii_guardrail_config = NULL WHERE pg_column_size(pii_guardrail_config) < 16 AND pii_guardrail_config::text = 'null';
+UPDATE workspace_connectors SET runtime_config = NULL WHERE pg_column_size(runtime_config) < 16 AND runtime_config::text = 'null';
+```
+
+The size query above returns 0 for `memories` once they have run. An offline
+upgrade (`alembic upgrade --sql`) emits exactly these statements.
+
+**Columns that keep their historical JSON null.** These tables are large or
+append-only, so the migration leaves them as they are. New rows store SQL
+`NULL`; older rows can hold JSON `null`:
+
+- `audit_logs.user_metadata`
+- `llm_call_log.call_metadata`
+- `memory_access_events.event_metadata` (a trigger blocks UPDATE)
+- `secret_access_log.req_meta` (a trigger blocks UPDATE; the hash chain
+  hashes both forms the same)
+- `resource_events.payload` (a delete event is `op = 'delete'`, not a NULL
+  payload)
+- `neural_memory_edges.metadata`
+
+To count "no value" in these columns, match both forms:
+
+```sql
+SELECT count(*) FROM llm_call_log
+ WHERE call_metadata IS NULL OR call_metadata::text = 'null';
+```
+
+A SQL merge into one of them needs `NULLIF(col, 'null'::jsonb)` (for a `json`
+column, `NULLIF(col::jsonb, 'null'::jsonb)`) before `||`, because
+`'null'::jsonb || '{...}'` is an array, not an object.
+
+Downgrade is a no-op: every version of the code reads both forms the same.
+
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
 A tier's `features` set is env-overridable too. `PLAN_<KEY>_FEATURES` is a

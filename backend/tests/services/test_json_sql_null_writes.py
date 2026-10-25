@@ -445,3 +445,64 @@ def test_cases_cover_every_switched_model() -> None:
 
     tables = {c.table.name for c in NULLABLE} - {"secret_access_log"}
     assert {case[0] for case in CASES} == tables
+
+
+# --- the erasure summary merge (account_erasure_service._merged_summary) ------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "expected_keys"),
+    [
+        ("null", {"postgres"}),  # legacy JSON null: merged like SQL NULL
+        (None, {"postgres"}),
+        ('{"retry": {"attempts": 1}}', {"retry", "postgres"}),
+    ],
+    ids=["json-null", "sql-null", "object"],
+)
+async def test_erasure_summary_merge_treats_json_null_as_empty(db_session, stored, expected_keys):
+    """``'null'::jsonb || {...}`` is an array, which would hide ``postgres``
+    from ``has_key``; the merge reads a JSON-null summary as empty (#2026)."""
+    from sqlalchemy import select, update
+
+    from services.account_erasure_service import _merged_summary
+    from services.erasure_details import _ran_in_postgres
+
+    request = ErasureRequest(
+        user_id=f"gone-{uuid4().hex[:8]}",
+        user_email_hash="0" * 64,
+        initiated_by="admin-x",
+        is_self_service=False,
+        reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+    )
+    db_session.add(request)
+    await db_session.flush()
+    await db_session.execute(
+        text("UPDATE erasure_requests SET deleted_data_summary = CAST(:v AS jsonb) WHERE id = :id"),
+        {"v": stored, "id": request.id},
+    )
+
+    await db_session.execute(
+        update(ErasureRequest)
+        .where(ErasureRequest.id == request.id)
+        .values(deleted_data_summary=_merged_summary({"postgres": {"users": 1}}))
+        .execution_options(synchronize_session=False)
+    )
+
+    kind, keys = (
+        await db_session.execute(
+            text(
+                "SELECT jsonb_typeof(deleted_data_summary), "
+                "ARRAY(SELECT jsonb_object_keys(deleted_data_summary)) "
+                "FROM erasure_requests WHERE id = :id"
+            ),
+            {"id": request.id},
+        )
+    ).one()
+    assert kind == "object"
+    assert set(keys) == expected_keys
+    ran = (
+        await db_session.execute(select(_ran_in_postgres()).where(ErasureRequest.id == request.id))
+    ).scalar_one()
+    assert ran is True
+    await db_session.rollback()
