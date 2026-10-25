@@ -426,7 +426,7 @@ Reserve quota and return a presigned PUT URL for an R2 file upload (100 MiB Phas
   - `content_type` — string (MIME)
   - `size_bytes` — integer
   - `sha256` — string (lower-case hex; no `pattern` constraint ⚠ format prose-only)
-- **Optional**: `workspace_id` — string ⚠ "Overrides the authenticated workspace_id" appears on all 5 file tools and nowhere else on the surface. Every other tool scopes implicitly by auth (+ context_id). An auth-override parameter is both an inconsistency and a security-review item — if it's an internal/admin affordance it should not be in the frozen public schema
+- **Optional**: `workspace_id` — string, "Workspace to act in; defaults to the session's. A workspace-scoped API key reaches only its own workspace." (same text on all 5 file tools). Every other tool scopes implicitly by auth (+ context_id); scoped by the key since v0.126.0
 
 ### complete_file_upload
 

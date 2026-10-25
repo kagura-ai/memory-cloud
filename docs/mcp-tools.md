@@ -489,7 +489,7 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 |------|------------|---------------|
 | `get_sleep_history` | List past sleep runs | Viewer+ |
 | `get_sleep_report` | Detailed sleep report with all actions | Viewer+ |
-| `rollback_sleep_run` | Rollback all actions from a completed sleep run | Member+ (report owner only) |
+| `rollback_sleep_run` | Rollback all actions from a completed sleep run | Editor+ on the report's context (report owner only; workspace viewers refused) |
 
 ## Usage (1)
 

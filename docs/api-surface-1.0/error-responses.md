@@ -428,8 +428,12 @@ rest do not.
 The envelope is unchanged by the capacity-over purge
 ([#1969](https://github.com/kagura-ai/memory-cloud/issues/1969)): a workspace that stays
 locked for 30 days has its memories, contexts and files deleted, and the date that happens is
-on `GET /api/v1/workspace/usage/current` as `capacity_lock.purge_at` (ISO-8601 UTC, `null`
-until the daily sweep has stamped the workspace), not in this error.
+on `GET /api/v1/workspace/usage/current` as `capacity_lock.purge_at` (ISO-8601 UTC), not in
+this error. `purge_at` is `null` until the daily sweep has stamped the workspace, and while the
+purge cannot run (the purge flag, the countdown mails or a delivering mail provider is off).
+Otherwise it is the daily run that purges: the latest of day 30 of the lock, seven days after
+the first countdown mail and the day after the final one, never before the next run
+([#1971](https://github.com/kagura-ai/memory-cloud/issues/1971)).
 
 The lock applies only when the plan is `free` **and** `entitlement_source` is
 `external_billing` (the workspace came back from a subscription); a self-hosted or
@@ -439,8 +443,10 @@ the refusal is not one feature or one cap. On MCP every blocked tool is refused 
 caller may reach the target — the lock is checked after authorization, in the context resolver
 or the service the tool calls ([#1954](https://github.com/kagura-ai/memory-cloud/issues/1954)),
 so a context the caller cannot read answers with the usual `context_not_found` instead. The
-analysis, resource / connector and sleep-report tools, and a blocked tool that names no context,
-are still checked on the caller's own (session) workspace. The refusal carries
+Sleep report tools (`get_sleep_report`, `rollback_sleep_run`) name their target with
+`report_id` and check the report's context's workspace after authorization. The analysis and
+resource / connector tools, and a blocked tool that names no context or report, are checked on
+the caller's own (session) workspace. The refusal carries
 `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context` — which since
 [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
