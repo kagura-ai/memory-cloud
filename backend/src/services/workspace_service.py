@@ -1159,6 +1159,7 @@ class WorkspaceService:
                 UsageStats.workspace_id == workspace_id,
                 UsageStats.date >= week_ago,
                 UsageStats.context_id.isnot(None),
+                *(() if context_ids is None else (UsageStats.context_id.in_(context_ids),)),
             )
             .group_by(UsageStats.context_id)
         )

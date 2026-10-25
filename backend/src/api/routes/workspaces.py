@@ -34,7 +34,7 @@ from config.constants import (
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Context, ExternalAPIKey, User, Workspace
+from models.auth import Context, ExternalAPIKey, User, Workspace, WorkspaceMember
 from models.schemas import OpenAIKeyStatusResponse
 from services.email_service import get_email_service
 from services.permission_service import PermissionService
@@ -984,13 +984,32 @@ async def remove_member(
 
 
 async def _resolve_workspace_context(
-    perm_service: PermissionService, user: dict, workspace_id: UUID, context_id: UUID
+    perm_service: PermissionService,
+    member: WorkspaceMember,
+    user: dict,
+    workspace_id: UUID,
+    context_id: UUID,
 ) -> None:
-    """A per-context dashboard reads only a context of ``workspace_id`` the
-    caller can open; anything else is the uniform ``Context not found``."""
+    """A per-context dashboard reads a live context of ``workspace_id`` and,
+    for a caller below admin, only one it can open (its context access list
+    and context privacy); anything else is the uniform ``Context not found``.
+    Owners and admins keep the view the workspace context stats give them."""
     from services.capacity_lock import CapacityPolicy
     from utils.exceptions import NotFoundException
 
+    if member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+        found = (
+            await perm_service.db.execute(
+                select(Context.id).where(
+                    Context.id == context_id,
+                    Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        if found is None:
+            raise NotFoundException("Context", str(context_id))
+        return
     context = await perm_service.resolve_context_for_workspace_read(
         user["user_id"],
         context_id,
@@ -1102,11 +1121,11 @@ async def get_context_usage_timeline(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(
+    member = await perm_service.check_workspace_access(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
-    await _resolve_workspace_context(perm_service, user, workspace_id, context_id)
+    await _resolve_workspace_context(perm_service, member, user, workspace_id, context_id)
 
     # Limit days to prevent excessive queries
     days = min(days, 30)
@@ -1174,12 +1193,12 @@ async def get_workspace_memory_timeline(
     workspace_service = WorkspaceService(db)
     perm_service = PermissionService(db)
 
-    await perm_service.check_workspace_access(
+    member = await perm_service.check_workspace_access(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
     if context_id is not None:
-        await _resolve_workspace_context(perm_service, user, workspace_id, context_id)
+        await _resolve_workspace_context(perm_service, member, user, workspace_id, context_id)
 
     days = min(days, 90)  # Performance limit
 
@@ -1228,11 +1247,11 @@ async def get_context_public_api_stats(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(
+    member = await perm_service.check_workspace_access(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
-    await _resolve_workspace_context(perm_service, user, workspace_id, context_id)
+    await _resolve_workspace_context(perm_service, member, user, workspace_id, context_id)
 
     # Limit days to prevent excessive queries
     days = min(days, 30)

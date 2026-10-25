@@ -629,14 +629,24 @@ async def test_listings_follow_the_list(live, caller) -> None:
         assert shown == reachable, shown
 
 
-@pytest.mark.parametrize("caller", ["mA", "m_null", "outsider"])
+@pytest.mark.parametrize("caller", ["owner", "admin", "mA", "m_null", "outsider"])
 async def test_per_context_dashboards_need_reach(live, caller) -> None:
+    """Below admin a per-context dashboard needs reach; owners and admins keep
+    every row the workspace context stats list for them (others' private ones
+    included)."""
     w: World = live
-    for ctx in ("A", "B"):
+    for ctx in ("A", "B", "pM"):
         async with _rest(w, caller) as c:
             r = await c.get(f"/api/v1/workspaces/{w.ws['w']}/contexts/{w.ctx[ctx]}/usage-timeline")
+            missing = await c.get(
+                f"/api/v1/workspaces/{w.ws['w']}/contexts/{uuid4()}/usage-timeline"
+            )
         if caller == "outsider":
             assert r.status_code in (403, 404), r.text
+            continue
+        assert missing.status_code == 404, missing.text
+        if CALLERS[caller][0] in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+            assert r.status_code == 200, (ctx, r.text)
         else:
             assert r.status_code == (200 if _reach(caller, ctx) else 404), (ctx, r.text)
 
