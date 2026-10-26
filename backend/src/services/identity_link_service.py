@@ -506,12 +506,19 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     Does not commit: it runs inside the caller's transaction, after the
     caller has locked the ``users`` row.
 
+    Lock order (#2278): the link lock, then every context ``user_id``
+    created in id order, then the memories it deletes in id order in one
+    statement — contexts before memories, the order
+    ``restore_deleted_context`` and the account erasure take, so the
+    hand-over cannot hold a memory while it waits on a context.
+
     Returns:
         ``{"contexts_handed_over": n, "identity_links_removed": n}``.
     """
     from auth.workspace_roles import WorkspaceRole, reaches_context
     from models.auth import Context, WorkspaceMember
     from models.memory import Memory
+    from services.erasure_details import locked_ids
 
     await lock_identity_links(db)
     link_rows = list(
@@ -524,16 +531,21 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
         .all()
     )
     others = sorted(row.user_id for row in link_rows if row.user_id != user_id)
-    handed_over = 0
+    handed_over: list[uuid.UUID] = []
     if others:
+        # Every context the subject created, in id order, before any memory
+        # (#2278): the caller rewrites or deletes all of them next.
+        await db.execute(locked_ids(Context, lambda c: (c.created_by == user_id,)))
         contexts = (
             (
                 await db.execute(
-                    select(Context).where(
+                    select(Context)
+                    .where(
                         Context.created_by == user_id,
                         Context.is_private.is_(True),
                         Context.deleted_at.is_(None),
                     )
+                    .order_by(Context.id)
                 )
             )
             .scalars()
@@ -586,11 +598,23 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
             )
             if not eligible:
                 continue
-            await db.execute(
-                delete(Memory).where(Memory.context_id == context.id, Memory.user_id == user_id)
-            )
             context.created_by = eligible[0][1]
-            handed_over += 1
+            handed_over.append(context.id)
+        if handed_over:
+            # One statement over every handed-over context, its rows locked in
+            # id order (#2278), like every other multi-row memories write.
+            await db.execute(
+                delete(Memory)
+                .where(
+                    Memory.id.in_(
+                        locked_ids(
+                            Memory,
+                            lambda m: (m.context_id.in_(handed_over), m.user_id == user_id),
+                        )
+                    )
+                )
+                .execution_options(synchronize_session=False)
+            )
 
     removed = await _remove_from_set(db, user_id, link_rows) if link_rows else 0
-    return {"contexts_handed_over": handed_over, "identity_links_removed": removed}
+    return {"contexts_handed_over": len(handed_over), "identity_links_removed": removed}

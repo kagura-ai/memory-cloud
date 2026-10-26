@@ -1110,6 +1110,79 @@ class TestErasingOneLinkedAccount:
         )
 
     @pytest.mark.asyncio
+    async def test_the_delete_takes_only_the_leavers_rows_in_handed_over_contexts(
+        self, async_engine, db_session
+    ):
+        """#2278: one DELETE over every handed-over context, its rows locked
+        in id order after the contexts (contexts before memories). Other
+        authors' rows, and the leaver's rows in a context it keeps, stay."""
+        from sqlalchemy import event
+
+        from services.identity_link_service import hand_over_private_contexts
+
+        admin, oauth, stranger = [await _user(db_session) for _ in range(3)]
+        workspace = await _workspace(db_session, admin, oauth, stranger)
+        first = await _private_context(db_session, workspace, admin)
+        second = await _private_context(db_session, workspace, admin)
+        kept = await _private_context(db_session, workspace, admin)
+        survivors = [
+            await _memory(db_session, first, oauth),
+            await _memory(db_session, second, oauth),
+            await _memory(db_session, first, stranger),
+            await _memory(db_session, kept, admin),
+        ]
+        leavers = [
+            await _memory(db_session, first, admin),
+            await _memory(db_session, second, admin),
+            await _memory(db_session, first, admin),
+        ]
+        leavers[2].deleted_at = utcnow()
+        leavers[2].deleted_by = admin.user_id
+        await db_session.flush()
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+        survivor_ids = [m.id for m in survivors]
+        leaver_ids = [m.id for m in leavers]
+
+        statements: list[str] = []
+
+        def record(_conn, _cursor, statement, *_rest) -> None:
+            statements.append(" ".join(statement.split()))
+
+        event.listen(async_engine.sync_engine, "before_cursor_execute", record)
+        try:
+            counts = await hand_over_private_contexts(db_session, admin.user_id)
+            await db_session.flush()
+        finally:
+            event.remove(async_engine.sync_engine, "before_cursor_execute", record)
+
+        assert counts["contexts_handed_over"] == 2
+        assert (first.created_by, second.created_by, kept.created_by) == (
+            oauth.user_id,
+            oauth.user_id,
+            admin.user_id,
+        )
+        left = set(
+            (
+                await db_session.execute(
+                    select(Memory.id).where(Memory.id.in_(survivor_ids + leaver_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert left == set(survivor_ids)
+
+        context_lock = next(
+            i
+            for i, s in enumerate(statements)
+            if s.startswith("SELECT contexts_1.id FROM contexts AS contexts_1")
+        )
+        (delete_at,) = [i for i, s in enumerate(statements) if s.startswith("DELETE FROM memories")]
+        assert context_lock < delete_at
+        assert statements[context_lock].endswith("ORDER BY contexts_1.id FOR UPDATE")
+        assert "ORDER BY memories_1.id FOR UPDATE" in statements[delete_at]
+
+    @pytest.mark.asyncio
     async def test_a_context_with_no_linked_member_in_its_workspace_is_left_alone(self, db_session):
         from services.identity_link_service import hand_over_private_contexts
 
