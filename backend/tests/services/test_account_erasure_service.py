@@ -730,9 +730,18 @@ class TestCancelSelfService:
         )
         request.id = uuid4()
         svc._find_active_request = AsyncMock(return_value=request)
-        now_status = MagicMock()
-        now_status.scalar_one_or_none.return_value = STATUS_IN_PROGRESS
-        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_status])
+        claimed = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_IN_PROGRESS,
+        )
+        claimed.id = request.id
+        now_row = MagicMock()
+        now_row.scalar_one_or_none.return_value = claimed
+        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_row])
 
         with pytest.raises(ErasureAlreadyInProgressError) as caught:
             await svc.cancel_self_service(user_id="u-1")
@@ -2663,6 +2672,71 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         summary = params["deleted_data_summary"]
         assert summary["retry"] == previous
         assert "postgres" not in summary
+
+    @pytest.mark.asyncio
+    async def test_the_failure_handler_is_guarded_by_the_runs_claim(self):
+        """#2306: like the reschedule, the generic handler's UPDATE matches
+        only the row this run claimed (its ``started_at``)."""
+        from models.erasure import STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(RuntimeError, match="deadlock"):
+                await svc._execute(request, _user())
+
+        stmt = _request_update(order)
+        assert order[-2:] == [stmt, "commit"]
+        params = stmt.compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["id_1"] == request.id
+        assert params["started_at_1"] == datetime(2026, 10, 1, 12, 0)
+        assert "erasure_requests.started_at = :started_at_1" in str(stmt)
+
+    @pytest.mark.parametrize("after_commit", [False, True])
+    @pytest.mark.asyncio
+    async def test_a_stale_runs_failure_handler_only_logs(self, after_commit):
+        """#2306: the row was claimed again by a later sweep; the handler's
+        UPDATE matches nothing, it logs ``erasure_failure_handler_stale_run``
+        and the run's own error still reaches the caller."""
+        svc = _service()
+        _stub_execute_steps(svc)
+        if after_commit:
+            svc._clear_redis = AsyncMock(side_effect=RuntimeError("redis down"))
+        else:
+            svc._delete_postgres = AsyncMock(side_effect=RuntimeError("redis down"))
+        order = _recording_execute(svc, rowcount=0)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(return_value={"kagura_memories": 0}),
+            ),
+            patch("services.account_erasure_service.sync_restored_payloads", new=AsyncMock()),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            with pytest.raises(RuntimeError, match="redis down"):
+                await svc._execute(request, _user())
+
+        _request_update(order)  # the one guarded UPDATE, nothing after it
+        assert order[-1] == "commit"
+        stale = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "erasure_failure_handler_stale_run"
+        ]
+        assert len(stale) == 1
+        assert stale[0].kwargs == {"request_id": str(request.id)}
 
     @pytest.mark.asyncio
     async def test_the_attempt_that_succeeds_keeps_the_history(self):

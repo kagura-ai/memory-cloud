@@ -706,8 +706,17 @@ class AccountErasureService:
         #2282) wins, and the cancel answers 409 instead of overwriting the
         running request.
 
+        A lost compare-and-set re-reads the row as the caller's (#2306):
+        ``cancelled`` (a concurrent cancel of the same request won, e.g. a
+        double-click) returns it like a first cancel does; a row that is
+        gone or no longer the caller's (a finished erasure pseudonymizes
+        its ``user_id``) is 404; ``in_progress`` / ``complete`` /
+        ``failed`` is 409 with that status.
+
         Raises:
-            ErasureRequestNotFoundError: No active cancellable request.
+            ErasureRequestNotFoundError: No active cancellable request, or
+                the row is no longer the caller's after a lost
+                compare-and-set.
             ErasureAlreadyInProgressError: The row left ``pending`` /
                 ``cooling_off`` after it was read (claimed by the sweep).
         """
@@ -737,18 +746,32 @@ class AccountErasureService:
         )
         await self.db.commit()
         if not result.rowcount:
-            # moved since the read: report what it is now (the sweep's claim)
+            # moved since the read: answer by what it is now, read as the
+            # caller's (#2306)
             current = (
                 await self.db.execute(
-                    select(ErasureRequest.status).where(ErasureRequest.id == request_id)
+                    select(ErasureRequest)
+                    .where(ErasureRequest.id == request_id, ErasureRequest.user_id == user_id)
+                    .execution_options(populate_existing=True)
                 )
             ).scalar_one_or_none()
             logger.info(
                 "erasure_request_cancel_lost",
                 request_id=str(request_id),
-                status=current,
+                status=current.status if current is not None else None,
             )
-            raise ErasureAlreadyInProgressError(current or STATUS_IN_PROGRESS)
+            if current is None:
+                raise ErasureRequestNotFoundError(user_id)
+            if current.status == STATUS_CANCELLED:
+                # a concurrent cancel of this request won: same answer
+                return current
+            # back in ``pending`` / ``cooling_off`` only after a claim beat
+            # this cancel and the run rescheduled it (#2282): report the claim
+            raise ErasureAlreadyInProgressError(
+                current.status
+                if current.status in (STATUS_IN_PROGRESS, STATUS_COMPLETE, STATUS_FAILED)
+                else STATUS_IN_PROGRESS
+            )
         await self.db.refresh(request)
 
         logger.info(
@@ -1407,10 +1430,23 @@ class AccountErasureService:
                     # DETAIL, a Redis key) can name the account (#2268 review)
                     failure_reason=f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {type(exc).__name__}",
                 )
-            await self.db.execute(
-                update(ErasureRequest).where(ErasureRequest.id == request_id).values(**values)
+            # #2306: guarded by this run's claim, like the reschedule above:
+            # a run that outlived the stale cutoff and was claimed again must
+            # not mark the newer run's row
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    .where(
+                        ErasureRequest.id == request_id,
+                        ErasureRequest.started_at == claimed_at,
+                    )
+                    .values(**values)
+                ),
             )
             await self.db.commit()
+            if not result.rowcount:
+                logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
             raise
 
     # ------------------------------------------------------------------
