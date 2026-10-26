@@ -109,6 +109,7 @@ from services.erasure_details import (  # noqa: E402
     note_row_pseudonymized,
     payload_counts,
     pseudonymize_audit_logs,
+    pseudonymized_request_values,
     sync_restored_payloads,
     unrepaired_erasure,
 )
@@ -328,11 +329,13 @@ async def _carries(db: AsyncSession, pseudonym: str) -> bool:
     return False
 
 
-async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym: str) -> bool:
+async def _repair(db: AsyncSession, request_id: UUID, account_id: str) -> bool:
     """Give a request that failed after its Postgres step (before v0.124.0)
     what the failure handler writes since #2268: the pseudonym instead of
     the account id, no request metadata, and the marker in
     ``failure_reason``. Scoped to the one row, by its id and stored value.
+    The values are ``pseudonymized_request_values``'s (#2288); the row is not
+    read, so ``initiated_by`` is decided in SQL.
 
     The old ``failure_reason`` is replaced, not kept: an exception text (a
     constraint's ``DETAIL``, a Redis key) can name the account.
@@ -344,12 +347,7 @@ async def _repair(db: AsyncSession, request_id: UUID, account_id: str, pseudonym
         update(ErasureRequest)
         .where(ErasureRequest.id == request_id, ErasureRequest.user_id == account_id)
         .values(
-            user_id=pseudonym,
-            initiated_by=func.coalesce(
-                func.nullif(ErasureRequest.initiated_by, account_id), pseudonym
-            ),
-            ip_address=None,
-            user_agent=None,
+            **pseudonymized_request_values(account_id, None),
             failure_reason=FAILURE_AFTER_POSTGRES_COMMIT + REPAIRED_REASON,
         )
     )
@@ -392,7 +390,7 @@ async def _reprocess_one(
     try:
         repaired = account_id is not None
         if repaired and not dry_run:
-            repaired = await _repair(db, request_id, cast(str, account_id), pseudonym)
+            repaired = await _repair(db, request_id, cast(str, account_id))
         audited, email_recovered = 0, None
         if audit_account_id is not None:
             emails = await _recover_emails(db, audit_account_id, email_hashes)
