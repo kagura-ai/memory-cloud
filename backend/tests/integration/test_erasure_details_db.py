@@ -1180,7 +1180,7 @@ async def test_payload_groups_commit_one_by_one(
         )
         with (
             patch(_QDRANT, AsyncMock(side_effect=patch_payload)),
-            patch("services.session_rollback.PAYLOAD_SYNC_GROUP", 1),
+            patch("services.payload_sync.PAYLOAD_SYNC_GROUP", 1),
         ):
             _, report = await _erase_memories(session, subject)
     assert report.payload_synced == 2

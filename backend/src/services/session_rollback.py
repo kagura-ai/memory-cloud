@@ -59,7 +59,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -95,6 +95,12 @@ from services.memory_versions import (
     record_edit,
     record_revision,
     versioned_snapshot,
+)
+from services.payload_sync import (
+    PAYLOAD_SYNC_GROUP,
+    PlannedPatch,
+    SwallowFailures,
+    sync_payloads_after_commit,
 )
 from services.write_provenance import (
     SessionPrincipal,
@@ -1457,86 +1463,75 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
     await _emit_access_events(result)
 
 
-#: Rows one payload-sync transaction holds ``FOR SHARE`` while it patches them.
-PAYLOAD_SYNC_GROUP = 50
+#: The columns ``finish`` re-reads ``FOR SHARE`` to rebuild a queued patch.
+_PAYLOAD_COLUMNS = (
+    Memory.id,
+    Memory.tags,
+    Memory.importance,
+    Memory.type,
+    Memory.details,
+    Memory.updated_at,
+    Memory.summary_embedding_id,
+)
 
 
-async def _share_lock_rows(db: AsyncSession, ids: list[UUID]) -> dict[UUID, Any]:
-    """The live rows among ``ids``, locked ``FOR SHARE`` in id order."""
-    rows = await db.execute(
-        select(
-            Memory.id,
-            Memory.tags,
-            Memory.importance,
-            Memory.type,
-            Memory.details,
-            Memory.updated_at,
-            Memory.summary_embedding_id,
-        )
-        .where(Memory.id.in_(ids), Memory.deleted_at.is_(None))
-        .order_by(Memory.id)
-        .with_for_update(read=True)
+def _plan_payload_sync(
+    sync: PayloadSync, rows: Mapping[UUID, Any] | None
+) -> PlannedPatch[tuple[PayloadSync, dict[str, Any], list[str]]] | None:
+    """``sync``'s patch from the row now (``rows``: the group's live rows, or
+    None when not read), or None when there is nothing to patch."""
+    if rows is not None and sync.memory_id not in rows:
+        return None  # forgotten or purged since: its payload is not read
+    row = rows.get(sync.memory_id) if rows is not None else None
+    if row is not None and (row.summary_embedding_id or row.id) != sync.target:
+        # #2100: the row names another point since the restore (the
+        # indexer moved it to a newer version): that point is not the
+        # one the restore resolved, and its payload is the indexer's.
+        logger.info("session_rollback_payload_point_moved", memory_id=str(sync.memory_id))
+        return None
+    updates, delete_keys = _sync_patch(sync, row)
+    if not (updates or delete_keys):
+        return None
+    return PlannedPatch(
+        sync.memory_id,
+        (sync, updates, delete_keys),
+        log_fields={"collection": sync.collection},
     )
-    return {row.id: row for row in rows}
+
+
+async def _apply_payload_sync(
+    patch: PlannedPatch[tuple[PayloadSync, dict[str, Any], list[str]]],
+) -> None:
+    from db.qdrant import update_memory_payload_in_qdrant
+
+    sync, updates, delete_keys = patch.data
+    await update_memory_payload_in_qdrant(
+        memory_id=sync.target,
+        payload_updates=updates,
+        collection_name=sync.collection,
+        delete_keys=delete_keys or None,
+        cascade_chunks=sync.cascade_chunks,
+    )
 
 
 async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None) -> None:
+    """The shared post-commit payload step (``payload_sync``, #2283) with
+    ``SwallowFailures``: a failed patch is logged and the next one goes on."""
     if not syncs:
         return
-    from db.qdrant import update_memory_payload_in_qdrant
-
-    failed = 0
-    for start in range(0, len(syncs), PAYLOAD_SYNC_GROUP):
-        group = syncs[start : start + PAYLOAD_SYNC_GROUP]
-        rows: dict[UUID, Any] | None = None
-        if db is not None:
-            try:
-                rows = await _share_lock_rows(db, [sync.memory_id for sync in group])
-            except Exception as exc:
-                logger.warning(
-                    "session_rollback_payload_reread_failed", error_class=type(exc).__name__
-                )
-                await _end_transaction(db, commit=False)
-        for sync in group:
-            if rows is not None and sync.memory_id not in rows:
-                continue  # forgotten or purged since: its payload is not read
-            row = rows.get(sync.memory_id) if rows is not None else None
-            if row is not None and (row.summary_embedding_id or row.id) != sync.target:
-                # #2100: the row names another point since the restore (the
-                # indexer moved it to a newer version): that point is not the
-                # one the restore resolved, and its payload is the indexer's.
-                logger.info("session_rollback_payload_point_moved", memory_id=str(sync.memory_id))
-                continue
-            updates, delete_keys = _sync_patch(sync, row)
-            if not (updates or delete_keys):
-                continue
-            try:
-                await update_memory_payload_in_qdrant(
-                    memory_id=sync.target,
-                    payload_updates=updates,
-                    collection_name=sync.collection,
-                    delete_keys=delete_keys or None,
-                    cascade_chunks=sync.cascade_chunks,
-                )
-            except Exception as exc:
-                failed += 1
-                logger.warning(
-                    "session_rollback_payload_sync_failed",
-                    memory_id=str(sync.memory_id),
-                    collection=sync.collection,
-                    error_class=type(exc).__name__,
-                )
-        if rows is not None and db is not None:
-            await _end_transaction(db, commit=True)  # releases the share locks
-    if failed:
-        logger.warning("session_rollback_payload_syncs_failed", failed=failed, of=len(syncs))
-
-
-async def _end_transaction(db: AsyncSession, *, commit: bool) -> None:
-    try:
-        await (db.commit() if commit else db.rollback())
-    except Exception as exc:
-        logger.warning("session_rollback_payload_tx_end_failed", error_class=type(exc).__name__)
+    policy = SwallowFailures("session_rollback_payload")
+    await sync_payloads_after_commit(
+        db,
+        syncs,
+        memory_id=lambda sync: sync.memory_id,
+        plan=_plan_payload_sync,
+        apply=_apply_payload_sync,
+        on_failure=policy,
+        columns=_PAYLOAD_COLUMNS,
+        live_only=True,
+    )
+    if policy.failed:
+        logger.warning("session_rollback_payload_syncs_failed", failed=policy.failed, of=len(syncs))
 
 
 async def _emit_access_events(result: RollbackResult) -> None:
