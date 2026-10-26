@@ -58,7 +58,10 @@ user row has whose pseudonym is the request's is the subject's account id,
 and the emails are those rows' ``user_email`` values whose sha256 is the
 ``user_email_hash`` of one of the account's requests (left as they are when
 none is). An account id that belongs to a user again (re-registered) is
-never matched: its rows are kept and the request is listed. Running it again changes
+never matched: its rows are kept (``user_id`` stays) and the request is
+listed — but a row of theirs that carries the erased address in
+``user_email`` (not in use) is matched by the mention sweep below: that
+address becomes its pseudonym and the row's IP / user agent are cleared. Running it again changes
 nothing.
 
 Other actors' rows that name the subject (#2298) — an admin acting on them
@@ -447,8 +450,10 @@ async def _reprocess_one(
     email_hashes: Collection[str] = (),
     audit_only: bool = False,
     mentioned: dict[str, str] | None = None,
+    swept_emails: set[str] | None = None,
 ) -> RequestChange:
-    """Repair the row (``account_id``), restore, then strip, by ``pseudonym``;
+    """Repair the row (``account_id``), restore, then strip, by ``pseudonym``,
+    then the audit rows (the live erasure's lock order: memories first);
     commit (or roll back a dry run); then patch the restored memories'
     payloads (``sync_restored_payloads``).
 
@@ -474,12 +479,28 @@ async def _reprocess_one(
     their request metadata (``clear_audit_request_metadata``,
     ``pseudonymize_erasure_audit_initiator``) — every caller passes
     ``mentioned`` for a request that stores (or, repaired, gets) the
-    pseudonym, and only then.
+    pseudonym, and only then. ``swept_emails`` (the run's): emails an
+    earlier request of the run already swept are left out of the mentions.
     """
     try:
         repaired = account_id is not None
         if repaired and not dry_run:
             repaired = await _repair(db, request_id, cast(str, account_id))
+        # the live erasure's order (#2298 review): the subject's memories are
+        # locked first (``erase_subject_details``), the audit rows after —
+        # one cross-table order for both paths
+        details = (
+            SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
+            if audit_only
+            else await erase_subject_details(
+                db,
+                pseudonym,
+                actor=pseudonym,
+                erased_actors=erased - {pseudonym},
+                existed_at=existed_at,
+                dry_run=dry_run,
+            )
+        )
         audited, mentions, email_recovered, mentions_kept = 0, 0, None, False
         emails: list[str] = []
         if audit_account_id is not None:
@@ -494,6 +515,11 @@ async def _reprocess_one(
             live = await _live_emails(db, mention_emails)
             mention_emails -= live
             mentions_kept = bool(live)
+            if swept_emails is not None:
+                # an address two erased accounts held: swept under the first
+                # request of the run, in the plan as when applied
+                mention_emails -= swept_emails
+                swept_emails |= mention_emails
         subs = [audit_account_id] if audit_account_id is not None and mentioned is not None else []
         if dry_run:
             if audit_account_id is not None:
@@ -516,23 +542,12 @@ async def _reprocess_one(
             )
         metadata_cleared = 0
         if mentioned is not None:
-            metadata_cleared = await clear_audit_request_metadata(
-                db, pseudonym, dry_run=dry_run
-            ) + await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run)
+            # rows, not edits: one row can lose its IP and get the initiator
+            cleared = await clear_audit_request_metadata(db, pseudonym, dry_run=dry_run)
+            initiators = await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run)
+            metadata_cleared = len(cleared | initiators)
         if audited:
             email_recovered = bool(emails)
-        details = (
-            SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
-            if audit_only
-            else await erase_subject_details(
-                db,
-                pseudonym,
-                actor=pseudonym,
-                erased_actors=erased - {pseudonym},
-                existed_at=existed_at,
-                dry_run=dry_run,
-            )
-        )
         restore, strip = details.restore, details.strip
         change = RequestChange(
             request_id=request_id,
@@ -683,8 +698,10 @@ async def reprocess_erasures(
     # the one request that pseudonymizes an account id's rows recovers every
     # email of the account (``email_hashes``, by the subject's pseudonym)
     audited: set[str] = set()
-    # #2298: the pseudonyms whose mention sweep ran (once per run)
+    # #2298: the pseudonyms whose mention sweep ran (once per run), and the
+    # emails swept (an address two erased accounts held: once per run)
     swept: set[str] = set()
+    swept_emails: set[str] = set()
 
     def mentions_of(pseudonym: str) -> dict[str, str] | None:
         """The run's mention map the first time ``pseudonym`` is processed."""
@@ -735,6 +752,7 @@ async def reprocess_erasures(
                 audit_account_id=audit_account_id(request.id, pseudonym),
                 email_hashes=email_hashes[pseudonym],
                 mentioned=mentions_of(pseudonym),
+                swept_emails=swept_emails,
             )
         else:
             # Both checks before the user_id is used as a subject: only a row
@@ -759,6 +777,7 @@ async def reprocess_erasures(
                         email_hashes=email_hashes[request.user_id],
                         audit_only=True,
                         mentioned=mentions_of(request.user_id),
+                        swept_emails=swept_emails,
                     )
                     record(change)
                 result.skipped.append((request.id, SKIPPED_NOT_RUN))
@@ -777,6 +796,7 @@ async def reprocess_erasures(
                 audit_account_id=audit_account_id(request.id, request.user_id),
                 email_hashes=email_hashes[request.user_id],
                 mentioned=mentions_of(request.user_id),
+                swept_emails=swept_emails,
             )
         record(change)
     return result

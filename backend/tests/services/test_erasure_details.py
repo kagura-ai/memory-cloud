@@ -756,12 +756,16 @@ async def test_the_dry_run_count_leaves_out_the_own_rows() -> None:
 
 
 async def test_request_metadata_is_cleared_by_the_pseudonym_under_a_lock() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
     from services.erasure_details import clear_audit_request_metadata
 
-    db = _mock_db(3)
-    assert await clear_audit_request_metadata(db, PSEUDONYM) == 3
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=iter([4, 7]))))
+    assert await clear_audit_request_metadata(db, PSEUDONYM) == {4, 7}
     sql, params = _compiled(db.execute.await_args.args[0])
     assert sql.startswith("UPDATE audit_logs SET ip_address=")
+    assert sql.endswith("RETURNING audit_logs.id")
     assert params["ip_address"] is None and params["user_agent"] is None
     assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
     assert "audit_logs_1.ip_address IS NOT NULL OR audit_logs_1.user_agent IS NOT NULL" in sql
@@ -775,10 +779,10 @@ async def test_the_request_metadata_dry_run_counts_without_a_lock() -> None:
     from services.erasure_details import clear_audit_request_metadata
 
     db = MagicMock()
-    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=2)))
-    assert await clear_audit_request_metadata(db, PSEUDONYM, dry_run=True) == 2
+    db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=iter([2]))))
+    assert await clear_audit_request_metadata(db, PSEUDONYM, dry_run=True) == {2}
     sql, params = _compiled(db.execute.await_args.args[0])
-    assert sql.startswith("SELECT count(") and "FOR UPDATE" not in sql
+    assert sql.startswith("SELECT audit_logs_1.id") and "FOR UPDATE" not in sql
     assert "ip_address IS NOT NULL OR" in sql and PSEUDONYM in _flat(params)
 
 
@@ -807,7 +811,7 @@ async def test_only_an_initiated_by_that_hashes_to_the_pseudonym_is_rewritten() 
             side_effect=[MagicMock(all=MagicMock(return_value=rows)), MagicMock()]
         )
         with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-            assert await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run) == 1
+            assert await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run) == {1}
         stmts = [c.args[0] for c in db.execute.await_args_list]
         select_sql, params = _compiled(stmts[0])
         assert isinstance(stmts[0], Select)

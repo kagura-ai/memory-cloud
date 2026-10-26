@@ -2069,8 +2069,8 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         # #2298: the own rows, then the mentions, after one lock over both
         assert len(audit) == 2 and audit[1] == audit[0] + 1
         lock = order[audit[0] - 1]
-        assert isinstance(lock, Select) and lock._for_update_arg is not None
-        assert "audit_logs" in str(lock)
+        assert isinstance(lock, Select)
+        assert "audit_logs" in str(lock) and str(lock).endswith("FOR UPDATE")
         # the mentions are the last statement before the user delete, and
         # everything is before the one commit
         assert order[audit[1] + 1] == "delete"

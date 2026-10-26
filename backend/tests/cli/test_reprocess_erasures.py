@@ -435,3 +435,53 @@ def test_cleared_request_metadata_is_reported_and_counted(capsys):
     assert f"would clear audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
     assert f"cleared audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
     assert cli._summary(plan).endswith(", 4 audit row(s) request metadata cleared")
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_the_memories_are_locked_before_the_audit_rows(dry_run):
+    """#2298 review: the live erasure locks the subject's memories, then the
+    audit rows; the re-run takes the same order (the details step first),
+    so a re-run and a live erasure that share rows cannot deadlock."""
+    from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
+
+    order: list[str] = []
+
+    async def step(name, result):
+        order.append(name)
+        return result
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    details = SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
+    with (
+        patch.object(cli, "erase_subject_details", lambda *a, **k: step("details", details)),
+        patch.object(cli, "_recover_emails", lambda *a, **k: step("recover", [])),
+        patch.object(cli, "_live_emails", lambda *a, **k: step("live", set())),
+        patch.object(cli, "_count_audit_rows", lambda *a, **k: step("audit", 0)),
+        patch.object(cli, "count_audit_mentions", lambda *a, **k: step("audit", 0)),
+        patch.object(cli, "pseudonymize_audit_trail", lambda *a, **k: step("audit", (0, 0))),
+        patch.object(cli, "clear_audit_request_metadata", lambda *a, **k: step("audit", set())),
+        patch.object(
+            cli, "pseudonymize_erasure_audit_initiator", lambda *a, **k: step("audit", set())
+        ),
+        patch.object(cli, "sync_restored_payloads", AsyncMock()),
+    ):
+        asyncio.run(
+            cli._reprocess_one(
+                db,
+                REQUEST_ID,
+                "p" * 64,
+                None,
+                None,
+                dry_run,
+                frozenset(),
+                audit_account_id="raw-sub",
+                mentioned={},
+                swept_emails=set(),
+            )
+        )
+
+    assert order[0] == "details"
+    assert "audit" in order and "details" not in order[1:]

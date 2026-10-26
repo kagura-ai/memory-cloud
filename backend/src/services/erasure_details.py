@@ -221,8 +221,10 @@ async def pseudonymize_audit_logs(
     email it recovered for the account (one per request of it), or none:
     then ``user_email`` and email occurrences in ``resource`` stay and only
     the sub is replaced. ``orphaned_only`` (the re-run): rows whose
-    ``user_id`` belongs to a user row are never touched, even when that user
-    row appeared after the run read the audit subs (a re-registration).
+    ``user_id`` belongs to a user row are never touched by this statement,
+    even when that user row appeared after the run read the audit subs (a
+    re-registration); the mention sweep (``pseudonymize_audit_mentions``)
+    still rewrites an erased address that no user row holds on them.
 
     Rows of every other ``user_id`` are never touched here: where another
     actor's row names the subject (an admin acting on them, or they acting
@@ -443,7 +445,7 @@ def _request_metadata_rows(row: Any, pseudonym: str) -> tuple[ColumnElement[bool
 
 async def clear_audit_request_metadata(
     db: AsyncSession, pseudonym: str, *, dry_run: bool = False
-) -> int:
+) -> set[int]:
     """Clear ``ip_address`` / ``user_agent`` on the audit rows that carry the
     erased subject's ``pseudonym`` (#2345): rows an erasure pseudonymized
     before the live path cleared them, and the ``account_erasure`` row that
@@ -451,15 +453,15 @@ async def clear_audit_request_metadata(
     locked in id order. Idempotent.
 
     Returns:
-        The rowcount (``dry_run``: how many rows would change; no lock).
+        The ids of the rows changed (``dry_run``: that would change; no lock).
     """
     if dry_run:
         row = aliased(AuditLog)
-        return (
-            await db.execute(
-                select(func.count(row.id)).where(*_request_metadata_rows(row, pseudonym))
-            )
-        ).scalar_one()
+        return set(
+            (
+                await db.execute(select(row.id).where(*_request_metadata_rows(row, pseudonym)))
+            ).scalars()
+        )
     result = await db.execute(
         update(AuditLog)
         .where(
@@ -469,13 +471,14 @@ async def clear_audit_request_metadata(
             *_request_metadata_rows(AuditLog, pseudonym),
         )
         .values(ip_address=None, user_agent=None)
+        .returning(AuditLog.id)
     )
-    return cast(CursorResult[Any], result).rowcount or 0
+    return set(result.scalars())
 
 
 async def pseudonymize_erasure_audit_initiator(
     db: AsyncSession, pseudonym: str, *, dry_run: bool = False
-) -> int:
+) -> set[int]:
     """The ``account_erasure`` rows of ``pseudonym`` whose
     ``user_metadata.initiated_by`` is the subject's raw sub get the
     pseudonym there (#2345: the rule of ``pseudonymized_request_values``,
@@ -485,7 +488,7 @@ async def pseudonymize_erasure_audit_initiator(
     order; the column is ``json``, so the whole value is written.
 
     Returns:
-        How many rows changed (``dry_run``: would change; no lock).
+        The ids of the rows changed (``dry_run``: that would change; no lock).
     """
     stmt = (
         select(AuditLog.id, AuditLog.user_metadata)
@@ -494,7 +497,7 @@ async def pseudonymize_erasure_audit_initiator(
     )
     if not dry_run:
         stmt = stmt.with_for_update()
-    changed = 0
+    changed: set[int] = set()
     for row_id, metadata in (await db.execute(stmt)).all():
         initiated_by = metadata.get("initiated_by") if isinstance(metadata, dict) else None
         if (
@@ -503,7 +506,7 @@ async def pseudonymize_erasure_audit_initiator(
             or erasure_pseudonym(initiated_by) != pseudonym
         ):
             continue
-        changed += 1
+        changed.add(row_id)
         if not dry_run:
             await db.execute(
                 update(AuditLog)
