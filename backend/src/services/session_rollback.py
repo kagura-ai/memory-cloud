@@ -97,7 +97,6 @@ from services.memory_versions import (
     versioned_snapshot,
 )
 from services.payload_sync import (
-    PAYLOAD_SYNC_GROUP,
     PlannedPatch,
     SwallowFailures,
     sync_payloads_after_commit,
@@ -1600,7 +1599,6 @@ __all__ = [
     "MAX_ROLLBACK_EVENTS_PER_CALL",
     "MAX_ROLLBACK_WINDOW",
     "MAX_UNFORGETS_PER_CALL",
-    "PAYLOAD_SYNC_GROUP",
     "SKIP_CAUSES",
     "AlreadyRolledBackError",
     "MemoryState",

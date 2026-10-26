@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, Protocol, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -56,8 +56,8 @@ class PlannedPatch(Generic[DataT]):
         data: What the caller's ``apply`` needs (the row, the patch, ...).
         embedded: Whether the row's embedding had succeeded when planned —
             read before the patch, since a failed SAVEPOINT expires the row.
-        log_fields: Extra fields for the failure log line (ids only, never
-            values).
+        log_fields: Extra fields for the policy's failure log lines (ids
+            only, never values); a key the policy sets itself is dropped.
     """
 
     memory_id: UUID
@@ -69,8 +69,9 @@ class PlannedPatch(Generic[DataT]):
 class PayloadFailurePolicy(Protocol):
     """What the payload step does when a read, a patch or a commit fails.
 
-    No method may fail the caller for the vector store's sake: the Postgres
-    work is committed already.
+    A vector-store failure never fails the caller: the Postgres work is
+    committed already. A session that cannot even roll back may (as
+    ``RequeueEmbeddingOnFailure`` lets it, #2266 behaviour kept by #2283).
     """
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
@@ -114,7 +115,7 @@ class SwallowFailures:
         try:
             await db.rollback()
         except Exception as end_exc:
-            await self.commit_failed(db, ids, end_exc)
+            self._log_tx_end_failed(end_exc)
         return True
 
     async def patch_failed(
@@ -124,11 +125,14 @@ class SwallowFailures:
         logger.warning(
             f"{self.event_prefix}_sync_failed",
             memory_id=str(patch.memory_id),
-            **patch.log_fields,
+            **_extra(patch, "error_class"),
             error_class=type(exc).__name__,
         )
 
     async def commit_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> None:
+        self._log_tx_end_failed(exc)
+
+    def _log_tx_end_failed(self, exc: Exception) -> None:
         logger.warning(f"{self.event_prefix}_tx_end_failed", error_class=type(exc).__name__)
 
 
@@ -174,16 +178,17 @@ class RequeueEmbeddingOnFailure:
         from services.content_chunk_writer import requeue_embedding
 
         try:
-            requeued = (
-                patch.embedded
-                and db is not None
-                and await requeue_embedding(db, patch.memory_id, reason=self.reason)
+            if patch.embedded and db is None:
+                raise RuntimeError("no session to re-queue the embedding")
+            requeued = patch.embedded and await requeue_embedding(
+                cast(AsyncSession, db), patch.memory_id, reason=self.reason
             )
         except Exception as requeue_exc:
             self.requeue_failed += 1
             logger.warning(
                 f"{self.event_prefix}_requeue_failed",
                 memory_id=str(patch.memory_id),
+                **_extra(patch, "error_class", "requeue_error_class"),
                 error_class=type(exc).__name__,
                 requeue_error_class=type(requeue_exc).__name__,
             )
@@ -196,6 +201,7 @@ class RequeueEmbeddingOnFailure:
         (logger.warning if requeued or not isinstance(exc, QdrantError) else logger.info)(
             f"{self.event_prefix}_failed",
             memory_id=str(patch.memory_id),
+            **_extra(patch, "error_class", "requeued"),
             error_class=type(exc).__name__,
             requeued=requeued,
         )
@@ -207,6 +213,11 @@ class RequeueEmbeddingOnFailure:
             memory_ids=[str(i) for i in ids],
             error_class=type(exc).__name__,
         )
+
+
+def _extra(patch: PlannedPatch[Any], *own: str) -> dict[str, Any]:
+    """``patch.log_fields`` without the keys a failure log line sets itself."""
+    return {k: v for k, v in patch.log_fields.items() if k not in {"memory_id", *own}}
 
 
 async def share_lock_rows(

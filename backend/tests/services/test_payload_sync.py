@@ -188,3 +188,43 @@ async def test_a_failed_commit_goes_to_the_policy(kind: str) -> None:
     else:
         assert event == "p_commit_failed"
         db.rollback.assert_awaited_once()
+
+
+async def test_requeue_without_a_session_counts_an_embedded_row_as_failed() -> None:
+    (only,) = _ids(1)
+    _, apply = _applier({only}, QdrantError("down"))
+    policy = ps.RequeueEmbeddingOnFailure("p", reason="r")
+    with patch(_REQUEUE, AsyncMock(return_value=True)) as requeue:
+        await ps.sync_payloads_after_commit(
+            None, [only], memory_id=lambda i: i, plan=_plan_all({only}), apply=apply,
+            on_failure=policy,
+        )  # fmt: skip
+    requeue.assert_not_awaited()
+    assert (policy.requeued_after_error, policy.skipped_requeued, policy.requeue_failed) == (
+        0,
+        0,
+        1,
+    )
+
+
+@pytest.mark.parametrize("kind", ["swallow", "requeue"])
+async def test_log_fields_never_clash_with_the_policy_keys(kind: str) -> None:
+    (only,) = _ids(1)
+    _, apply = _applier({only}, RuntimeError("down"))
+
+    def plan(memory_id: uuid.UUID, rows: Mapping[uuid.UUID, Any] | None) -> Any:
+        fields = {"memory_id": "x", "error_class": "x", "requeued": "x", "collection": "c"}
+        return ps.PlannedPatch(memory_id, None, log_fields=fields)
+
+    policy: ps.PayloadFailurePolicy = (
+        ps.SwallowFailures("p")
+        if kind == "swallow"
+        else ps.RequeueEmbeddingOnFailure("p", reason="r")
+    )
+    with patch.object(ps, "logger") as log:
+        await ps.sync_payloads_after_commit(
+            None, [only], memory_id=lambda i: i, plan=plan, apply=apply, on_failure=policy
+        )
+    kwargs = log.warning.call_args.kwargs
+    assert kwargs["memory_id"] == str(only) and kwargs["error_class"] == "RuntimeError"
+    assert kwargs["collection"] == "c"
