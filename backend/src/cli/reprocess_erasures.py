@@ -106,6 +106,7 @@ from services.erasure_details import (  # noqa: E402
     erasure_pseudonym,
     finalized_erasure,
     is_pseudonym,
+    memory_scrub_at,
     note_row_pseudonymized,
     payload_counts,
     pseudonymize_audit_logs,
@@ -294,10 +295,9 @@ def _existed_at(
     wrote on the subject's memories within that hour are stripped and marked
     too; later ones are left alone. Without ``started_at``, no bound.
     """
-    postgres = (summary or {}).get("postgres")
-    scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
-    if isinstance(scrubbed, str):
-        return to_naive_utc(datetime.fromisoformat(scrubbed))
+    scrubbed = memory_scrub_at(summary)
+    if scrubbed is not None:
+        return scrubbed
     if completed_at is not None:
         return to_naive_utc(completed_at)
     if started_at is not None:

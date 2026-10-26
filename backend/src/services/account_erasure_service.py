@@ -36,7 +36,11 @@ task, #2286) leaves the row ``in_progress``. The Postgres step writes its
 ``postgres`` summary on the request row inside its own transaction, so the
 sweep, finding the user row gone, can tell such a run from one that never
 started: it marks it ``failed`` with ``INTERRUPTED_AFTER_POSTGRES_COMMIT`` and
-pseudonymizes it like the handler would.
+pseudonymizes it like the handler would, then patches the vector payloads of
+the memories the run's restore put back (#2302; the ``account_erasure`` audit
+row and the completion email are not done on that path). The ``postgres``
+summary decides, not the user lookup: a user row with the sub of such a
+request is an account registered again since, and is never erased by it.
 
 The vector-store delete (step 1, ``delete_user_points``) is NOT best-effort:
 any failure of either backend (Qdrant, or LanceDB on Kagura Lite) is raised
@@ -62,7 +66,7 @@ import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -135,10 +139,12 @@ from services.erasure_details import (
     erasure_pseudonym,
     lock_subject_memories,
     locked_ids,
+    memory_scrub_at,
     payload_counts,
     pseudonymize_audit_logs,
     pseudonymize_revision_actor,
     pseudonymized_request_values,
+    restored_payload_syncs,
     strip_subject_details,
     sync_restored_payloads,
 )
@@ -288,6 +294,13 @@ def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
         "error_class": error_class,
         "last_attempt_at": to_utc_iso(utcnow()),
     }
+
+
+# #2302: what the sweep's close of a claimed request did
+CloseOutcome = Literal["interrupted", "never_ran", "moved"]
+_CLOSED_INTERRUPTED: CloseOutcome = "interrupted"
+_CLOSED_NEVER_RAN: CloseOutcome = "never_ran"
+_CLOSED_MOVED: CloseOutcome = "moved"
 
 
 def _merged_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
@@ -876,9 +889,15 @@ class AccountErasureService:
           transaction) means that step committed and the run was
           interrupted after it — ``failed`` with
           ``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the subject's Redis state
-          cleared best-effort; without it nothing ran — ``complete`` with
-          the ``user_row_already_absent`` note. Either way the row is
-          pseudonymized (``pseudonymized_request_values``).
+          cleared best-effort, and the vector payloads of the memories its
+          restore put back are patched right after (#2302,
+          ``_resync_interrupted_payloads``); without it nothing ran —
+          ``complete`` with the ``user_row_already_absent`` note. Either way
+          the row is pseudonymized (``pseudonymized_request_values``). A row
+          with ``postgres`` is closed that way even when a user row with its
+          sub exists (#2302): the subject was deleted in that transaction,
+          so the user row is an account registered again since — it is never
+          run against, and its Redis keys are kept.
 
         - **Stale ``pending``** (``requested_at`` older than 1h + 5min
           grace): the Redis confirm token (TTL 1h) has expired and the
@@ -965,10 +984,24 @@ class AccountErasureService:
             ).scalar_one_or_none()
             if request is None:
                 continue  # removed since it was claimed; nothing to run
+            # #2302: decided before the user lookup. ``postgres`` is written in
+            # the Postgres step's transaction, with the user delete: on a
+            # claimed row it proves this request's subject was erased, so a
+            # user row with that sub now is another account (registered again
+            # since) and must never be run against.
+            summary = dict(request.deleted_data_summary or {})
+            ran = isinstance(summary.get("postgres"), dict)
             target = await self._load_user_or_none(user_id)
-            if target is None:
+            if ran or target is None:
                 try:
-                    await self._close_request_without_user(request)
+                    closed = await self._close_request_without_user(
+                        request, user_row_exists=target is not None
+                    )
+                    if closed == _CLOSED_INTERRUPTED:
+                        # #2302: the run's payload patch of restored memories
+                        await self._resync_interrupted_payloads(
+                            request_id, self._pseudonym(user_id), summary
+                        )
                 except Exception as exc:
                     # one request's close must not stop the batch (the others
                     # are claimed already); the request id and the class only
@@ -1020,8 +1053,12 @@ class AccountErasureService:
                 continue
         return executed
 
-    async def _close_request_without_user(self, request: ErasureRequest) -> None:
-        """Close a claimed request whose user row is gone (#2286).
+    async def _close_request_without_user(
+        self, request: ErasureRequest, *, user_row_exists: bool = False
+    ) -> CloseOutcome:
+        """Close a claimed request whose user row is gone (#2286), or whose
+        Postgres step committed although a user row with its sub exists
+        (#2302: the sub was registered again since).
 
         ``deleted_data_summary.postgres`` is written in the Postgres step's
         own transaction (``_delete_postgres``), so its presence means the
@@ -1031,9 +1068,14 @@ class AccountErasureService:
         completion time; ``memory_scrub_at`` stays in the summary), so
         ``finalized_erasure`` — the re-run, the erased-members set — treats
         it as an erasure that ran. The subject's Redis state is cleared
-        best-effort here; the payload patch of restored memories, the
-        ``account_erasure`` audit row and the completion email are not
-        done. Without ``postgres`` nothing was erased (the row was removed
+        best-effort here; the payload patch of restored memories is re-driven
+        by the caller right after this commit (#2302,
+        ``_resync_interrupted_payloads``); the ``account_erasure`` audit row
+        and the completion email are not done. When ``user_row_exists`` (the
+        sub was registered again after the Postgres commit, #2302), the same
+        close is written, but the Redis keys are the new account's: they are
+        kept, no ``redis`` key is added, and the log line is
+        ``erasure_sweep_subject_reregistered``. Without ``postgres`` nothing was erased (the row was removed
         some other way, or the run was interrupted before the Postgres
         commit on a version that wrote the summary only after it): the
         ``complete`` row gets the ``user_row_already_absent`` note, with
@@ -1047,6 +1089,14 @@ class AccountErasureService:
         guarded by ``status = in_progress`` (the claim set it), so a row
         moved meanwhile is left alone and only logged as moved. The log
         lines carry the request id only.
+
+        Returns:
+            ``"interrupted"`` (the row is now ``failed`` with the marker),
+            ``"never_ran"`` (the note row) or ``"moved"`` (nothing written).
+
+        Raises:
+            ValueError: ``user_row_exists`` on a row without ``postgres``: that
+                request must run (``_execute``), not be closed.
         """
         request_id = request.id
         user_id = request.user_id
@@ -1056,11 +1106,14 @@ class AccountErasureService:
         # later write, and they are lost with the interrupted process.
         summary = dict(request.deleted_data_summary or {})
         ran = isinstance(summary.get("postgres"), dict)
+        if user_row_exists and not ran:
+            raise ValueError("a request that never ran with a live user row is not closed")
         values = pseudonymized_request_values(user_id, request.initiated_by)
         if ran:
-            redis = await self._clear_redis_best_effort(request_id, user_id)
-            if redis is not None:
-                summary["redis"] = redis
+            if not user_row_exists:
+                redis = await self._clear_redis_best_effort(request_id, user_id)
+                if redis is not None:
+                    summary["redis"] = redis
             values.update(
                 status=STATUS_FAILED,
                 failure_reason=INTERRUPTED_AFTER_POSTGRES_COMMIT,
@@ -1086,9 +1139,67 @@ class AccountErasureService:
         await self.db.commit()
         if not result.rowcount:
             logger.info("erasure_sweep_request_moved", request_id=str(request_id))
+            return _CLOSED_MOVED
+        if user_row_exists:
+            logger.warning("erasure_sweep_subject_reregistered", request_id=str(request_id))
+        else:
+            logger.warning(
+                "erasure_sweep_user_row_absent", request_id=str(request_id), ran_in_postgres=ran
+            )
+        return _CLOSED_INTERRUPTED if ran else _CLOSED_NEVER_RAN
+
+    async def _resync_interrupted_payloads(
+        self, request_id: UUID, pseudonym: str, summary: dict[str, Any]
+    ) -> None:
+        """Patch the vector payloads of the memories an interrupted run
+        restored (#2302), right after the sweep closed it as interrupted.
+
+        The run's ``RestoreReport`` died with its process, so the restored
+        set comes from the restore's revision rows
+        (``restored_payload_syncs``, bounded by the run's ``memory_scrub_at``)
+        and goes through ``sync_restored_payloads`` — its own group
+        transactions after the close's commit, a failed patch re-queues the
+        memory for embedding, and it never raises for the vector store's or
+        the session's sake. The outcome is recorded as the live run's step 3b
+        would (``payload_counts`` in the ``postgres`` section, zeros
+        included: ``details_payload_synced`` present means the re-drive ran,
+        which is what ``reprocess_erasures`` checks before its backstop),
+        guarded by ``status = failed`` and the interrupted marker: when the
+        run's own ``_finalize`` landed meanwhile (it clears the marker, and
+        patched its own payloads), nothing is written and the row is logged
+        as moved. Logs carry the request id and counts only.
+        """
+        syncs = await restored_payload_syncs(self.db, pseudonym, since=memory_scrub_at(summary))
+        await self.db.rollback()  # ends the read; the patch groups commit their own
+        report = RestoreReport()
+        await sync_restored_payloads(self.db, syncs, report)
+        counts = payload_counts(report)
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(
+                    ErasureRequest.id == request_id,
+                    ErasureRequest.status == STATUS_FAILED,
+                    ErasureRequest.failure_reason == INTERRUPTED_AFTER_POSTGRES_COMMIT,
+                )
+                .values(
+                    deleted_data_summary=_merged_summary(
+                        {"postgres": {**summary["postgres"], **counts}}
+                    )
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        await self.db.commit()
+        if not result.rowcount:
+            logger.info("erasure_sweep_request_moved", request_id=str(request_id))
             return
-        logger.warning(
-            "erasure_sweep_user_row_absent", request_id=str(request_id), ran_in_postgres=ran
+        logger.info(
+            "erasure_sweep_payloads_resynced",
+            request_id=str(request_id),
+            memories=len(syncs),
+            **counts,
         )
 
     async def _clear_redis_best_effort(
@@ -2308,6 +2419,20 @@ class AccountErasureService:
         acting admin's sub — legitimate accountability evidence, kept. Only the
         success path pseudonymizes: a failed/cancelled request means the user was
         NOT erased, so that row legitimately keeps identifying info.
+
+        Not guarded by this run's claim (``started_at``), unlike the failure
+        handlers before the Postgres commit (#2302, deciding the #2306
+        review's question): ``_finalize`` only runs after this run's
+        Postgres step committed, and that fact outranks any newer claim of
+        the row, as in the generic handler's ``erased_in_postgres`` case. A
+        newer claim found the subject either gone (the sweep closes the row
+        ``interrupted``, which this completion is meant to replace, #2286)
+        or still there before this run's commit — then the newer run cannot
+        erase it again, and whatever it wrote (a reschedule, a failure with
+        the raw ids, a cancel after a reschedule) is wrong once the subject
+        is erased: ``complete`` with the pseudonymized row is the truth. A
+        0-row match means the row was deleted meanwhile: logged, nothing
+        else (the subject is erased and the audit row is written).
         """
         values: dict[str, Any] = {
             "status": STATUS_COMPLETE,
@@ -2318,10 +2443,16 @@ class AccountErasureService:
             "failure_reason": None,
             **pseudonymized_request_values(request.user_id, request.initiated_by),
         }
-        await self.db.execute(
-            update(ErasureRequest).where(ErasureRequest.id == request.id).values(**values)
+        request_id = request.id
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(ErasureRequest).where(ErasureRequest.id == request_id).values(**values)
+            ),
         )
         await self.db.commit()
+        if not result.rowcount:
+            logger.warning("erasure_finalize_request_missing", request_id=str(request_id))
 
     # ------------------------------------------------------------------
     # Lookups

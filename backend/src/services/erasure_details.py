@@ -109,7 +109,7 @@ from services.payload_sync import (
     sync_payloads_after_commit,
 )
 from services.write_provenance import WriteProvenance
-from utils.datetime import to_utc_iso, utcnow
+from utils.datetime import to_naive_utc, to_utc_iso, utcnow
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
@@ -827,6 +827,56 @@ class RestoreReport:
     payload_requeue_failed: int = 0
     memory_ids: list[UUID] = field(default_factory=list)
     to_sync: list[PayloadSync] = field(default_factory=list)
+
+
+def memory_scrub_at(summary: Mapping[str, Any] | None) -> datetime | None:
+    """``summary.postgres.memory_scrub_at`` (#2268) as naive UTC, or None.
+
+    When the erasure locked the subject's memories, as ``_execute`` stores it
+    in the request's summary (since v0.124.0). None when the summary has no
+    ``postgres`` section or no such key.
+    """
+    postgres = (summary or {}).get("postgres")
+    scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
+    if isinstance(scrubbed, str):
+        return to_naive_utc(datetime.fromisoformat(scrubbed))
+    return None
+
+
+async def restored_payload_syncs(
+    db: AsyncSession, pseudonym: str, *, since: datetime | None
+) -> list[PayloadSync]:
+    """The memories an erasure run restored under ``pseudonym`` (#2302).
+
+    Read back from the restore's own revision rows (``restore_editor_details``
+    writes one per restored memory: ``kind='updated'``, ``writer='erasure'``,
+    ``actor_user_id`` = the pseudonym, ``at`` = after ``memory_scrub_at``),
+    for a run whose in-memory ``RestoreReport`` was lost with its process
+    (interrupted after the Postgres commit, #2286): what
+    ``sync_restored_payloads`` needs to patch their vector payloads. One
+    entry per memory, at its newest such revision's version — a row edited
+    since has moved past it and is skipped by the patch, as in the live run.
+    A later restore under the same pseudonym (the re-run, or an erasure of
+    the same sub registered again) is included too: the patch is idempotent.
+
+    ``since`` is the run's ``memory_scrub_at``; None (no bound to trust)
+    gives nothing. Reads ``idx_memory_revisions_actor``: the pseudonym's
+    rows only.
+    """
+    if since is None:
+        return []
+    rows = await db.execute(
+        select(MemoryRevision.memory_id, func.max(MemoryRevision.version))
+        .where(
+            MemoryRevision.actor_user_id == pseudonym,
+            MemoryRevision.writer == REVISION_WRITER_ERASURE,
+            MemoryRevision.kind == REVISION_KIND_UPDATED,
+            MemoryRevision.at >= since,
+        )
+        .group_by(MemoryRevision.memory_id)
+        .order_by(MemoryRevision.memory_id)
+    )
+    return [PayloadSync(memory_id, version) for memory_id, version in rows.all()]
 
 
 def payload_counts(report: RestoreReport) -> dict[str, int]:

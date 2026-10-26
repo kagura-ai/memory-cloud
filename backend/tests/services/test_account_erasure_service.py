@@ -1535,6 +1535,42 @@ class TestErasureResiduals1365:
         assert params["user_id"] != "erased-sub"  # pseudonymized
         assert "initiated_by" not in params  # admin sub kept out of the UPDATE
 
+    @pytest.mark.parametrize("rowcount", [1, 0])
+    @pytest.mark.asyncio
+    async def test_finalize_is_not_guarded_by_the_runs_claim(self, rowcount):
+        """#2302: the completion follows the Postgres commit, which outranks a
+        newer claim of the row: the UPDATE matches the id alone (no
+        ``started_at`` / ``status``). A 0-row match (the row was deleted) is
+        logged with the request id only and does not raise."""
+        svc = _service()
+        captured: dict = {}
+
+        async def _exec(stmt):
+            captured["stmt"] = stmt
+            return SimpleNamespace(rowcount=rowcount)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        svc.db.commit = AsyncMock()
+        request = SimpleNamespace(id=uuid4(), user_id="erased-sub", initiated_by="erased-sub")
+
+        with patch("services.account_erasure_service.logger") as log:
+            await svc._finalize(request, {"users": 1})
+
+        where = str(captured["stmt"].whereclause)
+        assert "started_at" not in where and "status" not in where
+        assert "erasure_requests.id" in where
+        names = [c.args[0] for c in log.warning.call_args_list]
+        if rowcount:
+            assert "erasure_finalize_request_missing" not in names
+        else:
+            (call,) = [
+                c
+                for c in log.warning.call_args_list
+                if c.args[0] == "erasure_finalize_request_missing"
+            ]
+            assert call.kwargs == {"request_id": str(request.id)}
+        svc.db.commit.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_sweep_calls_secret_access_log_erasure(self):
         svc = _service()
@@ -2137,6 +2173,8 @@ def _sweep_with_absent_user(
     svc._load_user_or_none = AsyncMock(return_value=None)
     svc._execute = AsyncMock()
     svc._clear_redis = AsyncMock(return_value={"sessions": 1, "co_act": 0})
+    # #2302: the payload re-drive after an interrupted close (tested below)
+    svc._resync_interrupted_payloads = AsyncMock()
     return svc, statements
 
 
@@ -2303,6 +2341,236 @@ class TestSweepClosesARequestWithoutAUserRow:
         svc.db.rollback.assert_awaited()
         (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_close_failed"]
         assert call.kwargs == {"request_id": str(gone.id), "error_class": "RuntimeError"}
+
+
+class TestTheSweepReDrivesAnInterruptedRunsPayloads:
+    """#2302: right after closing a row as interrupted, the sweep patches the
+    vector payloads of the memories the run's restore put back (read from
+    the restore's revision rows) and records the counts on the row."""
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_re_drives_only_an_interrupted_close(self):
+        request = _execute_request(self_service=True)
+        postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        request.deleted_data_summary = {"postgres": postgres}
+        svc, _ = _sweep_with_absent_user(request)
+
+        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+            await svc.sweep_pending_erasures()
+            pseudonym = svc._pseudonym("u-1")
+
+        svc._resync_interrupted_payloads.assert_awaited_once_with(
+            request.id, pseudonym, {"postgres": postgres}
+        )
+
+    @pytest.mark.parametrize("summary", [None, {"qdrant": {"kagura_memories": 0}}])
+    @pytest.mark.asyncio
+    async def test_a_never_ran_note_row_is_not_re_driven(self, summary):
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = summary
+        svc, statements = _sweep_with_absent_user(request)
+
+        await svc.sweep_pending_erasures()
+
+        svc._resync_interrupted_payloads.assert_not_awaited()
+        _close_values(statements)  # the close is the only UPDATE
+
+    @pytest.mark.asyncio
+    async def test_a_moved_row_is_not_re_driven(self):
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"postgres": {"users": 1}}
+        svc, statements = _sweep_with_absent_user(request)
+        executed = svc.db.execute.side_effect
+
+        def moved(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            result = executed(stmt, *args, **kwargs)
+            if len(statements) > 3:
+                result.rowcount = 0
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=moved)
+        await svc.sweep_pending_erasures()
+
+        svc._resync_interrupted_payloads.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_re_drive_is_logged_and_the_batch_goes_on(self):
+        gone, live = _execute_request(self_service=True), _execute_request(self_service=True)
+        gone.deleted_data_summary = {"postgres": {"users": 1}}
+        live.user_id = live.initiated_by = "u-2"
+        svc = _service()
+        claimed = MagicMock()
+        claimed.scalars.return_value.all.return_value = [gone, live]
+        fresh = [MagicMock(), MagicMock()]
+        fresh[0].scalar_one_or_none.return_value = gone
+        fresh[1].scalar_one_or_none.return_value = live
+        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), claimed, *fresh])
+        svc._load_user_or_none = AsyncMock(side_effect=[None, _user(user_id="u-2")])
+        svc._close_request_without_user = AsyncMock(return_value="interrupted")
+        svc._resync_interrupted_payloads = AsyncMock(side_effect=RuntimeError("u-1 down"))
+        svc._execute = AsyncMock()
+
+        with patch("services.account_erasure_service.logger") as log:
+            assert await svc.sweep_pending_erasures() == 1
+
+        svc._execute.assert_awaited_once()
+        svc.db.rollback.assert_awaited()
+        (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_close_failed"]
+        assert call.kwargs == {"request_id": str(gone.id), "error_class": "RuntimeError"}
+
+    @staticmethod
+    def _resync_service(rowcount: int) -> tuple[AccountErasureService, list[Any]]:
+        svc = _service()
+        statements: list[Any] = []
+
+        def execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            statements.append(stmt)
+            return MagicMock(rowcount=rowcount)
+
+        svc.db.execute = AsyncMock(side_effect=execute)
+        return svc, statements
+
+    @pytest.mark.parametrize("rowcount", [1, 0])
+    @pytest.mark.asyncio
+    async def test_the_restored_set_is_patched_and_the_counts_recorded(self, rowcount):
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from services.erasure_details import PayloadSync
+
+        request_id = uuid4()
+        memory_id = uuid4()
+        postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        svc, statements = self._resync_service(rowcount)
+        syncs = [PayloadSync(memory_id, 3)]
+
+        async def sync(db: Any, given: Any, report: Any) -> None:
+            assert given == syncs
+            report.payload_synced = 1
+
+        with (
+            patch(
+                "services.account_erasure_service.restored_payload_syncs",
+                new=AsyncMock(return_value=syncs),
+            ) as derive,
+            patch(
+                "services.account_erasure_service.sync_restored_payloads",
+                new=AsyncMock(side_effect=sync),
+            ) as patched,
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            await svc._resync_interrupted_payloads(request_id, "p" * 64, {"postgres": postgres})
+
+        derive.assert_awaited_once_with(svc.db, "p" * 64, since=datetime(2026, 10, 1, 12, 0))
+        patched.assert_awaited_once()
+        (update_stmt,) = statements
+        params = update_stmt.compile().params
+        assert params["id_1"] == request_id
+        assert params["status_1"] == STATUS_FAILED
+        assert params["failure_reason_1"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        (keys,) = [v for v in params.values() if isinstance(v, dict) and "postgres" in v]
+        assert keys["postgres"]["users"] == 1
+        assert keys["postgres"]["memory_scrub_at"] == "2026-10-01T12:00:00Z"
+        assert keys["postgres"]["details_payload_synced"] == 1
+        assert keys["postgres"]["details_payload_requeue_failed"] == 0
+        assert len([k for k in keys["postgres"] if k.startswith("details_payload_")]) == 7
+        svc.db.commit.assert_awaited()
+        calls = [*log.info.call_args_list, *log.warning.call_args_list]
+        names = [c.args[0] for c in calls]
+        if rowcount:
+            (call,) = [c for c in calls if c.args[0] == "erasure_sweep_payloads_resynced"]
+            assert call.kwargs["request_id"] == str(request_id)
+            assert call.kwargs["memories"] == 1
+            assert call.kwargs["details_payload_synced"] == 1
+            assert "erasure_sweep_request_moved" not in names
+        else:
+            assert "erasure_sweep_request_moved" in names
+            assert "erasure_sweep_payloads_resynced" not in names
+        for c in calls:
+            assert "p" * 64 not in repr(c)
+
+    @pytest.mark.asyncio
+    async def test_no_scrub_time_records_zero_counts(self):
+        svc, statements = self._resync_service(1)
+        with patch(
+            "services.account_erasure_service.sync_restored_payloads", new=AsyncMock()
+        ) as patched:
+            await svc._resync_interrupted_payloads(uuid4(), "p" * 64, {"postgres": {"users": 1}})
+
+        # no bound: nothing is read from the revision log, nothing patched
+        assert patched.await_args.args[1] == []
+        (update_stmt,) = statements
+        params = update_stmt.compile().params
+        (keys,) = [v for v in params.values() if isinstance(v, dict) and "postgres" in v]
+        assert keys["postgres"]["details_payload_synced"] == 0
+
+
+class TestTheSweepNeverRunsAgainstAReRegisteredSub:
+    """#2302: a claimed row whose Postgres step committed is closed as
+    interrupted even when a user row with its sub exists — that is an
+    account registered again since, and is never run against."""
+
+    @pytest.mark.parametrize("self_service", [True, False])
+    @pytest.mark.asyncio
+    async def test_the_new_account_is_not_erased_and_its_redis_is_kept(self, self_service):
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        request = _execute_request(self_service=self_service)
+        request.ip_address, request.user_agent = "203.0.113.9", "agent"
+        postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        request.deleted_data_summary = {"postgres": postgres}
+        svc, statements = _sweep_with_absent_user(request)
+        svc._load_user_or_none = AsyncMock(return_value=_user())
+
+        with (
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            assert await svc.sweep_pending_erasures() == 0
+            pseudonym = svc._pseudonym("u-1")
+
+        svc._execute.assert_not_awaited()
+        svc._clear_redis.assert_not_awaited()
+        params = _close_values(statements)
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert params["user_id"] == pseudonym
+        if self_service:
+            assert params["initiated_by"] == pseudonym
+        else:
+            assert "initiated_by" not in params
+        assert params["deleted_data_summary"] == {"postgres": postgres}  # no redis key
+        svc._resync_interrupted_payloads.assert_awaited_once()
+        (call,) = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "erasure_sweep_subject_reregistered"
+        ]
+        assert call.kwargs == {"request_id": str(request.id)}
+        names = [c.args[0] for c in log.warning.call_args_list]
+        assert "erasure_sweep_user_row_absent" not in names
+        for c in [*log.warning.call_args_list, *log.error.call_args_list]:
+            assert "u-1" not in repr(c), c
+
+    @pytest.mark.parametrize("summary", [None, {"retry": {"attempts": 1}}])
+    @pytest.mark.asyncio
+    async def test_a_stale_run_that_never_reached_postgres_runs_again(self, summary):
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = summary
+        svc, statements = _sweep_with_absent_user(request)
+        target = _user()
+        svc._load_user_or_none = AsyncMock(return_value=target)
+
+        assert await svc.sweep_pending_erasures() == 1
+
+        svc._execute.assert_awaited_once_with(request, target)
+        svc._resync_interrupted_payloads.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_close_refuses_a_live_user_on_a_row_that_never_ran(self):
+        request = _execute_request(self_service=True)
+        svc = _service()
+        with pytest.raises(ValueError):
+            await svc._close_request_without_user(request, user_row_exists=True)
+        svc.db.execute.assert_not_awaited()
 
 
 class TestThePostgresStepRecordsItselfOnTheRequest:

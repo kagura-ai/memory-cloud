@@ -574,3 +574,59 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",
     ]
+
+
+# ---------------------------------------------------------------------------
+# #2302: the restored set of an interrupted run, read back from the log
+# ---------------------------------------------------------------------------
+
+
+def test_memory_scrub_at_parses_the_summary_as_naive_utc() -> None:
+    from datetime import datetime
+
+    from services.erasure_details import memory_scrub_at
+
+    summary = {"postgres": {"memory_scrub_at": "2026-10-01T12:00:00Z"}}
+    assert memory_scrub_at(summary) == datetime(2026, 10, 1, 12, 0)
+    assert memory_scrub_at({"postgres": {"memory_scrub_at": "2026-10-01T21:00:00+09:00"}}) == (
+        datetime(2026, 10, 1, 12, 0)
+    )
+    for empty in (None, {}, {"postgres": None}, {"postgres": {"users": 1}}, {"note": "x"}):
+        assert memory_scrub_at(empty) is None
+
+
+async def test_restored_payload_syncs_reads_the_restores_revision_rows() -> None:
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import PayloadSync, restored_payload_syncs
+
+    memory_id = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[(memory_id, 4)])))
+    since = datetime(2026, 10, 1, 12, 0)
+
+    assert await restored_payload_syncs(db, "p" * 64, since=since) == [PayloadSync(memory_id, 4)]
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt)
+    params = stmt.compile().params
+    assert "max(memory_revisions.version)" in sql
+    assert "GROUP BY memory_revisions.memory_id" in sql
+    assert "ORDER BY memory_revisions.memory_id" in sql
+    assert "memory_revisions.at >=" in sql
+    assert params["actor_user_id_1"] == "p" * 64
+    assert params["writer_1"] == "erasure"
+    assert params["kind_1"] == "updated"
+    assert params["at_1"] == since
+
+
+async def test_restored_payload_syncs_without_a_bound_reads_nothing() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import restored_payload_syncs
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    assert await restored_payload_syncs(db, "p" * 64, since=None) == []
+    db.execute.assert_not_awaited()
