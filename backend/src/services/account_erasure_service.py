@@ -128,6 +128,7 @@ from services.billing_contract import (
 )
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
+    ERASURE_AUDIT_ACTION,
     RestoreReport,
     StripCounts,
     erase_subject_details,
@@ -2288,7 +2289,7 @@ class AccountErasureService:
             AuditLog(
                 user_email=email_pseudonym,
                 user_id=user_pseudonym,
-                action="account_erasure",
+                action=ERASURE_AUDIT_ACTION,
                 resource=f"user_pseudonym:{user_pseudonym[:16]}",
                 user_metadata={
                     "request_id": str(request.id),

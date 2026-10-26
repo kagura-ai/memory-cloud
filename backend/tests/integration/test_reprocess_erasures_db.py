@@ -1082,7 +1082,7 @@ async def audit_case(async_engine: AsyncEngine) -> AsyncIterator[_AuditCase]:
             resource=f"user:{email}",
         ),
         # #2298: the subject acting as an admin on the live account (the row's
-        # user_id is the live account's); its request metadata is kept
+        # user_id is the live account's); the subject's IP / UA there go too
         AuditLog(
             user_email=email,
             user_id=live_sub,
@@ -1174,7 +1174,13 @@ async def _others_before(session: AsyncSession, case: _AuditCase) -> tuple[dict,
     expected = {**before}
     for row_id in (about_gone, about_live):
         expected[row_id] = {**before[row_id], "resource": f"user:{case.email_p}"}
-    expected[by_subject] = {**before[by_subject], "user_email": case.email_p}
+    # the subject was the actor there: their IP / UA go too (#2345)
+    expected[by_subject] = {
+        **before[by_subject],
+        "user_email": case.email_p,
+        "ip_address": None,
+        "user_agent": None,
+    }
     return before, expected
 
 
@@ -1808,3 +1814,45 @@ async def test_the_request_metadata_leaves_the_subjects_audit_rows(
     assert "request metadata" not in capsys.readouterr().out
     async with _maker(async_engine)() as session:
         assert await _snapshots(session, []) == after
+
+
+async def test_the_plan_counts_what_the_apply_changes_for_an_email_named_only(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2298 review: an email of the account's that only a ``resource`` names
+    (the subject never acted under it) is recovered by ``_mentioned_emails``;
+    the subject's own row naming it is rewritten by the own-row UPDATE, so
+    the plan's counts are the apply's."""
+    case = audit_case
+    second_email = f"second-{uuid.uuid4().hex[:6]}@example.com"
+    request = await _add_request(async_engine, case, legacy=False)
+    await _add_request(async_engine, case, legacy=False, email=second_email)
+    async with _maker(async_engine)() as session:
+        named = AuditLog(
+            user_email="admin@example.com",
+            user_id=case.sub,
+            action="role_assign",
+            resource=f"user:{second_email}",
+        )
+        session.add(named)
+        await session.commit()
+        case.own.append(named.id)
+
+    code, _ = await _run(async_engine, ["--all"])
+    assert code == 0
+    plan = capsys.readouterr().out
+    code, _ = await _run(async_engine, ["--all", "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    for line in (
+        f"audit rows  {request.id}  3 row(s)\n",
+        f"audit mentions  {request.id}  3 row(s)\n",
+    ):
+        assert f"would pseudonymize {line}" in plan and f"pseudonymized {line}" in out
+    second_p = _salted(second_email)
+    async with _maker(async_engine)() as session:
+        assert (await _own_rows(session, case))[2] == (
+            case.p,
+            "admin@example.com",
+            f"user:{second_p}",
+        )

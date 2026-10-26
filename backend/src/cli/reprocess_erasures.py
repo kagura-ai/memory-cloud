@@ -310,33 +310,40 @@ async def _recover_emails(
     return sorted(email for email in candidates if sha256_hex(email) in email_hashes)
 
 
+def _sha256_hex_sql(value: Any) -> Any:
+    """``sha256_hex(value)`` (no salt) in SQL: what ``user_email_hash`` stores."""
+    return func.encode(func.sha256(func.convert_to(value, "UTF8")), "hex")
+
+
 async def _mentioned_emails(db: AsyncSession, email_hashes: Collection[str]) -> dict[str, str]:
     """The emails audit rows name whose unsalted sha256 is among
     ``email_hashes`` (every in-scope request's ``user_email_hash``), keyed by
-    that hash (#2298). Read once per run: the distinct ``user_email`` values
-    and the ``user:`` resources. A pseudonym-shaped value hashes to no
-    request's hash; nothing is printed or logged."""
+    that hash (#2298). Read once per run: the ``user_email`` values and the
+    ``user:`` resources, hashed and matched in the database (only matches
+    come back). A pseudonym-shaped value hashes to no request's hash;
+    nothing is printed or logged."""
     if not email_hashes:
         return {}
-    emails = (await db.execute(select(AuditLog.user_email).distinct())).scalars().all()
-    resources = (
-        (
+    wanted = sorted(set(email_hashes))
+    email = AuditLog.user_email
+    named = func.substr(AuditLog.resource, len(USER_RESOURCE) + 1)
+    values = [
+        *(
+            await db.execute(select(email).distinct().where(_sha256_hex_sql(email).in_(wanted)))
+        ).scalars(),
+        *(
             await db.execute(
-                select(func.substr(AuditLog.resource, len(USER_RESOURCE) + 1))
+                select(named)
                 .distinct()
-                .where(AuditLog.resource.startswith(USER_RESOURCE, autoescape=True))
+                .where(
+                    AuditLog.resource.startswith(USER_RESOURCE, autoescape=True),
+                    _sha256_hex_sql(named).in_(wanted),
+                )
             )
-        )
-        .scalars()
-        .all()
-    )
-    wanted = set(email_hashes)
-    found: dict[str, str] = {}
-    for value in {*emails, *resources}:
-        digest = sha256_hex(value)
-        if digest in wanted:
-            found[digest] = value
-    return found
+        ).scalars(),
+    ]
+    # the database matched them; the digest is the key
+    return {sha256_hex(value): value for value in values}
 
 
 async def _live_emails(db: AsyncSession, emails: Collection[str]) -> set[str]:
@@ -480,6 +487,10 @@ async def _reprocess_one(
         mention_emails: set[str] = set()
         if mentioned is not None:
             mention_emails = set(emails) | {mentioned[h] for h in email_hashes if h in mentioned}
+            # the subject's own rows (by the account id) take every email of
+            # theirs, so no own row is left for the mention UPDATE (the dry
+            # run's count leaves them all out)
+            emails = sorted(mention_emails)
             live = await _live_emails(db, mention_emails)
             mention_emails -= live
             mentions_kept = bool(live)

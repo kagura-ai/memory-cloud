@@ -366,32 +366,39 @@ def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
     assert cli._summary(plan).endswith(", 3 audit mention(s) pseudonymized")
 
 
-def test_the_mentioned_emails_are_read_once_and_matched_by_hash():
+def test_the_mentioned_emails_are_matched_by_hash_in_the_database():
     """#2298: two SELECTs (the distinct ``user_email`` values and the
-    ``user:`` resources, the prefix cut in SQL); a value is kept only when
-    its unsalted sha256 is a request's ``user_email_hash``."""
+    ``user:`` resources, the prefix cut in SQL), each filtered by its
+    unsalted sha256 in SQL; the matches come back keyed by that hash."""
     from sqlalchemy.dialects import postgresql
 
     from utils.hashing import sha256_hex
 
     db = MagicMock()
     emails = MagicMock()
-    emails.scalars.return_value.all.return_value = ["a@x.io", "admin@x.io"]
+    emails.scalars.return_value = iter(["a@x.io"])
     resources = MagicMock()
-    resources.scalars.return_value.all.return_value = ["b@x.io", "a@x.io", "f" * 64]
+    resources.scalars.return_value = iter(["b@x.io", "a@x.io"])
     db.execute = AsyncMock(side_effect=[emails, resources])
+    hashes = {sha256_hex("a@x.io"), sha256_hex("b@x.io"), "0" * 64}
 
-    found = asyncio.run(
-        cli._mentioned_emails(db, {sha256_hex("a@x.io"), sha256_hex("b@x.io"), "0" * 64})
-    )
+    found = asyncio.run(cli._mentioned_emails(db, hashes))
 
     assert found == {sha256_hex("a@x.io"): "a@x.io", sha256_hex("b@x.io"): "b@x.io"}
-    first, second = (
-        str(c.args[0].compile(dialect=postgresql.dialect())) for c in db.execute.await_args_list
+    (first, first_params), (second, second_params) = (
+        (str(compiled), compiled.params)
+        for compiled in (
+            c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
+        )
     )
-    assert first == "SELECT DISTINCT audit_logs.user_email \nFROM audit_logs"
+    digest = "encode(sha256(convert_to({}, %(convert_to_1)s::VARCHAR)), %(encode_1)s::VARCHAR)"
+    assert first.startswith("SELECT DISTINCT audit_logs.user_email \nFROM audit_logs \nWHERE ")
+    assert digest.format("audit_logs.user_email") + " IN (" in first
+    assert first_params["convert_to_1"] == "UTF8" and first_params["encode_1"] == "hex"
+    assert sorted(hashes) in first_params.values()
     assert second.startswith("SELECT DISTINCT substr(audit_logs.resource, ")
-    assert "LIKE" in second and "FROM audit_logs" in second
+    assert "LIKE" in second and "sha256(convert_to(substr(audit_logs.resource" in second
+    assert sorted(hashes) in second_params.values()
 
 
 def test_no_request_hashes_read_nothing():
