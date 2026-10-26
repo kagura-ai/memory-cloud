@@ -1005,7 +1005,9 @@ async def rotate_connector_kmc_key(
 
     Revokes the current key immediately, mints a replacement with a 365-day
     expiry, and bumps ``config_version`` so the worker re-fetches on its next
-    poll. The new plaintext key is returned exactly once.
+    poll. The new plaintext key is returned exactly once. It also mints a key,
+    under the workspace owner, for a connector whose key row is gone when no
+    other active key is linked to it (#2305).
 
     **No grace period (v1)**: coordinate rotation during a maintenance window
     or a brief pause in ai-worker activity; the old key is invalid as soon as

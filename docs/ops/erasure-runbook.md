@@ -85,6 +85,8 @@ FK の依存逆順で削除:
 
 ここまでが 1 つの Postgres トランザクション。どこかで失敗すると全体が rollback され (user 行は残る)、request は marker なしの `failed` (id はそのまま) になり、新しい request で再実行できる。
 
+#2305 より前の erasure で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。
+
 ### 2.5 Audit logs (Step 4 の一部)
 
 `audit_logs` 行は **保持** (legal retention)、ただし本人が actor の行 (`user_id = :uid`) の `user_id` を SHA256 で pseudonymize、`user_email` は本人の email と一致する場合のみ pseudonymize (他人が actor の行に残る actor の email は保持)、`resource` 内の本人の email / sub も置換する (pseudonym で列長 255 を超える値は 255 文字に切り詰め、erasure が失敗しないようにする)。salt は per-deployment 定数 (`_AUDIT_PSEUDO_SALT`) で同一ユーザー由来行の cross-row 相関は維持、original sub/email は不可逆。admin が本人を操作した行 (`user_id` が admin) は対象外。

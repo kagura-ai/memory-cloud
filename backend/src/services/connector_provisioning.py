@@ -1360,10 +1360,16 @@ class ConnectorProvisioningService:
             expiry, and the bumped config_version (so the caller need not
             re-query the connector).
 
+        When the stored key's row is gone and no active key is linked to the
+        connector (#2305), nothing is revoked: the replacement is minted under
+        the workspace's owner, which heals a connector whose key an account
+        erasure deleted before #2305.
+
         Raises:
             NotFoundException: if no matching connector exists in workspace.
             ValidationError: if the connector has no KMC key to rotate
-                (registration flow was not completed).
+                (registration flow was not completed), or if its stored key
+                matches no active row while another active key is linked to it.
         """
         from auth.api_keys import APIKeyManager
         from models.auth import APIKey
@@ -1406,19 +1412,38 @@ class ConnectorProvisioningService:
             )
         )
         old_key = old_key_result.scalar_one_or_none()
+        healed = False
         if old_key is None:
-            # Stored key matches no active APIKey row (Fernet secret rotated,
-            # external revocation, or DB drift). Fail with a clear diagnostic
-            # rather than letting create_key surface an opaque 500.
-            raise ValidationError(
-                "Connector's stored KMC key matches no active API key; "
-                "re-register the connector to mint a fresh key"
+            # #2305: the stored key's row is gone. When no active key is linked
+            # to this connector at all (the row was deleted — by an account
+            # erasure before #2305, or outside the service), there is nothing
+            # to duplicate: mint a replacement under the workspace's owner,
+            # the one member every workspace has. When another active linked
+            # key exists the connector row and api_keys disagree (Fernet
+            # secret rotated, DB drift): fail with a clear diagnostic rather
+            # than mint a second key or let create_key surface an opaque 500.
+            linked_result = await self.db.execute(
+                select(APIKey.id).where(
+                    APIKey.connector_id == connector_id,
+                    APIKey.revoked_at.is_(None),
+                )
             )
-        owner_user_id = old_key.user_id
-
-        # Revoke the old key immediately — no grace period for v1. Operators
-        # should schedule rotation during a maintenance window or worker pause.
-        old_key.revoked_at = utcnow()
+            if linked_result.first() is not None:
+                raise ValidationError(
+                    "Connector's stored KMC key matches no active API key; "
+                    "re-register the connector to mint a fresh key"
+                )
+            owner_user_id = (
+                await self.db.execute(
+                    select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
+                )
+            ).scalar_one()
+            healed = True
+        else:
+            owner_user_id = old_key.user_id
+            # Revoke the old key immediately — no grace period for v1. Operators
+            # should schedule rotation during a maintenance window or worker pause.
+            old_key.revoked_at = utcnow()
 
         # Mint replacement key under the ORIGINAL owner (not the rotating admin)
         # so per-user key listings stay correct. create_key computes and stores
@@ -1437,7 +1462,7 @@ class ConnectorProvisioningService:
         await self.db.flush()
 
         logger.info(
-            "connector_kmc_key_rotated",
+            "connector_kmc_key_healed" if healed else "connector_kmc_key_rotated",
             connector_id=str(connector_id),
             workspace_id=str(workspace_id),
             rotated_by=user_id,

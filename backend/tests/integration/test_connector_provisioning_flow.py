@@ -527,10 +527,66 @@ async def test_rotate_kmc_key_heals_an_unlinked_backing_row(db_session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_rotate_kmc_key_fails_when_the_backing_row_is_gone(db_session: AsyncSession):
-    """#1952: the backing row is matched by ``key_hash`` AND ``connector_id``;
-    a row deleted outside the service is the existing ``ValidationError``."""
+async def test_rotate_kmc_key_heals_a_connector_whose_key_row_is_gone(db_session: AsyncSession):
+    """#2305: the backing row was deleted (an account erasure before #2305)
+    and no active key is linked to the connector — nothing to duplicate, so
+    the replacement is minted under the workspace's owner."""
     from sqlalchemy import delete
+
+    from models.auth import APIKey
+    from utils.hashing import sha256_hex
+
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    admin_id = f"admin-{uuid4().hex}"
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
+    )
+    await db_session.flush()
+    service = ConnectorProvisioningService(db_session)
+    result = await service.provision_connector(
+        workspace_id=workspace.id,
+        user_id=admin_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db_session.flush()
+    connector = result.connector
+    version = connector.config_version
+    await db_session.execute(delete(APIKey).where(APIKey.connector_id == connector.id))
+
+    with patch("services.connector_provisioning.logger") as logger:
+        rotated = await service.rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=admin_id
+        )
+    await db_session.flush()
+
+    assert rotated.key_owner_user_id == owner_id
+    assert rotated.config_version == version + 1
+    assert connector.config_version == version + 1
+    (row,) = (
+        (await db_session.execute(select(APIKey).where(APIKey.connector_id == connector.id)))
+        .scalars()
+        .all()
+    )
+    assert row.user_id == owner_id and row.revoked_at is None
+    assert row.name == f"connector:{connector.id}"
+    assert connector.get_kmc_api_key() == rotated.plaintext_kmc_api_key
+    assert row.key_hash == sha256_hex(rotated.plaintext_kmc_api_key)
+    assert connector.kmc_api_key_expires_at == row.expires_at
+    event, fields = logger.info.call_args.args[0], logger.info.call_args.kwargs
+    assert event == "connector_kmc_key_healed"
+    assert fields["key_owner"] == owner_id and fields["rotated_by"] == admin_id
+    assert rotated.plaintext_kmc_api_key not in repr(logger.info.call_args)
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_fails_when_another_linked_key_is_live(db_session: AsyncSession):
+    """#1952: the backing row is matched by ``key_hash`` AND ``connector_id``;
+    a stored key that matches no active row while another active key is
+    linked to the connector is drift — the existing ``ValidationError``, and
+    nothing is minted (#2305 heals only when no linked key is live)."""
+    from sqlalchemy import update
 
     from models.auth import APIKey
 
@@ -544,12 +600,24 @@ async def test_rotate_kmc_key_fails_when_the_backing_row_is_gone(db_session: Asy
         auto_create_context_name=f"slack-{uuid4().hex[:8]}",
     )
     await db_session.flush()
-    await db_session.execute(delete(APIKey).where(APIKey.connector_id == result.connector.id))
+    connector_id = result.connector.id
+    await db_session.execute(
+        update(APIKey)
+        .where(APIKey.connector_id == connector_id)
+        .values(key_hash="0" * 64)
+        .execution_options(synchronize_session="fetch")
+    )
 
     with pytest.raises(ValidationError, match="matches no active API key"):
         await service.rotate_kmc_key(
-            workspace_id=workspace.id, connector_id=result.connector.id, user_id=user_id
+            workspace_id=workspace.id, connector_id=connector_id, user_id=user_id
         )
+    count = (
+        await db_session.execute(
+            select(func.count(APIKey.id)).where(APIKey.connector_id == connector_id)
+        )
+    ).scalar_one()
+    assert count == 1
 
 
 @pytest.mark.asyncio
