@@ -50,7 +50,9 @@ in ``deleted_data_summary.retry``; the hourly sweep runs it again and
 request can still be cancelled meanwhile, an admin one cannot. After
 ``VECTOR_STORE_MAX_ATTEMPTS`` attempts the request is ``failed`` with
 ``vector_store_unavailable after N attempts: ...`` (raw ids kept, like any
-failure before the Postgres commit); a new request is the retry. Any other
+failure before the Postgres commit); a new request is the retry. When such a
+request is cancelled, or fails after its last attempt, the subject's live
+embedded memories are re-queued for embedding (#2304). Any other
 error at step 1 (a configuration error building the client, say) fails the
 request at once, as before.
 """
@@ -211,6 +213,14 @@ VECTOR_STORE_MAX_ATTEMPTS = 4
 _STEP_VECTOR_STORE = "vector_store"
 _RETRY_KEY = "retry"
 
+# #2304: rows per re-queue statement after a cancelled or failed vector-store
+# retry — bounds the lock set of each UPDATE; one commit per batch.
+EMBEDDING_REQUEUE_BATCH = 500
+
+# #2304: keys inside ``summary.retry`` recording the re-queue.
+_REQUEUED_KEY = "embeddings_requeued"
+_REQUEUED_AT_KEY = "requeued_at"
+
 
 @dataclass(frozen=True)
 class PostgresErasure:
@@ -300,6 +310,69 @@ def _merged_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
     """
     stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
     return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
+
+
+async def requeue_subject_embeddings(
+    db: AsyncSession, user_id: str, *, batch: int = EMBEDDING_REQUEUE_BATCH
+) -> int:
+    """Put the subject's live embedded memories back to ``pending`` (#2304).
+
+    For a request whose vector-store step ran at least once and that then
+    ended without erasing the account (cancelled, or failed after its last
+    attempt): ``delete_user_points`` may have removed some or all of the
+    subject's points, so their memories would stay ``success`` in Postgres and
+    never be found by a search. Only the subject's own rows can have lost a
+    point (the point payload's ``user_id`` mirrors ``memories.user_id``; a
+    resource-indexer row's author is the context's creator, who is also its
+    point's ``user_id``), so the scan is one indexed predicate over them.
+
+    ``success`` rows only: a ``pending`` / ``processing`` row gets its point
+    from the run already queued or in flight (the write is an upsert); a
+    ``failed`` row keeps its own retry budget; a tombstone has no point by
+    design. Resource-indexer rows are included: the embedding pipeline
+    rebuilds their indexer point from the row (``write_memory_point``).
+
+    Writes ``embedding_status`` only, like ``requeue_embedding``:
+    ``updated_at`` and the pipeline's attempt/error/retry fields stay. Each
+    batch locks its rows in id order (``FOR NO KEY UPDATE`` subquery, no SKIP
+    LOCKED — a skipped row would be missed) and commits, so a long re-queue
+    never holds a large lock set; the loop ends on a short batch.
+
+    Cost: one embedding call per re-queued memory (plus its chunks) — what
+    the runbook's manual statement costs. The embedding sweep orders
+    ``pending`` rows by ``created_at``, so a large re-queue is embedded
+    before newer rows of other members.
+
+    Returns:
+        How many rows were re-queued (0 on a second call).
+    """
+    total = 0
+    while True:
+        locked = (
+            select(Memory.id)
+            .where(
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+                Memory.embedding_status == "success",
+            )
+            .order_by(Memory.id)
+            .limit(batch)
+            .with_for_update(key_share=True)
+        )
+        result = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(Memory)
+                .where(Memory.id.in_(locked))
+                .values(embedding_status="pending")
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        await db.commit()
+        moved = int(result.rowcount or 0)
+        total += moved
+        if moved < batch:
+            return total
 
 
 class AccountErasureService:
@@ -699,6 +772,12 @@ class AccountErasureService:
         is ``cooling_off`` too while it waits for a vector-store retry
         (#2282), and the erased user must not be able to call it off.
 
+        A request that already spent a vector-store attempt
+        (``summary.retry.attempts > 0``) may have deleted some of the
+        subject's points: once the cancel is committed, the subject's live
+        embedded memories go back to ``pending`` (#2304,
+        ``_requeue_after_vector_store_failure``; never fails the cancel).
+
         ``in_progress`` rows are NOT cancellable — the orchestrator is
         already running, and racing it would risk an inconsistent half-
         applied erasure. The cancel is a compare-and-set on the status
@@ -722,6 +801,9 @@ class AccountErasureService:
 
         cancelled_from = request.status
         request_id = request.id
+        # #2304: a request that spent a vector-store attempt may have deleted
+        # the subject's points; read before the write (the row is refreshed)
+        spent_retry, spent_attempts = _previous_retry(request.deleted_data_summary)
         result = cast(
             CursorResult[Any],
             await self.db.execute(
@@ -750,6 +832,10 @@ class AccountErasureService:
                 status=current,
             )
             raise ErasureAlreadyInProgressError(current or STATUS_IN_PROGRESS)
+        if spent_retry is not None and spent_attempts > 0:
+            await self._requeue_after_vector_store_failure(
+                request_id, user_id, spent_retry, status=STATUS_CANCELLED
+            )
         await self.db.refresh(request)
 
         logger.info(
@@ -759,6 +845,58 @@ class AccountErasureService:
             cancelled_from=cancelled_from,
         )
         return request
+
+    async def _requeue_after_vector_store_failure(
+        self, request_id: UUID, user_id: str, retry: dict[str, Any], *, status: str
+    ) -> None:
+        """Re-queue the subject's embeddings after a request that spent a
+        vector-store attempt ended without an erasure (#2304).
+
+        Called after the terminal status (``cancelled`` / ``failed``) is
+        committed, in its own transactions: ``requeue_subject_embeddings``,
+        then the count merged into ``summary.retry`` on the request row
+        (guarded by id + ``status``). Never raises: the cancel's answer and
+        the failure's own error stand; a failed re-queue is logged for the
+        runbook's manual statement. The logs carry no account id.
+        """
+        try:
+            requeued = await requeue_subject_embeddings(self.db, user_id)
+            block = {
+                **retry,
+                _REQUEUED_KEY: requeued,
+                _REQUEUED_AT_KEY: to_utc_iso(utcnow()),
+            }
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id, ErasureRequest.status == status)
+                    .values(deleted_data_summary=_merged_summary({_RETRY_KEY: block}))
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            await self.db.commit()
+        except Exception as exc:
+            await self.db.rollback()
+            logger.error(
+                "erasure_embeddings_requeue_failed",
+                request_id=str(request_id),
+                error_class=type(exc).__name__,
+            )
+            return
+        if not result.rowcount:
+            # a terminal row does not move; defensive
+            logger.warning(
+                "erasure_embeddings_requeue_unrecorded",
+                request_id=str(request_id),
+                memories=requeued,
+            )
+            return
+        logger.info(
+            "erasure_embeddings_requeued",
+            request_id=str(request_id),
+            memories=requeued,
+        )
 
     # ------------------------------------------------------------------
     # Admin force-erase path
@@ -1119,7 +1257,8 @@ class AccountErasureService:
         The vector store first so its failure leaves everything untouched:
         the user row exists and the request can simply run again — a
         ``QdrantError`` there reschedules it (#2282, ``ErasureRetryScheduledError``)
-        until ``VECTOR_STORE_MAX_ATTEMPTS``. Redis last because
+        until ``VECTOR_STORE_MAX_ATTEMPTS``; the last one fails the request
+        and re-queues the subject's embeddings (#2304). Redis last because
         session/rate-limit data is ephemeral and re-creatable from cookies if
         anything goes wrong.
 
@@ -1133,6 +1272,9 @@ class AccountErasureService:
         # expired id back (MissingGreenlet) — the row would never be marked
         # failed (#2244: a vector-store failure inside the Postgres step).
         request_id = request.id
+        # #2304: the subject whose embeddings a give-up re-queues (``target``
+        # is expired by the handler's rollback too)
+        subject_id = target.user_id
         # #2268: what a failure after the Postgres commit writes on the row —
         # read now, like ``request_id``
         pseudonymized_row = pseudonymized_request_values(request.user_id, request.initiated_by)
@@ -1412,6 +1554,11 @@ class AccountErasureService:
                 update(ErasureRequest).where(ErasureRequest.id == request_id).values(**values)
             )
             await self.db.commit()
+            if vector_store_gave_up is not None:
+                # #2304: the attempts may have deleted the subject's points
+                await self._requeue_after_vector_store_failure(
+                    request_id, subject_id, summary[_RETRY_KEY], status=STATUS_FAILED
+                )
             raise
 
     # ------------------------------------------------------------------
