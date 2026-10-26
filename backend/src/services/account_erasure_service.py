@@ -838,25 +838,24 @@ class AccountErasureService:
 
         cancelled_from = request.status
         request_id = request.id
-        # #2304: a request that spent a vector-store attempt may have deleted
-        # the subject's points; read before the write (the row is refreshed)
-        spent_retry, spent_attempts = _previous_retry(request.deleted_data_summary)
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(
-                    ErasureRequest.id == request_id,
-                    ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF]),
-                )
-                .values(status=STATUS_CANCELLED, cancelled_at=utcnow())
-                # no in-session evaluation: the loaded row may be stale (that
-                # is the race); the refresh below reads what was written
-                .execution_options(synchronize_session=False)
-            ),
+        result = await self.db.execute(
+            update(ErasureRequest)
+            .where(
+                ErasureRequest.id == request_id,
+                ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF]),
+            )
+            .values(status=STATUS_CANCELLED, cancelled_at=utcnow())
+            # #2304: the summary of the row this cancel moved, not of the
+            # one read above — a run that rescheduled the request in
+            # between may have spent an attempt
+            .returning(ErasureRequest.deleted_data_summary)
+            # no in-session evaluation: the loaded row may be stale (that
+            # is the race); the refresh below reads what was written
+            .execution_options(synchronize_session=False)
         )
+        moved = result.first()  # None: the compare-and-set matched nothing
         await self.db.commit()
-        if not result.rowcount:
+        if moved is None:
             # moved since the read: answer by what it is now, read as the
             # caller's (#2306)
             current = (
@@ -881,6 +880,11 @@ class AccountErasureService:
             # after a claim beat this cancel and the run rescheduled it
             # (#2282): report the claim
             raise ErasureAlreadyInProgressError(STATUS_IN_PROGRESS)
+        # #2304: a request that spent a vector-store attempt may have deleted
+        # the subject's points
+        spent_retry, spent_attempts = _previous_retry(
+            moved.deleted_data_summary if moved is not None else None
+        )
         if spent_retry is not None and spent_attempts > 0:
             await self._requeue_after_vector_store_failure(
                 request_id, user_id, spent_retry, status=STATUS_CANCELLED
