@@ -1813,7 +1813,9 @@ the row gets the pseudonym derived from the account id (the value the
 erased-members set already used), its request IP and user agent cleared,
 `initiated_by` replaced when it was the member's own id (an admin's id stays)
 and `"pseudonymized": true` in its summary; its audit residue is handled by
-that pseudonym in the same transaction. Status and completion time stay, and
+that pseudonym in the same transaction, and the vector payloads of memories an
+erasure restored under it (a run interrupted on v0.124.x ends up as such a
+row) are patched once after the commit. Status and completion time stay, and
 the account id is never printed.
 
 **Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0

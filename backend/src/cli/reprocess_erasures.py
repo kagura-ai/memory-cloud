@@ -121,6 +121,7 @@ from services.erasure_details import (  # noqa: E402
     note_row_pseudonymized,
     payload_counts,
     payloads_resynced,
+    postgres_section,
     pseudonymize_audit_logs,
     pseudonymized_request_values,
     record_resynced_payloads,
@@ -336,8 +337,8 @@ def _wrote_pseudonym(summary: dict[str, Any] | None) -> bool:
     """The erasure's summary says it wrote the pseudonym on memory or revision
     rows (#2268 review). When it wrote none, no row can carry it and the
     repair goes ahead: the account id must not stay on the row."""
-    postgres = (summary or {}).get("postgres")
-    if not isinstance(postgres, dict):
+    postgres = postgres_section(summary)
+    if postgres is None:
         return False
     return any(
         isinstance(postgres.get(key), int) and postgres[key] > 0
@@ -455,7 +456,11 @@ async def _reprocess_one(
     Postgres step as far as its row says, so there is nothing to restore or
     strip by its pseudonym. ``note_account_id`` (#2302, a note row from
     before v0.125.0): the account id the row stores; the row gets the
-    pseudonym in the same transaction (``_repair_note_row``).
+    pseudonym in the same transaction (``_repair_note_row``), and the memories
+    an erasure restored under that pseudonym (a run interrupted after its
+    Postgres commit on v0.124.x ends up as such a row; a request that never ran
+    has none) have their payloads patched after the commit, unbounded —
+    once, as the repair is (review of #2302).
     ``resync_postgres`` (#2302, a run interrupted after its Postgres commit
     whose sweep never recorded the payload re-drive): the row's ``postgres``
     summary; the memories that run restored (``restored_payload_syncs``,
@@ -471,10 +476,13 @@ async def _reprocess_one(
         if note_repaired and not dry_run:
             note_repaired = await _repair_note_row(db, request_id, cast(str, note_account_id))
         derived: list[PayloadSync] = []
-        if resync_postgres is not None:
-            derived = await restored_payload_syncs(
-                db, pseudonym, since=memory_scrub_at({"postgres": resync_postgres})
+        if resync_postgres is not None or note_account_id is not None:
+            since = (
+                memory_scrub_at({"postgres": resync_postgres}, strict=False)
+                if resync_postgres is not None
+                else None
             )
+            derived = await restored_payload_syncs(db, pseudonym, since=since)
         audited, email_recovered = 0, None
         if audit_account_id is not None:
             emails = await _recover_emails(db, audit_account_id, email_hashes)
@@ -511,7 +519,14 @@ async def _reprocess_one(
             audit_logs_pseudonymized=audited,
             audit_email_recovered=email_recovered,
             note_repaired=note_repaired,
-            payload_resync=len(derived) if resync_postgres is not None else None,
+            # an interrupted row's re-drive is a change even with nothing to
+            # patch (its counts are recorded); a note row's only when it has
+            # memories to patch (its repair is the change)
+            payload_resync=(
+                len(derived)
+                if resync_postgres is not None or (note_account_id is not None and derived)
+                else None
+            ),
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -851,7 +866,7 @@ def _summary(result: ReprocessResult) -> str:
         + (f", {repaired} request row(s) repaired" if repaired else "")
         + (f", {audited} audit row(s) pseudonymized" if audited else "")
         + (f", {notes} note row(s) pseudonymized" if notes else "")
-        + (f", {resynced} interrupted run(s) payloads resynced" if resynced else "")
+        + (f", {resynced} request(s) payloads resynced" if resynced else "")
     )
 
 

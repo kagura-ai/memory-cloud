@@ -2415,7 +2415,14 @@ class TestTheSweepReDrivesAnInterruptedRunsPayloads:
 
         svc._execute.assert_awaited_once()
         svc.db.rollback.assert_awaited()
-        (call,) = [c for c in log.error.call_args_list if c.args[0] == "erasure_sweep_close_failed"]
+        # its own event: the close committed, the row is terminal
+        names = [c.args[0] for c in log.error.call_args_list]
+        assert "erasure_sweep_close_failed" not in names
+        (call,) = [
+            c
+            for c in log.error.call_args_list
+            if c.args[0] == "erasure_sweep_payload_resync_failed"
+        ]
         assert call.kwargs == {"request_id": str(gone.id), "error_class": "RuntimeError"}
 
     @staticmethod
@@ -2487,16 +2494,25 @@ class TestTheSweepReDrivesAnInterruptedRunsPayloads:
         for c in calls:
             assert "p" * 64 not in repr(c)
 
+    @pytest.mark.parametrize("scrub", [None, "not a time"])
     @pytest.mark.asyncio
-    async def test_no_scrub_time_records_zero_counts(self):
+    async def test_no_usable_scrub_time_reads_without_a_bound(self, scrub):
+        """Review of #2302: no bound reads every restore of the pseudonym
+        (never patches nothing and records it as done)."""
         svc, statements = self._resync_service(1)
-        with patch(
-            "services.account_erasure_service.sync_restored_payloads", new=AsyncMock()
-        ) as patched:
-            await svc._resync_interrupted_payloads(uuid4(), "p" * 64, {"postgres": {"users": 1}})
+        postgres: dict[str, Any] = {"users": 1}
+        if scrub is not None:
+            postgres["memory_scrub_at"] = scrub
+        with (
+            patch(
+                "services.account_erasure_service.restored_payload_syncs",
+                new=AsyncMock(return_value=[]),
+            ) as derive,
+            patch("services.account_erasure_service.sync_restored_payloads", new=AsyncMock()),
+        ):
+            await svc._resync_interrupted_payloads(uuid4(), "p" * 64, {"postgres": postgres})
 
-        # no bound: nothing is read from the revision log, nothing patched
-        assert patched.await_args.args[1] == []
+        derive.assert_awaited_once_with(svc.db, "p" * 64, since=None)
         (update_stmt,) = statements
         params = update_stmt.compile().params
         (keys,) = [v for v in params.values() if isinstance(v, dict) and "postgres" in v]

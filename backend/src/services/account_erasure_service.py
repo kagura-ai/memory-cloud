@@ -297,9 +297,6 @@ def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
 
 # #2302: what the sweep's close of a claimed request did
 CloseOutcome = Literal["interrupted", "never_ran", "moved"]
-_CLOSED_INTERRUPTED: CloseOutcome = "interrupted"
-_CLOSED_NEVER_RAN: CloseOutcome = "never_ran"
-_CLOSED_MOVED: CloseOutcome = "moved"
 
 
 # #2302: moved to ``erasure_details`` (the re-run writes the summary too)
@@ -988,11 +985,6 @@ class AccountErasureService:
                     closed = await self._close_request_without_user(
                         request, user_row_exists=target is not None
                     )
-                    if closed == _CLOSED_INTERRUPTED:
-                        # #2302: the run's payload patch of restored memories
-                        await self._resync_interrupted_payloads(
-                            request_id, self._pseudonym(user_id), summary
-                        )
                 except Exception as exc:
                     # one request's close must not stop the batch (the others
                     # are claimed already); the request id and the class only
@@ -1002,6 +994,23 @@ class AccountErasureService:
                         request_id=str(request_id),
                         error_class=type(exc).__name__,
                     )
+                    continue
+                if closed == "interrupted":
+                    try:
+                        # #2302: the run's payload patch of restored memories
+                        await self._resync_interrupted_payloads(
+                            request_id, self._pseudonym(user_id), summary
+                        )
+                    except Exception as exc:
+                        # the row is closed (terminal) already: only
+                        # ``reprocess_erasures`` re-drives it now (no
+                        # ``details_payload_synced`` key on the row)
+                        await self.db.rollback()
+                        logger.error(
+                            "erasure_sweep_payload_resync_failed",
+                            request_id=str(request_id),
+                            error_class=type(exc).__name__,
+                        )
                 continue
             try:
                 await self._execute(request, target)
@@ -1130,14 +1139,14 @@ class AccountErasureService:
         await self.db.commit()
         if not result.rowcount:
             logger.info("erasure_sweep_request_moved", request_id=str(request_id))
-            return _CLOSED_MOVED
+            return "moved"
         if user_row_exists:
             logger.warning("erasure_sweep_subject_reregistered", request_id=str(request_id))
         else:
             logger.warning(
                 "erasure_sweep_user_row_absent", request_id=str(request_id), ran_in_postgres=ran
             )
-        return _CLOSED_INTERRUPTED if ran else _CLOSED_NEVER_RAN
+        return "interrupted" if ran else "never_ran"
 
     async def _resync_interrupted_payloads(
         self, request_id: UUID, pseudonym: str, summary: dict[str, Any]
@@ -1160,7 +1169,9 @@ class AccountErasureService:
         patched its own payloads), nothing is written and the row is logged
         as moved. Logs carry the request id and counts only.
         """
-        syncs = await restored_payload_syncs(self.db, pseudonym, since=memory_scrub_at(summary))
+        syncs = await restored_payload_syncs(
+            self.db, pseudonym, since=memory_scrub_at(summary, strict=False)
+        )
         await self.db.rollback()  # ends the read; the patch groups commit their own
         report = RestoreReport()
         await sync_restored_payloads(self.db, syncs, report)

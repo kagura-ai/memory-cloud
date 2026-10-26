@@ -11,6 +11,8 @@ import random
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from services.erasure_details import (
     DetailsEdit,
     RestoreTarget,
@@ -597,10 +599,15 @@ def test_memory_scrub_at_parses_the_summary_as_naive_utc() -> None:
         {"postgres": None},
         {"postgres": {"users": 1}},
         {"note": "x"},
-        {"postgres": {"memory_scrub_at": "x"}},
         {"postgres": {"memory_scrub_at": 1}},
     ):
         assert memory_scrub_at(empty) is None
+    # a value that is not an ISO time: an error for the strip bound, no bound
+    # for the payload re-drive
+    malformed = {"postgres": {"memory_scrub_at": "x"}}
+    with pytest.raises(ValueError):
+        memory_scrub_at(malformed)
+    assert memory_scrub_at(malformed, strict=False) is None
 
 
 async def test_restored_payload_syncs_reads_the_restores_revision_rows() -> None:
@@ -629,12 +636,17 @@ async def test_restored_payload_syncs_reads_the_restores_revision_rows() -> None
     assert params["at_1"] == since
 
 
-async def test_restored_payload_syncs_without_a_bound_reads_nothing() -> None:
+async def test_restored_payload_syncs_without_a_bound_reads_every_restore() -> None:
+    """Review of #2302: no usable scrub time reads every restore row of the
+    pseudonym (the patch is idempotent) instead of patching nothing."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from services.erasure_details import restored_payload_syncs
+    from services.erasure_details import PayloadSync, restored_payload_syncs
 
+    memory_id = uuid4()
     db = MagicMock()
-    db.execute = AsyncMock()
-    assert await restored_payload_syncs(db, "p" * 64, since=None) == []
-    db.execute.assert_not_awaited()
+    db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[(memory_id, 2)])))
+    assert await restored_payload_syncs(db, "p" * 64, since=None) == [PayloadSync(memory_id, 2)]
+    stmt = db.execute.await_args.args[0]
+    assert "memory_revisions.at" not in str(stmt.whereclause)
+    assert stmt.compile().params["actor_user_id_1"] == "p" * 64

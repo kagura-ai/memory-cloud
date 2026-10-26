@@ -245,7 +245,7 @@ def test_a_payload_resync_is_listed_and_reported(capsys, memories):
     )
     cli._print_applied(applied)
     assert f"payload  {REQUEST_ID}  synced {memories}," in capsys.readouterr().out
-    assert cli._summary(applied).endswith(", 1 interrupted run(s) payloads resynced")
+    assert cli._summary(applied).endswith(", 1 request(s) payloads resynced")
 
 
 def test_no_note_or_resync_adds_nothing_to_the_report(capsys):

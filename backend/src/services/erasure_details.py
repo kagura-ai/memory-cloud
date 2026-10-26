@@ -322,12 +322,18 @@ async def record_resynced_payloads(
     return bool(cast(CursorResult[Any], result).rowcount)
 
 
+def postgres_section(summary: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """``summary.postgres`` when it is an object (the Postgres step's
+    counts), else None."""
+    postgres = (summary or {}).get("postgres")
+    return postgres if isinstance(postgres, dict) else None
+
+
 def payloads_resynced(summary: Mapping[str, Any] | None) -> bool:
     """The payload re-drive of an interrupted run recorded its outcome
     (``record_resynced_payloads``; the live run's step 3b writes the same
     key)."""
-    postgres = (summary or {}).get("postgres")
-    return isinstance(postgres, dict) and "details_payload_synced" in postgres
+    return "details_payload_synced" in (postgres_section(summary) or {})
 
 
 def note_row_pseudonymized() -> ColumnElement[bool]:
@@ -892,21 +898,27 @@ class RestoreReport:
     to_sync: list[PayloadSync] = field(default_factory=list)
 
 
-def memory_scrub_at(summary: Mapping[str, Any] | None) -> datetime | None:
+def memory_scrub_at(summary: Mapping[str, Any] | None, *, strict: bool = True) -> datetime | None:
     """``summary.postgres.memory_scrub_at`` (#2268) as naive UTC, or None.
 
     When the erasure locked the subject's memories, as ``_execute`` stores it
     in the request's summary (since v0.124.0). None when the summary has no
-    ``postgres`` section, no such key, or a value that is not an ISO time
-    (no bound is better than a wrong one).
+    ``postgres`` section or no such key.
+
+    Raises:
+        ValueError: The value is not an ISO time and ``strict`` (the re-run's
+            strip bound: a wrong bound would strip rows it must not). With
+            ``strict=False`` it gives None (the payload re-drive, which then
+            reads without a bound).
     """
-    postgres = (summary or {}).get("postgres")
-    scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
+    scrubbed = (postgres_section(summary) or {}).get("memory_scrub_at")
     if not isinstance(scrubbed, str):
         return None
     try:
         return to_naive_utc(datetime.fromisoformat(scrubbed))
     except ValueError:
+        if strict:
+            raise
         return None
 
 
@@ -926,19 +938,21 @@ async def restored_payload_syncs(
     A later restore under the same pseudonym (the re-run, or an erasure of
     the same sub registered again) is included too: the patch is idempotent.
 
-    ``since`` is the run's ``memory_scrub_at``; None (no bound to trust)
-    gives nothing. Reads ``idx_memory_revisions_actor``: the pseudonym's
-    rows only.
+    ``since`` is the run's ``memory_scrub_at``. None (a summary without a
+    usable one, or a note row of a run interrupted on v0.124.x) reads every
+    such row of the pseudonym: an earlier restore under it is patched too,
+    which the idempotent, version-checked patch makes harmless — leaving a
+    restored point with the erased member's ``location`` is not. Reads
+    ``idx_memory_revisions_actor``: the pseudonym's rows only.
     """
-    if since is None:
-        return []
+    bound = [] if since is None else [MemoryRevision.at >= since]
     rows = await db.execute(
         select(MemoryRevision.memory_id, func.max(MemoryRevision.version))
         .where(
             MemoryRevision.actor_user_id == pseudonym,
             MemoryRevision.writer == REVISION_WRITER_ERASURE,
             MemoryRevision.kind == REVISION_KIND_UPDATED,
-            MemoryRevision.at >= since,
+            *bound,
         )
         .group_by(MemoryRevision.memory_id)
         .order_by(MemoryRevision.memory_id)

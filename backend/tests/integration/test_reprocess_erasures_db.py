@@ -1328,7 +1328,7 @@ async def test_an_interrupted_runs_missing_payload_re_drive_is_done_once(
         assert code == 0
         out = capsys.readouterr().out
         assert f"payload  {request.id}  synced 1, skipped 0" in out
-        assert "1 interrupted run(s) payloads resynced" in out
+        assert "1 request(s) payloads resynced" in out
         sync.assert_awaited_once()
         assert sync.await_args.kwargs["memory_id"] == restored.id
         assert sync.await_args.kwargs["payload_updates"]["location"] == AUTHORS["location"]
@@ -1544,6 +1544,71 @@ async def test_a_legacy_note_row_whose_sub_is_in_use_again_keeps_the_live_rows(
         assert (await _request_row(session, request.id)).user_id == case.p
         assert await _audit(session, case.own) == own
         assert await _snapshot(session, "users", "t.user_id = :u", u=case.sub) == live_user
+
+
+async def test_a_legacy_note_rows_restored_memories_are_patched_once(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review of #2302: a run interrupted after its Postgres commit on
+    v0.124.x left a legacy note row (raw sub) and a restored memory whose
+    point may keep the erased member's ``location``. The repair patches it
+    (found by the derived pseudonym's ``erasure`` revision row) once; the
+    next run, the row now flagged, changes nothing and calls no vector store."""
+    from services.erasure_details import erasure_pseudonym
+
+    sub = f"google-oauth2|legacy-{uuid.uuid4().hex[:8]}"
+    derived = erasure_pseudonym(sub)
+    restored = _memory(world["ws"], world["ctx"], world["author"], AUTHORS, 4)
+    request = _request(sub, summary={"note": "user_row_already_absent"})
+    async with _maker(async_engine)() as session:
+        session.add(restored)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(restored, 3, derived, {"details": AUTHORS}),
+                _edit(
+                    restored,
+                    4,
+                    derived,
+                    {"erased": ["details"], "restored_from": 3},
+                    AFTER,
+                    writer="erasure",
+                ),
+                request,
+            ]
+        )
+        await session.commit()
+    try:
+        code, sync = await _run(async_engine, ["--request", str(request.id)])
+        assert code == 0
+        plan = capsys.readouterr().out
+        assert f"would pseudonymize note row  {request.id}" in plan
+        assert f"would resync payloads  {request.id}  1 memory(ies)" in plan
+        sync.assert_not_awaited()
+
+        code, sync = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"payload  {request.id}  synced 1," in out
+        assert sub not in out and sub not in plan
+        sync.assert_awaited_once()
+        assert sync.await_args.kwargs["memory_id"] == restored.id
+        async with _maker(async_engine)() as session:
+            assert (await _request_row(session, request.id)).user_id == derived
+            before = await _snapshots(session, [])
+
+        code, sync = await _run(async_engine, ["--request", str(request.id), "--apply", "--yes"])
+        assert code == 0
+        assert "1 completed erasure(s): would change 0, skipped 1" in capsys.readouterr().out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == derived))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.execute(delete(Memory).where(Memory.id == restored.id))
+            await session.commit()
 
 
 async def test_a_note_rows_derived_pseudonym_is_an_erased_member(
