@@ -426,7 +426,8 @@ class AuditLog(Base):
 
     # Who
     user_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # indexed since #2298 (f17): erasure, its re-run and ops look rows up by it
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # What
     action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
