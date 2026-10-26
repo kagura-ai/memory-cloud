@@ -3194,6 +3194,26 @@ VACUUM (ANALYZE) memories;
 
 Downgrade is a no-op: every version of the code reads both forms the same.
 
+### Migration `f17_2298_audit_logs_user_id_idx` (#2298)
+
+Adds the btree index `ix_audit_logs_user_id` on `audit_logs (user_id)`. The
+account erasure reads the member's audit rows by `user_id` inside its Postgres
+transaction, and `reprocess_erasures` does so for every past erasure; without
+the index each of those reads scans the table.
+
+- The index is built `CREATE INDEX CONCURRENTLY IF NOT EXISTS` in an
+  autocommit block: `audit_logs` stays writable during the build, and no table
+  lock is held.
+- It can be run again after an interrupted build: an `INVALID` leftover index
+  is dropped first.
+- It does not run offline (`alembic upgrade --sql`) and needs a direct
+  database connection, not a transaction-pooling proxy.
+- The old image never reads the index, so a blue-green deploy is safe. The
+  downgrade drops it `CONCURRENTLY`.
+
+Run `reprocess_erasures --all` (plan, then `--apply --yes`) only after the
+index exists; see `docs/ops/erasure-runbook.md` §2.5.
+
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
 A tier's `features` set is env-overridable too. `PLAN_<KEY>_FEATURES` is a
