@@ -11,6 +11,8 @@ import random
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from services.erasure_details import (
     DetailsEdit,
     RestoreTarget,
@@ -578,6 +580,80 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",
     ]
+
+
+# ---------------------------------------------------------------------------
+# #2302: the restored set of an interrupted run, read back from the log
+# ---------------------------------------------------------------------------
+
+
+def test_memory_scrub_at_parses_the_summary_as_naive_utc() -> None:
+    from datetime import datetime
+
+    from services.erasure_details import memory_scrub_at
+
+    summary = {"postgres": {"memory_scrub_at": "2026-10-01T12:00:00Z"}}
+    assert memory_scrub_at(summary) == datetime(2026, 10, 1, 12, 0)
+    assert memory_scrub_at({"postgres": {"memory_scrub_at": "2026-10-01T21:00:00+09:00"}}) == (
+        datetime(2026, 10, 1, 12, 0)
+    )
+    for empty in (
+        None,
+        {},
+        {"postgres": None},
+        {"postgres": {"users": 1}},
+        {"note": "x"},
+        {"postgres": {"memory_scrub_at": 1}},
+    ):
+        assert memory_scrub_at(empty) is None
+    # a value that is not an ISO time: an error for the strip bound, no bound
+    # for the payload re-drive
+    malformed = {"postgres": {"memory_scrub_at": "x"}}
+    with pytest.raises(ValueError):
+        memory_scrub_at(malformed)
+    assert memory_scrub_at(malformed, strict=False) is None
+
+
+async def test_restored_payload_syncs_reads_the_restores_revision_rows() -> None:
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import PayloadSync, restored_payload_syncs
+
+    memory_id = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[(memory_id, 4)])))
+    since = datetime(2026, 10, 1, 12, 0)
+
+    assert await restored_payload_syncs(db, "p" * 64, since=since) == [PayloadSync(memory_id, 4)]
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt)
+    params = stmt.compile().params
+    assert "max(memory_revisions.version)" in sql
+    assert "GROUP BY memory_revisions.memory_id" in sql
+    assert "ORDER BY memory_revisions.memory_id" in sql
+    assert "memory_revisions.at >=" in sql
+    assert params["actor_user_id_1"] == "p" * 64
+    assert params["writer_1"] == "erasure"
+    assert params["kind_1"] == "updated"
+    assert params["at_1"] == since
+
+
+async def test_restored_payload_syncs_without_a_bound_reads_every_restore() -> None:
+    """Review of #2302: no usable scrub time reads every restore row of the
+    pseudonym (the patch is idempotent) instead of patching nothing."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import PayloadSync, restored_payload_syncs
+
+    memory_id = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[(memory_id, 2)])))
+    assert await restored_payload_syncs(db, "p" * 64, since=None) == [PayloadSync(memory_id, 2)]
+    stmt = db.execute.await_args.args[0]
+    assert "memory_revisions.at" not in str(stmt.whereclause)
+    assert stmt.compile().params["actor_user_id_1"] == "p" * 64
 
 
 # ---------------------------------------------------------------------------

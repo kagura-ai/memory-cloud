@@ -41,9 +41,16 @@ request is then processed by it. Two kinds of completed request are
 skipped and counted: one the sweep marked complete without running it (the
 user row was already gone; it stores the account id, or since v0.125.0 its
 pseudonym, #2286), and one finalized before v0.58.1 that stores the account
-id (before the revision log of v0.113.0 anyway). A request the sweep found
-interrupted after its Postgres step (``after_postgres_commit: interrupted:
-sweep``, #2286) ran and is processed like any other. A request that failed
+id (before the revision log of v0.113.0 anyway). Such a note row written
+before v0.125.0 is still pseudonymized (#2302): it gets the pseudonym derived
+from the account id, no request metadata and the ``pseudonymized`` flag, as
+the sweep writes it since. A request the sweep found interrupted after its
+Postgres step (``after_postgres_commit: interrupted: sweep``, #2286) ran and is
+processed like any other; when a request marked ``after_postgres_commit:``
+has no ``details_payload_synced`` in its summary (the sweep's re-drive never
+recorded, or the run failed inside its payload step, #2302), the memories its
+restore put back (its ``erasure`` revision rows) have their vector payloads
+patched once and the counts are recorded. A request that failed
 before its Postgres step erased nothing and is not listed. On a skipped note
 row the sweep pseudonymized (since v0.125.0) the subject's audit rows that
 still carry the account id are pseudonymized all the same (below): a run
@@ -113,12 +120,14 @@ from cli._oneshot import add_log_level_argument, configure_logging, run_plan_app
 from models.auth import AuditLog, User  # noqa: E402
 from models.erasure import (  # noqa: E402
     FAILURE_AFTER_POSTGRES_COMMIT,
+    NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     ErasureRequest,
 )
 from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
     ERASURE_AUDIT_ACTION,
+    PayloadSync,
     RestoreReport,
     StripCounts,
     SubjectDetailsErasure,
@@ -129,11 +138,18 @@ from services.erasure_details import (  # noqa: E402
     erasure_pseudonym,
     finalized_erasure,
     is_pseudonym,
+    legacy_note_row,
+    memory_scrub_at,
+    merged_request_summary,
     note_row_pseudonymized,
     payload_counts,
+    payloads_resynced,
+    postgres_section,
     pseudonymize_audit_trail,
     pseudonymize_erasure_audit_initiator,
     pseudonymized_request_values,
+    record_resynced_payloads,
+    restored_payload_syncs,
     sync_restored_payloads,
     unrepaired_erasure,
 )
@@ -158,6 +174,10 @@ SKIPPED_NO_ROWS = (
     "failed after its Postgres step: its summary counts memory or revision rows it "
     "pseudonymized, but none carries the derived pseudonym (the salt changed?); "
     "left as it is"
+)
+# #2302: never prints the account id it replaces
+NOTE_REPAIRED = (
+    "marked complete without running before v0.125.0: the account id is replaced by its pseudonym"
 )
 # #2287: never prints the account id or the email
 AUDIT_KEPT = "rows kept: the account id is in use again"
@@ -197,6 +217,13 @@ class RequestChange:
     # #2345: rows of the pseudonym whose IP / user agent were cleared, plus
     # the ``account_erasure`` rows whose ``initiated_by`` was pseudonymized
     audit_metadata_cleared: int = 0
+    # #2302: a note row from before v0.125.0 stored the account id and gets
+    # the pseudonym
+    note_repaired: bool = False
+    # #2302: memories whose payloads are patched again: a run that failed or
+    # was interrupted after its Postgres commit without recording its payload
+    # step, or a legacy note row's (None: not such a request)
+    payload_resync: int | None = None
 
     @property
     def changes(self) -> int:
@@ -209,6 +236,8 @@ class RequestChange:
             + self.audit_logs_pseudonymized
             + self.audit_mentions_pseudonymized
             + self.audit_metadata_cleared
+            + int(self.note_repaired)
+            + int(self.payload_resync is not None)
         )
 
 
@@ -376,10 +405,9 @@ def _existed_at(
     wrote on the subject's memories within that hour are stripped and marked
     too; later ones are left alone. Without ``started_at``, no bound.
     """
-    postgres = (summary or {}).get("postgres")
-    scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
-    if isinstance(scrubbed, str):
-        return to_naive_utc(datetime.fromisoformat(scrubbed))
+    scrubbed = memory_scrub_at(summary)
+    if scrubbed is not None:
+        return scrubbed
     if completed_at is not None:
         return to_naive_utc(completed_at)
     if started_at is not None:
@@ -391,8 +419,8 @@ def _wrote_pseudonym(summary: dict[str, Any] | None) -> bool:
     """The erasure's summary says it wrote the pseudonym on memory or revision
     rows (#2268 review). When it wrote none, no row can carry it and the
     repair goes ahead: the account id must not stay on the row."""
-    postgres = (summary or {}).get("postgres")
-    if not isinstance(postgres, dict):
+    postgres = postgres_section(summary)
+    if postgres is None:
         return False
     return any(
         isinstance(postgres.get(key), int) and postgres[key] > 0
@@ -436,6 +464,45 @@ async def _repair(db: AsyncSession, request_id: UUID, account_id: str) -> bool:
     return bool(cast(CursorResult[Any], result).rowcount)
 
 
+async def _repair_note_row(db: AsyncSession, request_id: UUID, account_id: str) -> bool:
+    """Pseudonymize a note row the sweep wrote before v0.125.0 (#2302): the
+    request was marked ``complete`` because the user row was already gone,
+    and the row kept the account id. It gets what the sweep writes since
+    #2286 — the pseudonym, no request metadata (``pseudonymized_request_values``,
+    ``initiated_by`` decided in SQL: an admin's id stays) and
+    ``pseudonymized: true`` in its summary. ``erased_pseudonyms`` derived the
+    same pseudonym from the account id before, so no later walk changes.
+    Scoped to the one row by its id, stored value and shape
+    (``legacy_note_row``); status and ``completed_at`` stay.
+
+    Returns:
+        Whether the row was repaired (False when another run got there first).
+    """
+    result = await db.execute(
+        update(ErasureRequest)
+        .where(
+            ErasureRequest.id == request_id,
+            ErasureRequest.user_id == account_id,
+            legacy_note_row(),
+        )
+        .values(
+            **pseudonymized_request_values(account_id, None),
+            deleted_data_summary=merged_request_summary({NOTE_PSEUDONYMIZED_KEY: True}),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(cast(CursorResult[Any], result).rowcount)
+
+
+def _merge_syncs(live: list[PayloadSync], derived: list[PayloadSync]) -> list[PayloadSync]:
+    """``live`` (this run's restore) and ``derived`` (an interrupted run's,
+    from the log), one per memory: a live entry wins, it carries the newer
+    version."""
+    merged = {sync.memory_id: sync for sync in derived}
+    merged.update((sync.memory_id, sync) for sync in live)
+    return [merged[memory_id] for memory_id in sorted(merged)]
+
+
 async def _reprocess_one(
     db: AsyncSession,
     request_id: UUID,
@@ -451,6 +518,8 @@ async def _reprocess_one(
     audit_only: bool = False,
     mentioned: dict[str, str] | None = None,
     swept_emails: set[str] | None = None,
+    note_account_id: str | None = None,
+    resync_postgres: dict[str, Any] | None = None,
 ) -> RequestChange:
     """Repair the row (``account_id``), restore, then strip, by ``pseudonym``,
     then the audit rows (the live erasure's lock order: memories first);
@@ -481,11 +550,35 @@ async def _reprocess_one(
     ``mentioned`` for a request that stores (or, repaired, gets) the
     pseudonym, and only then. ``swept_emails`` (the run's): emails an
     earlier request of the run already swept are left out of the mentions.
+    ``note_account_id`` (#2302, a note row from before v0.125.0): the account
+    id the row stores; the row gets the pseudonym in the same transaction
+    (``_repair_note_row``), and the memories an erasure restored under that
+    pseudonym (a run interrupted after its Postgres commit on v0.124.x ends
+    up as such a row; a request that never ran has none) have their payloads
+    patched after the commit, unbounded — once, as the repair is.
+    ``resync_postgres`` (#2302, a run that failed or was interrupted after its
+    Postgres commit without recording its payload step): the row's
+    ``postgres`` summary; the memories that run restored
+    (``restored_payload_syncs``, bounded by its ``memory_scrub_at``) are
+    patched with this run's, and the outcome is recorded on the row
+    (``record_resynced_payloads``), so a second run does not patch them again.
     """
     try:
         repaired = account_id is not None
         if repaired and not dry_run:
             repaired = await _repair(db, request_id, cast(str, account_id))
+        note_repaired = note_account_id is not None
+        if note_repaired and not dry_run:
+            note_repaired = await _repair_note_row(db, request_id, cast(str, note_account_id))
+        # #2302: a plain read of the log, before any memory lock
+        derived: list[PayloadSync] = []
+        if resync_postgres is not None or note_account_id is not None:
+            since = (
+                memory_scrub_at({"postgres": resync_postgres}, strict=False)
+                if resync_postgres is not None
+                else None
+            )
+            derived = await restored_payload_syncs(db, pseudonym, since=since)
         # the live erasure's order (#2298 review): the subject's memories are
         # locked first (``erase_subject_details``), the audit rows after —
         # one cross-table order for both paths
@@ -563,6 +656,15 @@ async def _reprocess_one(
             audit_mentions_pseudonymized=mentions,
             audit_mentions_kept=mentions_kept,
             audit_metadata_cleared=metadata_cleared,
+            note_repaired=note_repaired,
+            # a re-drive after the Postgres commit is a change even with
+            # nothing to patch (its counts are recorded); a note row's only
+            # when it has memories to patch (its repair is the change)
+            payload_resync=(
+                len(derived)
+                if resync_postgres is not None or (note_account_id is not None and derived)
+                else None
+            ),
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -585,6 +687,13 @@ async def _reprocess_one(
                     "audit_mentions_pseudonymized": change.audit_mentions_pseudonymized,
                     "audit_metadata_cleared": change.audit_metadata_cleared,
                     "tool": TOOL,
+                    # #2302: only on the requests they apply to
+                    **({"request_note_pseudonymized": True} if change.note_repaired else {}),
+                    **(
+                        {"payloads_resynced": change.payload_resync}
+                        if change.payload_resync is not None
+                        else {}
+                    ),
                 },
             )
         )
@@ -603,9 +712,18 @@ async def _reprocess_one(
         audit_logs_pseudonymized=change.audit_logs_pseudonymized,
         audit_mentions_pseudonymized=change.audit_mentions_pseudonymized,
         audit_metadata_cleared=change.audit_metadata_cleared,
+        request_note_pseudonymized=change.note_repaired,
+        payloads_resynced=change.payload_resync,
     )
     try:
-        await sync_restored_payloads(db, restore.to_sync, restore)
+        await sync_restored_payloads(db, _merge_syncs(restore.to_sync, derived), restore)
+        if resync_postgres is not None:
+            if await record_resynced_payloads(db, request_id, resync_postgres, restore):
+                await db.commit()
+            else:
+                # the row moved since it was read: nothing recorded
+                await db.rollback()
+                logger.info("erasure_reprocessed_request_moved", request_id=str(request_id))
     except BaseException:
         await db.rollback()
         raise
@@ -651,6 +769,7 @@ async def reprocess_erasures(
             ErasureRequest.started_at,
             ErasureRequest.deleted_data_summary,
             ErasureRequest.user_email_hash,
+            ErasureRequest.failure_reason,
             finalized_erasure().label("finalized"),
             unrepaired_erasure().label("unrepaired"),
             note_row_pseudonymized().label("note_pseudonymized"),
@@ -671,16 +790,17 @@ async def reprocess_erasures(
     # account's other requests carry its other emails, and once its audit
     # rows carry the pseudonym no later run can reach them again
     email_hashes: dict[str, set[str]] = defaultdict(set)
-    for user_id, email_hash, unrepaired in (
+    for user_id, email_hash, derive in (
         await db.execute(
             select(
                 ErasureRequest.user_id,
                 ErasureRequest.user_email_hash,
-                unrepaired_erasure().label("unrepaired"),
+                (unrepaired_erasure() | legacy_note_row()).label("derive"),
             ).where(stmt.whereclause)
         )
     ).all():
-        email_hashes[erasure_pseudonym(user_id) if unrepaired else user_id].add(email_hash)
+        # #2302: a legacy note row is keyed by its derived pseudonym too
+        email_hashes[erasure_pseudonym(user_id) if derive else user_id].add(email_hash)
     if request_id is not None:
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
@@ -753,6 +873,13 @@ async def reprocess_erasures(
                 email_hashes=email_hashes[pseudonym],
                 mentioned=mentions_of(pseudonym),
                 swept_emails=swept_emails,
+                # #2302: the repair writes the marker in this transaction;
+                # the payload step's backstop runs with it, like the others'
+                resync_postgres=(
+                    None
+                    if payloads_resynced(request.deleted_data_summary)
+                    else dict(postgres_section(request.deleted_data_summary) or {})
+                ),
             )
         else:
             # Both checks before the user_id is used as a subject: only a row
@@ -762,29 +889,43 @@ async def reprocess_erasures(
                 # pseudonym, so the orphan lookup is sound for it: audit rows
                 # a run interrupted on v0.124.x (before its audit-log step)
                 # left raw are found and scrubbed, and the rows naming the
-                # subject (#2298) — nothing else is done. A legacy note row
-                # stores the raw sub: never looked up.
-                if request.note_pseudonymized:
-                    change = await _reprocess_one(
-                        db,
-                        request.id,
-                        request.user_id,
-                        request.completed_at,
-                        existed_at,
-                        dry_run,
-                        erased,
-                        audit_account_id=audit_account_id(request.id, request.user_id),
-                        email_hashes=email_hashes[request.user_id],
-                        audit_only=True,
-                        mentioned=mentions_of(request.user_id),
-                        swept_emails=swept_emails,
-                    )
-                    record(change)
+                # subject (#2298) — nothing else is done. #2302: a legacy note
+                # row (before v0.125.0) stores the raw sub: it gets the
+                # pseudonym derived from it (what ``erased_pseudonyms``
+                # derives), and the same scrub by that pseudonym, in one
+                # transaction. The sub is never looked up as a subject.
+                legacy = not request.note_pseudonymized
+                pseudonym = erasure_pseudonym(request.user_id) if legacy else request.user_id
+                change = await _reprocess_one(
+                    db,
+                    request.id,
+                    pseudonym,
+                    request.completed_at,
+                    existed_at,
+                    dry_run,
+                    erased,
+                    audit_account_id=audit_account_id(request.id, pseudonym),
+                    email_hashes=email_hashes[pseudonym],
+                    audit_only=True,
+                    mentioned=mentions_of(pseudonym),
+                    swept_emails=swept_emails,
+                    note_account_id=request.user_id if legacy else None,
+                )
+                record(change)
                 result.skipped.append((request.id, SKIPPED_NOT_RUN))
                 continue
             if not is_pseudonym(request.user_id):
                 result.skipped.append((request.id, SKIPPED_NOT_PSEUDONYMIZED))
                 continue
+            # #2302: the backstop of the payload step of a run that failed or
+            # was interrupted after its Postgres commit without recording it
+            # (the sweep's re-drive, or a failure inside the step itself)
+            summary = request.deleted_data_summary or {}
+            resync = (
+                request.failure_reason is not None
+                and request.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+                and not payloads_resynced(summary)
+            )
             change = await _reprocess_one(
                 db,
                 request.id,
@@ -797,6 +938,7 @@ async def reprocess_erasures(
                 email_hashes=email_hashes[request.user_id],
                 mentioned=mentions_of(request.user_id),
                 swept_emails=swept_emails,
+                resync_postgres=dict(summary["postgres"]) if resync else None,
             )
         record(change)
     return result
@@ -815,6 +957,12 @@ def _print_plan(result: ReprocessResult) -> None:
         if c.repaired:
             # The plan always runs as a dry run (``_oneshot.run_plan_apply``).
             print(f"would repair  {c.request_id}  {REPAIRED}")
+    for c in result.changed:
+        if c.note_repaired:
+            print(f"would pseudonymize note row  {c.request_id}  {NOTE_REPAIRED}")
+    for c in result.changed:
+        if c.payload_resync is not None:
+            print(f"would resync payloads  {c.request_id}  {c.payload_resync} memory(ies)")
     for c in result.changed:
         if c.audit_logs_pseudonymized:
             print(f"would pseudonymize audit rows  {c.request_id}  {_audit_rows(c)}")
@@ -848,6 +996,9 @@ def _print_applied(result: ReprocessResult) -> None:
         if c.repaired:
             print(f"repaired  {c.request_id}  {REPAIRED}")
     for c in result.changed:
+        if c.note_repaired:
+            print(f"pseudonymized note row  {c.request_id}  {NOTE_REPAIRED}")
+    for c in result.changed:
         if c.audit_logs_pseudonymized:
             print(f"pseudonymized audit rows  {c.request_id}  {_audit_rows(c)}")
     for c in result.changed:
@@ -862,7 +1013,7 @@ def _print_applied(result: ReprocessResult) -> None:
                 f"cleared audit request metadata  {c.request_id}  {c.audit_metadata_cleared} row(s)"
             )
     for c in result.changed:
-        if c.details_restored or c.details_restored_unavailable:
+        if c.details_restored or c.details_restored_unavailable or c.payload_resync is not None:
             p = c.payload
             skipped = {
                 "tombstone": p.get("details_payload_skipped_tombstone", 0),
@@ -904,6 +1055,8 @@ def _summary(result: ReprocessResult) -> str:
     audited = sum(c.audit_logs_pseudonymized for c in result.changed)
     mentions = sum(c.audit_mentions_pseudonymized for c in result.changed)
     cleared = sum(c.audit_metadata_cleared for c in result.changed)
+    notes = sum(c.note_repaired for c in result.changed)
+    resynced = sum(c.payload_resync is not None for c in result.changed)
     return (
         (
             f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
@@ -914,6 +1067,8 @@ def _summary(result: ReprocessResult) -> str:
         + (f", {audited} audit row(s) pseudonymized" if audited else "")
         + (f", {mentions} audit mention(s) pseudonymized" if mentions else "")
         + (f", {cleared} audit row(s) request metadata cleared" if cleared else "")
+        + (f", {notes} note row(s) pseudonymized" if notes else "")
+        + (f", {resynced} request(s) payloads resynced" if resynced else "")
     )
 
 
@@ -943,7 +1098,10 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     scope.add_argument(
         "--all",
         action="store_true",
-        help="every completed erasure request, and every request that failed after its Postgres step",
+        help=(
+            "every completed erasure request (note rows from before v0.125.0 are "
+            "pseudonymized), and every request that failed after its Postgres step"
+        ),
     )
     scope.add_argument("--request", type=UUID, help="one such erasure request (its id)")
     mode = parser.add_mutually_exclusive_group()

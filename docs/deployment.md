@@ -1779,12 +1779,24 @@ never started. A request whose Postgres step committed ends `failed` with
 `failure_reason` set to `after_postgres_commit: interrupted: sweep`, is
 pseudonymized like any request that failed after its Postgres step, and keeps
 the Postgres counts; the member's Redis state (sessions, rate limits, security
-notices) is cleared then, best-effort. The command processes it like any
-request that ran (nothing is expected to change: the restore and strip ran in
-the Postgres step). Not done on this path: the patch of the vector payloads of
-memories whose `details` the erasure put back (a restored memory's point may
-keep the member's `location` until it is re-embedded), the `account_erasure`
-audit row and the completion email. A request the sweep finds with no
+notices) is cleared then, best-effort. From v0.128.0 (#2302) the sweep then
+patches the vector payloads of the memories whose `details` the run put back
+(found from the restore's own `memory_revisions` rows), as the run would have,
+and records the counts in `deleted_data_summary.postgres.details_payload_*`; a
+patch that fails re-queues the memory for embedding. The command processes the
+request like any request that ran (nothing is expected to change: the restore
+and strip ran in the Postgres step), and when the summary has no
+`details_payload_synced` key (the sweep's own patch was interrupted, or the
+row was closed before v0.128.0) it runs that patch once and records the counts
+(`would resync payloads <request id> <n> memory(ies)` in the plan). The same
+backstop covers any request marked `after_postgres_commit:` without that key,
+such as a run that failed inside its own payload step. Not done
+on this path: the `account_erasure` audit row and the completion email. The
+sweep decides from the `postgres` summary, not from the user lookup (#2302):
+if the member signed up again with the same identity before the sweep reached
+the row, the request is closed the same way, the new account is never touched
+and its Redis state is kept (`erasure_sweep_subject_reregistered`), and the
+closed row no longer blocks a new erasure request of the new account. A request the sweep finds with no
 `postgres` in its summary never ran: it is marked `complete` with the note
 `user_row_already_absent` as before, and from v0.125.0 its account id, request
 IP and user agent are replaced or cleared too (the summary then also carries
@@ -1794,15 +1806,23 @@ commit then), so the sweep marks it that way (`never ran`). Such a member is
 still counted among the erased members, so a later erasure never puts their
 value back: by the stored pseudonym when the row was closed on v0.125.0 or
 later, by the pseudonym derived from the stored account id when it was closed
-before. The command does not process or repair these rows (still `never ran`),
-with one exception: on v0.124.x the audit-log step ran after the Postgres
-commit, so such a run may also have left the member's audit rows with their
-account id and email. For a row closed on v0.125.0 or later (it stores the
-pseudonym, `"pseudonymized": true`) the command finds those rows as below and
+before. The command restores and strips nothing for these rows (still `never
+ran`). On v0.124.x the audit-log step ran after the Postgres commit, so such a
+run may also have left the member's audit rows with their account id and
+email: the command finds those rows by the request's pseudonym as below and
 pseudonymizes them — the plan lists `would pseudonymize audit rows <request
-id> <n> row(s)` next to the `never ran` line; nothing else is restored,
-stripped or written on the request row. A row closed before v0.125.0 stores
-the account id and is never used for that lookup, so its audit residue stays.
+id> <n> row(s)` next to the `never ran` line. A row closed before v0.125.0
+stores the account id; from v0.128.0 (#2302) the command repairs it by default
+under `--apply`: the plan lists `would pseudonymize note row <request id>`, and
+the row gets the pseudonym derived from the account id (the value the
+erased-members set already used), its request IP and user agent cleared,
+`initiated_by` replaced when it was the member's own id (an admin's id stays)
+and `"pseudonymized": true` in its summary; its audit residue is handled by
+that pseudonym in the same transaction (with the #2298 / #2345 sweeps of
+other members' rows naming the member and of request metadata), and the vector payloads of memories an
+erasure restored under it (a run interrupted on v0.124.x ends up as such a
+row) are patched once after the commit. Status and completion time stay, and
+the account id is never printed.
 
 **Audit rows left by a failed audit-log step — Issue #2287.** From v0.125.0
 the pseudonymization of the member's own audit rows (`audit_logs.user_id`,

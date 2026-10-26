@@ -13,6 +13,7 @@ import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -201,6 +202,70 @@ def test_a_repaired_request_is_listed_without_a_completion_time(capsys):
     assert row.split()[1:] == ["-", "0", "0", "0", "0"]
     assert f"would repair  {REQUEST_ID}  failed after its Postgres step" in out
     assert cli._summary(result).endswith(", 1 request row(s) repaired")
+
+
+def _change(**kwargs: Any) -> cli.RequestChange:
+    fields: dict[str, Any] = {
+        "request_id": REQUEST_ID,
+        "completed_at": None,
+        "details_restored": 0,
+        "details_restored_unavailable": 0,
+        "details_stripped": 0,
+        "scrub_marked": 0,
+    }
+    return cli.RequestChange(**{**fields, **kwargs})
+
+
+def test_a_pseudonymized_note_row_is_listed_and_counted(capsys):
+    """#2302: a legacy note row's repair is a change of its own; the plan and
+    the apply name it, never the account id."""
+    for dry_run, line in ((True, "would pseudonymize note row"), (False, "pseudonymized note row")):
+        result = cli.ReprocessResult(dry_run=dry_run, scanned=1)
+        result.changed.append(_change(note_repaired=True))
+        assert result.changes == 1
+        (cli._print_plan if dry_run else cli._print_applied)(result)
+        out = capsys.readouterr().out
+        assert f"{line}  {REQUEST_ID}  marked complete without running before v0.125.0" in out
+        assert cli._summary(result).endswith(", 1 note row(s) pseudonymized")
+
+
+@pytest.mark.parametrize("memories", [0, 2])
+def test_a_payload_resync_is_listed_and_reported(capsys, memories):
+    """#2302: the backstop of the sweep's re-drive is a change even with
+    nothing to patch (its counts are written); the apply prints the payload
+    line."""
+    plan = cli.ReprocessResult(dry_run=True, scanned=1)
+    plan.changed.append(_change(payload_resync=memories))
+    assert plan.changes == 1
+    cli._print_plan(plan)
+    assert f"would resync payloads  {REQUEST_ID}  {memories} memory(ies)" in capsys.readouterr().out
+    applied = cli.ReprocessResult(dry_run=False, scanned=1)
+    applied.changed.append(
+        _change(payload_resync=memories, payload={"details_payload_synced": memories})
+    )
+    cli._print_applied(applied)
+    assert f"payload  {REQUEST_ID}  synced {memories}," in capsys.readouterr().out
+    assert cli._summary(applied).endswith(", 1 request(s) payloads resynced")
+
+
+def test_no_note_or_resync_adds_nothing_to_the_report(capsys):
+    result = cli.ReprocessResult(dry_run=True, scanned=1)
+    result.changed.append(_change(details_stripped=1))
+    cli._print_plan(result)
+    out = capsys.readouterr().out
+    assert "note row" not in out and "resync" not in out
+    assert "note row" not in cli._summary(result) and "resynced" not in cli._summary(result)
+
+
+def test_merged_syncs_prefer_this_runs_restore():
+
+    from services.erasure_details import PayloadSync
+
+    a, b, c = sorted([uuid4(), uuid4(), uuid4()])
+    merged = cli._merge_syncs(
+        [PayloadSync(b, 7), PayloadSync(a, 2)], [PayloadSync(b, 5), PayloadSync(c, 3)]
+    )
+    assert merged == [PayloadSync(a, 2), PayloadSync(b, 7), PayloadSync(c, 3)]
 
 
 @pytest.mark.parametrize(

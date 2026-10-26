@@ -28,6 +28,10 @@ past erasures by pseudonym (#2243) share one definition:
 - ``sync_restored_payloads(db, syncs, report)`` (#2266) — the restored
   memories' vector payloads, patched after the caller's commit: no
   vector-store call happens while the subject's memories are locked.
+  ``restored_payload_syncs`` and ``record_resynced_payloads`` (#2302) — the
+  same for a run interrupted after its Postgres commit: the restored set read
+  back from the log, and the outcome recorded on its request row (the
+  sweep's re-drive and the re-run's backstop).
 - ``erased_pseudonyms(db)`` (#2243, #2268) — every member whose erasure ran
   in Postgres, the restore's ``erased_actors``.
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
@@ -75,6 +79,7 @@ from sqlalchemy import (
     case,
     exists,
     func,
+    literal,
     null,
     or_,
     select,
@@ -118,7 +123,7 @@ from services.payload_sync import (
     sync_payloads_after_commit,
 )
 from services.write_provenance import WriteProvenance
-from utils.datetime import to_utc_iso, utcnow
+from utils.datetime import to_naive_utc, to_utc_iso, utcnow
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
@@ -516,7 +521,7 @@ async def pseudonymize_erasure_audit_initiator(
     return changed
 
 
-def _ran_in_postgres() -> ColumnElement[bool]:
+def ran_in_postgres() -> ColumnElement[bool]:
     """The request's Postgres step committed: only a run writes
     ``deleted_data_summary.postgres`` (since #360) — after that commit
     before v0.125.0, inside its transaction since (#2286)."""
@@ -527,7 +532,73 @@ def _never_ran() -> ColumnElement[bool]:
     """A ``complete`` request without ``postgres`` in its summary: the
     sweep's ``user_row_already_absent`` rows, its only writer (#2286; the
     table and the ``postgres`` summary both came with #360)."""
-    return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
+    return (ErasureRequest.status == STATUS_COMPLETE) & ~ran_in_postgres()
+
+
+def legacy_note_row() -> ColumnElement[bool]:
+    """A note row (``_never_ran``) the sweep wrote before v0.125.0: it stores
+    the raw sub, not the pseudonym (#2302: ``reprocess_erasures`` repairs it)."""
+    return _never_ran() & ~note_row_pseudonymized()
+
+
+def merged_request_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
+    """``deleted_data_summary || keys`` in SQL, keeping what the row holds.
+
+    A summary still stored as the JSON value ``null`` (written before #2026
+    made the column store SQL NULL) is treated like SQL NULL: ``'null' ||
+    {...}`` is a JSON *array*, which would hide ``postgres`` from
+    ``has_key`` (``ran_in_postgres``).
+    """
+    stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
+    return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
+
+
+async def record_resynced_payloads(
+    db: AsyncSession, request_id: UUID, postgres: Mapping[str, Any], report: RestoreReport
+) -> bool:
+    """Record the payload re-drive of a run interrupted after its Postgres
+    commit (#2302) on its request row, as the live run's step 3b would:
+    ``payload_counts(report)`` merged into the ``postgres`` section
+    (``postgres`` = what the row held), zeros included — the presence of
+    ``details_payload_synced`` is what tells ``reprocess_erasures`` the
+    re-drive ran. Guarded by ``status = failed`` and the
+    ``after_postgres_commit:`` marker (the sweep's ``interrupted`` close, or a
+    failure inside the run's own payload step — review of #2302): a row the
+    run's own ``_finalize`` completed meanwhile is left alone.
+    Does not commit.
+
+    Returns:
+        Whether the row was written.
+    """
+    result = await db.execute(
+        update(ErasureRequest)
+        .where(
+            ErasureRequest.id == request_id,
+            ErasureRequest.status == STATUS_FAILED,
+            _failed_after_commit_marked(),
+        )
+        .values(
+            deleted_data_summary=merged_request_summary(
+                {"postgres": {**postgres, **payload_counts(report)}}
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(cast(CursorResult[Any], result).rowcount)
+
+
+def postgres_section(summary: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """``summary.postgres`` when it is an object (the Postgres step's
+    counts), else None."""
+    postgres = (summary or {}).get("postgres")
+    return postgres if isinstance(postgres, dict) else None
+
+
+def payloads_resynced(summary: Mapping[str, Any] | None) -> bool:
+    """The payload re-drive of an interrupted run recorded its outcome
+    (``record_resynced_payloads``; the live run's step 3b writes the same
+    key)."""
+    return "details_payload_synced" in (postgres_section(summary) or {})
 
 
 def note_row_pseudonymized() -> ColumnElement[bool]:
@@ -556,7 +627,7 @@ def finalized_erasure() -> ColumnElement[bool]:
     and since #2286 the sweep for a run interrupted after that commit
     (``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the same prefix).
     """
-    return _ran_in_postgres() & (
+    return ran_in_postgres() & (
         (ErasureRequest.status == STATUS_COMPLETE)
         | ((ErasureRequest.status == STATUS_FAILED) & _failed_after_commit_marked())
     )
@@ -572,7 +643,7 @@ def unrepaired_erasure() -> ColumnElement[bool]:
     """
     return (
         (ErasureRequest.status == STATUS_FAILED)
-        & _ran_in_postgres()
+        & ran_in_postgres()
         & ~_failed_after_commit_marked()
     )
 
@@ -598,12 +669,11 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
     it as is. For a request that really never ran either value is one no row
     carries: a no-op.
     """
-    never_ran = _never_ran()
     rows = await db.execute(
         select(
             ErasureRequest.user_id,
-            (unrepaired_erasure() | (never_ran & ~note_row_pseudonymized())).label("derive"),
-        ).where(finalized_erasure() | unrepaired_erasure() | never_ran)
+            (unrepaired_erasure() | legacy_note_row()).label("derive"),
+        ).where(finalized_erasure() | unrepaired_erasure() | _never_ran())
     )
     pseudonyms: set[str] = set()
     for user_id, derive in rows.all():
@@ -1091,6 +1161,68 @@ class RestoreReport:
     payload_requeue_failed: int = 0
     memory_ids: list[UUID] = field(default_factory=list)
     to_sync: list[PayloadSync] = field(default_factory=list)
+
+
+def memory_scrub_at(summary: Mapping[str, Any] | None, *, strict: bool = True) -> datetime | None:
+    """``summary.postgres.memory_scrub_at`` (#2268) as naive UTC, or None.
+
+    When the erasure locked the subject's memories, as ``_execute`` stores it
+    in the request's summary (since v0.124.0). None when the summary has no
+    ``postgres`` section or no such key.
+
+    Raises:
+        ValueError: The value is not an ISO time and ``strict`` (the re-run's
+            strip bound: a wrong bound would strip rows it must not). With
+            ``strict=False`` it gives None (the payload re-drive, which then
+            reads without a bound).
+    """
+    scrubbed = (postgres_section(summary) or {}).get("memory_scrub_at")
+    if not isinstance(scrubbed, str):
+        return None
+    try:
+        return to_naive_utc(datetime.fromisoformat(scrubbed))
+    except ValueError:
+        if strict:
+            raise
+        return None
+
+
+async def restored_payload_syncs(
+    db: AsyncSession, pseudonym: str, *, since: datetime | None
+) -> list[PayloadSync]:
+    """The memories an erasure run restored under ``pseudonym`` (#2302).
+
+    Read back from the restore's own revision rows (``restore_editor_details``
+    writes one per restored memory: ``kind='updated'``, ``writer='erasure'``,
+    ``actor_user_id`` = the pseudonym, ``at`` = after ``memory_scrub_at``),
+    for a run whose in-memory ``RestoreReport`` was lost with its process
+    (interrupted after the Postgres commit, #2286): what
+    ``sync_restored_payloads`` needs to patch their vector payloads. One
+    entry per memory, at its newest such revision's version — a row edited
+    since has moved past it and is skipped by the patch, as in the live run.
+    A later restore under the same pseudonym (the re-run, or an erasure of
+    the same sub registered again) is included too: the patch is idempotent.
+
+    ``since`` is the run's ``memory_scrub_at``. None (a summary without a
+    usable one, or a note row of a run interrupted on v0.124.x) reads every
+    such row of the pseudonym: an earlier restore under it is patched too,
+    which the idempotent, version-checked patch makes harmless — leaving a
+    restored point with the erased member's ``location`` is not. Reads
+    ``idx_memory_revisions_actor``: the pseudonym's rows only.
+    """
+    bound = [] if since is None else [MemoryRevision.at >= since]
+    rows = await db.execute(
+        select(MemoryRevision.memory_id, func.max(MemoryRevision.version))
+        .where(
+            MemoryRevision.actor_user_id == pseudonym,
+            MemoryRevision.writer == REVISION_WRITER_ERASURE,
+            MemoryRevision.kind == REVISION_KIND_UPDATED,
+            *bound,
+        )
+        .group_by(MemoryRevision.memory_id)
+        .order_by(MemoryRevision.memory_id)
+    )
+    return [PayloadSync(memory_id, version) for memory_id, version in rows.all()]
 
 
 def payload_counts(report: RestoreReport) -> dict[str, int]:
