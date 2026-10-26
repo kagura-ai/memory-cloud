@@ -2202,3 +2202,193 @@ class TestContextAuthorshipSweepLocksInIdOrder:
 
         (update_sql,) = [s for s in statements if s.startswith("UPDATE contexts")]
         assert "ORDER BY contexts_1.id FOR UPDATE" in update_sql
+
+
+# ---------------------------------------------------------------------------
+# #2304: re-queue embeddings after a cancelled or failed vector-store retry
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def subject_memories(db_session: AsyncSession, erasure_scenario):
+    """The target's memories in every embedding state, and a member's
+    ``success`` memory in the same context (a bystander)."""
+    from models.auth import Context
+    from models.memory import Memory
+
+    target = erasure_scenario["target_user_id"]
+    context = Context(
+        id=uuid4(),
+        workspace_id=erasure_scenario["workspace_id"],
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=target,
+    )
+    db_session.add(context)
+    await db_session.flush()
+
+    def _memory(user_id: str, status: str, **extra) -> Memory:
+        return Memory(
+            id=uuid4(),
+            user_id=user_id,
+            workspace_id=erasure_scenario["workspace_id"],
+            context_id=context.id,
+            summary=f"{status} memory",
+            content="body",
+            type="note",
+            client="test",
+            embedding_status=status,
+            embedding_retry_count=1,
+            embedding_error="earlier" if status == "failed" else None,
+            version=3,
+            **extra,
+        )
+
+    live = [_memory(target, "success") for _ in range(3)]
+    # a resource row: the pipeline rebuilds its point from the row (#2065)
+    resource = _memory(target, "success", details={"resource_id": "crm"})
+    untouched = [
+        _memory(target, "pending"),
+        _memory(target, "processing"),
+        _memory(target, "failed"),
+        _memory(target, "success", deleted_at=utcnow()),  # a tombstone
+        _memory(erasure_scenario["other_user_id"], "success"),  # the bystander
+    ]
+    db_session.add_all([*live, resource, *untouched])
+    await db_session.commit()
+    return {
+        "requeued": {m.id for m in [*live, resource]},
+        "untouched": {m.id for m in untouched},
+    }
+
+
+def _without_status(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "embedding_status"}
+
+
+async def _assert_requeued(db_session: AsyncSession, before: dict, memories: dict) -> None:
+    """The subject's live ``success`` rows are ``pending`` with nothing else
+    changed; every other memory row is byte-identical."""
+    after = await _table_snapshot(db_session, "memories")
+    assert after.keys() == before.keys()
+    for memory_id in memories["requeued"]:
+        assert before[memory_id]["embedding_status"] == "success"
+        assert after[memory_id]["embedding_status"] == "pending"
+        assert _without_status(after[memory_id]) == _without_status(before[memory_id])
+    for memory_id in set(after) - memories["requeued"]:
+        assert after[memory_id] == before[memory_id]
+
+
+class TestEmbeddingsRequeuedAfterAVectorStoreRetry:
+    """#2304: step 1 may delete the subject's points before it fails; a
+    request that then ends without an erasure puts the subject's live
+    embedded memories back to ``pending``."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_after_a_failed_attempt_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.erasure import STATUS_CANCELLED
+        from services.account_erasure_service import requeue_subject_embeddings
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        retry = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]["retry"]
+        before = await _everything_but(db_session, request_id)
+
+        cancelled = await AccountErasureService(db_session).cancel_self_service(user_id=target)
+
+        assert cancelled.id == request_id
+        assert cancelled.status == STATUS_CANCELLED
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        got = row["deleted_data_summary"]["retry"]
+        assert got["requeued_at"].endswith("Z")
+        assert {k: v for k, v in got.items() if k != "requeued_at"} == {
+            **retry,
+            "embeddings_requeued": 4,
+        }
+        assert row["deleted_data_summary"] == {"retry": got}
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _user_exists(db_session, target)
+
+        # idempotent: nothing is success any more
+        assert await requeue_subject_embeddings(db_session, target) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_fourth_attempt_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.erasure import STATUS_FAILED
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(
+            db_session,
+            erasure_scenario,
+            summary={"retry": {"attempts": 3, "step": "vector_store"}},
+        )
+        before = await _everything_but(db_session, request_id)
+
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"].startswith("vector_store_unavailable after 4 attempts")
+        retry = row["deleted_data_summary"]["retry"]
+        assert retry["attempts"] == 4
+        assert retry["embeddings_requeued"] == 4
+        assert retry["requeued_at"].endswith("Z")
+        # nothing erased: raw ids kept
+        assert (row["user_id"], row["initiated_by"]) == (target, target)
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _user_exists(db_session, target)
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_without_an_attempt_requeues_nothing(
+        self, db_session: AsyncSession, erasure_scenario, subject_memories
+    ):
+        from datetime import timedelta
+
+        from models.erasure import STATUS_CANCELLED, STATUS_COOLING_OFF
+
+        target = erasure_scenario["target_user_id"]
+        request = ErasureRequest(
+            user_id=target,
+            user_email_hash=sha256_hex(erasure_scenario["target_email"]),
+            initiated_by=target,
+            is_self_service=True,
+            reason_code="self_service",
+            status=STATUS_COOLING_OFF,
+            scheduled_for=utcnow() + timedelta(days=7),
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        before = await _table_snapshot(db_session, "memories")
+
+        await AccountErasureService(db_session).cancel_self_service(user_id=target)
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        assert row["deleted_data_summary"] is None
+        assert await _table_snapshot(db_session, "memories") == before
