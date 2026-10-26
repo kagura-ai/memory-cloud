@@ -893,13 +893,17 @@ def memory_scrub_at(summary: Mapping[str, Any] | None) -> datetime | None:
 
     When the erasure locked the subject's memories, as ``_execute`` stores it
     in the request's summary (since v0.124.0). None when the summary has no
-    ``postgres`` section or no such key.
+    ``postgres`` section, no such key, or a value that is not an ISO time
+    (no bound is better than a wrong one).
     """
     postgres = (summary or {}).get("postgres")
     scrubbed = postgres.get("memory_scrub_at") if isinstance(postgres, dict) else None
-    if isinstance(scrubbed, str):
+    if not isinstance(scrubbed, str):
+        return None
+    try:
         return to_naive_utc(datetime.fromisoformat(scrubbed))
-    return None
+    except ValueError:
+        return None
 
 
 async def restored_payload_syncs(

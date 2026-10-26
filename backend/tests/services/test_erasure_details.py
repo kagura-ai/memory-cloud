@@ -591,7 +591,15 @@ def test_memory_scrub_at_parses_the_summary_as_naive_utc() -> None:
     assert memory_scrub_at({"postgres": {"memory_scrub_at": "2026-10-01T21:00:00+09:00"}}) == (
         datetime(2026, 10, 1, 12, 0)
     )
-    for empty in (None, {}, {"postgres": None}, {"postgres": {"users": 1}}, {"note": "x"}):
+    for empty in (
+        None,
+        {},
+        {"postgres": None},
+        {"postgres": {"users": 1}},
+        {"note": "x"},
+        {"postgres": {"memory_scrub_at": "x"}},
+        {"postgres": {"memory_scrub_at": 1}},
+    ):
         assert memory_scrub_at(empty) is None
 
 

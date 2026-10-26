@@ -1318,6 +1318,40 @@ async def _request_snapshot(db_session: AsyncSession, request_id) -> dict:
     return (await _table_snapshot(db_session, "erasure_requests"))[request_id]
 
 
+_QDRANT_PATCH = "services.erasure_details.update_memory_payload_in_qdrant"
+
+
+async def _crash_after_the_postgres_commit(db_session: AsyncSession, target: str) -> UUID:
+    """An admin force-erase of ``target`` whose process dies after the
+    Postgres step committed (#2286 recipe: a ``CancelledError`` at the Redis
+    step, which no handler catches). Returns the request id; the row is
+    ``in_progress`` with the raw sub, as another process sees it."""
+    import asyncio
+
+    with (
+        patch(_QDRANT_PATCH, AsyncMock()),
+        patch.object(
+            AccountErasureService, "_clear_redis", AsyncMock(side_effect=asyncio.CancelledError())
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=target,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2302)",
+                ip_address="203.0.113.9",
+                user_agent="agent",
+            )
+    await db_session.rollback()
+    db_session.expire_all()
+    request_id = (
+        await db_session.execute(select(ErasureRequest.id).where(ErasureRequest.user_id == target))
+    ).scalar_one()
+    await db_session.rollback()
+    return request_id
+
+
 class TestARunInterruptedAfterThePostgresCommit:
     """#2286: the process dies after ``_delete_postgres`` committed (here a
     ``CancelledError``, which no handler catches): the request stays
@@ -1395,7 +1429,11 @@ class TestARunInterruptedAfterThePostgresCommit:
         await _age(db_session, request_id)
         before = await _everything_but(db_session, request_id)
         capsys.readouterr()
-        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        # #2302: the sweep re-drives the payload patch of the restored memory
+        with patch(_QDRANT_PATCH, AsyncMock()) as qdrant:
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        qdrant.assert_awaited_once()
+        assert qdrant.await_args.kwargs["memory_id"] == edited_by_target
 
         closed = await _request_snapshot(db_session, request_id)
         assert closed["status"] == STATUS_FAILED
@@ -1408,6 +1446,8 @@ class TestARunInterruptedAfterThePostgresCommit:
             None,
         )
         assert "memory_scrub_at" in closed["deleted_data_summary"]["postgres"]
+        assert closed["deleted_data_summary"]["postgres"]["details_payload_synced"] == 1
+        assert closed["deleted_data_summary"]["postgres"]["details_payload_requeue_failed"] == 0
         assert "redis" in closed["deleted_data_summary"]
         assert target not in repr(closed)
         # every other row of every table it could reach is byte-identical
@@ -1416,7 +1456,9 @@ class TestARunInterruptedAfterThePostgresCommit:
         assert target not in capsys.readouterr().out
 
         # a second sweep never re-claims it (``failed`` is terminal)
-        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        with patch(_QDRANT_PATCH, AsyncMock()) as qdrant:
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        qdrant.assert_not_awaited()
         assert await _request_snapshot(db_session, request_id) == closed
         assert await _everything_but(db_session, request_id) == before
 
@@ -1437,6 +1479,154 @@ class TestARunInterruptedAfterThePostgresCommit:
         assert "1 completed erasure(s): would change 0, skipped 0" in out
         assert target not in out
         assert await _request_snapshot(db_session, request_id) == closed
+
+
+class TestTheSweepsPayloadReDriveAndAReRegisteredSub:
+    """#2302: the sweep's re-drive of an interrupted run's payload patch when
+    the vector store is down, and a sub registered again before the sweep
+    reached the interrupted row."""
+
+    @pytest.mark.asyncio
+    async def test_a_vector_store_outage_re_queues_the_restored_memory(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        edited_by_target,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from models.memory import Memory
+        from utils.exceptions import QdrantError
+
+        request_id = await _crash_after_the_postgres_commit(
+            db_session, erasure_scenario["target_user_id"]
+        )
+        await _age(db_session, request_id)
+        before = await _everything_but(db_session, request_id)
+
+        with patch(_QDRANT_PATCH, AsyncMock(side_effect=QdrantError("down"))) as qdrant:
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        qdrant.assert_awaited_once()
+
+        closed = await _request_snapshot(db_session, request_id)
+        assert (closed["status"], closed["failure_reason"]) == (
+            STATUS_FAILED,
+            INTERRUPTED_AFTER_POSTGRES_COMMIT,
+        )
+        postgres = closed["deleted_data_summary"]["postgres"]
+        assert postgres["details_payload_requeued_after_error"] == 1
+        assert postgres["details_payload_synced"] == 0
+        status = (
+            await db_session.execute(
+                select(Memory.embedding_status).where(Memory.id == edited_by_target)
+            )
+        ).scalar_one()
+        assert status == "pending"
+        after = await _everything_but(db_session, request_id)
+        after["memories"].pop(edited_by_target), before["memories"].pop(edited_by_target)
+        assert after == before
+
+    @pytest.mark.asyncio
+    async def test_a_re_registered_sub_is_never_erased_by_the_old_request(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.auth import Context
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from models.memory import Memory
+        from services.erasure_details import erased_pseudonyms
+
+        sub = erasure_scenario["target_user_id"]
+        pseudonym = sha256_hex(sub, salt=_audit_salt())
+        request_id = await _crash_after_the_postgres_commit(db_session, sub)
+
+        # the same IdP identity signs up again before the sweep comes by
+        user = User(
+            email=f"again-{uuid4().hex[:6]}@example.com",
+            user_id=sub,
+            name="Again",
+            role="user",
+            is_initial_admin=False,
+            auth_method="oauth",
+            auth_provider="google",
+        )
+        db_session.add(user)
+        await db_session.flush()
+        workspace = Workspace(
+            id=uuid4(),
+            name=f"ws-again-{uuid4().hex[:8]}",
+            plan_name="free",
+            owner_user_id=sub,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+        )
+        db_session.add(workspace)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=workspace.id, user_id=sub, role=WorkspaceRole.OWNER)
+        )
+        context = Context(id=uuid4(), workspace_id=workspace.id, name="again", created_by=sub)
+        db_session.add(context)
+        await db_session.flush()
+        db_session.add(
+            Memory(
+                id=uuid4(),
+                user_id=sub,
+                workspace_id=workspace.id,
+                context_id=context.id,
+                summary="the new account's memory",
+                content="body",
+                type="note",
+                client="test",
+                version=1,
+                embedding_status="success",
+            )
+        )
+        await db_session.commit()
+        workspace_id = workspace.id
+        try:
+            await _age(db_session, request_id)
+            before = await _everything_but(db_session, request_id)
+            members = await _table_snapshot(db_session, "workspace_members")
+            workspaces = await _table_snapshot(db_session, "workspaces")
+            delete_points = AsyncMock(return_value={"kagura_memories": 0})
+            clear_redis = AsyncMock(return_value={})
+
+            for _ in range(2):  # a second sweep changes nothing either
+                with (
+                    patch(_QDRANT_PATCH, AsyncMock()),
+                    patch("services.account_erasure_service.delete_user_points", delete_points),
+                    patch.object(AccountErasureService, "_clear_redis", clear_redis),
+                ):
+                    assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+                closed = await _request_snapshot(db_session, request_id)
+                assert (closed["status"], closed["failure_reason"]) == (
+                    STATUS_FAILED,
+                    INTERRUPTED_AFTER_POSTGRES_COMMIT,
+                )
+                assert closed["user_id"] == pseudonym
+                assert "redis" not in closed["deleted_data_summary"]
+                # the new account: user row, memory, workspace, membership
+                assert await _everything_but(db_session, request_id) == before
+                assert await _table_snapshot(db_session, "workspace_members") == members
+                assert await _table_snapshot(db_session, "workspaces") == workspaces
+                delete_points.assert_not_awaited()
+                clear_redis.assert_not_awaited()
+
+            assert pseudonym in await erased_pseudonyms(db_session)
+            # the row no longer blocks the new account's own request (no 409)
+            service = AccountErasureService(db_session)
+            assert await service.get_active_request_for_user(sub) is None
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(Workspace).where(Workspace.id == workspace_id))
+            await db_session.execute(delete(User).where(User.user_id == sub))
+            await db_session.commit()
 
 
 class TestARequestWhoseUserVanishedUnrun:
