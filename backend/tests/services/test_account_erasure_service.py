@@ -1197,7 +1197,9 @@ class TestRestoreEditorDetailsWiring:
     erasure summary."""
 
     @pytest.mark.asyncio
-    async def test_restore_runs_before_the_revision_scrub_and_is_counted(self, restore_details):
+    async def test_restore_runs_before_the_revision_scrub_and_is_counted(
+        self, restore_details, hand_over
+    ):
         from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
 
         order: list[str] = []
@@ -1237,15 +1239,26 @@ class TestRestoreEditorDetailsWiring:
 
         async def _execute(statement, *args, **kwargs):
             sql = " ".join(str(statement).split())
+            if sql.startswith("SELECT pg_advisory_xact_lock"):
+                order.append("link_lock")
             if sql.startswith("SELECT contexts_1.id FROM contexts AS contexts_1"):
+                # #2278: one phase over the contexts the subject created or deleted
                 assert sql.endswith(
-                    "WHERE contexts_1.deleted_by = :deleted_by_1 ORDER BY contexts_1.id FOR UPDATE"
+                    "WHERE contexts_1.created_by = :created_by_1 "
+                    "OR contexts_1.deleted_by = :deleted_by_1 ORDER BY contexts_1.id FOR UPDATE"
                 )
-                assert statement.compile().params == {"deleted_by_1": "raw-sub"}
+                assert statement.compile().params == {
+                    "created_by_1": "raw-sub",
+                    "deleted_by_1": "raw-sub",
+                }
                 order.append("contexts_lock")
             return MagicMock()
 
         svc.db.execute = AsyncMock(side_effect=_execute)
+        hand_over.side_effect = lambda *a: (
+            order.append("hand_over"),
+            {"contexts_handed_over": 0, "identity_links_removed": 0},
+        )[1]
         target = _user(user_id="raw-sub")
 
         with (
@@ -1261,10 +1274,13 @@ class TestRestoreEditorDetailsWiring:
         # #2263: the subject's tombstones go right after the memory lock, so
         # no revision statement below meets their rows (the FK cascade takes
         # their revisions)
-        # #2263: the contexts the subject deleted are locked first, the order
-        # ``restore_deleted_context`` takes (context, then its memories)
+        # #2263, #2278: the contexts the subject created or deleted are locked
+        # first, after the link lock and before the hand-over's memory DELETE —
+        # the order ``restore_deleted_context`` takes (context, then memories)
         assert order == [
+            "link_lock",
             "contexts_lock",
+            "hand_over",
             "lock",
             "tombstones",
             "restore",

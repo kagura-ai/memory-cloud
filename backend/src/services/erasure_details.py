@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -103,9 +103,13 @@ from services.memory_versions import (
     record_revision,
     revision_changed_field,
 )
+from services.payload_sync import (
+    PlannedPatch,
+    RequeueEmbeddingOnFailure,
+    sync_payloads_after_commit,
+)
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import QdrantError
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
@@ -1109,8 +1113,9 @@ async def sync_restored_payloads(
     Called AFTER the restore's transaction committed, in the same session (a
     fresh transaction), by the live erasure and by the re-run (#2266): no
     vector-store round trip happens while the subject's memories are locked.
-    Works in groups of ``PAYLOAD_SYNC_GROUP`` rows, one transaction each (as
-    ``session_rollback``'s payload step does): the group's rows are read
+    Runs the shared post-commit payload step (``payload_sync``, #2283, as
+    ``session_rollback`` does) in groups of ``PAYLOAD_SYNC_GROUP`` rows, one
+    transaction each: the group's rows are read
     ``FOR SHARE`` in id order and held until the group commits, so an edit
     that lands meanwhile waits and then syncs its own payload over this one,
     and no row waits on more than one group's round trips. Per row:
@@ -1131,9 +1136,10 @@ async def sync_restored_payloads(
     patch fails — for any reason, the vector store or a read in between —
     degrades to an embedding re-queue (``requeue_embedding``: the sweep's
     upsert rewrites the whole payload from the row); a row not ``success`` is
-    queued already. A re-queue that fails too is counted
-    (``payload_requeue_failed``) and logged, and the next row goes on. Each
-    row runs in a SAVEPOINT, so a failed statement leaves the group usable.
+    queued already (``RequeueEmbeddingOnFailure``). A re-queue that fails too
+    is counted (``payload_requeue_failed``) and logged, and the next row goes
+    on. Each row runs in a SAVEPOINT, so a failed statement leaves the group
+    usable.
     Logs carry ids only, never values.
 
     Semantics: between the restore's commit and the patch — or, when the
@@ -1147,59 +1153,37 @@ async def sync_restored_payloads(
     """
     if not syncs:
         return
-    from services.session_rollback import PAYLOAD_SYNC_GROUP
-
     versions = {sync.memory_id: sync.version for sync in syncs}
-    ids = sorted(versions)
     routes: dict[UUID, tuple[str, bool]] = {}
-    for start in range(0, len(ids), PAYLOAD_SYNC_GROUP):
-        group = ids[start : start + PAYLOAD_SYNC_GROUP]
-        try:
-            memories = {
-                memory.id: memory
-                for memory in (
-                    await db.execute(
-                        select(Memory)
-                        .where(Memory.id.in_(group))
-                        .order_by(Memory.id)
-                        .with_for_update(read=True)
-                        .execution_options(populate_existing=True)
-                    )
-                ).scalars()
-            }
-        except Exception as exc:
-            await db.rollback()
-            report.payload_requeue_failed += len(group)
-            logger.warning(
-                "erasure_details_payload_read_failed",
-                memory_ids=[str(i) for i in group],
-                error_class=type(exc).__name__,
+    policy = RequeueEmbeddingOnFailure("erasure_details_payload", reason="erasure_details_payload")
+
+    def plan(memory_id: UUID, rows: Mapping[UUID, Any] | None) -> PlannedPatch[Memory] | None:
+        memory = rows.get(memory_id) if rows is not None else None
+        if memory is None or memory.deleted_at is not None or memory.context_id is None:
+            report.payload_skipped_tombstone += 1
+            return None
+        if memory.version != versions[memory_id]:
+            report.payload_skipped_moved += 1
+            logger.info(
+                "erasure_details_payload_moved",
+                memory_id=str(memory_id),
+                restored_version=versions[memory_id],
+                version=memory.version,
             )
-            continue
-        for memory_id in group:
-            memory = memories.get(memory_id)
-            if memory is None or memory.deleted_at is not None or memory.context_id is None:
-                report.payload_skipped_tombstone += 1
-                continue
-            if memory.version != versions[memory_id]:
-                report.payload_skipped_moved += 1
-                logger.info(
-                    "erasure_details_payload_moved",
-                    memory_id=str(memory_id),
-                    restored_version=versions[memory_id],
-                    version=memory.version,
-                )
-                continue
-            await _sync_one_payload(db, memory, routes, report)
-        try:
-            await db.commit()
-        except Exception as exc:
-            await db.rollback()
-            logger.warning(
-                "erasure_details_payload_commit_failed",
-                memory_ids=[str(i) for i in group],
-                error_class=type(exc).__name__,
-            )
+            return None
+        return PlannedPatch(memory.id, memory, embedded=memory.embedding_status == "success")
+
+    async def apply(patch: PlannedPatch[Memory]) -> None:
+        await _sync_one_payload(db, patch.data, routes, report)
+
+    try:
+        await sync_payloads_after_commit(
+            db, sorted(versions), memory_id=lambda i: i, plan=plan, apply=apply, on_failure=policy
+        )
+    finally:
+        report.payload_requeued_after_error += policy.requeued_after_error
+        report.payload_skipped_requeued += policy.skipped_requeued
+        report.payload_requeue_failed += policy.requeue_failed
 
 
 async def _sync_one_payload(
@@ -1208,8 +1192,11 @@ async def _sync_one_payload(
     routes: dict[UUID, tuple[str, bool]],
     report: RestoreReport,
 ) -> None:
-    """Patch one restored row's point, or re-queue it (``sync_restored_payloads``)."""
-    from services.content_chunk_writer import chunk_cascade_needed, requeue_embedding
+    """Patch one restored row's point (``sync_restored_payloads``).
+
+    Raises on any failure: ``RequeueEmbeddingOnFailure`` re-queues the row.
+    """
+    from services.content_chunk_writer import chunk_cascade_needed
     from services.context_routing import resolve_collection_name
     from services.memory_service import (
         metadata_patch_target,
@@ -1217,60 +1204,30 @@ async def _sync_one_payload(
         restore_payload_request,
     )
 
-    memory_id, embedded = memory.id, memory.embedding_status == "success"
-    try:
-        async with db.begin_nested():
-            updates, delete_keys = metadata_payload_patch(
-                restore_payload_request(memory, {"details"}), None, memory.details
-            )
-            # Issue #78: date-range filters read the payload's updated_at.
-            updates["updated_at"] = to_utc_iso(memory.updated_at)
-            target = await metadata_patch_target(
-                db, memory.id, memory.point_id, updates, delete_keys
-            )
-            if target is None:
-                report.payload_skipped_shared += 1
-                return
-            if memory.context_id not in routes:
-                context_id = cast(UUID, memory.context_id)
-                routes[context_id] = (
-                    await resolve_collection_name(db, context_id),
-                    await chunk_cascade_needed(db, context_id),
-                )
-            collection, cascade = routes[cast(UUID, memory.context_id)]
-            await update_memory_payload_in_qdrant(
-                memory_id=target.point_id,
-                payload_updates=target.updates,
-                collection_name=collection,
-                delete_keys=target.delete_keys or None,
-                cascade_chunks=cascade and target.own_point,
-            )
-    except Exception as exc:
-        try:
-            requeued = embedded and await requeue_embedding(
-                db, memory_id, reason="erasure_details_payload"
-            )
-        except Exception as requeue_exc:
-            report.payload_requeue_failed += 1
-            logger.warning(
-                "erasure_details_payload_requeue_failed",
-                memory_id=str(memory_id),
-                error_class=type(exc).__name__,
-                requeue_error_class=type(requeue_exc).__name__,
-            )
-            return
-        if requeued:
-            report.payload_requeued_after_error += 1
-        else:
-            report.payload_skipped_requeued += 1
-        # a row queued already may have no point yet: not a fault
-        (logger.warning if requeued or not isinstance(exc, QdrantError) else logger.info)(
-            "erasure_details_payload_failed",
-            memory_id=str(memory_id),
-            error_class=type(exc).__name__,
-            requeued=requeued,
+    async with db.begin_nested():
+        updates, delete_keys = metadata_payload_patch(
+            restore_payload_request(memory, {"details"}), None, memory.details
         )
-        return
+        # Issue #78: date-range filters read the payload's updated_at.
+        updates["updated_at"] = to_utc_iso(memory.updated_at)
+        target = await metadata_patch_target(db, memory.id, memory.point_id, updates, delete_keys)
+        if target is None:
+            report.payload_skipped_shared += 1
+            return
+        if memory.context_id not in routes:
+            context_id = cast(UUID, memory.context_id)
+            routes[context_id] = (
+                await resolve_collection_name(db, context_id),
+                await chunk_cascade_needed(db, context_id),
+            )
+        collection, cascade = routes[cast(UUID, memory.context_id)]
+        await update_memory_payload_in_qdrant(
+            memory_id=target.point_id,
+            payload_updates=target.updates,
+            collection_name=collection,
+            delete_keys=target.delete_keys or None,
+            cascade_chunks=cascade and target.own_point,
+        )
     report.payload_synced += 1
 
 
