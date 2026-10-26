@@ -263,6 +263,32 @@ class TestF16ObservedAtMigration:
         finally:
             _leave_db_at_head()
 
+    def test_legacy_rewrite_runs_under_the_lock_timeout(self, monkeypatch) -> None:
+        """The legacy row UPDATEs wait at most the cap too: a row held by a
+        live writer during the deploy fails the migration instead of hanging."""
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        try:
+            _reset_and_upgrade_to(PRE_F16_REV)
+            engine = _sync_engine()
+            module = _load_migration()
+            seen: list[str] = []
+            with engine.begin() as conn:
+                monkeypatch.setattr(
+                    module,
+                    "_normalise_legacy_values",
+                    lambda: seen.append(conn.execute(text("SHOW lock_timeout")).scalar_one()),
+                )
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    module.upgrade()
+                    module.downgrade()
+            engine.dispose()
+            assert seen == ["5s"]
+        finally:
+            _leave_db_at_head()
+
     def test_downgrade_drops_the_column_and_the_index(self) -> None:
         try:
             _reset_and_upgrade_to(F16_REV)
