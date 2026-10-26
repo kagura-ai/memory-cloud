@@ -2438,18 +2438,50 @@ class TestThePostgresStepRecordsItselfOnTheRequest:
         assert svc._delete_postgres.await_args.kwargs == {"request_id": request.id}
 
 
-@pytest.mark.parametrize("subject_initiated", [True, False])
-def test_pseudonymized_request_values(subject_initiated):
-    """#2286 (one #2288 carve-out): the one values dict every writer that
-    pseudonymizes a request row uses."""
-    from services.account_erasure_service import _pseudonymized_request_values
+@pytest.mark.parametrize("initiated_by", ["u-1", "admin-1"])
+def test_pseudonymized_request_values(initiated_by):
+    """#2286, #2288: the one values dict every writer that pseudonymizes a
+    request row uses — the pseudonym is ``erasure_pseudonym``'s, and an
+    admin's ``initiated_by`` stays out of the values."""
+    from services.erasure_details import erasure_pseudonym, pseudonymized_request_values
 
-    values = _pseudonymized_request_values("p" * 64, subject_initiated=subject_initiated)
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        values = pseudonymized_request_values("u-1", initiated_by)
+        pseudonym = erasure_pseudonym("u-1")
 
-    expected = {"user_id": "p" * 64, "ip_address": None, "user_agent": None}
-    if subject_initiated:
-        expected["initiated_by"] = "p" * 64
+    expected = {"user_id": pseudonym, "ip_address": None, "user_agent": None}
+    if initiated_by == "u-1":
+        expected["initiated_by"] = pseudonym
     assert values == expected
+
+
+def test_pseudonymized_request_values_unread_row_decides_in_sql():
+    """#2288: without the row's ``initiated_by`` (the re-run's repair) the
+    column decides by the same rule: the subject's own sub becomes the
+    pseudonym, any other value stays."""
+    from sqlalchemy import update
+    from sqlalchemy.dialects import postgresql
+
+    from services.erasure_details import erasure_pseudonym, pseudonymized_request_values
+
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        values = pseudonymized_request_values("u-1", None)
+        pseudonym = erasure_pseudonym("u-1")
+
+    assert {k: v for k, v in values.items() if k != "initiated_by"} == {
+        "user_id": pseudonym,
+        "ip_address": None,
+        "user_agent": None,
+    }
+    compiled = (
+        update(ErasureRequest)
+        .values(**values)
+        .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert (
+        f"initiated_by=coalesce(nullif(erasure_requests.initiated_by, 'u-1'), '{pseudonym}')"
+        in str(compiled)
+    )
 
 
 # ---------------------------------------------------------------------------

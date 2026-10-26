@@ -139,6 +139,7 @@ from services.erasure_details import (
     payload_counts,
     pseudonymize_audit_logs,
     pseudonymize_revision_actor,
+    pseudonymized_request_values,
     strip_subject_details,
     sync_restored_payloads,
 )
@@ -264,24 +265,6 @@ def _audit_salt() -> str:
 
 
 _sha256_hex = sha256_hex  # backward-compat alias for tests + this module
-
-
-def _pseudonymized_request_values(pseudonym: str, *, subject_initiated: bool) -> dict[str, Any]:
-    """The request row's own PII, pseudonymized once its subject is erased.
-
-    ``user_id`` (always the subject) becomes ``pseudonym``, the request
-    metadata (``ip_address``/``user_agent``) is cleared, and ``initiated_by``
-    becomes ``pseudonym`` only when the subject started the request
-    (self-service); an admin's id is accountability evidence and stays. One
-    definition for every writer that pseudonymizes a request row:
-    ``_finalize``, ``_execute``'s handler after the Postgres commit (#2268)
-    and the sweep's interrupted / user-row-gone branch (#2286).
-    ``reprocess_erasures``'s ``_repair`` decides the same in SQL.
-    """
-    values: dict[str, Any] = {"user_id": pseudonym, "ip_address": None, "user_agent": None}
-    if subject_initiated:
-        values["initiated_by"] = pseudonym
-    return values
 
 
 def _previous_retry(summary: dict[str, Any] | None) -> tuple[dict[str, Any] | None, int]:
@@ -896,7 +879,7 @@ class AccountErasureService:
           ``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the subject's Redis state
           cleared best-effort; without it nothing ran — ``complete`` with
           the ``user_row_already_absent`` note. Either way the row is
-          pseudonymized (``_pseudonymized_request_values``).
+          pseudonymized (``pseudonymized_request_values``).
 
         - **Stale ``pending``** (``requested_at`` older than 1h + 5min
           grace): the Redis confirm token (TTL 1h) has expired and the
@@ -1074,9 +1057,7 @@ class AccountErasureService:
         # later write, and they are lost with the interrupted process.
         summary = dict(request.deleted_data_summary or {})
         ran = isinstance(summary.get("postgres"), dict)
-        values = _pseudonymized_request_values(
-            self._pseudonym(user_id), subject_initiated=request.initiated_by == user_id
-        )
+        values = pseudonymized_request_values(user_id, request.initiated_by)
         if ran:
             redis = await self._clear_redis_best_effort(request_id, user_id)
             if redis is not None:
@@ -1155,8 +1136,7 @@ class AccountErasureService:
         request_id = request.id
         # #2268: what a failure after the Postgres commit writes on the row —
         # read now, like ``request_id``
-        user_pseudonym = self._pseudonym(target.user_id)
-        subject_initiated = request.initiated_by == request.user_id
+        pseudonymized_row = pseudonymized_request_values(request.user_id, request.initiated_by)
         # #2282: earlier vector-store failures of this request. The block is
         # carried in ``summary`` from the start, so every write of the summary
         # below (``_finalize``, each failure handler) keeps the history.
@@ -1424,9 +1404,7 @@ class AccountErasureService:
                 # any more than a ``complete`` one does (``_finalize``), and
                 # the marker lets the re-run and later erasures find it.
                 values.update(
-                    _pseudonymized_request_values(
-                        user_pseudonym, subject_initiated=subject_initiated
-                    ),
+                    pseudonymized_row,
                     # the class only: an exception text (a constraint's
                     # DETAIL, a Redis key) can name the account (#2268 review)
                     failure_reason=f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {type(exc).__name__}",
@@ -1922,11 +1900,13 @@ class AccountErasureService:
         return PostgresErasure(counts, restore, memory_scrub_at)
 
     def _pseudonym(self, value: str) -> str:
-        """Salted-SHA256 pseudonym — the single derivation every sweep uses.
+        """Salted-SHA256 pseudonym: shorthand for ``erasure_pseudonym``.
 
-        One definition so a future salt rotation / algorithm change cannot
-        produce inconsistent pseudonyms for the same subject across tables
-        (same-user cross-row correlation is the legal-retention contract).
+        ``erasure_pseudonym`` is the one derivation (the request-row values and
+        the audit-row hashes call it directly, #2288), so a future salt
+        rotation / algorithm change cannot produce inconsistent pseudonyms for
+        the same subject across tables (same-user cross-row correlation is the
+        legal-retention contract). Patch the salt, not this method.
         """
         return erasure_pseudonym(value)
 
@@ -2317,9 +2297,9 @@ class AccountErasureService:
         guarantees no plaintext email or user_id ever lands in audit_logs
         for this event — required for GDPR Art.5(1)(c) compliance.
         """
-        salt = _audit_salt()
-        user_pseudonym = _sha256_hex(target.user_id, salt=salt)
-        email_pseudonym = _sha256_hex(target.email, salt=salt)
+        # #2288: the same derivation as every other pseudonym of the subject
+        user_pseudonym = erasure_pseudonym(target.user_id)
+        email_pseudonym = erasure_pseudonym(target.email)
         # Self-service `initiated_by` IS the subject's raw user_id (the
         # user clicked their own delete button). Storing it verbatim in
         # audit_logs.user_metadata would re-introduce a stable plaintext
@@ -2373,10 +2353,7 @@ class AccountErasureService:
             # #2286: a sweep may have closed a run alive past the stale cutoff
             # as ``interrupted`` meanwhile; the run completed, so no marker
             "failure_reason": None,
-            **_pseudonymized_request_values(
-                self._pseudonym(request.user_id),
-                subject_initiated=request.initiated_by == request.user_id,
-            ),
+            **pseudonymized_request_values(request.user_id, request.initiated_by),
         }
         await self.db.execute(
             update(ErasureRequest).where(ErasureRequest.id == request.id).values(**values)

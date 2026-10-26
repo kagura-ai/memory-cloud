@@ -33,6 +33,10 @@ past erasures by pseudonym (#2243) share one definition:
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
   own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
   and by the re-run for rows an erasure on v0.124.x or before left behind.
+- ``erasure_pseudonym(value)`` and ``pseudonymized_request_values(account_id,
+  initiated_by)`` (#2288) — the one salted pseudonym, and the values every
+  writer of an erasure request row sets once its subject is erased (the
+  live erasure's handler, sweep and finalize, and the re-run's repair).
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
@@ -120,15 +124,55 @@ def erasure_pseudonym(value: str) -> str:
     """The salted sha256 pseudonym an erasure stores for ``value`` (a raw sub).
 
     The one derivation: ``AccountErasureService._pseudonym`` delegates here,
-    and ``reprocess_erasures`` uses it only to repair a request row that
-    failed after its Postgres step on a version before v0.124.0 and still
-    stores the raw sub (#2268). The salt is looked up through
+    as do the request row's values (``pseudonymized_request_values``) and the
+    audit-log hashes of the subject's sub and email (``pseudonymize_audit_logs``,
+    the ``account_erasure`` audit row; #2288); ``reprocess_erasures`` derives
+    the pseudonym of a request row that failed after its Postgres step on a
+    version before v0.124.0 and still stores the raw sub (#2268). The salt is
+    looked up through
     ``services.account_erasure_service._audit_salt`` at call time (a lazy
     import: that module imports this one).
     """
     from services import account_erasure_service
 
     return sha256_hex(value, salt=account_erasure_service._audit_salt())
+
+
+def pseudonymized_request_values(account_id: str, initiated_by: str | None) -> dict[str, Any]:
+    """The UPDATE values that pseudonymize an erasure request row (#2288).
+
+    One definition for every writer that pseudonymizes a request row once
+    its subject is erased: ``_finalize``, ``_execute``'s failure handler
+    after the Postgres commit (#2268), the sweep's interrupted / user-row-gone
+    branch (#2286) and ``reprocess_erasures``'s ``_repair``.
+
+    ``user_id`` (always the subject, ``account_id``) becomes
+    ``erasure_pseudonym(account_id)`` and the request metadata
+    (``ip_address``/``user_agent``) is cleared. ``initiated_by`` becomes the
+    pseudonym only when the subject started the request (self-service); an
+    admin's id is accountability evidence and stays.
+
+    Args:
+        account_id: The subject's raw sub, as the row stores it.
+        initiated_by: The row's ``initiated_by`` when the caller has read it:
+            the decision is made here, and an admin's id is left out of the
+            values. ``None`` when the caller has not read the row (the
+            re-run's repair): the column decides in SQL by the same rule
+            (``initiated_by`` is NOT NULL, so the ``coalesce`` never sees a
+            NULL of its own).
+
+    Returns:
+        The values for ``update(ErasureRequest)``.
+    """
+    pseudonym = erasure_pseudonym(account_id)
+    values: dict[str, Any] = {"user_id": pseudonym, "ip_address": None, "user_agent": None}
+    if initiated_by is None:
+        values["initiated_by"] = func.coalesce(
+            func.nullif(ErasureRequest.initiated_by, account_id), pseudonym
+        )
+    elif initiated_by == account_id:
+        values["initiated_by"] = pseudonym
+    return values
 
 
 async def pseudonymize_audit_logs(
@@ -173,14 +217,11 @@ async def pseudonymize_audit_logs(
     Returns:
         The rowcount.
     """
-    from services import account_erasure_service
-
     user_pseudonym = erasure_pseudonym(user_id)
     values: dict[str, Any] = {"user_id": user_pseudonym}
     resource: ColumnElement[str] = AuditLog.resource.expression
     pseudonyms = {
-        email: sha256_hex(email, salt=account_erasure_service._audit_salt())
-        for email in sorted(set(emails), key=lambda e: (-len(e), e))
+        email: erasure_pseudonym(email) for email in sorted(set(emails), key=lambda e: (-len(e), e))
     }
     for email, email_pseudonym in pseudonyms.items():
         resource = func.replace(resource, email, email_pseudonym)
