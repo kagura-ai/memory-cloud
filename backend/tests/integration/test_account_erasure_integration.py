@@ -38,7 +38,9 @@ from auth.workspace_roles import WorkspaceRole
 from models.auth import APIKey, AuditLog, User, Workspace, WorkspaceMember
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
+    STATUS_CANCELLED,
     STATUS_COMPLETE,
+    STATUS_FAILED,
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService, _audit_salt
@@ -2088,6 +2090,118 @@ class TestAVectorStoreOutageAtStepOne:
         assert row["deleted_data_summary"] is None
         assert datetime.fromisoformat(row["started_at"]) == reclaimed_at.astimezone(UTC)
         assert await _user_exists(db_session, erasure_scenario["target_user_id"])
+
+    @pytest.mark.parametrize("error", ["generic", "transfer"])
+    @pytest.mark.asyncio
+    async def test_a_stale_runs_failure_does_not_mark_the_newer_claim(
+        self,
+        error,
+        db_session: AsyncSession,
+        async_engine,
+        erasure_scenario,
+        bystanders,
+        patched_external_stores,
+    ):
+        """#2306: the run outlived the stale cutoff and a later sweep claimed
+        the row again before the run failed (not a vector-store error, so the
+        generic handler, or the workspace-transfer one): its ``failed`` write
+        is guarded by the run's own claim, so the newer run's row, and every
+        other request, stay as they are."""
+        from datetime import timedelta
+
+        from sqlalchemy import update
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from models.erasure import STATUS_IN_PROGRESS
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        reclaimed_at = utcnow() + timedelta(hours=1)
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def reclaimed_then_broken(user_id: str) -> dict[str, int]:
+            async with maker() as other:
+                await other.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .values(started_at=reclaimed_at)
+                )
+                await other.commit()
+            if error == "transfer":
+                raise WorkspaceTransferRequiredError("ws-1", 2)
+            raise RuntimeError("unexpected")
+
+        before = await _everything_but(db_session, request_id)
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=reclaimed_then_broken),
+        ):
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_IN_PROGRESS
+        assert row["failure_reason"] is None
+        assert row["deleted_data_summary"] is None
+        assert datetime.fromisoformat(row["started_at"]) == reclaimed_at.astimezone(UTC)
+        assert await _user_exists(db_session, erasure_scenario["target_user_id"])
+        assert await _everything_but(db_session, request_id) == before
+
+    @pytest.mark.asyncio
+    async def test_the_same_runs_failure_is_still_recorded(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        """#2306: the guard matches the run's own claim, so an unclaimed-again
+        failure is still written as ``failed``."""
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=RuntimeError("unexpected")),
+        ):
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"] == "unexpected"
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_losing_to_a_concurrent_cancel_answers_the_cancelled_row(
+        self, db_session: AsyncSession, async_engine, erasure_scenario, bystanders
+    ):
+        """#2306: a double-click — another cancel of the same request commits
+        between this cancel's read and its compare-and-set. This one returns
+        the cancelled row (the route's 200) instead of a 409."""
+        from sqlalchemy import update
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        service = AccountErasureService(db_session)
+        read = service._find_active_request
+        cancelled_at = utcnow()
+
+        async def read_then_cancelled(user_id: str):
+            request = await read(user_id)
+            async with maker() as other:
+                await other.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .values(status=STATUS_CANCELLED, cancelled_at=cancelled_at)
+                )
+                await other.commit()
+            return request
+
+        before = await _everything_but(db_session, request_id)
+        with patch.object(service, "_find_active_request", side_effect=read_then_cancelled):
+            result = await service.cancel_self_service(user_id=target)
+
+        assert result.id == request_id
+        assert result.status == STATUS_CANCELLED
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        assert datetime.fromisoformat(row["cancelled_at"]) == cancelled_at.astimezone(UTC)
+        assert await _everything_but(db_session, request_id) == before
 
     @pytest.mark.asyncio
     async def test_a_cancel_racing_the_sweeps_claim_does_not_overwrite_it(

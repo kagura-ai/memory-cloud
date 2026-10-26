@@ -730,9 +730,18 @@ class TestCancelSelfService:
         )
         request.id = uuid4()
         svc._find_active_request = AsyncMock(return_value=request)
-        now_status = MagicMock()
-        now_status.scalar_one_or_none.return_value = STATUS_IN_PROGRESS
-        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_status])
+        claimed = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_IN_PROGRESS,
+        )
+        claimed.id = request.id
+        now_row = MagicMock()
+        now_row.scalar_one_or_none.return_value = claimed
+        svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_row])
 
         with pytest.raises(ErasureAlreadyInProgressError) as caught:
             await svc.cancel_self_service(user_id="u-1")
@@ -2683,6 +2692,116 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         assert "postgres" not in summary
 
     @pytest.mark.asyncio
+    async def test_the_failure_handler_is_guarded_by_the_runs_claim(self):
+        """#2306: like the reschedule, the generic handler's UPDATE matches
+        only the row this run claimed (its ``started_at``)."""
+        from models.erasure import STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(RuntimeError, match="deadlock"):
+                await svc._execute(request, _user())
+
+        stmt = _request_update(order)
+        assert order[-2:] == [stmt, "commit"]
+        params = stmt.compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["id_1"] == request.id
+        assert params["started_at_1"] == datetime(2026, 10, 1, 12, 0)
+        assert "erasure_requests.started_at = :started_at_1" in str(stmt)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("deadlock"),
+            "billing",
+            "transfer",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_stale_runs_failure_handler_only_logs(self, error):
+        """#2306: the row was claimed again by a later sweep; the handler's
+        UPDATE (generic, billing-contract or workspace-transfer) matches
+        nothing, it logs ``erasure_failure_handler_stale_run`` and the run's
+        own error still reaches the caller."""
+        from utils.exceptions import BillingContractActiveError, WorkspaceTransferRequiredError
+
+        if error == "billing":
+            error = BillingContractActiveError(["ws-1"])
+        elif error == "transfer":
+            error = WorkspaceTransferRequiredError("ws-1", 2)
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=error)
+        order = _recording_execute(svc, rowcount=0)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(return_value={"kagura_memories": 0}),
+            ),
+            patch("services.account_erasure_service.sync_restored_payloads", new=AsyncMock()),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            with pytest.raises(type(error)):
+                await svc._execute(request, _user())
+
+        stmt = _request_update(order)  # the one guarded UPDATE, nothing after it
+        assert order[-2:] == [stmt, "commit"]
+        assert stmt.compile().params["started_at_1"] == datetime(2026, 10, 1, 12, 0)
+        assert "erasure_requests.started_at = :started_at_1" in str(stmt)
+        stale = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "erasure_failure_handler_stale_run"
+        ]
+        assert len(stale) == 1
+        assert stale[0].kwargs == {"request_id": str(request.id)}
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_postgres_commit_is_written_whatever_the_claim(self):
+        """#2306: once this run erased the subject in Postgres, its handler
+        writes by id alone — the row must be pseudonymized and carry the
+        marker even if a later sweep claimed it again meanwhile."""
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._clear_redis = AsyncMock(side_effect=RuntimeError("redis down"))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(return_value={"kagura_memories": 0}),
+            ),
+            patch("services.account_erasure_service.sync_restored_payloads", new=AsyncMock()),
+        ):
+            with pytest.raises(RuntimeError, match="redis down"):
+                await svc._execute(request, _user())
+
+        stmt = _request_update(order)
+        params = stmt.compile().params
+        assert "started_at" not in str(stmt.whereclause)
+        assert params["id_1"] == request.id
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert params["user_id"] != "u-1"
+
+    @pytest.mark.asyncio
     async def test_the_attempt_that_succeeds_keeps_the_history(self):
         svc = _service()
         _stub_execute_steps(svc)
@@ -2948,7 +3067,8 @@ class TestRequeueAfterACancelledRetry:
         svc = _service()
         svc._find_active_request = AsyncMock(return_value=_spent_request(2))
         now_status = MagicMock()
-        now_status.scalar_one_or_none.return_value = "in_progress"
+        # #2306: the lost compare-and-set re-reads the row as the caller's
+        now_status.scalar_one_or_none.return_value = MagicMock(status="in_progress")
         svc.db.execute = AsyncMock(side_effect=[MagicMock(rowcount=0), now_status])
         requeue = AsyncMock(return_value=0)
 

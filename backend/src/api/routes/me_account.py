@@ -249,7 +249,9 @@ async def cancel_erasure_request(
     or the active one is an admin force-erase (it can be ``cooling_off`` while
     it waits for a vector-store retry, #2282). Returns 409 ``ERASURE-006`` if
     the request started running between the read and the cancel (the sweep
-    claimed it).
+    claimed it), with the status it has now. A cancel that loses to a
+    concurrent cancel of the same request (a double-click) answers 200 with
+    the cancelled request, like the first one (#2306).
     """
     service = AccountErasureService(db)
     record = await service.cancel_self_service(user_id=user["user_id"])
