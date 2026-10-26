@@ -3150,9 +3150,31 @@ class TestRequeueAfterTheLastAttempt:
 
 
 class TestRequeueSubjectEmbeddings:
+    @staticmethod
+    def _db(batches: list[list[Any]]) -> tuple[MagicMock, list[Any]]:
+        """A session recording statements and commits; each UPDATE returns
+        the next batch of ids."""
+        from sqlalchemy.sql.dml import Update
+
+        db = MagicMock()
+        order: list[Any] = []
+        pending = iter(batches)
+
+        def _execute(stmt, *a, **k):
+            order.append(stmt)
+            result = MagicMock()
+            if isinstance(stmt, Update):
+                result.scalars.return_value.all.return_value = next(pending)
+            return result
+
+        db.execute = AsyncMock(side_effect=_execute)
+        db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        return db, order
+
     @pytest.mark.asyncio
-    async def test_batches_until_a_short_one(self):
+    async def test_batches_on_a_keyset_until_a_short_one(self):
         from sqlalchemy.dialects import postgresql
+        from sqlalchemy.sql.elements import TextClause
 
         from services.account_erasure_service import (
             EMBEDDING_REQUEUE_BATCH,
@@ -3160,18 +3182,18 @@ class TestRequeueSubjectEmbeddings:
         )
 
         assert EMBEDDING_REQUEUE_BATCH == 500
-        db = MagicMock()
-        order: list[Any] = []
-        counts = iter([500, 3])
-        db.execute = AsyncMock(
-            side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=next(counts))
-        )
-        db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        first_ids = sorted(uuid4() for _ in range(500))
+        db, order = self._db([first_ids, [uuid4() for _ in range(3)]])
 
         assert await requeue_subject_embeddings(db, "u-1") == 503
 
-        first, _, second, _ = order
-        assert order[1::2] == ["commit", "commit"]
+        timeout1, first, commit1, timeout2, second, commit2 = order
+        assert (commit1, commit2) == ("commit", "commit")
+        for timeout in (timeout1, timeout2):
+            # each batch's transaction bounds its lock wait
+            assert isinstance(timeout, TextClause)
+            assert str(timeout) == "SET LOCAL lock_timeout = '5s'"
+        sqls = []
         for stmt in (first, second):
             assert str(stmt.table) == "memories"
             assert stmt.get_execution_options()["synchronize_session"] is False
@@ -3179,27 +3201,58 @@ class TestRequeueSubjectEmbeddings:
             sql = " ".join(str(compiled).split())
             params = compiled.params
             assert sql.startswith("UPDATE memories SET embedding_status=")
+            assert sql.endswith("RETURNING memories.id")
             assert "memories.user_id = %(user_id_1)s" in sql
             assert "memories.deleted_at IS NULL" in sql
-            assert "memories.embedding_status = %(embedding_status_1)s" in sql
+            assert "memories.embedding_status IN (__[POSTCOMPILE_embedding_status_1])" in sql
+            # a stale processing row with no budget left stays the sweep's
+            assert "NOT (memories.embedding_status = %(embedding_status_2)s" in sql
+            assert "memories.embedding_retry_count >=" in sql
             assert "ORDER BY memories.id" in sql
-            assert "LIMIT %(param_1)s::INTEGER FOR NO KEY UPDATE" in sql
+            assert "::INTEGER FOR NO KEY UPDATE" in sql
             assert "resource_id" not in sql  # indexer rows are rebuilt too
             assert params["user_id_1"] == "u-1"
-            assert params["embedding_status_1"] == "success"
+            assert list(params["embedding_status_1"]) == ["success", "processing"]
+            assert params["embedding_status_2"] == "processing"
             assert params["embedding_status"] == "pending"
-            assert params["param_1"] == 500
+            assert 500 in params.values()
             # the status only: updated_at and the pipeline's fields stay
             assert set(stmt._values) == {stmt.table.c.embedding_status}
+            sqls.append((sql, params))
+        # the second batch starts after the first's last id
+        assert "memories.id >" not in sqls[0][0]
+        assert "memories.id > %(id_1)s" in sqls[1][0]
+        assert sqls[1][1]["id_1"] == first_ids[-1]
 
     @pytest.mark.asyncio
     async def test_nothing_to_requeue(self):
         from services.account_erasure_service import requeue_subject_embeddings
 
-        db = MagicMock()
-        db.execute = AsyncMock(return_value=MagicMock(rowcount=0))
-        db.commit = AsyncMock()
+        db, order = self._db([[]])
 
         assert await requeue_subject_embeddings(db, "u-1") == 0
-        db.execute.assert_awaited_once()
+        assert len(order) == 3  # lock timeout, the UPDATE, its commit
         db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_rollback_does_not_escape(self):
+        svc = _service()
+        svc.db.rollback = AsyncMock(side_effect=ConnectionError("gone"))
+        request_id = uuid4()
+
+        with (
+            patch(
+                "services.account_erasure_service.requeue_subject_embeddings",
+                new=AsyncMock(side_effect=ConnectionError("gone")),
+            ),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            await svc._requeue_after_vector_store_failure(
+                request_id, "u-1", {"attempts": 1}, status=STATUS_CANCELLED
+            )
+
+        log.error.assert_called_once_with(
+            "erasure_embeddings_requeue_failed",
+            request_id=str(request_id),
+            error_class="ConnectionError",
+        )

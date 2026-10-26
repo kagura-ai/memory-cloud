@@ -1851,12 +1851,16 @@ can still cancel it on the account page; memories whose points were already
 deleted then stay out of search results until they are re-embedded. From
 v0.128.0 (#2304) the service re-queues them itself: when a request that
 already spent an attempt at this step is cancelled, or fails after its fourth
-attempt, every live embedded memory the member authored goes back to
-`pending` (count and time in `deleted_data_summary.retry.embeddings_requeued`
-/ `requeued_at`; one embedding call per memory, worked off by the embedding
-sweep at its usual rate, older rows first). A request that failed at this
-step before v0.125.0, or one cancelled by SQL, is not covered; the runbook's
-manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
+attempt, every live memory the member authored that is embedded or being
+embedded goes back to `pending` (count and time in
+`deleted_data_summary.retry.embeddings_requeued` / `requeued_at`; one
+embedding call per memory, worked off by the embedding sweep at its usual
+rate, older rows first; a batch waits at most 5 seconds for a row lock, then
+the re-queue stops and logs `erasure_embeddings_requeue_failed`). Not
+covered: a request that failed at this step before v0.125.0, one cancelled by
+SQL, one whose vector delete succeeded but that then failed before the
+Postgres commit (a workspace-transfer error, say), and a re-queue that
+failed; the runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
 erasure runs. The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request

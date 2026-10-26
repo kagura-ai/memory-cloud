@@ -78,6 +78,7 @@ from sqlalchemy import (
     null,
     or_,
     select,
+    text,
     tuple_,
     update,
 )
@@ -217,6 +218,11 @@ _RETRY_KEY = "retry"
 # retry — bounds the lock set of each UPDATE; one commit per batch.
 EMBEDDING_REQUEUE_BATCH = 500
 
+# #2304: the longest a re-queue batch waits for a memory row another
+# transaction holds; past it the re-queue stops and is logged (the runbook's
+# manual statement finishes it). Bounds a member's cancel request.
+_REQUEUE_LOCK_TIMEOUT_SQL = text("SET LOCAL lock_timeout = '5s'")
+
 # #2304: keys inside ``summary.retry`` recording the re-queue.
 _REQUEUED_KEY = "embeddings_requeued"
 _REQUEUED_AT_KEY = "requeued_at"
@@ -326,8 +332,13 @@ async def requeue_subject_embeddings(
     resource-indexer row's author is the context's creator, who is also its
     point's ``user_id``), so the scan is one indexed predicate over them.
 
-    ``success`` rows only: a ``pending`` / ``processing`` row gets its point
-    from the run already queued or in flight (the write is an upsert); a
+    ``success`` and ``processing`` rows: a run in flight may have written its
+    point before the delete removed it and would then stamp ``success``;
+    moving its row to ``pending`` fences that run off (its outcome writes
+    match on ``processing``) and the sweep embeds the row again, as the chunk
+    backfill's ``include_in_flight`` does (#2095). A stale ``processing`` row
+    with no retry budget left stays the sweep's to fail. A ``pending`` row
+    gets its point from the queued run (the write is an upsert); a
     ``failed`` row keeps its own retry budget; a tombstone has no point by
     design. Resource-indexer rows are included: the embedding pipeline
     rebuilds their indexer point from the row (``write_memory_point``).
@@ -335,8 +346,11 @@ async def requeue_subject_embeddings(
     Writes ``embedding_status`` only, like ``requeue_embedding``:
     ``updated_at`` and the pipeline's attempt/error/retry fields stay. Each
     batch locks its rows in id order (``FOR NO KEY UPDATE`` subquery, no SKIP
-    LOCKED — a skipped row would be missed) and commits, so a long re-queue
-    never holds a large lock set; the loop ends on a short batch.
+    LOCKED — a skipped row would be missed), waits at most 5 s for a row
+    another transaction holds (``lock_timeout``; the error ends the re-queue),
+    and commits, so a long re-queue never holds a large lock set. Batches
+    page on the id (keyset), so a row the sweep re-embeds meanwhile is not
+    queued twice; the loop ends on a short batch.
 
     Cost: one embedding call per re-queued memory (plus its chunks) — what
     the runbook's manual statement costs. The embedding sweep orders
@@ -346,33 +360,47 @@ async def requeue_subject_embeddings(
     Returns:
         How many rows were re-queued (0 on a second call).
     """
+    from services.embedding_claim import STALE_CLAIM_SECONDS
+    from services.memory_service import embedding_reclaim_exhausted_clause
+
     total = 0
+    after: UUID | None = None
     while True:
+        stale_cutoff = utcnow() - timedelta(seconds=STALE_CLAIM_SECONDS)
+        conditions = [
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_status.in_(("success", "processing")),
+            ~embedding_reclaim_exhausted_clause(stale_cutoff),
+        ]
+        if after is not None:
+            conditions.append(Memory.id > after)
         locked = (
             select(Memory.id)
-            .where(
-                Memory.user_id == user_id,
-                Memory.deleted_at.is_(None),
-                Memory.embedding_status == "success",
-            )
+            .where(*conditions)
             .order_by(Memory.id)
             .limit(batch)
             .with_for_update(key_share=True)
         )
-        result = cast(
-            CursorResult[Any],
-            await db.execute(
-                update(Memory)
-                .where(Memory.id.in_(locked))
-                .values(embedding_status="pending")
-                .execution_options(synchronize_session=False)
-            ),
+        await db.execute(_REQUEUE_LOCK_TIMEOUT_SQL)
+        moved = list(
+            (
+                await db.execute(
+                    update(Memory)
+                    .where(Memory.id.in_(locked))
+                    .values(embedding_status="pending")
+                    .returning(Memory.id)
+                    .execution_options(synchronize_session=False)
+                )
+            )
+            .scalars()
+            .all()
         )
         await db.commit()
-        moved = int(result.rowcount or 0)
-        total += moved
-        if moved < batch:
+        total += len(moved)
+        if len(moved) < batch:
             return total
+        after = max(moved)
 
 
 class AccountErasureService:
@@ -877,7 +905,10 @@ class AccountErasureService:
             )
             await self.db.commit()
         except Exception as exc:
-            await self.db.rollback()
+            try:
+                await self.db.rollback()
+            except Exception:  # noqa: S110 - the connection is gone; the session resets on next use
+                pass
             logger.error(
                 "erasure_embeddings_requeue_failed",
                 request_id=str(request_id),
