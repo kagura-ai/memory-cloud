@@ -399,3 +399,32 @@ def test_no_request_hashes_read_nothing():
     db.execute = AsyncMock()
     assert asyncio.run(cli._mentioned_emails(db, set())) == {}
     db.execute.assert_not_awaited()
+
+
+def test_cleared_request_metadata_is_reported_and_counted(capsys):
+    """#2345: rows whose IP / user agent were cleared (and ``initiated_by``
+    rewrites) are a change of their own; never an IP or a user agent."""
+
+    def result(dry_run: bool) -> cli.ReprocessResult:
+        r = cli.ReprocessResult(dry_run=dry_run, scanned=1)
+        r.changed.append(
+            cli.RequestChange(
+                request_id=REQUEST_ID,
+                completed_at=None,
+                details_restored=0,
+                details_restored_unavailable=0,
+                details_stripped=0,
+                scrub_marked=0,
+                audit_metadata_cleared=4,
+            )
+        )
+        return r
+
+    plan = result(True)
+    assert plan.changes == 4
+    cli._print_plan(plan)
+    cli._print_applied(result(False))
+    out = capsys.readouterr().out
+    assert f"would clear audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
+    assert f"cleared audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
+    assert cli._summary(plan).endswith(", 4 audit row(s) request metadata cleared")

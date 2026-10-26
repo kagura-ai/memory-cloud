@@ -348,6 +348,8 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
             "audit_logs_pseudonymized": 0,
             # #2298: the request's email hash names no audit row
             "audit_mentions_pseudonymized": 0,
+            # #2345: the erasure's audit row has no IP / user agent here
+            "audit_metadata_cleared": 0,
             "tool": "cli.reprocess_erasures",
         }
     sync.assert_awaited_once()
@@ -1692,3 +1694,117 @@ async def test_a_re_registered_email_keeps_the_rows_naming_it(
             assert await _audit(session, case.others + case.untouched) == others
     async with _maker(async_engine)() as session:
         assert [row[0] for row in await _own_rows(session, case)] == [case.p, case.p]
+
+
+async def test_the_request_metadata_leaves_the_subjects_audit_rows(
+    async_engine: AsyncEngine, audit_case: _AuditCase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2345: an erasure that ran before the fix left the IP / user agent on
+    the subject's pseudonymized rows and its ``account_erasure`` row, whose
+    ``initiated_by`` was the subject's sub on a self-initiated admin request.
+    The re-run clears both and pseudonymizes that ``initiated_by``; another
+    erasure row's admin id stays, other accounts' rows (the subject acting
+    on one included) and a skipped request's rows are untouched. The plan
+    counts and writes nothing; nothing identifying is printed; a second run
+    is a no-op."""
+    from services.erasure_details import pseudonymize_audit_logs
+
+    case = audit_case
+    raw_sub = f"google-oauth2|legacy-{uuid.uuid4().hex[:8]}"
+    async with _maker(async_engine)() as session:
+        # what the live erasure left before v0.128.0: own rows pseudonymized
+        # (without the IP), then given back their request metadata here
+        assert await pseudonymize_audit_logs(session, case.sub, [case.email]) == 2
+        await session.execute(
+            update(AuditLog)
+            .where(AuditLog.id.in_(case.own))
+            .values(ip_address="203.0.113.5", user_agent="ua")
+        )
+        request = _request(case.p)
+        skipped = _request(raw_sub)  # finalized before v0.58.1: skipped
+        session.add_all([request, skipped])
+        erasure_rows = [
+            AuditLog(
+                user_email=case.email_p,
+                user_id=case.p,
+                action="account_erasure",
+                resource=f"user_pseudonym:{case.p[:16]}",
+                user_metadata={
+                    "request_id": str(request.id),
+                    "initiated_by": case.sub,
+                    "is_self_service": False,
+                },
+                ip_address="203.0.113.9",
+                user_agent="agent",
+            ),
+            AuditLog(
+                user_email=case.email_p,
+                user_id=case.p,
+                action="account_erasure",
+                resource=f"user_pseudonym:{case.p[:16]}",
+                user_metadata={"request_id": str(request.id), "initiated_by": "admin-x"},
+                ip_address="203.0.113.10",
+            ),
+            AuditLog(
+                user_email="legacy@example.com",
+                user_id=raw_sub,
+                action="account_erasure",
+                resource="user:legacy@example.com",
+                user_metadata={"initiated_by": raw_sub},
+                ip_address="203.0.113.11",
+            ),
+        ]
+        session.add_all(erasure_rows)
+        await session.commit()
+        case.requests += [request.id, skipped.id]
+        case.untouched.append(erasure_rows[2].id)
+        mine, admins, legacy = (row.id for row in erasure_rows)
+        others = await _audit(session, case.others + case.untouched)
+        before = await _snapshots(session, [])
+
+    code, _ = await _run(async_engine, ["--all"])
+    assert code == 0
+    plan = capsys.readouterr().out
+    # two own rows + two erasure rows cleared, one initiated_by rewritten
+    assert f"would clear audit request metadata  {request.id}  5 row(s)\n" in plan
+    async with _maker(async_engine)() as session:
+        assert await _snapshots(session, []) == before
+
+    code, _ = await _run(async_engine, ["--all", "--apply", "--yes"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"cleared audit request metadata  {request.id}  5 row(s)\n" in out
+    assert "5 audit row(s) request metadata cleared" in out
+    assert f"skipped  {skipped.id}" in out
+    for text_ in (plan, out):
+        for value in (case.sub, raw_sub, "203.0.113.", "agent"):
+            assert value not in text_
+    async with _maker(async_engine)() as session:
+        rows = {
+            row.id: row
+            for row in (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.id.in_([*case.own, mine, admins]))
+                )
+            ).scalars()
+        }
+        for row in rows.values():
+            assert (row.ip_address, row.user_agent) == (None, None)
+        assert rows[mine].user_metadata == {
+            "request_id": str(request.id),
+            "initiated_by": case.p,
+            "is_self_service": False,
+        }
+        assert rows[admins].user_metadata["initiated_by"] == "admin-x"
+        assert await _audit(session, case.others + case.untouched) == others
+        assert legacy in case.untouched
+        (audit,) = await _reprocess_audit_rows(session, case.p)
+        assert audit.user_metadata["audit_metadata_cleared"] == 5
+        assert audit.ip_address is None
+        after = await _snapshots(session, [])
+
+    code, _ = await _run(async_engine, ["--all", "--apply", "--yes"])
+    assert code == 0
+    assert "request metadata" not in capsys.readouterr().out
+    async with _maker(async_engine)() as session:
+        assert await _snapshots(session, []) == after

@@ -37,6 +37,10 @@ past erasures by pseudonym (#2243) share one definition:
   actors' rows that name the subject by an exact ``user_email`` or
   ``resource = 'user:'||email`` value; ``pseudonymize_audit_trail`` runs
   both under one id-ordered lock (the live erasure and the re-run).
+- ``clear_audit_request_metadata`` / ``pseudonymize_erasure_audit_initiator``
+  (#2345) — the re-run's sweep of the rows that already carry the
+  pseudonym: no IP / user agent, and the ``account_erasure`` row's
+  ``initiated_by`` the pseudonym where it was the subject's sub.
 - ``erasure_pseudonym(value)`` and ``pseudonymized_request_values(account_id,
   initiated_by)`` (#2288) — the one salted pseudonym, and the values every
   writer of an erasure request row sets once its subject is erased (the
@@ -414,6 +418,89 @@ async def pseudonymize_audit_trail(
         else 0
     )
     return own, await pseudonymize_audit_mentions(db, mentioned, subs=subs)
+
+
+# The erasure's own audit row (``AccountErasureService._write_audit_log``).
+ERASURE_AUDIT_ACTION = "account_erasure"
+
+
+def _request_metadata_rows(row: Any, pseudonym: str) -> tuple[ColumnElement[bool], ...]:
+    return (
+        row.user_id == pseudonym,
+        or_(row.ip_address.is_not(None), row.user_agent.is_not(None)),
+    )
+
+
+async def clear_audit_request_metadata(
+    db: AsyncSession, pseudonym: str, *, dry_run: bool = False
+) -> int:
+    """Clear ``ip_address`` / ``user_agent`` on the audit rows that carry the
+    erased subject's ``pseudonym`` (#2345): rows an erasure pseudonymized
+    before the live path cleared them, and the ``account_erasure`` row that
+    copied the request's. By the pseudonym, never the raw sub; the rows are
+    locked in id order. Idempotent.
+
+    Returns:
+        The rowcount (``dry_run``: how many rows would change; no lock).
+    """
+    if dry_run:
+        row = aliased(AuditLog)
+        return (
+            await db.execute(
+                select(func.count(row.id)).where(*_request_metadata_rows(row, pseudonym))
+            )
+        ).scalar_one()
+    result = await db.execute(
+        update(AuditLog)
+        .where(
+            AuditLog.id.in_(
+                locked_ids(AuditLog, lambda row: _request_metadata_rows(row, pseudonym))
+            ),
+            *_request_metadata_rows(AuditLog, pseudonym),
+        )
+        .values(ip_address=None, user_agent=None)
+    )
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
+async def pseudonymize_erasure_audit_initiator(
+    db: AsyncSession, pseudonym: str, *, dry_run: bool = False
+) -> int:
+    """The ``account_erasure`` rows of ``pseudonym`` whose
+    ``user_metadata.initiated_by`` is the subject's raw sub get the
+    pseudonym there (#2345: the rule of ``pseudonymized_request_values``,
+    decided by comparison — the value's pseudonym is the subject's — not by
+    ``is_self_service``). An admin's id, a value already pseudonymized and
+    a missing key are left. One or two rows per erasure, locked in id
+    order; the column is ``json``, so the whole value is written.
+
+    Returns:
+        How many rows changed (``dry_run``: would change; no lock).
+    """
+    stmt = (
+        select(AuditLog.id, AuditLog.user_metadata)
+        .where(AuditLog.action == ERASURE_AUDIT_ACTION, AuditLog.user_id == pseudonym)
+        .order_by(AuditLog.id)
+    )
+    if not dry_run:
+        stmt = stmt.with_for_update()
+    changed = 0
+    for row_id, metadata in (await db.execute(stmt)).all():
+        initiated_by = metadata.get("initiated_by") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(initiated_by, str)
+            or initiated_by == pseudonym
+            or erasure_pseudonym(initiated_by) != pseudonym
+        ):
+            continue
+        changed += 1
+        if not dry_run:
+            await db.execute(
+                update(AuditLog)
+                .where(AuditLog.id == row_id)
+                .values(user_metadata={**metadata, "initiated_by": pseudonym})
+            )
+    return changed
 
 
 def _ran_in_postgres() -> ColumnElement[bool]:

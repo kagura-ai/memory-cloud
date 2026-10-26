@@ -743,3 +743,81 @@ async def test_the_dry_run_count_leaves_out_the_own_rows() -> None:
     assert await count_audit_mentions(db, ["a@x.io"], exclude_user_id="raw-sub") == 1
     sql, params = _compiled(db.execute.await_args.args[0])
     assert "audit_logs.user_id != " in sql and "raw-sub" in _flat(params)
+
+
+# ---------------------------------------------------------------------------
+# #2345: the re-run's request-metadata sweep, compiled
+# ---------------------------------------------------------------------------
+
+
+async def test_request_metadata_is_cleared_by_the_pseudonym_under_a_lock() -> None:
+    from services.erasure_details import clear_audit_request_metadata
+
+    db = _mock_db(3)
+    assert await clear_audit_request_metadata(db, PSEUDONYM) == 3
+    sql, params = _compiled(db.execute.await_args.args[0])
+    assert sql.startswith("UPDATE audit_logs SET ip_address=")
+    assert params["ip_address"] is None and params["user_agent"] is None
+    assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
+    assert "audit_logs_1.ip_address IS NOT NULL OR audit_logs_1.user_agent IS NOT NULL" in sql
+    assert "audit_logs.ip_address IS NOT NULL OR audit_logs.user_agent IS NOT NULL" in sql
+    assert {v for k, v in params.items() if k.startswith("user_id_")} == {PSEUDONYM}
+
+
+async def test_the_request_metadata_dry_run_counts_without_a_lock() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import clear_audit_request_metadata
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=2)))
+    assert await clear_audit_request_metadata(db, PSEUDONYM, dry_run=True) == 2
+    sql, params = _compiled(db.execute.await_args.args[0])
+    assert sql.startswith("SELECT count(") and "FOR UPDATE" not in sql
+    assert "ip_address IS NOT NULL OR" in sql and PSEUDONYM in _flat(params)
+
+
+async def test_only_an_initiated_by_that_hashes_to_the_pseudonym_is_rewritten() -> None:
+    """The subject's raw sub becomes the pseudonym; an admin's id, a value
+    already pseudonymized, a missing key and a non-dict stay."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from sqlalchemy import Select
+    from sqlalchemy.sql.dml import Update
+
+    from services.erasure_details import pseudonymize_erasure_audit_initiator
+    from utils.hashing import sha256_hex
+
+    pseudonym = sha256_hex("raw-sub", salt="salt")
+    rows = [
+        (1, {"request_id": "r", "initiated_by": "raw-sub", "is_self_service": False}),
+        (2, {"initiated_by": "admin-1"}),
+        (3, {"initiated_by": pseudonym}),
+        (4, {"request_id": "r"}),
+        (5, None),
+    ]
+    for dry_run in (False, True):
+        db = MagicMock()
+        db.execute = AsyncMock(
+            side_effect=[MagicMock(all=MagicMock(return_value=rows)), MagicMock()]
+        )
+        with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+            assert await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run) == 1
+        stmts = [c.args[0] for c in db.execute.await_args_list]
+        select_sql, params = _compiled(stmts[0])
+        assert isinstance(stmts[0], Select)
+        assert ("FOR UPDATE" in select_sql) is not dry_run
+        assert select_sql.split("FOR UPDATE")[0].rstrip().endswith("ORDER BY audit_logs.id")
+        assert {"account_erasure", pseudonym} <= _flat(params)
+        if dry_run:
+            assert len(stmts) == 1
+        else:
+            (write,) = stmts[1:]
+            assert isinstance(write, Update)
+            _, write_params = _compiled(write)
+            assert write_params["id_1"] == 1
+            assert write_params["user_metadata"] == {
+                "request_id": "r",
+                "initiated_by": pseudonym,
+                "is_self_service": False,
+            }

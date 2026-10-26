@@ -73,6 +73,13 @@ account's; the request is listed. The dry run writes and locks nothing and makes
 vector-store call; it prints request ids and counts, never values or
 account ids.
 
+The subject's request metadata (#2345): the audit rows that carry the
+pseudonym lose their IP and user agent, and the ``account_erasure`` row's
+``initiated_by`` becomes the pseudonym where it was the subject's own
+account id (an admin's id stays) — once per pseudonym per run, for requests
+that store the pseudonym (the repaired legacy row included; the skipped
+ones are not).
+
 Exit codes: 0 ok · 1 error (the run stops at that request; the requests
 before it stay done — each is logged to stderr as ``erasure_reprocessed``
 and has its audit row — and a re-run picks up the rest) · 2 usage (``--yes``
@@ -108,9 +115,11 @@ from models.erasure import (  # noqa: E402
 )
 from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
+    ERASURE_AUDIT_ACTION,
     RestoreReport,
     StripCounts,
     SubjectDetailsErasure,
+    clear_audit_request_metadata,
     count_audit_mentions,
     erase_subject_details,
     erased_pseudonyms,
@@ -120,6 +129,7 @@ from services.erasure_details import (  # noqa: E402
     note_row_pseudonymized,
     payload_counts,
     pseudonymize_audit_trail,
+    pseudonymize_erasure_audit_initiator,
     pseudonymized_request_values,
     sync_restored_payloads,
     unrepaired_erasure,
@@ -131,8 +141,6 @@ from utils.logger import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 AUDIT_ACTION = "account_erasure_reprocess"
-# The erasure's own audit row: its user_email is the email pseudonym.
-ERASURE_AUDIT_ACTION = "account_erasure"
 TOOL = "cli.reprocess_erasures"
 # Neither ``user_id`` is used or printed: the account id (the second one, and
 # the first one before v0.125.0) or a pseudonym of an erasure that never ran.
@@ -183,6 +191,9 @@ class RequestChange:
     audit_mentions_pseudonymized: int = 0
     # an email of the subject's is in use again: rows naming it were kept
     audit_mentions_kept: bool = False
+    # #2345: rows of the pseudonym whose IP / user agent were cleared, plus
+    # the ``account_erasure`` rows whose ``initiated_by`` was pseudonymized
+    audit_metadata_cleared: int = 0
 
     @property
     def changes(self) -> int:
@@ -194,6 +205,7 @@ class RequestChange:
             + int(self.repaired)
             + self.audit_logs_pseudonymized
             + self.audit_mentions_pseudonymized
+            + self.audit_metadata_cleared
         )
 
 
@@ -451,6 +463,11 @@ async def _reprocess_one(
     other actors' rows naming one of the account's emails (``email_hashes``)
     or its account id are pseudonymized in the same transaction, under one
     lock with the subject's own rows; an email a user row holds is left.
+    The same first time (#2345), the rows that carry ``pseudonym`` lose
+    their request metadata (``clear_audit_request_metadata``,
+    ``pseudonymize_erasure_audit_initiator``) — every caller passes
+    ``mentioned`` for a request that stores (or, repaired, gets) the
+    pseudonym, and only then.
     """
     try:
         repaired = account_id is not None
@@ -476,14 +493,21 @@ async def _reprocess_one(
                     db, mention_emails, subs=subs, exclude_user_id=audit_account_id
                 )
         else:
+            # one lock phase over every audit row this request rewrites
             audited, mentions = await pseudonymize_audit_trail(
                 db,
                 audit_account_id,
                 emails,
                 orphaned_only=True,
+                pseudonym=pseudonym if mentioned is not None else None,
                 mention_emails=mention_emails,
                 mention_subs=subs,
             )
+        metadata_cleared = 0
+        if mentioned is not None:
+            metadata_cleared = await clear_audit_request_metadata(
+                db, pseudonym, dry_run=dry_run
+            ) + await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run)
         if audited:
             email_recovered = bool(emails)
         details = (
@@ -512,6 +536,7 @@ async def _reprocess_one(
             audit_email_recovered=email_recovered,
             audit_mentions_pseudonymized=mentions,
             audit_mentions_kept=mentions_kept,
+            audit_metadata_cleared=metadata_cleared,
         )
         if dry_run or not change.changes:
             await db.rollback()
@@ -532,6 +557,7 @@ async def _reprocess_one(
                     "request_repaired": change.repaired,
                     "audit_logs_pseudonymized": change.audit_logs_pseudonymized,
                     "audit_mentions_pseudonymized": change.audit_mentions_pseudonymized,
+                    "audit_metadata_cleared": change.audit_metadata_cleared,
                     "tool": TOOL,
                 },
             )
@@ -550,6 +576,7 @@ async def _reprocess_one(
         request_repaired=change.repaired,
         audit_logs_pseudonymized=change.audit_logs_pseudonymized,
         audit_mentions_pseudonymized=change.audit_mentions_pseudonymized,
+        audit_metadata_cleared=change.audit_metadata_cleared,
     )
     try:
         await sync_restored_payloads(db, restore.to_sync, restore)
@@ -766,6 +793,12 @@ def _print_plan(result: ReprocessResult) -> None:
                 f"would pseudonymize audit mentions  {c.request_id}  "
                 f"{c.audit_mentions_pseudonymized} row(s)"
             )
+    for c in result.changed:
+        if c.audit_metadata_cleared:
+            print(
+                f"would clear audit request metadata  {c.request_id}  "
+                f"{c.audit_metadata_cleared} row(s)"
+            )
     for request_id in result.audit_kept:
         print(f"audit  {request_id}  {AUDIT_KEPT}")
     for request_id in result.mentions_kept:
@@ -791,6 +824,11 @@ def _print_applied(result: ReprocessResult) -> None:
             print(
                 f"pseudonymized audit mentions  {c.request_id}  "
                 f"{c.audit_mentions_pseudonymized} row(s)"
+            )
+    for c in result.changed:
+        if c.audit_metadata_cleared:
+            print(
+                f"cleared audit request metadata  {c.request_id}  {c.audit_metadata_cleared} row(s)"
             )
     for c in result.changed:
         if c.details_restored or c.details_restored_unavailable:
@@ -834,6 +872,7 @@ def _summary(result: ReprocessResult) -> str:
     repaired = sum(c.repaired for c in result.changed)
     audited = sum(c.audit_logs_pseudonymized for c in result.changed)
     mentions = sum(c.audit_mentions_pseudonymized for c in result.changed)
+    cleared = sum(c.audit_metadata_cleared for c in result.changed)
     return (
         (
             f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
@@ -843,6 +882,7 @@ def _summary(result: ReprocessResult) -> str:
         + (f", {repaired} request row(s) repaired" if repaired else "")
         + (f", {audited} audit row(s) pseudonymized" if audited else "")
         + (f", {mentions} audit mention(s) pseudonymized" if mentions else "")
+        + (f", {cleared} audit row(s) request metadata cleared" if cleared else "")
     )
 
 
