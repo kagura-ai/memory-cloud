@@ -74,6 +74,7 @@ from sqlalchemy import (
     func,
     literal,
     null,
+    or_,
     select,
     tuple_,
     update,
@@ -1720,8 +1721,24 @@ class AccountErasureService:
         # #1784: a private context the subject created may hold memories a
         # linked account wrote. Pass it to that account before created_by is
         # pseudonymized below, or those memories go out of anyone's reach.
-        from services.identity_link_service import hand_over_private_contexts
+        from services.identity_link_service import (
+            hand_over_private_contexts,
+            lock_identity_links,
+        )
 
+        # #2278: one lock phase over every context this erasure writes — the
+        # ones the subject created (hand-over, authorship sweep) and the ones
+        # it deleted (cleared with the memory steps) — in id order, before the
+        # hand-over's memory DELETE: contexts before memories, the order
+        # ``restore_deleted_context`` takes. Two separately ordered phases
+        # (created_by, then deleted_by) would let two erasures each hold a
+        # context the other deleted. The link lock first, the order the
+        # hand-over and admin user delete take (users row, link lock,
+        # contexts); the hand-over re-takes it for free.
+        await lock_identity_links(self.db)
+        await self.db.execute(
+            locked_ids(Context, lambda c: (or_(c.created_by == user_id, c.deleted_by == user_id),))
+        )
         counts.update(await hand_over_private_contexts(self.db, user_id))
 
         authorship_sweeps: tuple[tuple[Any, Any], ...] = (
@@ -1780,12 +1797,10 @@ class AccountErasureService:
         # #2242: lock the subject's memories in id order first, before any of
         # the memories / memory_revisions UPDATEs below, so edits, session
         # rollbacks and other erasures queue on them instead of deadlocking.
-        # #2263: first the contexts the subject deleted, then — in the same
-        # ordered statement as the subject's memories — the memories the
-        # subject deleted, both cleared at the end of the memory steps. One
-        # lock phase per table, contexts before memories: the order
-        # ``restore_deleted_context`` takes (the context, then its memories).
-        await self.db.execute(locked_ids(Context, lambda c: (c.deleted_by == user_id,)))
+        # #2263: in the same ordered statement as the subject's memories, the
+        # memories the subject deleted, cleared at the end of the memory
+        # steps. The contexts it deleted are held since the hand-over (#2278):
+        # one lock phase per table, contexts before memories.
         await lock_subject_memories(self.db, user_id, deleted_by=True)
         # #2268: from here on no edit lands on the subject's memories until
         # the commit — every revision row this erasure sees is older
@@ -2196,13 +2211,23 @@ class AccountErasureService:
         Used for legal-retention tables (e.g. plan_changes) where the row
         must survive but the personal-data link to the deleted user must
         not. The pseudonym itself is ``_pseudonym``'s.
+
+        ``contexts`` rows are reached through ``locked_ids`` (#2278), locked
+        in id order like every other multi-row write over that table (all of
+        them are held since the hand-over, so the re-lock is free).
+        ``synchronize_session="fetch"``: the hand-over loaded some of them
+        into the session, which must not keep the raw sub.
         """
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(model).where(column == user_id).values({column: self._pseudonym(user_id)})
-            ),
-        )
+        statement = update(model).values({column: self._pseudonym(user_id)})
+        if model is Context:
+            statement = statement.where(
+                Context.id.in_(
+                    locked_ids(Context, lambda row: (getattr(row, column.key) == user_id,))
+                )
+            ).execution_options(synchronize_session="fetch")
+        else:
+            statement = statement.where(column == user_id)
+        result = cast(CursorResult[Any], await self.db.execute(statement))
         return result.rowcount or 0
 
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> tuple[int, int]:

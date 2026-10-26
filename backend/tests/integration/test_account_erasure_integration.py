@@ -31,7 +31,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -2219,3 +2219,73 @@ class TestAVectorStoreOutageAtStepOne:
         assert row["cancelled_at"] is None
         assert datetime.fromisoformat(row["started_at"]) == claimed_at.astimezone(UTC)
         assert await _everything_but(db_session, request_id) == before
+
+
+class TestContextAuthorshipSweepLocksInIdOrder:
+    """#2278: the ``contexts.created_by`` sweep reaches its rows through an
+    id-ordered ``FOR UPDATE`` subquery and rewrites only the subject's."""
+
+    @pytest.mark.asyncio
+    async def test_only_the_subjects_contexts_change_and_rows_lock_in_id_order(
+        self, async_engine, db_session: AsyncSession, erasure_scenario
+    ):
+        from sqlalchemy import event
+
+        from models.auth import Context
+
+        target = erasure_scenario["target_user_id"]
+        other = erasure_scenario["other_user_id"]
+        ws_id = erasure_scenario["workspace_id"]
+
+        def context(created_by: str, *, deleted: bool = False) -> Context:
+            return Context(
+                id=uuid4(),
+                workspace_id=ws_id,
+                name=f"ctx-{uuid4().hex[:8]}",
+                created_by=created_by,
+                deleted_at=utcnow() if deleted else None,
+            )
+
+        mine = [context(target), context(target, deleted=True)]
+        theirs = context(other)
+        db_session.add_all([*mine, theirs])
+        await db_session.flush()
+        before = (
+            await db_session.execute(
+                select(func.count(Context.id)).where(Context.created_by == target)
+            )
+        ).scalar_one()
+
+        statements: list[str] = []
+
+        def record(_conn, _cursor, statement, *_rest) -> None:
+            statements.append(" ".join(statement.split()))
+
+        service = AccountErasureService(db_session)
+        event.listen(async_engine.sync_engine, "before_cursor_execute", record)
+        try:
+            swept = await service._pseudonymize_field(Context, Context.created_by, target)
+        finally:
+            event.remove(async_engine.sync_engine, "before_cursor_execute", record)
+
+        # The fixture's own context counts too: every row the subject created.
+        assert swept == before >= 2
+        rows = dict(
+            (
+                await db_session.execute(
+                    select(Context.id, Context.created_by).where(
+                        Context.id.in_([c.id for c in (*mine, theirs)])
+                    )
+                )
+            ).all()
+        )
+        pseudonym = service._pseudonym(target)
+        assert {rows[c.id] for c in mine} == {pseudonym}
+        assert rows[theirs.id] == other
+        # Loaded objects follow the UPDATE: the session keeps no raw sub.
+        assert {c.created_by for c in mine} == {pseudonym}
+        left = await db_session.execute(select(Context.id).where(Context.created_by == target))
+        assert left.first() is None
+
+        (update_sql,) = [s for s in statements if s.startswith("UPDATE contexts")]
+        assert "ORDER BY contexts_1.id FOR UPDATE" in update_sql
