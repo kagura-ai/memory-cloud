@@ -76,7 +76,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.auth import AuditLog, Context, User
+from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
     NOTE_PSEUDONYMIZED_KEY,
@@ -429,7 +429,7 @@ def scrub_mark_predicate(
 
 
 def locked_ids(
-    model: type[Memory] | type[Context] | type[MemoryRevision] | type[AuditLog],
+    model: type[Memory] | type[Context] | type[MemoryRevision] | type[AuditLog] | type[APIKey],
     predicate_on: Callable[[Any], Sequence[ColumnElement[bool]]],
 ) -> Select[Any]:
     """Ids of the ``model`` rows ``predicate_on`` matches, locked in id order.
@@ -443,7 +443,7 @@ def locked_ids(
     ``NOWAIT`` here. Row locks last until the transaction commits, so a later
     statement re-locking a row is free. Used for ``memory_revisions``
     (``locked_revision_ids``, #2242), for ``memories`` / ``contexts``
-    (#2263) and for ``audit_logs`` (#2287).
+    (#2263), for ``audit_logs`` (#2287) and for connector ``api_keys`` (#2305).
     """
     row = aliased(model)
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()

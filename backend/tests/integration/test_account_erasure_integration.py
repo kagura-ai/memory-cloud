@@ -2132,3 +2132,335 @@ class TestAVectorStoreOutageAtStepOne:
         assert row["cancelled_at"] is None
         assert datetime.fromisoformat(row["started_at"]) == claimed_at.astimezone(UTC)
         assert await _everything_but(db_session, request_id) == before
+
+
+# ---------------------------------------------------------------------------
+# #2305: connector write keys survive their provisioner's erasure
+# ---------------------------------------------------------------------------
+
+
+class _ConnectorWorld:
+    """Seeds workspaces, members and connectors for the #2305 tests and
+    remembers what to clean up (the database outlives a test)."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.workspace_ids: list[UUID] = []
+        self.targets: list[str] = []
+
+    async def user(self, prefix: str) -> str:
+        """A ``users`` row (only the erased subjects need one)."""
+        user_id = f"{prefix}_{uuid4().hex[:8]}"
+        self.db.add(
+            User(
+                email=f"{user_id}@example.com",
+                user_id=user_id,
+                name=prefix,
+                role="user",
+                is_initial_admin=False,
+                auth_method="oauth",
+                auth_provider="google",
+            )
+        )
+        await self.db.flush()
+        self.targets.append(user_id)
+        return user_id
+
+    async def workspace(self, owner: str, **members: str) -> Workspace:
+        """A workspace ``owner`` owns; ``members`` maps user_id → role."""
+        workspace = Workspace(
+            id=uuid4(),
+            name=f"ws-{uuid4().hex[:8]}",
+            plan_name="promax",  # #1551: provisioning creates, XL only
+            owner_user_id=owner,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+        )
+        self.db.add(workspace)
+        await self.db.flush()
+        self.workspace_ids.append(workspace.id)
+        self.db.add(
+            WorkspaceMember(workspace_id=workspace.id, user_id=owner, role=WorkspaceRole.OWNER)
+        )
+        for user_id, role in members.items():
+            self.db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user_id, role=role))
+        await self.db.flush()
+        return workspace
+
+    async def connector(self, workspace: Workspace, by: str):
+        """A connector ``by`` provisions, with its KMC write key."""
+        from services.connector_provisioning import ConnectorProvisioningService
+
+        result = await ConnectorProvisioningService(self.db).provision_connector(
+            workspace_id=workspace.id,
+            user_id=by,
+            connector_type="slack",
+            resource_id=f"slack_{uuid4().hex[:8]}",
+            auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+        )
+        await self.db.flush()
+        return result
+
+    async def personal_key(self, user_id: str, workspace: Workspace) -> UUID:
+        from auth.api_keys import APIKeyManager
+
+        _, row = await APIKeyManager(self.db).create_key(
+            name=f"personal-{uuid4().hex[:6]}", user_id=user_id, workspace_id=workspace.id
+        )
+        await self.db.flush()
+        return row.id
+
+    async def erase(self, target: str) -> dict:
+        """Force-erase ``target``; returns the summary's ``postgres`` counts."""
+        await self.db.commit()
+        request = await AccountErasureService(self.db).admin_force_erase(
+            target_user_id=target,
+            initiator_user_id="admin-runner",
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test",
+        )
+        assert request.status == STATUS_COMPLETE
+        counts = request.deleted_data_summary["postgres"]
+        # The re-own is a Core UPDATE; reload rather than read stale ORM state.
+        self.db.expire_all()
+        return counts
+
+    async def cleanup(self) -> None:
+        await self.db.rollback()
+        pseudonyms = [sha256_hex(t, salt=_audit_salt()) for t in self.targets]
+        await self.db.execute(
+            delete(AuditLog).where(
+                AuditLog.action.in_(("account_erasure", "account_erasure_reprocess"))
+                & AuditLog.user_id.in_(pseudonyms)
+            )
+        )
+        await self.db.execute(
+            delete(ErasureRequest).where(ErasureRequest.user_id.in_(self.targets + pseudonyms))
+        )
+        await self.db.execute(delete(Workspace).where(Workspace.id.in_(self.workspace_ids)))
+        await self.db.execute(delete(User).where(User.user_id.in_(self.targets)))
+        await self.db.commit()
+
+
+@pytest_asyncio.fixture
+async def connector_world(db_session: AsyncSession):
+    # The auto-created write-target context would create a Qdrant collection.
+    with patch(
+        "services.context_service.ContextService._ensure_context_collection",
+        new=AsyncMock(return_value=None),
+    ):
+        world = _ConnectorWorld(db_session)
+        yield world
+        await world.cleanup()
+
+
+async def _key_rows(db_session: AsyncSession, ids) -> dict:
+    """Byte-level ``to_jsonb`` of the ``api_keys`` rows ``ids``."""
+    rows = (
+        await db_session.execute(
+            text("SELECT t.id, to_jsonb(t) FROM api_keys AS t WHERE t.id = ANY(:ids)"),
+            {"ids": list(ids)},
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _live_connector_key(db_session: AsyncSession, connector_id) -> APIKey:
+    return (
+        await db_session.execute(
+            select(APIKey).where(APIKey.connector_id == connector_id, APIKey.revoked_at.is_(None))
+        )
+    ).scalar_one()
+
+
+def _without_owner(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "user_id"}
+
+
+class TestConnectorKeysSurviveErasure:
+    """#2305: an erased admin's live connector keys move to the workspace's
+    owner, unchanged otherwise, so the connector keeps writing."""
+
+    @pytest.mark.asyncio
+    async def test_an_admins_connector_key_moves_to_the_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from auth.api_keys import APIKeyManager
+        from services.connector_provisioning import ConnectorProvisioningService
+
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
+
+        # a connector the target provisioned and rotated once: the first key
+        # is now revoked and still the target's
+        provisioned = await world.connector(ws, by=target)
+        connector_id = provisioned.connector.id
+        revoked_key = await _live_connector_key(db_session, connector_id)
+        revoked_key_id = revoked_key.id
+        rotated = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=ws.id, connector_id=connector_id, user_id=target
+        )
+        await db_session.flush()
+        live = await _live_connector_key(db_session, connector_id)
+        assert live.user_id == target
+        live_id = live.id
+        personal_id = await world.personal_key(target, ws)
+        before = (await _key_rows(db_session, [live_id]))[live_id]
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        after = (await _key_rows(db_session, [live_id]))[live_id]
+        assert after["user_id"] == owner
+        assert after["revoked_at"] is None
+        assert _without_owner(after) == _without_owner(before)
+        # the target's personal key and revoked connector key are gone
+        assert await _key_rows(db_session, [personal_id, revoked_key_id]) == {}
+        assert counts["connector_api_keys_reowned"] == 1
+        assert counts["api_keys"] == 2
+
+        # the worker's stored plaintext still verifies, now as the owner
+        verified = await APIKeyManager(db_session).verify_key(rotated.plaintext_kmc_api_key)
+        assert verified is not None
+        assert verified.user_id == owner
+        assert verified.is_connector_key is True
+
+        # and the owner can rotate it; the replacement stays the owner's
+        again = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=ws_id, connector_id=connector_id, user_id=owner
+        )
+        await db_session.flush()
+        assert again.key_owner_user_id == owner
+        assert (await _live_connector_key(db_session, connector_id)).user_id == owner
+
+    @pytest.mark.asyncio
+    async def test_other_members_and_workspaces_keys_are_untouched(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        member = f"member_{uuid4().hex[:8]}"
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, member: WorkspaceRole.ADMIN}
+        )
+        mine = await world.connector(ws, by=target)
+        theirs = await world.connector(ws, by=member)
+        owners_key = await world.personal_key(owner, ws)
+        elsewhere_owner = f"else_{uuid4().hex[:8]}"
+        elsewhere = await world.workspace(elsewhere_owner)
+        unrelated = await world.connector(elsewhere, by=elsewhere_owner)
+        bystanders = [
+            (await _live_connector_key(db_session, theirs.connector.id)).id,
+            (await _live_connector_key(db_session, unrelated.connector.id)).id,
+            owners_key,
+        ]
+        mine_id = (await _live_connector_key(db_session, mine.connector.id)).id
+        before = await _key_rows(db_session, bystanders)
+        assert len(before) == 3
+
+        counts = await world.erase(target)
+
+        assert await _key_rows(db_session, bystanders) == before
+        assert (await _key_rows(db_session, [mine_id]))[mine_id]["user_id"] == owner
+        assert counts["connector_api_keys_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_owners_key_follows_the_workspace_to_its_new_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        # step 2 hands the workspace to the lowest-user_id admin
+        heir = f"a_heir_{uuid4().hex[:8]}"
+        later = f"z_later_{uuid4().hex[:8]}"
+        ws = await world.workspace(
+            target, **{heir: WorkspaceRole.ADMIN, later: WorkspaceRole.ADMIN}
+        )
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        workspace = (
+            await db_session.execute(select(Workspace).where(Workspace.id == ws_id))
+        ).scalar_one()
+        assert workspace.owner_user_id == heir
+        assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == heir
+        assert counts["connector_api_keys_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_sole_owned_workspace_takes_its_connector_key_with_it(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        ws = await world.workspace(target)
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        assert (
+            await db_session.execute(select(Workspace).where(Workspace.id == ws_id))
+        ).scalar_one_or_none() is None
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert counts["connector_api_keys_reowned"] == 0
+
+    @pytest.mark.asyncio
+    async def test_keys_in_two_workspaces_go_to_each_workspaces_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        owner_1 = f"owner1_{uuid4().hex[:8]}"
+        owner_2 = f"owner2_{uuid4().hex[:8]}"
+        ws_1 = await world.workspace(owner_1, **{target: WorkspaceRole.ADMIN})
+        ws_2 = await world.workspace(owner_2, **{target: WorkspaceRole.ADMIN})
+        key_1 = (
+            await _live_connector_key(
+                db_session, (await world.connector(ws_1, by=target)).connector.id
+            )
+        ).id
+        key_2 = (
+            await _live_connector_key(
+                db_session, (await world.connector(ws_2, by=target)).connector.id
+            )
+        ).id
+
+        counts = await world.erase(target)
+
+        rows = await _key_rows(db_session, [key_1, key_2])
+        assert rows[key_1]["user_id"] == owner_1
+        assert rows[key_2]["user_id"] == owner_2
+        assert counts["connector_api_keys_reowned"] == 2
+
+    @pytest.mark.asyncio
+    async def test_an_expired_unrevoked_connector_key_moves_too(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from sqlalchemy import update
+
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        await db_session.execute(
+            update(APIKey)
+            .where(APIKey.id == key_id)
+            .values(expires_at=to_naive_utc(datetime(2020, 1, 1, tzinfo=UTC)))
+            .execution_options(synchronize_session=False)
+        )
+
+        counts = await world.erase(target)
+
+        row = (await _key_rows(db_session, [key_id]))[key_id]
+        assert row["user_id"] == owner
+        assert row["revoked_at"] is None
+        assert counts["connector_api_keys_reowned"] == 1

@@ -54,6 +54,8 @@ GDPR Art.12(3) の「受領後 1 ヶ月以内」応答義務を満たすため�
 - **admin が他に居ないが member がいる場合**: `WorkspaceTransferRequiredError` (HTTP 409)。ユーザーは ownership を譲渡してから再実行する必要がある。
 - **sole owner の場合**: そのまま step 4 で workspace ごと削除 (cascade で contexts/memories/edges/...)。
 
+譲渡された workspace の connector write key のうち本人名義のものは、step 4 で新しい owner の名義に移る (#2305)。
+
 ### 2.4 Postgres (Step 4)
 
 FK の依存逆順で削除:
@@ -64,7 +66,8 @@ FK の依存逆順で削除:
 | `oauth_authorization_codes` | `user_id = :uid` | FK cascade なし |
 | `oauth_clients` | `owner_id = :uid` | tokens は cascade で残らず |
 | `external_api_keys` | `user_id = :uid` | Fernet 暗号化 3rd-party キー |
-| `api_keys` | `user_id = :uid` | |
+| `api_keys` (`connector_id IS NOT NULL`, `revoked_at IS NULL`) | `user_id = :uid` かつ workspace の owner が本人でない | 削除せず `user_id` を workspace の `owner_user_id` に付け替え (#2305)。connector の write key は workspace のもので、worker が持つ平文はそのまま有効、以後の rotate は owner 名義で発行される。counts キー = `connector_api_keys_reowned` |
+| `api_keys` | `user_id = :uid` | connector key 以外 (revoked の connector key を含む) |
 | `graph_memory` | `user_id = :uid` | orphan, FK cascade なし |
 | `usage_stats` | `user_id = :uid` | |
 | `user_plans` | `user_id = :uid` | PK = user_id |
