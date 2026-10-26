@@ -228,3 +228,60 @@ async def test_log_fields_never_clash_with_the_policy_keys(kind: str) -> None:
     kwargs = log.warning.call_args.kwargs
     assert kwargs["memory_id"] == str(only) and kwargs["error_class"] == "RuntimeError"
     assert kwargs["collection"] == "c"
+
+
+async def test_requeue_survives_a_failed_rollback_after_a_failed_read() -> None:
+    ids = _ids(3)
+    db = _db()
+    db.rollback = AsyncMock(side_effect=RuntimeError("connection gone"))
+    reads: list[list[uuid.UUID]] = []
+
+    async def read(_db: Any, group: list[uuid.UUID], **_: Any) -> dict[uuid.UUID, Any]:
+        reads.append(list(group))
+        raise RuntimeError("read")
+
+    apply = AsyncMock()
+    policy = ps.RequeueEmbeddingOnFailure("p", reason="r")
+    with (
+        patch.object(ps, "PAYLOAD_SYNC_GROUP", 2),
+        patch(_READ, side_effect=read),
+        patch.object(ps, "logger") as log,
+    ):
+        await ps.sync_payloads_after_commit(
+            db, ids, memory_id=lambda i: i, plan=_plan_all(), apply=apply, on_failure=policy
+        )  # does not raise
+    assert reads == [ids[:2], ids[2:]]  # the next group still runs
+    apply.assert_not_awaited()
+    assert policy.requeue_failed == 3
+    events = [c.args[0] for c in log.warning.call_args_list]
+    assert events == ["p_tx_end_failed", "p_read_failed"] * 2
+
+
+async def test_requeue_survives_a_failed_rollback_after_a_failed_commit() -> None:
+    ids = _ids(2)
+    db = _db()
+    db.commit = AsyncMock(side_effect=RuntimeError("commit"))
+    db.rollback = AsyncMock(side_effect=RuntimeError("connection gone"))
+    applied: list[uuid.UUID] = []
+
+    async def apply(patch: ps.PlannedPatch[Any]) -> None:
+        applied.append(patch.memory_id)
+
+    policy = ps.RequeueEmbeddingOnFailure("p", reason="r")
+    with (
+        patch.object(ps, "PAYLOAD_SYNC_GROUP", 1),
+        patch(_READ, AsyncMock(side_effect=lambda _db, g, **_: {i: object() for i in g})),
+        patch.object(ps, "logger") as log,
+    ):
+        await ps.sync_payloads_after_commit(
+            db, ids, memory_id=lambda i: i, plan=_plan_all(), apply=apply, on_failure=policy
+        )  # does not raise
+    assert applied == ids  # the next group still runs
+    assert (policy.requeued_after_error, policy.skipped_requeued, policy.requeue_failed) == (
+        0,
+        0,
+        0,
+    )
+    events = [c.args[0] for c in log.warning.call_args_list]
+    assert events == ["p_tx_end_failed", "p_commit_failed"] * 2
+    assert log.warning.call_args_list[1].kwargs["memory_ids"] == [str(ids[0])]

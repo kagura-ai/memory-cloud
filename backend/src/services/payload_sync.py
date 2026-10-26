@@ -69,9 +69,8 @@ class PlannedPatch(Generic[DataT]):
 class PayloadFailurePolicy(Protocol):
     """What the payload step does when a read, a patch or a commit fails.
 
-    A vector-store failure never fails the caller: the Postgres work is
-    committed already. A session that cannot even roll back may (as
-    ``RequeueEmbeddingOnFailure`` lets it, #2266 behaviour kept by #2283).
+    No method may fail the caller, for the vector store's sake or for a
+    session that cannot roll back: the Postgres work is committed already.
     """
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
@@ -112,10 +111,7 @@ class SwallowFailures:
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
         logger.warning(f"{self.event_prefix}_reread_failed", error_class=type(exc).__name__)
-        try:
-            await db.rollback()
-        except Exception as end_exc:
-            self._log_tx_end_failed(end_exc)
+        await _rollback_or_log(db, self.event_prefix)
         return True
 
     async def patch_failed(
@@ -130,10 +126,7 @@ class SwallowFailures:
         )
 
     async def commit_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> None:
-        self._log_tx_end_failed(exc)
-
-    def _log_tx_end_failed(self, exc: Exception) -> None:
-        logger.warning(f"{self.event_prefix}_tx_end_failed", error_class=type(exc).__name__)
+        _log_tx_end_failed(self.event_prefix, exc)
 
 
 class RequeueEmbeddingOnFailure:
@@ -144,9 +137,14 @@ class RequeueEmbeddingOnFailure:
     upsert rewrites the whole payload from the row); a row not ``success`` is
     queued already. A re-queue that fails too is counted and logged, and the
     next row goes on. A group whose read fails is skipped and its rows
-    counted as ``requeue_failed``. Events are ``<prefix>_failed``,
-    ``<prefix>_requeue_failed``, ``<prefix>_read_failed`` and
-    ``<prefix>_commit_failed``; logs carry ids only, never values.
+    counted as ``requeue_failed``. A group whose commit fails is rolled back:
+    its patches reached the vector store, but the re-queues made inside its
+    transaction are lost — the ``<prefix>_commit_failed`` line's ids are the
+    operator's list. A rollback that fails too is logged
+    (``<prefix>_tx_end_failed``), never raised. Events are
+    ``<prefix>_failed``, ``<prefix>_requeue_failed``, ``<prefix>_read_failed``,
+    ``<prefix>_commit_failed`` and ``<prefix>_tx_end_failed``; logs carry ids
+    only, never values.
 
     Attributes:
         requeued_after_error: Failed patches on embedded rows, re-queued.
@@ -163,7 +161,7 @@ class RequeueEmbeddingOnFailure:
         self.requeue_failed = 0
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
-        await db.rollback()
+        await _rollback_or_log(db, self.event_prefix)
         self.requeue_failed += len(ids)
         logger.warning(
             f"{self.event_prefix}_read_failed",
@@ -207,12 +205,24 @@ class RequeueEmbeddingOnFailure:
         )
 
     async def commit_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> None:
-        await db.rollback()
+        await _rollback_or_log(db, self.event_prefix)
         logger.warning(
             f"{self.event_prefix}_commit_failed",
             memory_ids=[str(i) for i in ids],
             error_class=type(exc).__name__,
         )
+
+
+def _log_tx_end_failed(event_prefix: str, exc: Exception) -> None:
+    logger.warning(f"{event_prefix}_tx_end_failed", error_class=type(exc).__name__)
+
+
+async def _rollback_or_log(db: AsyncSession, event_prefix: str) -> None:
+    """Roll the group's transaction back; a failed rollback is logged, not raised."""
+    try:
+        await db.rollback()
+    except Exception as exc:
+        _log_tx_end_failed(event_prefix, exc)
 
 
 def _extra(patch: PlannedPatch[Any], *own: str) -> dict[str, Any]:
