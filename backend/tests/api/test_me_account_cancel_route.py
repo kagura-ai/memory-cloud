@@ -6,9 +6,9 @@ row is read again as the caller's and the answer follows what it is now:
 | row after the lost compare-and-set        | answer                          |
 |-------------------------------------------|---------------------------------|
 | ``cancelled`` (a concurrent cancel won)   | 200, the body a first cancel returns |
-| gone, or no longer the caller's           | 404 ``ERASURE-001``             |
-| ``in_progress`` / ``complete`` / ``failed`` | 409 ``ERASURE-006`` with it   |
+| ``in_progress``                           | 409 ``ERASURE-006``             |
 | back in ``cooling_off`` (claimed, then rescheduled) | 409 ``in_progress``   |
+| ``complete`` / ``failed``, gone, or no longer the caller's | 404 ``ERASURE-001`` |
 
 DB-free: dependency overrides, the real service over a scripted session,
 and the app's real ``MemoryCloudException`` handler, so the bodies are the
@@ -130,7 +130,7 @@ def test_a_first_cancel_answers_200_with_the_cancelled_request():
 
 
 def test_a_cancel_that_loses_to_a_concurrent_cancel_answers_like_the_first():
-    """A double-click: both cancels read ``cooling_off``, one wins the
+    """Two cancels (e.g. two tabs) both read ``cooling_off``, one wins the
     compare-and-set; the other gets the same 200 body, not a 409."""
     first_row = _row()
     first_db = _session(MagicMock(rowcount=1))
@@ -163,15 +163,25 @@ def test_a_row_gone_meanwhile_answers_404():
     assert resp.json()["error"] == "ERASURE-001"
 
 
-@pytest.mark.parametrize("status", [STATUS_IN_PROGRESS, STATUS_COMPLETE, STATUS_FAILED])
-def test_a_row_that_moved_on_answers_409_with_its_status(status):
-    resp, _db = _lost(_row(status))
+def test_a_row_claimed_meanwhile_answers_409_in_progress():
+    resp, _db = _lost(_row(STATUS_IN_PROGRESS))
 
     assert resp.status_code == 409
     body = resp.json()
     assert body["error"] == "ERASURE-006"
-    assert body["details"] == {"existing_status": status}
-    assert f"already {status}" in body["message"]
+    assert body["details"] == {"existing_status": STATUS_IN_PROGRESS}
+    assert "already in_progress" in body["message"]
+
+
+@pytest.mark.parametrize("status", [STATUS_COMPLETE, STATUS_FAILED])
+def test_a_row_that_ended_answers_404(status):
+    """Nothing left to cancel. (A finished erasure pseudonymizes the row's
+    ``user_id``, so the re-read usually finds nothing; a ``failed`` row
+    before the Postgres step keeps it.)"""
+    resp, _db = _lost(_row(status))
+
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "ERASURE-001"
 
 
 def test_a_row_claimed_then_rescheduled_answers_409_in_progress():

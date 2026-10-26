@@ -2091,9 +2091,11 @@ class TestAVectorStoreOutageAtStepOne:
         assert datetime.fromisoformat(row["started_at"]) == reclaimed_at.astimezone(UTC)
         assert await _user_exists(db_session, erasure_scenario["target_user_id"])
 
+    @pytest.mark.parametrize("error", ["generic", "transfer"])
     @pytest.mark.asyncio
     async def test_a_stale_runs_failure_does_not_mark_the_newer_claim(
         self,
+        error,
         db_session: AsyncSession,
         async_engine,
         erasure_scenario,
@@ -2102,15 +2104,16 @@ class TestAVectorStoreOutageAtStepOne:
     ):
         """#2306: the run outlived the stale cutoff and a later sweep claimed
         the row again before the run failed (not a vector-store error, so the
-        generic handler): its ``failed`` write is guarded by the run's own
-        claim, so the newer run's row, and every other request, stay as they
-        are."""
+        generic handler, or the workspace-transfer one): its ``failed`` write
+        is guarded by the run's own claim, so the newer run's row, and every
+        other request, stay as they are."""
         from datetime import timedelta
 
         from sqlalchemy import update
         from sqlalchemy.ext.asyncio import async_sessionmaker
 
         from models.erasure import STATUS_IN_PROGRESS
+        from utils.exceptions import WorkspaceTransferRequiredError
 
         request_id = await _due_self_service_request(db_session, erasure_scenario)
         reclaimed_at = utcnow() + timedelta(hours=1)
@@ -2124,6 +2127,8 @@ class TestAVectorStoreOutageAtStepOne:
                     .values(started_at=reclaimed_at)
                 )
                 await other.commit()
+            if error == "transfer":
+                raise WorkspaceTransferRequiredError("ws-1", 2)
             raise RuntimeError("unexpected")
 
         before = await _everything_but(db_session, request_id)

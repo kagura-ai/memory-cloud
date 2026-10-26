@@ -708,14 +708,14 @@ class AccountErasureService:
 
         A lost compare-and-set re-reads the row as the caller's (#2306):
         ``cancelled`` (a concurrent cancel of the same request won, e.g. a
-        double-click) returns it like a first cancel does; a row that is
-        gone or no longer the caller's (a finished erasure pseudonymizes
-        its ``user_id``) is 404; ``in_progress`` / ``complete`` /
-        ``failed`` is 409 with that status.
+        second tab) returns it like a first cancel does; ``in_progress`` is
+        409; a row that ended (``complete`` / ``failed``), is gone, or is no
+        longer the caller's (a finished erasure pseudonymizes its
+        ``user_id``) is 404 — there is nothing left to cancel.
 
         Raises:
             ErasureRequestNotFoundError: No active cancellable request, or
-                the row is no longer the caller's after a lost
+                the row ended or is no longer the caller's after a lost
                 compare-and-set.
             ErasureAlreadyInProgressError: The row left ``pending`` /
                 ``cooling_off`` after it was read (claimed by the sweep).
@@ -760,18 +760,16 @@ class AccountErasureService:
                 request_id=str(request_id),
                 status=current.status if current is not None else None,
             )
-            if current is None:
-                raise ErasureRequestNotFoundError(user_id)
-            if current.status == STATUS_CANCELLED:
+            if current is not None and current.status == STATUS_CANCELLED:
                 # a concurrent cancel of this request won: same answer
                 return current
-            # back in ``pending`` / ``cooling_off`` only after a claim beat
-            # this cancel and the run rescheduled it (#2282): report the claim
-            raise ErasureAlreadyInProgressError(
-                current.status
-                if current.status in (STATUS_IN_PROGRESS, STATUS_COMPLETE, STATUS_FAILED)
-                else STATUS_IN_PROGRESS
-            )
+            if current is None or current.status in (STATUS_COMPLETE, STATUS_FAILED):
+                # ended or gone: nothing to cancel
+                raise ErasureRequestNotFoundError(user_id)
+            # ``in_progress``; or back in ``pending`` / ``cooling_off`` only
+            # after a claim beat this cancel and the run rescheduled it
+            # (#2282): report the claim
+            raise ErasureAlreadyInProgressError(STATUS_IN_PROGRESS)
         await self.db.refresh(request)
 
         logger.info(
@@ -1335,20 +1333,26 @@ class AccountErasureService:
             # `failed` with a structured reason; the user creates a new request
             # once the contract has ended. Nothing was deleted yet.
             await self.db.rollback()
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(ErasureRequest.id == request_id)
-                .values(
-                    status=STATUS_FAILED,
-                    failure_reason=(
-                        f"billing_contract_active: workspace_ids={','.join(exc.details['workspace_ids'])}. "
-                        "Cancel the subscription and wait for the contract period to end, "
-                        "then create a new erasure request."
-                    )[:1000],
-                    deleted_data_summary=summary or None,
-                )
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    # #2306: this run's row only (see the generic handler)
+                    .where(ErasureRequest.id == request_id, ErasureRequest.started_at == claimed_at)
+                    .values(
+                        status=STATUS_FAILED,
+                        failure_reason=(
+                            f"billing_contract_active: workspace_ids={','.join(exc.details['workspace_ids'])}. "
+                            "Cancel the subscription and wait for the contract period to end, "
+                            "then create a new erasure request."
+                        )[:1000],
+                        deleted_data_summary=summary or None,
+                    )
+                ),
             )
             await self.db.commit()
+            if not result.rowcount:
+                logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
             raise
         except WorkspaceTransferRequiredError as exc:
             # Caller-actionable error. Move the row to the terminal `failed`
@@ -1372,20 +1376,26 @@ class AccountErasureService:
             # + member_count), and a fresh request can be created once the
             # workspace state is corrected.
             await self.db.rollback()
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(ErasureRequest.id == request_id)
-                .values(
-                    status=STATUS_FAILED,
-                    failure_reason=(
-                        f"workspace_transfer_required: workspace_id={exc.details.get('workspace_id')} "
-                        f"member_count={exc.details.get('member_count')}. "
-                        "Promote another member to admin (or remove members), then create a new erasure request."
-                    )[:1000],
-                    deleted_data_summary=summary or None,
-                )
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    # #2306: this run's row only (see the generic handler)
+                    .where(ErasureRequest.id == request_id, ErasureRequest.started_at == claimed_at)
+                    .values(
+                        status=STATUS_FAILED,
+                        failure_reason=(
+                            f"workspace_transfer_required: workspace_id={exc.details.get('workspace_id')} "
+                            f"member_count={exc.details.get('member_count')}. "
+                            "Promote another member to admin (or remove members), then create a new erasure request."
+                        )[:1000],
+                        deleted_data_summary=summary or None,
+                    )
+                ),
             )
             await self.db.commit()
+            if not result.rowcount:
+                logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
             raise
         except Exception as exc:
             if erased_in_postgres:
@@ -1432,17 +1442,16 @@ class AccountErasureService:
                 )
             # #2306: guarded by this run's claim, like the reschedule above:
             # a run that outlived the stale cutoff and was claimed again must
-            # not mark the newer run's row
+            # not mark the newer run's row. Not once this run erased the
+            # subject in Postgres: that fact outranks the newer claim (whose
+            # subject is gone), and the row must not keep the raw sub nor
+            # lose the marker the re-run and later erasures look for.
+            guard = [ErasureRequest.id == request_id]
+            if not erased_in_postgres:
+                guard.append(ErasureRequest.started_at == claimed_at)
             result = cast(
                 CursorResult[Any],
-                await self.db.execute(
-                    update(ErasureRequest)
-                    .where(
-                        ErasureRequest.id == request_id,
-                        ErasureRequest.started_at == claimed_at,
-                    )
-                    .values(**values)
-                ),
+                await self.db.execute(update(ErasureRequest).where(*guard).values(**values)),
             )
             await self.db.commit()
             if not result.rowcount:
