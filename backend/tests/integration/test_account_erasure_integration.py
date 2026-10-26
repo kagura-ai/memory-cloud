@@ -194,10 +194,17 @@ def patched_external_stores():
 
 @pytest_asyncio.fixture
 async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
-    """#2287: audit rows the target's erasure must leave byte-identical — the
-    other member acting on the target (``resource`` names the target's
-    email: out of scope, the row's ``user_id`` is not the target's) and a
-    third account acting on itself."""
+    """Other actors' audit rows around the target (#2287, #2298), in order:
+
+    0. the other member acting on the target (``resource`` names the
+       target's email): only ``resource`` changes, to the email pseudonym;
+    1. the target acting as an admin on the other member (``user_email`` is
+       the target's, ``user_id`` and ``resource`` the other's): only
+       ``user_email`` changes — the row's IP stays, it is another actor's;
+    2. a third account acting on itself, with an IP: byte-identical;
+    3. a look-alike ``resource`` (the target's email plus a suffix):
+       byte-identical — exact values only, never a substring.
+    """
     target_email = erasure_scenario["target_email"]
     other = erasure_scenario["other_user_id"]
     rows = [
@@ -206,12 +213,29 @@ async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
             user_id=other,
             action="role_assign",
             resource=f"user:{target_email}",
+            ip_address="198.51.100.20",
+            user_agent="admin-agent",
+        ),
+        AuditLog(
+            user_email=target_email,
+            user_id=other,
+            action="role_assign",
+            resource=f"user:{other}@example.com",
+            ip_address="198.51.100.21",
+            user_agent="target-agent",
         ),
         AuditLog(
             user_email="third@example.com",
             user_id=f"third_{uuid4().hex[:8]}",
             action="password_set",
             resource="user:third@example.com",
+            ip_address="198.51.100.22",
+        ),
+        AuditLog(
+            user_email=f"{other}@example.com",
+            user_id=other,
+            action="role_assign",
+            resource=f"user:{target_email}-x",
         ),
     ]
     db_session.add_all(rows)
@@ -288,9 +312,23 @@ class TestAdminForceEraseHappyPath:
         # target).
         assert request.deleted_data_summary["postgres"]["audit_logs_pseudonymized"] >= 1
         assert "audit_logs_pseudonymized" not in request.deleted_data_summary
-        # every other actor's audit rows are byte-identical (#2287), the
-        # admin's row about the target included (out of scope)
-        assert await _audit_rows_snapshot(db_session, other_actors_audit) == others_before
+        # #2298: the rows naming the target change in that one value only;
+        # every other actor's row is byte-identical
+        assert request.deleted_data_summary["postgres"]["audit_mentions_pseudonymized"] == 2
+        others_after = await _audit_rows_snapshot(db_session, other_actors_audit)
+        about, by_target, third, lookalike = other_actors_audit
+        email_pseudonym = erasure_pseudonym(target_email)
+        assert others_after[about] == {
+            **others_before[about],
+            "resource": f"user:{email_pseudonym}",
+        }
+        assert others_after[by_target] == {
+            **others_before[by_target],
+            "user_email": email_pseudonym,
+        }
+        assert others_after[by_target]["ip_address"] == "198.51.100.21"
+        for row_id in (third, lookalike):
+            assert others_after[row_id] == others_before[row_id]
 
         # User row is gone.
         result = await db_session.execute(select(User).where(User.user_id == target_user_id))
@@ -399,12 +437,21 @@ class TestAuditLogFailureRollsThePostgresStepBack:
     request can retry."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failing",
+        [
+            "services.account_erasure_service.AccountErasureService._pseudonymize_audit_logs",
+            # #2298: after the own rows' UPDATE ran in the transaction
+            "services.erasure_details.pseudonymize_audit_mentions",
+        ],
+    )
     async def test_an_audit_log_failure_rolls_the_postgres_step_back(
         self,
         db_session: AsyncSession,
         erasure_scenario,
         other_actors_audit,
         patched_external_stores,
+        failing: str,
     ):
         from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
 
@@ -412,11 +459,7 @@ class TestAuditLogFailureRollsThePostgresStepBack:
         tables = ("users", "audit_logs", "api_keys", "memories", "memory_revisions")
         before = {table: await _table_snapshot(db_session, table) for table in tables}
 
-        with patch.object(
-            AccountErasureService,
-            "_pseudonymize_audit_logs",
-            AsyncMock(side_effect=RuntimeError("audit_logs unavailable")),
-        ):
+        with patch(failing, AsyncMock(side_effect=RuntimeError("audit_logs unavailable"))):
             with pytest.raises(RuntimeError):
                 await AccountErasureService(db_session).admin_force_erase(
                     target_user_id=target,

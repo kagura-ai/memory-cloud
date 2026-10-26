@@ -33,6 +33,10 @@ past erasures by pseudonym (#2243) share one definition:
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
   own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
   and by the re-run for rows an erasure on v0.124.x or before left behind.
+- ``pseudonymize_audit_mentions(db, emails, subs=...)`` (#2298) — other
+  actors' rows that name the subject by an exact ``user_email`` or
+  ``resource = 'user:'||email`` value; ``pseudonymize_audit_trail`` runs
+  both under one id-ordered lock (the live erasure and the re-run).
 - ``erasure_pseudonym(value)`` and ``pseudonymized_request_values(account_id,
   initiated_by)`` (#2288) — the one salted pseudonym, and the values every
   writer of an erasure request row sets once its subject is erased (the
@@ -211,10 +215,11 @@ async def pseudonymize_audit_logs(
     ``user_id`` belongs to a user row are never touched, even when that user
     row appeared after the run read the audit subs (a re-registration).
 
-    Out of scope, here as before: rows where another actor (an admin) acted
-    on the subject — their ``user_id`` is the admin's, and a ``resource``
-    naming the subject's email stays. Rows of every other ``user_id`` are
-    never touched. The rows are locked in id order first (``locked_ids``).
+    Rows of every other ``user_id`` are never touched here: where another
+    actor's row names the subject (an admin acting on them, or they acting
+    on someone else) ``pseudonymize_audit_mentions`` rewrites the exact
+    values (#2298); ``pseudonymize_audit_trail`` runs both under one lock.
+    The rows are locked in id order first (``locked_ids``).
 
     Returns:
         The rowcount.
@@ -237,10 +242,7 @@ async def pseudonymize_audit_logs(
     )
 
     def own_rows(row: Any) -> tuple[ColumnElement[bool], ...]:
-        predicate: tuple[ColumnElement[bool], ...] = (row.user_id == user_id,)
-        if orphaned_only:
-            predicate += (~exists().where(User.user_id == row.user_id),)
-        return predicate
+        return (_own_audit_rows(row, user_id, orphaned_only=orphaned_only),)
 
     result = await db.execute(
         update(AuditLog)
@@ -248,6 +250,153 @@ async def pseudonymize_audit_logs(
         .values(values)
     )
     return cast(CursorResult[Any], result).rowcount or 0
+
+
+def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnElement[bool]:
+    """The rows ``user_id`` acted in (``pseudonymize_audit_logs``'s scope)."""
+    predicate: ColumnElement[bool] = row.user_id == user_id
+    if orphaned_only:
+        predicate = predicate & ~exists().where(User.user_id == row.user_id)
+    return predicate
+
+
+def _by_length(values: Iterable[str]) -> list[str]:
+    """Distinct ``values``, the longest first (then alphabetical): a stable order."""
+    return sorted(set(values), key=lambda v: (-len(v), v))
+
+
+def audit_mention_resources(emails: Collection[str], subs: Collection[str] = ()) -> list[str]:
+    """The ``resource`` values naming the subject (#2298): ``user:{email}``,
+    the shape every writer of a row about a member produces, and
+    ``user:{sub}`` (today only on the subject's own rows; one more value)."""
+    return [f"user:{e}" for e in _by_length(emails)] + [f"user:{s}" for s in _by_length(subs)]
+
+
+def audit_mention_predicate(
+    row: Any, emails: Collection[str], subs: Collection[str] = ()
+) -> ColumnElement[bool] | None:
+    """Rows that name the subject by an exact value (#2298): ``user_email``
+    is one of ``emails`` (the subject acting on another member's row) or
+    ``resource`` is one of ``audit_mention_resources`` (another actor
+    acting on the subject). None when there is nothing to match."""
+    arms: list[ColumnElement[bool]] = []
+    if emails:
+        arms.append(row.user_email.in_(_by_length(emails)))
+    resources = audit_mention_resources(emails, subs)
+    if resources:
+        arms.append(row.resource.in_(resources))
+    return or_(*arms) if arms else None
+
+
+async def pseudonymize_audit_mentions(
+    db: AsyncSession, emails: Collection[str], *, subs: Collection[str] = ()
+) -> int:
+    """Pseudonymize the subject's identifiers on other actors' audit rows (#2298).
+
+    The rows are kept (legal retention) and so is everything else on them —
+    the acting member's own ``user_id`` / ``user_email`` (accountability
+    evidence), ``action``, the hashes, ``ip_address`` / ``user_agent``.
+    Exact values only, never a substring of another actor's text:
+
+    - ``user_email`` equal to one of ``emails`` (the subject acting as an
+      admin on someone else's row: ``user_id`` is the target's there) →
+      ``erasure_pseudonym(email)``;
+    - ``resource`` equal to ``user:{email}`` or ``user:{sub}`` (an admin
+      acting on the subject) → ``user:`` + the pseudonym — 69 characters,
+      within the column.
+
+    The pseudonyms are the ones ``pseudonymize_audit_logs`` writes on the
+    subject's own rows, so the two still correlate. No ``user_id``
+    predicate: the live erasure rewrote the own rows just before (none is
+    counted twice), and the re-run may not know the sub. Idempotent: once
+    rewritten, no row matches. The rows are locked in id order first.
+
+    Returns:
+        The rowcount; 0 without a statement when there is nothing to match.
+    """
+    if audit_mention_predicate(AuditLog, emails, subs) is None:
+        return 0
+    values: dict[str, Any] = {}
+    ordered = _by_length(emails)
+    if ordered:
+        values["user_email"] = case(
+            *((AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered),
+            else_=AuditLog.user_email,
+        )
+    values["resource"] = case(
+        *(
+            (AuditLog.resource == f"user:{v}", f"user:{erasure_pseudonym(v)}")
+            for v in [*ordered, *_by_length(subs)]
+        ),
+        else_=AuditLog.resource,
+    )
+
+    def mentions(row: Any) -> tuple[ColumnElement[bool], ...]:
+        return (cast(ColumnElement[bool], audit_mention_predicate(row, emails, subs)),)
+
+    result = await db.execute(
+        update(AuditLog)
+        .where(AuditLog.id.in_(locked_ids(AuditLog, mentions)), *mentions(AuditLog))
+        .values(values)
+    )
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
+async def count_audit_mentions(
+    db: AsyncSession, emails: Collection[str], *, subs: Collection[str] = ()
+) -> int:
+    """What ``pseudonymize_audit_mentions`` would change (a dry run's count;
+    the same predicate, no lock)."""
+    predicate = audit_mention_predicate(AuditLog, emails, subs)
+    if predicate is None:
+        return 0
+    return (await db.execute(select(func.count(AuditLog.id)).where(predicate))).scalar_one()
+
+
+async def pseudonymize_audit_trail(
+    db: AsyncSession,
+    user_id: str | None,
+    emails: Collection[str],
+    *,
+    orphaned_only: bool = False,
+    pseudonym: str | None = None,
+) -> tuple[int, int]:
+    """The subject's own audit rows and the rows that mention them (#2287, #2298).
+
+    The one entry point of the live erasure and the re-run. One lock phase
+    first, in id order, over the union of every row the statements below
+    rewrite (``user_id = :sub`` when given, the mention predicate, and the
+    rows of ``pseudonym`` when given — the re-run's #2345 sweep that follows
+    in its transaction): two erasures of members who acted on each other
+    (one's own row is the other's mention) then queue instead of
+    deadlocking. Then ``pseudonymize_audit_logs`` (when ``user_id`` is
+    given) and ``pseudonymize_audit_mentions`` with ``subs=[user_id]``.
+
+    Returns:
+        ``(own rows, mentions)`` rowcounts.
+    """
+    subs = (user_id,) if user_id is not None else ()
+
+    def union(row: Any) -> tuple[ColumnElement[bool], ...]:
+        arms: list[ColumnElement[bool]] = []
+        if user_id is not None:
+            arms.append(_own_audit_rows(row, user_id, orphaned_only=orphaned_only))
+        mention = audit_mention_predicate(row, emails, subs)
+        if mention is not None:
+            arms.append(mention)
+        if pseudonym is not None:
+            arms.append(row.user_id == pseudonym)
+        return (or_(*arms),)
+
+    if user_id is None and pseudonym is None and not emails:
+        return 0, 0
+    await db.execute(locked_ids(AuditLog, union))
+    own = (
+        await pseudonymize_audit_logs(db, user_id, emails, orphaned_only=orphaned_only)
+        if user_id is not None
+        else 0
+    )
+    return own, await pseudonymize_audit_mentions(db, emails, subs=subs)
 
 
 def _ran_in_postgres() -> ColumnElement[bool]:

@@ -578,3 +578,154 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",
     ]
+
+
+# ---------------------------------------------------------------------------
+# #2298: pseudonymize_audit_mentions / pseudonymize_audit_trail, compiled
+# ---------------------------------------------------------------------------
+
+
+def _mock_db(rowcount: int = 2) -> Any:
+    from unittest.mock import AsyncMock, MagicMock
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=rowcount))
+    return db
+
+
+def _compiled(stmt: Any) -> tuple[str, dict]:
+    from sqlalchemy.dialects import postgresql
+
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    return str(compiled), compiled.params
+
+
+def _flat(params: dict) -> set:
+    """Every bound value, the members of an ``IN`` list included."""
+    out: set = set()
+    for value in params.values():
+        out.update(value if isinstance(value, list) else [value])
+    return out
+
+
+async def _mentions_update(emails: list[str], subs: list[str]) -> tuple[str, dict]:
+    from unittest.mock import patch
+
+    from services.erasure_details import pseudonymize_audit_mentions
+
+    db = _mock_db()
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        assert await pseudonymize_audit_mentions(db, emails, subs=subs) == 2
+    assert db.execute.await_count == 1
+    return _compiled(db.execute.await_args.args[0])
+
+
+async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
+    from utils.hashing import sha256_hex
+
+    sql, params = await _mentions_update(["a@x.io", "longer@example.com"], ["raw-sub"])
+
+    # the UPDATE's own WHERE after the locked ids: the two IN arms, no user_id
+    tail = sql.rsplit(" AND ", 1)[1]
+    assert tail.startswith("(audit_logs.user_email IN")
+    assert "audit_logs.user_email IN" in tail and "audit_logs.resource IN" in tail
+    assert "user_id" not in tail
+    assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
+    # exact values only: no substring rewrite, no cut (the bound holds)
+    assert "replace(" not in sql and "left(" not in sql
+    # user_email: one WHEN per email; resource: one per email plus the sub
+    assert sql.count("WHEN (audit_logs.user_email =") == 2
+    assert sql.count("WHEN (audit_logs.resource =") == 3
+    values = list(params.values())
+    assert values.index("longer@example.com") < values.index("a@x.io")
+    for email in ("a@x.io", "longer@example.com"):
+        assert sha256_hex(email, salt="salt") in values
+        assert f"user:{email}" in values
+        assert f"user:{sha256_hex(email, salt='salt')}" in values
+    assert f"user:{sha256_hex('raw-sub', salt='salt')}" in values
+    assert len(f"user:{sha256_hex('raw-sub', salt='salt')}") == 69 <= 255
+
+
+async def test_mentions_by_sub_alone_leave_user_email() -> None:
+    sql, params = await _mentions_update([], ["raw-sub"])
+
+    assert "user_email" not in sql
+    assert "user:raw-sub" in _flat(params)
+
+
+async def test_mentions_with_nothing_to_match_execute_nothing() -> None:
+    from services.erasure_details import count_audit_mentions, pseudonymize_audit_mentions
+
+    db = _mock_db()
+    assert await pseudonymize_audit_mentions(db, [], subs=[]) == 0
+    assert await count_audit_mentions(db, []) == 0
+    db.execute.assert_not_awaited()
+
+
+async def test_the_count_uses_the_apply_predicate() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import count_audit_mentions
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=4)))
+    assert await count_audit_mentions(db, ["a@x.io"], subs=["raw-sub"]) == 4
+    sql, params = _compiled(db.execute.await_args.args[0])
+    assert "FOR UPDATE" not in sql
+    assert "audit_logs.user_email IN" in sql and "audit_logs.resource IN" in sql
+    assert {"a@x.io", "user:a@x.io", "user:raw-sub"} <= _flat(params)
+    assert "user_id" not in sql
+
+
+async def test_the_trail_locks_once_then_own_rows_then_mentions() -> None:
+    from unittest.mock import patch
+
+    from sqlalchemy import Select
+    from sqlalchemy.sql.dml import Update
+
+    from services.erasure_details import pseudonymize_audit_trail
+
+    db = _mock_db(3)
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        assert await pseudonymize_audit_trail(db, "raw-sub", ["a@x.io"]) == (3, 3)
+
+    stmts = [c.args[0] for c in db.execute.await_args_list]
+    assert [type(s) for s in stmts] == [Select, Update, Update]
+    lock_sql, lock_params = _compiled(stmts[0])
+    assert lock_sql.endswith("ORDER BY audit_logs_1.id FOR UPDATE")
+    # the union: own rows OR the mention arms
+    assert "audit_logs_1.user_id = " in lock_sql and " OR " in lock_sql
+    assert "audit_logs_1.user_email IN" in lock_sql and "audit_logs_1.resource IN" in lock_sql
+    assert {"raw-sub", "a@x.io", "user:a@x.io", "user:raw-sub"} <= _flat(lock_params)
+    own_sql, _ = _compiled(stmts[1])
+    assert "replace(" in own_sql  # pseudonymize_audit_logs
+    mentions_sql, _ = _compiled(stmts[2])
+    assert "replace(" not in mentions_sql
+
+
+async def test_the_trail_without_a_sub_does_only_the_mentions() -> None:
+    from unittest.mock import patch
+
+    from sqlalchemy import Select
+    from sqlalchemy.sql.dml import Update
+
+    from services.erasure_details import pseudonymize_audit_trail
+
+    db = _mock_db(1)
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        assert await pseudonymize_audit_trail(db, None, ["a@x.io"], pseudonym=PSEUDONYM) == (0, 1)
+
+    stmts = [c.args[0] for c in db.execute.await_args_list]
+    assert [type(s) for s in stmts] == [Select, Update]
+    lock_sql, lock_params = _compiled(stmts[0])
+    # the re-run's pseudonym rows are locked in the same phase
+    assert PSEUDONYM in _flat(lock_params)
+    assert "raw-sub" not in _flat(lock_params)
+
+
+async def test_the_trail_with_nothing_to_do_executes_nothing() -> None:
+    from services.erasure_details import pseudonymize_audit_trail
+
+    db = _mock_db()
+    assert await pseudonymize_audit_trail(db, None, []) == (0, 0)
+    db.execute.assert_not_awaited()

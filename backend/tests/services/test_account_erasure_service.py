@@ -2030,6 +2030,7 @@ class TestAuditLogPseudonymizationInThePostgresStep:
 
     @pytest.mark.asyncio
     async def test_the_update_runs_before_the_commit_by_the_raw_sub(self):
+        from sqlalchemy import Select
         from sqlalchemy.sql.dml import Update
 
         svc = _delete_postgres_service()
@@ -2049,15 +2050,60 @@ class TestAuditLogPseudonymizationInThePostgresStep:
             for i, stmt in enumerate(order)
             if isinstance(stmt, Update) and str(stmt.table) == "audit_logs"
         ]
-        assert len(audit) == 1
-        # last statement before the user delete, and before the one commit
-        assert order[audit[0] + 1] == "delete"
-        assert order.index("commit") > audit[0] and order.count("commit") == 1
+        # #2298: the own rows, then the mentions, after one lock over both
+        assert len(audit) == 2 and audit[1] == audit[0] + 1
+        lock = order[audit[0] - 1]
+        assert isinstance(lock, Select) and lock._for_update_arg is not None
+        assert "audit_logs" in str(lock)
+        # the mentions are the last statement before the user delete, and
+        # everything is before the one commit
+        assert order[audit[1] + 1] == "delete"
+        assert order.index("commit") > audit[1] and order.count("commit") == 1
         params = order[audit[0]].compile().params
         # WHERE by the raw sub, never by the pseudonym (that would hash the hash)
         assert {v for k, v in params.items() if k.startswith("user_id_")} == {"u-1"}
         assert params["user_id"] == pseudonym
+        mention = str(order[audit[1]].compile())
+        assert "audit_logs.user_email IN" in mention and "audit_logs.resource IN" in mention
         assert counts["audit_logs_pseudonymized"] == 3
+        assert counts["audit_mentions_pseudonymized"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing", ["own", "mentions"])
+    async def test_a_failing_audit_statement_rolls_the_step_back(self, failing):
+        """#2298: a failure in either audit UPDATE goes through the handler
+        that keeps the request's ids (nothing was committed)."""
+        from sqlalchemy.sql.dml import Update
+
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT
+
+        svc = _delete_postgres_service()
+        svc._handle_owned_workspaces = AsyncMock(return_value={})
+        seen: list[str] = []
+
+        async def _exec(stmt, *a, **k):
+            if isinstance(stmt, Update) and str(stmt.table) == "audit_logs":
+                kind = "mentions" if "audit_logs.resource IN" in str(stmt) else "own"
+                seen.append(kind)
+                if kind == failing:
+                    raise RuntimeError("audit down")
+            return MagicMock(rowcount=1)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+            patch("services.account_erasure_service.erased_pseudonyms", new=AsyncMock()),
+        ):
+            with pytest.raises(RuntimeError):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        assert seen[-1] == failing
+        svc.db.delete.assert_not_awaited()
+        svc.db.commit.assert_awaited_once()  # the failure row only
+        params = svc.db.execute.await_args.args[0].compile().params
+        assert params["failure_reason"] == "audit down"
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "user_id" not in params and "initiated_by" not in params
 
     @pytest.mark.asyncio
     async def test_a_failure_rolls_the_postgres_step_back(self):

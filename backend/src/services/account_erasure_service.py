@@ -135,7 +135,7 @@ from services.erasure_details import (
     lock_subject_memories,
     locked_ids,
     payload_counts,
-    pseudonymize_audit_logs,
+    pseudonymize_audit_trail,
     pseudonymize_revision_actor,
     pseudonymized_request_values,
     strip_subject_details,
@@ -1217,7 +1217,9 @@ class AccountErasureService:
             postgres.update(payload_counts(erased.restore))
 
             # Step 4 (the audit_logs pseudonymize) runs inside the Postgres
-            # step since #2287: ``counts["audit_logs_pseudonymized"]``.
+            # step since #2287: ``counts["audit_logs_pseudonymized"]``, and the
+            # rows mentioning the subject since #2298:
+            # ``counts["audit_mentions_pseudonymized"]``.
 
             # Step 5: Redis cleanup (best-effort)
             step = "redis"
@@ -1858,11 +1860,14 @@ class AccountErasureService:
         # keeps its ids and can be retried) instead of leaving the raw sub and
         # email on the rows after the commit. Last before the user delete, so
         # nothing this transaction writes to audit_logs could be missed
-        # (nothing does today). No new lock order: these rows are the
-        # subject's alone and every other writer only inserts.
-        counts["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
-            user_id, target.email
-        )
+        # (nothing does today). #2298: other actors' rows that name the
+        # subject by an exact value (``user_email``, ``resource =
+        # 'user:'||email``) are rewritten in the same step, under one
+        # id-ordered lock over both sets; every other writer only inserts.
+        (
+            counts["audit_logs_pseudonymized"],
+            counts["audit_mentions_pseudonymized"],
+        ) = await self._pseudonymize_audit_logs(user_id, target.email)
         counts["users"] = 1  # deleted below, in this transaction
 
         # #2286: "this step committed", on the request row and in the same
@@ -2200,10 +2205,15 @@ class AccountErasureService:
         )
         return result.rowcount or 0
 
-    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
-        """The subject's audit rows (``erasure_details.pseudonymize_audit_logs``),
-        in ``_delete_postgres``'s transaction (#2287)."""
-        return await pseudonymize_audit_logs(self.db, user_id, [email])
+    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> tuple[int, int]:
+        """The subject's audit rows and the rows mentioning them
+        (``erasure_details.pseudonymize_audit_trail``), in
+        ``_delete_postgres``'s transaction (#2287, #2298).
+
+        Returns:
+            ``(own rows, mentions)`` rowcounts.
+        """
+        return await pseudonymize_audit_trail(self.db, user_id, [email])
 
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
