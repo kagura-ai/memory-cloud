@@ -42,7 +42,7 @@ GDPR Art.12(3) の「受領後 1 ヶ月以内」応答義務を満たすため�
 
 > Lance backend (Lite): 同エントリポイントが `LanceStore.delete_user_points` に委譲され、`kagura_memories*` 各テーブルへ `user_id = :sub` の SQL delete を発行する(#1336)。確認は Qdrant collection ではなく Lance テーブルの行数で行う。
 
-> **障害時 (v0.125.0, #2282)**: この削除が失敗すると (どちらの backend でも、接続・timeout・API エラーはすべて `QdrantError`) erasure はここで止まる。これが最初のステップなので Postgres は何も消えておらず `users` 行も残っているため (vector の削除は collection ごとなので、失敗した collection より前の collection の point は削除済みのことがある。再実行が残りを削除する)、request は `failed` にならず `cooling_off` に戻り、`scheduled_for` = 15 分後、`deleted_data_summary.retry` に `{attempts, step: "vector_store", error_class, last_attempt_at}` が入る (ID・例外テキストは入らない)。hourly の cron sweep が期限後に再実行するので実際の間隔は最大 1 時間。4 回目 (最初の実行を含む) も失敗すると `failed` + `failure_reason = "vector_store_unavailable after 4 attempts: …"` (ID はそのまま。新しい request を作るのが再試行)。`QdrantError` 以外の例外 (client 生成時の設定エラー等) は従来どおり即 `failed`。待機中の self-service 行はユーザーがアカウント画面から取り消せる (Postgres はまだ何も消えていない。前述の削除済み point の memory は再 embedding されるまで検索に出ない。自動では再キューされない。v0.125.0 より前にこのステップで失敗した request も同じ)。admin 強制削除の行は待機中も本人には取り消せない。恒常的な `QdrantError` (不正な filter 等) も約 3 時間で `failed` になる。
+> **障害時 (v0.125.0, #2282)**: この削除が失敗すると (どちらの backend でも、接続・timeout・API エラーはすべて `QdrantError`) erasure はここで止まる。これが最初のステップなので Postgres は何も消えておらず `users` 行も残っているため (vector の削除は collection ごとなので、失敗した collection より前の collection の point は削除済みのことがある。再実行が残りを削除する)、request は `failed` にならず `cooling_off` に戻り、`scheduled_for` = 15 分後、`deleted_data_summary.retry` に `{attempts, step: "vector_store", error_class, last_attempt_at}` が入る (ID・例外テキストは入らない)。hourly の cron sweep が期限後に再実行するので実際の間隔は最大 1 時間。4 回目 (最初の実行を含む) も失敗すると `failed` + `failure_reason = "vector_store_unavailable after 4 attempts: …"` (ID はそのまま。新しい request を作るのが再試行)。`QdrantError` 以外の例外 (client 生成時の設定エラー等) は従来どおり即 `failed`。待機中の self-service 行はユーザーがアカウント画面から取り消せる (Postgres はまだ何も消えていない。前述の削除済み point の memory は再 embedding されるまで検索に出ない)。v0.128.0 (#2304) からは、このステップを 1 回以上試した request が取り消されたとき、または 4 回目で `failed` になったとき、サービスが本人の live な embedding 済み (`success`) memory をすべて `pending` に戻す (resource indexer の行も含む。embedding パイプラインが行から indexer の point を作り直す)。件数は `deleted_data_summary.retry.embeddings_requeued`、時刻は `requeued_at`。コストは memory 1 件につき embedding 1 回 (+ chunk)。embedding sweep が通常のペース (30 秒ごとに 20 件、`created_at` の古い順) で処理するので、件数が多いと他のメンバーの新しい memory の embedding がその分遅れる。v0.125.0 より前にこのステップで失敗した request と SQL で取り消した行は対象外 (§5.4)。admin 強制削除の行は待機中も本人には取り消せない。恒常的な `QdrantError` (不正な filter 等) も約 3 時間で `failed` になる。
 
 > ⚠️ **Multi-tenant 設計の trade-off**: 共有 workspace 内でユーザーが author の point も削除される。GDPR 上の data subject = author のため意図的な挙動。共有 workspace co-owner には事前同意 (Privacy Policy / ToS) が前提。
 
@@ -201,7 +201,7 @@ v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行
 ### 5.4 失敗時の手動再試行
 
 - vector store の障害 (§2.2) は手動再試行不要 (v0.125.0, #2282): request は `cooling_off` に戻り、cron sweep が 15 分以上後に最大 4 回まで自動で再実行する。`deleted_data_summary.retry.attempts` が失敗した回数。4 回とも失敗した行 (`failure_reason` が `vector_store_unavailable after 4 attempts: ` で始まる) は、障害を解消してから新しい request を作る (下記)
-- 取り消された self-service 行、または 4 回とも失敗した行の本人は、一部の collection で point が削除済みのことがある (§2.2)。本人のアカウントが残る場合は、本人が author の live な memory を手動で再キューして embedding sweep に point を作り直させる (memory 数だけ embedding のコストがかかる。作り直されるのは active な collection の point のみ): `UPDATE memories SET embedding_status = 'pending' WHERE user_id = '<subject-sub>' AND deleted_at IS NULL AND embedding_status = 'success';`
+- 取り消された self-service 行、または 4 回とも失敗した行の本人は、一部の collection で point が削除済みのことがある (§2.2)。v0.128.0 (#2304) からはサービスが本人の live な memory を自動で再キューする (`deleted_data_summary.retry.embeddings_requeued`)。手動の再キューが要るのは、サービスが扱わない次の場合だけ: v0.125.0 より前にこのステップで失敗した行 (`retry` がない)、SQL で取り消した行、`retry.attempts > 0` なのに `embeddings_requeued` がない行 (自動の再キューが失敗した: `erasure_embeddings_requeue_failed`)。本人のアカウントが残る場合は、本人が author の live な memory を手動で再キューして embedding sweep に point を作り直させる (memory 数だけ embedding のコストがかかる。作り直されるのは active な collection の point のみ): `UPDATE memories SET embedding_status = 'pending' WHERE user_id = '<subject-sub>' AND deleted_at IS NULL AND embedding_status = 'success';`
 - `erasure_requests.status='failed'` の行は cron で自動再試行されない
 - `failure_reason` を確認し、原因 (例: Qdrant 接続障害) を解消
 - 同じユーザーで `POST /api/v1/admin/users/{user_id}/erase` を再実行 → `ErasureAlreadyInProgressError` (409) が返る場合は失敗行を `cancelled` に手動 update してから再実行
@@ -312,6 +312,9 @@ Kagura Memory Cloud Operations
 - `erasure_sweep_redis_cleanup_failed` — 上記の中断行の Redis 削除に失敗 (request_id + 例外クラス。キーは TTL で消える)
 - `erasure_sweep_request_moved` — sweep が閉じようとした request が claim 後に別の処理で状態を変えていた (何も書いていない。request_id のみ)
 - `erasure_sweep_close_failed` — 上記の close が DB エラーで失敗 (request_id + 例外クラス。行は `in_progress` のまま、次回 sweep で再試行)
+- `erasure_embeddings_requeued` — vector store の試行後に取り消し / `failed` になった request で、本人の memory を embedding に再キューした (request_id + `memories` 件数。#2304)
+- `erasure_embeddings_requeue_failed` — 上記の再キューが失敗した (request_id + 例外クラス。取り消し・失敗の結果は変わらない)。§5.4 の手動 SQL を実行する
+- `erasure_embeddings_requeue_unrecorded` — 再キューはしたが件数を request 行に書けなかった (行の status が変わっていた。request_id + `memories`)
 - `erasure_email_*` — 手動送信待ちメール
 
 監視 alert (将来):
