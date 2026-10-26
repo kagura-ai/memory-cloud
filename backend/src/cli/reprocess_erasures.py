@@ -41,9 +41,15 @@ request is then processed by it. Two kinds of completed request are
 skipped and counted: one the sweep marked complete without running it (the
 user row was already gone; it stores the account id, or since v0.125.0 its
 pseudonym, #2286), and one finalized before v0.58.1 that stores the account
-id (before the revision log of v0.113.0 anyway). A request the sweep found
+id (before the revision log of v0.113.0 anyway). Such a note row written
+before v0.125.0 is still pseudonymized (#2302): it gets the pseudonym derived
+from the account id, no request metadata and the ``pseudonymized`` flag, as
+the sweep writes it since. A request the sweep found
 interrupted after its Postgres step (``after_postgres_commit: interrupted:
-sweep``, #2286) ran and is processed like any other. A request that failed
+sweep``, #2286) ran and is processed like any other; when its summary has no
+``details_payload_synced`` (the sweep's payload re-drive never recorded,
+#2302), the memories its restore put back (its ``erasure`` revision rows) have
+their vector payloads patched once and the counts are recorded. A request that failed
 before its Postgres step erased nothing and is not listed. On a skipped note
 row the sweep pseudonymized (since v0.125.0) the subject's audit rows that
 still carry the account id are pseudonymized all the same (below): a run
@@ -875,7 +881,10 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     scope.add_argument(
         "--all",
         action="store_true",
-        help="every completed erasure request, and every request that failed after its Postgres step",
+        help=(
+            "every completed erasure request (note rows from before v0.125.0 are "
+            "pseudonymized), and every request that failed after its Postgres step"
+        ),
     )
     scope.add_argument("--request", type=UUID, help="one such erasure request (its id)")
     mode = parser.add_mutually_exclusive_group()

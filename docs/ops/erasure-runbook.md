@@ -86,7 +86,7 @@ FK の依存逆順で削除:
 
 `audit_logs` 行は **保持** (legal retention)、ただし本人が actor の行 (`user_id = :uid`) の `user_id` を SHA256 で pseudonymize、`user_email` は本人の email と一致する場合のみ pseudonymize (他人が actor の行に残る actor の email は保持)、`resource` 内の本人の email / sub も置換する (pseudonym で列長 255 を超える値は 255 文字に切り詰め、erasure が失敗しないようにする)。salt は per-deployment 定数 (`_AUDIT_PSEUDO_SALT`) で同一ユーザー由来行の cross-row 相関は維持、original sub/email は不可逆。admin が本人を操作した行 (`user_id` が admin) は対象外。
 
-v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行される (`backend/src/services/erasure_details.py` の `pseudonymize_audit_logs`)。v0.124.x 以前は Postgres の commit 後の別ステップで、そこで失敗すると (`failure_reason` = `after_postgres_commit: audit_logs: <class>`、v0.124.0 より前は marker なしの例外文) 本人の audit 行が sub と email を残したままになる。`reprocess_erasures` がそれを pseudonymize する: `users` 行のない `audit_logs.user_id` のうち pseudonym が request のものと一致する値が本人の sub、email は同じ account の request の `user_email_hash` (salt なし sha256) のいずれかと一致する `user_email` 値。email が見つからなければ `user_email` は残し sub だけ置換する。同じ sub が再登録されて `users` 行がある場合は一致させず、行は保持して `rows kept` と表示する ([deployment.md](../deployment.md) の "Erasures run before v0.124.0")。`rows kept` 行はその sub が `users` にある限り毎回の実行で繰り返し表示される (想定どおり。対処不要)。`--request <id>` でも同じ account の他の request の email まで復元する。
+v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行される (`backend/src/services/erasure_details.py` の `pseudonymize_audit_logs`)。v0.124.x 以前は Postgres の commit 後の別ステップで、そこで失敗すると (`failure_reason` = `after_postgres_commit: audit_logs: <class>`、v0.124.0 より前は marker なしの例外文) 本人の audit 行が sub と email を残したままになる。`reprocess_erasures` がそれを pseudonymize する: `users` 行のない `audit_logs.user_id` のうち pseudonym が request のものと一致する値が本人の sub、email は同じ account の request の `user_email_hash` (salt なし sha256) のいずれかと一致する `user_email` 値。email が見つからなければ `user_email` は残し sub だけ置換する。同じ sub が再登録されて `users` 行がある場合は一致させず、行は保持して `rows kept` と表示する ([deployment.md](../deployment.md) の "Erasures run before v0.124.0")。`rows kept` 行はその sub が `users` にある限り毎回の実行で繰り返し表示される (想定どおり。対処不要)。`--request <id>` でも同じ account の他の request の email まで復元する。v0.128.0 から (#2302) v0.125.0 より前の note 行 (raw sub を保存) も、導出した pseudonym で同じ処理を行い、行自体も pseudonymize する (§5.4)。
 
 **v0.125.0 へ上げたら、次の erasure を実行する前に `reprocess_erasures --all` (plan → `--all --apply --yes`) を一度走らせること。** 再登録された sub を v0.125.0 で erasure すると、その時点の email だけで pseudonymize されるため、前回の erasure が v0.124.x 以前に残した audit 行の旧 email は raw のまま pseudonym 側に移り、以後 `reprocess_erasures` から到達できなくなる。
 
@@ -206,7 +206,9 @@ v0.125.0 (#2287) から Step 4 の Postgres トランザクション内で実行
 - `failure_reason` を確認し、原因 (例: Qdrant 接続障害) を解消
 - 同じユーザーで `POST /api/v1/admin/users/{user_id}/erase` を再実行 → `ErasureAlreadyInProgressError` (409) が返る場合は失敗行を `cancelled` に手動 update してから再実行
 - `failure_reason` が `after_postgres_commit: ` で始まる行は再試行できない (Postgres の削除は commit 済みで `users` 行がない)。`reprocess_erasures` の対象 ([deployment.md](../deployment.md) の "Requests that failed after the Postgres step")
-- `after_postgres_commit: interrupted: sweep` (v0.125.0, #2286): Postgres の commit 後にプロセスが落ちた (再起動・OOM・タスクの cancel) まま 1 時間経った `in_progress` 行を、cron sweep が `users` 行なしで見つけて `failed` にしたもの。Postgres ステップが同じトランザクションで request 行に書く `deleted_data_summary.postgres` が "実行済み" の印。行は pseudonymize 済み、Redis は sweep が best-effort で削除。復元した memory の vector payload の patch、`account_erasure` audit 行、完了メールは行われない (本人の email は `users` 行と一緒に削除済みで、request 行には hash しか残らないため、受付時のチケット等で宛先が分かる場合に限り §7 の手順で手動送信できる)。`postgres` がなければ実行されていないので従来どおり `complete` + `{"note": "user_row_already_absent"}` (v0.125.0 からは ID も pseudonymize し、summary に `"pseudonymized": true`)。v0.124.x 以前に中断した行は summary がないためこちらになる
+- `after_postgres_commit: interrupted: sweep` (v0.125.0, #2286): Postgres の commit 後にプロセスが落ちた (再起動・OOM・タスクの cancel) まま 1 時間経った `in_progress` 行を、cron sweep が `users` 行なしで見つけて `failed` にしたもの。Postgres ステップが同じトランザクションで request 行に書く `deleted_data_summary.postgres` が "実行済み" の印。行は pseudonymize 済み、Redis は sweep が best-effort で削除。v0.128.0 から (#2302) sweep は閉じた直後に、その実行が復元した memory (restore 自身の `memory_revisions` 行 = `writer='erasure'`・本人の pseudonym・`memory_scrub_at` 以降) の vector payload を patch し、件数を `deleted_data_summary.postgres.details_payload_*` に書く (patch に失敗した memory は embedding 再キュー)。`details_payload_synced` キーがない行は sweep 自身の patch が中断したか v0.128.0 より前に閉じた行なので、`reprocess_erasures --request <id>` (plan、`would resync payloads <id> <n> memory(ies)`) → `--apply` で一度だけ patch して件数を記録する (2 回目は何もしない)。`account_erasure` audit 行、完了メールは行われない (本人の email は `users` 行と一緒に削除済みで、request 行には hash しか残らないため、受付時のチケット等で宛先が分かる場合に限り §7 の手順で手動送信できる)。`postgres` がなければ実行されていないので従来どおり `complete` + `{"note": "user_row_already_absent"}` (v0.125.0 からは ID も pseudonymize し、summary に `"pseudonymized": true`)。v0.124.x 以前に中断した行は summary がないためこちらになる
+- 中断行の sub が sweep より前に再登録された場合 (v0.128.0, #2302): sweep は user の有無ではなく `postgres` summary で判断し、同じく `interrupted: sweep` の `failed` で閉じる。新しいアカウントには `_execute` を実行せず (vector point・workspace・Postgres・`users` 行に触れない)、Redis キーも新しいアカウントのものなので削除しない (summary に `redis` キーなし)。ログは `erasure_sweep_subject_reregistered`。閉じた行は新しいアカウントの erasure request を妨げない (409 にならない)
+- v0.125.0 より前に sweep が書いた note 行 (`complete` + `{"note": "user_row_already_absent"}`、`pseudonymized` なし、`user_id` が raw sub) は、v0.128.0 から `reprocess_erasures --all` (plan、`would pseudonymize note row <id>`) → `--all --apply --yes` で pseudonymize される (#2302): `user_id` を導出した pseudonym に、`ip_address` / `user_agent` を NULL に、`initiated_by` は本人の sub のときだけ pseudonym に、summary に `"pseudonymized": true`。status と `completed_at` は変えない。本人の残留 audit 行 (§2.5) も同じトランザクションでその pseudonym により処理される。sub は表示しない
 
 ```sql
 UPDATE erasure_requests
@@ -311,7 +313,10 @@ Kagura Memory Cloud Operations
 - `erasure_sweep_user_row_absent` — sweep が `users` 行のない request を閉じた (request_id + `ran_in_postgres`: true なら `interrupted: sweep` の `failed`、false なら `complete` + note。#2286)
 - `erasure_sweep_redis_cleanup_failed` — 上記の中断行の Redis 削除に失敗 (request_id + 例外クラス。キーは TTL で消える)
 - `erasure_sweep_request_moved` — sweep が閉じようとした request が claim 後に別の処理で状態を変えていた (何も書いていない。request_id のみ)
-- `erasure_sweep_close_failed` — 上記の close が DB エラーで失敗 (request_id + 例外クラス。行は `in_progress` のまま、次回 sweep で再試行)
+- `erasure_sweep_close_failed` — 上記の close が DB エラーで失敗 (request_id + 例外クラス。行は `in_progress` のまま、次回 sweep で再試行)。close の後の payload 再 patch (下記) の失敗もこの event (行は閉じ済み。`details_payload_synced` がなければ §5.4 の `reprocess_erasures` で補う)
+- `erasure_sweep_payloads_resynced` — 中断行を閉じた直後に、復元した memory の vector payload を patch した (request_id + memory 数 + `details_payload_*` 件数のみ。#2302)
+- `erasure_sweep_subject_reregistered` — 中断行の sub が再登録されていた: 行は `interrupted: sweep` で閉じ、新しいアカウントには触れず Redis も削除していない (request_id のみ。#2302)
+- `erasure_finalize_request_missing` — `_finalize` の UPDATE が 0 行 (request 行が実行中に削除された。request_id のみ。#2302)。`_finalize` は実行の claim (`started_at`) で guard しない: Postgres の commit 後にしか呼ばれず、その事実は新しい claim より優先されるため (sweep の `interrupted` close も上書きして `complete` にする)
 - `erasure_email_*` — 手動送信待ちメール
 
 監視 alert (将来):
@@ -319,6 +324,7 @@ Kagura Memory Cloud Operations
 - `erasure_execute_failed` 発生 → admin に通知
 - `erasure_retry_scheduled` が続く → vector store の障害。4 回目で `failed` になる (§5.4)
 - `erasure_sweep_user_row_absent` (`ran_in_postgres=true`) 発生 → 中断した erasure。§5.4 を確認
+- `erasure_sweep_subject_reregistered` 発生 → 中断した erasure の後に同じ ID で再登録があった。新しいアカウントのセッションは削除していないので通常は対処不要 (本人から問い合わせがあれば状態を確認)
 - `erasure_sweep_executed count > 0` が 24h 続く → SLA 違反警告
 - `email_dispatch_required=true` の未処理ログ件数 → 1 営業日超過で alert
 

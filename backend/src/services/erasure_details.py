@@ -28,6 +28,10 @@ past erasures by pseudonym (#2243) share one definition:
 - ``sync_restored_payloads(db, syncs, report)`` (#2266) — the restored
   memories' vector payloads, patched after the caller's commit: no
   vector-store call happens while the subject's memories are locked.
+  ``restored_payload_syncs`` and ``record_resynced_payloads`` (#2302) — the
+  same for a run interrupted after its Postgres commit: the restored set read
+  back from the log, and the outcome recorded on its request row (the
+  sweep's re-drive and the re-run's backstop).
 - ``erased_pseudonyms(db)`` (#2243, #2268) — every member whose erasure ran
   in Postgres, the restore's ``erased_actors``.
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
