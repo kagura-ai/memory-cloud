@@ -152,11 +152,13 @@ def _normalise_legacy_values() -> None:
 
 
 def upgrade() -> None:
+    # Bound every lock wait of this migration, the legacy row UPDATEs included
+    # (a row held by a live writer would otherwise block them indefinitely)
+    # as well as the ACCESS EXCLUSIVE lock of the ALTER. A timeout fails the
+    # transaction (nothing is kept) and the operator reruns the upgrade.
+    op.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     _normalise_legacy_values()
 
-    # Bound the wait for the ACCESS EXCLUSIVE lock; a timeout fails the
-    # transaction (nothing above is kept) and the operator reruns the upgrade.
-    op.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     op.execute(
         "ALTER TABLE memories ADD COLUMN observed_at VARCHAR(32) "
         f"GENERATED ALWAYS AS ({OBSERVED_AT_SQL}) STORED"
