@@ -533,24 +533,21 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     others = sorted(row.user_id for row in link_rows if row.user_id != user_id)
     handed_over: list[uuid.UUID] = []
     if others:
-        # Every context the subject created, in id order, before any memory
-        # (#2278): the caller rewrites or deletes all of them next.
-        await db.execute(locked_ids(Context, lambda c: (c.created_by == user_id,)))
-        contexts = (
+        # Every context the subject created, locked in id order before any
+        # memory (#2278): the caller rewrites or deletes all of them next.
+        created = (
             (
                 await db.execute(
                     select(Context)
-                    .where(
-                        Context.created_by == user_id,
-                        Context.is_private.is_(True),
-                        Context.deleted_at.is_(None),
-                    )
+                    .where(Context.created_by == user_id)
                     .order_by(Context.id)
+                    .with_for_update()
                 )
             )
             .scalars()
             .all()
         )
+        contexts = [c for c in created if c.is_private and c.deleted_at is None]
         for context in contexts:
             authors = set(
                 (
@@ -613,7 +610,7 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
                         )
                     )
                 )
-                .execution_options(synchronize_session=False)
+                .execution_options(synchronize_session="fetch")
             )
 
     removed = await _remove_from_set(db, user_id, link_rows) if link_rows else 0

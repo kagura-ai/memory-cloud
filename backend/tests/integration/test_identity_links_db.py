@@ -1172,14 +1172,13 @@ class TestErasingOneLinkedAccount:
         )
         assert left == set(survivor_ids)
 
-        context_lock = next(
+        (context_lock,) = [
             i
             for i, s in enumerate(statements)
-            if s.startswith("SELECT contexts_1.id FROM contexts AS contexts_1")
-        )
+            if s.startswith("SELECT contexts.") and s.endswith("ORDER BY contexts.id FOR UPDATE")
+        ]
         (delete_at,) = [i for i, s in enumerate(statements) if s.startswith("DELETE FROM memories")]
         assert context_lock < delete_at
-        assert statements[context_lock].endswith("ORDER BY contexts_1.id FOR UPDATE")
         assert "ORDER BY memories_1.id FOR UPDATE" in statements[delete_at]
 
     @pytest.mark.asyncio

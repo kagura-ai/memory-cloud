@@ -2195,6 +2195,8 @@ class TestContextAuthorshipSweepLocksInIdOrder:
         pseudonym = service._pseudonym(target)
         assert {rows[c.id] for c in mine} == {pseudonym}
         assert rows[theirs.id] == other
+        # Loaded objects follow the UPDATE: the session keeps no raw sub.
+        assert {c.created_by for c in mine} == {pseudonym}
         left = await db_session.execute(select(Context.id).where(Context.created_by == target))
         assert left.first() is None
 
