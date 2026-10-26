@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.connector_keys import connector_key_name
 from auth.resource_tokens import ResourceTokenManager
 from config.plan_tiers import has_feature, lowest_tier_with_limit, quota_gate_details
-from models.auth import Workspace
+from models.auth import Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.datetime import utcnow
@@ -684,7 +684,31 @@ class ConnectorProvisioningService:
         ``hashtext`` would collide at ~65k workspaces and block unrelated
         tenants (PR #686 loop 4).
         """
-        lock_key = f"connector_seat:{workspace_id}"
+        await self._acquire_xact_lock(
+            f"connector_seat:{workspace_id}",
+            timeout_event="connector_seat_lock_timeout",
+            message="Connector seat lock unavailable; please retry.",
+            error_code="CONNECTOR-002",
+            workspace_id=str(workspace_id),
+        )
+
+    async def _acquire_xact_lock(
+        self,
+        lock_key: str,
+        *,
+        timeout_event: str,
+        message: str,
+        error_code: str,
+        **log_fields: str,
+    ) -> None:
+        """Take a transaction-scoped advisory lock, waiting at most 5 s.
+
+        On SQLSTATE ``55P03`` (``lock_not_available``) the poisoned session is
+        rolled back and a retriable 503 ``error_code`` raised; any other DB
+        error propagates after rollback. The timeout is reset to ``'0'`` after
+        a successful acquire so it does not bleed into the rest of the
+        transaction (see ``_acquire_connector_seat_lock``).
+        """
         await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
         try:
             await self.db.execute(
@@ -698,19 +722,44 @@ class ConnectorProvisioningService:
             # so the next request on this session starts clean.
             await self.db.rollback()
             if sqlstate == "55P03":
-                logger.warning(
-                    "connector_seat_lock_timeout",
-                    workspace_id=str(workspace_id),
-                )
+                logger.warning(timeout_event, **log_fields)
                 raise MemoryCloudException(
-                    "Connector seat lock unavailable; please retry.",
+                    message,
                     status_code=503,
-                    error_code="CONNECTOR-002",
+                    error_code=error_code,
                 ) from exc
             raise
         # Reset is on the success path only; on failure the rollback above has
         # already cleared the SET LOCAL along with the rest of the transaction.
         await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
+
+    async def _live_workspace_owner(self, workspace_id: UUID) -> str:
+        """The workspace's owner, with their ``users`` row share-locked (#2305).
+
+        A key minted for the owner on someone else's behalf (the rotate heal,
+        or a rotation whose key owner left the workspace) must not land under
+        an owner whose erasure is in flight: the erasure takes the ``users``
+        row FOR UPDATE first (``revoke_oauth_grants``, #1738), so this waits
+        for it. A row gone after the wait is an erased owner — retry, and the
+        read then finds the workspace's new owner.
+        """
+        from models.auth import User
+
+        owner_user_id = (
+            await self.db.execute(
+                select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
+            )
+        ).scalar_one()
+        locked = (
+            await self.db.execute(
+                select(User.user_id).where(User.user_id == owner_user_id).with_for_update(read=True)
+            )
+        ).first()
+        if locked is None:
+            raise ValidationError(
+                "The workspace owner's account is being erased; retry the rotation"
+            )
+        return owner_user_id
 
     async def list_connectors(self, workspace_id: UUID) -> list[ConnectorListItem]:
         """Return all connectors for a workspace, newest first.
@@ -1363,14 +1412,20 @@ class ConnectorProvisioningService:
         When the stored key's row is gone and no active key is linked to the
         connector (#2305), nothing is revoked: the replacement is minted under
         the workspace's owner, which heals a connector whose key an account
-        erasure deleted before #2305.
+        erasure deleted before #2305. A key whose owner is no longer a member
+        of the workspace is revoked as usual and its replacement minted under
+        the workspace's owner. Both share-lock the owner's ``users`` row
+        (``_live_workspace_owner``).
 
         Raises:
             NotFoundException: if no matching connector exists in workspace.
             ValidationError: if the connector has no KMC key to rotate
                 (registration flow was not completed), or if its stored key
                 matches no active row while that row survives revoked or
-                another active key is linked to the connector or named after it.
+                another active key is linked to the connector or named after
+                it, or if the workspace owner it would mint for is being erased.
+            MemoryCloudException: 503 ``CONNECTOR-003`` when the heal lock is
+                not acquired within 5 s.
         """
         from auth.api_keys import APIKeyManager
         from models.auth import APIKey
@@ -1420,7 +1475,6 @@ class ConnectorProvisioningService:
             .execution_options(populate_existing=True)
         )
         old_key = old_key_result.scalar_one_or_none()
-        healed = False
         if old_key is None:
             # #2305: the stored key's row is gone. When it is gone for good (no
             # row has its hash: deleted by an account erasure before #2305, or
@@ -1433,9 +1487,13 @@ class ConnectorProvisioningService:
             # create_key's opaque name clash. Concurrent heals of one
             # connector queue on a transaction lock, so the second sees the
             # first's key and stops here.
-            await self.db.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": f"connector_kmc_key_heal:{connector_id}"},
+            await self._acquire_xact_lock(
+                f"connector_kmc_key_heal:{connector_id}",
+                timeout_event="connector_kmc_key_heal_lock_timeout",
+                message="Connector key heal lock unavailable; please retry.",
+                error_code="CONNECTOR-003",
+                connector_id=str(connector_id),
+                workspace_id=str(workspace_id),
             )
             blocking_result = await self.db.execute(
                 select(APIKey.id).where(
@@ -1459,14 +1517,27 @@ class ConnectorProvisioningService:
                     "Connector's stored KMC key matches no active API key; "
                     "re-register the connector to mint a fresh key"
                 )
-            owner_user_id = (
-                await self.db.execute(
-                    select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
-                )
-            ).scalar_one()
-            healed = True
+            owner_user_id = await self._live_workspace_owner(workspace_id)
+            event = "connector_kmc_key_healed"
         else:
-            owner_user_id = old_key.user_id
+            # #2305 review: a key owner who is no longer a member (removed, or
+            # an erased subject a racing rotation minted under) would keep the
+            # key authenticating and failing every write, rotation after
+            # rotation; the replacement goes to the workspace's owner instead.
+            still_member = (
+                await self.db.execute(
+                    select(WorkspaceMember.user_id).where(
+                        WorkspaceMember.workspace_id == workspace_id,
+                        WorkspaceMember.user_id == old_key.user_id,
+                    )
+                )
+            ).first()
+            if still_member is not None:
+                owner_user_id = old_key.user_id
+                event = "connector_kmc_key_rotated"
+            else:
+                owner_user_id = await self._live_workspace_owner(workspace_id)
+                event = "connector_kmc_key_reowned_on_rotate"
             # Revoke the old key immediately — no grace period for v1. Operators
             # should schedule rotation during a maintenance window or worker pause.
             old_key.revoked_at = utcnow()
@@ -1488,7 +1559,7 @@ class ConnectorProvisioningService:
         await self.db.flush()
 
         logger.info(
-            "connector_kmc_key_healed" if healed else "connector_kmc_key_rotated",
+            event,
             connector_id=str(connector_id),
             workspace_id=str(workspace_id),
             rotated_by=user_id,

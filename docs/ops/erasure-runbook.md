@@ -85,7 +85,7 @@ FK の依存逆順で削除:
 
 ここまでが 1 つの Postgres トランザクション。どこかで失敗すると全体が rollback され (user 行は残る)、request は marker なしの `failed` (id はそのまま) になり、新しい request で再実行できる。
 
-#2305 より前の erasure で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。
+#2305 より前の erasure で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。key の名義人が workspace のメンバーでなくなっている connector も、同じ rotate で新しい key が owner 名義になる。lock 待ちが 5 秒を超えると `503` `CONNECTOR-003` (再試行する)。
 
 ### 2.5 Audit logs (Step 4 の一部)
 
