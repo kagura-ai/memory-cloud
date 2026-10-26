@@ -2211,13 +2211,20 @@ class AccountErasureService:
         Used for legal-retention tables (e.g. plan_changes) where the row
         must survive but the personal-data link to the deleted user must
         not. The pseudonym itself is ``_pseudonym``'s.
+
+        ``contexts`` / ``memories`` rows are reached through ``locked_ids``
+        (#2278), locked in id order like every other multi-row write over
+        those tables. ``synchronize_session=False``: the ORM cannot evaluate
+        the subquery in memory.
         """
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(model).where(column == user_id).values({column: self._pseudonym(user_id)})
-            ),
-        )
+        statement = update(model).values({column: self._pseudonym(user_id)})
+        if model is Context or model is Memory:
+            statement = statement.where(
+                model.id.in_(locked_ids(model, lambda row: (getattr(row, column.key) == user_id,)))
+            ).execution_options(synchronize_session=False)
+        else:
+            statement = statement.where(column == user_id)
+        result = cast(CursorResult[Any], await self.db.execute(statement))
         return result.rowcount or 0
 
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
