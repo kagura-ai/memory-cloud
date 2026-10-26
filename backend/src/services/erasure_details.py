@@ -37,6 +37,14 @@ past erasures by pseudonym (#2243) share one definition:
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
   own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
   and by the re-run for rows an erasure on v0.124.x or before left behind.
+- ``pseudonymize_audit_mentions(db, emails, subs=...)`` (#2298) — other
+  actors' rows that name the subject by an exact ``user_email`` or
+  ``resource = 'user:'||email`` value; ``pseudonymize_audit_trail`` runs
+  both under one id-ordered lock (the live erasure and the re-run).
+- ``clear_audit_request_metadata`` / ``pseudonymize_erasure_audit_initiator``
+  (#2345) — the re-run's sweep of the rows that already carry the
+  pseudonym: no IP / user agent, and the ``account_erasure`` row's
+  ``initiated_by`` the pseudonym where it was the subject's sub.
 - ``erasure_pseudonym(value)`` and ``pseudonymized_request_values(account_id,
   initiated_by)`` (#2288) — the one salted pseudonym, and the values every
   writer of an erasure request row sets once its subject is erased (the
@@ -72,6 +80,7 @@ from sqlalchemy import (
     exists,
     func,
     literal,
+    null,
     or_,
     select,
     type_coerce,
@@ -85,10 +94,9 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.auth import AuditLog, Context, User
+from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
-    INTERRUPTED_AFTER_POSTGRES_COMMIT,
     NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -211,24 +219,29 @@ async def pseudonymize_audit_logs(
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
+    - ``ip_address`` and ``user_agent`` are cleared (#2345): request metadata
+      of the subject, like the request row's own, which is cleared too.
 
     The live erasure passes the subject's one email. The re-run passes every
     email it recovered for the account (one per request of it), or none:
     then ``user_email`` and email occurrences in ``resource`` stay and only
     the sub is replaced. ``orphaned_only`` (the re-run): rows whose
-    ``user_id`` belongs to a user row are never touched, even when that user
-    row appeared after the run read the audit subs (a re-registration).
+    ``user_id`` belongs to a user row are never touched by this statement,
+    even when that user row appeared after the run read the audit subs (a
+    re-registration); the mention sweep (``pseudonymize_audit_mentions``)
+    still rewrites an erased address that no user row holds on them.
 
-    Out of scope, here as before: rows where another actor (an admin) acted
-    on the subject — their ``user_id`` is the admin's, and a ``resource``
-    naming the subject's email stays. Rows of every other ``user_id`` are
-    never touched. The rows are locked in id order first (``locked_ids``).
+    Rows of every other ``user_id`` are never touched here: where another
+    actor's row names the subject (an admin acting on them, or they acting
+    on someone else) ``pseudonymize_audit_mentions`` rewrites the exact
+    values (#2298); ``pseudonymize_audit_trail`` runs both under one lock.
+    The rows are locked in id order first (``locked_ids``).
 
     Returns:
         The rowcount.
     """
     user_pseudonym = erasure_pseudonym(user_id)
-    values: dict[str, Any] = {"user_id": user_pseudonym}
+    values: dict[str, Any] = {"user_id": user_pseudonym, "ip_address": None, "user_agent": None}
     resource: ColumnElement[str] = AuditLog.resource.expression
     pseudonyms = {
         email: erasure_pseudonym(email) for email in sorted(set(emails), key=lambda e: (-len(e), e))
@@ -245,10 +258,7 @@ async def pseudonymize_audit_logs(
     )
 
     def own_rows(row: Any) -> tuple[ColumnElement[bool], ...]:
-        predicate: tuple[ColumnElement[bool], ...] = (row.user_id == user_id,)
-        if orphaned_only:
-            predicate += (~exists().where(User.user_id == row.user_id),)
-        return predicate
+        return (_own_audit_rows(row, user_id, orphaned_only=orphaned_only),)
 
     result = await db.execute(
         update(AuditLog)
@@ -258,7 +268,260 @@ async def pseudonymize_audit_logs(
     return cast(CursorResult[Any], result).rowcount or 0
 
 
-def _ran_in_postgres() -> ColumnElement[bool]:
+def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnElement[bool]:
+    """The rows ``user_id`` acted in (``pseudonymize_audit_logs``'s scope)."""
+    predicate: ColumnElement[bool] = row.user_id == user_id
+    if orphaned_only:
+        predicate = predicate & ~exists().where(User.user_id == row.user_id)
+    return predicate
+
+
+def _by_length(values: Iterable[str]) -> list[str]:
+    """Distinct ``values``, the longest first (then alphabetical): a stable order."""
+    return sorted(set(values), key=lambda v: (-len(v), v))
+
+
+def audit_mention_resources(emails: Collection[str], subs: Collection[str] = ()) -> list[str]:
+    """The ``resource`` values naming the subject (#2298): ``user:{email}``,
+    the shape every writer of a row about a member produces, and
+    ``user:{sub}`` (today only on the subject's own rows; one more value)."""
+    return [f"user:{e}" for e in _by_length(emails)] + [f"user:{s}" for s in _by_length(subs)]
+
+
+def audit_mention_predicate(
+    row: Any, emails: Collection[str], subs: Collection[str] = ()
+) -> ColumnElement[bool] | None:
+    """Rows that name the subject by an exact value (#2298): ``user_email``
+    is one of ``emails`` (the subject acting on another member's row) or
+    ``resource`` is one of ``audit_mention_resources`` (another actor
+    acting on the subject). None when there is nothing to match."""
+    arms: list[ColumnElement[bool]] = []
+    if emails:
+        arms.append(row.user_email.in_(_by_length(emails)))
+    resources = audit_mention_resources(emails, subs)
+    if resources:
+        arms.append(row.resource.in_(resources))
+    return or_(*arms) if arms else None
+
+
+async def pseudonymize_audit_mentions(
+    db: AsyncSession, emails: Collection[str], *, subs: Collection[str] = ()
+) -> int:
+    """Pseudonymize the subject's identifiers on other actors' audit rows (#2298).
+
+    The rows are kept (legal retention) and so is everything else on them —
+    ``user_id``, ``action``, the hashes. Exact values only, never a
+    substring of another actor's text:
+
+    - ``user_email`` equal to one of ``emails`` (the subject acting as an
+      admin on someone else's row: ``user_id`` is the target's there) →
+      ``erasure_pseudonym(email)``; the subject was the actor, so the row's
+      ``ip_address`` / ``user_agent`` are theirs and are cleared (#2345);
+    - ``resource`` equal to ``user:{email}`` or ``user:{sub}`` (an admin
+      acting on the subject) → ``user:`` + the pseudonym — 69 characters,
+      within the column. The acting admin's ``user_id`` / ``user_email``
+      and request metadata stay (accountability evidence).
+
+    The pseudonyms are the ones ``pseudonymize_audit_logs`` writes on the
+    subject's own rows, so the two still correlate. No ``user_id``
+    predicate: the live erasure rewrote the own rows just before (none is
+    counted twice), and the re-run may not know the sub. Idempotent: once
+    rewritten, no row matches. The rows are locked in id order first.
+
+    Returns:
+        The rowcount; 0 without a statement when there is nothing to match.
+    """
+    if audit_mention_predicate(AuditLog, emails, subs) is None:
+        return 0
+    values: dict[str, Any] = {}
+    ordered = _by_length(emails)
+    if ordered:
+        values["user_email"] = case(
+            *((AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered),
+            else_=AuditLog.user_email,
+        )
+        # every SET reads the row's old values: ``user_email`` before its rewrite
+        acted = AuditLog.user_email.in_(ordered)
+        for column in (AuditLog.ip_address, AuditLog.user_agent):
+            values[column.key] = case((acted, null()), else_=column)
+    values["resource"] = case(
+        *(
+            (AuditLog.resource == f"user:{v}", f"user:{erasure_pseudonym(v)}")
+            for v in [*ordered, *_by_length(subs)]
+        ),
+        else_=AuditLog.resource,
+    )
+
+    def mentions(row: Any) -> tuple[ColumnElement[bool], ...]:
+        return (cast(ColumnElement[bool], audit_mention_predicate(row, emails, subs)),)
+
+    result = await db.execute(
+        update(AuditLog)
+        .where(AuditLog.id.in_(locked_ids(AuditLog, mentions)), *mentions(AuditLog))
+        .values(values)
+    )
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
+async def count_audit_mentions(
+    db: AsyncSession,
+    emails: Collection[str],
+    *,
+    subs: Collection[str] = (),
+    exclude_user_id: str | None = None,
+) -> int:
+    """What ``pseudonymize_audit_mentions`` would change (a dry run's count;
+    the same predicate, no lock). ``exclude_user_id``: the rows the own-row
+    UPDATE rewrites before the mentions (``pseudonymize_audit_trail``), so
+    a dry run does not count them twice."""
+    predicate = audit_mention_predicate(AuditLog, emails, subs)
+    if predicate is None:
+        return 0
+    if exclude_user_id is not None:
+        predicate = predicate & (AuditLog.user_id != exclude_user_id)
+    return (await db.execute(select(func.count(AuditLog.id)).where(predicate))).scalar_one()
+
+
+async def pseudonymize_audit_trail(
+    db: AsyncSession,
+    user_id: str | None,
+    emails: Collection[str],
+    *,
+    orphaned_only: bool = False,
+    pseudonym: str | None = None,
+    mention_emails: Collection[str] | None = None,
+    mention_subs: Collection[str] | None = None,
+) -> tuple[int, int]:
+    """The subject's own audit rows and the rows that mention them (#2287, #2298).
+
+    The one entry point of the live erasure and the re-run. One lock phase
+    first, in id order, over the union of every row the statements below
+    rewrite (``user_id = :sub`` when given, the mention predicate, and the
+    rows of ``pseudonym`` when given — the re-run's #2345 sweep that follows
+    in its transaction): two erasures of members who acted on each other
+    (one's own row is the other's mention) then queue instead of
+    deadlocking. Then ``pseudonymize_audit_logs`` (when ``user_id`` is
+    given) and ``pseudonymize_audit_mentions`` with ``emails`` and
+    ``subs=[user_id]`` — or ``mention_emails`` / ``mention_subs`` when given
+    (the re-run: the emails a user row holds again are left out of the
+    mentions, not of the subject's own rows; the sweep runs once per run).
+
+    Returns:
+        ``(own rows, mentions)`` rowcounts.
+    """
+    if mention_subs is not None:
+        subs: Collection[str] = tuple(mention_subs)
+    else:
+        subs = (user_id,) if user_id is not None else ()
+    mentioned = tuple(emails) if mention_emails is None else tuple(mention_emails)
+
+    def union(row: Any) -> tuple[ColumnElement[bool], ...]:
+        arms: list[ColumnElement[bool]] = []
+        if user_id is not None:
+            arms.append(_own_audit_rows(row, user_id, orphaned_only=orphaned_only))
+        mention = audit_mention_predicate(row, mentioned, subs)
+        if mention is not None:
+            arms.append(mention)
+        if pseudonym is not None:
+            arms.append(row.user_id == pseudonym)
+        return (or_(*arms),)
+
+    if user_id is None and pseudonym is None and not mentioned and not subs:
+        return 0, 0
+    await db.execute(locked_ids(AuditLog, union))
+    own = (
+        await pseudonymize_audit_logs(db, user_id, emails, orphaned_only=orphaned_only)
+        if user_id is not None
+        else 0
+    )
+    return own, await pseudonymize_audit_mentions(db, mentioned, subs=subs)
+
+
+# The erasure's own audit row (``AccountErasureService._write_audit_log``).
+ERASURE_AUDIT_ACTION = "account_erasure"
+
+
+def _request_metadata_rows(row: Any, pseudonym: str) -> tuple[ColumnElement[bool], ...]:
+    return (
+        row.user_id == pseudonym,
+        or_(row.ip_address.is_not(None), row.user_agent.is_not(None)),
+    )
+
+
+async def clear_audit_request_metadata(
+    db: AsyncSession, pseudonym: str, *, dry_run: bool = False
+) -> set[int]:
+    """Clear ``ip_address`` / ``user_agent`` on the audit rows that carry the
+    erased subject's ``pseudonym`` (#2345): rows an erasure pseudonymized
+    before the live path cleared them, and the ``account_erasure`` row that
+    copied the request's. By the pseudonym, never the raw sub; the rows are
+    locked in id order. Idempotent.
+
+    Returns:
+        The ids of the rows changed (``dry_run``: that would change; no lock).
+    """
+    if dry_run:
+        row = aliased(AuditLog)
+        return set(
+            (
+                await db.execute(select(row.id).where(*_request_metadata_rows(row, pseudonym)))
+            ).scalars()
+        )
+    result = await db.execute(
+        update(AuditLog)
+        .where(
+            AuditLog.id.in_(
+                locked_ids(AuditLog, lambda row: _request_metadata_rows(row, pseudonym))
+            ),
+            *_request_metadata_rows(AuditLog, pseudonym),
+        )
+        .values(ip_address=None, user_agent=None)
+        .returning(AuditLog.id)
+    )
+    return set(result.scalars())
+
+
+async def pseudonymize_erasure_audit_initiator(
+    db: AsyncSession, pseudonym: str, *, dry_run: bool = False
+) -> set[int]:
+    """The ``account_erasure`` rows of ``pseudonym`` whose
+    ``user_metadata.initiated_by`` is the subject's raw sub get the
+    pseudonym there (#2345: the rule of ``pseudonymized_request_values``,
+    decided by comparison — the value's pseudonym is the subject's — not by
+    ``is_self_service``). An admin's id, a value already pseudonymized and
+    a missing key are left. One or two rows per erasure, locked in id
+    order; the column is ``json``, so the whole value is written.
+
+    Returns:
+        The ids of the rows changed (``dry_run``: that would change; no lock).
+    """
+    stmt = (
+        select(AuditLog.id, AuditLog.user_metadata)
+        .where(AuditLog.action == ERASURE_AUDIT_ACTION, AuditLog.user_id == pseudonym)
+        .order_by(AuditLog.id)
+    )
+    if not dry_run:
+        stmt = stmt.with_for_update()
+    changed: set[int] = set()
+    for row_id, metadata in (await db.execute(stmt)).all():
+        initiated_by = metadata.get("initiated_by") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(initiated_by, str)
+            or initiated_by == pseudonym
+            or erasure_pseudonym(initiated_by) != pseudonym
+        ):
+            continue
+        changed.add(row_id)
+        if not dry_run:
+            await db.execute(
+                update(AuditLog)
+                .where(AuditLog.id == row_id)
+                .values(user_metadata={**metadata, "initiated_by": pseudonym})
+            )
+    return changed
+
+
+def ran_in_postgres() -> ColumnElement[bool]:
     """The request's Postgres step committed: only a run writes
     ``deleted_data_summary.postgres`` (since #360) — after that commit
     before v0.125.0, inside its transaction since (#2286)."""
@@ -269,7 +532,7 @@ def _never_ran() -> ColumnElement[bool]:
     """A ``complete`` request without ``postgres`` in its summary: the
     sweep's ``user_row_already_absent`` rows, its only writer (#2286; the
     table and the ``postgres`` summary both came with #360)."""
-    return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
+    return (ErasureRequest.status == STATUS_COMPLETE) & ~ran_in_postgres()
 
 
 def legacy_note_row() -> ColumnElement[bool]:
@@ -284,7 +547,7 @@ def merged_request_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
     A summary still stored as the JSON value ``null`` (written before #2026
     made the column store SQL NULL) is treated like SQL NULL: ``'null' ||
     {...}`` is a JSON *array*, which would hide ``postgres`` from
-    ``has_key`` (``_ran_in_postgres``).
+    ``has_key`` (``ran_in_postgres``).
     """
     stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
     return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
@@ -298,8 +561,10 @@ async def record_resynced_payloads(
     ``payload_counts(report)`` merged into the ``postgres`` section
     (``postgres`` = what the row held), zeros included — the presence of
     ``details_payload_synced`` is what tells ``reprocess_erasures`` the
-    re-drive ran. Guarded by ``status = failed`` and the interrupted marker:
-    a row the run's own ``_finalize`` completed meanwhile is left alone.
+    re-drive ran. Guarded by ``status = failed`` and the
+    ``after_postgres_commit:`` marker (the sweep's ``interrupted`` close, or a
+    failure inside the run's own payload step — review of #2302): a row the
+    run's own ``_finalize`` completed meanwhile is left alone.
     Does not commit.
 
     Returns:
@@ -310,7 +575,7 @@ async def record_resynced_payloads(
         .where(
             ErasureRequest.id == request_id,
             ErasureRequest.status == STATUS_FAILED,
-            ErasureRequest.failure_reason == INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            _failed_after_commit_marked(),
         )
         .values(
             deleted_data_summary=merged_request_summary(
@@ -362,7 +627,7 @@ def finalized_erasure() -> ColumnElement[bool]:
     and since #2286 the sweep for a run interrupted after that commit
     (``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the same prefix).
     """
-    return _ran_in_postgres() & (
+    return ran_in_postgres() & (
         (ErasureRequest.status == STATUS_COMPLETE)
         | ((ErasureRequest.status == STATUS_FAILED) & _failed_after_commit_marked())
     )
@@ -378,7 +643,7 @@ def unrepaired_erasure() -> ColumnElement[bool]:
     """
     return (
         (ErasureRequest.status == STATUS_FAILED)
-        & _ran_in_postgres()
+        & ran_in_postgres()
         & ~_failed_after_commit_marked()
     )
 
@@ -543,7 +808,7 @@ def scrub_mark_predicate(
 
 
 def locked_ids(
-    model: type[Memory] | type[Context] | type[MemoryRevision] | type[AuditLog],
+    model: type[Memory] | type[Context] | type[MemoryRevision] | type[AuditLog] | type[APIKey],
     predicate_on: Callable[[Any], Sequence[ColumnElement[bool]]],
 ) -> Select[Any]:
     """Ids of the ``model`` rows ``predicate_on`` matches, locked in id order.
@@ -557,7 +822,7 @@ def locked_ids(
     ``NOWAIT`` here. Row locks last until the transaction commits, so a later
     statement re-locking a row is free. Used for ``memory_revisions``
     (``locked_revision_ids``, #2242), for ``memories`` / ``contexts``
-    (#2263) and for ``audit_logs`` (#2287).
+    (#2263), for ``audit_logs`` (#2287) and for connector ``api_keys`` (#2305).
     """
     row = aliased(model)
     return select(row.id).where(*predicate_on(row)).order_by(row.id).with_for_update()

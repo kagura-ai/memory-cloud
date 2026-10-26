@@ -8,7 +8,9 @@ Owns the full lifecycle of an `erasure_requests` row:
 Both paths converge on `_execute`, which performs the multi-step cross-store
 deletion (Qdrant -> workspace transfer -> Postgres (incl. audit-log
 pseudonymize) -> Redis -> audit row -> finalize) covered by the design pin
-in #360.
+in #360. The subject's live connector write keys are not deleted with their
+other keys: they serve the workspace, so the Postgres step hands them to the
+workspace's owner (#2305, ``_reown_connector_keys``).
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers,
@@ -54,7 +56,9 @@ in ``deleted_data_summary.retry``; the hourly sweep runs it again and
 request can still be cancelled meanwhile, an admin one cannot. After
 ``VECTOR_STORE_MAX_ATTEMPTS`` attempts the request is ``failed`` with
 ``vector_store_unavailable after N attempts: ...`` (raw ids kept, like any
-failure before the Postgres commit); a new request is the retry. Any other
+failure before the Postgres commit); a new request is the retry. When such a
+request is cancelled, or fails after its last attempt, the subject's live
+embedded memories are re-queued for embedding (#2304). Any other
 error at step 1 (a configuration error building the client, say) fails the
 request at once, as before.
 """
@@ -71,6 +75,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
+    ColumnElement,
     and_,
     case,
     delete,
@@ -78,6 +83,7 @@ from sqlalchemy import (
     null,
     or_,
     select,
+    text,
     tuple_,
     update,
 )
@@ -129,6 +135,7 @@ from services.billing_contract import (
 )
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
+    ERASURE_AUDIT_ACTION,
     RestoreReport,
     StripCounts,
     erase_subject_details,
@@ -139,9 +146,10 @@ from services.erasure_details import (
     memory_scrub_at,
     merged_request_summary,
     payload_counts,
-    pseudonymize_audit_logs,
+    pseudonymize_audit_trail,
     pseudonymize_revision_actor,
     pseudonymized_request_values,
+    ran_in_postgres,
     record_resynced_payloads,
     restored_payload_syncs,
     strip_subject_details,
@@ -215,6 +223,19 @@ VECTOR_STORE_MAX_ATTEMPTS = 4
 # that carries the attempts across runs.
 _STEP_VECTOR_STORE = "vector_store"
 _RETRY_KEY = "retry"
+
+# #2304: rows per re-queue statement after a cancelled or failed vector-store
+# retry — bounds the lock set of each UPDATE; one commit per batch.
+EMBEDDING_REQUEUE_BATCH = 500
+
+# #2304: the longest a re-queue batch waits for a memory row another
+# transaction holds; past it the re-queue stops and is logged (the runbook's
+# manual statement finishes it). Bounds a member's cancel request.
+_REQUEUE_LOCK_TIMEOUT_SQL = text("SET LOCAL lock_timeout = '5s'")
+
+# #2304: keys inside ``summary.retry`` recording the re-queue.
+_REQUEUED_KEY = "embeddings_requeued"
+_REQUEUED_AT_KEY = "requeued_at"
 
 
 @dataclass(frozen=True)
@@ -301,6 +322,91 @@ CloseOutcome = Literal["interrupted", "never_ran", "moved"]
 
 # #2302: moved to ``erasure_details`` (the re-run writes the summary too)
 _merged_summary = merged_request_summary
+
+
+async def requeue_subject_embeddings(
+    db: AsyncSession, user_id: str, *, batch: int = EMBEDDING_REQUEUE_BATCH
+) -> int:
+    """Put the subject's live embedded memories back to ``pending`` (#2304).
+
+    For a request whose vector-store step ran at least once and that then
+    ended without erasing the account (cancelled, or failed after its last
+    attempt): ``delete_user_points`` may have removed some or all of the
+    subject's points, so their memories would stay ``success`` in Postgres and
+    never be found by a search. Only the subject's own rows can have lost a
+    point (the point payload's ``user_id`` mirrors ``memories.user_id``; a
+    resource-indexer row's author is the context's creator, who is also its
+    point's ``user_id``), so the scan is one indexed predicate over them.
+
+    ``success`` and ``processing`` rows: a run in flight may have written its
+    point before the delete removed it and would then stamp ``success``;
+    moving its row to ``pending`` fences that run off (its outcome writes
+    match on ``processing``) and the sweep embeds the row again, as the chunk
+    backfill's ``include_in_flight`` does (#2095). A stale ``processing`` row
+    with no retry budget left stays the sweep's to fail. A ``pending`` row
+    gets its point from the queued run (the write is an upsert); a
+    ``failed`` row keeps its own retry budget; a tombstone has no point by
+    design. Resource-indexer rows are included: the embedding pipeline
+    rebuilds their indexer point from the row (``write_memory_point``).
+
+    Writes ``embedding_status`` only, like ``requeue_embedding``:
+    ``updated_at`` and the pipeline's attempt/error/retry fields stay. Each
+    batch locks its rows in id order (``FOR NO KEY UPDATE`` subquery, no SKIP
+    LOCKED — a skipped row would be missed), waits at most 5 s for a row
+    another transaction holds (``lock_timeout``; the error ends the re-queue),
+    and commits, so a long re-queue never holds a large lock set. Batches
+    page on the id (keyset), so a row the sweep re-embeds meanwhile is not
+    queued twice; the loop ends on a short batch.
+
+    Cost: one embedding call per re-queued memory (plus its chunks) — what
+    the runbook's manual statement costs. The embedding sweep orders
+    ``pending`` rows by ``created_at``, so a large re-queue is embedded
+    before newer rows of other members.
+
+    Returns:
+        How many rows were re-queued (0 on a second call).
+    """
+    from services.embedding_claim import STALE_CLAIM_SECONDS
+    from services.memory_service import embedding_reclaim_exhausted_clause
+
+    total = 0
+    after: UUID | None = None
+    while True:
+        stale_cutoff = utcnow() - timedelta(seconds=STALE_CLAIM_SECONDS)
+        conditions = [
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_status.in_(("success", "processing")),
+            ~embedding_reclaim_exhausted_clause(stale_cutoff),
+        ]
+        if after is not None:
+            conditions.append(Memory.id > after)
+        locked = (
+            select(Memory.id)
+            .where(*conditions)
+            .order_by(Memory.id)
+            .limit(batch)
+            .with_for_update(key_share=True)
+        )
+        await db.execute(_REQUEUE_LOCK_TIMEOUT_SQL)
+        moved = list(
+            (
+                await db.execute(
+                    update(Memory)
+                    .where(Memory.id.in_(locked))
+                    .values(embedding_status="pending")
+                    .returning(Memory.id)
+                    .execution_options(synchronize_session=False)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await db.commit()
+        total += len(moved)
+        if len(moved) < batch:
+            return total
+        after = max(moved)
 
 
 class AccountErasureService:
@@ -700,6 +806,12 @@ class AccountErasureService:
         is ``cooling_off`` too while it waits for a vector-store retry
         (#2282), and the erased user must not be able to call it off.
 
+        A request that already spent a vector-store attempt
+        (``summary.retry.attempts > 0``) may have deleted some of the
+        subject's points: once the cancel is committed, the subject's live
+        embedded memories go back to ``pending`` (#2304,
+        ``_requeue_after_vector_store_failure``; never fails the cancel).
+
         ``in_progress`` rows are NOT cancellable — the orchestrator is
         already running, and racing it would risk an inconsistent half-
         applied erasure. The cancel is a compare-and-set on the status
@@ -732,22 +844,24 @@ class AccountErasureService:
 
         cancelled_from = request.status
         request_id = request.id
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(
-                    ErasureRequest.id == request_id,
-                    ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF]),
-                )
-                .values(status=STATUS_CANCELLED, cancelled_at=utcnow())
-                # no in-session evaluation: the loaded row may be stale (that
-                # is the race); the refresh below reads what was written
-                .execution_options(synchronize_session=False)
-            ),
+        result = await self.db.execute(
+            update(ErasureRequest)
+            .where(
+                ErasureRequest.id == request_id,
+                ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF]),
+            )
+            .values(status=STATUS_CANCELLED, cancelled_at=utcnow())
+            # #2304: the summary of the row this cancel moved, not of the
+            # one read above — a run that rescheduled the request in
+            # between may have spent an attempt
+            .returning(ErasureRequest.deleted_data_summary)
+            # no in-session evaluation: the loaded row may be stale (that
+            # is the race); the refresh below reads what was written
+            .execution_options(synchronize_session=False)
         )
+        moved = result.first()  # None: the compare-and-set matched nothing
         await self.db.commit()
-        if not result.rowcount:
+        if moved is None:
             # moved since the read: answer by what it is now, read as the
             # caller's (#2306)
             current = (
@@ -772,6 +886,15 @@ class AccountErasureService:
             # after a claim beat this cancel and the run rescheduled it
             # (#2282): report the claim
             raise ErasureAlreadyInProgressError(STATUS_IN_PROGRESS)
+        # #2304: a request that spent a vector-store attempt may have deleted
+        # the subject's points
+        spent_retry, spent_attempts = _previous_retry(
+            moved.deleted_data_summary if moved is not None else None
+        )
+        if spent_retry is not None and spent_attempts > 0:
+            await self._requeue_after_vector_store_failure(
+                request_id, user_id, spent_retry, status=STATUS_CANCELLED
+            )
         await self.db.refresh(request)
 
         logger.info(
@@ -781,6 +904,61 @@ class AccountErasureService:
             cancelled_from=cancelled_from,
         )
         return request
+
+    async def _requeue_after_vector_store_failure(
+        self, request_id: UUID, user_id: str, retry: dict[str, Any], *, status: str
+    ) -> None:
+        """Re-queue the subject's embeddings after a request that spent a
+        vector-store attempt ended without an erasure (#2304).
+
+        Called after the terminal status (``cancelled`` / ``failed``) is
+        committed, in its own transactions: ``requeue_subject_embeddings``,
+        then the count merged into ``summary.retry`` on the request row
+        (guarded by id + ``status``). Never raises: the cancel's answer and
+        the failure's own error stand; a failed re-queue is logged for the
+        runbook's manual statement. The logs carry no account id.
+        """
+        try:
+            requeued = await requeue_subject_embeddings(self.db, user_id)
+            block = {
+                **retry,
+                _REQUEUED_KEY: requeued,
+                _REQUEUED_AT_KEY: to_utc_iso(utcnow()),
+            }
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ErasureRequest)
+                    .where(ErasureRequest.id == request_id, ErasureRequest.status == status)
+                    .values(deleted_data_summary=_merged_summary({_RETRY_KEY: block}))
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            await self.db.commit()
+        except Exception as exc:
+            try:
+                await self.db.rollback()
+            except Exception:  # noqa: S110 - the connection is gone; the session resets on next use
+                pass
+            logger.error(
+                "erasure_embeddings_requeue_failed",
+                request_id=str(request_id),
+                error_class=type(exc).__name__,
+            )
+            return
+        if not result.rowcount:
+            # a terminal row does not move; defensive
+            logger.warning(
+                "erasure_embeddings_requeue_unrecorded",
+                request_id=str(request_id),
+                memories=requeued,
+            )
+            return
+        logger.info(
+            "erasure_embeddings_requeued",
+            request_id=str(request_id),
+            memories=requeued,
+        )
 
     # ------------------------------------------------------------------
     # Admin force-erase path
@@ -1026,7 +1204,10 @@ class AccountErasureService:
                         # the row is closed (terminal) already: only
                         # ``reprocess_erasures`` re-drives it now (no
                         # ``details_payload_synced`` key on the row)
-                        await self.db.rollback()
+                        try:
+                            await self.db.rollback()
+                        except Exception:  # noqa: S110 - the connection is gone; the session resets on next use
+                            pass
                         logger.error(
                             "erasure_sweep_payload_resync_failed",
                             request_id=str(request_id),
@@ -1149,13 +1330,16 @@ class AccountErasureService:
                     NOTE_PSEUDONYMIZED_KEY: True,
                 },
             )
+        guard = [ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS]
+        if not ran:
+            # #2302 review: a run alive past the cutoff may commit its Postgres
+            # step (writing ``postgres``) after the sweep read the row; the
+            # note must not replace that summary — the next sweep closes the
+            # row as interrupted instead
+            guard.append(~ran_in_postgres())
         result = cast(
             CursorResult[Any],
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS)
-                .values(**values)
-            ),
+            await self.db.execute(update(ErasureRequest).where(*guard).values(**values)),
         )
         await self.db.commit()
         if not result.rowcount:
@@ -1236,7 +1420,8 @@ class AccountErasureService:
         The vector store first so its failure leaves everything untouched:
         the user row exists and the request can simply run again — a
         ``QdrantError`` there reschedules it (#2282, ``ErasureRetryScheduledError``)
-        until ``VECTOR_STORE_MAX_ATTEMPTS``. Redis last because
+        until ``VECTOR_STORE_MAX_ATTEMPTS``; the last one fails the request
+        and re-queues the subject's embeddings (#2304). Redis last because
         session/rate-limit data is ephemeral and re-creatable from cookies if
         anything goes wrong.
 
@@ -1250,6 +1435,9 @@ class AccountErasureService:
         # expired id back (MissingGreenlet) — the row would never be marked
         # failed (#2244: a vector-store failure inside the Postgres step).
         request_id = request.id
+        # #2304: the subject whose embeddings a give-up re-queues (``target``
+        # is expired by the handler's rollback too)
+        subject_id = target.user_id
         # #2268: what a failure after the Postgres commit writes on the row —
         # read now, like ``request_id``
         pseudonymized_row = pseudonymized_request_values(request.user_id, request.initiated_by)
@@ -1335,7 +1523,9 @@ class AccountErasureService:
             postgres.update(payload_counts(erased.restore))
 
             # Step 4 (the audit_logs pseudonymize) runs inside the Postgres
-            # step since #2287: ``counts["audit_logs_pseudonymized"]``.
+            # step since #2287: ``counts["audit_logs_pseudonymized"]``, and the
+            # rows mentioning the subject since #2298:
+            # ``counts["audit_mentions_pseudonymized"]``.
 
             # Step 5: Redis cleanup (best-effort)
             step = "redis"
@@ -1435,7 +1625,11 @@ class AccountErasureService:
                 await self.db.execute(
                     update(ErasureRequest)
                     # #2306: this run's row only (see the generic handler)
-                    .where(ErasureRequest.id == request_id, ErasureRequest.started_at == claimed_at)
+                    .where(
+                        ErasureRequest.id == request_id,
+                        ErasureRequest.started_at == claimed_at,
+                        ErasureRequest.status == STATUS_IN_PROGRESS,
+                    )
                     .values(
                         status=STATUS_FAILED,
                         failure_reason=(
@@ -1478,7 +1672,11 @@ class AccountErasureService:
                 await self.db.execute(
                     update(ErasureRequest)
                     # #2306: this run's row only (see the generic handler)
-                    .where(ErasureRequest.id == request_id, ErasureRequest.started_at == claimed_at)
+                    .where(
+                        ErasureRequest.id == request_id,
+                        ErasureRequest.started_at == claimed_at,
+                        ErasureRequest.status == STATUS_IN_PROGRESS,
+                    )
                     .values(
                         status=STATUS_FAILED,
                         failure_reason=(
@@ -1543,9 +1741,15 @@ class AccountErasureService:
             # subject in Postgres: that fact outranks the newer claim (whose
             # subject is gone), and the row must not keep the raw sub nor
             # lose the marker the re-run and later erasures look for.
+            # #2302 review: and still running — an older run of the same row
+            # that outlived the cutoff may have completed it (``_finalize``
+            # writes by id alone), and a ``complete`` row is the truth then
             guard = [ErasureRequest.id == request_id]
             if not erased_in_postgres:
-                guard.append(ErasureRequest.started_at == claimed_at)
+                guard += [
+                    ErasureRequest.started_at == claimed_at,
+                    ErasureRequest.status == STATUS_IN_PROGRESS,
+                ]
             result = cast(
                 CursorResult[Any],
                 await self.db.execute(update(ErasureRequest).where(*guard).values(**values)),
@@ -1553,6 +1757,13 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
+            elif vector_store_gave_up is not None:
+                # #2304: the attempts may have deleted the subject's points;
+                # only when this run's failure was written (a newer run owns
+                # a row the guard did not match)
+                await self._requeue_after_vector_store_failure(
+                    request_id, subject_id, summary[_RETRY_KEY], status=STATUS_FAILED
+                )
             raise
 
     # ------------------------------------------------------------------
@@ -1687,7 +1898,9 @@ class AccountErasureService:
         Order matters because not every column is FK-cascaded — most
         cross-table user references are plain VARCHAR (OAuth2 sub) with
         no cascade. The full sweep here is the application-layer
-        equivalent of `ON DELETE CASCADE` for all per-user data.
+        equivalent of `ON DELETE CASCADE` for all per-user data. The one
+        transfer: the subject's live connector keys go to their workspace's
+        owner before the per-user ``api_keys`` delete (#2305).
 
         Args:
             target: The user being erased.
@@ -1746,6 +1959,11 @@ class AccountErasureService:
         counts["external_api_keys"] = await self._count_and_delete(
             ExternalAPIKey, ExternalAPIKey.user_id == user_id
         )
+        # #2305: a connector's write key the subject provisioned serves the
+        # workspace, not the person — after step 2 the owner is never the
+        # subject (a sole-owned workspace goes with its keys below), so hand
+        # the live keys to the owner; the revoked ones are deleted with the rest.
+        counts["connector_api_keys_reowned"] = await self._reown_connector_keys(user_id)
         counts["api_keys"] = await self._count_and_delete(APIKey, APIKey.user_id == user_id)
         counts["graph_memory"] = await self._count_and_delete(
             GraphMemory, GraphMemory.user_id == user_id
@@ -2014,11 +2232,14 @@ class AccountErasureService:
         # keeps its ids and can be retried) instead of leaving the raw sub and
         # email on the rows after the commit. Last before the user delete, so
         # nothing this transaction writes to audit_logs could be missed
-        # (nothing does today). No new lock order: these rows are the
-        # subject's alone and every other writer only inserts.
-        counts["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
-            user_id, target.email
-        )
+        # (nothing does today). #2298: other actors' rows that name the
+        # subject by an exact value (``user_email``, ``resource =
+        # 'user:'||email``) are rewritten in the same step, under one
+        # id-ordered lock over both sets; every other writer only inserts.
+        (
+            counts["audit_logs_pseudonymized"],
+            counts["audit_mentions_pseudonymized"],
+        ) = await self._pseudonymize_audit_logs(user_id, target.email)
         counts["users"] = 1  # deleted below, in this transaction
 
         # #2286: "this step committed", on the request row and in the same
@@ -2056,6 +2277,59 @@ class AccountErasureService:
         legal-retention contract). Patch the salt, not this method.
         """
         return erasure_pseudonym(value)
+
+    async def _reown_connector_keys(self, user_id: str) -> int:
+        """Hand the subject's live connector write keys to their workspace's
+        owner (#2305) and return how many moved.
+
+        A connector's write key (``api_keys.connector_id`` set) is the
+        workspace's ingest credential: the worker holds its plaintext, and
+        deleting the row with the subject's other keys would silently stop the
+        connector. Only ``user_id`` changes — hash, prefix, name,
+        ``connector_id``, ``workspace_id`` and expiry stay — so the stored
+        plaintext keeps verifying, and ``verify_key`` / ``rotate_kmc_key`` /
+        ``delete_connector`` need no change (they key on ``key_hash`` /
+        ``connector_id``); the next rotation mints under the owner, who is a
+        live member by construction.
+
+        Scope: the subject's rows with ``connector_id`` set and
+        ``revoked_at IS NULL`` (an expired, unrevoked key is still rotatable,
+        so it moves too); revoked connector keys are dead rows and are deleted
+        with the rest. The ``owner_user_id <> subject`` guard keeps a key of a
+        workspace the subject still owns — a sole-owned one, deleted with its
+        keys later in this transaction — where it is. The UPDATE bypasses
+        ``create_key``'s per-owner active-name check; an owner already holding
+        an active ``connector:<same id>`` key cannot happen (one active key
+        per connector; rotation revokes before it mints).
+
+        Lock order: the rows are the subject's alone, locked in id order
+        (``locked_ids``); the other writers of one of them, ``rotate_kmc_key``
+        (by ``key_hash``) and ``delete_connector`` (by ``connector_id``), hold
+        no ``users`` or ``memories`` lock first, so no new order.
+        """
+
+        def live(k: Any) -> tuple[ColumnElement[bool], ...]:
+            return (
+                k.user_id == user_id,
+                k.connector_id.is_not(None),
+                k.revoked_at.is_(None),
+            )
+
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(APIKey)
+                .where(
+                    APIKey.id.in_(locked_ids(APIKey, live)),
+                    *live(APIKey),
+                    APIKey.workspace_id == Workspace.id,
+                    Workspace.owner_user_id != user_id,
+                )
+                .values(user_id=Workspace.owner_user_id)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount or 0
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.
@@ -2366,10 +2640,15 @@ class AccountErasureService:
         result = cast(CursorResult[Any], await self.db.execute(statement))
         return result.rowcount or 0
 
-    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
-        """The subject's audit rows (``erasure_details.pseudonymize_audit_logs``),
-        in ``_delete_postgres``'s transaction (#2287)."""
-        return await pseudonymize_audit_logs(self.db, user_id, [email])
+    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> tuple[int, int]:
+        """The subject's audit rows and the rows mentioning them
+        (``erasure_details.pseudonymize_audit_trail``), in
+        ``_delete_postgres``'s transaction (#2287, #2298).
+
+        Returns:
+            ``(own rows, mentions)`` rowcounts.
+        """
+        return await pseudonymize_audit_trail(self.db, user_id, [email])
 
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
@@ -2396,28 +2675,30 @@ class AccountErasureService:
     ) -> None:
         """Append the canonical `account_erasure` audit row, fully pseudonymized.
 
-        This row is born AFTER the bulk pseudonymize step (Step 5) ran, so
-        we cannot rely on a later sweep to scrub it. Inline pseudonymization
-        guarantees no plaintext email or user_id ever lands in audit_logs
-        for this event — required for GDPR Art.5(1)(c) compliance.
+        This row is born AFTER the audit-log pseudonymize step ran (inside the
+        Postgres step), so we cannot rely on a later sweep to scrub it. Inline
+        pseudonymization guarantees no plaintext email or user_id ever lands
+        in audit_logs for this event — required for GDPR Art.5(1)(c)
+        compliance. The row carries no ``ip_address`` / ``user_agent``
+        (#2345): the request row clears both once the subject is erased, the
+        admin-initiated case included, and this row follows it.
         """
         # #2288: the same derivation as every other pseudonym of the subject
         user_pseudonym = erasure_pseudonym(target.user_id)
         email_pseudonym = erasure_pseudonym(target.email)
-        # Self-service `initiated_by` IS the subject's raw user_id (the
-        # user clicked their own delete button). Storing it verbatim in
-        # audit_logs.user_metadata would re-introduce a stable plaintext
-        # identifier for the erased user — a regression of the
-        # pseudonymization invariant the rest of this row enforces.
-        # Admin path `initiated_by` is the admin's user_id (NOT the
-        # erased subject), which is legitimate audit-trail information
-        # and stays plaintext.
-        initiated_by_value = user_pseudonym if request.is_self_service else request.initiated_by
+        # #2345: the request row's rule (``pseudonymized_request_values``):
+        # `initiated_by` is the pseudonym iff it is the subject's own sub —
+        # decided by comparing with the subject, not by `is_self_service`
+        # (an admin request the subject started themselves is the subject's
+        # sub too). Another admin's id is audit-trail evidence and stays.
+        initiated_by_value = (
+            user_pseudonym if request.initiated_by == request.user_id else request.initiated_by
+        )
         self.db.add(
             AuditLog(
                 user_email=email_pseudonym,
                 user_id=user_pseudonym,
-                action="account_erasure",
+                action=ERASURE_AUDIT_ACTION,
                 resource=f"user_pseudonym:{user_pseudonym[:16]}",
                 user_metadata={
                     "request_id": str(request.id),
@@ -2426,8 +2707,6 @@ class AccountErasureService:
                     "reason_code": request.reason_code,
                     "deleted_data_summary": summary,
                 },
-                ip_address=request.ip_address,
-                user_agent=request.user_agent,
             )
         )
         await self.db.commit()
@@ -2460,7 +2739,10 @@ class AccountErasureService:
         or still there before this run's commit — then the newer run cannot
         erase it again, and whatever it wrote (a reschedule, a failure with
         the raw ids, a cancel after a reschedule) is wrong once the subject
-        is erased: ``complete`` with the pseudonymized row is the truth. A
+        is erased: ``complete`` with the pseudonymized row is the truth. The
+        newer run's own writes before its Postgres commit (the reschedule and
+        the failure handlers) are fenced by ``status = in_progress`` as well
+        as its claim, so they cannot overwrite this completion afterwards. A
         0-row match means the row was deleted meanwhile: logged, nothing
         else (the subject is erased and the audit row is written).
         """

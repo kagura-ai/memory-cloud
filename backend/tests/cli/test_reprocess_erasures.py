@@ -396,3 +396,157 @@ def test_the_dry_run_counts_what_the_apply_would_change():
         "FROM users \nWHERE users.user_id = audit_logs.user_id))"
     )
     assert compiled.params == {"user_id_1": "raw-sub"}
+
+
+def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
+    """#2298: the rows naming the subject are a change of their own, in the
+    plan, the applied report and the summary; an email in use again is
+    listed. Never an email or the account id."""
+    kept = uuid4()
+
+    def result(dry_run: bool) -> cli.ReprocessResult:
+        r = cli.ReprocessResult(dry_run=dry_run, scanned=2)
+        r.changed.append(
+            cli.RequestChange(
+                request_id=REQUEST_ID,
+                completed_at=None,
+                details_restored=0,
+                details_restored_unavailable=0,
+                details_stripped=0,
+                scrub_marked=0,
+                audit_mentions_pseudonymized=3,
+            )
+        )
+        r.mentions_kept.append(kept)
+        return r
+
+    plan = result(True)
+    assert plan.changes == 3
+    cli._print_plan(plan)
+    cli._print_applied(result(False))
+    out = capsys.readouterr().out
+    assert f"would pseudonymize audit mentions  {REQUEST_ID}  3 row(s)\n" in out
+    assert f"pseudonymized audit mentions  {REQUEST_ID}  3 row(s)\n" in out
+    assert f"audit mentions  {kept}  rows kept: the email is in use again" in out
+    assert cli._summary(plan).endswith(", 3 audit mention(s) pseudonymized")
+
+
+def test_the_mentioned_emails_are_matched_by_hash_in_the_database():
+    """#2298: two SELECTs (the distinct ``user_email`` values and the
+    ``user:`` resources, the prefix cut in SQL), each filtered by its
+    unsalted sha256 in SQL; the matches come back keyed by that hash."""
+    from sqlalchemy.dialects import postgresql
+
+    from utils.hashing import sha256_hex
+
+    db = MagicMock()
+    emails = MagicMock()
+    emails.scalars.return_value = iter(["a@x.io"])
+    resources = MagicMock()
+    resources.scalars.return_value = iter(["b@x.io", "a@x.io"])
+    db.execute = AsyncMock(side_effect=[emails, resources])
+    hashes = {sha256_hex("a@x.io"), sha256_hex("b@x.io"), "0" * 64}
+
+    found = asyncio.run(cli._mentioned_emails(db, hashes))
+
+    assert found == {sha256_hex("a@x.io"): "a@x.io", sha256_hex("b@x.io"): "b@x.io"}
+    (first, first_params), (second, second_params) = (
+        (str(compiled), compiled.params)
+        for compiled in (
+            c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
+        )
+    )
+    digest = "encode(sha256(convert_to({}, %(convert_to_1)s::VARCHAR)), %(encode_1)s::VARCHAR)"
+    assert first.startswith("SELECT DISTINCT audit_logs.user_email \nFROM audit_logs \nWHERE ")
+    assert digest.format("audit_logs.user_email") + " IN (" in first
+    assert first_params["convert_to_1"] == "UTF8" and first_params["encode_1"] == "hex"
+    assert sorted(hashes) in first_params.values()
+    assert second.startswith("SELECT DISTINCT substr(audit_logs.resource, ")
+    assert "LIKE" in second and "sha256(convert_to(substr(audit_logs.resource" in second
+    assert sorted(hashes) in second_params.values()
+
+
+def test_no_request_hashes_read_nothing():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    assert asyncio.run(cli._mentioned_emails(db, set())) == {}
+    db.execute.assert_not_awaited()
+
+
+def test_cleared_request_metadata_is_reported_and_counted(capsys):
+    """#2345: rows whose IP / user agent were cleared (and ``initiated_by``
+    rewrites) are a change of their own; never an IP or a user agent."""
+
+    def result(dry_run: bool) -> cli.ReprocessResult:
+        r = cli.ReprocessResult(dry_run=dry_run, scanned=1)
+        r.changed.append(
+            cli.RequestChange(
+                request_id=REQUEST_ID,
+                completed_at=None,
+                details_restored=0,
+                details_restored_unavailable=0,
+                details_stripped=0,
+                scrub_marked=0,
+                audit_metadata_cleared=4,
+            )
+        )
+        return r
+
+    plan = result(True)
+    assert plan.changes == 4
+    cli._print_plan(plan)
+    cli._print_applied(result(False))
+    out = capsys.readouterr().out
+    assert f"would clear audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
+    assert f"cleared audit request metadata  {REQUEST_ID}  4 row(s)\n" in out
+    assert cli._summary(plan).endswith(", 4 audit row(s) request metadata cleared")
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_the_memories_are_locked_before_the_audit_rows(dry_run):
+    """#2298 review: the live erasure locks the subject's memories, then the
+    audit rows; the re-run takes the same order (the details step first),
+    so a re-run and a live erasure that share rows cannot deadlock."""
+    from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
+
+    order: list[str] = []
+
+    async def step(name, result):
+        order.append(name)
+        return result
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    details = SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
+    with (
+        patch.object(cli, "erase_subject_details", lambda *a, **k: step("details", details)),
+        patch.object(cli, "_recover_emails", lambda *a, **k: step("recover", [])),
+        patch.object(cli, "_live_emails", lambda *a, **k: step("live", set())),
+        patch.object(cli, "_count_audit_rows", lambda *a, **k: step("audit", 0)),
+        patch.object(cli, "count_audit_mentions", lambda *a, **k: step("audit", 0)),
+        patch.object(cli, "pseudonymize_audit_trail", lambda *a, **k: step("audit", (0, 0))),
+        patch.object(cli, "clear_audit_request_metadata", lambda *a, **k: step("audit", set())),
+        patch.object(
+            cli, "pseudonymize_erasure_audit_initiator", lambda *a, **k: step("audit", set())
+        ),
+        patch.object(cli, "sync_restored_payloads", AsyncMock()),
+    ):
+        asyncio.run(
+            cli._reprocess_one(
+                db,
+                REQUEST_ID,
+                "p" * 64,
+                None,
+                None,
+                dry_run,
+                frozenset(),
+                audit_account_id="raw-sub",
+                mentioned={},
+                swept_emails=set(),
+            )
+        )
+
+    assert order[0] == "details"
+    assert "audit" in order and "details" not in order[1:]

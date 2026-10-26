@@ -466,7 +466,7 @@ async def test_erasure_summary_merge_treats_json_null_as_empty(db_session, store
     from sqlalchemy import select, update
 
     from services.account_erasure_service import _merged_summary
-    from services.erasure_details import _ran_in_postgres
+    from services.erasure_details import ran_in_postgres
 
     request = ErasureRequest(
         user_id=f"gone-{uuid4().hex[:8]}",
@@ -502,7 +502,7 @@ async def test_erasure_summary_merge_treats_json_null_as_empty(db_session, store
     assert kind == "object"
     assert set(keys) == expected_keys
     ran = (
-        await db_session.execute(select(_ran_in_postgres()).where(ErasureRequest.id == request.id))
+        await db_session.execute(select(ran_in_postgres()).where(ErasureRequest.id == request.id))
     ).scalar_one()
     assert ran is True
     await db_session.rollback()

@@ -25,6 +25,7 @@ Coverage gaps these tests close (per QA-Lead Gate2 review):
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -44,6 +45,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService, _audit_salt
+from services.erasure_details import erasure_pseudonym
 from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
@@ -120,6 +122,9 @@ async def erasure_scenario(db_session: AsyncSession):
         resource=f"user:{target_email}",
         old_value_hash="user",
         new_value_hash="admin",
+        # #2345: the subject's request metadata, cleared by the erasure
+        ip_address="203.0.113.5",
+        user_agent="ua",
     )
     db_session.add(prior_audit)
     await db_session.commit()
@@ -192,10 +197,18 @@ def patched_external_stores():
 
 @pytest_asyncio.fixture
 async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
-    """#2287: audit rows the target's erasure must leave byte-identical — the
-    other member acting on the target (``resource`` names the target's
-    email: out of scope, the row's ``user_id`` is not the target's) and a
-    third account acting on itself."""
+    """Other actors' audit rows around the target (#2287, #2298), in order:
+
+    0. the other member acting on the target (``resource`` names the
+       target's email): only ``resource`` changes, to the email pseudonym —
+       the acting member's IP stays;
+    1. the target acting as an admin on the other member (``user_email`` is
+       the target's, ``user_id`` and ``resource`` the other's): ``user_email``
+       changes and the target's IP / user agent are cleared;
+    2. a third account acting on itself, with an IP: byte-identical;
+    3. a look-alike ``resource`` (the target's email plus a suffix):
+       byte-identical — exact values only, never a substring.
+    """
     target_email = erasure_scenario["target_email"]
     other = erasure_scenario["other_user_id"]
     rows = [
@@ -204,12 +217,29 @@ async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
             user_id=other,
             action="role_assign",
             resource=f"user:{target_email}",
+            ip_address="198.51.100.20",
+            user_agent="admin-agent",
+        ),
+        AuditLog(
+            user_email=target_email,
+            user_id=other,
+            action="role_assign",
+            resource=f"user:{other}@example.com",
+            ip_address="198.51.100.21",
+            user_agent="target-agent",
         ),
         AuditLog(
             user_email="third@example.com",
             user_id=f"third_{uuid4().hex[:8]}",
             action="password_set",
             resource="user:third@example.com",
+            ip_address="198.51.100.22",
+        ),
+        AuditLog(
+            user_email=f"{other}@example.com",
+            user_id=other,
+            action="role_assign",
+            resource=f"user:{target_email}-x",
         ),
     ]
     db_session.add_all(rows)
@@ -272,6 +302,8 @@ class TestAdminForceEraseHappyPath:
             initiator_user_id="admin-runner",
             reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
             reason_detail="integration test",
+            ip_address="203.0.113.9",
+            user_agent="agent",
         )
 
         # The erasure_requests row reached terminal complete with a summary.
@@ -284,9 +316,26 @@ class TestAdminForceEraseHappyPath:
         # target).
         assert request.deleted_data_summary["postgres"]["audit_logs_pseudonymized"] >= 1
         assert "audit_logs_pseudonymized" not in request.deleted_data_summary
-        # every other actor's audit rows are byte-identical (#2287), the
-        # admin's row about the target included (out of scope)
-        assert await _audit_rows_snapshot(db_session, other_actors_audit) == others_before
+        # #2298: the rows naming the target change in that one value only;
+        # every other actor's row is byte-identical
+        assert request.deleted_data_summary["postgres"]["audit_mentions_pseudonymized"] == 2
+        others_after = await _audit_rows_snapshot(db_session, other_actors_audit)
+        about, by_target, third, lookalike = other_actors_audit
+        email_pseudonym = erasure_pseudonym(target_email)
+        assert others_after[about] == {
+            **others_before[about],
+            "resource": f"user:{email_pseudonym}",
+        }
+        # the target was the actor there: their IP / UA go too (#2345)
+        assert others_after[by_target] == {
+            **others_before[by_target],
+            "user_email": email_pseudonym,
+            "ip_address": None,
+            "user_agent": None,
+        }
+        assert others_after[about]["ip_address"] == "198.51.100.20"  # the admin's
+        for row_id in (third, lookalike):
+            assert others_after[row_id] == others_before[row_id]
 
         # User row is gone.
         result = await db_session.execute(select(User).where(User.user_id == target_user_id))
@@ -322,6 +371,8 @@ class TestAdminForceEraseHappyPath:
         # the legal-retention table (Copilot loop 3 finding).
         assert target_email not in (prior.resource or "")
         assert target_user_id not in (prior.resource or "")
+        # #2345: the subject's IP / user agent leave their own rows
+        assert (prior.ip_address, prior.user_agent) == (None, None)
 
         # The new "account_erasure" audit row is also pseudonymized at
         # insert — guards against the regression PR-review caught
@@ -342,11 +393,47 @@ class TestAdminForceEraseHappyPath:
         # so it stays plaintext — the assertion below uses target_user_id,
         # which would only appear if self-service had leaked it.
         assert new_audit.user_metadata is not None
-        assert new_audit.user_metadata.get("initiated_by") != target_user_id
+        assert new_audit.user_metadata.get("initiated_by") == "admin-runner"
         # And no plaintext email/user_id anywhere else in user_metadata.
         metadata_repr = repr(new_audit.user_metadata)
         assert target_email not in metadata_repr
         assert target_user_id not in metadata_repr
+        # #2345: no request metadata on the row, the admin's included (the
+        # request row clears both too)
+        assert (new_audit.ip_address, new_audit.user_agent) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_self_initiated_admin_request_pseudonymizes_initiated_by(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        """#2345: ``initiated_by`` equal to the subject is pseudonymized on the
+        audit row like on the request row, though ``is_self_service`` is
+        False (the admin route refuses this; the service does not)."""
+        target_user_id = erasure_scenario["target_user_id"]
+
+        request = await AccountErasureService(db_session).admin_force_erase(
+            target_user_id=target_user_id,
+            initiator_user_id=target_user_id,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test (#2345)",
+            ip_address="203.0.113.9",
+            user_agent="agent",
+        )
+
+        pseudonym = erasure_pseudonym(target_user_id)
+        assert (request.user_id, request.initiated_by) == (pseudonym, pseudonym)
+        audit = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "account_erasure",
+                    AuditLog.user_metadata["request_id"].as_string() == str(request.id),
+                )
+            )
+        ).scalar_one()
+        assert audit.user_metadata["is_self_service"] is False
+        assert audit.user_metadata["initiated_by"] == pseudonym
+        assert (audit.ip_address, audit.user_agent) == (None, None)
+        assert target_user_id not in repr(audit.user_metadata)
 
 
 class TestAuditLogFailureRollsThePostgresStepBack:
@@ -357,12 +444,21 @@ class TestAuditLogFailureRollsThePostgresStepBack:
     request can retry."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failing",
+        [
+            "services.account_erasure_service.AccountErasureService._pseudonymize_audit_logs",
+            # #2298: after the own rows' UPDATE ran in the transaction
+            "services.erasure_details.pseudonymize_audit_mentions",
+        ],
+    )
     async def test_an_audit_log_failure_rolls_the_postgres_step_back(
         self,
         db_session: AsyncSession,
         erasure_scenario,
         other_actors_audit,
         patched_external_stores,
+        failing: str,
     ):
         from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
 
@@ -370,11 +466,7 @@ class TestAuditLogFailureRollsThePostgresStepBack:
         tables = ("users", "audit_logs", "api_keys", "memories", "memory_revisions")
         before = {table: await _table_snapshot(db_session, table) for table in tables}
 
-        with patch.object(
-            AccountErasureService,
-            "_pseudonymize_audit_logs",
-            AsyncMock(side_effect=RuntimeError("audit_logs unavailable")),
-        ):
+        with patch(failing, AsyncMock(side_effect=RuntimeError("audit_logs unavailable"))):
             with pytest.raises(RuntimeError):
                 await AccountErasureService(db_session).admin_force_erase(
                     target_user_id=target,
@@ -1631,6 +1723,77 @@ class TestTheSweepsPayloadReDriveAndAReRegisteredSub:
             await db_session.commit()
 
 
+class TestTheNeverRanCloseKeepsALatePostgresMarker:
+    """Review of #2302: the sweep read a claimed row without ``postgres``; a
+    run alive past the cutoff then committed its Postgres step (writing
+    ``postgres`` and deleting the user). The never-ran close must not replace
+    that summary with the note: it matches nothing (moved), and the next
+    sweep closes the row as interrupted."""
+
+    @pytest.mark.asyncio
+    async def test_the_note_does_not_replace_a_postgres_summary(
+        self, db_session: AsyncSession, patched_external_stores
+    ):
+        from datetime import timedelta
+
+        from models.erasure import (
+            INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            STATUS_FAILED,
+            STATUS_IN_PROGRESS,
+        )
+
+        sub = f"late_{uuid4().hex[:8]}"  # no user row: the late commit deleted it
+        request = ErasureRequest(
+            user_id=sub,
+            user_email_hash="3" * 64,
+            initiated_by="admin-runner",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status=STATUS_IN_PROGRESS,
+            started_at=utcnow() - timedelta(hours=2),
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        try:
+            # what the sweep read: no ``postgres`` yet
+            await db_session.refresh(request)
+            # the late commit lands on the row meanwhile (another session)
+            postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+            await db_session.execute(
+                text("UPDATE erasure_requests SET deleted_data_summary = :s WHERE id = :id"),
+                {"s": json.dumps({"postgres": postgres}), "id": request_id},
+            )
+            await db_session.commit()
+            # the stale read the sweep holds (detached: nothing flushes it)
+            db_session.expunge(request)
+            request.deleted_data_summary = None
+
+            with patch("services.account_erasure_service.logger") as log:
+                outcome = await AccountErasureService(db_session)._close_request_without_user(
+                    request
+                )
+            assert outcome == "moved"
+            assert "erasure_sweep_request_moved" in [c.args[0] for c in log.info.call_args_list]
+            row = await _request_snapshot(db_session, request_id)
+            assert row["status"] == STATUS_IN_PROGRESS
+            assert row["deleted_data_summary"] == {"postgres": postgres}
+
+            # the next sweep reads ``postgres`` and closes it as interrupted
+            with patch(_QDRANT_PATCH, AsyncMock()):
+                assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+            row = await _request_snapshot(db_session, request_id)
+            assert (row["status"], row["failure_reason"]) == (
+                STATUS_FAILED,
+                INTERRUPTED_AFTER_POSTGRES_COMMIT,
+            )
+            assert row["deleted_data_summary"]["postgres"]["users"] == 1
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == request_id))
+            await db_session.commit()
+
+
 class TestARequestWhoseUserVanishedUnrun:
     """#2286: the user row disappears before the sweep runs the request
     (removed by hand): nothing was erased, so the request is ``complete``
@@ -2438,6 +2601,338 @@ class TestAVectorStoreOutageAtStepOne:
         assert await _everything_but(db_session, request_id) == before
 
 
+# ---------------------------------------------------------------------------
+# #2305: connector write keys survive their provisioner's erasure
+# ---------------------------------------------------------------------------
+
+
+class _ConnectorWorld:
+    """Seeds workspaces, members and connectors for the #2305 tests and
+    remembers what to clean up (the database outlives a test)."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.workspace_ids: list[UUID] = []
+        self.targets: list[str] = []
+
+    async def user(self, prefix: str) -> str:
+        """A ``users`` row (only the erased subjects need one)."""
+        user_id = f"{prefix}_{uuid4().hex[:8]}"
+        self.db.add(
+            User(
+                email=f"{user_id}@example.com",
+                user_id=user_id,
+                name=prefix,
+                role="user",
+                is_initial_admin=False,
+                auth_method="oauth",
+                auth_provider="google",
+            )
+        )
+        await self.db.flush()
+        self.targets.append(user_id)
+        return user_id
+
+    async def workspace(self, owner: str, **members: str) -> Workspace:
+        """A workspace ``owner`` owns; ``members`` maps user_id → role."""
+        workspace = Workspace(
+            id=uuid4(),
+            name=f"ws-{uuid4().hex[:8]}",
+            plan_name="promax",  # #1551: provisioning creates, XL only
+            owner_user_id=owner,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+        )
+        self.db.add(workspace)
+        await self.db.flush()
+        self.workspace_ids.append(workspace.id)
+        self.db.add(
+            WorkspaceMember(workspace_id=workspace.id, user_id=owner, role=WorkspaceRole.OWNER)
+        )
+        for user_id, role in members.items():
+            self.db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user_id, role=role))
+        await self.db.flush()
+        return workspace
+
+    async def connector(self, workspace: Workspace, by: str):
+        """A connector ``by`` provisions, with its KMC write key."""
+        from services.connector_provisioning import ConnectorProvisioningService
+
+        result = await ConnectorProvisioningService(self.db).provision_connector(
+            workspace_id=workspace.id,
+            user_id=by,
+            connector_type="slack",
+            resource_id=f"slack_{uuid4().hex[:8]}",
+            auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+        )
+        await self.db.flush()
+        return result
+
+    async def personal_key(self, user_id: str, workspace: Workspace) -> UUID:
+        from auth.api_keys import APIKeyManager
+
+        _, row = await APIKeyManager(self.db).create_key(
+            name=f"personal-{uuid4().hex[:6]}", user_id=user_id, workspace_id=workspace.id
+        )
+        await self.db.flush()
+        return row.id
+
+    async def erase(self, target: str) -> dict:
+        """Force-erase ``target``; returns the summary's ``postgres`` counts."""
+        await self.db.commit()
+        request = await AccountErasureService(self.db).admin_force_erase(
+            target_user_id=target,
+            initiator_user_id="admin-runner",
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test",
+        )
+        assert request.status == STATUS_COMPLETE
+        counts = request.deleted_data_summary["postgres"]
+        # The re-own is a Core UPDATE; reload rather than read stale ORM state.
+        self.db.expire_all()
+        return counts
+
+    async def cleanup(self) -> None:
+        await self.db.rollback()
+        pseudonyms = [sha256_hex(t, salt=_audit_salt()) for t in self.targets]
+        await self.db.execute(
+            delete(AuditLog).where(
+                AuditLog.action.in_(("account_erasure", "account_erasure_reprocess"))
+                & AuditLog.user_id.in_(pseudonyms)
+            )
+        )
+        await self.db.execute(
+            delete(ErasureRequest).where(ErasureRequest.user_id.in_(self.targets + pseudonyms))
+        )
+        await self.db.execute(delete(Workspace).where(Workspace.id.in_(self.workspace_ids)))
+        await self.db.execute(delete(User).where(User.user_id.in_(self.targets)))
+        await self.db.commit()
+
+
+@pytest_asyncio.fixture
+async def connector_world(db_session: AsyncSession):
+    # The auto-created write-target context would create a Qdrant collection.
+    with patch(
+        "services.context_service.ContextService._ensure_context_collection",
+        new=AsyncMock(return_value=None),
+    ):
+        world = _ConnectorWorld(db_session)
+        yield world
+        await world.cleanup()
+
+
+async def _key_rows(db_session: AsyncSession, ids) -> dict:
+    """Byte-level ``to_jsonb`` of the ``api_keys`` rows ``ids``."""
+    rows = (
+        await db_session.execute(
+            text("SELECT t.id, to_jsonb(t) FROM api_keys AS t WHERE t.id = ANY(:ids)"),
+            {"ids": list(ids)},
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _live_connector_key(db_session: AsyncSession, connector_id) -> APIKey:
+    return (
+        await db_session.execute(
+            select(APIKey).where(APIKey.connector_id == connector_id, APIKey.revoked_at.is_(None))
+        )
+    ).scalar_one()
+
+
+def _without_owner(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "user_id"}
+
+
+class TestConnectorKeysSurviveErasure:
+    """#2305: an erased admin's live connector keys move to the workspace's
+    owner, unchanged otherwise, so the connector keeps writing."""
+
+    @pytest.mark.asyncio
+    async def test_an_admins_connector_key_moves_to_the_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from auth.api_keys import APIKeyManager
+        from services.connector_provisioning import ConnectorProvisioningService
+
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
+
+        # a connector the target provisioned and rotated once: the first key
+        # is now revoked and still the target's
+        provisioned = await world.connector(ws, by=target)
+        connector_id = provisioned.connector.id
+        revoked_key = await _live_connector_key(db_session, connector_id)
+        revoked_key_id = revoked_key.id
+        rotated = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=ws.id, connector_id=connector_id, user_id=target
+        )
+        await db_session.flush()
+        live = await _live_connector_key(db_session, connector_id)
+        assert live.user_id == target
+        live_id = live.id
+        personal_id = await world.personal_key(target, ws)
+        before = (await _key_rows(db_session, [live_id]))[live_id]
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        after = (await _key_rows(db_session, [live_id]))[live_id]
+        assert after["user_id"] == owner
+        assert after["revoked_at"] is None
+        assert _without_owner(after) == _without_owner(before)
+        # the target's personal key and revoked connector key are gone
+        assert await _key_rows(db_session, [personal_id, revoked_key_id]) == {}
+        assert counts["connector_api_keys_reowned"] == 1
+        assert counts["api_keys"] == 2
+
+        # the worker's stored plaintext still verifies, now as the owner
+        verified = await APIKeyManager(db_session).verify_key(rotated.plaintext_kmc_api_key)
+        assert verified is not None
+        assert verified.user_id == owner
+        assert verified.is_connector_key is True
+
+        # and the owner can rotate it; the replacement stays the owner's
+        again = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=ws_id, connector_id=connector_id, user_id=owner
+        )
+        await db_session.flush()
+        assert again.key_owner_user_id == owner
+        assert (await _live_connector_key(db_session, connector_id)).user_id == owner
+
+    @pytest.mark.asyncio
+    async def test_other_members_and_workspaces_keys_are_untouched(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        member = f"member_{uuid4().hex[:8]}"
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, member: WorkspaceRole.ADMIN}
+        )
+        mine = await world.connector(ws, by=target)
+        theirs = await world.connector(ws, by=member)
+        owners_key = await world.personal_key(owner, ws)
+        elsewhere_owner = f"else_{uuid4().hex[:8]}"
+        elsewhere = await world.workspace(elsewhere_owner)
+        unrelated = await world.connector(elsewhere, by=elsewhere_owner)
+        bystanders = [
+            (await _live_connector_key(db_session, theirs.connector.id)).id,
+            (await _live_connector_key(db_session, unrelated.connector.id)).id,
+            owners_key,
+        ]
+        mine_id = (await _live_connector_key(db_session, mine.connector.id)).id
+        before = await _key_rows(db_session, bystanders)
+        assert len(before) == 3
+
+        counts = await world.erase(target)
+
+        assert await _key_rows(db_session, bystanders) == before
+        assert (await _key_rows(db_session, [mine_id]))[mine_id]["user_id"] == owner
+        assert counts["connector_api_keys_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_owners_key_follows_the_workspace_to_its_new_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        # step 2 hands the workspace to the lowest-user_id admin
+        heir = f"a_heir_{uuid4().hex[:8]}"
+        later = f"z_later_{uuid4().hex[:8]}"
+        ws = await world.workspace(
+            target, **{heir: WorkspaceRole.ADMIN, later: WorkspaceRole.ADMIN}
+        )
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        workspace = (
+            await db_session.execute(select(Workspace).where(Workspace.id == ws_id))
+        ).scalar_one()
+        assert workspace.owner_user_id == heir
+        assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == heir
+        assert counts["connector_api_keys_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_sole_owned_workspace_takes_its_connector_key_with_it(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        ws = await world.workspace(target)
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        ws_id = ws.id
+
+        counts = await world.erase(target)
+
+        assert (
+            await db_session.execute(select(Workspace).where(Workspace.id == ws_id))
+        ).scalar_one_or_none() is None
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert counts["connector_api_keys_reowned"] == 0
+
+    @pytest.mark.asyncio
+    async def test_keys_in_two_workspaces_go_to_each_workspaces_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        world = connector_world
+        target = await world.user("target")
+        owner_1 = f"owner1_{uuid4().hex[:8]}"
+        owner_2 = f"owner2_{uuid4().hex[:8]}"
+        ws_1 = await world.workspace(owner_1, **{target: WorkspaceRole.ADMIN})
+        ws_2 = await world.workspace(owner_2, **{target: WorkspaceRole.ADMIN})
+        key_1 = (
+            await _live_connector_key(
+                db_session, (await world.connector(ws_1, by=target)).connector.id
+            )
+        ).id
+        key_2 = (
+            await _live_connector_key(
+                db_session, (await world.connector(ws_2, by=target)).connector.id
+            )
+        ).id
+
+        counts = await world.erase(target)
+
+        rows = await _key_rows(db_session, [key_1, key_2])
+        assert rows[key_1]["user_id"] == owner_1
+        assert rows[key_2]["user_id"] == owner_2
+        assert counts["connector_api_keys_reowned"] == 2
+
+    @pytest.mark.asyncio
+    async def test_an_expired_unrevoked_connector_key_moves_too(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from sqlalchemy import update
+
+        world = connector_world
+        target = await world.user("target")
+        owner = f"owner_{uuid4().hex[:8]}"
+        ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
+        provisioned = await world.connector(ws, by=target)
+        key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+        await db_session.execute(
+            update(APIKey)
+            .where(APIKey.id == key_id)
+            .values(expires_at=to_naive_utc(datetime(2020, 1, 1, tzinfo=UTC)))
+            .execution_options(synchronize_session=False)
+        )
+
+        counts = await world.erase(target)
+
+        row = (await _key_rows(db_session, [key_id]))[key_id]
+        assert row["user_id"] == owner
+        assert row["revoked_at"] is None
+        assert counts["connector_api_keys_reowned"] == 1
+
+
 class TestContextAuthorshipSweepLocksInIdOrder:
     """#2278: the ``contexts.created_by`` sweep reaches its rows through an
     id-ordered ``FOR UPDATE`` subquery and rewrites only the subject's."""
@@ -2506,3 +3001,300 @@ class TestContextAuthorshipSweepLocksInIdOrder:
 
         (update_sql,) = [s for s in statements if s.startswith("UPDATE contexts")]
         assert "ORDER BY contexts_1.id FOR UPDATE" in update_sql
+
+
+# ---------------------------------------------------------------------------
+# #2304: re-queue embeddings after a cancelled or failed vector-store retry
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def subject_memories(db_session: AsyncSession, erasure_scenario):
+    """The target's memories in every embedding state, and a member's
+    ``success`` memory in the same context (a bystander)."""
+    from models.auth import Context
+    from models.memory import Memory
+    from services.resource_indexer import owns_resource_point, resource_point_id
+
+    target = erasure_scenario["target_user_id"]
+    context = Context(
+        id=uuid4(),
+        workspace_id=erasure_scenario["workspace_id"],
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=target,
+    )
+    db_session.add(context)
+    await db_session.flush()
+
+    def _memory(user_id: str, status: str, *, retries: int = 1, **extra) -> Memory:
+        return Memory(
+            id=uuid4(),
+            user_id=user_id,
+            workspace_id=erasure_scenario["workspace_id"],
+            context_id=context.id,
+            summary=f"{status} memory",
+            content="body",
+            type="note",
+            client="test",
+            embedding_status=status,
+            embedding_retry_count=retries,
+            embedding_error="earlier" if status == "failed" else None,
+            version=3,
+            **extra,
+        )
+
+    live = [_memory(target, "success") for _ in range(3)]
+    # an API row with an external id (its point is its own id)
+    external = _memory(target, "success", details={"resource_id": "crm"})
+    # a resource-indexer row: it owns the indexer's point, which the
+    # pipeline rebuilds from the row (#2065)
+    indexer = _memory(
+        target,
+        "success",
+        details={"resource_id": "crm", "doc_id": "doc-1", "version": 2},
+        summary_embedding_id=resource_point_id("crm", "doc-1", 2),
+    )
+    # a run in flight: fenced off and embedded again
+    in_flight = _memory(target, "processing", embedding_attempted_at=utcnow())
+    untouched = [
+        _memory(target, "pending"),
+        # stale with no retry budget left: the sweep's to fail
+        _memory(target, "processing", retries=3),
+        _memory(target, "failed"),
+        _memory(target, "success", deleted_at=utcnow()),  # a tombstone
+        _memory(erasure_scenario["other_user_id"], "success"),  # the bystander
+    ]
+    db_session.add_all([*live, external, indexer, in_flight, *untouched])
+    await db_session.commit()
+    await db_session.refresh(indexer)  # the generated resource columns
+    assert owns_resource_point(indexer)
+    return {
+        "requeued": {m.id for m in [*live, external, indexer, in_flight]},
+        "live": live[0].id,
+        "untouched": {m.id for m in untouched},
+    }
+
+
+def _without_status(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "embedding_status"}
+
+
+async def _assert_requeued(db_session: AsyncSession, before: dict, memories: dict) -> None:
+    """The subject's live ``success`` / ``processing`` rows are ``pending`` with nothing else
+    changed; every other memory row is byte-identical."""
+    after = await _table_snapshot(db_session, "memories")
+    assert after.keys() == before.keys()
+    for memory_id in memories["requeued"]:
+        assert before[memory_id]["embedding_status"] in ("success", "processing")
+        assert after[memory_id]["embedding_status"] == "pending"
+        assert _without_status(after[memory_id]) == _without_status(before[memory_id])
+    for memory_id in set(after) - memories["requeued"]:
+        assert after[memory_id] == before[memory_id]
+
+
+class TestEmbeddingsRequeuedAfterAVectorStoreRetry:
+    """#2304: step 1 may delete the subject's points before it fails; a
+    request that then ends without an erasure puts the subject's live
+    embedded memories back to ``pending``."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_after_a_failed_attempt_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.erasure import STATUS_CANCELLED
+        from services.account_erasure_service import requeue_subject_embeddings
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        retry = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]["retry"]
+        before = await _everything_but(db_session, request_id)
+
+        cancelled = await AccountErasureService(db_session).cancel_self_service(user_id=target)
+
+        assert cancelled.id == request_id
+        assert cancelled.status == STATUS_CANCELLED
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        got = row["deleted_data_summary"]["retry"]
+        assert got["requeued_at"].endswith("Z")
+        assert {k: v for k, v in got.items() if k != "requeued_at"} == {
+            **retry,
+            "embeddings_requeued": 6,
+        }
+        assert row["deleted_data_summary"] == {"retry": got}
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _user_exists(db_session, target)
+
+        # idempotent: nothing is success any more
+        assert await requeue_subject_embeddings(db_session, target) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_fourth_attempt_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        patched_external_stores,
+    ):
+        from models.erasure import STATUS_FAILED
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(
+            db_session,
+            erasure_scenario,
+            summary={"retry": {"attempts": 3, "step": "vector_store"}},
+        )
+        before = await _everything_but(db_session, request_id)
+
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"].startswith("vector_store_unavailable after 4 attempts")
+        retry = row["deleted_data_summary"]["retry"]
+        assert retry["attempts"] == 4
+        assert retry["embeddings_requeued"] == 6
+        assert retry["requeued_at"].endswith("Z")
+        # nothing erased: raw ids kept
+        assert (row["user_id"], row["initiated_by"]) == (target, target)
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _user_exists(db_session, target)
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_without_an_attempt_requeues_nothing(
+        self, db_session: AsyncSession, erasure_scenario, subject_memories
+    ):
+        from datetime import timedelta
+
+        from models.erasure import STATUS_CANCELLED, STATUS_COOLING_OFF
+
+        target = erasure_scenario["target_user_id"]
+        request = ErasureRequest(
+            user_id=target,
+            user_email_hash=sha256_hex(erasure_scenario["target_email"]),
+            initiated_by=target,
+            is_self_service=True,
+            reason_code="self_service",
+            status=STATUS_COOLING_OFF,
+            scheduled_for=utcnow() + timedelta(days=7),
+        )
+        db_session.add(request)
+        await db_session.commit()
+        request_id = request.id
+        before = await _table_snapshot(db_session, "memories")
+
+        await AccountErasureService(db_session).cancel_self_service(user_id=target)
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        assert row["deleted_data_summary"] is None
+        assert await _table_snapshot(db_session, "memories") == before
+
+    @pytest.mark.asyncio
+    async def test_a_held_row_ends_the_requeue_not_the_cancel(
+        self,
+        db_session: AsyncSession,
+        async_engine,
+        erasure_scenario,
+        subject_memories,
+        patched_external_stores,
+    ):
+        """A memory row another transaction holds: the batch gives up after
+        its lock timeout, the cancel stands, and nothing is recorded."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from models.erasure import STATUS_CANCELLED
+        from models.memory import Memory
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        with _vector_store_down():
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+        before = await _table_snapshot(db_session, "memories")
+
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        async with maker() as holder:
+            await holder.execute(
+                select(Memory.id).where(Memory.id == subject_memories["live"]).with_for_update()
+            )
+            with (
+                patch("services.account_erasure_service.logger") as log,
+                # the production wait is 5 s; the test needs only its error
+                patch(
+                    "services.account_erasure_service._REQUEUE_LOCK_TIMEOUT_SQL",
+                    text("SET LOCAL lock_timeout = '200ms'"),
+                ),
+            ):
+                cancelled = await AccountErasureService(db_session).cancel_self_service(
+                    user_id=target
+                )
+            await holder.rollback()
+
+        assert cancelled.status == STATUS_CANCELLED
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_CANCELLED
+        assert "embeddings_requeued" not in row["deleted_data_summary"]["retry"]
+        assert await _table_snapshot(db_session, "memories") == before
+        (failed,) = [
+            c
+            for c in log.error.call_args_list
+            if c.args and c.args[0] == "erasure_embeddings_requeue_failed"
+        ]
+        assert failed.kwargs["error_class"] == "DBAPIError"  # lock_timeout
+
+    @pytest.mark.asyncio
+    async def test_a_run_rescheduling_between_the_read_and_the_cancel_requeues(
+        self,
+        db_session: AsyncSession,
+        async_engine,
+        erasure_scenario,
+        subject_memories,
+        patched_external_stores,
+    ):
+        """The cancel read the request before any attempt; the hourly sweep
+        ran it with the store down before the cancel's compare-and-set. The
+        row the cancel moved has spent an attempt, so it re-queues."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from models.erasure import STATUS_CANCELLED
+
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        svc = AccountErasureService(db_session)
+        original = svc._find_active_request
+
+        async def read_then_sweep(user_id: str):
+            row = await original(user_id)
+            assert row is not None and row.deleted_data_summary is None
+            async with maker() as other:
+                with _vector_store_down():
+                    assert await AccountErasureService(other).sweep_pending_erasures() == 0
+            return row
+
+        with patch.object(svc, "_find_active_request", new=read_then_sweep):
+            cancelled = await svc.cancel_self_service(user_id=target)
+
+        assert cancelled.status == STATUS_CANCELLED
+        retry = (await _request_snapshot(db_session, request_id))["deleted_data_summary"]["retry"]
+        assert retry["attempts"] == 1
+        assert retry["embeddings_requeued"] == 6
+        rows = await _table_snapshot(db_session, "memories")
+        assert {rows[i]["embedding_status"] for i in subject_memories["requeued"]} == {"pending"}

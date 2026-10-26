@@ -1697,7 +1697,10 @@ v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks
 double-erasure chains, stores the right bound and repairs failed requests,
 see below; a run on v0.125.0 or later also pseudonymizes audit rows a failed
 audit-log step left, #2287 — run it once on v0.125.0 before the next
-erasure, whatever the earlier runs found; see
+erasure, whatever the earlier runs found; a run on v0.128.0 or later also
+rewrites the erased member's email / sub on other actors' audit rows that
+name them, #2298, and clears the IP and user agent on their own audit rows,
+#2345 — run it once on v0.128.0 too; see
 `docs/ops/erasure-runbook.md` §2.5). An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
 (the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
@@ -1785,7 +1788,9 @@ request like any request that ran (nothing is expected to change: the restore
 and strip ran in the Postgres step), and when the summary has no
 `details_payload_synced` key (the sweep's own patch was interrupted, or the
 row was closed before v0.128.0) it runs that patch once and records the counts
-(`would resync payloads <request id> <n> memory(ies)` in the plan). Not done
+(`would resync payloads <request id> <n> memory(ies)` in the plan). The same
+backstop covers any request marked `after_postgres_commit:` without that key,
+such as a run that failed inside its own payload step. Not done
 on this path: the `account_erasure` audit row and the completion email. The
 sweep decides from the `postgres` summary, not from the user lookup (#2302):
 if the member signed up again with the same identity before the sweep reached
@@ -1813,7 +1818,8 @@ the row gets the pseudonym derived from the account id (the value the
 erased-members set already used), its request IP and user agent cleared,
 `initiated_by` replaced when it was the member's own id (an admin's id stays)
 and `"pseudonymized": true` in its summary; its audit residue is handled by
-that pseudonym in the same transaction, and the vector payloads of memories an
+that pseudonym in the same transaction (with the #2298 / #2345 sweeps of
+other members' rows naming the member and of request metadata), and the vector payloads of memories an
 erasure restored under it (a run interrupted on v0.124.x ends up as such a
 row) are patched once after the commit. Status and completion time stay, and
 the account id is never printed.
@@ -1865,10 +1871,19 @@ hits the outage answers 503 `ERASURE-007` with `request_id` and
 do not retry the call (a second one answers 409 while the request waits), and
 the member cannot cancel it. A member whose self-service request is waiting
 can still cancel it on the account page; memories whose points were already
-deleted then stay out of search results until they are re-embedded (nothing
-re-queues them by itself; the same holds for a request that failed at this
-step before v0.125.0; the runbook's manual retry section shows how to
-re-queue them). A cancel that races the sweep's claim answers 409 and the
+deleted then stay out of search results until they are re-embedded. From
+v0.128.0 (#2304) the service re-queues them itself: when a request that
+already spent an attempt at this step is cancelled, or fails after its fourth
+attempt, every live memory the member authored that is embedded or being
+embedded goes back to `pending` (count and time in
+`deleted_data_summary.retry.embeddings_requeued` / `requeued_at`; one
+embedding call per memory, worked off by the embedding sweep at its usual
+rate, older rows first; a batch waits at most 5 seconds for a row lock, then
+the re-queue stops and logs `erasure_embeddings_requeue_failed`). Not
+covered: a request that failed at this step before v0.125.0, one cancelled by
+SQL, one whose vector delete succeeded but that then failed before the
+Postgres commit (a workspace-transfer error, say), and a re-queue that
+failed; the runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
 erasure runs. The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request

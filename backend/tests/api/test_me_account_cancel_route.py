@@ -101,6 +101,14 @@ def _reread(row: ErasureRequest | None) -> MagicMock:
     return result
 
 
+def _lost_cas() -> MagicMock:
+    """The cancel's compare-and-set result when it matched nothing: no
+    ``RETURNING`` row (#2304)."""
+    result = MagicMock(rowcount=0)
+    result.first.return_value = None
+    return result
+
+
 def _cancel(db: MagicMock, read: ErasureRequest):
     with patch.object(
         AccountErasureService, "_find_active_request", new=AsyncMock(return_value=read)
@@ -111,7 +119,7 @@ def _cancel(db: MagicMock, read: ErasureRequest):
 def _lost(reread_row: ErasureRequest | None, read: ErasureRequest | None = None):
     """The cancel read ``cooling_off``; its compare-and-set matched nothing."""
     read = read or _row()
-    db = _session(MagicMock(rowcount=0), _reread(reread_row))
+    db = _session(_lost_cas(), _reread(reread_row))
     return _cancel(db, read), db
 
 

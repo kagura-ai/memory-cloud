@@ -1005,7 +1005,10 @@ async def rotate_connector_kmc_key(
 
     Revokes the current key immediately, mints a replacement with a 365-day
     expiry, and bumps ``config_version`` so the worker re-fetches on its next
-    poll. The new plaintext key is returned exactly once.
+    poll. The new plaintext key is returned exactly once. It also mints a key,
+    under the workspace owner, for a connector whose key row is gone when no
+    other active key is linked to it, and mints the replacement under the
+    workspace owner when the key's owner is no longer a member (#2305).
 
     **No grace period (v1)**: coordinate rotation during a maintenance window
     or a brief pause in ai-worker activity; the old key is invalid as soon as
@@ -1043,6 +1046,10 @@ async def rotate_connector_kmc_key(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from exc
     except HTTPException:
+        raise
+    except MemoryCloudException:
+        # #2305: the heal's lock timeout is a retriable 503 (CONNECTOR-003).
+        await db.rollback()
         raise
     except Exception as exc:
         await db.rollback()

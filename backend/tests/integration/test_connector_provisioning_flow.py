@@ -5,13 +5,14 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+import pytest_asyncio
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.routes.resource_ingest import ingest_event, verify_resource_token
 from auth.api_keys import APIKeyManager
 from auth.workspace_roles import WorkspaceRole
-from models.auth import Workspace, WorkspaceMember
+from models.auth import User, Workspace, WorkspaceMember
 from models.resource import Resource, ResourceEvent, ResourceToken, WorkspaceConnector
 from models.schemas import ResourceEventRequest
 from services.connector_provisioning import ConnectorProvisioningService
@@ -59,6 +60,25 @@ async def _seed_workspace(
     db.add(member)
     await db.flush()
     return user_id, workspace
+
+
+async def _add_user(db: AsyncSession, user_id: str) -> None:
+    """A ``users`` row for ``user_id`` (a mint for the workspace owner
+    share-locks it, #2305)."""
+    from models.auth import User
+
+    db.add(
+        User(
+            email=f"{user_id}@example.com",
+            user_id=user_id,
+            name=user_id,
+            role="user",
+            is_initial_admin=False,
+            auth_method="oauth",
+            auth_provider="google",
+        )
+    )
+    await db.flush()
 
 
 class TestConnectorProvisioningDbFlow:
@@ -527,10 +547,67 @@ async def test_rotate_kmc_key_heals_an_unlinked_backing_row(db_session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_rotate_kmc_key_fails_when_the_backing_row_is_gone(db_session: AsyncSession):
-    """#1952: the backing row is matched by ``key_hash`` AND ``connector_id``;
-    a row deleted outside the service is the existing ``ValidationError``."""
+async def test_rotate_kmc_key_heals_a_connector_whose_key_row_is_gone(db_session: AsyncSession):
+    """#2305: the backing row was deleted (an account erasure before #2305)
+    and no active key is linked to the connector — nothing to duplicate, so
+    the replacement is minted under the workspace's owner."""
     from sqlalchemy import delete
+
+    from models.auth import APIKey
+    from utils.hashing import sha256_hex
+
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    await _add_user(db_session, owner_id)
+    admin_id = f"admin-{uuid4().hex}"
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
+    )
+    await db_session.flush()
+    service = ConnectorProvisioningService(db_session)
+    result = await service.provision_connector(
+        workspace_id=workspace.id,
+        user_id=admin_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db_session.flush()
+    connector = result.connector
+    version = connector.config_version
+    await db_session.execute(delete(APIKey).where(APIKey.connector_id == connector.id))
+
+    with patch("services.connector_provisioning.logger") as logger:
+        rotated = await service.rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=admin_id
+        )
+    await db_session.flush()
+
+    assert rotated.key_owner_user_id == owner_id
+    assert rotated.config_version == version + 1
+    assert connector.config_version == version + 1
+    (row,) = (
+        (await db_session.execute(select(APIKey).where(APIKey.connector_id == connector.id)))
+        .scalars()
+        .all()
+    )
+    assert row.user_id == owner_id and row.revoked_at is None
+    assert row.name == f"connector:{connector.id}"
+    assert connector.get_kmc_api_key() == rotated.plaintext_kmc_api_key
+    assert row.key_hash == sha256_hex(rotated.plaintext_kmc_api_key)
+    assert connector.kmc_api_key_expires_at == row.expires_at
+    event, fields = logger.info.call_args.args[0], logger.info.call_args.kwargs
+    assert event == "connector_kmc_key_healed"
+    assert fields["key_owner"] == owner_id and fields["rotated_by"] == admin_id
+    assert rotated.plaintext_kmc_api_key not in repr(logger.info.call_args)
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_fails_when_another_linked_key_is_live(db_session: AsyncSession):
+    """#1952: the backing row is matched by ``key_hash`` AND ``connector_id``;
+    a stored key that matches no active row while another active key is
+    linked to the connector is drift — the existing ``ValidationError``, and
+    nothing is minted (#2305 heals only when no linked key is live)."""
+    from sqlalchemy import update
 
     from models.auth import APIKey
 
@@ -544,12 +621,310 @@ async def test_rotate_kmc_key_fails_when_the_backing_row_is_gone(db_session: Asy
         auto_create_context_name=f"slack-{uuid4().hex[:8]}",
     )
     await db_session.flush()
-    await db_session.execute(delete(APIKey).where(APIKey.connector_id == result.connector.id))
+    connector_id = result.connector.id
+    await db_session.execute(
+        update(APIKey)
+        .where(APIKey.connector_id == connector_id)
+        .values(key_hash="0" * 64)
+        .execution_options(synchronize_session="fetch")
+    )
 
     with pytest.raises(ValidationError, match="matches no active API key"):
         await service.rotate_kmc_key(
-            workspace_id=workspace.id, connector_id=result.connector.id, user_id=user_id
+            workspace_id=workspace.id, connector_id=connector_id, user_id=user_id
         )
+    count = (
+        await db_session.execute(
+            select(func.count(APIKey.id)).where(APIKey.connector_id == connector_id)
+        )
+    ).scalar_one()
+    assert count == 1
+
+
+async def _provision_with_key(db: AsyncSession, workspace: Workspace, user_id: str):
+    result = await ConnectorProvisioningService(db).provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db.flush()
+    return result.connector
+
+
+async def _connector_key_count(db: AsyncSession, workspace_id) -> int:
+    from models.auth import APIKey
+
+    return (
+        await db.execute(select(func.count(APIKey.id)).where(APIKey.workspace_id == workspace_id))
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_does_not_heal_a_revoked_key(db_session: AsyncSession):
+    """#2305 review: a stored key whose row was revoked (someone revoked the
+    credential) is not "gone" — no new key is minted, the 422 stays."""
+    from sqlalchemy import update
+
+    from models.auth import APIKey
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    connector = await _provision_with_key(db_session, workspace, user_id)
+    await db_session.execute(
+        update(APIKey)
+        .where(APIKey.connector_id == connector.id)
+        .values(revoked_at=func.now())
+        .execution_options(synchronize_session="fetch")
+    )
+
+    with pytest.raises(ValidationError, match="matches no active API key"):
+        await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=user_id
+        )
+    assert await _connector_key_count(db_session, workspace.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_does_not_heal_past_an_unlinked_key_of_its_name(
+    db_session: AsyncSession,
+):
+    """#2305 review: an active unlinked key named after the connector (a
+    legacy row whose hash is not the stored key's) is drift — the 422, not
+    create_key's name clash as a 500."""
+    from sqlalchemy import update
+
+    from models.auth import APIKey
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    connector = await _provision_with_key(db_session, workspace, user_id)
+    await db_session.execute(
+        update(APIKey)
+        .where(APIKey.connector_id == connector.id)
+        .values(connector_id=None, key_hash="1" * 64)
+        .execution_options(synchronize_session="fetch")
+    )
+
+    with pytest.raises(ValidationError, match="matches no active API key"):
+        await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=user_id
+        )
+    assert await _connector_key_count(db_session, workspace.id) == 1
+
+
+@pytest_asyncio.fixture
+async def committed_connector(async_engine):
+    """A committed workspace + connector with its key, for two-session tests;
+    removed afterwards (the database outlives a test)."""
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as db:
+        owner_id, workspace = await _seed_workspace(db, plan_name="promax")
+        await _add_user(db, owner_id)
+        admin_id = f"admin-{uuid4().hex}"
+        db.add(
+            WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
+        )
+        await db.flush()
+        connector = await _provision_with_key(db, workspace, admin_id)
+        await db.commit()
+        yield SimpleNamespace(
+            maker=maker,
+            owner_id=owner_id,
+            admin_id=admin_id,
+            workspace_id=workspace.id,
+            connector_id=connector.id,
+        )
+        await db.rollback()
+        await db.execute(delete(Workspace).where(Workspace.id == workspace.id))
+        await db.execute(delete(User).where(User.user_id == owner_id))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_waits_for_a_concurrent_reown(committed_connector):
+    """#2305 review: a rotation racing the erasure's re-own waits on the key
+    row and mints under the owner it finds after that commit, never under
+    the erased admin."""
+    import asyncio
+
+    from sqlalchemy import update
+
+    from models.auth import APIKey
+
+    c = committed_connector
+    async with c.maker() as erasure, c.maker() as rotation:
+        await erasure.execute(
+            update(APIKey)
+            .where(APIKey.connector_id == c.connector_id)
+            .values(user_id=c.owner_id)
+            .execution_options(synchronize_session=False)
+        )
+        task = asyncio.create_task(
+            ConnectorProvisioningService(rotation).rotate_kmc_key(
+                workspace_id=c.workspace_id, connector_id=c.connector_id, user_id=c.admin_id
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not task.done()
+        await erasure.commit()
+        rotated = await asyncio.wait_for(task, timeout=10)
+        await rotation.commit()
+
+    assert rotated.key_owner_user_id == c.owner_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_heals_mint_one_key(committed_connector):
+    """#2305 review: two heals of one connector queue on the heal lock; the
+    second finds the first's key and mints nothing."""
+    import asyncio
+
+    from models.auth import APIKey
+
+    c = committed_connector
+    async with c.maker() as db:
+        await db.execute(delete(APIKey).where(APIKey.connector_id == c.connector_id))
+        await db.commit()
+
+    async with c.maker() as first, c.maker() as second:
+        rotated = await ConnectorProvisioningService(first).rotate_kmc_key(
+            workspace_id=c.workspace_id, connector_id=c.connector_id, user_id=c.admin_id
+        )
+        task = asyncio.create_task(
+            ConnectorProvisioningService(second).rotate_kmc_key(
+                workspace_id=c.workspace_id, connector_id=c.connector_id, user_id=c.admin_id
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not task.done()
+        await first.commit()
+        with pytest.raises(ValidationError, match="matches no active API key"):
+            await asyncio.wait_for(task, timeout=10)
+        await second.rollback()
+
+    async with c.maker() as db:
+        rows = (
+            (await db.execute(select(APIKey).where(APIKey.connector_id == c.connector_id)))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].user_id == c.owner_id
+    assert rotated.key_owner_user_id == c.owner_id
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_mints_for_the_owner_when_the_key_owner_left(
+    db_session: AsyncSession,
+):
+    """#2305 review: the key's owner is no longer a member (removed, or an
+    erased subject a racing rotation minted under) — the old key is revoked
+    and the replacement goes to the workspace's owner, not the non-member."""
+    from models.auth import APIKey
+
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    await _add_user(db_session, owner_id)
+    admin_id = f"admin-{uuid4().hex}"
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
+    )
+    await db_session.flush()
+    connector = await _provision_with_key(db_session, workspace, admin_id)
+    await db_session.execute(
+        delete(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.user_id == admin_id
+        )
+    )
+    await db_session.flush()
+
+    with patch("services.connector_provisioning.logger") as logger:
+        rotated = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=owner_id
+        )
+    await db_session.flush()
+
+    assert rotated.key_owner_user_id == owner_id
+    rows = (
+        (
+            await db_session.execute(
+                select(APIKey).where(APIKey.connector_id == connector.id).order_by(APIKey.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    old, new = rows
+    assert old.user_id == admin_id and old.revoked_at is not None
+    assert new.user_id == owner_id and new.revoked_at is None
+    assert logger.info.call_args.args[0] == "connector_kmc_key_reowned_on_rotate"
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_keeps_a_members_key_with_them(db_session: AsyncSession):
+    """#2305 review: a key owner who is still a member keeps the replacement
+    (the #1752 contract), whoever rotates."""
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    admin_id = f"admin-{uuid4().hex}"
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
+    )
+    await db_session.flush()
+    connector = await _provision_with_key(db_session, workspace, admin_id)
+
+    rotated = await ConnectorProvisioningService(db_session).rotate_kmc_key(
+        workspace_id=workspace.id, connector_id=connector.id, user_id=owner_id
+    )
+
+    assert rotated.key_owner_user_id == admin_id
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_heal_refuses_an_owner_without_a_user_row(
+    db_session: AsyncSession,
+):
+    """#2305 review: the owner's ``users`` row is share-locked before the
+    mint; a row gone (the owner's erasure committed while the heal waited) is
+    a retriable refusal, never a key under the erased owner."""
+    from models.auth import APIKey
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
+    connector = await _provision_with_key(db_session, workspace, user_id)
+    await db_session.execute(delete(APIKey).where(APIKey.connector_id == connector.id))
+
+    with pytest.raises(ValidationError, match="being erased"):
+        await ConnectorProvisioningService(db_session).rotate_kmc_key(
+            workspace_id=workspace.id, connector_id=connector.id, user_id=user_id
+        )
+    assert await _connector_key_count(db_session, workspace.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_heal_lock_times_out_as_a_retriable_503(committed_connector):
+    """#2305 review: the heal's advisory lock waits at most 5 s (the seat-lock
+    pattern) and answers a retriable 503 ``CONNECTOR-003``."""
+    from sqlalchemy import text
+
+    from models.auth import APIKey
+    from utils.exceptions import MemoryCloudException
+
+    c = committed_connector
+    async with c.maker() as db:
+        await db.execute(delete(APIKey).where(APIKey.connector_id == c.connector_id))
+        await db.commit()
+
+    async with c.maker() as holder, c.maker() as rotation:
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"connector_kmc_key_heal:{c.connector_id}"},
+        )
+        with pytest.raises(MemoryCloudException) as caught:
+            await ConnectorProvisioningService(rotation).rotate_kmc_key(
+                workspace_id=c.workspace_id, connector_id=c.connector_id, user_id=c.admin_id
+            )
+        await holder.rollback()
+
+    assert caught.value.status_code == 503
+    assert caught.value.error_code == "CONNECTOR-003"
 
 
 @pytest.mark.asyncio
