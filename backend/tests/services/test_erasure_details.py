@@ -636,6 +636,10 @@ async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
     # user_email: one WHEN per email; resource: one per email plus the sub
     assert sql.count("WHEN (audit_logs.user_email =") == 2
     assert sql.count("WHEN (audit_logs.resource =") == 3
+    # the subject acted on the user_email rows: their IP / UA go (#2345)
+    assert "ip_address=CASE WHEN (audit_logs.user_email IN" in sql
+    assert "user_agent=CASE WHEN (audit_logs.user_email IN" in sql
+    assert "THEN NULL ELSE audit_logs.ip_address END" in sql
     values = list(params.values())
     assert values.index("longer@example.com") < values.index("a@x.io")
     for email in ("a@x.io", "longer@example.com"):
@@ -650,6 +654,7 @@ async def test_mentions_by_sub_alone_leave_user_email() -> None:
     sql, params = await _mentions_update([], ["raw-sub"])
 
     assert "user_email" not in sql
+    assert "ip_address" not in sql and "user_agent" not in sql
     assert "user:raw-sub" in _flat(params)
 
 

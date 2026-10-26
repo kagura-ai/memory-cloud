@@ -75,6 +75,7 @@ from sqlalchemy import (
     case,
     exists,
     func,
+    null,
     or_,
     select,
     type_coerce,
@@ -302,16 +303,17 @@ async def pseudonymize_audit_mentions(
     """Pseudonymize the subject's identifiers on other actors' audit rows (#2298).
 
     The rows are kept (legal retention) and so is everything else on them —
-    the acting member's own ``user_id`` / ``user_email`` (accountability
-    evidence), ``action``, the hashes, ``ip_address`` / ``user_agent``.
-    Exact values only, never a substring of another actor's text:
+    ``user_id``, ``action``, the hashes. Exact values only, never a
+    substring of another actor's text:
 
     - ``user_email`` equal to one of ``emails`` (the subject acting as an
       admin on someone else's row: ``user_id`` is the target's there) →
-      ``erasure_pseudonym(email)``;
+      ``erasure_pseudonym(email)``; the subject was the actor, so the row's
+      ``ip_address`` / ``user_agent`` are theirs and are cleared (#2345);
     - ``resource`` equal to ``user:{email}`` or ``user:{sub}`` (an admin
       acting on the subject) → ``user:`` + the pseudonym — 69 characters,
-      within the column.
+      within the column. The acting admin's ``user_id`` / ``user_email``
+      and request metadata stay (accountability evidence).
 
     The pseudonyms are the ones ``pseudonymize_audit_logs`` writes on the
     subject's own rows, so the two still correlate. No ``user_id``
@@ -331,6 +333,10 @@ async def pseudonymize_audit_mentions(
             *((AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered),
             else_=AuditLog.user_email,
         )
+        # every SET reads the row's old values: ``user_email`` before its rewrite
+        acted = AuditLog.user_email.in_(ordered)
+        for column in (AuditLog.ip_address, AuditLog.user_agent):
+            values[column.key] = case((acted, null()), else_=column)
     values["resource"] = case(
         *(
             (AuditLog.resource == f"user:{v}", f"user:{erasure_pseudonym(v)}")

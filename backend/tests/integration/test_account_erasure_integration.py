@@ -197,10 +197,11 @@ async def other_actors_audit(db_session: AsyncSession, erasure_scenario):
     """Other actors' audit rows around the target (#2287, #2298), in order:
 
     0. the other member acting on the target (``resource`` names the
-       target's email): only ``resource`` changes, to the email pseudonym;
+       target's email): only ``resource`` changes, to the email pseudonym —
+       the acting member's IP stays;
     1. the target acting as an admin on the other member (``user_email`` is
-       the target's, ``user_id`` and ``resource`` the other's): only
-       ``user_email`` changes — the row's IP stays, it is another actor's;
+       the target's, ``user_id`` and ``resource`` the other's): ``user_email``
+       changes and the target's IP / user agent are cleared;
     2. a third account acting on itself, with an IP: byte-identical;
     3. a look-alike ``resource`` (the target's email plus a suffix):
        byte-identical — exact values only, never a substring.
@@ -322,11 +323,14 @@ class TestAdminForceEraseHappyPath:
             **others_before[about],
             "resource": f"user:{email_pseudonym}",
         }
+        # the target was the actor there: their IP / UA go too (#2345)
         assert others_after[by_target] == {
             **others_before[by_target],
             "user_email": email_pseudonym,
+            "ip_address": None,
+            "user_agent": None,
         }
-        assert others_after[by_target]["ip_address"] == "198.51.100.21"
+        assert others_after[about]["ip_address"] == "198.51.100.20"  # the admin's
         for row_id in (third, lookalike):
             assert others_after[row_id] == others_before[row_id]
 
