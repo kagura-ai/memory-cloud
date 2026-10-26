@@ -332,11 +332,13 @@ class TestRollbackApplyChecksThePointAgain:
             summary_embedding_id=row_point,
         )
         with (
-            patch.object(sr, "_share_lock_rows", AsyncMock(return_value={memory_id: row})),
-            patch.object(sr, "_end_transaction", AsyncMock()),
+            patch(
+                "services.payload_sync.share_lock_rows",
+                AsyncMock(return_value={memory_id: row}),
+            ),
             patch("db.qdrant.update_memory_payload_in_qdrant", new_callable=AsyncMock) as write,
         ):
-            await sr._apply_payload_syncs([sync], MagicMock())
+            await sr._apply_payload_syncs([sync], MagicMock(commit=AsyncMock()))
         return write
 
     async def test_the_resolved_point_is_patched(self):
