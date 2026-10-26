@@ -1697,7 +1697,10 @@ v0.113.0 through v0.123.x (do not run it on v0.123.0: the v0.124.0 run walks
 double-erasure chains, stores the right bound and repairs failed requests,
 see below; a run on v0.125.0 or later also pseudonymizes audit rows a failed
 audit-log step left, #2287 — run it once on v0.125.0 before the next
-erasure, whatever the earlier runs found; see
+erasure, whatever the earlier runs found; a run on v0.128.0 or later also
+rewrites the erased member's email / sub on other actors' audit rows that
+name them, #2298, and clears the IP and user agent on their own audit rows,
+#2345 — run it once on v0.128.0 too; see
 `docs/ops/erasure-runbook.md` §2.5). An erasure on those versions could leave the erased
 member's `details` on memories other members authored: in the revision log
 (the prior of the next `details` edit after theirs, #2235, fixed in v0.121.0;
