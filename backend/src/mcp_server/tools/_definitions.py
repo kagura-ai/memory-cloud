@@ -1041,8 +1041,8 @@ Returns: {status, message, updated_fields, context_{id, name, display_name, is_p
                         "type": "string",
                         "description": (
                             "Name under which resource-token holders push data into this context "
-                            "through Kagura's own ingestion API: lowercase alphanumerics and underscores "
-                            "(e.g. 'product_feed'), unique on this server. Setting it "
+                            "through Kagura's own ingestion API: lowercase alphanumerics, hyphens and "
+                            "underscores (e.g. 'product_feed'), unique on this server. Setting it "
                             "makes no outbound call. Changing it revokes the resource tokens you "
                             "issued for the old slug."
                         ),
@@ -1330,7 +1330,7 @@ Returns: {status, message, context_id, context_name, resource_id, token, token_i
                     },
                     "resource_id": {
                         "type": "string",
-                        "description": "Resource identifier, unique in the workspace: lowercase alphanumerics, hyphens, underscores; max 255 chars, e.g. 'ec_products'.",
+                        "description": "Resource identifier, unique on this server (a slug another workspace's context uses also conflicts): lowercase alphanumerics, hyphens, underscores; max 255 chars, e.g. 'ec_products'.",
                     },
                     "display_name": {
                         "type": "string",

@@ -1082,6 +1082,15 @@ class TestSetupResourceHappyPath:
             )
         data = _json_of(result)
         assert data["error"] == "resource_id_conflict"
+        # #2284: ``ux_contexts_resource_id_active`` is server-wide, so the
+        # pre-check is not scoped to the caller's workspace and says so.
+        assert "on this server" in data["message"]
+        assert "another workspace" in data["message"]
+        dup_sql = str(
+            mock_db.execute.call_args_list[1].args[0].compile(dialect=postgresql.dialect())
+        )
+        assert "contexts.resource_id" in dup_sql
+        assert "contexts.workspace_id" not in dup_sql
 
 
 class TestDatabaseSessionUnavailable:

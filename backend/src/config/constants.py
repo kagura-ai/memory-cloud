@@ -4,6 +4,7 @@ Issue #273: Extract magic numbers to centralized configuration for maintainabili
 All constants are grouped by category with clear documentation.
 """
 
+import re
 from datetime import timedelta
 from typing import Literal, get_args
 
@@ -56,6 +57,22 @@ CONTEXT_USAGE_GUIDE_MAX_LENGTH = 2000
 # before the cap is served as a preview of this length (description_truncated)
 # and may be saved back unchanged.
 WORKSPACE_DESCRIPTION_MAX_LENGTH = 1000
+
+# ============================================================================
+# Resource ID format (#2284)
+# ============================================================================
+# The one ``resource_id`` slug format, shared by the REST context update
+# (ContextUpdate + ContextService.update_context), the MCP tools
+# (update_context, setup_resource, setup_connector, ingest/stat tools) and the
+# connector provisioning service. Hyphens are allowed: the MCP tools and the
+# connector flow have always accepted them, so stored slugs may contain them,
+# and a slug is only ever a URL path segment, a Redis key part or a uuid5 seed
+# — none of which treats "-" specially. Python callers use
+# ``RESOURCE_ID_RE.fullmatch`` (``match`` with ``$`` would let a trailing
+# newline through); Pydantic takes ``RESOURCE_ID_PATTERN`` as is.
+RESOURCE_ID_PATTERN = r"^[a-z0-9_-]+$"
+RESOURCE_ID_RE = re.compile(RESOURCE_ID_PATTERN)
+RESOURCE_ID_MAX_LENGTH = 255
 
 # ============================================================================
 # Memory Content Limits

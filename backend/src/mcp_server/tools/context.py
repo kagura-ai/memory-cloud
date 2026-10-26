@@ -11,6 +11,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from config.constants import RESOURCE_ID_MAX_LENGTH, RESOURCE_ID_RE
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
@@ -581,15 +582,22 @@ async def _apply_resource_id(
     Returns:
         An error response to send instead of continuing, or ``None`` on success.
     """
-    import re as _re
+    old_rid = context.resource_id
+    if rid == old_rid:
+        # #2284: re-sending the stored slug is a no-op and never re-validated.
+        return None
 
-    if not _re.match(r"^[a-z0-9_-]+$", rid) or len(rid) > 255:
+    if (
+        not isinstance(rid, str)
+        or len(rid) > RESOURCE_ID_MAX_LENGTH
+        or not RESOURCE_ID_RE.fullmatch(rid)
+    ):
         return _error_response(
             "invalid_resource_id",
-            "resource_id must be lowercase alphanumeric, underscores, and hyphens only (max 255 chars).",
+            "resource_id must be lowercase alphanumeric, underscores, and hyphens only "
+            f"(max {RESOURCE_ID_MAX_LENGTH} chars).",
         )
 
-    old_rid = context.resource_id
     if old_rid and old_rid != rid:
         from auth.resource_tokens import ResourceTokenManager
 

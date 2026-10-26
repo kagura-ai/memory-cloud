@@ -312,7 +312,7 @@ Atomically create a public context + resource token for an ingestion pipeline (o
 
 - **Required**:
   - `name` — string (lowercase alphanumeric/hyphen/underscore, max 100 chars — prose-only)
-  - `resource_id` — string (lowercase alphanumeric/hyphen/underscore, max 255 chars, workspace-unique)
+  - `resource_id` — string (lowercase alphanumeric/hyphen/underscore, max 255 chars, unique on the server — the context's `resource_id` has a server-wide unique index, so another workspace's slug conflicts too)
 - **Optional**:
   - `display_name` — string
   - `description` — string (token description)

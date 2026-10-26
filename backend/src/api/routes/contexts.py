@@ -25,6 +25,8 @@ from config.constants import (
     CONTEXT_DESCRIPTION_MAX_LENGTH,
     CONTEXT_SUMMARY_MAX_LENGTH,
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+    RESOURCE_ID_MAX_LENGTH,
+    RESOURCE_ID_PATTERN,
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -190,8 +192,8 @@ class ContextUpdate(BaseModel):
     )
     resource_id: str | None = Field(
         None,
-        max_length=255,
-        pattern=r"^[a-z0-9_-]+$",
+        max_length=RESOURCE_ID_MAX_LENGTH,
+        pattern=RESOURCE_ID_PATTERN,
         description="Resource ID for contexts (lowercase alphanumeric, underscore, and hyphen)",
     )
     is_locked: bool | None = Field(
