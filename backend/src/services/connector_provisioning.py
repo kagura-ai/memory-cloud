@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1369,7 +1369,8 @@ class ConnectorProvisioningService:
             NotFoundException: if no matching connector exists in workspace.
             ValidationError: if the connector has no KMC key to rotate
                 (registration flow was not completed), or if its stored key
-                matches no active row while another active key is linked to it.
+                matches no active row while that row survives revoked or
+                another active key is linked to the connector or named after it.
         """
         from auth.api_keys import APIKeyManager
         from models.auth import APIKey
@@ -1403,32 +1404,57 @@ class ConnectorProvisioningService:
         # ran (old code still serving during a rollout) is the connector's own
         # stored key by its hash; rotating it revokes it and the replacement
         # is linked, so rotation also heals that row.
+        # #2305: FOR UPDATE, re-read — an account erasure hands the subject's
+        # connector keys to the workspace owner; a rotation racing it waits
+        # for that commit and then mints under the row's owner as it is now,
+        # never under the erased subject.
         old_key_result = await self.db.execute(
-            select(APIKey).where(
+            select(APIKey)
+            .where(
                 APIKey.workspace_id == workspace_id,
                 or_(APIKey.connector_id == connector_id, APIKey.connector_id.is_(None)),
                 APIKey.key_hash == sha256_hex(current_key),
                 APIKey.revoked_at.is_(None),
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         old_key = old_key_result.scalar_one_or_none()
         healed = False
         if old_key is None:
-            # #2305: the stored key's row is gone. When no active key is linked
-            # to this connector at all (the row was deleted — by an account
-            # erasure before #2305, or outside the service), there is nothing
-            # to duplicate: mint a replacement under the workspace's owner,
-            # the one member every workspace has. When another active linked
-            # key exists the connector row and api_keys disagree (Fernet
-            # secret rotated, DB drift): fail with a clear diagnostic rather
-            # than mint a second key or let create_key surface an opaque 500.
-            linked_result = await self.db.execute(
+            # #2305: the stored key's row is gone. When it is gone for good (no
+            # row has its hash: deleted by an account erasure before #2305, or
+            # outside the service) and no active key is linked to this
+            # connector or carries its name, there is nothing to duplicate:
+            # mint a replacement under the workspace's owner, the one member
+            # every workspace has. A revoked row (someone revoked this
+            # credential) or another active key (Fernet secret rotated, DB
+            # drift) is the diagnostic below, never a new key — and never
+            # create_key's opaque name clash. Concurrent heals of one
+            # connector queue on a transaction lock, so the second sees the
+            # first's key and stops here.
+            await self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"connector_kmc_key_heal:{connector_id}"},
+            )
+            blocking_result = await self.db.execute(
                 select(APIKey.id).where(
-                    APIKey.connector_id == connector_id,
-                    APIKey.revoked_at.is_(None),
+                    or_(
+                        APIKey.key_hash == sha256_hex(current_key),
+                        and_(
+                            APIKey.revoked_at.is_(None),
+                            or_(
+                                APIKey.connector_id == connector_id,
+                                and_(
+                                    APIKey.workspace_id == workspace_id,
+                                    APIKey.name == connector_key_name(connector_id),
+                                ),
+                            ),
+                        ),
+                    )
                 )
             )
-            if linked_result.first() is not None:
+            if blocking_result.first() is not None:
                 raise ValidationError(
                     "Connector's stored KMC key matches no active API key; "
                     "re-register the connector to mint a fresh key"
