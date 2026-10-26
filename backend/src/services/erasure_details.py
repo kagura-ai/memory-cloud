@@ -201,6 +201,8 @@ async def pseudonymize_audit_logs(
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
+    - ``ip_address`` and ``user_agent`` are cleared (#2345): request metadata
+      of the subject, like the request row's own, which is cleared too.
 
     The live erasure passes the subject's one email. The re-run passes every
     email it recovered for the account (one per request of it), or none:
@@ -218,7 +220,7 @@ async def pseudonymize_audit_logs(
         The rowcount.
     """
     user_pseudonym = erasure_pseudonym(user_id)
-    values: dict[str, Any] = {"user_id": user_pseudonym}
+    values: dict[str, Any] = {"user_id": user_pseudonym, "ip_address": None, "user_agent": None}
     resource: ColumnElement[str] = AuditLog.resource.expression
     pseudonyms = {
         email: erasure_pseudonym(email) for email in sorted(set(emails), key=lambda e: (-len(e), e))

@@ -533,6 +533,8 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
     assert sha256_hex("a@example.com", salt="salt") in params.values()
     assert "EXISTS" not in sql  # the live erasure: the user row is still there
+    # #2345: the subject's request metadata goes too
+    assert params["ip_address"] is None and params["user_agent"] is None
 
 
 async def test_without_an_email_only_the_sub_is_replaced() -> None:
@@ -541,6 +543,7 @@ async def test_without_an_email_only_the_sub_is_replaced() -> None:
     assert sql.count("replace(") == 1
     assert "user_email" not in sql
     assert _subs(params) == {"raw-sub"}
+    assert params["ip_address"] is None and params["user_agent"] is None
 
 
 async def test_every_email_given_is_replaced_the_longest_first() -> None:
@@ -566,7 +569,8 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
     """The ``NOT EXISTS`` reads ``users`` alone, correlated to the audit row
     being matched — a ``FROM users, audit_logs`` cross join would make the
     re-run skip every row as soon as any live user had an audit row."""
-    sql, _ = await _audit_update([], orphaned_only=True)
+    sql, params = await _audit_update([], orphaned_only=True)
+    assert params["ip_address"] is None and params["user_agent"] is None
 
     # in the locking sub-select and in the UPDATE's own WHERE
     assert sql.count("NOT (EXISTS (SELECT") == 2

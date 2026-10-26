@@ -2230,23 +2230,25 @@ class AccountErasureService:
     ) -> None:
         """Append the canonical `account_erasure` audit row, fully pseudonymized.
 
-        This row is born AFTER the bulk pseudonymize step (Step 5) ran, so
-        we cannot rely on a later sweep to scrub it. Inline pseudonymization
-        guarantees no plaintext email or user_id ever lands in audit_logs
-        for this event — required for GDPR Art.5(1)(c) compliance.
+        This row is born AFTER the audit-log pseudonymize step ran (inside the
+        Postgres step), so we cannot rely on a later sweep to scrub it. Inline
+        pseudonymization guarantees no plaintext email or user_id ever lands
+        in audit_logs for this event — required for GDPR Art.5(1)(c)
+        compliance. The row carries no ``ip_address`` / ``user_agent``
+        (#2345): the request row clears both once the subject is erased, the
+        admin-initiated case included, and this row follows it.
         """
         # #2288: the same derivation as every other pseudonym of the subject
         user_pseudonym = erasure_pseudonym(target.user_id)
         email_pseudonym = erasure_pseudonym(target.email)
-        # Self-service `initiated_by` IS the subject's raw user_id (the
-        # user clicked their own delete button). Storing it verbatim in
-        # audit_logs.user_metadata would re-introduce a stable plaintext
-        # identifier for the erased user — a regression of the
-        # pseudonymization invariant the rest of this row enforces.
-        # Admin path `initiated_by` is the admin's user_id (NOT the
-        # erased subject), which is legitimate audit-trail information
-        # and stays plaintext.
-        initiated_by_value = user_pseudonym if request.is_self_service else request.initiated_by
+        # #2345: the request row's rule (``pseudonymized_request_values``):
+        # `initiated_by` is the pseudonym iff it is the subject's own sub —
+        # decided by comparing with the subject, not by `is_self_service`
+        # (an admin request the subject started themselves is the subject's
+        # sub too). Another admin's id is audit-trail evidence and stays.
+        initiated_by_value = (
+            user_pseudonym if request.initiated_by == request.user_id else request.initiated_by
+        )
         self.db.add(
             AuditLog(
                 user_email=email_pseudonym,
@@ -2260,8 +2262,6 @@ class AccountErasureService:
                     "reason_code": request.reason_code,
                     "deleted_data_summary": summary,
                 },
-                ip_address=request.ip_address,
-                user_agent=request.user_agent,
             )
         )
         await self.db.commit()

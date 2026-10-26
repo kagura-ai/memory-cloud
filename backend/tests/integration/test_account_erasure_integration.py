@@ -42,6 +42,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService, _audit_salt
+from services.erasure_details import erasure_pseudonym
 from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
@@ -118,6 +119,9 @@ async def erasure_scenario(db_session: AsyncSession):
         resource=f"user:{target_email}",
         old_value_hash="user",
         new_value_hash="admin",
+        # #2345: the subject's request metadata, cleared by the erasure
+        ip_address="203.0.113.5",
+        user_agent="ua",
     )
     db_session.add(prior_audit)
     await db_session.commit()
@@ -270,6 +274,8 @@ class TestAdminForceEraseHappyPath:
             initiator_user_id="admin-runner",
             reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
             reason_detail="integration test",
+            ip_address="203.0.113.9",
+            user_agent="agent",
         )
 
         # The erasure_requests row reached terminal complete with a summary.
@@ -320,6 +326,8 @@ class TestAdminForceEraseHappyPath:
         # the legal-retention table (Copilot loop 3 finding).
         assert target_email not in (prior.resource or "")
         assert target_user_id not in (prior.resource or "")
+        # #2345: the subject's IP / user agent leave their own rows
+        assert (prior.ip_address, prior.user_agent) == (None, None)
 
         # The new "account_erasure" audit row is also pseudonymized at
         # insert — guards against the regression PR-review caught
@@ -340,11 +348,47 @@ class TestAdminForceEraseHappyPath:
         # so it stays plaintext — the assertion below uses target_user_id,
         # which would only appear if self-service had leaked it.
         assert new_audit.user_metadata is not None
-        assert new_audit.user_metadata.get("initiated_by") != target_user_id
+        assert new_audit.user_metadata.get("initiated_by") == "admin-runner"
         # And no plaintext email/user_id anywhere else in user_metadata.
         metadata_repr = repr(new_audit.user_metadata)
         assert target_email not in metadata_repr
         assert target_user_id not in metadata_repr
+        # #2345: no request metadata on the row, the admin's included (the
+        # request row clears both too)
+        assert (new_audit.ip_address, new_audit.user_agent) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_self_initiated_admin_request_pseudonymizes_initiated_by(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        """#2345: ``initiated_by`` equal to the subject is pseudonymized on the
+        audit row like on the request row, though ``is_self_service`` is
+        False (the admin route refuses this; the service does not)."""
+        target_user_id = erasure_scenario["target_user_id"]
+
+        request = await AccountErasureService(db_session).admin_force_erase(
+            target_user_id=target_user_id,
+            initiator_user_id=target_user_id,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test (#2345)",
+            ip_address="203.0.113.9",
+            user_agent="agent",
+        )
+
+        pseudonym = erasure_pseudonym(target_user_id)
+        assert (request.user_id, request.initiated_by) == (pseudonym, pseudonym)
+        audit = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "account_erasure",
+                    AuditLog.user_metadata["request_id"].as_string() == str(request.id),
+                )
+            )
+        ).scalar_one()
+        assert audit.user_metadata["is_self_service"] is False
+        assert audit.user_metadata["initiated_by"] == pseudonym
+        assert (audit.ip_address, audit.user_agent) == (None, None)
+        assert target_user_id not in repr(audit.user_metadata)
 
 
 class TestAuditLogFailureRollsThePostgresStepBack:
