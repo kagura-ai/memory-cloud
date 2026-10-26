@@ -33,6 +33,10 @@ past erasures by pseudonym (#2243) share one definition:
 - ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
   own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
   and by the re-run for rows an erasure on v0.124.x or before left behind.
+- ``erasure_pseudonym(value)`` and ``pseudonymized_request_values(account_id,
+  initiated_by)`` (#2288) — the one salted pseudonym, and the values every
+  writer of an erasure request row sets once its subject is erased (the
+  live erasure's handler, sweep and finalize, and the re-run's repair).
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every

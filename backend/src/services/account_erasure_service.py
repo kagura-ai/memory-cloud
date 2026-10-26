@@ -1891,11 +1891,13 @@ class AccountErasureService:
         return PostgresErasure(counts, restore, memory_scrub_at)
 
     def _pseudonym(self, value: str) -> str:
-        """Salted-SHA256 pseudonym — the single derivation every sweep uses.
+        """Salted-SHA256 pseudonym: shorthand for ``erasure_pseudonym``.
 
-        One definition so a future salt rotation / algorithm change cannot
-        produce inconsistent pseudonyms for the same subject across tables
-        (same-user cross-row correlation is the legal-retention contract).
+        ``erasure_pseudonym`` is the one derivation (the request-row values and
+        the audit-row hashes call it directly, #2288), so a future salt
+        rotation / algorithm change cannot produce inconsistent pseudonyms for
+        the same subject across tables (same-user cross-row correlation is the
+        legal-retention contract). Patch the salt, not this method.
         """
         return erasure_pseudonym(value)
 
