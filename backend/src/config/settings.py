@@ -35,8 +35,9 @@ TERMS_VERSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # gap, the referral program would BE the paid tier, for free.
 #
 # The two tier defaults are duplicated here rather than imported from
-# ``config.plan_tiers`` because that module calls ``get_settings()`` at import
-# time (``_apply_settings_overrides``), so importing it here would be circular.
+# ``config.plan_tiers`` because that module's registry is filled from
+# ``get_settings()`` (``_apply_settings_overrides``), so the settings would
+# depend on the module they configure.
 # The coupling is instead pinned by
 # ``tests/api/test_referrals.py::test_payout_budget_matches_the_free_to_basic_gap``,
 # which fails if the tier values move and these constants do not.

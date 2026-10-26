@@ -279,8 +279,8 @@ class AddonCacheDriftEntry(BaseModel):
 class PlanTierInfo(BaseModel):
     """Plan tier configuration served to the admin tiers comparison table.
 
-    Issue #664. Reflects environment variable overrides applied at module
-    import time (see ``config.plan_tiers._apply_settings_overrides``).
+    Issue #664. Reflects environment variable overrides applied on the
+    registry's first use (see ``config.plan_tiers._apply_settings_overrides``).
     """
 
     name: str
@@ -403,7 +403,7 @@ async def list_plan_tiers(
     Issue #664: Admin tiers tab consumes this endpoint instead of i18n
     hardcoded values, so values stay in sync with environment overrides
     (``PLAN_FREE_MEMORY_LIMIT`` etc.). No DB access — ``PLAN_TIERS`` is a
-    process-global registry populated at import time.
+    process-global registry, overridden from the settings on first use.
 
     Returns:
         List of plan tier info in canonical upgrade order (``PLAN_ORDER``).

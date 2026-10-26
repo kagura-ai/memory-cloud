@@ -5,9 +5,11 @@ Issue #149: Plan tier enforcement (Free/Basic/Pro)
 Defines quota limits and feature access for each plan tier.
 """
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from config.constants import GATE_PLAN, GATE_QUOTA
 from utils.logger import get_logger
@@ -16,6 +18,66 @@ if TYPE_CHECKING:
     from config.settings import Settings
 
 logger = get_logger(__name__)
+
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class _SettingsBackedDict(dict[_K, _V]):
+    """A registry dict that applies the env overrides before its first use (#2276).
+
+    ``PLAN_TIERS`` and ``FEATURE_MIN_PLANS`` hold the code defaults until
+    something reads (or writes) them; that first access runs
+    ``ensure_settings_overrides`` once, which builds the settings and
+    rewrites the entries in place. Importing this module therefore never
+    builds the settings, while every caller — including the ones that bound
+    the dict with ``from config.plan_tiers import PLAN_TIERS`` — still only
+    ever sees the overridden values.
+    """
+
+
+def _apply_first(name: str) -> Callable[..., Any]:
+    method = getattr(dict, name)
+
+    def wrapper(self: dict[Any, Any], *args: Any, **kwargs: Any) -> Any:
+        ensure_settings_overrides()
+        return method(self, *args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__qualname__ = f"_SettingsBackedDict.{name}"
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
+# Every dict entry point, so no read (or write) sees the bare code defaults.
+for _name in (
+    "__contains__",
+    "__delitem__",
+    "__eq__",
+    "__getitem__",
+    "__ior__",
+    "__iter__",
+    "__len__",
+    "__ne__",
+    "__or__",
+    "__reduce_ex__",
+    "__repr__",
+    "__reversed__",
+    "__ror__",
+    "__setitem__",
+    "clear",
+    "copy",
+    "get",
+    "items",
+    "keys",
+    "pop",
+    "popitem",
+    "setdefault",
+    "update",
+    "values",
+):
+    setattr(_SettingsBackedDict, _name, _apply_first(_name))
+del _name
 
 # Constants
 UNLIMITED_CONTEXTS = 999999  # Effectively unlimited
@@ -314,19 +376,24 @@ PLAN_PROMAX = PlanTier(
     features=PLAN_PRO.features | {"resources", "connectors", "public_contexts"},
 )
 
-# Plan tier registry. Insertion order IS the upgrade order (free → ... → promax):
-# the plan endpoints, downgrade targets and ``plan_rank`` all rely on it.
-PLAN_TIERS: dict[str, PlanTier] = {
+# The code-default tiers. Insertion order IS the upgrade order (free → ... →
+# promax): the plan endpoints, downgrade targets and ``plan_rank`` all rely on it.
+_CODE_DEFAULT_TIERS: dict[str, PlanTier] = {
     PlanName.FREE: PLAN_FREE,
     PlanName.BASIC: PLAN_BASIC,
     PlanName.PRO: PLAN_PRO,
     PlanName.PROMAX: PLAN_PROMAX,
 }
 
+# Plan tier registry: the code defaults with the env overrides applied, which
+# happens on first use rather than at import (#2276, ``_SettingsBackedDict``).
+PLAN_TIERS: dict[str, PlanTier] = _SettingsBackedDict(_CODE_DEFAULT_TIERS)
+
 # Lowest → highest tier, derived from the registry so a new tier is added in
 # exactly one place (#1548). Prefer ``plan_rank`` / ``plan_at_least`` over
 # hardcoded name lists or ``== "pro"`` checks that mean "pro or better".
-PLAN_ORDER: tuple[str, ...] = tuple(PLAN_TIERS)
+# Overrides never add or remove a tier, so the code defaults give the order.
+PLAN_ORDER: tuple[str, ...] = tuple(_CODE_DEFAULT_TIERS)
 
 
 def plan_rank(plan_name: str | None) -> int:
@@ -352,7 +419,7 @@ def plan_at_least(plan_name: str | None, minimum: str) -> bool:
 # the feature belongs to, not that anything refuses a tier without it. What
 # each entry actually does at runtime is declared in ``FEATURE_ENFORCEMENT``
 # below (#1648) — read the two together.
-FEATURE_MIN_PLANS: dict[str, str] = {
+_CODE_DEFAULT_FEATURE_MIN_PLANS: dict[str, str] = {
     "api_keys": "free",
     "reranking": "basic",
     "oauth": "free",  # Free plan includes OAuth (updated from basic)
@@ -367,13 +434,16 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "content_chunks": "basic",  # Issue #2103: content chunk vectors (M and above, capped per tier)
     "llm_selector": "basic",  # Issue #2144: recall LLM selector (M and above, capped per tier)
 }
+# Re-derived from the effective tiers when a ``PLAN_<KEY>_FEATURES`` override
+# is set; like ``PLAN_TIERS`` that happens on first use (#2276).
+FEATURE_MIN_PLANS: dict[str, str] = _SettingsBackedDict(_CODE_DEFAULT_FEATURE_MIN_PLANS)
 
 # Every feature name the registry knows (#1559): the code-default tiers'
 # ``features`` plus the matrix keys — ``secret_store`` is on every tier and so
 # has no matrix row. Computed BEFORE the env overrides run, so it is the
 # vocabulary a ``PLAN_<KEY>_FEATURES`` value is validated against.
-KNOWN_FEATURES: frozenset[str] = frozenset(FEATURE_MIN_PLANS).union(
-    *(tier.features for tier in PLAN_TIERS.values())
+KNOWN_FEATURES: frozenset[str] = frozenset(_CODE_DEFAULT_FEATURE_MIN_PLANS).union(
+    *(tier.features for tier in _CODE_DEFAULT_TIERS.values())
 )
 
 # ============================================================================
@@ -520,7 +590,7 @@ def _parse_features_override(plan_name: str, raw: str) -> frozenset[str]:
     """Parse and validate one ``PLAN_<KEY>_FEATURES`` value (#1559).
 
     Comma-separated and whitespace-tolerant; the result REPLACES the tier's
-    ``features``. Refused at import (``ValueError``) when a name is not in
+    ``features``. Refused on first use (``ValueError``) when a name is not in
     ``KNOWN_FEATURES`` or the set breaks a registry invariant: every tier
     carries ``secret_store`` (#1128), and ``resources`` implies
     ``public_contexts`` because ``setup_resource`` inserts a *public* context.
@@ -576,7 +646,8 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
     """Apply environment variable overrides to plan tiers.
 
     Reads override values from Settings and creates new PlanTier instances
-    with overridden values where configured. Called once at module load time.
+    with overridden values where configured. Called once, by
+    ``ensure_settings_overrides``, the first time a registry is used (#2276).
 
     This enables OSS deployments to customize plan limits via environment
     variables without modifying source code. ``PLAN_<KEY>_FEATURES`` (#1559)
@@ -585,7 +656,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
     refusal text names the right minimum tier.
 
     Args:
-        settings: Settings to read from. ``None`` (the import-time call) uses
+        settings: Settings to read from. ``None`` (the first-use call) uses
             the process-global instance; tests pass one built in-process.
 
     Raises:
@@ -658,7 +729,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
 
     # Validate every tier's features BEFORE mutating the registry, so a
     # rejected override leaves the process with the untouched code defaults
-    # (the ValueError aborts the import either way).
+    # (the ValueError then fails every use of the registries).
     features_by_plan: dict[str, frozenset[str]] = {}
     for plan_name, overrides in override_map.items():
         raw_features = overrides.pop("features")
@@ -695,8 +766,33 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
     )
 
 
-# Apply overrides from environment variables at import time
-_apply_settings_overrides()
+_overrides_lock = threading.RLock()
+_overrides_applied = False
+_overrides_applying = False
+
+
+def ensure_settings_overrides() -> None:
+    """Apply the env overrides to the registries once, on their first use (#2276).
+
+    Deferred from import so that importing a module which depends on this one
+    does not build the settings: a CLI can run its own secret guard first.
+    Other threads wait for the first application; a read made by
+    ``_apply_settings_overrides`` itself (same thread) passes straight
+    through. A failure (settings refused, bad ``PLAN_<KEY>_FEATURES``) leaves
+    the flag unset, so every later use raises it again.
+    """
+    global _overrides_applied, _overrides_applying
+    if _overrides_applied:
+        return
+    with _overrides_lock:
+        if _overrides_applied or _overrides_applying:
+            return
+        _overrides_applying = True
+        try:
+            _apply_settings_overrides()
+            _overrides_applied = True
+        finally:
+            _overrides_applying = False
 
 
 def get_plan_tier(plan_name: str) -> PlanTier:
