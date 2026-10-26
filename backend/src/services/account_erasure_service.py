@@ -71,19 +71,16 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
-    ColumnElement,
     and_,
     case,
     delete,
     func,
-    literal,
     null,
     or_,
     select,
     tuple_,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -140,10 +137,12 @@ from services.erasure_details import (
     lock_subject_memories,
     locked_ids,
     memory_scrub_at,
+    merged_request_summary,
     payload_counts,
     pseudonymize_audit_logs,
     pseudonymize_revision_actor,
     pseudonymized_request_values,
+    record_resynced_payloads,
     restored_payload_syncs,
     strip_subject_details,
     sync_restored_payloads,
@@ -303,16 +302,8 @@ _CLOSED_NEVER_RAN: CloseOutcome = "never_ran"
 _CLOSED_MOVED: CloseOutcome = "moved"
 
 
-def _merged_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
-    """``deleted_data_summary || keys`` in SQL, keeping what the row holds.
-
-    A summary still stored as the JSON value ``null`` (written before #2026
-    made the column store SQL NULL) is treated like SQL NULL: ``'null' ||
-    {...}`` is a JSON *array*, which would hide ``postgres`` from
-    ``has_key`` (``erasure_details._ran_in_postgres``).
-    """
-    stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
-    return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
+# #2302: moved to ``erasure_details`` (the re-run writes the summary too)
+_merged_summary = merged_request_summary
 
 
 class AccountErasureService:
@@ -1173,33 +1164,16 @@ class AccountErasureService:
         await self.db.rollback()  # ends the read; the patch groups commit their own
         report = RestoreReport()
         await sync_restored_payloads(self.db, syncs, report)
-        counts = payload_counts(report)
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(ErasureRequest)
-                .where(
-                    ErasureRequest.id == request_id,
-                    ErasureRequest.status == STATUS_FAILED,
-                    ErasureRequest.failure_reason == INTERRUPTED_AFTER_POSTGRES_COMMIT,
-                )
-                .values(
-                    deleted_data_summary=_merged_summary(
-                        {"postgres": {**summary["postgres"], **counts}}
-                    )
-                )
-                .execution_options(synchronize_session=False)
-            ),
-        )
+        written = await record_resynced_payloads(self.db, request_id, summary["postgres"], report)
         await self.db.commit()
-        if not result.rowcount:
+        if not written:
             logger.info("erasure_sweep_request_moved", request_id=str(request_id))
             return
         logger.info(
             "erasure_sweep_payloads_resynced",
             request_id=str(request_id),
             memories=len(syncs),
-            **counts,
+            **payload_counts(report),
         )
 
     async def _clear_redis_best_effort(

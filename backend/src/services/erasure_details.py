@@ -67,6 +67,7 @@ from sqlalchemy import (
     case,
     exists,
     func,
+    literal,
     or_,
     select,
     type_coerce,
@@ -83,6 +84,7 @@ from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import AuditLog, Context, User
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
+    INTERRUPTED_AFTER_POSTGRES_COMMIT,
     NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -266,6 +268,64 @@ def _never_ran() -> ColumnElement[bool]:
     return (ErasureRequest.status == STATUS_COMPLETE) & ~_ran_in_postgres()
 
 
+def legacy_note_row() -> ColumnElement[bool]:
+    """A note row (``_never_ran``) the sweep wrote before v0.125.0: it stores
+    the raw sub, not the pseudonym (#2302: ``reprocess_erasures`` repairs it)."""
+    return _never_ran() & ~note_row_pseudonymized()
+
+
+def merged_request_summary(keys: dict[str, Any]) -> ColumnElement[Any]:
+    """``deleted_data_summary || keys`` in SQL, keeping what the row holds.
+
+    A summary still stored as the JSON value ``null`` (written before #2026
+    made the column store SQL NULL) is treated like SQL NULL: ``'null' ||
+    {...}`` is a JSON *array*, which would hide ``postgres`` from
+    ``has_key`` (``_ran_in_postgres``).
+    """
+    stored = func.nullif(ErasureRequest.deleted_data_summary, literal("null").cast(JSONB))
+    return func.coalesce(stored, literal({}, JSONB)).op("||")(literal(keys, JSONB))
+
+
+async def record_resynced_payloads(
+    db: AsyncSession, request_id: UUID, postgres: Mapping[str, Any], report: RestoreReport
+) -> bool:
+    """Record the payload re-drive of a run interrupted after its Postgres
+    commit (#2302) on its request row, as the live run's step 3b would:
+    ``payload_counts(report)`` merged into the ``postgres`` section
+    (``postgres`` = what the row held), zeros included — the presence of
+    ``details_payload_synced`` is what tells ``reprocess_erasures`` the
+    re-drive ran. Guarded by ``status = failed`` and the interrupted marker:
+    a row the run's own ``_finalize`` completed meanwhile is left alone.
+    Does not commit.
+
+    Returns:
+        Whether the row was written.
+    """
+    result = await db.execute(
+        update(ErasureRequest)
+        .where(
+            ErasureRequest.id == request_id,
+            ErasureRequest.status == STATUS_FAILED,
+            ErasureRequest.failure_reason == INTERRUPTED_AFTER_POSTGRES_COMMIT,
+        )
+        .values(
+            deleted_data_summary=merged_request_summary(
+                {"postgres": {**postgres, **payload_counts(report)}}
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(cast(CursorResult[Any], result).rowcount)
+
+
+def payloads_resynced(summary: Mapping[str, Any] | None) -> bool:
+    """The payload re-drive of an interrupted run recorded its outcome
+    (``record_resynced_payloads``; the live run's step 3b writes the same
+    key)."""
+    postgres = (summary or {}).get("postgres")
+    return isinstance(postgres, dict) and "details_payload_synced" in postgres
+
+
 def note_row_pseudonymized() -> ColumnElement[bool]:
     """The sweep pseudonymized this note row (since v0.125.0, #2286): its
     ``user_id`` is the pseudonym, not the raw sub."""
@@ -334,12 +394,11 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
     it as is. For a request that really never ran either value is one no row
     carries: a no-op.
     """
-    never_ran = _never_ran()
     rows = await db.execute(
         select(
             ErasureRequest.user_id,
-            (unrepaired_erasure() | (never_ran & ~note_row_pseudonymized())).label("derive"),
-        ).where(finalized_erasure() | unrepaired_erasure() | never_ran)
+            (unrepaired_erasure() | legacy_note_row()).label("derive"),
+        ).where(finalized_erasure() | unrepaired_erasure() | _never_ran())
     )
     pseudonyms: set[str] = set()
     for user_id, derive in rows.all():
