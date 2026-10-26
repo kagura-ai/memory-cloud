@@ -331,3 +331,71 @@ def test_the_dry_run_counts_what_the_apply_would_change():
         "FROM users \nWHERE users.user_id = audit_logs.user_id))"
     )
     assert compiled.params == {"user_id_1": "raw-sub"}
+
+
+def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
+    """#2298: the rows naming the subject are a change of their own, in the
+    plan, the applied report and the summary; an email in use again is
+    listed. Never an email or the account id."""
+    kept = uuid4()
+
+    def result(dry_run: bool) -> cli.ReprocessResult:
+        r = cli.ReprocessResult(dry_run=dry_run, scanned=2)
+        r.changed.append(
+            cli.RequestChange(
+                request_id=REQUEST_ID,
+                completed_at=None,
+                details_restored=0,
+                details_restored_unavailable=0,
+                details_stripped=0,
+                scrub_marked=0,
+                audit_mentions_pseudonymized=3,
+            )
+        )
+        r.mentions_kept.append(kept)
+        return r
+
+    plan = result(True)
+    assert plan.changes == 3
+    cli._print_plan(plan)
+    cli._print_applied(result(False))
+    out = capsys.readouterr().out
+    assert f"would pseudonymize audit mentions  {REQUEST_ID}  3 row(s)\n" in out
+    assert f"pseudonymized audit mentions  {REQUEST_ID}  3 row(s)\n" in out
+    assert f"audit mentions  {kept}  rows kept: the email is in use again" in out
+    assert cli._summary(plan).endswith(", 3 audit mention(s) pseudonymized")
+
+
+def test_the_mentioned_emails_are_read_once_and_matched_by_hash():
+    """#2298: two SELECTs (the distinct ``user_email`` values and the
+    ``user:`` resources, the prefix cut in SQL); a value is kept only when
+    its unsalted sha256 is a request's ``user_email_hash``."""
+    from sqlalchemy.dialects import postgresql
+
+    from utils.hashing import sha256_hex
+
+    db = MagicMock()
+    emails = MagicMock()
+    emails.scalars.return_value.all.return_value = ["a@x.io", "admin@x.io"]
+    resources = MagicMock()
+    resources.scalars.return_value.all.return_value = ["b@x.io", "a@x.io", "f" * 64]
+    db.execute = AsyncMock(side_effect=[emails, resources])
+
+    found = asyncio.run(
+        cli._mentioned_emails(db, {sha256_hex("a@x.io"), sha256_hex("b@x.io"), "0" * 64})
+    )
+
+    assert found == {sha256_hex("a@x.io"): "a@x.io", sha256_hex("b@x.io"): "b@x.io"}
+    first, second = (
+        str(c.args[0].compile(dialect=postgresql.dialect())) for c in db.execute.await_args_list
+    )
+    assert first == "SELECT DISTINCT audit_logs.user_email \nFROM audit_logs"
+    assert second.startswith("SELECT DISTINCT substr(audit_logs.resource, ")
+    assert "LIKE" in second and "FROM audit_logs" in second
+
+
+def test_no_request_hashes_read_nothing():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    assert asyncio.run(cli._mentioned_emails(db, set())) == {}
+    db.execute.assert_not_awaited()

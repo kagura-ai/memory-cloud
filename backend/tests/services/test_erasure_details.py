@@ -729,3 +729,17 @@ async def test_the_trail_with_nothing_to_do_executes_nothing() -> None:
     db = _mock_db()
     assert await pseudonymize_audit_trail(db, None, []) == (0, 0)
     db.execute.assert_not_awaited()
+
+
+async def test_the_dry_run_count_leaves_out_the_own_rows() -> None:
+    """The apply rewrites the subject's own rows first: a dry run that also
+    counts the own rows names them once, not twice."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.erasure_details import count_audit_mentions
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=1)))
+    assert await count_audit_mentions(db, ["a@x.io"], exclude_user_id="raw-sub") == 1
+    sql, params = _compiled(db.execute.await_args.args[0])
+    assert "audit_logs.user_id != " in sql and "raw-sub" in _flat(params)

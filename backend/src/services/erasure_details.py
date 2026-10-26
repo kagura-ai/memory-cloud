@@ -343,13 +343,21 @@ async def pseudonymize_audit_mentions(
 
 
 async def count_audit_mentions(
-    db: AsyncSession, emails: Collection[str], *, subs: Collection[str] = ()
+    db: AsyncSession,
+    emails: Collection[str],
+    *,
+    subs: Collection[str] = (),
+    exclude_user_id: str | None = None,
 ) -> int:
     """What ``pseudonymize_audit_mentions`` would change (a dry run's count;
-    the same predicate, no lock)."""
+    the same predicate, no lock). ``exclude_user_id``: the rows the own-row
+    UPDATE rewrites before the mentions (``pseudonymize_audit_trail``), so
+    a dry run does not count them twice."""
     predicate = audit_mention_predicate(AuditLog, emails, subs)
     if predicate is None:
         return 0
+    if exclude_user_id is not None:
+        predicate = predicate & (AuditLog.user_id != exclude_user_id)
     return (await db.execute(select(func.count(AuditLog.id)).where(predicate))).scalar_one()
 
 
@@ -360,6 +368,8 @@ async def pseudonymize_audit_trail(
     *,
     orphaned_only: bool = False,
     pseudonym: str | None = None,
+    mention_emails: Collection[str] | None = None,
+    mention_subs: Collection[str] | None = None,
 ) -> tuple[int, int]:
     """The subject's own audit rows and the rows that mention them (#2287, #2298).
 
@@ -370,25 +380,32 @@ async def pseudonymize_audit_trail(
     in its transaction): two erasures of members who acted on each other
     (one's own row is the other's mention) then queue instead of
     deadlocking. Then ``pseudonymize_audit_logs`` (when ``user_id`` is
-    given) and ``pseudonymize_audit_mentions`` with ``subs=[user_id]``.
+    given) and ``pseudonymize_audit_mentions`` with ``emails`` and
+    ``subs=[user_id]`` — or ``mention_emails`` / ``mention_subs`` when given
+    (the re-run: the emails a user row holds again are left out of the
+    mentions, not of the subject's own rows; the sweep runs once per run).
 
     Returns:
         ``(own rows, mentions)`` rowcounts.
     """
-    subs = (user_id,) if user_id is not None else ()
+    if mention_subs is not None:
+        subs: Collection[str] = tuple(mention_subs)
+    else:
+        subs = (user_id,) if user_id is not None else ()
+    mentioned = tuple(emails) if mention_emails is None else tuple(mention_emails)
 
     def union(row: Any) -> tuple[ColumnElement[bool], ...]:
         arms: list[ColumnElement[bool]] = []
         if user_id is not None:
             arms.append(_own_audit_rows(row, user_id, orphaned_only=orphaned_only))
-        mention = audit_mention_predicate(row, emails, subs)
+        mention = audit_mention_predicate(row, mentioned, subs)
         if mention is not None:
             arms.append(mention)
         if pseudonym is not None:
             arms.append(row.user_id == pseudonym)
         return (or_(*arms),)
 
-    if user_id is None and pseudonym is None and not emails:
+    if user_id is None and pseudonym is None and not mentioned and not subs:
         return 0, 0
     await db.execute(locked_ids(AuditLog, union))
     own = (
@@ -396,7 +413,7 @@ async def pseudonymize_audit_trail(
         if user_id is not None
         else 0
     )
-    return own, await pseudonymize_audit_mentions(db, emails, subs=subs)
+    return own, await pseudonymize_audit_mentions(db, mentioned, subs=subs)
 
 
 def _ran_in_postgres() -> ColumnElement[bool]:
