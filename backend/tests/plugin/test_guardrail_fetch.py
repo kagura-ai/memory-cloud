@@ -22,6 +22,7 @@ from tests.plugin.conftest import (
     CANARY_KEY,
     CLAUDE_PLUGIN_JSON,
     CONTEXT_ID,
+    STORE_AUTHORITY_LINE,
     PluginEnv,
     RunHook,
     StubServer,
@@ -162,6 +163,7 @@ def test_request_shape_and_cache_bytes(
 
     context = result.specific["additionalContext"]
     assert context == (
+        f"{STORE_AUTHORITY_LINE}\n"  # #2341
         f"Kagura Memory: 3 tool guardrails active for context {CONTEXT_ID} (fetched); "
         "the kagura-memory plugin hook delivers each at its matching tool call."
     )
@@ -580,12 +582,16 @@ def test_skipped_items_are_named(
     )
 
 
-def test_session_start_without_guardrails_prints_no_context(
+def test_session_start_without_guardrails_prints_only_the_rule(
     plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
 ) -> None:
+    """#2341: a fetched context with no guardrails and no index gets the
+    store-is-the-authority line and nothing else."""
     stub_server.set_guardrails([])
     result = _start(plugin_env, run_hook, stub_server.url)
-    assert result.stdout == ""
+    assert result.json is not None
+    assert result.json["hookSpecificOutput"]["additionalContext"] == STORE_AUTHORITY_LINE
+    assert "systemMessage" not in result.json
     assert plugin_env.cache_path.exists()
 
 

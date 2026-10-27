@@ -11,7 +11,6 @@ Provides 5 tools for managing resources via MCP:
 - list_resource_tokens: List tokens for a resource
 """
 
-import re
 import time
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -19,6 +18,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 import services.resource_ingest_service as resource_ingest_service
+from config.constants import RESOURCE_ID_MAX_LENGTH, is_valid_resource_id
 from mcp_server.tools._errors import (
     CAUSE_INTERNAL_ERROR,
     _tool_exception_response,
@@ -48,8 +48,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Resource ID format: lowercase alphanumeric + underscore + hyphen
-_RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
 # Max events per batch — single source in the shared ingest service
 # (Issue #1255); the per-event payload-size cap lives there too
@@ -164,12 +162,12 @@ def _failed_item_fields(err: IngestItemError) -> dict[str, Any]:
 
 def _validate_resource_id(resource_id: str) -> list[TextContent] | None:
     """Validate resource_id format. Returns error response or None."""
-    if not resource_id or len(resource_id) > 255:
+    if not resource_id or len(resource_id) > RESOURCE_ID_MAX_LENGTH:
         return _error_response(
             "validation_error",
-            "resource_id must be 1-255 characters.",
+            f"resource_id must be 1-{RESOURCE_ID_MAX_LENGTH} characters.",
         )
-    if not _RESOURCE_ID_PATTERN.match(resource_id):
+    if not is_valid_resource_id(resource_id):
         return _error_response(
             "validation_error",
             f"Invalid resource_id format: '{resource_id}'. "
@@ -896,13 +894,13 @@ async def _setup_resource_preflight(
             None,
         )
 
-    # 4. Check resource_id not already bound to an existing context in this
-    # workspace. The DB constraint `unique_context_resource_id_per_workspace`
-    # also enforces this, but an explicit pre-insert lookup returns a clean
+    # 4. Check resource_id not already bound to a live context on this server.
+    # ``ux_contexts_resource_id_active`` (migration a96) is a server-wide
+    # partial UNIQUE index, so a slug used by another workspace's context
+    # conflicts too (#2284). The explicit pre-insert lookup returns a clean
     # `resource_id_conflict` instead of relying on exception-based control flow.
     resource_dup_result = await db.execute(
         select(Context.id).where(
-            Context.workspace_id == workspace_id,
             Context.resource_id == resource_id,
             Context.deleted_at.is_(None),
         )
@@ -911,7 +909,8 @@ async def _setup_resource_preflight(
         return (
             _error_response(
                 "resource_id_conflict",
-                f"resource_id '{resource_id}' is already in use in this workspace.",
+                f"resource_id '{resource_id}' is already used by another context on this "
+                "server (it may belong to another workspace).",
                 help="Choose a different resource_id, or update the existing context.",
             ),
             None,

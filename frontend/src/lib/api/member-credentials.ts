@@ -28,6 +28,9 @@ export interface MemberAPIKey {
   // #2188: set when the key is bound to an agent — the agent's default
   // binding applies, so the key cannot carry a default context.
   agent_id: string | null;
+  // #2299: set when the key is a connector's shared key (#1952). Classify
+  // connector keys by this, never by the `connector:` display name.
+  connector_id: string | null;
 }
 
 export interface MemberOAuthApp {

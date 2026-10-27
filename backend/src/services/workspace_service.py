@@ -916,6 +916,9 @@ class WorkspaceService:
         - Contexts (workspace resources)
         - Resource tokens (API access)
 
+        Re-owns:
+        - The member's live connector write keys in this workspace (#2352)
+
         Deletes:
         - Context memberships
         - API credentials (keys, OAuth clients/tokens, external keys)
@@ -1017,6 +1020,7 @@ class WorkspaceService:
                 workspace_id=str(workspace_id),
                 user_id=user_id,
                 context_members_deleted=context_cleanup["context_members_deleted"],
+                connector_api_keys_reowned=cred_cleanup["connector_api_keys_reowned"],
                 api_keys_deleted=cred_cleanup["api_keys_deleted"],
                 oauth_clients_deleted=cred_cleanup["oauth_clients_deleted"],
                 oauth_tokens_revoked=cred_cleanup["oauth_tokens_revoked"],

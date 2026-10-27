@@ -35,8 +35,9 @@ TERMS_VERSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # gap, the referral program would BE the paid tier, for free.
 #
 # The two tier defaults are duplicated here rather than imported from
-# ``config.plan_tiers`` because that module calls ``get_settings()`` at import
-# time (``_apply_settings_overrides``), so importing it here would be circular.
+# ``config.plan_tiers`` because that module's registry is filled from
+# ``get_settings()`` (``_apply_settings_overrides``), so the settings would
+# depend on the module they configure.
 # The coupling is instead pinned by
 # ``tests/api/test_referrals.py::test_payout_budget_matches_the_free_to_basic_gap``,
 # which fails if the tier values move and these constants do not.
@@ -1960,7 +1961,8 @@ class Settings(BaseSettings):
 
     # Issue #1559: replace a tier's ``features`` set wholesale (comma-separated,
     # whitespace-tolerant). Validated against ``config.plan_tiers.KNOWN_FEATURES``
-    # when that module loads — an unknown name refuses to boot. ``None`` or
+    # when ``get_settings()`` first builds the settings — an unknown name
+    # refuses to boot. ``None`` or
     # blank = the dataclass default. Lets a self-host re-enable the XL-only
     # ``resources`` / ``connectors`` / ``public_contexts`` (#1551) on a lower
     # tier. Every set must keep ``secret_store``; ``resources`` requires
@@ -2302,6 +2304,14 @@ def get_settings() -> Settings:
     global _settings
 
     if _settings is None:
-        _settings = Settings()
+        settings = Settings()
+        # Issue #2276: the plan-tier env overrides are applied here, when the
+        # settings are first built, instead of when config.plan_tiers is
+        # imported. Cached only after they succeed, so a rejected
+        # PLAN_<KEY>_FEATURES refuses every call, as a refused field does.
+        from config.plan_tiers import ensure_settings_overrides
+
+        ensure_settings_overrides(settings)
+        _settings = settings
 
     return _settings

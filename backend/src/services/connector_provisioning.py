@@ -8,7 +8,6 @@ resource token scoped to that resource.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -21,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.connector_keys import connector_key_name
 from auth.resource_tokens import ResourceTokenManager
+from config.constants import is_valid_resource_id
 from config.plan_tiers import has_feature, lowest_tier_with_limit, quota_gate_details
 from models.auth import Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
@@ -40,7 +40,6 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 CONNECTOR_TYPES = frozenset({"slack", "discord", "teams"})
-_RESOURCE_ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 def _flatten_runtime_fields(value: dict[str, Any], prefix: str = "") -> set[str]:
@@ -530,7 +529,7 @@ class ConnectorProvisioningService:
                 "connector_type must be one of: slack, discord, teams",
                 field="connector_type",
             )
-        if not resource_id or len(resource_id) > 255 or not _RESOURCE_ID_RE.match(resource_id):
+        if not is_valid_resource_id(resource_id):
             raise ValidationError(
                 "resource_id must be lowercase alphanumeric with hyphen/underscore only",
                 field="resource_id",

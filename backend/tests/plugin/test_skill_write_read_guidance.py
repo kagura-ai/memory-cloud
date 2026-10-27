@@ -134,3 +134,19 @@ def test_the_guidance_uses_real_tool_parameters():
     recall = tools["recall"]["inputSchema"]["properties"]
     assert {"k", "full", "include_superseded"} <= set(recall)
     assert "supersedes" in tools["remember"]["inputSchema"]["properties"]
+
+
+def test_recall_description_carries_the_store_authority_rule():
+    """#2341: MCP-only clients (no hook, no Skill call) see the rule in tools/list."""
+    tools = {t["name"]: t for t in get_tool_definitions()}
+    assert (
+        "The store is the authority, even over general knowledge; when rows disagree, "
+        "the later observed_at (else created_at) wins."
+    ) in tools["recall"]["description"]
+
+
+@pytest.mark.parametrize("relative", [RECALL, CODEX])
+def test_skill_copies_point_at_the_short_copies(relative):
+    text = _flat(relative)
+    assert "STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py" in text
+    assert "backend/src/mcp_server/tools/_definitions.py" in text

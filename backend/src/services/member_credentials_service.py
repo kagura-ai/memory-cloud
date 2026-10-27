@@ -24,6 +24,7 @@ from models.auth import (
     OAuth2Token,
     WorkspaceMember,
 )
+from services.connector_key_ownership import reown_connector_keys
 from services.credential_default_context import default_context_names
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthorizationError, ValidationError
@@ -345,11 +346,16 @@ class MemberCredentialsService:
         """Clean up all credentials for a removed member.
 
         Issue #196: Called when member is removed from workspace
-        (manual removal or auto-removal on plan downgrade).
+        (the member-removal route).
         Issue #275: Added ExternalAPIKey cleanup.
 
+        Re-owns:
+        - The member's live connector write keys in this workspace, handed to
+          the workspace's owner so the connector keeps writing (#2352,
+          ``services.connector_key_ownership``)
+
         Deletes:
-        - All API keys for this user + workspace
+        - All other API keys for this user + workspace
         - All OAuth clients for this user + workspace
         - All OAuth tokens for this user + workspace
         - All workspace-scoped external API keys
@@ -360,11 +366,16 @@ class MemberCredentialsService:
 
         Returns:
             Dict with cleanup stats:
+                - connector_api_keys_reowned: int
                 - api_keys_deleted: int
                 - oauth_clients_deleted: int
                 - oauth_tokens_revoked: int
                 - external_keys_deleted: int
         """
+        # #2352: the member's live connector keys serve the workspace — hand
+        # them to the owner before the delete below takes the rest.
+        reowned = await reown_connector_keys(self.db, user_id, workspace_id=workspace_id)
+
         # 1. Delete API keys (bulk operation)
         # Issue #200: Use rowcount for efficient counting without loading data
         api_keys_result = cast(
@@ -433,6 +444,7 @@ class MemberCredentialsService:
             "member_credentials_cleaned_up",
             workspace_id=str(workspace_id),
             user_id=user_id,
+            connector_api_keys_reowned=reowned,
             api_keys=api_keys_count,
             oauth_clients=oauth_clients_count,
             tokens_revoked=tokens_count,
@@ -440,6 +452,7 @@ class MemberCredentialsService:
         )
 
         return {
+            "connector_api_keys_reowned": reowned,
             "api_keys_deleted": api_keys_count,
             "oauth_clients_deleted": oauth_clients_count,
             "oauth_tokens_revoked": tokens_count,
@@ -757,4 +770,6 @@ class MemberCredentialsService:
             ),
             "default_context_name": default_context_name,
             "agent_id": str(api_key.agent_id) if api_key.agent_id else None,
+            # #2299: the connector link classifies connector keys, not the name.
+            "connector_id": str(api_key.connector_id) if api_key.connector_id else None,
         }
