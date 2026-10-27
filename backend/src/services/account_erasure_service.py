@@ -437,6 +437,10 @@ async def requeue_subject_embeddings(
         after = max(moved)
 
 
+class _StaleErasureRun(Exception):
+    """A prior run erased this request's subject, or its exact user row is gone."""
+
+
 class AccountErasureService:
     """Service-layer orchestrator for GDPR right-to-erasure.
 
@@ -1293,7 +1297,11 @@ class AccountErasureService:
         return executed
 
     async def _close_request_without_user(
-        self, request: ErasureRequest, *, user_row_exists: bool = False
+        self,
+        request: ErasureRequest,
+        *,
+        user_row_exists: bool = False,
+        claimed_at: datetime | None = None,
     ) -> CloseOutcome:
         """Close a claimed request whose user row is gone (#2286), or whose
         Postgres step committed although a user row with its sub exists
@@ -1376,6 +1384,8 @@ class AccountErasureService:
                 },
             )
         guard = [ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS]
+        if claimed_at is not None:
+            guard.append(ErasureRequest.started_at == claimed_at)
         if not ran:
             # #2302 review: a run alive past the cutoff may commit its Postgres
             # step (writing ``postgres``) after the sweep read the row; the
@@ -1516,6 +1526,10 @@ class AccountErasureService:
 
         step = "postgres"
         try:
+            # #2362: re-read after the sweep's unlocked snapshot, before any
+            # external delete. Lock the exact account row, never a new same-sub
+            # registration. No request lock yet: requests are locked last.
+            await self._guard_erasure_run(target, request_id=request_id)
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
             # Issue #1940: the enforcement point for self-service erasure — a
@@ -1632,6 +1646,40 @@ class AccountErasureService:
                     error=str(exc),
                 )
 
+        except _StaleErasureRun:
+            # A slow run may have committed after this sweep read the request.
+            # Never overwrite its counts or run raw-sub vector/Redis cleanup on
+            # a potentially re-registered account. A later durable point job is
+            # scoped to the original UUIDs, not the re-used subject.
+            await self.db.rollback()
+            current = (
+                await self.db.execute(
+                    select(ErasureRequest)
+                    .where(ErasureRequest.id == request_id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if current is not None:
+                original_summary = dict(current.deleted_data_summary or {})
+                ran = isinstance(original_summary.get("postgres"), dict)
+                pseudonym = self._pseudonym(current.user_id)
+                closed = await self._close_request_without_user(
+                    current, user_row_exists=ran, claimed_at=claimed_at
+                )
+                if closed == "interrupted":
+                    try:
+                        await self._resync_interrupted_payloads(
+                            request_id, pseudonym, original_summary
+                        )
+                    except Exception as exc:
+                        await self.db.rollback()
+                        logger.error(
+                            "erasure_sweep_payload_resync_failed",
+                            request_id=str(request_id),
+                            error_class=type(exc).__name__,
+                        )
+            logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
+            return
         except ErasureRetryScheduledError as exc:
             # #2282: nothing was erased in Postgres; the request goes back to
             # the sweep's queue. The summary is the retry block alone (step 1
@@ -1982,6 +2030,31 @@ class AccountErasureService:
 
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
+    async def _guard_erasure_run(
+        self, target: User, *, request_id: UUID | None, lock_request: bool = False
+    ) -> None:
+        """#2362: keep users first and requests last in the erasure lock order.
+
+        A normal read under the user lock is enough before external I/O: the
+        original erasure cannot commit its user deletion while we hold that
+        row. The final check additionally locks the request after all child
+        rows, so an old marker can never be overwritten by a reclaimed run.
+        """
+        present = (
+            await self.db.execute(select(User.id).where(User.id == target.id).with_for_update())
+        ).scalar_one_or_none()
+        if request_id is not None:
+            statement = select(ErasureRequest.deleted_data_summary).where(
+                ErasureRequest.id == request_id
+            )
+            if lock_request:
+                statement = statement.with_for_update()
+            summary = (await self.db.execute(statement)).scalar_one_or_none()
+            if isinstance(summary, dict) and isinstance(summary.get("postgres"), dict):
+                raise _StaleErasureRun()
+        if present is None:
+            raise _StaleErasureRun()
+
     async def _delete_postgres(
         self, target: User, *, request_id: UUID | None = None
     ) -> PostgresErasure:
@@ -2014,6 +2087,8 @@ class AccountErasureService:
 
         user_id = target.user_id
         counts: dict[str, int] = {}
+        # Ownership transfers can commit, releasing the pre-vector user lock.
+        await self._guard_erasure_run(target, request_id=request_id)
 
         # Remove the OAuth grants first, through the one revoker that owns
         # the lock order (users → codes → device codes → tokens, #1770): it
@@ -2367,6 +2442,7 @@ class AccountErasureService:
         # Merged into what the row holds (``||``), not replacing it: a key
         # written before this step (#2282's ``retry``) survives a crash too.
         if request_id is not None:
+            await self._guard_erasure_run(target, request_id=request_id, lock_request=True)
             postgres = {**counts, "memory_scrub_at": to_utc_iso(memory_scrub_at)}
             await self.db.execute(
                 update(ErasureRequest)

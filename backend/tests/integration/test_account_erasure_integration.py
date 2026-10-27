@@ -4133,3 +4133,184 @@ def durable_vector_network_boundary(monkeypatch):
     monkeypatch.setattr(
         "services.vector_erasure.list_memory_collections", AsyncMock(return_value=[])
     )
+
+
+async def test_reclaimed_run_rechecks_committed_marker_before_any_external_delete(
+    async_engine, db_session, erasure_scenario, patched_external_stores
+):
+    """#2362: stale request read -> old PG commit -> same-sub signup -> execute."""
+    from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    case = erasure_scenario
+    sub = case["target_user_id"]
+    request = ErasureRequest(
+        user_id=sub,
+        user_email_hash=sha256_hex(case["target_email"]),
+        initiated_by=sub,
+        is_self_service=False,
+        reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+        status="in_progress",
+        started_at=utcnow(),
+    )
+    db_session.add(request)
+    await db_session.commit()
+    request_id = request.id
+    assert request.deleted_data_summary is None  # the sweep's stale snapshot
+    counts = {"users": 1, "memories_scrubbed": 3, "memory_scrub_at": "2026-10-01T00:00:00Z"}
+    maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with maker() as original:
+        await original.execute(delete(User).where(User.user_id == sub))
+        await original.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == request_id)
+            .values(deleted_data_summary={"postgres": counts})
+        )
+        await original.commit()
+    async with maker() as signup:
+        replacement = User(user_id=sub, email="replacement@example.com", name="replacement")
+        signup.add(replacement)
+        await signup.commit()
+        replacement_id = replacement.id
+    target = (await db_session.execute(select(User).where(User.id == replacement_id))).scalar_one()
+    service = AccountErasureService(db_session, email_service=AsyncMock())
+    with (
+        patch("services.vector_erasure.delete_subject_points", new=AsyncMock()) as points,
+        patch.object(service, "_clear_redis", new=AsyncMock()) as redis,
+        patch.object(service, "_write_audit_log", new=AsyncMock()) as audit,
+        patch.object(service, "_resync_interrupted_payloads", new=AsyncMock()) as resync,
+    ):
+        await service._execute(request, target)
+    resync.assert_awaited_once_with(request_id, erasure_pseudonym(sub), {"postgres": counts})
+    points.assert_not_awaited()
+    redis.assert_not_awaited()
+    audit.assert_not_awaited()
+    assert (
+        await db_session.execute(select(User.id).where(User.user_id == sub))
+    ).scalar_one() == replacement_id
+    fresh = (
+        await db_session.execute(
+            select(ErasureRequest)
+            .where(ErasureRequest.id == request_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert fresh.deleted_data_summary == {"postgres": counts}
+    assert fresh.user_id == erasure_pseudonym(sub)
+    assert fresh.status == STATUS_FAILED
+    # Re-running an already closed request is equally harmless.
+    await db_session.refresh(target)
+    await service._execute(fresh, target)
+    assert (
+        await db_session.execute(select(User.id).where(User.user_id == sub))
+    ).scalar_one() == replacement_id
+
+
+async def test_postgres_guard_waits_for_original_commit_and_preserves_its_counts(
+    async_engine, db_session, erasure_scenario
+):
+    """#2362: the old exact user row disappears during a FOR UPDATE wait."""
+    import asyncio
+
+    from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from services.account_erasure_service import _StaleErasureRun
+
+    sub = erasure_scenario["target_user_id"]
+    target = (await db_session.execute(select(User).where(User.user_id == sub))).scalar_one()
+    request = ErasureRequest(
+        user_id=sub,
+        user_email_hash=sha256_hex(target.email),
+        initiated_by=sub,
+        is_self_service=False,
+        reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+        status="in_progress",
+        started_at=utcnow(),
+    )
+    db_session.add(request)
+    await db_session.commit()
+    request_id, target_id = request.id, target.id
+    maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    contender_pid = (await db_session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+    async with maker() as original:
+        await original.execute(select(User.id).where(User.id == target_id).with_for_update())
+        service = AccountErasureService(db_session, email_service=AsyncMock())
+        waiting = asyncio.create_task(service._delete_postgres(target, request_id=request_id))
+        try:
+            async with asyncio.timeout(5):
+                while not (
+                    await original.execute(
+                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                        {"pid": contender_pid},
+                    )
+                ).scalar_one():
+                    await asyncio.sleep(0.01)
+            counts = {"users": 1, "memories_scrubbed": 7}
+            await original.execute(delete(User).where(User.id == target_id))
+            await original.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request_id)
+                .values(deleted_data_summary={"postgres": counts})
+            )
+            await original.commit()
+            with pytest.raises(_StaleErasureRun):
+                await asyncio.wait_for(waiting, timeout=5)
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+    await db_session.rollback()
+    fresh = (
+        await db_session.execute(select(ErasureRequest).where(ErasureRequest.id == request_id))
+    ).scalar_one()
+    assert fresh.deleted_data_summary == {"postgres": counts}
+    assert (
+        await db_session.execute(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.action == "account_erasure", AuditLog.user_id == erasure_pseudonym(sub)
+            )
+        )
+    ).scalar_one() == 0
+
+
+async def test_stale_missing_user_without_marker_closes_with_no_raw_identifiers(
+    db_session, erasure_scenario, patched_external_stores
+):
+    """#2362 review: external admin deletion leaves a pseudonymized note, not PII."""
+    sub = erasure_scenario["target_user_id"]
+    target = (await db_session.execute(select(User).where(User.user_id == sub))).scalar_one()
+    request = ErasureRequest(
+        user_id=sub,
+        user_email_hash=sha256_hex(target.email),
+        initiated_by=sub,
+        is_self_service=False,
+        reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+        status="in_progress",
+        started_at=utcnow(),
+        ip_address="203.0.113.2",
+        user_agent="test",
+    )
+    db_session.add(request)
+    await db_session.commit()
+    request_id = request.id
+    # Keep the loaded object as a reclaimed run would; simulate external deletion.
+    await db_session.execute(
+        delete(User).where(User.id == target.id).execution_options(synchronize_session=False)
+    )
+    await db_session.commit()
+    service = AccountErasureService(db_session, email_service=AsyncMock())
+    with patch("services.vector_erasure.delete_subject_points", new=AsyncMock()) as points:
+        await service._execute(request, target)
+    points.assert_not_awaited()
+    fresh = (
+        await db_session.execute(
+            select(ErasureRequest)
+            .where(ErasureRequest.id == request_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert fresh.status == STATUS_COMPLETE
+    assert fresh.user_id == fresh.initiated_by == erasure_pseudonym(sub)
+    assert fresh.ip_address is None and fresh.user_agent is None
+    assert fresh.deleted_data_summary == {"note": "user_row_already_absent", "pseudonymized": True}

@@ -134,7 +134,11 @@ def _service() -> AccountErasureService:
     # send_erasure_confirmation defaults to success — Issue #469's OAuth path
     # exercises this; tests that need failure modes override per-test.
     email.send_erasure_confirmation = AsyncMock(return_value=True)
-    return AccountErasureService(db, email_service=email)
+    service = AccountErasureService(db, email_service=email)
+    # #2362 guard reads real row identity/request markers; covered against PG
+    # in test_account_erasure_integration.py, not this scripted session.
+    service._guard_erasure_run = AsyncMock()
+    return service
 
 
 # ---------------------------------------------------------------------------
