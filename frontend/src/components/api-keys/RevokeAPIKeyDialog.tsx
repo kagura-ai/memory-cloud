@@ -82,7 +82,7 @@ export function RevokeAPIKeyDialog({
 
           <div className="space-y-2">
             <p className="text-sm">
-              Are you sure you want to revoke the API key <strong>"{keyName}"</strong>?
+              Are you sure you want to revoke the API key <strong>&quot;{keyName}&quot;</strong>?
             </p>
             <p className="text-xs text-slate-500">
               The key will remain in the database for audit purposes but will no longer be usable.

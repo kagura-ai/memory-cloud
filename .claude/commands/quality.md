@@ -9,11 +9,15 @@ Steps:
    ```
    make type-check
    ```
-3. Frontend build check:
+3. Frontend lint (eslint, errors only fail):
+   ```
+   cd frontend && npm run lint
+   ```
+4. Frontend build check:
    ```
    cd frontend && npm run build
    ```
-4. Frontend tests:
+5. Frontend tests:
    ```
    cd frontend && npm test
    ```

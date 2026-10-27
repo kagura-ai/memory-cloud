@@ -391,12 +391,12 @@ export function ResourceTokensTabPanel({
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-purple-900">1.</span>
-                    <a
+                    <Link
                       href="/workspace/contexts"
                       className="text-purple-600 hover:text-purple-700 underline font-medium"
                     >
                       {t("goToContexts")}
-                    </a>
+                    </Link>
                   </div>
                 </div>
               </div>

@@ -50,7 +50,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspacesRef.current = workspaces;
 
       // Set current workspace based on user's current_workspace_id
-      // @ts-ignore - user.current_workspace_id might not be in type yet
       const userCurrentWorkspaceId = user?.current_workspace_id;
       if (userCurrentWorkspaceId && workspaces.length > 0) {
         const currentWorkspaceFromBackend = workspaces.find(o => o.id === userCurrentWorkspaceId);

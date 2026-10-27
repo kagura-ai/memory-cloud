@@ -243,6 +243,11 @@ jobs:
       - name: Type check
         run: cd frontend && npx tsc --noEmit
 
+      # ESLint flat config (frontend/eslint.config.mjs, #2202). Errors fail the
+      # job; rule families with pre-existing hits are warn-only for now.
+      - name: Lint
+        run: cd frontend && npm run lint
+
       # CI builds with the webpack compiler (`--webpack`) instead of the
       # Next.js 16 default (Turbopack). Turbopack's `next build` hard-requires
       # the native @next/swc-* binding, which `npm ci` fails to provide on the
