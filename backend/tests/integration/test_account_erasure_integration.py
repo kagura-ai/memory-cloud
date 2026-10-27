@@ -316,6 +316,8 @@ class TestAdminForceEraseHappyPath:
         # target).
         assert request.deleted_data_summary["postgres"]["audit_logs_pseudonymized"] >= 1
         assert "audit_logs_pseudonymized" not in request.deleted_data_summary
+        # #2358: a completed erasure re-queues nothing and records no retry
+        assert "retry" not in request.deleted_data_summary
         # #2298: the rows naming the target change in that one value only;
         # every other actor's row is byte-identical
         assert request.deleted_data_summary["postgres"]["audit_mentions_pseudonymized"] == 2
@@ -3298,3 +3300,225 @@ class TestEmbeddingsRequeuedAfterAVectorStoreRetry:
         assert retry["embeddings_requeued"] == 6
         rows = await _table_snapshot(db_session, "memories")
         assert {rows[i]["embedding_status"] for i in subject_memories["requeued"]} == {"pending"}
+
+
+# ---------------------------------------------------------------------------
+# #2358: re-queue embeddings after a failure before the Postgres commit
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def other_workspace_memories(db_session: AsyncSession, bystanders):
+    """Another account's workspace with its ``success`` and in-flight
+    ``processing`` memories: the target's re-queue must leave them alone."""
+    from models.auth import Context
+    from models.memory import Memory
+
+    owner = bystanders["user_id"]
+    workspace = Workspace(
+        id=uuid4(),
+        name=f"ws-{uuid4().hex[:8]}",
+        plan_name="free",
+        owner_user_id=owner,
+        daily_api_limit=500,
+        weekly_api_limit=2500,
+    )
+    db_session.add(workspace)
+    await db_session.flush()
+    context = Context(
+        id=uuid4(), workspace_id=workspace.id, name=f"ctx-{uuid4().hex[:8]}", created_by=owner
+    )
+    db_session.add(context)
+    await db_session.flush()
+    memories = [
+        Memory(
+            id=uuid4(),
+            user_id=owner,
+            workspace_id=workspace.id,
+            context_id=context.id,
+            summary=f"{status} memory of another workspace",
+            content="body",
+            type="note",
+            client="test",
+            embedding_status=status,
+            embedding_retry_count=1,
+            embedding_attempted_at=utcnow() if status == "processing" else None,
+        )
+        for status in ("success", "processing")
+    ]
+    db_session.add_all(memories)
+    await db_session.commit()
+    ids = [m.id for m in memories]
+    workspace_id, context_id = workspace.id, context.id
+    yield ids
+    await db_session.rollback()
+    await db_session.execute(delete(Memory).where(Memory.id.in_(ids)))
+    await db_session.execute(delete(Context).where(Context.id == context_id))
+    await db_session.execute(delete(Workspace).where(Workspace.id == workspace_id))
+    await db_session.commit()
+
+
+async def _demote_the_other_member(db_session: AsyncSession, scenario: dict) -> None:
+    """No other admin in the target's workspace: step 2 raises
+    ``WorkspaceTransferRequiredError``."""
+    from sqlalchemy import update
+
+    await db_session.execute(
+        update(WorkspaceMember)
+        .where(
+            WorkspaceMember.workspace_id == scenario["workspace_id"],
+            WorkspaceMember.user_id == scenario["other_user_id"],
+        )
+        .values(role=WorkspaceRole.MEMBER)
+    )
+    await db_session.commit()
+
+
+async def _workspace_tables(db_session: AsyncSession) -> dict:
+    return {
+        table: await _table_snapshot(db_session, table)
+        for table in ("workspaces", "workspace_members", "contexts", "api_keys")
+    }
+
+
+def _assert_requeue_record(summary: dict, *, attempts: int = 0) -> None:
+    """``summary.retry`` holds the re-queue of the six live rows (#2358)."""
+    retry = summary["retry"]
+    assert retry["requeued_at"].endswith("Z")
+    assert {k: v for k, v in retry.items() if k != "requeued_at"} == {
+        "attempts": attempts,
+        "embeddings_requeued": 6,
+    }
+
+
+class TestEmbeddingsRequeuedAfterAFailureBeforeTheCommit:
+    """#2358: step 1 deleted the subject's points, then the request failed
+    before the Postgres commit; the account stays, so its live embedded
+    memories go back to ``pending`` — nobody else's."""
+
+    @pytest.mark.asyncio
+    async def test_a_transfer_error_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        other_workspace_memories,
+        patched_external_stores,
+    ):
+        from services.account_erasure_service import requeue_subject_embeddings
+
+        target = erasure_scenario["target_user_id"]
+        await _demote_the_other_member(db_session, erasure_scenario)
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        before = await _everything_but(db_session, request_id)
+        workspaces_before = await _workspace_tables(db_session)
+
+        assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"].startswith("workspace_transfer_required")
+        summary = row["deleted_data_summary"]
+        assert set(summary) == {"qdrant", "retry"}
+        assert summary["qdrant"] == {"kagura_memories": 0}
+        _assert_requeue_record(summary)
+        # nothing erased: raw ids kept
+        assert (row["user_id"], row["initiated_by"]) == (target, target)
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        # the other workspace's rows are among the byte-identical ones
+        assert set(other_workspace_memories) <= set(after["memories"])
+        for memory_id in other_workspace_memories:
+            assert after["memories"][memory_id] == before["memories"][memory_id]
+        # no ownership moved, no role changed, no key touched
+        assert await _workspace_tables(db_session) == workspaces_before
+        assert await _user_exists(db_session, target)
+
+        # idempotent: nothing is success any more
+        assert await requeue_subject_embeddings(db_session, target) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_failure_inside_the_postgres_step_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        other_workspace_memories,
+        patched_external_stores,
+    ):
+        """The step's transaction is rolled back (user, keys, audit rows
+        identical) and the subject's rows are re-queued."""
+        target = erasure_scenario["target_user_id"]
+        request_id = await _due_self_service_request(db_session, erasure_scenario)
+        before = await _everything_but(db_session, request_id)
+        keys_before = await _table_snapshot(db_session, "api_keys")
+
+        with patch(
+            "services.account_erasure_service.AccountErasureService._pseudonymize_audit_logs",
+            AsyncMock(side_effect=RuntimeError("audit_logs unavailable")),
+        ):
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"] == "audit_logs unavailable"
+        summary = row["deleted_data_summary"]
+        assert "postgres" not in summary
+        _assert_requeue_record(summary)
+        assert (row["user_id"], row["initiated_by"]) == (target, target)
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _table_snapshot(db_session, "api_keys") == keys_before
+        assert await _user_exists(db_session, target)
+
+    @pytest.mark.asyncio
+    async def test_an_admin_force_erase_requeues_before_the_409(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        other_workspace_memories,
+        patched_external_stores,
+    ):
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        target = erasure_scenario["target_user_id"]
+        await _demote_the_other_member(db_session, erasure_scenario)
+        before = await _everything_but(db_session, None)
+        workspaces_before = await _workspace_tables(db_session)
+
+        with pytest.raises(WorkspaceTransferRequiredError):
+            await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=target,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2358)",
+            )
+
+        request_id = (
+            await db_session.execute(
+                select(ErasureRequest.id).where(ErasureRequest.user_id == target)
+            )
+        ).scalar_one()
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"].startswith("workspace_transfer_required")
+        _assert_requeue_record(row["deleted_data_summary"])
+        assert (row["user_id"], row["initiated_by"]) == (target, "admin-runner")
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert after["erasure_requests"] == before["erasure_requests"]
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _workspace_tables(db_session) == workspaces_before
+        assert await _user_exists(db_session, target)
