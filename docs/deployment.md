@@ -3593,6 +3593,71 @@ With it set, Sleep's judge calls on the managed lane also pass
 not deleted for you: each workspace owner can still list and delete their own
 stored keys (#1613).
 
+## Migration lock timeout — Issue #2300
+
+`alembic upgrade` / `alembic downgrade` start every migration transaction with
+`SET LOCAL lock_timeout` (default **5 s**). An `ALTER TABLE` needs an ACCESS
+EXCLUSIVE lock; while it waits for one behind a long transaction, every later
+query on that table queues behind it, so on a hot table (`memories`,
+`api_keys`, `audit_logs`, `memory_revisions`) one slow reader would stall the
+API. With the cap, a lock wait past 5 s fails the migration instead.
+
+**What it looks like.** The upgrade stops with SQLSTATE `55P03`:
+
+```text
+sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) canceling statement due to lock timeout
+```
+
+In `deploy.sh` this is Step 2: the new color is not started and traffic is not
+moved. The failing revision rolled back; revisions applied before it in the
+same run, and the autocommit steps (`CREATE INDEX CONCURRENTLY`, VALIDATE)
+that already ran, stay. `alembic current` shows where it stopped.
+
+**What to do.** Run the upgrade again (`alembic upgrade head`, or re-run the
+deploy). A lock held for a moment (a slow request, a Sleep run) is usually gone
+by then. If it fails again, find the session holding the table:
+
+```sql
+-- sessions holding a lock on the table named in the failing statement
+SELECT a.pid, a.usename, a.application_name, a.state,
+       now() - a.xact_start AS xact_age, l.mode, left(a.query, 120) AS query
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.relation = 'api_keys'::regclass AND l.granted
+ORDER BY a.xact_start;
+
+-- the oldest open transactions on the server
+SELECT pid, usename, application_name, state,
+       now() - xact_start AS xact_age, left(query, 120) AS query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start
+LIMIT 10;
+```
+
+An `idle in transaction` session with a large `xact_age` is the usual cause.
+Let it finish, or end it (`SELECT pg_cancel_backend(<pid>)`, then
+`pg_terminate_backend(<pid>)`) once you know what it is, and run the upgrade
+again.
+
+**Override.** `KAGURA_MIGRATION_LOCK_TIMEOUT` sets the cap for the process that
+runs alembic: a PostgreSQL duration (`500ms`, `30s`, `2min`; a bare number is
+milliseconds). `0` turns it off (the lock wait is unbounded, as before
+v0.129.0). A longer value is a longer stall of the table while the `ALTER`
+waits. Set it in the env file the migration container reads, or on the one-off
+run (`docker compose run --rm -e KAGURA_MIGRATION_LOCK_TIMEOUT=30s ... alembic
+upgrade head`). A value that is not a duration stops alembic before any schema
+change.
+
+- A revision that sets its own `lock_timeout` keeps it for its own statements
+  (e91 and e95: 10 s; e99, f14, f15 and f16: 5 s); the override does not change
+  those.
+- Statements inside an autocommit block (`CREATE INDEX CONCURRENTLY`) have no
+  cap: their wait for older transactions blocks neither reads nor writes.
+- The setting is transaction-local, so it works through a transaction-pooling
+  pgbouncer. An offline script (`alembic upgrade --sql`) does not carry it:
+  `SET lock_timeout` in the `psql` session that runs the script.
+
 ## Database Connection Pool — Issue #1980
 
 Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (`backend/src/db/base.py`). Three variables size it:

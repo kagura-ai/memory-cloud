@@ -215,8 +215,10 @@ run_migrations() {
     dc run --rm --no-deps -T "$svc" alembic upgrade head \
         || error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
        If the output above names refused secrets (ENVIRONMENT=production), set them
-       in the env file and re-run; otherwise check \`alembic current\` and any
-       INVALID indexes before re-running."
+       in the env file and re-run; on \"canceling statement due to lock timeout\"
+       another session held a table lock (docs/deployment.md, Migration lock
+       timeout); otherwise check \`alembic current\` and any INVALID indexes
+       before re-running."
 }
 
 # Abort a registry-mode rollback that has nothing to roll back TO.
