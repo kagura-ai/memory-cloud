@@ -235,7 +235,7 @@ EMBEDDING_RETRY_BACKOFF_SECONDS = 60
 # marks it ``failed`` with the retry budget spent, so
 # no sweep recreates its points; the admin retry-failed endpoint (or an
 # embedding-model switch of the context) brings it back, and it then embeds
-# under the pseudonym. Here so the erasure and the sweep's backlog count
+# under the pseudonym. A context merge copies it still terminal. Here so the erasure and the sweep's backlog count
 # share it without importing each other.
 ERASED_AUTHOR_EMBEDDING_ERROR = (
     "erased_author: the author's account was erased; its vector points are "
