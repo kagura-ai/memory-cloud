@@ -335,7 +335,12 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
                 4,
                 "erasure",
                 p,
-                {"details": {}, "erased_details_keys": _BY_LOCATION, "restored_from": 3},
+                {
+                    "details": {},
+                    "erased_details_keys": _BY_LOCATION,
+                    "restored_from": 3,
+                    "details_restored_from": dict.fromkeys(_BY_LOCATION, 3),
+                },
             ),
         ]
         assert await _log(session, leftover.id) == [
@@ -576,7 +581,12 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
                     4,
                     "erasure",
                     p1,
-                    {"details": {}, "erased_details_keys": _BY_LOCATION, "restored_from": 2},
+                    {
+                        "details": {},
+                        "erased_details_keys": _BY_LOCATION,
+                        "restored_from": 2,
+                        "details_restored_from": dict.fromkeys(_BY_LOCATION, 2),
+                    },
                 )
             ]
             assert len(log) == 3

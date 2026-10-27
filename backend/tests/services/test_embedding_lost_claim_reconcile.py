@@ -2,8 +2,8 @@
 when the row's author changed meanwhile (the author was erased: the row now
 carries the pseudonym), or when the row is gone.
 
-``_reconcile_after_lost_claim`` first re-queues a ``success`` row as before
-(#2061); only when that moved nothing does it read the row's author.
+``_reconcile_after_lost_claim`` first re-queues a ``success`` row of the same
+author atomically (#2061, #2393); otherwise it checks for an erased author.
 """
 
 from __future__ import annotations
@@ -92,6 +92,9 @@ async def test_a_finished_newer_run_is_re_queued_and_no_point_is_deleted() -> No
 
     assert requeued is True
     assert db.execute.await_count == 1  # the re-queue, no read
+    # The status update must test the old run's author atomically. Reading
+    # first would let erasure replace it before this success -> pending write.
+    assert f"MEMORIES.USER_ID = '{RAW}'".upper() in _sql(db, 0)
     delete_points.assert_not_awaited()
     delete_chunks.assert_not_awaited()
 
@@ -137,6 +140,25 @@ async def test_a_newer_run_in_flight_under_the_new_author_is_fenced_and_re_queue
 
     assert requeued is True
     delete_points.assert_awaited_once_with([str(memory_id)], COLLECTION)
+    assert "MEMORIES.USER_ID = 'PSEUDONYM'" in _sql(db, 2)
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_retry_success_under_the_new_author_is_cleaned_and_re_queued() -> None:
+    """A success belongs to an explicit retry if erasure terminalized all
+    survivors. The old run must remove its raw-author point before repairing
+    that success, even though the same-author fast path would match status.
+    """
+    memory_id = uuid4()
+    db = _db([_rowcount(0), _author("pseudonym"), _rowcount(1)])
+
+    requeued, delete_points, delete_chunks, _ = await _reconcile(db, memory_id)
+
+    assert requeued is True
+    delete_points.assert_awaited_once_with([str(memory_id)], COLLECTION)
+    delete_chunks.assert_awaited_once_with([memory_id], COLLECTION)
+    assert f"MEMORIES.USER_ID = '{RAW}'".upper() in _sql(db, 0)
+    assert "MEMORIES.USER_ID = 'PSEUDONYM'" in _sql(db, 2)
 
 
 @pytest.mark.asyncio

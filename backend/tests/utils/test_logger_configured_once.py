@@ -73,7 +73,7 @@ def test_api_main_configures_once_at_import_before_it_logs():
     the app), so ``ensure_logger_configured()`` must come before the first
     ``api.*`` / ``mcp_server.*`` import as well as the first ``logger.*`` call.
     """
-    tree = ast.parse(_MAIN.read_text())
+    tree = ast.parse(_MAIN.read_text(encoding="utf-8"))
     calls = [
         (node.lineno, ast.unparse(node.value.func))
         for node in tree.body

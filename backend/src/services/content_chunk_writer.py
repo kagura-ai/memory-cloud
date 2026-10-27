@@ -584,7 +584,12 @@ async def write_content_chunks(
 
 
 async def requeue_embedding(
-    db: AsyncSession, memory_id: Any, *, reason: str, include_processing: bool = False
+    db: AsyncSession,
+    memory_id: Any,
+    *,
+    reason: str,
+    include_processing: bool = False,
+    expected_author: str | None = None,
 ) -> bool:
     """Put an embedded memory back to ``pending`` so the embedding sweep redoes it (#2061).
 
@@ -608,6 +613,11 @@ async def requeue_embedding(
     (``_stale_after_write``). ``pending``, ``failed`` and deleted rows are
     still never moved.
 
+    ``expected_author`` also compares the author in the UPDATE (#2393): a
+    lost-claim run must not requeue a newer author's success before checking
+    whether erasure changed the author. A preceding read alone would race
+    erasure's commit. No author is logged.
+
     Returns:
         True when the row was re-queued.
 
@@ -616,7 +626,11 @@ async def requeue_embedding(
     """
     async with db.begin_nested():
         result = await db.execute(
-            _requeue_statement(memory_id, include_processing=include_processing)
+            _requeue_statement(
+                memory_id,
+                include_processing=include_processing,
+                expected_author=expected_author,
+            )
         )
     requeued = int(getattr(result, "rowcount", 0) or 0) > 0
     if requeued:
@@ -624,10 +638,12 @@ async def requeue_embedding(
     return requeued
 
 
-def _requeue_statement(memory_id: Any, *, include_processing: bool) -> Any:
+def _requeue_statement(
+    memory_id: Any, *, include_processing: bool, expected_author: str | None = None
+) -> Any:
     """The fenced re-queue UPDATE (``requeue_embedding``, ``_requeue_over_run``)."""
     statuses = ("success", "processing") if include_processing else ("success",)
-    return (
+    statement = (
         update(Memory)
         .where(
             Memory.id == memory_id,
@@ -637,6 +653,9 @@ def _requeue_statement(memory_id: Any, *, include_processing: bool) -> Any:
         .values(embedding_status="pending")
         .execution_options(synchronize_session=False)
     )
+    if expected_author is not None:
+        statement = statement.where(Memory.user_id == expected_author)
+    return statement
 
 
 #: Summary-point payload keys ``build_memory_point`` writes only when the

@@ -124,7 +124,9 @@ class TestCloseQdrant:
 class TestLifespanClosesQdrant:
     def test_shutdown_closes_qdrant_after_the_scheduler_and_before_the_db(self):
         """Awaited calls after ``yield`` in ``lifespan()``, read from the AST."""
-        src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
+        src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text(
+            encoding="utf-8"
+        )
         lifespan = next(
             node
             for node in ast.walk(ast.parse(src))

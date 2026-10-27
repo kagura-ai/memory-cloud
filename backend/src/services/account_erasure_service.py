@@ -1568,8 +1568,8 @@ class AccountErasureService:
 
             # Step 3a (#2363): an embedding run that wrote a point under the
             # raw sub after step 1 and stamped ``success`` before the Postgres
-            # step locked the row left that point behind; the dequeue only
-            # fences runs still in flight at the lock. A second delete by the
+            # step locked the row left that point behind; terminalizing the
+            # row cannot delete an existing point. A second delete by the
             # raw sub, after the commit, removes it. Best-effort: never fails
             # the request (the subject is erased in Postgres).
             step = "late_points"
@@ -2626,8 +2626,8 @@ class AccountErasureService:
         Step 1 deletes them before anything else, but a run claiming one of
         the subject's queued memories can write its point (raw sub, live
         ``details``) after that and stamp ``success`` before
-        ``lock_subject_memories``; ``_dequeue_surviving_embeddings`` leaves a
-        ``success`` row alone, so nothing else would remove the point. After
+        ``lock_subject_memories``. Terminalizing the row stops future runs,
+        but cannot remove a point that already reached the store. After
         the commit no row carries the raw sub, so a run in flight writes under
         it only if it loaded the row before the commit, and its outcome write
         then misses the fence and it deletes its own point
@@ -2654,17 +2654,18 @@ class AccountErasureService:
     async def _dequeue_surviving_embeddings(self, user_id: str) -> int:
         """Take the subject's surviving memories out of the embedding queue (#2363).
 
-        Step 1 deleted every point of the subject. A surviving memory that was
-        still ``pending``, ``processing`` or ``failed`` with retry budget left
-        would be claimed by the sweep after the commit and get its points back
-        under the pseudonym. Each such row (any status but ``success``) becomes
-        terminal: ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR``, the retry
+        Step 1 deleted every point of the subject. Every surviving memory,
+        including a ``success`` row, becomes terminal: ``failed`` with
+        ``ERASED_AUTHOR_EMBEDDING_ERROR``, the retry
         budget spent (``MAX_EMBEDDING_RETRIES``, so
         ``embedding_retry_eligible_clause`` never matches it; the reclaim
         clauses need ``processing``) and the pipeline's clock stamped. A
-        ``success`` row is left as it is: its point is gone since step 1 (one
-        a run wrote after step 1 goes with ``_delete_late_points``). No
-        automatic retry takes these rows again; the admin retry-failed
+        ``success`` row must also be terminal (#2393): an older run that lost
+        its claim can still write after a newer run succeeded and erasure
+        finished; leaving ``success`` would let its lost-claim repair requeue
+        the erased author's row automatically. A point a run wrote before the
+        commit goes with ``_delete_late_points``. No automatic retry takes
+        these rows again; the admin retry-failed
         endpoint, or an embedding-model switch of the context (which re-queues
         every row that is not ``success``), brings them back, and they then
         embed under the pseudonym with no ``details``.
@@ -2692,7 +2693,7 @@ class AccountErasureService:
                     Memory.id.in_(
                         locked_ids(
                             Memory,
-                            lambda m: (m.user_id == user_id, m.embedding_status != "success"),
+                            lambda m: (m.user_id == user_id,),
                         )
                     )
                 )
@@ -2717,7 +2718,7 @@ class AccountErasureService:
         the memory text remains workspace content, but structured personal
         payload (coordinates, arbitrary detail keys) is removed at rest. The
         subject's tombstones are gone already (``_delete_subject_tombstones``),
-        and the rows still queued for an embedding are out of the queue
+        and all surviving authored rows are terminalized
         (``_dequeue_surviving_embeddings``, #2363).
 
         A ``type='time'`` memory keeps ``{"trigger": ...}`` and nothing else

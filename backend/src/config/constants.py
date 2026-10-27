@@ -230,9 +230,9 @@ MAX_EMBEDDING_RETRIES = 3
 # Backoff before a failed embedding is eligible for auto-retry — gives a
 # transient condition time to clear and spaces retries across sweep ticks.
 EMBEDDING_RETRY_BACKOFF_SECONDS = 60
-# #2363: the ``embedding_error`` of an erased author's surviving memory that
-# was still waiting for (or retrying) its embedding when the erasure
-# committed. The erasure marks it ``failed`` with the retry budget spent, so
+# #2363 / #2393: the ``embedding_error`` of every erased author's surviving
+# memory, including one already embedded when erasure committed. The erasure
+# marks it ``failed`` with the retry budget spent, so
 # no sweep recreates its points; the admin retry-failed endpoint (or an
 # embedding-model switch of the context) brings it back, and it then embeds
 # under the pseudonym. Here so the erasure and the sweep's backlog count

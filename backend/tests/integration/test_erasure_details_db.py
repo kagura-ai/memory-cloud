@@ -169,12 +169,24 @@ def _gone(details: dict[str, Any], *keys: str) -> dict[str, Any]:
 
 
 def _put_back(
-    restored_from: int, details: dict[str, Any] | None = None, *, keys: tuple[str, ...] = ()
+    restored_from: int,
+    details: dict[str, Any] | None = None,
+    *,
+    keys: tuple[str, ...] = (),
+    versions: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """The prior of the erasure row (#2275): the overwritten value minus the
     subject's keys, their digests, and the lowest version a value it reverted
     was written at."""
-    return {"details": details or {}, MARK: _digests(*keys), "restored_from": restored_from}
+    return {
+        "details": details or {},
+        MARK: _digests(*keys),
+        "restored_from": restored_from,
+        "details_restored_from": {
+            details_key_digest(k): v
+            for k, v in (versions or dict.fromkeys(keys, restored_from)).items()
+        },
+    }
 
 
 def _service(session: AsyncSession) -> AccountErasureService:
@@ -345,7 +357,14 @@ async def test_the_subjects_earlier_edits_are_walked_past(
             (memory.id, 4, "api", pseudonym, {"summary": "not details"}, None),
             # the subject's first value: both keys are theirs, stripped
             (memory.id, 5, "api", pseudonym, _gone({}, *("by", "location")), None),
-            (memory.id, 6, "erasure", pseudonym, _put_back(3, keys=("by", "secret")), None),
+            (
+                memory.id,
+                6,
+                "erasure",
+                pseudonym,
+                _put_back(3, keys=("by", "secret"), versions={"by": 3, "secret": 5}),
+                None,
+            ),
         ]
 
 
@@ -1368,6 +1387,7 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
                     "details": {"t": "z", "c": True},
                     MARK: [*_digests("location"), *_digests("a")],
                     "restored_from": 2,
+                    "details_restored_from": {details_key_digest("location"): 2},
                 },
                 None,
             ),
@@ -1450,3 +1470,108 @@ async def test_a_pre_v0129_stripped_state_is_counted_ambiguous_and_kept(
             assert result.restore == RestoreReport(keys_ambiguous=1)
             assert result.strip == StripCounts(0, 0)
             assert await _outside(session, everything) == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_per_key_restore_origins_survive_commit_and_reprocessing(
+    async_engine: AsyncEngine, world: dict[str, Any], reverse: bool
+) -> None:
+    """#2393: real JSONB persistence across erasures, order-independent
+    removal, unrelated rows unchanged, and dry/real reprocessing is a no-op."""
+    from services.erasure_details import _updated_rows, pseudonymize_revision_actor
+
+    subject, author, b, c = world["subject"], world["author"], world["third"], world["fourth"]
+    memory = _memory(world, author, {"k": 1, "x": 1}, 5)
+    untouched = _memory(world, b, {"unrelated": True}, 1)
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [memory, untouched],
+            [
+                _edit(world, memory, 2, subject, {"details": {"k": 0, "x": 0}}),
+                _edit(world, memory, 3, b, {"details": {"k": 0, "x": 1}}),
+                _edit(world, memory, 4, c, {"details": {"x": 1}}),
+                _edit(world, memory, 5, subject, {"details": {"k": 0, "x": 1}}),
+            ],
+        )
+        outside = await _outside(session, [memory.id])
+
+    erased = set()
+    for member, pseudonym in (
+        [(c, "c" * 64), (subject, "5" * 64)] if reverse else [(subject, "5" * 64), (c, "c" * 64)]
+    ):
+        # Reopen to prove that replay reads the stored JSONB map, rather
+        # than retaining the first erasure's in-memory plan.
+        async with _maker(async_engine)() as session:
+            await erase_subject_details(session, member, actor=pseudonym, erased_actors=erased)
+            await pseudonymize_revision_actor(session, member, pseudonym)
+            await session.commit()
+        erased.add(pseudonym)
+        if not reverse and member == subject:
+            async with _maker(async_engine)() as session:
+                edits = await _updated_rows(session, c)
+                put_back = next(e for e in edits if e.writer == "erasure")
+                assert put_back.restored_from == 2
+                assert put_back.restored_from_by_key == {
+                    details_key_digest("k"): 5,
+                    details_key_digest("x"): 2,
+                }
+
+    async with _maker(async_engine)() as session:
+        live = await _live(session, memory.id)
+        assert live.details == {"x": 0}
+        assert await _outside(session, [memory.id]) == outside
+        # Version reconstruction ignores the metadata and only applies
+        # versioned fields; the subject's restored k is no longer exposed.
+        for version in range(1, live.version):
+            rebuilt = await load_version(session, live, version)
+            assert "details_restored_from" not in rebuilt.values
+        everything = [uuid.uuid4()]
+        after = await _outside(session, everything)
+        for pseudonym in erased:
+            for dry_run in (True, False):
+                result = await erase_subject_details(
+                    session,
+                    pseudonym,
+                    actor=pseudonym,
+                    erased_actors=erased,
+                    dry_run=dry_run,
+                )
+                assert result.restore == RestoreReport()
+                assert result.strip == StripCounts(0, 0)
+                await session.commit()
+        assert await _outside(session, everything) == after
+
+
+@pytest.mark.parametrize("metadata", [None, [], "invalid", {"not-a-digest": 2}])
+async def test_present_malformed_restore_map_does_not_become_a_legacy_scalar(
+    async_engine: AsyncEngine, world: dict[str, Any], metadata: Any
+) -> None:
+    from services.details_provenance import plan_details_erasure
+    from services.erasure_details import _updated_rows
+
+    subject, author, b = world["subject"], world["author"], world["third"]
+    memory = _memory(world, author, {"k": 1}, 5)
+    put_back = _edit(
+        world,
+        memory,
+        5,
+        author,
+        {"details": {"k": 1}, "restored_from": 3, "details_restored_from": metadata},
+    )
+    put_back.writer = "rollback"
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [memory],
+            [
+                _edit(world, memory, 2, subject, {"details": {"k": 0}}),
+                _edit(world, memory, 3, b, {"details": {"k": 1}}),
+                _edit(world, memory, 4, b, {"details": {"k": 2}}),
+                put_back,
+            ],
+        )
+        edits = await _updated_rows(session, subject)
+        assert edits[-1].restored_from_by_key == {}
+        plan = plan_details_erasure(edits, {memory.id: (memory.details, author)}, subject)
+        assert plan.reverts == ()

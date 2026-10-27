@@ -31,9 +31,10 @@ Rules, per memory (``replay``):
   changed or added is that edit's actor's.
 - A put-back row (``writer`` ``rollback`` or ``erasure``) writes no value of
   its own: a key it changed is attributed to whoever wrote that value below
-  — the state right below the version it names in ``restored_from``
-  (``pre(r)``) when that state holds the value, else the newest earlier state
-  holding the same value (rows without ``restored_from``: session rollbacks
+  — the state right below that key's version in ``details_restored_from``
+  (a digest-to-version map; ``restored_from`` only on legacy rows without
+  the map). When that state holds the value, use its writer; else the newest
+  earlier state holding the same value (rows without ``restored_from``: session rollbacks
   from before #2266; exact unless the rolled-back session itself re-wrote a
   key to an earlier value), else nobody (a value the put-back synthesized:
   the trigger window an erasure merges into a time memory). An ``erasure``
@@ -77,6 +78,7 @@ attributed to the subject any more.
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -85,9 +87,10 @@ from typing import Any, Final
 from uuid import UUID
 
 from models.memory import REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK
-from utils.hashing import sha256_hex
+from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 
 _PUT_BACK: Final = (REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK)
+_KEY_DIGEST: Final = re.compile(SHA256_HEX_PATTERN)
 
 
 def details_key_digest(key: str) -> str:
@@ -114,6 +117,9 @@ class DetailsEdit:
         restored_from: On a put-back row (``erasure``, and ``rollback`` since
             #2266), ``prior.restored_from``: the lowest version at which a
             value it put back over was written.
+        restored_from_by_key: On a new erasure row, each reverted key's
+            digest maps to its own restore version. None identifies legacy
+            rows that use the scalar ``restored_from`` for every key.
         details_changed: The edit changed ``details``
             (``revision_edited_details``). Rows that did not are ignored.
     """
@@ -128,6 +134,26 @@ class DetailsEdit:
     erased_keys: frozenset[str] = frozenset()
     restored_from: int | None = None
     details_changed: bool = True
+    restored_from_by_key: Mapping[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.restored_from_by_key is None:
+            return  # Only an absent legacy map enables the scalar fallback.
+        raw = self.restored_from_by_key
+        valid = (
+            {
+                digest.lower(): version
+                for digest, version in raw.items()
+                if isinstance(digest, str)
+                and _KEY_DIGEST.fullmatch(digest)
+                and type(version) is int
+                and 1 <= version < self.version
+            }
+            if isinstance(raw, Mapping)
+            else {}
+        )
+        # Malformed/new metadata stays a present map, never a legacy scalar.
+        object.__setattr__(self, "restored_from_by_key", valid)
 
 
 class _Unknown:
@@ -223,6 +249,11 @@ class MemoryRevert:
     result: Any
     prior: dict[str, Any]
     erased_keys: tuple[str, ...] = ()
+
+    @property
+    def restored_from_by_key(self) -> dict[str, int]:
+        """Only key digests and versions; never key names, values or actors."""
+        return {details_key_digest(r.key): r.from_version for r in self.reverts}
 
     @property
     def unavailable(self) -> bool:
@@ -330,11 +361,6 @@ def replay(
             continue
         before_known = states[i] is not UNKNOWN
         put_back = edit.writer in _PUT_BACK
-        pre = (
-            _pre(versions, edit.restored_from, i)
-            if put_back and edit.restored_from is not None
-            else None
-        )
         # an erasure row since #2275 carries the overwritten dict minus the
         # erased keys: what it did not revert keeps its writer first. Any
         # other put-back puts back pre(r) whole.
@@ -347,6 +373,10 @@ def replay(
         )
         mapping: dict[str, Origin] = {}
         for key, value in _keys(after).items():
+            restored_from = _restored_from(edit, details_key_digest(key))
+            pre = (
+                _pre(versions, restored_from, i) if put_back and restored_from is not None else None
+            )
             mapping[key] = _attribute(
                 key,
                 value,
@@ -362,6 +392,17 @@ def replay(
         writers[i + 1] = mapping
     stripped = (*(e.erased_keys for e in edits), frozenset())
     return Replay(tuple(edits), tuple(states), tuple(writers), stripped, tuple(versions))
+
+
+def _restored_from(edit: DetailsEdit, digest: str) -> int | None:
+    """A new put-back's per-key origin; use the scalar only for legacy rows.
+
+    A key missing from a present map was carried or synthesized, never
+    restored from the unrelated oldest version named by the scalar.
+    """
+    if edit.restored_from_by_key is not None:
+        return edit.restored_from_by_key.get(digest)
+    return edit.restored_from
 
 
 def _attribute(
@@ -457,18 +498,22 @@ def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
 
     The edit that wrote ``S_j`` carried it from ``S_{j-1}``, or wrote it
     itself (an erased member's ``api`` edit): ``S_{j-1}`` either way. A
-    put-back row put it back from ``pre(r)`` — a session rollback whole, an
-    erasure row for the keys it reverted (absent from its own prior) — so
+    put-back row put it back from that key's ``pre(r)`` — a session rollback
+    whole, an erasure row for the keys it reverted — so
     the walk goes on there, not in the state the put-back replaced.
     """
     producer = run.edits[j - 1]
-    if producer.writer not in _PUT_BACK or producer.restored_from is None:
+    restored_from = _restored_from(producer, digest)
+    if producer.writer not in _PUT_BACK or restored_from is None:
         return j - 1
-    if producer.writer == REVISION_WRITER_ERASURE:
+    if producer.writer == REVISION_WRITER_ERASURE and producer.restored_from_by_key is None:
+        # Legacy rows have no per-key map: infer carried/restored from the
+        # prior. New rows say exactly which keys they reverted, even when
+        # another erasure has since stripped the overwritten value too.
         prior = run.states[j - 1]
         if prior is UNKNOWN or key in _keys(prior) or digest in run.stripped[j - 1]:
             return j - 1  # carried by the erasure row
-    return _pre(run.versions, producer.restored_from, j - 1)
+    return _pre(run.versions, restored_from, j - 1)
 
 
 def _plan_memory(

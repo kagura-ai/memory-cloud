@@ -3663,7 +3663,99 @@ class TestQueuedSurvivorsAreNotReEmbedded:
     pseudonym. The admin retry is the only way back."""
 
     @pytest.mark.asyncio
-    async def test_the_erasure_dequeues_only_the_subjects_queued_survivors(
+    @pytest.mark.parametrize("explicit_retry", [False, True])
+    async def test_an_old_run_after_a_newer_success_and_erasure_cannot_revive_the_author(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+        explicit_retry: bool,
+    ):
+        """#2393: W1 loses its claim, W2 succeeds, erasure finishes, then W1 writes.
+
+        All state transitions use Postgres; only provider/vector IO is stubbed.
+        An explicit admin retry after erasure may legitimately rebuild a point:
+        if W1 overwrites that new success, delete the stale point and requeue
+        the current author rather than leaving its success without a point.
+        """
+        import asyncio
+
+        from sqlalchemy import update
+
+        from api.routes.admin import retry_failed_embeddings
+        from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+        from models.memory import Memory
+
+        target = erasure_scenario["target_user_id"]
+        memory_id = queued_survivors["queued"][0]
+        embedding, release = asyncio.Event(), asyncio.Event()
+
+        async def _blocked_embed(*_a, **_k) -> list[float]:
+            embedding.set()
+            await release.wait()
+            return [0.1] * 8
+
+        run = asyncio.create_task(
+            _embed_once(db_session, memory_id, embed=AsyncMock(side_effect=_blocked_embed))
+        )
+        try:
+            await asyncio.wait_for(embedding.wait(), 15)
+            # A pre-commit erasure failure's compensation (#2358), or an edit,
+            # can revoke W1's claim while its provider call is still running.
+            await db_session.execute(
+                update(Memory).where(Memory.id == memory_id).values(embedding_status="pending")
+            )
+            await db_session.commit()
+            newer = await _embed_once(db_session, memory_id)
+            newer["add_memory_to_qdrant"].assert_awaited_once()
+            assert (await _table_snapshot(db_session, "memories"))[memory_id][
+                "embedding_status"
+            ] == "success"
+            request = await _erase(db_session, erasure_scenario)
+            assert request.status == STATUS_COMPLETE
+
+            if explicit_retry:
+                await retry_failed_embeddings(
+                    user={"user_id": "admin-runner"},
+                    db=db_session,
+                    context_id=str(queued_survivors["context_id"]),
+                    workspace_id=None,
+                )
+                row = (await _table_snapshot(db_session, "memories"))[memory_id]
+                assert row["embedding_status"] == "pending"
+                assert row["embedding_error"] is None
+                await _embed_once(db_session, memory_id)
+                assert (await _table_snapshot(db_session, "memories"))[memory_id][
+                    "embedding_status"
+                ] == "success"
+            release.set()
+            stale = await asyncio.wait_for(run, 15)
+        finally:
+            release.set()
+            if not run.done():
+                await asyncio.wait_for(run, 15)
+
+        assert stale["add_memory_to_qdrant"].await_args.kwargs["user_id"] == target
+        stale["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
+        stale["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
+        row = (await _table_snapshot(db_session, "memories"))[memory_id]
+        assert row["user_id"] == erasure_pseudonym(target)
+        if explicit_retry:
+            assert row["embedding_status"] == "pending"
+            rebuilt = await _embed_once(db_session, memory_id, build_point=True)
+            assert rebuilt["add_memory_to_qdrant"].await_args.kwargs["user_id"] == row["user_id"]
+            assert (await _table_snapshot(db_session, "memories"))[memory_id][
+                "embedding_status"
+            ] == "success"
+        else:
+            assert row["embedding_status"] == "failed"
+            assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
+            sweep = await _embed_once(db_session, memory_id)
+            sweep["embed"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_erasure_terminalizes_only_the_subjects_survivors(
         self,
         db_session: AsyncSession,
         erasure_scenario,
@@ -3681,9 +3773,9 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         request = await _erase(db_session, erasure_scenario)
 
         assert request.status == STATUS_COMPLETE
-        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 4
+        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 5
         after = await _table_snapshot(db_session, "memories")
-        for memory_id in queued_survivors["queued"]:
+        for memory_id in [*queued_survivors["queued"], queued_survivors["embedded"]]:
             row = after[memory_id]
             assert row["user_id"] == pseudonym
             assert row["details"] is None
@@ -3692,12 +3784,9 @@ class TestQueuedSurvivorsAreNotReEmbedded:
             assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
             assert row["embedding_retry_count"] == MAX_EMBEDDING_RETRIES
             assert to_naive_utc(datetime.fromisoformat(row["embedding_attempted_at"])) >= started
-        # the embedded survivor is scrubbed; its embedding state is unchanged
+        # A success must also stay out of lost-claim automatic recovery.
         embedded = queued_survivors["embedded"]
         assert after[embedded]["user_id"] == pseudonym
-        assert {c: after[embedded][c] for c in _DEQUEUE_COLUMNS} == {
-            c: before[embedded][c] for c in _DEQUEUE_COLUMNS
-        }
         assert queued_survivors["tombstone"] not in after
         # another author's row the target edited: its details are put back
         # (#2244), its embedding state is not the dequeue's
@@ -3740,7 +3829,7 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         )
 
         await _erase(db_session, erasure_scenario)
-        queued = queued_survivors["queued"]
+        queued = [*queued_survivors["queued"], queued_survivors["embedded"]]
         before = await _table_snapshot(db_session, "memories")
         later = utcnow() + timedelta(days=1)
         stale_cutoff = later - timedelta(seconds=STALE_CLAIM_SECONDS)
@@ -3800,9 +3889,9 @@ class TestQueuedSurvivorsAreNotReEmbedded:
             workspace_id=None,
         )
 
-        assert response["reset_count"] == 4
+        assert response["reset_count"] == 5
         rows = await _table_snapshot(db_session, "memories")
-        for memory_id in queued_survivors["queued"]:
+        for memory_id in [*queued_survivors["queued"], queued_survivors["embedded"]]:
             assert rows[memory_id]["embedding_status"] == "pending"
             assert rows[memory_id]["embedding_error"] is None
             assert rows[memory_id]["embedding_retry_count"] == 0
@@ -3884,8 +3973,8 @@ class TestQueuedSurvivorsAreNotReEmbedded:
     ):
         """A run embeds one of the queued survivors to ``success`` between step
         1 and the Postgres step (here: during the workspace hand-over). The
-        dequeue leaves a ``success`` row alone, so the subject's points are
-        deleted once more, by the raw sub, after the commit."""
+        dequeue terminalizes the row but cannot delete its existing point,
+        so the subject's points are deleted again after the commit."""
         target = erasure_scenario["target_user_id"]
         memory_id = queued_survivors["queued"][0]  # pending, with coordinates
         order: list[tuple] = []
@@ -3918,10 +4007,10 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         ]
         summary = request.deleted_data_summary
         assert summary["qdrant_after_commit"] == {"kagura_memories": 1}
-        # ``success`` at the lock: not dequeued, scrubbed like any survivor
-        assert summary["postgres"]["memories_embedding_dequeued"] == 3
+        # ``success`` at the lock: terminalized like every other survivor.
+        assert summary["postgres"]["memories_embedding_dequeued"] == 5
         row = (await _table_snapshot(db_session, "memories"))[memory_id]
-        assert row["embedding_status"] == "success"
+        assert row["embedding_status"] == "failed"
         assert row["user_id"] == erasure_pseudonym(target)
         assert row["details"] is None
 
@@ -4013,7 +4102,7 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         from cli import reprocess_erasures as cli
 
         request = await _erase(db_session, erasure_scenario)
-        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 4
+        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 5
         before = await _table_snapshot(db_session, "memories")
         capsys.readouterr()  # the erasure's own log lines carry the raw id
 

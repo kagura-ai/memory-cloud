@@ -33,8 +33,9 @@ past erasures by pseudonym (#2243) share one definition:
   ``actor`` is always the pseudonym. Each restore writes a ``writer='erasure'``
   row whose prior is ``{"details": <the overwritten value minus the
   subject's keys>, "erased_details_keys": <their digests>, "restored_from":
-  <version>}`` (before v0.129.0: ``{"erased": ["details"], "restored_from":
-  <version>}``).
+  <version>, "details_restored_from": <key digest to version>}``
+  (#2393; the per-key map takes precedence over the scalar; before v0.129.0:
+  ``{"erased": ["details"], "restored_from": <version>}``).
 - ``erase_subject_details(db, subject, ...)`` (#2268) — the restore, then
   the strip, from one read of the logs under the memory locks and one
   ``details_provenance.plan_details_erasure`` (#2275): what the live
@@ -133,6 +134,7 @@ from services.details_provenance import (
     plan_details_erasure,
 )
 from services.memory_versions import (
+    PRIOR_DETAILS_RESTORED_FROM_KEY,
     PRIOR_ERASED_DETAILS_KEYS_KEY,
     PRIOR_ERASED_KEY,
     PRIOR_RESTORED_FROM_KEY,
@@ -1317,6 +1319,10 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 MemoryRevision.prior[PRIOR_ERASED_KEY].has_key("details").label("erased"),
                 MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY].label("erased_keys"),
                 MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].as_integer().label("restored_from"),
+                MemoryRevision.prior[PRIOR_DETAILS_RESTORED_FROM_KEY].label("restored_from_by_key"),
+                MemoryRevision.prior.has_key(PRIOR_DETAILS_RESTORED_FROM_KEY).label(
+                    "has_restore_map"
+                ),
                 revision_edited_details(MemoryRevision).label("details_changed"),
             )
             .join(Memory, Memory.id == MemoryRevision.memory_id)
@@ -1340,6 +1346,11 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
             erased=bool(row.erased),
             erased_keys=frozenset(row.erased_keys if isinstance(row.erased_keys, list) else ()),
             restored_from=row.restored_from,
+            restored_from_by_key=(
+                (row.restored_from_by_key if isinstance(row.restored_from_by_key, dict) else {})
+                if row.has_restore_map
+                else None
+            ),
             details_changed=bool(row.details_changed),
         )
         for row in rows
@@ -1583,7 +1594,8 @@ async def restore_editor_details(
     and one ``updated`` revision row with ``writer='erasure'``, ``actor`` as
     its actor and ``{"details": <the overwritten value minus the subject's
     keys>, "erased_details_keys": <their digests>, "restored_from":
-    <from_version>}`` as its prior — stripped like
+    <from_version>, "details_restored_from": <key digest to version>}`` as
+    its prior (#2393) — stripped like
     every other prior, so the subject's value is in none, a later erasure
     can tell whose keys are live, ``expected_version`` protects the restored
     value from a stale edit, and a rebuilt version shows the other members'
@@ -1675,6 +1687,7 @@ async def restore_editor_details(
                 "details": copy.deepcopy(revert.prior),
                 PRIOR_ERASED_DETAILS_KEYS_KEY: list(revert.erased_keys),
                 PRIOR_RESTORED_FROM_KEY: revert.from_version,
+                PRIOR_DETAILS_RESTORED_FROM_KEY: revert.restored_from_by_key,
             },
             writer=REVISION_WRITER_ERASURE,
             provenance=WriteProvenance(None, None),
