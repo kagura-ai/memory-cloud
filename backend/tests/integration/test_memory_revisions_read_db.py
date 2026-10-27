@@ -157,7 +157,8 @@ async def test_erasure_strips_the_details_the_subject_wrote_not_the_ones_they_ov
 ) -> None:
     """A's details sit in the prior of the NEXT details edit after A's (here
     D's v5), not in A's own row, whose prior is B's. Erasing A strips v5 and
-    keeps v3; the versions that held A's details read as unavailable."""
+    keeps v3; the versions that held A's details read without A's keys
+    (#2275: per key, nothing else was in the value)."""
     subject = f"erased-{uuid.uuid4().hex[:8]}"
     ws_id, ctx_id, mem_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     async with _maker(async_engine)() as session:
@@ -221,10 +222,10 @@ async def test_erasure_strips_the_details_the_subject_wrote_not_the_ones_they_ov
             (2, {"details": {"c": 1}}),
             (3, {"details": {"b": 1}}),  # B's value, kept
             (4, {"summary": "a's"}),
-            (5, {"erased": ["details"]}),  # A's value, gone
+            (5, {"details": {}}),  # A's key, gone
         ]
-        assert rebuilt[4].unavailable == ("details",)
-        assert rebuilt[3].unavailable == ("details",)
+        assert rebuilt[4].values["details"] == {} and rebuilt[4].unavailable == ()
+        assert rebuilt[3].values["details"] == {} and rebuilt[3].unavailable == ()
         assert rebuilt[2].values["details"] == {"b": 1} and rebuilt[2].unavailable == ()
         assert rebuilt[1].values["details"] == {"c": 1}
     finally:

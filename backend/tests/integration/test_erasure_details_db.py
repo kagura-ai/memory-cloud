@@ -153,10 +153,10 @@ async def _seed(session: AsyncSession, memories: list[Memory], edits: list[Memor
     await session.commit()
 
 
-def _put_back(restored_from: int) -> dict[str, Any]:
-    """The prior of the erasure row: details unavailable, and the version of
-    the lowest edit of the block it reverted."""
-    return {"erased": ["details"], "restored_from": restored_from}
+def _put_back(restored_from: int, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The prior of the erasure row (#2275): the overwritten value minus the
+    subject's keys, and the lowest version a value it reverted was written at."""
+    return {"details": details or {}, "restored_from": restored_from}
 
 
 def _service(session: AsyncSession) -> AccountErasureService:
@@ -280,9 +280,10 @@ async def test_the_authors_value_comes_back_with_its_own_revision(
             (memory.id, 4, "api", pseudonym, {"details": AUTHORS}, None),
             (memory.id, 5, "erasure", pseudonym, _put_back(4), None),
         ]
-        # the subject's version reads "unavailable"; the author's reads back
+        # the subject's version reads without the subject's keys (#2275); the
+        # author's reads back
         at_4 = await load_version(session, live, 4)
-        assert at_4.unavailable == ("details",) and at_4.values["details"] is None
+        assert at_4.unavailable == () and at_4.values["details"] == {}
         assert (await load_version(session, live, 3)).values["details"] == AUTHORS
         assert (await load_version(session, live, 1)).values["details"] == CREATION
 
@@ -316,14 +317,16 @@ async def test_the_subjects_earlier_edits_are_walked_past(
         with patch(_QDRANT, AsyncMock()):
             pseudonym, report = await _erase_memories(session, subject)
 
-        assert (report.restored, report.unavailable) == (1, 0)
-        assert (await _live(session, memory.id)).details == AUTHORS  # not SUBJECTS
+        assert (report.restored, report.unavailable, report.keys_reverted) == (1, 0, 2)
+        # #2275: ``by`` goes back past both of the subject's edits; their
+        # ``secret`` goes; the author's ``location`` they removed stays removed
+        assert (await _live(session, memory.id)).details == {"by": "author"}
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", author, {"details": CREATION}, None),
             (memory.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
             (memory.id, 4, "api", pseudonym, {"summary": "not details"}, None),
-            # the subject's first value: stripped from the log as before
-            (memory.id, 5, "api", pseudonym, {"erased": ["details"]}, None),
+            # the subject's first value: both keys are theirs, stripped
+            (memory.id, 5, "api", pseudonym, {"details": {}}, None),
             (memory.id, 6, "erasure", pseudonym, _put_back(3), None),
         ]
 
@@ -447,7 +450,8 @@ async def test_the_subjects_tombstones_leave_before_the_strip(
         assert await _log(session, tombstone.id, live.id, edited.id) == [
             (live.id, 2, "api", third, {"erased": ["details"], "scrubbed": ["details"]}, None),
             (edited.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (edited.id, 3, "api", third, {"erased": ["details"]}, None),
+            # #2275: both keys of the subject's value leave the prior
+            (edited.id, 3, "api", third, {"details": {}}, None),
         ]
         assert (await _live(session, edited.id)).details == {"by": "third"}
         assert await _snapshot(session, _REVISIONS_OUTSIDE, in_scope) == revisions_before
@@ -727,7 +731,7 @@ async def _assert_scope(
             (restored.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
             (restored.id, 4, "erasure", pseudonym, _put_back(3), None),
             (overwritten.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (overwritten.id, 3, "api", third, {"erased": ["details"]}, "sess-t"),
+            (overwritten.id, 3, "api", third, {"details": {}}, "sess-t"),
             (
                 own.id,
                 2,
@@ -758,7 +762,8 @@ async def test_a_re_run_by_pseudonym_and_a_dry_run_change_nothing(
         with patch(_QDRANT, sync):
             dry = await restore_editor_details(session, subject, actor="p" * 64, dry_run=True)
         await session.flush()
-        assert dry == RestoreReport(restored=1, memory_ids=[memory.id])  # no to_sync
+        # no to_sync
+        assert dry == RestoreReport(restored=1, keys_reverted=2, memory_ids=[memory.id])
         assert await _snapshot(session, _REVISIONS_OUTSIDE, everything) == before
         assert await _snapshot(session, _MEMORIES_OUTSIDE, everything) == memories_before
         await session.rollback()
@@ -850,17 +855,20 @@ async def test_a_second_erasure_finds_the_value_the_first_one_put_back(
         )
         with patch(_QDRANT, AsyncMock()):
             p_first, first_report = await _erase_memories(session, first)
-        assert (await _live(session, memory.id)).details == SUBJECTS_2  # V's value
+        # V's ``by`` is back; U's ``location`` goes; V's ``secret`` that U
+        # removed stays removed (#2275: deletions stand)
+        assert (await _live(session, memory.id)).details == {"by": "subject-again"}
         with patch(_QDRANT, AsyncMock()):
             p_second, second_report = await _erase_memories(session, second)
 
         assert (first_report.restored, second_report.restored) == (1, 1)
         live = await _live(session, memory.id)
-        assert (live.details, live.version) == (AUTHORS, 5)
+        # the author's ``by``; the ``location`` V removed stays removed
+        assert (live.details, live.version) == ({"by": "author"}, 5)
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", p_second, {"details": AUTHORS}, None),
             # V's value, stripped by V's erasure
-            (memory.id, 3, "api", p_first, {"erased": ["details"]}, None),
+            (memory.id, 3, "api", p_first, {"details": {}}, None),
             (memory.id, 4, "erasure", p_first, _put_back(3), None),
             (memory.id, 5, "erasure", p_second, _put_back(2), None),
         ]
@@ -980,7 +988,8 @@ async def test_a_merged_live_trigger_loses_its_text(
     merged into the author's value, never its ``text``."""
     subject, author = world["subject"], world["author"]
     labelled = normalize_trigger({"year": 2027, "month": 1, "day": 1, "text": "private"})
-    memory = _memory(world, author, {"trigger": labelled}, 2, kind="time")
+    # the subject added the trigger and carried the author's keys
+    memory = _memory(world, author, {**AUTHORS, "trigger": labelled}, 2, kind="time")
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
         before = await _outside(session, [memory.id])
@@ -1014,7 +1023,10 @@ async def test_an_unnormalized_authors_trigger_is_normalized(
     vectors are gone): it is normalized, or replaced by the live window."""
     subject, author = world["subject"], world["author"]
     raw = {"trigger": raw_trigger, "by": "author"}
-    memory = _memory(world, author, {"trigger": TRIGGER}, 2, kind="time")
+    # the subject rewrote the trigger (with a text of theirs) and carried the
+    # author's ``by``
+    subjects = normalize_trigger({"year": 2027, "month": 1, "day": 1, "text": "subject's"})
+    memory = _memory(world, author, {"trigger": subjects, "by": "author"}, 2, kind="time")
     async with _maker(async_engine)() as session:
         await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": raw})])
         before = await _outside(session, [memory.id])

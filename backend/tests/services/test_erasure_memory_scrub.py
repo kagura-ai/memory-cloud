@@ -261,26 +261,26 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     service.db = db
 
     # the subject's details edit (row 11) and the next one over it (row 12):
-    # row 12's prior holds the subject's value (review B3: decided by the
-    # provenance walk, read under the memory locks)
-    from uuid import uuid4
+    # row 12's prior holds the subject's key (#2275: decided per key by the
+    # replay, read under the memory locks)
+    from services.details_provenance import DetailsErasurePlan, PriorStrip
 
-    from services.erasure_details import DetailsEdit
-
-    memory_id = uuid4()
-    edits = [
-        DetailsEdit(memory_id, 2, 11, "google-oauth2|erased", "api", {"a": 1}, False),
-        DetailsEdit(memory_id, 3, 12, "someone-else", "api", {"b": 2}, False),
-    ]
+    plan = DetailsErasurePlan(strips=(PriorStrip(12, ("a",)),))
     with (
         patch("services.account_erasure_service._audit_salt", return_value="salt"),
-        patch("services.erasure_details._updated_rows", new=AsyncMock(return_value=edits)),
+        patch(
+            "services.erasure_details.plan_subject_details", new=AsyncMock(return_value=plan)
+        ) as planned,
     ):
         counts = await service._erase_memory_revisions("google-oauth2|erased")
+    assert planned.await_args.args[1] == "google-oauth2|erased"
 
-    # #2244: the strip's rowcount reaches the erasure summary too
-    assert counts == {"memory_revisions_pseudonymized": 3, "revision_details_stripped": 3}
-    lock, strip, scrub, pseudonymize = (c.args[0] for c in db.execute.await_args_list)
+    # #2244: the strip's rowcounts reach the erasure summary too (the per-key
+    # editor rows and the authored rows)
+    assert counts == {"memory_revisions_pseudonymized": 3, "revision_details_stripped": 6}
+    lock, key_lock, keys, strip, scrub, pseudonymize = (
+        c.args[0] for c in db.execute.await_args_list
+    )
     # #2242 review: the subject's memories are locked first, in id order, so
     # no edit adds to their logs and no rollback / erasure deadlocks on them
     lock_sql = " ".join(str(lock.compile(dialect=postgresql.dialect())).split())
@@ -289,6 +289,15 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     )
     assert " UNION SELECT " in lock_sql
     assert lock_sql.endswith("ORDER BY memories_1.id FOR UPDATE")
+    # #2275: the rows holding the subject's keys are locked in id order, then
+    # lose those keys only
+    key_lock_compiled = key_lock.compile(dialect=postgresql.dialect())
+    assert str(key_lock_compiled).endswith("ORDER BY memory_revisions.id FOR UPDATE")
+    assert [v for k, v in key_lock_compiled.params.items() if k.startswith("strip_ids")] == [[12]]
+    keys_compiled = keys.compile(dialect=postgresql.dialect())
+    assert str(keys_compiled).startswith("UPDATE memory_revisions SET prior=jsonb_set(")
+    assert keys_compiled.params["keys_1"] == ["a"]
+    assert [v for k, v in keys_compiled.params.items() if k.startswith("ids")] == [[12]]
     strip_compiled = strip.compile(dialect=postgresql.dialect())
     strip_sql = str(strip_compiled)
     assert strip_sql.startswith("UPDATE memory_revisions SET prior=((memory_revisions.prior #-")
@@ -299,11 +308,9 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
         "FROM memories AS memories_1 WHERE memories_1.user_id = "
     ) in " ".join(strip_sql.split())
     assert " UNION SELECT memory_revisions_2.memory_id" in strip_sql
-    # every event of a memory the subject wrote, and the events whose prior
-    # holds a details the subject wrote — the ids the walk found
+    # the authored arm only: every event of a memory the subject authored
     assert "memory_revisions_1.memory_id IN (SELECT memories.id" in strip_sql
-    assert "memory_revisions_1.id = ANY (" in strip_sql
-    assert [v for k, v in strip_compiled.params.items() if k.startswith("held_ids")] == [[12]]
+    assert "held_ids" not in strip_sql and "= ANY (" not in strip_sql
     # no time bound during erasure: every row predates it
     assert ".at <=" not in strip_sql
     assert _from_lists(strip_sql) == [
@@ -417,8 +424,8 @@ async def test_strip_subject_details_takes_one_subject_string() -> None:
 @pytest.mark.asyncio
 async def test_a_re_run_bounds_the_authored_arm_to_rows_the_erasure_saw() -> None:
     """#2243 (review S1): with ``existed_at`` the authored arm of both
-    statements reaches only rows written by then; the held-ids arm (a prior
-    that holds the subject's value) is not bounded."""
+    statements reaches only rows written by then; the per-key editor arm
+    (#2275, no rows here) is not bounded."""
     from datetime import datetime
 
     from sqlalchemy.dialects import postgresql
@@ -436,11 +443,11 @@ async def test_a_re_run_bounds_the_authored_arm_to_rows_the_erasure_saw() -> Non
     strip_compiled = strip.compile(dialect=postgresql.dialect())
     strip_sql = " ".join(str(strip_compiled).split())
     assert (
-        "(memory_revisions_1.id = ANY (%(held_ids_1)s::BIGINT[]) OR "
         "memory_revisions_1.memory_id IN (SELECT memories.id FROM memories "
         "WHERE memories.user_id = %(user_id_2)s::VARCHAR) AND "
-        "memory_revisions_1.at <= %(at_1)s::TIMESTAMP WITHOUT TIME ZONE)"
+        "memory_revisions_1.at <= %(at_1)s::TIMESTAMP WITHOUT TIME ZONE"
     ) in strip_sql
+    assert "held_ids" not in strip_sql
     assert strip_compiled.params["at_1"] == existed_at
     scrub_compiled = scrub.compile(dialect=postgresql.dialect())
     assert "memory_revisions_1.at <= " in str(scrub_compiled)

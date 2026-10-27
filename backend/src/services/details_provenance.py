@@ -53,11 +53,14 @@ Rules, per memory (``replay``):
 - **The subject's keys** are the live keys whose writer is the subject.
   Each goes back to the value it had right below the edit that wrote it,
   walking further down past every value an erased member (the subject or
-  one of ``erased_actors``) wrote — or is removed when there was none.
-  Where that state is UNKNOWN and the edit that wrote it is an erased
-  member's, the walk goes on below it; otherwise the value is unavailable
-  and the key is removed. Keys an erased member other than the subject
-  wrote are left to that member's erasure (or re-run).
+  one of ``erased_actors``) wrote and every state their own edit wrote
+  without the key (their removal, or their value stripped by their
+  erasure) — or is removed when there was none. Where that state is
+  UNKNOWN and the edit that wrote it is an erased member's, the walk goes
+  on below it; otherwise the value is unavailable and the key is removed.
+  So the result does not depend on which of two erasures runs first. Keys
+  an erased member other than the subject wrote are left to that member's
+  erasure (or re-run).
 - **Deletions stand**: a key the subject removed was not their data and is
   not put back, even when their edit is the newest.
 - **Strip**: every intermediate state's keys whose writer is the subject
@@ -386,27 +389,41 @@ def _revert(
     """Where the subject's live ``key`` goes back to: below the edit that
     wrote it, past every value an erased member wrote.
 
+    A state an erased member's own (``api``) edit wrote is walked past
+    whatever it holds for ``key``: their value, their removal of the key, or
+    — once their erasure stripped the key or the whole state — nothing.
+
     Returns:
         The revert, and the index of the state its value comes from.
     """
     states, writers, edits = run.states, run.writers, run.edits
-    o = origin
+
+    def erased_wrote(j: int) -> bool:
+        return (
+            j >= 1
+            and edits[j - 1].writer not in _PUT_BACK
+            and (edits[j - 1].actor_user_id in erased)
+        )
+
+    j = origin.state - 1
     while True:
-        j = o.state - 1
-        while states[j] is UNKNOWN:
-            # a state an erased member's edit wrote is walked past like their
-            # value; one anybody else wrote is gone: the value is unavailable
-            if j == 0 or edits[j - 1].actor_user_id not in erased:
-                return KeyRevert(key, None, False, True, edits[o.state - 1].version), j
+        if states[j] is UNKNOWN:
+            if not erased_wrote(j):
+                # stripped, and not by an erased member's own edit: gone
+                return KeyRevert(key, None, False, True, edits[j].version), j
             j -= 1
-        mapping = writers[j]
-        below = mapping.get(key) if mapping is not None else None
+            continue
+        mapping = writers[j] or {}
+        below = mapping.get(key)
         if below is not None and below.actor in erased:
-            if below.state >= 1:
-                o = below
-                continue
-            # the creation value of an erased author: nothing to go back to
-            return KeyRevert(key, None, False, False, edits[j].version), j
+            if below.state == 0:
+                # the creation value of an erased author: nothing to go back to
+                return KeyRevert(key, None, False, False, edits[j].version), j
+            j = below.state - 1
+            continue
+        if below is None and erased_wrote(j):
+            j -= 1
+            continue
         keys = _keys(states[j])
         present = key in keys
         revert = KeyRevert(key, keys[key] if present else None, present, False, edits[j].version)

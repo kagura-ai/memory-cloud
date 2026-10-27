@@ -51,7 +51,9 @@ CREATION = {"at": "creation"}
 AUTHORS = {"by": "author", "location": {"lat": 10.5, "lon": 20.25}}
 SUBJECTS = {"by": "subject", "location": {"lat": 35.0, "lon": 139.0}}
 THIRDS = {"by": "third"}
-STRIPPED = {"erased": ["details"]}
+STRIPPED = {"erased": ["details"]}  # the whole-value strip (authored arm, before v0.129.0)
+# #2275: a prior whose keys were all the subject's, stripped per key
+KEYS_STRIPPED: dict[str, Any] = {"details": {}}
 SCRUBBED = {"erased": ["details"], "scrubbed": ["details"]}
 
 COMPLETED_AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -325,11 +327,11 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
         assert await _log(session, live.id) == [
             (2, "api", world["author"], {"details": CREATION}),
             (3, "api", p, {"details": AUTHORS}),
-            (4, "erasure", p, {"erased": ["details"], "restored_from": 3}),
+            (4, "erasure", p, {"details": {}, "restored_from": 3}),
         ]
         assert await _log(session, leftover.id) == [
             (2, "api", p, {"details": AUTHORS}),
-            (3, "api", world["fourth"], STRIPPED),
+            (3, "api", world["fourth"], KEYS_STRIPPED),
         ]
         assert await _details(session, leftover.id) == {"by": "fourth"}
         # every other row — the S1 rows on the scrubbed memory, the B3 chain
@@ -551,11 +553,14 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
         async with _maker(async_engine)() as session:
             assert await _details(session, memory.id) == AUTHORS
             log = await _log(session, memory.id)
-            assert log[:2] == [(2, "api", p2, {"details": AUTHORS}), (3, "api", p1, STRIPPED)]
+            assert log[:2] == [
+                (2, "api", p2, {"details": AUTHORS}),
+                (3, "api", p1, KEYS_STRIPPED),
+            ]
             # exactly one erasure row, by the request that restored, naming
             # the whole run of erased members' edits
             assert [row for row in log if row[1] == "erasure"] == [
-                (4, "erasure", p1, {"erased": ["details"], "restored_from": 2})
+                (4, "erasure", p1, {"details": {}, "restored_from": 2})
             ]
             assert len(log) == 3
             after = await _snapshots(session, [memory.id])
@@ -594,9 +599,13 @@ async def test_a_time_memory_with_an_unnormalized_authors_trigger_is_restored(
     one) and the run succeeds."""
     from utils.time_trigger import normalize_trigger
 
-    live_trigger = normalize_trigger({"year": 2027, "month": 1, "day": 1})
+    # the erased member's trigger (with a text of theirs); the author's ``by``
+    # carried in their edit (#2275: a key they removed would stay removed)
+    live_trigger = normalize_trigger({"year": 2027, "month": 1, "day": 1, "text": "p's"})
     p = _pseudonym()
-    memory = _memory(world["ws"], world["ctx"], world["author"], {"trigger": live_trigger}, 2)
+    memory = _memory(
+        world["ws"], world["ctx"], world["author"], {"trigger": live_trigger, "by": "author"}, 2
+    )
     memory.type = "time"
     request = _request(p, minutes=5)
     async with _maker(async_engine)() as session:
@@ -723,7 +732,7 @@ async def test_a_legacy_failed_after_commit_request_is_repaired_and_reprocessed(
                     3,
                     "api",
                     world["fourth"],
-                    STRIPPED,
+                    KEYS_STRIPPED,
                 )
                 (audit,) = await _reprocess_audit_rows(session, p)
                 assert audit.user_metadata["request_repaired"] is True
