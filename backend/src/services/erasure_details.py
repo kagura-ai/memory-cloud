@@ -125,9 +125,11 @@ from services.details_provenance import (
     DetailsEdit,
     DetailsErasurePlan,
     PriorStrip,
+    details_key_digest,
     plan_details_erasure,
 )
 from services.memory_versions import (
+    PRIOR_ERASED_DETAILS_KEYS_KEY,
     PRIOR_ERASED_KEY,
     PRIOR_RESTORED_FROM_KEY,
     PRIOR_SCRUBBED_KEY,
@@ -920,10 +922,12 @@ async def strip_subject_details(
        prior that holds them (``plan.strips``: the states in which the
        replay attributes a key's value to the subject — written by them, or
        carried unchanged by a later whole-dict edit, or put back over theirs
-       by a session rollback). The rest of each dict stays, with no marker:
-       a rebuilt version shows the other members' keys. One lock phase over
-       all those rows, in id order, then one ``jsonb - text[]`` UPDATE per
-       distinct key set (``_strip_editor_keys``).
+       by a session rollback). The rest of each dict stays — a rebuilt
+       version shows the other members' keys — and the removed keys'
+       digests join ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (no key name; read
+       only by a later erasure's replay). One lock phase over all those
+       rows, in id order, then one ``jsonb - text[]`` UPDATE per distinct
+       key set (``_strip_editor_keys``).
     2. On memories the subject authored: ``prior.details`` is removed from
        every revision and replaced by ``{"erased": ["details"]}``
        (``PRIOR_ERASED_KEY``) so a rebuilt earlier version reports its
@@ -1023,7 +1027,9 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
     The rows are locked first, all of them in one id-ordered ``FOR UPDATE``
     (the order every revision statement takes, #2242); every one belongs
     to a memory the caller holds. Then one UPDATE per distinct key set:
-    ``jsonb_set(prior, '{details}', prior->'details' - keys)``. The guards
+    ``jsonb_set(prior, '{details}', prior->'details' - keys)``, and the keys'
+    digests appended to ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's
+    walk reads them as an erased member's values, not as removals). The guards
     keep a row whose ``details`` is gone or not an object (NULL: ``-`` on a
     scalar raises) as it is.
 
@@ -1063,10 +1069,25 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
                 )
                 .values(
                     prior=func.jsonb_set(
-                        MemoryRevision.prior,
-                        bindparam("path", ["details"], type_=ARRAY(Text), unique=True),
-                        details.op("-", return_type=JSONB)(
-                            bindparam("keys", list(keys), type_=ARRAY(Text), unique=True)
+                        func.jsonb_set(
+                            MemoryRevision.prior,
+                            bindparam("path", ["details"], type_=ARRAY(Text), unique=True),
+                            details.op("-", return_type=JSONB)(
+                                bindparam("keys", list(keys), type_=ARRAY(Text), unique=True)
+                            ),
+                            type_=JSONB,
+                        ),
+                        bindparam(
+                            "marker_path",
+                            [PRIOR_ERASED_DETAILS_KEYS_KEY],
+                            type_=ARRAY(Text),
+                            unique=True,
+                        ),
+                        func.coalesce(
+                            MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY],
+                            type_coerce([], JSONB),
+                        ).op("||", return_type=JSONB)(
+                            type_coerce(sorted(details_key_digest(k) for k in keys), JSONB)
                         ),
                         type_=JSONB,
                     )
@@ -1290,7 +1311,7 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 MemoryRevision.writer,
                 MemoryRevision.prior["details"].label("details"),
                 MemoryRevision.prior[PRIOR_ERASED_KEY].has_key("details").label("erased"),
-                MemoryRevision.undone_by,
+                MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY].label("erased_keys"),
                 MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].as_integer().label("restored_from"),
                 revision_edited_details(MemoryRevision).label("details_changed"),
             )
@@ -1313,7 +1334,7 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
             writer=row.writer,
             details=row.details,
             erased=bool(row.erased),
-            undone_by=row.undone_by,
+            erased_keys=frozenset(row.erased_keys if isinstance(row.erased_keys, list) else ()),
             restored_from=row.restored_from,
             details_changed=bool(row.details_changed),
         )
@@ -1557,7 +1578,8 @@ async def restore_editor_details(
     Each restore is an edit of its own: ``version`` + 1, ``updated_at`` now,
     and one ``updated`` revision row with ``writer='erasure'``, ``actor`` as
     its actor and ``{"details": <the overwritten value minus the subject's
-    keys>, "restored_from": <from_version>}`` as its prior — stripped like
+    keys>, "erased_details_keys": <their digests>, "restored_from":
+    <from_version>}`` as its prior — stripped like
     every other prior, so the subject's value is in none, a later erasure
     can tell whose keys are live, ``expected_version`` protects the restored
     value from a stale edit, and a rebuilt version shows the other members'
@@ -1576,10 +1598,12 @@ async def restore_editor_details(
     restored row is listed in ``report.to_sync`` for
     ``sync_restored_payloads``, which the caller runs after its commit.
 
-    The resource indexer rewrites ``details`` without a revision; on such a
-    row the replay attributes the indexer's change to the next edit's actor
-    and the restore may replace the indexer's value until its next run
-    writes it again. No special case.
+    The resource indexer (and a Sleep merge) rewrites ``details`` without a
+    revision; the replay sees that change in the next edit's prior and
+    attributes it to the edit before it — when that edit is the subject's,
+    the restore puts the indexer's keys back to their older values and the
+    strip removes the indexer's values from the priors, until the indexer's
+    next run writes them again. No special case (a known residual).
 
     Args:
         db: The session; the caller owns the transaction.
@@ -1645,6 +1669,7 @@ async def restore_editor_details(
             at=memory.updated_at,
             prior={
                 "details": copy.deepcopy(revert.prior),
+                PRIOR_ERASED_DETAILS_KEYS_KEY: list(revert.erased_keys),
                 PRIOR_RESTORED_FROM_KEY: revert.from_version,
             },
             writer=REVISION_WRITER_ERASURE,

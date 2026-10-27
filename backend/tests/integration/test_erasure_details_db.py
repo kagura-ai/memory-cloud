@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from models.auth import Context, Workspace
 from models.memory import Memory, MemoryRevision
 from services.account_erasure_service import AccountErasureService
+from services.details_provenance import details_key_digest
 from services.erasure_details import (
     PayloadSync,
     RestoreReport,
@@ -154,10 +155,26 @@ async def _seed(session: AsyncSession, memories: list[Memory], edits: list[Memor
     await session.commit()
 
 
-def _put_back(restored_from: int, details: dict[str, Any] | None = None) -> dict[str, Any]:
+MARK = "erased_details_keys"
+
+
+def _digests(*keys: str) -> list[str]:
+    return sorted(details_key_digest(k) for k in keys)
+
+
+def _gone(details: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """A prior the per-key strip rewrote (#2275): the rest of the value, and
+    the removed keys' digests."""
+    return {"details": details, MARK: _digests(*keys)}
+
+
+def _put_back(
+    restored_from: int, details: dict[str, Any] | None = None, *, keys: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """The prior of the erasure row (#2275): the overwritten value minus the
-    subject's keys, and the lowest version a value it reverted was written at."""
-    return {"details": details or {}, "restored_from": restored_from}
+    subject's keys, their digests, and the lowest version a value it reverted
+    was written at."""
+    return {"details": details or {}, MARK: _digests(*keys), "restored_from": restored_from}
 
 
 def _service(session: AsyncSession) -> AccountErasureService:
@@ -279,7 +296,7 @@ async def test_the_authors_value_comes_back_with_its_own_revision(
             (memory.id, 3, "api", author, {"importance": 0.4}, None),
             # the subject's own row holds the author's value: kept, pseudonymized
             (memory.id, 4, "api", pseudonym, {"details": AUTHORS}, None),
-            (memory.id, 5, "erasure", pseudonym, _put_back(4), None),
+            (memory.id, 5, "erasure", pseudonym, _put_back(4, keys=("by", "location")), None),
         ]
         # the subject's version reads without the subject's keys (#2275); the
         # author's reads back
@@ -327,8 +344,8 @@ async def test_the_subjects_earlier_edits_are_walked_past(
             (memory.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
             (memory.id, 4, "api", pseudonym, {"summary": "not details"}, None),
             # the subject's first value: both keys are theirs, stripped
-            (memory.id, 5, "api", pseudonym, {"details": {}}, None),
-            (memory.id, 6, "erasure", pseudonym, _put_back(3), None),
+            (memory.id, 5, "api", pseudonym, _gone({}, *("by", "location")), None),
+            (memory.id, 6, "erasure", pseudonym, _put_back(3, keys=("by", "secret")), None),
         ]
 
 
@@ -361,7 +378,7 @@ async def test_a_value_an_earlier_erasure_removed_gives_null(
             4,
             "erasure",
             pseudonym,
-            _put_back(3),
+            _put_back(3, keys=("by", "location")),
             None,
         )
     kwargs = sync.await_args.kwargs
@@ -452,7 +469,7 @@ async def test_the_subjects_tombstones_leave_before_the_strip(
             (live.id, 2, "api", third, {"erased": ["details"], "scrubbed": ["details"]}, None),
             (edited.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
             # #2275: both keys of the subject's value leave the prior
-            (edited.id, 3, "api", third, {"details": {}}, None),
+            (edited.id, 3, "api", third, _gone({}, *("by", "location")), None),
         ]
         assert (await _live(session, edited.id)).details == {"by": "third"}
         assert await _snapshot(session, _REVISIONS_OUTSIDE, in_scope) == revisions_before
@@ -627,7 +644,7 @@ async def test_a_strip_by_pseudonym_keeps_a_later_value_over_an_erasure_row(
         await session.commit()
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (memory.id, 3, "erasure", pseudonym, _put_back(2), None),
+            (memory.id, 3, "erasure", pseudonym, _put_back(2, keys=("by", "location")), None),
             (memory.id, 4, "api", third, {"details": AUTHORS}, None),
         ]
 
@@ -730,9 +747,9 @@ async def _assert_scope(
         assert await _log(session, restored.id, overwritten.id, own.id, summary_only.id) == [
             (restored.id, 2, "api", author, {"details": CREATION}, None),
             (restored.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
-            (restored.id, 4, "erasure", pseudonym, _put_back(3), None),
+            (restored.id, 4, "erasure", pseudonym, _put_back(3, keys=("by", "location")), None),
             (overwritten.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (overwritten.id, 3, "api", third, {"details": {}}, "sess-t"),
+            (overwritten.id, 3, "api", third, _gone({}, *("by", "location")), "sess-t"),
             (
                 own.id,
                 2,
@@ -869,9 +886,9 @@ async def test_a_second_erasure_finds_the_value_the_first_one_put_back(
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", p_second, {"details": AUTHORS}, None),
             # V's value, stripped by V's erasure
-            (memory.id, 3, "api", p_first, {"details": {}}, None),
-            (memory.id, 4, "erasure", p_first, _put_back(3), None),
-            (memory.id, 5, "erasure", p_second, _put_back(2), None),
+            (memory.id, 3, "api", p_first, _gone({}, "by", "secret"), None),
+            (memory.id, 4, "erasure", p_first, _put_back(3, keys=("by", "location")), None),
+            (memory.id, 5, "erasure", p_second, _put_back(2, keys=("by",)), None),
         ]
         log = await _log(session, memory.id)
         await session.commit()
@@ -975,7 +992,7 @@ async def test_a_time_memory_keeps_the_live_trigger(
             3,
             "erasure",
             pseudonym,
-            _put_back(2),
+            _put_back(2, keys=("by", "location", "trigger")),
             None,
         )
         assert await _snapshot(session, _REVISIONS_OUTSIDE, everything_else) == revisions_before
@@ -1268,9 +1285,16 @@ async def test_a_carried_key_is_reverted_and_stripped_per_key(
             (memory.id, 1, "api", author, {}, None),
             (memory.id, 2, "api", pseudonym, {"details": {"a": 1}}, None),
             # S's location and t (carried by B) leave B's and C's priors
-            (memory.id, 3, "api", b, {"details": {"a": 1}}, None),
-            (memory.id, 4, "api", c, {"details": {"a": 2}}, None),
-            (memory.id, 5, "erasure", pseudonym, _put_back(2, live.details), None),
+            (memory.id, 3, "api", b, _gone({"a": 1}, "location", "t"), None),
+            (memory.id, 4, "api", c, _gone({"a": 2}, "location", "t"), None),
+            (
+                memory.id,
+                5,
+                "erasure",
+                pseudonym,
+                _put_back(2, live.details, keys=("location",)),
+                None,
+            ),
         ]
         assert (await load_version(session, live, 4)).values["details"] == live.details
         assert (await load_version(session, live, 3)).values["details"] == {"a": 2}
@@ -1302,8 +1326,8 @@ async def test_a_carried_key_goes_back_to_the_authors_value(
         assert (report.restored, report.keys_reverted) == (1, 1)
         assert (await _live(session, memory.id)).details == {"a": 3, "location": L_A}
         assert (await _log(session, memory.id))[1:] == [
-            (memory.id, 3, "api", b, {"details": {"a": 1}}, None),
-            (memory.id, 4, "erasure", pseudonym, _put_back(2, {"a": 3}), None),
+            (memory.id, 3, "api", b, _gone({"a": 1}, "location"), None),
+            (memory.id, 4, "erasure", pseudonym, _put_back(2, {"a": 3}, keys=("location",)), None),
         ]
     assert sync.await_args.kwargs["payload_updates"]["location"] == L_A
 
@@ -1326,10 +1350,28 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
         assert await _log(session, memory.id) == [
             (memory.id, 1, "api", author, {}, None),
             (memory.id, 2, "api", p_s, {"details": {"a": 1}}, None),
-            (memory.id, 3, "api", p_b, {"details": {"a": 1}}, None),
-            (memory.id, 4, "api", c, {"details": {}}, None),
-            (memory.id, 5, "erasure", p_s, _put_back(2, {"t": "z", "c": True}), None),
-            (memory.id, 6, "erasure", p_b, _put_back(3, {"t": "z", "c": True}), None),
+            (memory.id, 3, "api", p_b, _gone({"a": 1}, "location", "t"), None),
+            (
+                memory.id,
+                4,
+                "api",
+                c,
+                {"details": {}, MARK: [*_digests("location", "t"), *_digests("a")]},
+                None,
+            ),
+            (
+                memory.id,
+                5,
+                "erasure",
+                p_s,
+                {
+                    "details": {"t": "z", "c": True},
+                    MARK: [*_digests("location"), *_digests("a")],
+                    "restored_from": 2,
+                },
+                None,
+            ),
+            (memory.id, 6, "erasure", p_b, _put_back(3, {"t": "z", "c": True}, keys=("a",)), None),
         ]
         everything = [uuid.uuid4()]
         after = await _outside(session, everything)

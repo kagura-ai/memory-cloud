@@ -18,6 +18,7 @@ from services.details_provenance import (
     DetailsErasurePlan,
     KeyRevert,
     PriorStrip,
+    details_key_digest,
     plan_details_erasure,
     replay,
 )
@@ -93,8 +94,11 @@ def _apply(
     out: list[DetailsEdit] = []
     for row in rows:
         if row.id in strips and isinstance(row.details, dict):
+            keys = strips[row.id]
             row = replace(
-                row, details={k: v for k, v in row.details.items() if k not in strips[row.id]}
+                row,
+                details={k: v for k, v in row.details.items() if k not in keys},
+                erased_keys=row.erased_keys | {details_key_digest(k) for k in keys},
             )
         if row.actor_user_id == subject:
             row = replace(row, actor_user_id=pseudonym)
@@ -111,6 +115,7 @@ def _apply(
                 writer="erasure",
                 details=revert.prior,
                 erased=False,
+                erased_keys=frozenset(revert.erased_keys),
                 restored_from=revert.from_version,
             )
         )
@@ -431,3 +436,85 @@ def test_a_re_run_over_the_result_plans_nothing() -> None:
     after_rows, after = _apply([*rows, *more], state, plan, subject=S, pseudonym=P_S)
     again = plan_details_erasure(after_rows, after, P_S)
     assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
+
+
+def _erase_in_order(
+    rows: list[DetailsEdit], live: Any, order: list[str]
+) -> tuple[Any, list[DetailsEdit]]:
+    m = rows[0].memory_id
+    state = {m: (live, AUTH)}
+    done: list[str] = []
+    for subject in order:
+        pseudonym = subject * 64 if len(subject) == 1 else subject
+        plan = plan_details_erasure(
+            rows, state, subject, erased_actors=frozenset(p * 64 for p in done)
+        )
+        rows, state = _apply(rows, state, plan, subject=subject, pseudonym=pseudonym)
+        done.append(subject)
+    return state[m][0], rows
+
+
+def test_the_result_does_not_depend_on_which_erasure_runs_first() -> None:
+    """Review of #2275: a key stripped from a prior must not read as a removal
+    in a later erasure's walk (the digest marker), and a put-back state's
+    stripped value comes from ``pre(r)``, not from the state it replaced."""
+    m = uuid4()
+    s_, t_ = "S", "T"
+    # A {a, c}; S rewrites both; B rewrites a; B removes a; T rewrites c
+    carried = [
+        _edit(m, 2, s_, {"a": "a0", "c": "c0"}),
+        _edit(m, 3, B, {"a": "aS", "c": "cS"}),
+        _edit(m, 4, B, {"a": "aB", "c": "cS"}),
+        _edit(m, 5, t_, {"c": "cS"}),
+    ]
+    # B wrote, S over it, C over S, B rolled C's session back, B wrote again
+    rolled = [
+        _edit(m, 2, "C", {"b": "b0"}),
+        _edit(m, 3, s_, {"b": "bC"}),
+        _edit(m, 4, "C", {"b": "bS", "c": "cS"}),
+        _rollback(m, 5, "B", {"b": "bC2", "c": "cS"}, restored_from=4),
+        _edit(m, 6, "B", {"b": "bS", "c": "cS"}),
+    ]
+    for rows, live, erased, expected in (
+        (carried, {"c": "cT"}, ["S", "T"], {"c": "c0"}),
+        (rolled, {"b": "bB", "c": "cS", "a": "aB"}, ["S", "B"], {"b": "bC"}),
+    ):
+        results = [_erase_in_order(rows, live, order)[0] for order in (erased, erased[::-1])]
+        assert results == [expected, expected], rows
+
+
+def test_a_removal_stands_whichever_erasure_runs_first() -> None:
+    """S removed c and wrote it again later; T's carry in between does not
+    matter: the walk stops at S's removal, in either order."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, "T", {"b": "b0", "c": "c0"}),
+        _edit(m, 3, "S", {"b": "b0", "c": "c0", "t": "t1"}),
+        _edit(m, 4, "T", {"b": "b0", "t": "t1"}),
+        _edit(m, 5, "S", {"b": "b0", "t": "t1"}),
+    ]
+    live = {"b": "b0", "t": "t1", "c": "cS"}
+    for order in (["S", "T"], ["T", "S"]):
+        assert _erase_in_order(rows, live, order)[0] == {"b": "b0"}, order
+
+
+def test_a_put_back_over_a_stripped_state_is_ambiguous_only_above_the_subjects_edit() -> None:
+    """The stripped state a put-back row wrote may hold the subject's value
+    only when the subject edited below it."""
+    m = uuid4()
+    x = "x" * 64
+    put_back = _old_erasure(m, 3, x, restored_from=2)
+    unrelated = [
+        _edit(m, 2, x, {"a": 1}),
+        put_back,
+        _edit(m, 4, B, erased=True),
+        _edit(m, 5, P_S, {"a": 1, "b": 2}),
+    ]
+    # P_S edited only above the stripped state: nothing of theirs can be in it
+    assert _plan(unrelated, {"a": 1, "b": 2, "s": 3}, P_S).keys_ambiguous == 0
+    # P_S wrote ``a`` below it: ``s`` (absent from the last known state) may
+    # be theirs; ``a``, unchanged since, is theirs and goes
+    below = [_edit(m, 1, P_S, {}, row_id=5), *unrelated[:3]]
+    plan = _plan(below, {"a": 1, "s": 3}, P_S)
+    assert plan.keys_ambiguous == 1
+    assert [r.key for r in plan.reverts[0].reverts] == ["a"]

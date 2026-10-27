@@ -41,6 +41,7 @@ from cli import reprocess_erasures as cli
 from models.auth import AuditLog, Context, User, Workspace
 from models.erasure import ErasureRequest
 from models.memory import Memory, MemoryRevision
+from services.details_provenance import details_key_digest
 from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -53,7 +54,8 @@ SUBJECTS = {"by": "subject", "location": {"lat": 35.0, "lon": 139.0}}
 THIRDS = {"by": "third"}
 STRIPPED = {"erased": ["details"]}  # the whole-value strip (authored arm, before v0.129.0)
 # #2275: a prior whose keys were all the subject's, stripped per key
-KEYS_STRIPPED: dict[str, Any] = {"details": {}}
+_BY_LOCATION = sorted(details_key_digest(k) for k in ("by", "location"))
+KEYS_STRIPPED: dict[str, Any] = {"details": {}, "erased_details_keys": _BY_LOCATION}
 SCRUBBED = {"erased": ["details"], "scrubbed": ["details"]}
 
 COMPLETED_AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -329,7 +331,12 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
         assert await _log(session, live.id) == [
             (2, "api", world["author"], {"details": CREATION}),
             (3, "api", p, {"details": AUTHORS}),
-            (4, "erasure", p, {"details": {}, "restored_from": 3}),
+            (
+                4,
+                "erasure",
+                p,
+                {"details": {}, "erased_details_keys": _BY_LOCATION, "restored_from": 3},
+            ),
         ]
         assert await _log(session, leftover.id) == [
             (2, "api", p, {"details": AUTHORS}),
@@ -565,7 +572,12 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
             # exactly one erasure row, by the request that restored, naming
             # the whole run of erased members' edits
             assert [row for row in log if row[1] == "erasure"] == [
-                (4, "erasure", p1, {"details": {}, "restored_from": 2})
+                (
+                    4,
+                    "erasure",
+                    p1,
+                    {"details": {}, "erased_details_keys": _BY_LOCATION, "restored_from": 2},
+                )
             ]
             assert len(log) == 3
             after = await _snapshots(session, [memory.id])

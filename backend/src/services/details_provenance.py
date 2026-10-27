@@ -53,19 +53,23 @@ Rules, per memory (``replay``):
 - **The subject's keys** are the live keys whose writer is the subject.
   Each goes back to the value it had right below the edit that wrote it,
   walking further down past every value an erased member (the subject or
-  one of ``erased_actors``) wrote and every state their own edit wrote
-  without the key (their removal, or their value stripped by their
-  erasure) — or is removed when there was none. Where that state is
-  UNKNOWN and the edit that wrote it is an erased member's, the walk goes
-  on below it; otherwise the value is unavailable and the key is removed.
-  So the result does not depend on which of two erasures runs first. Keys
-  an erased member other than the subject wrote are left to that member's
-  erasure (or re-run).
-- **Deletions stand**: a key the subject removed was not their data and is
-  not put back, even when their edit is the newest.
+  one of ``erased_actors``) wrote — including a value an earlier erasure
+  stripped from a prior per key (``erased_keys``) — or is removed when the
+  key was absent there. Where that state is UNKNOWN and the edit that wrote
+  it is an erased member's, the walk goes on below it; otherwise the value
+  is unavailable and the key is removed. Keys an erased member other than
+  the subject wrote are left to that member's erasure (or re-run).
+- **Deletions stand**: a key that was removed — by the subject or by anyone
+  else — is not put back, even when the subject's edit is the newest; a
+  walk that reaches a state without the key stops there.
 - **Strip**: every intermediate state's keys whose writer is the subject
-  leave the prior that holds the state; the rest of the dict stays, with no
-  marker (a rebuilt version shows the other members' keys).
+  leave the prior that holds the state; the rest of the dict stays. The
+  prior lists the removed keys' digests under ``erased_details_keys``
+  (``details_key_digest``; never a key name): a later walk passes a
+  stripped key like the erased member's value it was, and does not take it
+  for a removal. Readers of the version history ignore the list (a rebuilt
+  version shows the other members' keys, nothing unavailable). With it the
+  result does not depend on which of two erasures runs first.
 
 A re-run over the result plans nothing: no state, and no live key, is
 attributed to the subject any more.
@@ -73,6 +77,7 @@ attributed to the subject any more.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -80,8 +85,15 @@ from typing import Any, Final
 from uuid import UUID
 
 from models.memory import REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK
+from utils.hashing import sha256_hex
 
 _PUT_BACK: Final = (REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK)
+
+
+def details_key_digest(key: str) -> str:
+    """How a prior lists a ``details`` key an erasure removed from it
+    (``PRIOR_ERASED_DETAILS_KEYS_KEY``): the key's sha256, never its name."""
+    return sha256_hex(key)
 
 
 @dataclass(frozen=True)
@@ -97,8 +109,8 @@ class DetailsEdit:
             change ``details``).
         erased: An earlier erasure stripped ``prior.details`` whole (it lists
             ``details`` under ``PRIOR_ERASED_KEY``): the value is unavailable.
-        undone_by: The session rollback that reversed this edit, if any
-            (``MemoryRevision.undone_by``). Not read by the replay (#2275).
+        erased_keys: The digests of the ``details`` keys an erasure removed
+            from this prior per key (``PRIOR_ERASED_DETAILS_KEYS_KEY``, #2275).
         restored_from: On a put-back row (``erasure``, and ``rollback`` since
             #2266), ``prior.restored_from``: the lowest version at which a
             value it put back over was written.
@@ -113,7 +125,7 @@ class DetailsEdit:
     writer: str
     details: Any
     erased: bool
-    undone_by: int | None = None
+    erased_keys: frozenset[str] = frozenset()
     restored_from: int | None = None
     details_changed: bool = True
 
@@ -154,12 +166,14 @@ class Replay:
     ``states[i]`` is ``S_i`` (``UNKNOWN`` when stripped whole), ``writers[i]``
     maps each key of ``S_i`` to its ``Origin`` (None when ``S_i`` is
     ``UNKNOWN``), ``edits[i]`` moved ``S_i`` to ``S_{i+1}``; the last state is
-    the live value.
+    the live value. ``stripped[i]`` are the digests of the keys an erasure
+    removed from ``S_i`` (an erased member's values, not removals).
     """
 
     edits: tuple[DetailsEdit, ...]
     states: tuple[Any, ...]
     writers: tuple[dict[str, Origin] | None, ...]
+    stripped: tuple[frozenset[str], ...]
 
 
 @dataclass(frozen=True)
@@ -197,6 +211,8 @@ class MemoryRevert:
             left and the value below was NULL or unavailable, else ``{}``).
         prior: The live value minus the subject's keys: the erasure row's
             ``prior.details``, stripped like every other prior.
+        erased_keys: The digests of the subject's keys: the erasure row's
+            ``PRIOR_ERASED_DETAILS_KEYS_KEY``.
     """
 
     memory_id: UUID
@@ -204,6 +220,7 @@ class MemoryRevert:
     from_version: int
     result: Any
     prior: dict[str, Any]
+    erased_keys: tuple[str, ...] = ()
 
     @property
     def unavailable(self) -> bool:
@@ -249,32 +266,27 @@ def _holds(state: Any, key: str, value: Any) -> bool:
     return key in keys and keys[key] == value
 
 
-def _last_known(states: Sequence[Any], i: int) -> int | None:
-    """The newest known state at or below ``i``."""
-    for j in range(i, -1, -1):
-        if states[j] is not UNKNOWN:
-            return j
-    return None
-
-
-def _pre(edits: Sequence[DetailsEdit], restored_from: int, i: int) -> int:
+def _pre(versions: Sequence[int], restored_from: int, i: int) -> int:
     """``pre(r)``: the state right below the first details edit at or above
-    version ``restored_from`` (at most ``i``)."""
-    for j in range(i + 1):
-        if edits[j].version >= restored_from:
-            return j
-    return i
+    version ``restored_from`` (at most ``i``). ``versions`` ascend."""
+    return min(bisect_left(versions, restored_from), i)
 
 
 def _may_hold_subjects(
     states: Sequence[Any], edits: Sequence[DetailsEdit], i: int, subject: str
 ) -> bool:
     """The stripped states right at and below ``i`` may hold a value of the
-    subject's: one of them was written by the subject or by a put-back row."""
+    subject's: one of them was written by the subject, or by a put-back row
+    above a details edit of the subject's (a put-back puts back older values
+    only, so without one below it holds none of theirs)."""
     j = i
     while j >= 1 and states[j] is UNKNOWN:
         producer = edits[j - 1]
-        if producer.actor_user_id == subject or producer.writer in _PUT_BACK:
+        if producer.actor_user_id == subject:
+            return True
+        if producer.writer in _PUT_BACK and any(
+            e.actor_user_id == subject and e.writer not in _PUT_BACK for e in edits[: j - 1]
+        ):
             return True
         j -= 1
     return False
@@ -303,17 +315,21 @@ def replay(
     states: list[Any] = [UNKNOWN if e.erased else e.details for e in edits]
     states.append(live)
     writers: list[dict[str, Origin] | None] = [None] * len(states)
+    versions = [e.version for e in edits]
+    last: int | None = None  # the newest known state at or below i
     if states[0] is not UNKNOWN:
         writers[0] = {k: Origin(author, 1, 0) for k in _keys(states[0])}
+        last = 0
     for i, edit in enumerate(edits):
+        if states[i] is not UNKNOWN:
+            last = i
         after = states[i + 1]
         if after is UNKNOWN:
             continue
         before_known = states[i] is not UNKNOWN
-        last = _last_known(states, i)
         put_back = edit.writer in _PUT_BACK
         pre = (
-            _pre(edits, edit.restored_from, i)
+            _pre(versions, edit.restored_from, i)
             if put_back and edit.restored_from is not None
             else None
         )
@@ -342,7 +358,8 @@ def replay(
                 ambiguous=ambiguous,
             )
         writers[i + 1] = mapping
-    return Replay(tuple(edits), tuple(states), tuple(writers))
+    stripped = (*(e.erased_keys for e in edits), frozenset())
+    return Replay(tuple(edits), tuple(states), tuple(writers), stripped)
 
 
 def _attribute(
@@ -389,14 +406,17 @@ def _revert(
     """Where the subject's live ``key`` goes back to: below the edit that
     wrote it, past every value an erased member wrote.
 
-    A state an erased member's own (``api``) edit wrote is walked past
-    whatever it holds for ``key``: their value, their removal of the key, or
-    — once their erasure stripped the key or the whole state — nothing.
+    A key an erasure stripped from a state is walked past like the erased
+    member's value it was; a state without the key otherwise ends the walk
+    (the key is removed: deletions stand). A state an erasure before
+    v0.129.0 stripped whole is walked past when an erased member's own
+    (``api``) edit wrote it.
 
     Returns:
         The revert, and the index of the state its value comes from.
     """
     states, writers, edits = run.states, run.writers, run.edits
+    digest = details_key_digest(key)
 
     def erased_wrote(j: int) -> bool:
         return (
@@ -421,13 +441,33 @@ def _revert(
                 return KeyRevert(key, None, False, False, edits[j].version), j
             j = below.state - 1
             continue
-        if below is None and erased_wrote(j):
-            j -= 1
+        if below is None and j >= 1 and digest in run.stripped[j]:
+            j = _below_stripped(run, j, key, digest)  # an erased member's value
             continue
         keys = _keys(states[j])
         present = key in keys
         revert = KeyRevert(key, keys[key] if present else None, present, False, edits[j].version)
         return revert, j
+
+
+def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
+    """The state the stripped value of ``key`` in ``S_j`` came from.
+
+    The edit that wrote ``S_j`` carried it from ``S_{j-1}``, or wrote it
+    itself (an erased member's ``api`` edit): ``S_{j-1}`` either way. A
+    put-back row put it back from ``pre(r)`` — a session rollback whole, an
+    erasure row for the keys it reverted (absent from its own prior) — so
+    the walk goes on there, not in the state the put-back replaced.
+    """
+    producer = run.edits[j - 1]
+    if producer.writer not in _PUT_BACK or producer.restored_from is None:
+        return j - 1
+    if producer.writer == REVISION_WRITER_ERASURE:
+        prior = run.states[j - 1]
+        if prior is UNKNOWN or key in _keys(prior) or digest in run.stripped[j - 1]:
+            return j - 1  # carried by the erasure row
+    versions = [e.version for e in run.edits]
+    return _pre(versions, producer.restored_from, j - 1)
 
 
 def _plan_memory(
@@ -466,7 +506,14 @@ def _plan_memory(
         value = None  # nothing left, and the value below was NULL (or gone)
     prior = {k: v for k, v in _keys(live).items() if k not in mine}
     return (
-        MemoryRevert(memory_id, reverts, lowest.from_version, value, prior),
+        MemoryRevert(
+            memory_id,
+            reverts,
+            lowest.from_version,
+            value,
+            prior,
+            tuple(sorted(details_key_digest(k) for k in mine)),
+        ),
         strips,
         ambiguous,
     )

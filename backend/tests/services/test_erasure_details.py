@@ -10,6 +10,7 @@ the restore row, compiled.
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -21,9 +22,12 @@ from services.details_provenance import (
     KeyRevert,
     MemoryRevert,
     PriorStrip,
+    details_key_digest,
     plan_details_erasure,
 )
 from services.erasure_details import DetailsEdit
+
+digest = details_key_digest
 
 SUBJECT = "erased-sub"
 AUTHOR = "the-author"
@@ -40,7 +44,6 @@ def _edit(
     erased: bool = False,
     writer: str = "api",
     row_id: int | None = None,
-    undone_by: int | None = None,
     restored_from: int | None = None,
     details_changed: bool = True,
 ) -> DetailsEdit:
@@ -52,7 +55,6 @@ def _edit(
         writer=writer,
         details=None if erased or not details_changed else details,
         erased=erased,
-        undone_by=undone_by,
         restored_from=restored_from,
         details_changed=details_changed,
     )
@@ -204,7 +206,7 @@ def test_the_subjects_rollback_of_another_session_is_not_their_writing() -> None
     """Review M1: OTHER's session edits A's memory, the subject rolls it back."""
     m = uuid4()
     rows = [
-        _edit(m, 2, OTHER, {"by": "author"}, undone_by=7),
+        _edit(m, 2, OTHER, {"by": "author"}),
         _rollback(m, 3, SUBJECT, {"by": "other"}),
     ]
     assert _reverts(rows, {"by": "author"}) == []
@@ -219,8 +221,8 @@ def test_a_rollback_over_the_subjects_value_leaves_the_subject_as_the_writer() -
     for requester in (SUBJECT, AUTHOR):
         rows = [
             _edit(m, 2, SUBJECT, {"by": "author"}),
-            _edit(m, 3, OTHER, {"by": "subject"}, undone_by=7),
-            _edit(m, 4, OTHER, {"by": "other-1"}, undone_by=7),
+            _edit(m, 3, OTHER, {"by": "subject"}),
+            _edit(m, 4, OTHER, {"by": "other-1"}),
             _rollback(m, 5, requester, {"by": "other-2"}),
         ]
         assert _reverts(rows, {"by": "subject"}) == [({"by": "author"}, 2, False)], requester
@@ -271,6 +273,7 @@ def test_other_memories_and_actors_never_produce_a_revert_and_order_is_irrelevan
             from_version=3,
             result={"a": 2},
             prior={},
+            erased_keys=(details_key_digest("a"),),
         ),
     )
     assert plan_details_erasure(rows, live, SUBJECT).reverts == expected
@@ -298,7 +301,7 @@ def test_a_rollback_the_subject_requested_holds_no_value_of_theirs() -> None:
     put the author's value back."""
     m = uuid4()
     rows = [
-        _edit(m, 2, OTHER, {"by": "author"}, undone_by=1),
+        _edit(m, 2, OTHER, {"by": "author"}),
         _rollback(m, 3, SUBJECT, {"by": "other"}),
         _edit(m, 4, AUTHOR, {"by": "author"}),
     ]
@@ -340,10 +343,15 @@ def test_a_chain_of_erased_actors_is_walked_past_to_the_authors_value() -> None:
     # value from S1's prior; S1's run still reaches the author's value
     assert _reverts(rows, live, s2, erased_actors=frozenset({s1})) == []
     assert _strips(rows, live, s2, erased_actors=frozenset({s1})) == [30]
-    stripped = [rows[0], _edit(m, 3, s1, {})]
+    # the strip removed S2's ``by`` from S1's prior and listed its digest
+    stripped = [rows[0], replace(_edit(m, 3, s1, {}), erased_keys=frozenset({digest("by")}))]
     assert _reverts(stripped, live, s1, erased_actors=frozenset({s2})) == [
         ({"by": "author"}, 2, False)
     ]
+    # without the digest the prior reads as S2 having removed ``by``: deletions
+    # stand, so the key would go instead of coming back
+    unmarked = [rows[0], _edit(m, 3, s1, {})]
+    assert _reverts(unmarked, live, s1, erased_actors=frozenset({s2})) == [({}, 3, False)]
     # without the set, S2 is a surviving writer and their value comes back
     assert _reverts(rows, live, s1) == [({"by": "s2"}, 3, False)]
 
@@ -384,9 +392,9 @@ def _skipped_then_reverted(m: UUID, restored_from: int | None) -> list[DetailsEd
     non-details edit sits above it; the session then wrote e2, and the next
     call reverted {e2} alone. The live value is e1's."""
     return [
-        _edit(m, 2, SUBJECT, {"by": "author"}, undone_by=R),
+        _edit(m, 2, SUBJECT, {"by": "author"}),
         _other_field(m, 3, OTHER),
-        _edit(m, 4, SUBJECT, {"by": "subject-1"}, undone_by=R),
+        _edit(m, 4, SUBJECT, {"by": "subject-1"}),
         _rollback(m, 5, AUTHOR, {"by": "subject-2"}, restored_from=restored_from),
     ]
 
@@ -453,9 +461,14 @@ async def test_the_editor_strip_locks_once_then_one_update_per_key_set() -> None
         sql, params = _pg(stmt)
         assert "jsonb_set(memory_revisions.prior" in sql
         assert "memory_revisions.prior[%(prior_1)s::TEXT] - %(keys_1)s::TEXT[]" in sql
-        assert "memory_revisions.prior ? %(prior_2)s" in sql
+        assert "memory_revisions.prior ? %(prior_3)s" in sql
         assert "jsonb_typeof(memory_revisions.prior[%(prior_1)s::TEXT]) = " in sql
-        assert (params["prior_1"], params["prior_2"]) == ("details", "details")
+        assert (params["prior_1"], params["prior_3"]) == ("details", "details")
+        # the keys' digests join the marker list, never their names
+        assert params["marker_path_1"] == ["erased_details_keys"]
+        assert params["prior_2"] == "erased_details_keys"
+        assert params["param_2"] == sorted(details_key_digest(k) for k in params["keys_1"])
+        assert not set(params["keys_1"]) & set(params["param_2"])
         assert params["jsonb_typeof_1"] == "object"
         assert params["path_1"] == ["details"]
         ids = next(v for k, v in params.items() if k.startswith("ids"))
@@ -488,7 +501,8 @@ async def test_the_authored_arm_has_no_held_ids_arm() -> None:
 
 async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_keys() -> None:
     """#2275: ``prior`` = ``{"details": <live minus the subject's keys>,
-    "restored_from": v}`` — no ``erased`` marker."""
+    "erased_details_keys": <their digests>, "restored_from": v}`` — no
+    ``erased`` marker."""
     from types import SimpleNamespace
 
     from services import erasure_details
@@ -512,6 +526,7 @@ async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_k
                 from_version=2,
                 result={"a": 2, "t": "z"},
                 prior={"a": 2, "t": "z"},
+                erased_keys=(details_key_digest("s"),),
             ),
         ),
         keys_ambiguous=3,
@@ -525,7 +540,11 @@ async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_k
         report = await erasure_details.restore_editor_details(db, "sub", actor="p" * 64, plan=plan)
     assert memory.details == {"a": 2, "t": "z"} and memory.version == 5
     (call,) = record.call_args_list
-    assert call.kwargs["prior"] == {"details": {"a": 2, "t": "z"}, "restored_from": 2}
+    assert call.kwargs["prior"] == {
+        "details": {"a": 2, "t": "z"},
+        "erased_details_keys": [details_key_digest("s")],
+        "restored_from": 2,
+    }
     assert call.kwargs["writer"] == "erasure" and call.kwargs["actor_user_id"] == "p" * 64
     assert (report.restored, report.unavailable, report.keys_reverted) == (1, 0, 1)
     assert report.keys_ambiguous == 3

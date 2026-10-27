@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from models.auth import Context, Workspace
 from models.memory import Memory, MemoryRevision
 from services.account_erasure_service import AccountErasureService
+from services.details_provenance import details_key_digest
 from services.memory_versions import (
     list_revision_rows,
     load_version,
@@ -222,7 +223,7 @@ async def test_erasure_strips_the_details_the_subject_wrote_not_the_ones_they_ov
             (2, {"details": {"c": 1}}),
             (3, {"details": {"b": 1}}),  # B's value, kept
             (4, {"summary": "a's"}),
-            (5, {"details": {}}),  # A's key, gone
+            (5, {"details": {}, "erased_details_keys": [details_key_digest("a")]}),  # A's key
         ]
         assert rebuilt[4].values["details"] == {} and rebuilt[4].unavailable == ()
         assert rebuilt[3].values["details"] == {} and rebuilt[3].unavailable == ()

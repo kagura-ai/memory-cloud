@@ -40,7 +40,7 @@ from utils.exceptions import ValidationError, VersionConflictError
 # through ``prior_values``. A whole-value marker: the memories the subject
 # authored, and every erasure before v0.129.0. On memories others authored
 # the erasure removes only the subject's keys from ``prior.details`` since
-# #2275 and leaves the rest, with no marker.
+# #2275 and leaves the rest (``PRIOR_ERASED_DETAILS_KEYS_KEY`` lists them).
 PRIOR_ERASED_KEY = "erased"
 # Account erasure NULLs the live ``details`` of the subject's memories; it
 # marks their ``updated`` events with this key, so a rebuild (which starts
@@ -55,6 +55,13 @@ PRIOR_SCRUBBED_KEY = "scrubbed"
 # versioned field and not a marker: ``prior_values`` and the marker readers
 # ignore it.
 PRIOR_RESTORED_FROM_KEY = "restored_from"
+# #2275: the sha256 digests (``details_provenance.details_key_digest``, never
+# the names) of the ``details`` keys account erasure removed from this prior
+# per key — an erased member's values, not keys the edit found absent. Read
+# only by a later erasure's replay, so the result does not depend on which
+# of two erasures runs first. Not a versioned field and not an
+# ``unavailable`` marker: ``prior_values`` and the marker readers ignore it.
+PRIOR_ERASED_DETAILS_KEYS_KEY = "erased_details_keys"
 
 
 def versioned_snapshot(memory: Any) -> dict[str, Any]:

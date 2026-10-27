@@ -1708,6 +1708,7 @@ async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
     keeps ``a``. Rolling the session back then puts the owner's pre-session
     value back without the member's key (before #2275 the whole prior was
     gone and the rollback skipped the memory)."""
+    from services.details_provenance import details_key_digest
     from services.erasure_details import erase_subject_details
 
     w = world
@@ -1729,7 +1730,7 @@ async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
             )
         )
     ).scalar_one()
-    assert prior == {"details": {"a": 1}}
+    assert prior == {"details": {"a": 1}, "erased_details_keys": [details_key_digest("s")]}
 
     done = await _rollback(w, "RB", SessionPrincipal(w.owner, None), dry_run=False)
     await w.session.commit()
