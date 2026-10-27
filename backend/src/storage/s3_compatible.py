@@ -18,13 +18,15 @@ a backward-compatible alias.
 from __future__ import annotations
 
 import base64
+from collections.abc import AsyncIterator
+from datetime import UTC
 from typing import Any
 
 import aioboto3
 import structlog
 from botocore.exceptions import ClientError
 
-from storage.protocol import ObjectMetadata
+from storage.protocol import ObjectMetadata, StoredObject
 from utils.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
@@ -116,15 +118,31 @@ class S3CompatibleStorage:
                     "storage",
                     f"head_object failed for key={key!r}: {code}",
                 ) from exc
-            return ObjectMetadata(
+            metadata = ObjectMetadata(
                 size_bytes=int(resp["ContentLength"]),
                 etag=str(resp.get("ETag", "")).strip('"'),
             )
+            if "LastModified" in resp:
+                metadata["last_modified"] = (
+                    resp["LastModified"].astimezone(UTC).replace(tzinfo=None)
+                )
+            return metadata
 
     async def delete_object(self, key: str) -> None:
         async with self._client() as client:
             await client.delete_object(Bucket=self._bucket, Key=key)
-            logger.info("storage_object_deleted", key=key)
+            logger.info("storage_object_deleted")
+
+    async def iter_objects(self) -> AsyncIterator[StoredObject]:
+        """Paginated inventory; never buffer an entire bucket or log its keys."""
+        async with self._client() as client:
+            pages = client.get_paginator("list_objects_v2")
+            async for page in pages.paginate(Bucket=self._bucket):
+                for item in page.get("Contents", []):
+                    yield StoredObject(
+                        key=item["Key"],
+                        last_modified=item["LastModified"].astimezone(UTC).replace(tzinfo=None),
+                    )
 
     async def generate_presigned_put(
         self,

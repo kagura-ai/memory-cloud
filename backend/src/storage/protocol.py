@@ -13,7 +13,9 @@ need not branch on backend.
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict, runtime_checkable
+from collections.abc import AsyncIterator
+from datetime import datetime
+from typing import NotRequired, Protocol, TypedDict, runtime_checkable
 
 
 class ObjectMetadata(TypedDict):
@@ -27,6 +29,7 @@ class ObjectMetadata(TypedDict):
 
     size_bytes: int
     etag: str
+    last_modified: NotRequired[datetime]
 
 
 @runtime_checkable
@@ -101,3 +104,16 @@ class BlobStorageProtocol(Protocol):
         browser uses the original filename instead of the storage key.
         """
         ...
+
+
+class StoredObject(TypedDict):
+    """Inventory entry. Timestamps are naive UTC, like file registry dates."""
+
+    key: str
+    last_modified: datetime
+
+
+class BlobInventoryProtocol(BlobStorageProtocol, Protocol):
+    """Optional inventory surface for the operator orphan sweeper."""
+
+    def iter_objects(self) -> AsyncIterator[StoredObject]: ...

@@ -40,7 +40,7 @@ _SESSION_SET_LOCK_TIMEOUT = re.compile(r"\bSET\s+lock_timeout\b", re.I)
 # CONCURRENTLY sites the walker finds across ``alembic/versions``. A new
 # revision that builds or drops an index concurrently bumps it; a drop means
 # the walker lost a shape.
-_KNOWN_CONCURRENTLY_SITE_COUNT = 50
+_KNOWN_CONCURRENTLY_SITE_COUNT = 53
 
 # Revisions that carry their own copy of a helper (written before #2240).
 _LEGACY_INVALID_INDEX_PROBE = frozenset(
@@ -155,6 +155,7 @@ def test_the_concurrently_walker_finds_the_known_sites() -> None:
         "e26_818_summary_trgm_idx.py",  # a module constant
         "f10_2115_revisions_actor_idx.py",  # create and drop constants
         "f17_2298_audit_logs_user_id_idx.py",
+        "f18_2395_file_cleanup.py",
     ):
         assert sites[name], name
     assert sum(len(found) for found in sites.values()) == _KNOWN_CONCURRENTLY_SITE_COUNT, {

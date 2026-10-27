@@ -130,6 +130,7 @@ class FileObject(Base):
             "(status = 'reserved') OR (storage_backend = 'r2' AND storage_key IS NOT NULL)",
             name="valid_file_storage_shape",
         ),
+        Index("ix_file_objects_storage_key", "storage_key"),
         # Active dedup: a workspace can hold one row per sha256 at a time;
         # soft-deleted and failed rows are excluded so a redo upload
         # of a previously-deleted file is allowed.
@@ -204,4 +205,16 @@ class WorkspaceStorageUsage(Base):
     __table_args__ = (
         CheckConstraint("used_bytes >= 0", name="nonneg_used_bytes"),
         CheckConstraint("file_count >= 0", name="nonneg_file_count"),
+    )
+
+
+class StorageObjectDeletion(Base):
+    """Retry marker surviving file/workspace cascades; no account identifiers."""
+
+    __tablename__ = "storage_object_deletions"
+
+    storage_key: Mapped[str] = mapped_column(String(1024), primary_key=True)
+    available_after: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
     )

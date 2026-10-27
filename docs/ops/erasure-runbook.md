@@ -379,3 +379,59 @@ Kagura Memory Cloud Operations
 - `backend/src/services/account_erasure_service.py` — 実装本体
 - `backend/alembic/versions/c01_360_erasure_requests.py` — schema migration
 - `backend/src/services/email_service.py` — Email service interface + LoggingEmailService stub
+
+
+## Stored file objects (v0.130.0, #2395)
+
+File binaries are separate from PostgreSQL. Normal context deletion soft-deletes
+its files and cancels reservations in the same transaction; it does **not**
+cascade-delete file rows (`context_id` uses `ON DELETE SET NULL`). The existing
+context restore window remains unchanged. Workspace soft deletion now purges all
+its live files, including workspace-scoped uploads, with the same quota accounting.
+The 15-minute storage worker also repairs older soft-deleted workspaces in bounded
+batches (10 workspaces, at most 500 files each), rechecking deletion under the
+workspace row lock and keeping the original deletion timestamp. Revived workspaces
+are skipped. This uses the same quota-aware file purge; failures are counted.
+The nightly file GC removes soft-deleted binaries after seven days, before removing
+the tracking row. #1966's `backfill_deleted_context_files` fixes older soft-deleted
+contexts; it cannot find objects whose registry row has already disappeared.
+
+Hard workspace deletion, including sole-owner account erasure and legacy admin
+paths, cascades through `file_objects`. Migration `f18_2395_file_cleanup` captures
+each removed object key in `storage_object_deletions` **in that transaction**. The
+queue has no workspace/account FK, so the cascade cannot erase retry evidence.
+A rollback also rolls back the queue entry. The 15-minute storage deletion sweep
+removes a marker only after an idempotent object DELETE succeeds, or another file
+registry row still owns that key. Storage outages retain the marker for retry.
+A reserved upload may still PUT through an issued URL after its row disappears:
+cleanup waits until its recorded expiry plus one hour before deleting the object.
+
+Cleanup and inserts/updates share transaction-scoped PostgreSQL advisory key locks
+(compatible with PgBouncer transaction pooling). Statements lock multiple keys in
+sorted order. GC locks its file row before its key to serialize context restores.
+Live, reserved, and soft-deleted registry rows protect a shared object from the
+queue/inventory sweeps. A future deletion of the final tracking row enqueues it
+again. The queue retains only the exact object key and timestamps until cleanup;
+legacy keys can contain filenames, so treat the queue with the same restricted
+operator access as the original file registry. Cleanup logs contain counts and
+exception classes, never keys or exception text.
+
+For binaries orphaned before this migration, run the inventory command with the
+API's database and S3-compatible storage environment:
+
+```bash
+python -m src.cli.sweep_orphan_objects               # default read-only plan
+python -m src.cli.sweep_orphan_objects --apply --yes # recheck and delete
+```
+
+It prints counts only, scans paginated inventory, and considers only keys under a
+workspace UUID prefix with no registry row. Objects younger than two days (or the
+configured PUT lifetime plus one hour, if longer) and keys with a not-yet-due queue
+marker are kept. Apply repeats the registry and object-age checks under the same
+key lock; a previous plan does not authorize deleting a newly uploaded object.
+Deploy the migration first and drain old API processes and legacy attachment
+migration jobs before running inventory: pre-v0.130 legacy migrations can write
+bytes before inserting their registry row without this lock. Wait out any older,
+longer configured presigned PUT lifetime before inventory. Bucket versioning, if
+enabled by the operator, requires a separate lifecycle policy for noncurrent
+versions; ordinary S3 DELETE only removes the current object view.

@@ -112,6 +112,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # Fernet ciphertext and lifecycle metadata, never user-authored memory.
         "worker_app_identities",
         "workspace_storage_usage",
+        # Durable object-delete work survives workspace cascades until storage
+        # deletion succeeds; exact object key and timestamps, no account FK.
+        "storage_object_deletions",
         # break-glass dual-control approval workflow (#1113) — governance plumbing,
         # like erasure_requests/audit_logs; no user content, no learned structure
         "workspace_ownership_force_transfer_requests",

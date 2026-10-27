@@ -38,6 +38,11 @@ from db.base import get_db
 from models.file_objects import FileObject
 from services import storage_quota_service
 from services.file_storage_service import FILE_SOFT_DELETE_RETENTION
+from services.storage_cleanup import (
+    drain_storage_deletions,
+    lock_storage_key,
+    purge_deleted_workspace_files,
+)
 from storage.factory import get_blob_storage
 from utils.datetime import utcnow
 from utils.exceptions import ExternalServiceError
@@ -139,12 +144,28 @@ async def sweep_orphan_files() -> dict[str, int]:
         # point leaves the row durably ``failed`` so the partial-unique
         # index frees the (workspace, sha256) slot — consistent with
         # the operator's mental model of "sweeper marked these dead".
-        for workspace_id, size_bytes, storage_key, file_id in pending_releases:
+        for workspace_id, size_bytes, storage_key, file_id in sorted(
+            pending_releases, key=lambda release: release[2] or ""
+        ):
             await storage_quota_service.release_storage_bytes(
                 workspace_id=workspace_id,
                 size_bytes=size_bytes,
             )
             if storage is not None and storage_key:
+                await lock_storage_key(db, storage_key)
+                # The failed row freed the dedup slot at commit. A newer
+                # reservation may already own the same content-addressed key.
+                holders = await db.scalar(
+                    select(func.count())
+                    .select_from(FileObject)
+                    .where(
+                        FileObject.storage_key == storage_key,
+                        FileObject.id != file_id,
+                    )
+                )
+                if holders:
+                    await db.commit()
+                    continue
                 try:
                     await storage.delete_object(storage_key)
                     counts["r2_deleted"] += 1
@@ -158,9 +179,9 @@ async def sweep_orphan_files() -> dict[str, int]:
                     logger.warning(
                         "orphan_file_r2_delete_failed",
                         file_id=file_id,
-                        storage_key=storage_key,
-                        error=str(exc),
+                        error_class=type(exc).__name__,
                     )
+                await db.commit()
 
         # #962: defensively soft-delete any lingering ``failed`` rows that
         # never got a ``deleted_at``. Three sources land here: orphan-swept
@@ -193,15 +214,13 @@ async def sweep_orphan_files() -> dict[str, int]:
     return counts
 
 
-async def _key_held_by_a_live_row(db: AsyncSession, row: FileObject) -> bool:
-    """True when another, live ``file_objects`` row points at ``row.storage_key``."""
+async def _key_held_by_another_row(db: AsyncSession, row: FileObject) -> bool:
+    """Every other registry row protects its object until its own GC runs."""
     holders = await db.scalar(
         select(func.count())
         .select_from(FileObject)
         .where(
-            FileObject.workspace_id == row.workspace_id,
             FileObject.storage_key == row.storage_key,
-            FileObject.deleted_at.is_(None),
             FileObject.id != row.id,
         )
     )
@@ -230,9 +249,10 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
     Storage keys are content-addressed (``{workspace}/{sha[:2]}/{sha}``), so a
     file uploaded again after its first row was soft-deleted shares the R2
     object with that row. Deleting the object with the old row would break the
-    live re-upload (#1960 review: a context deletion purges many rows at once,
+    live re-upload or a younger soft-deleted row still inside its retention
+    window (#1960 review: a context deletion purges many rows at once,
     and a later re-upload of the same content is the normal way back). A row
-    whose key is still held by a live row is hard-deleted without touching R2
+    whose key is still held by another registry row is hard-deleted without touching R2
     (``object_kept_shared``).
 
     Returns:
@@ -277,11 +297,27 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
         )
         candidates = list(result.scalars().all())
 
-        for f in candidates:
+        for candidate in candidates:
+            # Lock the row before its key (restore uses this order too). Re-read
+            # after waiting: a restored row must never lose its object.
+            f = await db.scalar(
+                select(FileObject)
+                .where(
+                    FileObject.id == candidate.id,
+                    FileObject.deleted_at <= threshold,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if f is None:
+                await db.rollback()
+                continue
+            if f.storage_key:
+                await lock_storage_key(db, f.storage_key)
             file_id = str(f.id)
             storage_key = f.storage_key
 
-            if storage_key and await _key_held_by_a_live_row(db, f):
+            if storage_key and await _key_held_by_another_row(db, f):
                 counts["object_kept_shared"] += 1
             elif storage_key:
                 try:
@@ -298,9 +334,9 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                     logger.warning(
                         "soft_delete_gc_r2_delete_failed",
                         file_id=file_id,
-                        storage_key=storage_key,
-                        error=str(exc),
+                        error_class=type(exc).__name__,
                     )
+                    await db.rollback()
                     continue
             else:
                 # No binary to delete. For a ``failed`` row (#962) a NULL
@@ -345,6 +381,21 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
     return counts
 
 
+async def sweep_storage_deletions() -> dict[str, int]:
+    """Drain durable cleanup work captured before a cascade removes metadata."""
+    try:
+        storage = get_blob_storage()
+    except ExternalServiceError:
+        return {"deleted": 0, "failed": 0, "registered": 0}
+    counts = {"deleted": 0, "failed": 0, "registered": 0}
+    async for db in get_db():
+        backfill = await purge_deleted_workspace_files(db)
+        counts = {**await drain_storage_deletions(db, storage), **backfill}
+    if any(counts.values()):
+        logger.info("storage_deletions_swept", **counts)
+    return counts
+
+
 def schedule_file_tasks(scheduler: AsyncIOScheduler) -> None:
     """Register the orphan file sweeper and the nightly soft-delete GC."""
     scheduler.add_job(
@@ -366,6 +417,13 @@ def schedule_file_tasks(scheduler: AsyncIOScheduler) -> None:
         trigger=CronTrigger(hour=3, minute=15, timezone="UTC"),
         id="soft_delete_file_gc",
         name="Soft-Delete File GC (Issue #552)",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        sweep_storage_deletions,
+        trigger=IntervalTrigger(minutes=15),
+        id="storage_object_deletion_sweeper",
+        name="Durable Object Deletion (Issue #2395)",
         replace_existing=True,
     )
     logger.info(
