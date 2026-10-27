@@ -171,6 +171,40 @@ describe("APIKeysTabPanel — table view (#943)", () => {
     // A populated last_used_at must not collapse to the em-dash placeholder.
     expect(within(table).queryByLabelText("neverUsed")).not.toBeInTheDocument();
   });
+
+  it("offers no Regenerate on a connector key, renamed or not (#2299)", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          name: "renamed",
+          connector_id: "33333333-3333-4333-8333-333333333333",
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    await waitFor(() =>
+      expect(within(table).getByText("renamed")).toBeInTheDocument(),
+    );
+    expect(within(table).queryByText("regenerate")).not.toBeInTheDocument();
+  });
+
+  it("keeps Regenerate on a look-alike name without the link (#2299)", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({ name: "connector:33333333-3333-4333-8333-333333333333" }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(await within(table).findByText("regenerate")).toBeInTheDocument();
+  });
 });
 
 describe("APIKeysTabPanel — role badge + provenance (key clarity Phase 1)", () => {

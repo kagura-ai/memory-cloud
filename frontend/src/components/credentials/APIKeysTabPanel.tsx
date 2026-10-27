@@ -648,8 +648,9 @@ export function APIKeysTabPanel() {
     <div className="flex gap-2">
       {/* Issue #626: regenerate/hide/delete target legacy singleton endpoints
           (workspace-scoped keys only) and are suppressed for public-bound keys;
-          bound keys get a dedicated revoke instead. */}
-      {!apiKey.bound_context_id && (
+          bound keys get a dedicated revoke instead. A connector key (#2299)
+          is rotated from its connector — the API refuses it here (422). */}
+      {!apiKey.bound_context_id && !apiKey.connector_id && (
         <ActionButton
           onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
           icon={<RefreshCw className="w-4 h-4" />}
