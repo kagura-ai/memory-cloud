@@ -64,6 +64,12 @@ request at once, as before. A request whose step 1 succeeded, or that spent
 an earlier attempt, and that then fails before the Postgres commit
 (``workspace_transfer_required``, an error inside the Postgres step) re-queues
 them the same way (#2358): the points may be gone and the account stays.
+
+The Postgres step takes the subject's surviving memories that are still
+queued for an embedding (any status but ``success``) out of the queue (#2363):
+they are marked ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry
+budget, so the sweep does not write the points step 1 deleted again under the
+pseudonym; only the admin retry-failed endpoint brings them back.
 """
 
 from __future__ import annotations
@@ -95,6 +101,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
+from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
@@ -1488,7 +1495,10 @@ class AccountErasureService:
             """#2358: this run's step 1 returned, or an earlier attempt's step 1
             ran (#2282: a partial delete before its ``QdrantError``). A failure
             handler re-queues the subject's embeddings then, as long as the
-            Postgres step has not committed."""
+            Postgres step has not committed. ``vector_store_gave_up`` is
+            implied by ``failed_attempts > 0`` whenever
+            ``VECTOR_STORE_MAX_ATTEMPTS >= 2``; it is kept for the give-up on
+            a first attempt when the constant is 1, so it is not dead code."""
             return points_deleted or failed_attempts > 0 or vector_store_gave_up is not None
 
         step = "postgres"
@@ -2250,6 +2260,11 @@ class AccountErasureService:
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id, details.strip))
+        # #2363: the survivors still waiting for (or retrying) their embedding
+        # leave the queue before the scrub, which takes the raw sub off them:
+        # step 1 deleted the subject's points, and the sweep must not write
+        # them again under the pseudonym.
+        counts["memories_embedding_dequeued"] = await self._dequeue_surviving_embeddings(user_id)
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
         # #1365 review sweep: neural graph edges, analysis runs, retrieval
@@ -2585,6 +2600,59 @@ class AccountErasureService:
         )
         return result.rowcount or 0
 
+    async def _dequeue_surviving_embeddings(self, user_id: str) -> int:
+        """Take the subject's surviving memories out of the embedding queue (#2363).
+
+        Step 1 deleted every point of the subject. A surviving memory that was
+        still ``pending``, ``processing`` or ``failed`` with retry budget left
+        would be claimed by the sweep after the commit and get its points back
+        under the pseudonym. Each such row (any status but ``success``) becomes
+        terminal: ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR``, the retry
+        budget spent (``MAX_EMBEDDING_RETRIES``, so
+        ``embedding_retry_eligible_clause`` never matches it; the reclaim
+        clauses need ``processing``) and the pipeline's clock stamped. A
+        ``success`` row is left as it is: its point is gone since step 1 and
+        nothing re-queues it. The admin retry-failed endpoint is the only way
+        back; the row then embeds under the pseudonym with no ``details``.
+
+        The status change also fences a run in flight: both of its outcome
+        writes match ``processing`` and its own claim stamp, so it sees its
+        claim lost, and a run that wrote points by then deletes them
+        (``memory_service._reconcile_after_lost_claim``). An earlier
+        ``embedding_error`` is overwritten: the marker is what an operator
+        needs to read.
+
+        By the raw sub, before ``_scrub_surviving_memories`` pseudonymizes the
+        rows; they are held since ``lock_subject_memories``, so the id-ordered
+        re-lock is free. Rolled back with the Postgres step on any failure.
+
+        Returns:
+            How many rows were taken out of the queue.
+        """
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(Memory)
+                .where(
+                    Memory.id.in_(
+                        locked_ids(
+                            Memory,
+                            lambda m: (m.user_id == user_id, m.embedding_status != "success"),
+                        )
+                    )
+                )
+                .values(
+                    embedding_status="failed",
+                    embedding_error=ERASED_AUTHOR_EMBEDDING_ERROR,
+                    embedding_retry_count=MAX_EMBEDDING_RETRIES,
+                    # the pipeline's own clock (#1852); updated_at is an edit's
+                    embedding_attempted_at=utcnow(),
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount or 0
+
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).
 
@@ -2593,7 +2661,9 @@ class AccountErasureService:
         compliance, the sub is unrecoverable) and ``details`` is NULLed —
         the memory text remains workspace content, but structured personal
         payload (coordinates, arbitrary detail keys) is removed at rest. The
-        subject's tombstones are gone already (``_delete_subject_tombstones``).
+        subject's tombstones are gone already (``_delete_subject_tombstones``),
+        and the rows still queued for an embedding are out of the queue
+        (``_dequeue_surviving_embeddings``, #2363).
 
         A ``type='time'`` memory keeps ``{"trigger": ...}`` and nothing else
         (#2266): ``valid_trigger_window_format`` requires its trigger window,

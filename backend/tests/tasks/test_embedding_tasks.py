@@ -172,7 +172,7 @@ class TestSweepPendingEmbeddings:
         mock_result = MagicMock()
         mock_result.all.return_value = []
         mock_result.one.return_value = SimpleNamespace(
-            unsearchable=467, stalled=467, capped=400, configuration=7
+            unsearchable=467, stalled=467, capped=400, configuration=7, erased=20
         )
         mock_db.execute = AsyncMock(return_value=mock_result)
 
@@ -190,7 +190,9 @@ class TestSweepPendingEmbeddings:
             "stalled": 467,
             "capped": 400,
             "configuration": 7,
-            "other": 60,
+            # #2363: an erasure's dequeued survivors, not a provider problem
+            "erased": 20,
+            "other": 40,
         }
         backlog_sql = str(
             mock_db.execute.await_args_list[0]
@@ -199,6 +201,11 @@ class TestSweepPendingEmbeddings:
         )
         assert "LIKE 'QUOTA-002:%'" in backlog_sql
         assert "LIKE 'CFG-%'" in backlog_sql and "LIKE 'FEAT-%'" in backlog_sql
+        # an exact match on the erased-author marker, not a prefix
+        from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+
+        marker = ERASED_AUTHOR_EMBEDDING_ERROR.replace("'", "''")
+        assert f"memories.embedding_error = '{marker}'" in backlog_sql
 
     @pytest.mark.asyncio
     async def test_a_healthy_deployment_stays_quiet(self):

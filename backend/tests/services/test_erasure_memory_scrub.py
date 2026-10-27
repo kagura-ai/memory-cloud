@@ -118,6 +118,52 @@ async def test_delete_subject_tombstones_locks_in_id_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dequeue_surviving_embeddings_marks_the_queued_rows_terminal() -> None:
+    """#2363: the subject's surviving rows that are not ``success`` leave the
+    embedding queue in one UPDATE, by the raw sub, locked in id order: status
+    ``failed``, the erased-author marker, the retry budget spent and the
+    pipeline's clock stamped. Returns the rowcount."""
+    from datetime import datetime
+
+    from sqlalchemy.dialects import postgresql
+
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=3))
+    service = AccountErasureService.__new__(AccountErasureService)
+    service.db = db
+
+    assert await service._dequeue_surviving_embeddings("google-oauth2|erased") == 3
+
+    (statement,) = (c.args[0] for c in db.execute.await_args_list)
+    assert statement.get_execution_options()["synchronize_session"] is False
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert sql.startswith(
+        "UPDATE memories SET embedding_status=%(embedding_status)s::VARCHAR, "
+        "embedding_error=%(embedding_error)s::VARCHAR, "
+        "embedding_retry_count=%(embedding_retry_count)s::INTEGER, "
+        "embedding_attempted_at=%(embedding_attempted_at)s::TIMESTAMP WITHOUT TIME ZONE "
+        "WHERE memories.id IN (SELECT"
+    )
+    assert _memories_locked_in_id_order("memories", sql) == (
+        "memories_1.user_id = %(user_id_1)s::VARCHAR "
+        "AND memories_1.embedding_status != %(embedding_status_1)s::VARCHAR"
+    )
+    params = compiled.params
+    assert params["embedding_status"] == "failed"
+    assert params["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
+    assert ERASED_AUTHOR_EMBEDDING_ERROR.startswith("erased_author: ")
+    assert len(ERASED_AUTHOR_EMBEDDING_ERROR) <= 500
+    assert params["embedding_retry_count"] == MAX_EMBEDDING_RETRIES
+    assert isinstance(params["embedding_attempted_at"], datetime)
+    assert params["embedding_attempted_at"].tzinfo is None
+    assert params["user_id_1"] == "google-oauth2|erased"
+    assert params["embedding_status_1"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_session_provenance_locks_memories_in_id_order() -> None:
     """#2263: the ``memories.session_id`` scrub matches the subject's own
     (memory, session) pairs and locks the rows in id order."""

@@ -1554,7 +1554,10 @@ async def retry_failed_embeddings(
 ) -> dict:
     """Reset failed embeddings to pending for automatic retry.
 
-    Issue #93: Admin tool to recover from embedding failures.
+    Issue #93: Admin tool to recover from embedding failures. It also brings
+    back the surviving memories of an erased author that the erasure took out
+    of the queue (#2363, ``ERASED_AUTHOR_EMBEDDING_ERROR``): they embed under
+    the pseudonym, with no ``details``.
     """
     from uuid import UUID as PyUUID
 

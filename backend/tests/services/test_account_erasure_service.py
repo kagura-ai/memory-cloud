@@ -2818,6 +2818,48 @@ class TestTheSweepNeverRunsAgainstAReRegisteredSub:
         svc.db.execute.assert_not_awaited()
 
 
+class TestQueuedSurvivorsLeaveTheEmbeddingQueue:
+    """#2363: the Postgres step takes the subject's surviving memories that
+    are still queued for an embedding out of the queue, by the raw sub, before
+    the scrub pseudonymizes them, and records how many."""
+
+    @pytest.mark.asyncio
+    async def test_the_dequeue_runs_between_the_tombstones_and_the_scrub(self):
+        svc = _delete_postgres_service()
+        order: list[Any] = []
+
+        def _step(name: str, result: int) -> AsyncMock:
+            async def _run(user_id: str) -> int:
+                order.append((name, user_id))
+                return result
+
+            return AsyncMock(side_effect=_run)
+
+        svc._delete_subject_tombstones = _step("tombstones", 1)
+        svc._dequeue_surviving_embeddings = _step("dequeue", 5)
+        svc._scrub_surviving_memories = _step("scrub", 9)
+        captured: list[Any] = []
+        svc.db.execute = AsyncMock(
+            side_effect=lambda stmt, *a, **k: captured.append(stmt) or MagicMock(rowcount=0)
+        )
+        request_id = uuid4()
+
+        counts = (await svc._delete_postgres(_user(), request_id=request_id)).counts
+
+        assert order == [("tombstones", "u-1"), ("dequeue", "u-1"), ("scrub", "u-1")]
+        assert counts["memories_embedding_dequeued"] == 5
+        assert counts["memories_scrubbed"] == 9
+        # the count rides in the in-transaction ``postgres`` summary (#2286)
+        (summary,) = [
+            v
+            for stmt in captured
+            if str(getattr(stmt, "table", "")) == "erasure_requests"
+            for v in stmt.compile().params.values()
+            if isinstance(v, dict) and "postgres" in v
+        ]
+        assert summary["postgres"]["memories_embedding_dequeued"] == 5
+
+
 class TestThePostgresStepRecordsItselfOnTheRequest:
     """#2286: ``_delete_postgres`` writes the ``postgres`` summary on the
     request row inside its transaction, so a crash after the commit cannot

@@ -38,12 +38,18 @@ async def _log_unsearchable_backlog(db) -> None:
     all of these are retried without spending the budget) and ``other`` — so
     a capped workspace is not read as an unsearchable one. Rows failed before
     the prefix existed count as other.
+
+    #2363: ``erased`` counts the surviving memories an account erasure took
+    out of the queue (``ERASED_AUTHOR_EMBEDDING_ERROR``, exact match). They
+    sit at the retry ceiling by design, so they are part of ``stalled`` too,
+    but not of ``other``: they are not a provider problem.
     """
     from sqlalchemy import func, or_
 
-    from config.constants import MAX_EMBEDDING_RETRIES
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
     from models.memory import Memory
 
+    erased = Memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
     capped = Memory.embedding_error.like("QUOTA-002:%")
     configuration = or_(Memory.embedding_error.like("CFG-%"), Memory.embedding_error.like("FEAT-%"))
     try:
@@ -56,6 +62,7 @@ async def _log_unsearchable_backlog(db) -> None:
                     .label("stalled"),
                     func.count().filter(capped).label("capped"),
                     func.count().filter(configuration).label("configuration"),
+                    func.count().filter(erased).label("erased"),
                 ).where(
                     Memory.embedding_status == "failed",
                     Memory.deleted_at.is_(None),
@@ -74,7 +81,8 @@ async def _log_unsearchable_backlog(db) -> None:
             stalled=stalled,
             capped=row.capped,
             configuration=row.configuration,
-            other=unsearchable - row.capped - row.configuration,
+            erased=row.erased,
+            other=unsearchable - row.capped - row.configuration - row.erased,
         )
 
 

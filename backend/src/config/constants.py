@@ -230,6 +230,17 @@ MAX_EMBEDDING_RETRIES = 3
 # Backoff before a failed embedding is eligible for auto-retry — gives a
 # transient condition time to clear and spaces retries across sweep ticks.
 EMBEDDING_RETRY_BACKOFF_SECONDS = 60
+# #2363: the ``embedding_error`` of an erased author's surviving memory that
+# was still waiting for (or retrying) its embedding when the erasure
+# committed. The erasure marks it ``failed`` with the retry budget spent, so
+# no sweep recreates its points; only the admin retry-failed endpoint brings
+# it back (it then embeds under the pseudonym). Here so the erasure, the
+# embedding pipeline and the sweep's backlog count share it without importing
+# each other.
+ERASED_AUTHOR_EMBEDDING_ERROR = (
+    "erased_author: the author's account was erased; its vector points are "
+    "deleted by design (admin retry-failed re-embeds under the pseudonym)"
+)
 
 # =============================================================================
 # Tombstone sweep (#1521)
