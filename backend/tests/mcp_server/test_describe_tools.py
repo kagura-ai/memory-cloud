@@ -74,6 +74,17 @@ def test_the_view_is_derived_from_the_request_url_query():
     assert _hidden() == []
 
 
+def test_the_view_includes_add_tools_on_top_of_the_profile():
+    """#2354: ``describe_tools`` does not name an added tool as hidden."""
+    set_mcp_tool_view_query(b"add_tools=get_usage,secret_put")
+    view, error = current_view()
+    assert error is None
+    assert view == frozenset(CORE_TOOLS) | {"get_usage", "secret_put"}
+    names = {row["name"] for row in _hidden()}
+    assert "get_usage" not in names and "secret_put" not in names
+    assert "list_edges" in names
+
+
 def test_a_broken_url_selection_is_reported_not_papered_over():
     set_mcp_tool_view_query(b"profile=typo")
     view, error = current_view()
@@ -123,6 +134,7 @@ async def test_handle_lists_hidden_tools_with_the_url_hint():
     assert payload["count"] == len(payload["tools"]) > 40
     assert payload["listed"] == sorted(CORE_TOOLS)
     assert "profile=full" in payload["url"]["list_all"]
+    assert "add_tools=" in payload["url"]["add"]
     assert "describe_tools(names=" in payload["hint"] and "reconnect" in payload["hint"]
     assert "url_error" not in payload
 

@@ -1985,7 +1985,7 @@ Returns: {status, topics: [{topic, text}], unknown?, hint?}.""",
         {
             "name": "describe_tools",
             "readOnly": True,
-            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Call it when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane: it tells you what exists and which URL lists it — most clients let you call listed tools only, so the user reconnects with ?profile=full (everything) or ?tools=a,b.
+            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Call it when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane: it tells you what exists and which URL lists it — most clients let you call listed tools only, so the user reconnects with ?profile=full (everything) or ?add_tools=a,b.
 Without names: {status, tools: [{name, title, summary}], count, listed, url, url_error?, hint}. With names: {status, definitions: [<complete tool definitions>], unknown?, url, url_error?}.""",
             "inputSchema": {
                 "type": "object",

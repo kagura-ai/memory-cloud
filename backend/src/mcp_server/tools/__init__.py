@@ -587,7 +587,8 @@ async def execute_tool_call(
             f"Unknown tool: {tool_name}",
             help=(
                 "Call tools/list to see the tools this URL lists; describe_tools() names the "
-                "rest, and ?profile=full on the URL lists every tool."
+                "rest. ?add_tools=<name> on the URL adds one to the list, and ?profile=full "
+                "lists every tool."
             ),
         )
 

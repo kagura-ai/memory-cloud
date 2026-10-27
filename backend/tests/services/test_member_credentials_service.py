@@ -15,6 +15,7 @@ contract:
 
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -147,6 +148,7 @@ class TestSerializeApiKeyLastUsed:
             bound_context_id=None,
             agent_id=None,
             default_context_id=None,
+            connector_id=None,
         )
 
     def test_serialize_includes_last_used_at_when_present(self, service):
@@ -192,6 +194,7 @@ class TestDefaultContextOnMemberKeys:
             "bound_context_id": None,
             "agent_id": None,
             "default_context_id": None,
+            "connector_id": None,
             "workspace_id": self.WORKSPACE_ID,
         }
         base.update(over)
@@ -225,6 +228,25 @@ class TestDefaultContextOnMemberKeys:
         assert out["default_context_id"] is None
         assert out["default_context_name"] is None
         assert MemberAPIKeyResponse(**out).agent_id == str(self.AGENT_ID)
+
+    def test_serialize_emits_connector_id_for_a_connector_key(self):
+        """#2299: the connector link is on the wire, whatever the key is named."""
+        connector_id = uuid4()
+        service = MemberCredentialsService(MagicMock())
+        out = service._serialize_api_key(
+            self._key(4, name="renamed", connector_id=connector_id), show_secret=False
+        )
+        assert out["connector_id"] == str(connector_id)
+        assert MemberAPIKeyResponse(**out).connector_id == str(connector_id)
+
+    def test_serialize_a_look_alike_name_without_the_link_is_not_a_connector_key(self):
+        """#2299: a legacy ``connector:`` name without ``connector_id`` is ordinary."""
+        service = MemberCredentialsService(MagicMock())
+        out = service._serialize_api_key(
+            self._key(5, name=f"connector:{uuid4()}"), show_secret=False
+        )
+        assert out["connector_id"] is None
+        assert MemberAPIKeyResponse(**out).connector_id is None
 
     @pytest.mark.asyncio
     async def test_names_are_read_once_per_context_as_the_requester(self):
@@ -283,3 +305,49 @@ class TestDefaultContextOnMemberKeys:
         (key,) = out["api_keys"]
         assert key["default_context_id"] == str(self.CONTEXT_ID)
         assert key["default_context_name"] is None
+
+
+class TestCleanupReownsConnectorKeys:
+    """#2352: the removed member's live connector keys in the workspace go to
+    its owner before the member's other keys are deleted."""
+
+    @pytest.mark.asyncio
+    async def test_reown_runs_before_the_api_keys_delete_and_is_reported(self):
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.sql.dml import Delete, Update
+
+        captured: list[Any] = []
+
+        def _execute(stmt, *a, **k):
+            captured.append(stmt)
+            result = MagicMock(rowcount=1 if isinstance(stmt, Update) else 2)
+            result.scalars.return_value.all.return_value = []
+            return result
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=_execute)
+        workspace_id = uuid4()
+
+        with patch("services.member_credentials_service.logger") as mock_logger:
+            out = await MemberCredentialsService(db).cleanup_member_credentials(
+                workspace_id, "member-1"
+            )
+
+        reown, delete_keys = captured[0], captured[1]
+        assert isinstance(reown, Update)
+        sql = " ".join(str(reown.compile(dialect=postgresql.dialect())).split())
+        assert sql.startswith(
+            "UPDATE api_keys SET user_id=workspaces.owner_user_id FROM workspaces WHERE "
+        )
+        assert "api_keys.workspace_id = %(workspace_id_" in sql
+        params = reown.compile().params
+        assert params["workspace_id_1"] == workspace_id
+        assert params["workspace_id_2"] == workspace_id
+        assert isinstance(delete_keys, Delete)
+        assert getattr(delete_keys.table, "name", None) == "api_keys"
+
+        assert out["connector_api_keys_reowned"] == 1
+        assert out["api_keys_deleted"] == 2
+        (call,) = mock_logger.info.call_args_list
+        assert call.args[0] == "member_credentials_cleaned_up"
+        assert call.kwargs["connector_api_keys_reowned"] == 1

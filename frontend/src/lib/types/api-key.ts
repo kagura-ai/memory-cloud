@@ -20,6 +20,9 @@ export interface APIKey {
   // null when none is set OR the owner can no longer read the context.
   default_context_id: string | null;
   default_context_name: string | null;
+  // #2299: set when the key is a connector's shared key (#1952) — the
+  // `connector:` name is display only.
+  connector_id: string | null;
 }
 
 export interface APIKeyCreateRequest {

@@ -6,6 +6,7 @@ Database URL is read from DATABASE_URL environment variable
 """
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -31,6 +32,11 @@ from config.settings import get_settings
 
 # Import all models so autogenerate can detect them
 from db.base import Base  # noqa: F401
+from db.migration_helpers import (
+    install_migration_lock_timeout,
+    migration_lock_timeout,
+    reapply_migration_lock_timeout,
+)
 
 # The production secret guard (#2225, #2239): under ENVIRONMENT=production a
 # development-default or short secret stops the migration here, before any
@@ -38,6 +44,10 @@ from db.base import Base  # noqa: F401
 # than the API healthcheck after it. A no-op where the settings are already
 # cached (the in-process migration tests).
 get_settings()
+
+# The cap on each lock wait of the migration DDL (#2300): a bad
+# KAGURA_MIGRATION_LOCK_TIMEOUT stops here, before any schema change.
+lock_timeout = migration_lock_timeout()
 
 # Alembic Config object
 config = context.config
@@ -96,12 +106,25 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    """Run migrations with a given connection."""
+    """Run migrations with a given connection.
+
+    Every migration transaction starts with ``SET LOCAL lock_timeout`` (#2300,
+    ``db.migration_helpers``): at the first begin, at each begin after an
+    ``autocommit_block()``, and again after each revision, so an ALTER waiting
+    for ACCESS EXCLUSIVE behind a long transaction fails fast (to be rerun)
+    instead of queueing every later query on the table.
+    """
+    logging.getLogger("alembic.runtime.migration").info(
+        "lock_timeout %s for each migration transaction (KAGURA_MIGRATION_LOCK_TIMEOUT)",
+        lock_timeout or "off",
+    )
+    install_migration_lock_timeout(connection, lock_timeout)
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         include_object=include_object,
         include_name=include_name,
+        on_version_apply=reapply_migration_lock_timeout(lock_timeout),
     )
 
     with context.begin_transaction():

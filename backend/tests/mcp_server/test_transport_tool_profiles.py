@@ -424,12 +424,34 @@ async def test_http_routes_forward_the_query_string(monkeypatch, route, kwargs):
     assert seen["query_string"] == b"profile=core"
 
 
+@DRIVERS
+@pytest.mark.asyncio
+async def test_add_tools_lists_the_core_tools_plus_the_named_ones(drive):
+    """#2354: both transports read ``add_tools`` on top of the profile."""
+    send = await drive(b"add_tools=secret_put,get_usage&session_id=mcp-1")
+
+    assert send.status == 200
+    wanted = set(CORE_TOOLS) | {"secret_put", "get_usage"}
+    assert _listed(send) == [t["name"] for t in get_tool_definitions() if t["name"] in wanted]
+
+
+@DRIVERS
+@pytest.mark.asyncio
+async def test_add_tools_is_ignored_next_to_an_allowlist(drive):
+    send = await drive(b"tools=recall&add_tools=secret_put")
+
+    assert _listed(send) == ["recall"]
+
+
 # ------------------------------------------------- a view, not an authorization
 
 
 @DRIVERS
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", [b"profile=core", b"tools=recall", b"profile=no-such-profile"])
+@pytest.mark.parametrize(
+    "query",
+    [b"profile=core", b"tools=recall", b"profile=no-such-profile", b"add_tools=recall"],
+)
 async def test_tools_call_ignores_the_profile(monkeypatch, drive, query):
     """A tool outside the listed set stays callable — the existing role checks
     in the tool handlers are the only gate — and a bad profile value, which

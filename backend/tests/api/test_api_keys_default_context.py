@@ -313,6 +313,24 @@ async def test_list_names_each_default_once_per_context_and_scope():
 
 
 @pytest.mark.asyncio
+async def test_list_carries_the_connector_link_not_the_name():
+    """#2299: ``connector_id`` classifies a connector key — a renamed one keeps
+    it, a legacy look-alike name without the link carries null."""
+    connector_id = uuid.uuid4()
+    keys = [
+        _key(id=1, name="renamed", workspace_id=WORKSPACE_ID, connector_id=connector_id),
+        _key(id=2, name=f"connector:{uuid.uuid4()}", workspace_id=WORKSPACE_ID),
+        _key(id=3),
+    ]
+    manager = MagicMock(db=MagicMock())
+    manager.list_keys = AsyncMock(return_value=keys)
+
+    response = await list_api_keys(user=USER, manager=manager)
+
+    assert [r.connector_id for r in response] == [connector_id, None, None]
+
+
+@pytest.mark.asyncio
 async def test_regenerate_keeps_the_default_context():
     old = _key(default_context_id=CONTEXT_ID)
     new = _key(id=8, public_id="akey_" + "n" * 22, default_context_id=CONTEXT_ID)

@@ -1879,11 +1879,18 @@ embedded goes back to `pending` (count and time in
 `deleted_data_summary.retry.embeddings_requeued` / `requeued_at`; one
 embedding call per memory, worked off by the embedding sweep at its usual
 rate, older rows first; a batch waits at most 5 seconds for a row lock, then
-the re-queue stops and logs `erasure_embeddings_requeue_failed`). Not
-covered: a request that failed at this step before v0.125.0, one cancelled by
-SQL, one whose vector delete succeeded but that then failed before the
-Postgres commit (a workspace-transfer error, say), and a re-queue that
-failed; the runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
+the re-queue stops and logs `erasure_embeddings_requeue_failed`). From
+v0.129.0 (#2358) a request whose vector delete succeeded but that then failed
+before the Postgres commit (a workspace-transfer error, an error inside the
+Postgres step), and a retried request that fails for another reason (a
+billing contract that started while it waited, a configuration error at this
+step), re-queue them the same way once the `failed` row is written; its
+`retry.attempts` is 0 when this step never failed, and an admin force-erase
+does it before answering 409. A failure after the Postgres commit re-queues
+nothing (the memories are the pseudonym's). Not covered: a request that
+failed at this step before v0.125.0, one cancelled by SQL, one that failed
+before the Postgres commit before v0.129.0, and a re-queue that failed; the
+runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
 erasure runs. The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request
@@ -3592,6 +3599,83 @@ With it set, Sleep's judge calls on the managed lane also pass
 `platform_only`; without it Sleep keeps BYOK-then-env. The ignored rows are
 not deleted for you: each workspace owner can still list and delete their own
 stored keys (#1613).
+
+## Migration lock timeout — Issue #2300
+
+`alembic upgrade` / `alembic downgrade` start every migration transaction with
+`SET LOCAL lock_timeout` (default **5 s**). An `ALTER TABLE` needs an ACCESS
+EXCLUSIVE lock; while it waits for one behind a long transaction, every later
+query on that table queues behind it, so on a hot table (`memories`,
+`api_keys`, `audit_logs`, `memory_revisions`) one slow reader would stall the
+API. With the cap, a lock wait past 5 s fails the migration instead.
+
+**What it looks like.** The upgrade stops with SQLSTATE `55P03`:
+
+```text
+sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) canceling statement due to lock timeout
+```
+
+In `deploy.sh` this is Step 2, and the deploy retries it on its own: a run
+that fails on a lock timeout (55P03) is started again after 15 s, then after
+45 s, 3 attempts in total, each logged as `Migration attempt N/3 hit a lock
+timeout; retrying in …s`. `MIGRATION_RETRY_DELAYS` (default `"15 45"`, one
+delay per retry) changes the backoff and the number of attempts. Any other
+migration failure aborts at once. When every attempt times out, the deploy
+stops with "hit a lock timeout on all 3 attempts": the new color is not
+started and traffic is not moved.
+
+An upgrade runs in one transaction, so a timeout rolls back every revision
+since the last commit point — the start of the run, or the last autocommit
+block (`CREATE INDEX CONCURRENTLY`, VALIDATE), which commits what
+came before it. `alembic current` shows where the upgrade now stands.
+
+**What to do.** A lock held for a moment (a slow request, a Sleep run) is
+usually gone by the next attempt, which `deploy.sh` makes for you. Outside
+`deploy.sh`, run the upgrade again (`alembic upgrade head`). If it keeps
+failing, find the session holding the table:
+
+```sql
+-- sessions holding a lock on the table named in the failing statement
+SELECT a.pid, a.usename, a.application_name, a.state,
+       now() - a.xact_start AS xact_age, l.mode, left(a.query, 120) AS query
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.relation = 'api_keys'::regclass AND l.granted
+ORDER BY a.xact_start;
+
+-- the oldest open transactions on the server
+SELECT pid, usename, application_name, state,
+       now() - xact_start AS xact_age, left(query, 120) AS query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start
+LIMIT 10;
+```
+
+An `idle in transaction` session with a large `xact_age` is the usual cause.
+Let it finish, or end it (`SELECT pg_cancel_backend(<pid>)`, then
+`pg_terminate_backend(<pid>)`) once you know what it is, and run the upgrade
+again.
+
+**Override.** `KAGURA_MIGRATION_LOCK_TIMEOUT` sets the cap for the process that
+runs alembic: a PostgreSQL duration (`500ms`, `30s`, `2min`; a bare number is
+milliseconds; at most 2147483647 ms). `0` turns it off (the lock wait is unbounded, as before
+v0.129.0). A longer value is a longer stall of the table while the `ALTER`
+waits. Set it in the env file the migration container reads, or on the one-off
+run (`docker compose run --rm -e KAGURA_MIGRATION_LOCK_TIMEOUT=30s ... alembic
+upgrade head`). A value that is not a duration stops alembic before any schema
+change.
+
+- A revision that sets its own `lock_timeout` keeps it for its own statements
+  (e91 and e95: 10 s; f14 and f16: 5 s); the override does not change those.
+- This setting does not reach statements inside an autocommit block. A
+  revision that wants a cap there sets its own: the backfill / VALIDATE steps
+  of e99, f14 and f15 use 5 s, and a timeout there fails the same way.
+  `CREATE INDEX CONCURRENTLY` has none: its wait for older transactions blocks
+  neither reads nor writes.
+- The setting is transaction-local, so it works through a transaction-pooling
+  pgbouncer. An offline script (`alembic upgrade --sql`) does not carry it:
+  `SET lock_timeout` in the `psql` session that runs the script.
 
 ## Database Connection Pool — Issue #1980
 

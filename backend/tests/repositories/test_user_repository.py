@@ -85,11 +85,24 @@ class TestUserRepository:
 
     @pytest.mark.asyncio
     async def test_list(self, repository, sample_user):
-        """Test listing users."""
-        results = await repository.list()
+        """The user this test created is listed, however many rows other tests left (#2241).
 
-        assert len(results) > 0
-        assert any(u.id == sample_user.id for u in results)
+        Pages through the id-ordered list instead of reading one ``limit=100``
+        page, so rows accumulated in a shared test DB cannot push it out.
+        """
+        seen_ids: list[int] = []
+        skip = 0
+        while True:
+            page = await repository.list(skip=skip, limit=100)
+            if not page:
+                break
+            seen_ids.extend(u.id for u in page)
+            if sample_user.id in seen_ids:
+                break
+            skip += len(page)
+
+        assert sample_user.id in seen_ids
+        assert seen_ids == sorted(seen_ids)
 
     @pytest.mark.asyncio
     async def test_list_with_pagination(self, repository, db_session):

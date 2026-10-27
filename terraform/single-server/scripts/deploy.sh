@@ -43,6 +43,9 @@ WEB_READINESS_TIMEOUT="${WEB_READINESS_TIMEOUT:-30}"  # seconds to wait for kagu
 WEB_READINESS_INTERVAL="${WEB_READINESS_INTERVAL:-2}" # seconds between web checks
 WORKERS_GATE_TIMEOUT="${WORKERS_GATE_TIMEOUT:-30}"    # seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy
 WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security-gate checks (shared by the workers + internal gates)
+# Backoff before each re-run of a migration that failed on a lock timeout
+# (#2300): one delay per retry, so "15 45" is 3 attempts in total.
+MIGRATION_RETRY_DELAYS="${MIGRATION_RETRY_DELAYS:-15 45}"
 
 # curl indirection: the security-gate probe runs through "$CURL" so the bats
 # suite can inject a stub (tests/deploy_verify_workers_blocked.bats). Production
@@ -208,15 +211,46 @@ run_migrations() {
             || error "Image ${name} is not present locally (KAGURA_IMAGE_SOURCE=registry).
        Refusing to run migrations: compose would build it from the source tree."
     fi
-    # Explicit `|| error` rather than relying on set -e, which a caller in a
+    # Explicit `error` rather than relying on set -e, which a caller in a
     # conditional context would silently switch off. Not "nothing changed":
     # revisions that commit outside the alembic transaction (autocommit blocks,
     # CREATE INDEX CONCURRENTLY) may already have applied.
-    dc run --rm --no-deps -T "$svc" alembic upgrade head \
-        || error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
+    #
+    # A lock timeout (#2300: SQLSTATE 55P03, another session held a table the
+    # migration ALTERs) is retried after MIGRATION_RETRY_DELAYS; the rerun
+    # resumes at the revision that timed out. Any other failure aborts at once.
+    local -a delays
+    read -r -a delays <<< "$MIGRATION_RETRY_DELAYS"
+    local attempts=$(( ${#delays[@]} + 1 ))
+    local attempt=1 rc out
+    out="$(mktemp)"
+    while :; do
+        rc=0
+        dc run --rm --no-deps -T "$svc" alembic upgrade head 2>&1 | tee "$out" \
+            || rc="${PIPESTATUS[0]}"
+        if [ "$rc" -eq 0 ]; then
+            rm -f "$out"
+            return 0
+        fi
+        if ! grep -qE '55P03|canceling statement due to lock timeout|lock_not_available|LockNotAvailable' "$out"; then
+            rm -f "$out"
+            error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
        If the output above names refused secrets (ENVIRONMENT=production), set them
        in the env file and re-run; otherwise check \`alembic current\` and any
        INVALID indexes before re-running."
+        fi
+        if [ "$attempt" -ge "$attempts" ]; then
+            rm -f "$out"
+            error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
+       The migration hit a lock timeout on all ${attempts} attempts: another session
+       holds a lock on a table it alters. Find it (docs/deployment.md, Migration
+       lock timeout), then re-run."
+        fi
+        local delay="${delays[$((attempt - 1))]}"
+        log "Migration attempt ${attempt}/${attempts} hit a lock timeout; retrying in ${delay}s"
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
 }
 
 # Abort a registry-mode rollback that has nothing to roll back TO.

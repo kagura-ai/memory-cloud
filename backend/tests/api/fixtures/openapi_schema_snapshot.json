@@ -40,6 +40,7 @@
       "APIKeyCreateResponse": {
         "properties": {
           "api_key": {},
+          "connector_id": {},
           "created_at": {},
           "default_context_id": {},
           "default_context_name": {},
@@ -65,6 +66,7 @@
       },
       "APIKeyResponse": {
         "properties": {
+          "connector_id": {},
           "created_at": {},
           "default_context_id": {},
           "default_context_name": {},
@@ -5413,6 +5415,16 @@
             ]
           },
           "bound_context_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connector_id": {
             "anyOf": [
               {
                 "type": "string"
@@ -22391,6 +22403,21 @@
           {
             "in": "query",
             "name": "tools",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "add_tools",
             "required": false,
             "schema": {
               "anyOf": [

@@ -37,6 +37,7 @@ from models.schemas import (
     UpdateWorkspaceSlotBonusResponse,
     UserWorkspaceInfo,
 )
+from services.connector_key_ownership import reown_connector_keys
 from services.email_service import get_email_service
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
@@ -1016,7 +1017,9 @@ async def delete_user(
 
     Issue #166: System Admin protection
 
-    Deletes memories, API keys, OAuth2 clients, Qdrant collection, and user account.
+    Deletes memories, API keys (a connector's live write key is handed to its
+    workspace's owner instead, #2352), OAuth2 clients, Qdrant collection, and
+    user account.
     """
     from services.system_admin_service import SystemAdminService
 
@@ -1051,11 +1054,6 @@ async def delete_user(
         )
         memory_count = memory_count_result.scalar() or 0
 
-        api_key_count_result = await db.execute(
-            select(func.count(APIKey.id)).where(APIKey.user_id == user_id)
-        )
-        api_key_count = api_key_count_result.scalar() or 0
-
         # #1784: a private context this user created may hold memories a
         # linked account wrote. It passes to that account before the contexts
         # the user still owns are deleted below; the user leaves its link set.
@@ -1066,9 +1064,22 @@ async def delete_user(
         await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
         await hand_over_private_contexts(db, user_id)
 
-        # Delete memories and API keys
+        # #2352: a connector's live write key this user holds serves the
+        # workspace — hand it to that workspace's owner before the delete below.
+        # Workspaces this user owns are hard-deleted further down with their
+        # keys; the helper's owner guard leaves those rows alone.
+        reowned_connector_keys = await reown_connector_keys(db, user_id)
+
+        # Delete memories and API keys; the keys are counted from the delete
+        # itself, so the re-owned ones are not among them.
         await db.execute(delete(Memory).where(Memory.user_id == user_id))
-        await db.execute(delete(APIKey).where(APIKey.user_id == user_id))
+        api_key_count = (
+            cast(
+                CursorResult[Any],
+                await db.execute(delete(APIKey).where(APIKey.user_id == user_id)),
+            ).rowcount
+            or 0
+        )
 
         # Delete OAuth2 clients owned by the user
         await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
@@ -1175,6 +1186,7 @@ async def delete_user(
             email=target_user.email,
             memories_deleted=memory_count,
             api_keys_deleted=api_key_count,
+            connector_api_keys_reowned=reowned_connector_keys,
         )
 
         return {
@@ -1184,6 +1196,7 @@ async def delete_user(
                 "memories": memory_count,
                 "api_keys": api_key_count,
             },
+            "reowned": {"connector_api_keys": reowned_connector_keys},
         }
 
 

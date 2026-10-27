@@ -812,8 +812,9 @@ _EMPTY_CONTEXTS_HINT = (
     'create_context(name="my-project"); an admin must add is_private=false. '
     "Otherwise ask an owner or admin to create a context or give you access. If "
     "create_context is not in your tool list (a ?tools= allowlist on the MCP URL "
-    "left it out), create the context in the web UI, or reconnect with ?profile=core "
-    "or ?profile=full on the MCP URL (describe_tools() names the tools the URL left out)."
+    "left it out), create the context in the web UI, or reconnect with ?profile=core, "
+    "?add_tools=create_context or ?profile=full on the MCP URL (describe_tools() names "
+    "the tools the URL left out)."
 )
 # Without a workspace create_context refuses with ``workspace_required``, so
 # this variant never suggests calling it. The workspace is resolved on every

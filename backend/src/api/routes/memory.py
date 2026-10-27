@@ -459,6 +459,10 @@ async def guardrail_digest(
     tools: str | None = Query(
         None, description="target=instructions only: the MCP URL's tools allowlist"
     ),
+    add_tools: str | None = Query(
+        None,
+        description="target=instructions only: the MCP URL's add_tools (names added to profile)",
+    ),
 ) -> PlainTextResponse:
     """Render a context's tool guardrails for clients without tool hooks (#1621).
 
@@ -470,8 +474,8 @@ async def guardrail_digest(
         <!-- kagura-memory:guardrails end -->
 
     The instructions target previews the MCP ``instructions`` string lane (a)
-    would serve this credential for this context — ``profile`` / ``tools``
-    reproduce the URL's tool view so the truncation suffix names the same tool.
+    would serve this credential for this context — ``profile`` / ``tools`` /
+    ``add_tools`` reproduce the URL's tool view so the truncation suffix names the same tool.
     Same trusted-only read and binding filter as ``load_guardrails``, same
     uniform ``404`` on a denied, unknown or other-workspace context; an
     external-tier or unmarked context is a ``200`` with an empty body
@@ -536,7 +540,13 @@ async def guardrail_digest(
         # Rebuild the MCP URL's query the way a URL carries it (percent-
         # encoded) so a ``&`` or ``=`` inside a value stays inside that value
         # and cannot smuggle a second parameter into the tool view.
-        query = urlencode({k: v for k, v in (("profile", profile), ("tools", tools)) if v})
+        query = urlencode(
+            {
+                k: v
+                for k, v in (("profile", profile), ("tools", tools), ("add_tools", add_tools))
+                if v
+            }
+        )
         body = render_instructions(
             SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)
         )
