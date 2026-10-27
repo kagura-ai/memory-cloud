@@ -18,24 +18,27 @@ That recorder is what lets the reads run here; a real ``alembic --sql`` run
 has none. ``test_offline_runs_only_without_reads`` pins which revisions need a
 live connection (``_NEEDS_LIVE_CONNECTION``).
 
-``test_every_validate_sits_in_an_autocommit_block`` walks every revision's AST.
+``test_every_validate_sits_in_an_autocommit_block`` walks every revision's AST
+(the walker in ``tests/migration_ast.py``). A revision after f17 calls
+``db.migration_helpers.validate_constraint`` instead of writing the literal
+(``tests/test_check_migration_helpers.py``).
 """
 
 from __future__ import annotations
 
-import ast
 import importlib
 import io
 import re
 import sys
-from pathlib import Path
 from types import ModuleType
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-_ALEMBIC_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+from tests.migration_ast import ALEMBIC_VERSIONS as _ALEMBIC_VERSIONS
+from tests.migration_ast import Site, literal_sites, migration_trees
+
 if str(_ALEMBIC_VERSIONS) not in sys.path:
     sys.path.insert(0, str(_ALEMBIC_VERSIONS))
 
@@ -155,54 +158,13 @@ def test_validate_runs_after_the_not_valid_add_commits(revision, direction):
         assert not any(opened < b < validate for b in begins), (name, lines)
 
 
-def _is_autocommit_block(item: ast.withitem) -> bool:
-    expr = item.context_expr
-    return (
-        isinstance(expr, ast.Call)
-        and isinstance(expr.func, ast.Attribute)
-        and expr.func.attr == "autocommit_block"
-    )
-
-
-def _literal_text(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.JoinedStr):
-        return "".join(
-            piece.value
-            for piece in node.values
-            if isinstance(piece, ast.Constant) and isinstance(piece.value, str)
-        )
-    return None
-
-
-def _validate_sites(tree: ast.AST) -> list[tuple[int, bool]]:
+def _all_validate_sites() -> dict[str, list[Site]]:
     """``(lineno, inside an autocommit block)`` for every VALIDATE literal
-    that is not a docstring: call arguments, assigned values, returns. A
-    docstring (or any bare string statement) is an ``ast.Expr`` whose value
-    is the literal; comments are not in the AST at all."""
-    sites: list[tuple[int, bool]] = []
-
-    def visit(node: ast.AST, in_block: bool, parent: ast.AST | None) -> None:
-        if isinstance(node, ast.With) and any(_is_autocommit_block(i) for i in node.items):
-            in_block = True
-        text = _literal_text(node)
-        if text is not None:
-            if _PHRASE in text and not isinstance(parent, ast.Expr):
-                sites.append((getattr(node, "lineno", 0), in_block))
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, in_block, node)
-
-    visit(tree, False, None)
-    return sites
-
-
-def _all_validate_sites() -> dict[str, list[tuple[int, bool]]]:
+    that is not a docstring, by revision file."""
     return {
-        path.name: sites
-        for path in sorted(_ALEMBIC_VERSIONS.glob("*.py"))
-        if (sites := _validate_sites(ast.parse(path.read_text(), filename=str(path))))
+        name: sites
+        for name, tree in migration_trees().items()
+        if (sites := literal_sites(tree, lambda text: _PHRASE in text))
     }
 
 
