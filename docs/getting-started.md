@@ -105,8 +105,10 @@ python -m src.cli.create_admin
 # account's OAuth / MCP tokens, so Redis (REDIS_URL) must be reachable.
 python -m src.cli.reset_password
 
-# Delete admin (for re-creation)
-python -m src.cli.delete_admin
+# Delete admin (for re-creation). When other users exist and the admin owns
+# workspaces, name a member of each of them to take them over (#2371);
+# without --transfer-to the command lists the workspaces and stops.
+python -m src.cli.delete_admin [--transfer-to USER_ID_OR_EMAIL]
 ```
 
 > **Note**: Docker API container must be running. CLI reads `API_KEY_SECRET` from it.

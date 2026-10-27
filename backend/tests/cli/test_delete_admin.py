@@ -67,3 +67,33 @@ def test_reown_runs_before_the_api_keys_delete(total_users: int, capsys):
     assert isinstance(delete_keys, Delete)
     assert getattr(delete_keys.table, "name", None) == "api_keys"
     assert "Connector write keys handed to their workspace owners: 1" in capsys.readouterr().out
+
+
+def test_owned_workspaces_without_transfer_to_refuse_before_the_prompt(capsys):
+    """#2371: the admin owns a workspace and other users exist — no prompt,
+    no write, the workspaces are listed."""
+    admin = SimpleNamespace(user_id="local:admin", login_id="admin")
+    ws = SimpleNamespace(id="00000000-0000-0000-0000-0000000000aa", name="Default")
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = admin
+    db.execute.return_value.scalar.return_value = 2
+    session = MagicMock()
+    session.return_value.__enter__.return_value = db
+
+    with (
+        patch("cli.delete_admin.require_settings"),
+        patch("cli.delete_admin.get_sync_database_url", return_value="postgresql://x/y"),
+        patch("cli.delete_admin.create_engine"),
+        patch("cli.delete_admin.Session", session),
+        patch("cli.delete_admin._owned_workspaces", return_value=[ws]),
+        patch("builtins.input", side_effect=AssertionError("prompted")),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        delete_admin.delete_admin()
+
+    assert exc_info.value.code == 1
+    db.delete.assert_not_called()
+    db.commit.assert_not_called()
+    out = capsys.readouterr().out
+    assert "Default (00000000-0000-0000-0000-0000000000aa)" in out
+    assert "--transfer-to" in out

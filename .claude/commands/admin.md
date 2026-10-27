@@ -37,7 +37,9 @@ Run interactively:
 ```
 
 If solo admin: deletes user + workspace + API keys.
-If other users exist: deletes admin only, preserves workspace.
+If other users exist: deletes admin only, preserves workspaces. Workspaces the
+admin owns go to `--transfer-to USER` (user_id, login_id or email; a member of
+each); without it the command lists them and stops (#2371).
 
 After deletion, run create_admin to set up again.
 
