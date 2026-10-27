@@ -122,7 +122,7 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import exists, func, select, update  # noqa: E402
+from sqlalchemy import exists, func, select, union, update
 from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
@@ -136,11 +136,13 @@ from models.erasure import (  # noqa: E402
 )
 from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
+    AUDIT_SUBJECT_METADATA_KEYS,
     ERASURE_AUDIT_ACTION,
     PayloadSync,
     RestoreReport,
     StripCounts,
     SubjectDetailsErasure,
+    audit_actor_predicate,
     clear_audit_request_metadata,
     count_audit_mentions,
     erase_subject_details,
@@ -292,7 +294,7 @@ async def _email_pseudonym(db: AsyncSession, pseudonym: str) -> str:
 
 @dataclass(frozen=True)
 class AuditSubs:
-    """The ``audit_logs.user_id`` values, keyed by their pseudonym (#2287)."""
+    """Known audit subject-identifier candidates, keyed by salted pseudonym."""
 
     # no user row has them: an erased subject's residue is found here
     orphans: dict[str, str]
@@ -300,28 +302,79 @@ class AuditSubs:
     in_use: frozenset[str]
 
 
-async def _audit_subs(db: AsyncSession) -> AuditSubs:
-    """Every distinct ``audit_logs.user_id``, keyed by its pseudonym (the salt
-    in use). A request's subject whose audit rows still carry the account id
-    is found by the request's pseudonym among the orphans; an account id in
-    use again (re-registered) is not an orphan, so a live account's rows are
-    never rewritten. Pseudonymized values are orphans too (the hash of a
-    hash) and match nothing; with a salt other than the erasure's, nothing
-    matches either."""
-    rows = await db.execute(
-        select(
-            AuditLog.user_id,
-            exists().where(User.user_id == AuditLog.user_id).label("in_use"),
-        ).distinct()
+async def _audit_subs(db: AsyncSession, pseudonyms: Collection[str] | None = None) -> AuditSubs:
+    """Recover raw subjects only from recognized audit identifier locations.
+
+    A historical erasure may already have scrubbed every ``user_id`` while
+    leaving only metadata or a raw-sub email fallback. Candidate strings are
+    matched by their salted pseudonym to the request by the caller, never
+    inferred from arbitrary text. Current users are excluded, and the write
+    rechecks that exclusion. Known erased pseudonyms are not hashed again;
+    a raw IdP subject may itself be 64 hex, so shape alone cannot exclude it.
+    """
+    if pseudonyms is not None and not pseudonyms:
+        return AuditSubs({}, frozenset())
+    email = AuditLog.user_email
+    named = func.substr(AuditLog.resource, len(USER_RESOURCE) + 1)
+    candidates = union(
+        select(AuditLog.user_id.label("sub")),
+        select(email.label("sub")),
+        select(func.left(email, func.length(email) - 4).label("sub")).where(
+            email.endswith("@api", autoescape=True)
+        ),
+        select(named.label("sub")).where(
+            AuditLog.resource.startswith(USER_RESOURCE, autoescape=True)
+        ),
+    ).subquery()
+    rows = await db.stream(
+        select(candidates.c.sub, exists().where(User.user_id == candidates.c.sub).label("in_use")),
+        execution_options={"yield_per": 500},
     )
     orphans: dict[str, str] = {}
     in_use: set[str] = set()
-    for sub, live in rows.all():
+    async for sub, live in rows:
+        if not sub or (pseudonyms is not None and sub in pseudonyms):
+            continue
         pseudonym = erasure_pseudonym(sub)
+        if pseudonyms is not None and pseudonym not in pseudonyms:
+            continue
         if live:
             in_use.add(pseudonym)
         else:
             orphans[pseudonym] = sub
+    # Whole JSON only: even extracting an unrelated key rejects escaped U+0000.
+    rows = await db.stream(
+        select(AuditLog.user_metadata).where(AuditLog.user_metadata.is_not(None)),
+        execution_options={"yield_per": 500},
+    )
+    async for (metadata,) in rows:
+        if not isinstance(metadata, dict):
+            continue
+        for key in AUDIT_SUBJECT_METADATA_KEYS:
+            sub = metadata.get(key)
+            if (
+                not isinstance(sub, str)
+                or not sub
+                or (pseudonyms is not None and sub in pseudonyms)
+            ):
+                continue
+            pseudonym = erasure_pseudonym(sub)
+            if pseudonyms is None or pseudonym in pseudonyms:
+                orphans[pseudonym] = sub
+    # Recheck all matched candidates, including those discovered only in metadata.
+    subjects = list(orphans.values())
+    for offset in range(0, len(subjects), 500):
+        live = set(
+            (
+                await db.execute(
+                    select(User.user_id).where(User.user_id.in_(subjects[offset : offset + 500]))
+                )
+            ).scalars()
+        )
+        for sub in live:
+            pseudonym = erasure_pseudonym(sub)
+            in_use.add(pseudonym)
+            orphans.pop(pseudonym, None)
     return AuditSubs(orphans, frozenset(in_use))
 
 
@@ -638,7 +691,11 @@ async def _reprocess_one(
             if mentioned is not None:
                 # the apply rewrites the own rows first: none is counted twice
                 mentions = await count_audit_mentions(
-                    db, mention_emails, subs=subs, exclude_user_id=audit_account_id
+                    db,
+                    mention_emails,
+                    subs=subs,
+                    exclude_user_id=audit_account_id,
+                    orphaned_only=True,
                 )
         else:
             # one lock phase over every audit row this request rewrites
@@ -655,6 +712,18 @@ async def _reprocess_one(
         if mentioned is not None:
             # rows, not edits: one row can lose its IP and get the initiator
             cleared = await clear_audit_request_metadata(db, pseudonym, dry_run=dry_run)
+            if dry_run and cleared:
+                # The mention UPDATE clears its actor's IP/UA before this sweep.
+                # Do not count those rows twice when they already carry the pseudonym.
+                acted = audit_actor_predicate(AuditLog, mention_emails, subs, orphaned_only=True)
+                if acted is not None:
+                    cleared -= set(
+                        (
+                            await db.execute(
+                                select(AuditLog.id).where(AuditLog.id.in_(cleared), acted)
+                            )
+                        ).scalars()
+                    )
             initiators = await pseudonymize_erasure_audit_initiator(db, pseudonym, dry_run=dry_run)
             metadata_cleared = len(cleared | initiators)
         if audited:
@@ -829,7 +898,7 @@ async def reprocess_erasures(
         stmt = stmt.where(ErasureRequest.id == request_id)
     requests = (await db.execute(stmt)).all()
     erased = await erased_pseudonyms(db)
-    audit_subs = await _audit_subs(db)
+    audit_subs = await _audit_subs(db, erased)
     mentioned = await _mentioned_emails(db, {h for hs in email_hashes.values() for h in hs})
     await db.rollback()
     if request_id is not None and not requests:
