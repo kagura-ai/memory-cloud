@@ -191,7 +191,7 @@ async def test_main_configures_logging_before_the_scaffold_runs(module, argv, mo
     counts_only = module in (cleanup_erased_vectors, sweep_orphan_objects)
     # Both repair CLIs fix ERROR because private identifiers can reach adapters.
     if module is sweep_orphan_objects:
-        monkeypatch.setattr(module, "get_blob_storage", lambda: object())
+        monkeypatch.setattr(module, "get_blob_storage", object)
     expected_level = "ERROR" if counts_only else "WARNING"
     command_argv = argv if counts_only else [*argv, "--log-level", expected_level]
     with (

@@ -36,6 +36,12 @@ ALLOWED: dict[str, str] = {
     "db/qdrant.py::count_context_chunk_points": (
         "migration verify counts chunk points per memory; it wants chunk points only"
     ),
+    "db/qdrant.py::erasure_scope_points": (
+        "erasure inspects captured summary UUIDs and their chunk_of points to remove all author points"
+    ),
+    "db/qdrant.py::erasure_point_identities": (
+        "historical erasure discovers summary and chunk identities, including orphaned chunk points"
+    ),
 }
 
 
