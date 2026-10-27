@@ -323,7 +323,7 @@ class TestCleanupReownsConnectorKeys:
         assert params["workspace_id_1"] == workspace_id
         assert params["workspace_id_2"] == workspace_id
         assert isinstance(delete_keys, Delete)
-        assert delete_keys.table.name == "api_keys"
+        assert getattr(delete_keys.table, "name", None) == "api_keys"
 
         assert out["connector_api_keys_reowned"] == 1
         assert out["api_keys_deleted"] == 2

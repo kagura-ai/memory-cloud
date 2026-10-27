@@ -65,5 +65,5 @@ def test_reown_runs_before_the_api_keys_delete(total_users: int, capsys):
     )
     assert reown.compile().params["user_id_1"] == "local:admin"
     assert isinstance(delete_keys, Delete)
-    assert delete_keys.table.name == "api_keys"
+    assert getattr(delete_keys.table, "name", None) == "api_keys"
     assert "Connector write keys handed to their workspace owners: 1" in capsys.readouterr().out

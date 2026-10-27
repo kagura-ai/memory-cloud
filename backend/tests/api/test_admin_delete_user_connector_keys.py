@@ -81,7 +81,7 @@ async def test_reown_runs_after_the_user_lock_and_before_the_key_count_and_delet
     )
     key_delete = _index(
         order,
-        lambda s: isinstance(s, Delete) and s.table.name == "api_keys",
+        lambda s: isinstance(s, Delete) and getattr(s.table, "name", None) == "api_keys",
     )
     assert user_lock < reown < key_count < key_delete
     assert order.count(("reown", "target-1")) == 1
