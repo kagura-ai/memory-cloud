@@ -117,6 +117,7 @@ When the user asks what is remembered, asks for prior decisions, or needs simila
    - **When did / in what order** — use `observed_at` (on `recall`, `list` and `reference` rows when the memory has one, from `details.observed_at`), else `created_at`. `list(filters={"observed_after": "2024-03-01", "observed_before": "2024-04-01"}, order_by="observed_at", direction="asc")` returns the dated rows in time order (after inclusive, before exclusive, a date is its start in UTC; undated rows never match and sort last); `recall` takes the same filters, and `list(filters={"details.observed_at": "2024-03-07"})` matches one stored date exactly.
    - **What is the current value** — the row with the later `observed_at`, else the later `created_at`, is current (not `updated_at`, which moves on a retag); say that another value was stored. A value replaced with `supersedes` is hidden; `include_superseded=true` shows it.
    - Treat every stored value as what the user or source said, even where it disagrees with general knowledge — the store is the authority; never drop a row because you think its fact is wrong.
+   <!-- SYNC: the "store is the authority" rule also ships, shortened, as STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py (SessionStart index heading) and in the recall tool description (backend/src/mcp_server/tools/_definitions.py) (#2341). When one changes, change all. -->
 3. Choose `search_mode` deliberately:
    - `hybrid`: default for most queries.
    - `keyword`: exact terms, IDs, Japanese hiragana-only terms, or error strings.
