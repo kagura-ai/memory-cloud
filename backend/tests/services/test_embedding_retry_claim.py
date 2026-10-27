@@ -230,7 +230,7 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
             _chunk_flag(False),
             _rowcount(0),
             _rowcount(0),
-            _reconcile_read(None),
+            _reconcile_read("u1"),
         ]
     )
     original_execute = db.execute
@@ -263,8 +263,8 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
         await memory_service.process_pending_embedding(memory_id)
 
     # claim UPDATE, SELECT memory, chunk-flag SELECT, success UPDATE, the
-    # re-queue (#2061), the read of the row it left alone (#2363: neither
-    # erased nor gone) — and nothing else after a lost claim.
+    # re-queue (#2061), the read of the row's author (#2363: the same one,
+    # the row is not gone) — and nothing else after a lost claim.
     assert len(captured) == 6
     sql = str(
         captured[3].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
@@ -480,7 +480,7 @@ async def test_a_run_that_failed_after_writing_re_queues_a_finished_newer_run():
             RuntimeError("chunk flag lookup"),  # the chunk write fails
             _rowcount(0),  # the fenced failure write: claim lost
             _rowcount(0),  # the re-queue: the newer run is still in flight
-            _reconcile_read(None),  # #2363: the row as the newer run left it
+            _reconcile_read("u1"),  # #2363: the author the run wrote under
         ],
     )
     embed_svc = MagicMock()
@@ -530,21 +530,21 @@ async def test_a_failed_re_queue_after_a_lost_claim_is_only_logged():
     assert warning.kwargs["error_class"] == "RuntimeError"
 
 
-def _reconcile_read(embedding_error: str | None) -> MagicMock:
-    """#2363: the lost-claim reconcile's read of the row (``None``: no row)."""
+def _reconcile_read(author: str | None) -> MagicMock:
+    """#2363: the lost-claim reconcile's read of the row's author (``None``: no row)."""
     result = MagicMock()
-    result.one_or_none = MagicMock(return_value=MagicMock(embedding_error=embedding_error))
+    result.scalar_one_or_none = MagicMock(return_value=author)
     return result
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["success", "failure"])
 async def test_a_run_that_lost_its_claim_to_an_erasure_deletes_its_points(path: str):
-    """#2363: the erasure marked the row (raw sub gone, budget spent) after
-    deleting the author's points; this run's point went out before, so its
-    outcome write matches nothing and it deletes what it wrote — on the
-    success path and on a failure after the write alike."""
-    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+    """#2363: the erasure pseudonymized the row and marked it ``failed`` after
+    deleting the author's points; this run's point (raw sub) went out before,
+    so its outcome write matches nothing and it deletes what it wrote — on
+    the success path and on a failure after the write alike. The marked row
+    is not re-queued."""
     from services import memory_service
 
     memory_id = uuid4()
@@ -560,7 +560,8 @@ async def test_a_run_that_lost_its_claim_to_an_erasure_deletes_its_points(path: 
             _memory_row(memory_id),
             *after_write,
             _rowcount(0),  # the re-queue moves nothing: the row is ``failed``
-            _reconcile_read(ERASED_AUTHOR_EMBEDDING_ERROR),
+            _reconcile_read("pseudonym"),
+            _rowcount(0),  # the re-queue from processing: nothing, still ``failed``
         ],
     )
     embed_svc = MagicMock()
@@ -578,7 +579,7 @@ async def test_a_run_that_lost_its_claim_to_an_erasure_deletes_its_points(path: 
     delete_chunks.assert_awaited_once_with([memory_id], "kagura_memories")
     events = [c.args[0] for c in log.info.call_args_list]
     assert events == ["embedding_points_removed_after_lost_claim", "embedding_claim_lost"]
-    assert log.info.call_args_list[0].kwargs["reason"] == "erased_author"
+    assert log.info.call_args_list[0].kwargs["reason"] == "author_changed"
     assert log.info.call_args.kwargs["requeued"] is False
     knn.assert_not_awaited()
     tags.assert_not_awaited()

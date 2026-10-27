@@ -144,7 +144,7 @@ from utils.tag_normalize import (
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from models.memory import Memory
     from services.resource_indexer import ResourceIndexer
@@ -9948,43 +9948,51 @@ async def _reconcile_after_lost_claim(
     memory_id: UUID,
     *,
     collection: str | None,
-    point_ids: Sequence[str],
+    point_id: UUID | None,
+    user_id: str | None,
     wrote_points: bool,
 ) -> bool:
-    """Settle the points of an embedding run that found its claim lost (#2061, #2363).
+    """Settle the point of an embedding run that found its claim lost (#2061, #2363).
 
-    Nothing to do for a run that wrote no point. Otherwise its points went
-    out before it knew:
+    Nothing to do for a run that wrote no point. Otherwise its point went out
+    before it knew:
 
     - A newer run may have written the memory's summary and chunk points
       first, and this run's writes then replaced them. When that newer run is
       done (``success``), the row goes back to ``pending`` so the sweep writes
       them once more (``requeue_embedding`` moves only a ``success`` row).
-    - The row's author was erased while the run was embedding it (#2363): the
-      erasure marked the row ``ERASED_AUTHOR_EMBEDDING_ERROR`` after step 1
-      deleted the author's points, and this run's point (raw sub, live
-      ``details``) would outlive the erasure. Or the row is gone (a
-      workspace hand-over or a sole-owner cascade deleted it mid-run), and
-      the point is an orphan. Either way the run deletes the points it wrote.
+    - The row's author is no longer the one this run wrote the point under:
+      the author was erased while the run was embedding it (#2363; the
+      erasure pseudonymized the row after step 1 deleted the author's points,
+      and this run's point carries the raw sub and the ``details`` it read).
+      Or the row is gone (a workspace hand-over or a sole-owner cascade
+      deleted it mid-run) and the point is an orphan. Either way the run
+      deletes the point it wrote — kept when another live row names it
+      (``unshared_point_id``: a resource point shared across contexts) — and
+      its chunk points. When the author changed, a newer run still in flight
+      may have written its point before this one; the row is re-queued even
+      from ``processing`` (fencing that run out) so the sweep writes it again
+      under the current author. A row the erasure took out of the queue
+      (``failed``) stays out.
     - Any other state (re-queued by an edit or a migration switch, a newer
       run still in flight, a tombstone): left as it is.
 
     Never raises.
 
     Args:
-        collection: Where the run wrote; ``None`` when it never resolved it
-            (it then wrote nothing).
-        point_ids: The point ids the run may have written: the row id and,
-            for a resource row, the indexer's point. A superset is fine.
+        collection: Where the run wrote; ``None`` when it never resolved it.
+        point_id: The point the run wrote: the row id, or a resource row's
+            indexer point (``Memory.point_id``).
+        user_id: The author the run wrote the point under.
         wrote_points: Whether the run sent a vector-store write.
 
     Returns:
         Whether the row was re-queued.
     """
-    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
     from db.qdrant import delete_chunk_points, delete_points_from_qdrant
+    from services.resource_indexer import unshared_point_id
 
-    if not wrote_points or collection is None:
+    if not wrote_points or collection is None or point_id is None:
         return False
     try:
         requeued = await requeue_embedding(db, memory_id, reason="claim_lost_after_write")
@@ -9998,20 +10006,25 @@ async def _reconcile_after_lost_claim(
         return True
 
     try:
-        row = (
-            await db.execute(select(Memory.embedding_error).where(Memory.id == memory_id))
-        ).one_or_none()
-        if row is None:
+        author = (
+            await db.execute(select(Memory.user_id).where(Memory.id == memory_id))
+        ).scalar_one_or_none()
+        if author is None:
             reason = "row_gone"
-        elif row.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR:
-            reason = "erased_author"
+        elif author != user_id:
+            reason = "author_changed"
         else:
             return False
-        points = list(dict.fromkeys(point_ids))
-        if reason == "row_gone":
-            points = await _points_no_live_row_names(db, memory_id, points)
-        await delete_points_from_qdrant(points, collection)
-        await delete_chunk_points([memory_id], collection)
+        point = await unshared_point_id(db, memory_id, point_id)
+        if point is not None:
+            await delete_points_from_qdrant([str(point)], collection)
+        if point_id == memory_id:  # a resource row has no chunk points
+            await delete_chunk_points([memory_id], collection)
+        if reason == "author_changed":
+            requeued = await requeue_embedding(
+                db, memory_id, reason="claim_lost_author_changed", include_processing=True
+            )
+        await db.commit()
     except Exception as e:
         logger.warning(
             "embedding_points_removal_failed",
@@ -10026,32 +10039,7 @@ async def _reconcile_after_lost_claim(
         collection=collection,
         reason=reason,
     )
-    return False
-
-
-async def _points_no_live_row_names(db: Any, memory_id: UUID, point_ids: list[str]) -> list[str]:
-    """The ``point_ids`` other than ``memory_id``'s own that no live row names (#2363).
-
-    A resource row's point is the uuid5 of its document version, so a row
-    indexed again after the deleted one may name the same point; that point is
-    the newer row's and stays. The row id is unique to the deleted row.
-    """
-    own = str(memory_id)
-    shared = [p for p in point_ids if p != own]
-    if not shared:
-        return point_ids
-    named = {
-        str(pid)
-        for pid in (
-            await db.execute(
-                select(Memory.summary_embedding_id).where(
-                    Memory.summary_embedding_id.in_([UUID(p) for p in shared]),
-                    Memory.deleted_at.is_(None),
-                )
-            )
-        ).scalars()
-    }
-    return [p for p in point_ids if p == own or p not in named]
+    return requeued
 
 
 async def process_pending_embedding(memory_id: UUID) -> None:
@@ -10090,7 +10078,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
         # #2363: where and under which ids this run writes, for the lost-claim
         # reconcile (it deletes them when the row's author was erased mid-run).
         collection: str | None = None
-        point_ids: list[str] = []
+        point_id: UUID | None = None
+        written_by: str | None = None
         try:
             # Claim: atomically set pending/stale-processing → processing
             # Stale processing: embedding_attempted_at older than
@@ -10152,9 +10141,13 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             memory = mem_result.scalar_one_or_none()
             if not memory:
                 return
-            # The summary point is the row id; a resource row's is the
-            # indexer's (``Memory.point_id``).
-            point_ids = list(dict.fromkeys((str(memory.id), str(memory.point_id))))
+            # The point this run writes and the author it writes it under:
+            # the row id, or a resource row's indexer point
+            # (``write_memory_point`` picks the same way).
+            from services.resource_indexer import owns_resource_point
+
+            point_id = memory.point_id if owns_resource_point(memory) else memory.id
+            written_by = memory.user_id
 
             # #2092: the text this run embeds, and whether the row was already
             # embedded with exactly that text (a content-chunk backfill, an
@@ -10228,8 +10221,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             #
             # #2363: the claim is also gone when the row's author was erased
             # while this run embedded it: the erasure marks the row ``failed``
-            # (``ERASED_AUTHOR_EMBEDDING_ERROR``) after deleting the author's
-            # points, and the reconcile below deletes the ones this run wrote.
+            # and pseudonymizes it after deleting the author's points, and the
+            # reconcile below deletes the one this run wrote under the raw sub.
             await claim.stop_renewal()
             done = await db.execute(
                 update(Memory)
@@ -10257,7 +10250,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                         db,
                         memory_id,
                         collection=collection,
-                        point_ids=point_ids,
+                        point_id=point_id,
+                        user_id=written_by,
                         wrote_points=wrote_points,
                     ),
                 )
@@ -10358,7 +10352,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                         db,
                         memory_id,
                         collection=collection,
-                        point_ids=point_ids,
+                        point_id=point_id,
+                        user_id=written_by,
                         wrote_points=wrote_points,
                     ),
                 )
