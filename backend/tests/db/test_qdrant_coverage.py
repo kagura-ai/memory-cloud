@@ -8,7 +8,7 @@ every reachable error/ValueError branch are targeted deliberately.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -897,6 +897,32 @@ class TestDeleteUserPoints:
             VARIANT_COLLECTION: 0,
         }
         assert mock_client.delete.await_count == 1
+
+    @pytest.mark.parametrize("failure", [None, "get_collections", "count", "delete"])
+    async def test_erasure_logs_and_errors_never_expose_the_subject(
+        self, mock_client, monkeypatch, failure
+    ):
+        """#2375: even SDK errors can echo the raw filter; never propagate them."""
+        log = Mock()
+        monkeypatch.setattr(qmod, "logger", log)
+        mock_client.get_collections.return_value = SimpleNamespace(
+            collections=[SimpleNamespace(name=KAGURA_MEMORIES_COLLECTION)]
+        )
+        mock_client.count.return_value = SimpleNamespace(count=2)
+        if failure:
+            getattr(mock_client, failure).side_effect = RuntimeError(f"filter user_id={UID}")
+            with pytest.raises(QdrantError) as raised:
+                await delete_user_points(UID)
+            assert UID not in str(raised.value)
+            assert raised.value.__suppress_context__
+        else:
+            assert await delete_user_points(UID) == {KAGURA_MEMORIES_COLLECTION: 2}
+            assert (
+                mock_client.delete.await_args.kwargs["points_selector"].must[0].match.value == UID
+            )
+        assert log.mock_calls
+        assert UID not in repr(log.mock_calls)
+        assert "user_id_hash" in repr(log.mock_calls)
 
     async def test_list_collections_failure_wrapped(self, mock_client):
         """A get_collections failure raises a listing-specific QdrantError."""
