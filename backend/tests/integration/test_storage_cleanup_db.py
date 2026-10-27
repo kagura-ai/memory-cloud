@@ -1,7 +1,9 @@
 """#2395: real PostgreSQL cascade, rollback, shared-key and writer races.
 
-Set MINIO_TEST_ENDPOINT=http://127.0.0.1:19000 to run the same deletion tests
-against an isolated MinIO bucket as well as the hermetic storage fake.
+Set MINIO_TEST_ENDPOINT to run the same deletion tests against an isolated
+MinIO bucket as well as the hermetic storage fake. MINIO_TEST_ACCESS_KEY and
+MINIO_TEST_SECRET_KEY select its credentials (both default to minioadmin,
+matching the backend-integration CI service).
 """
 
 from __future__ import annotations
@@ -72,8 +74,8 @@ async def storage(request):
     bucket = "kmc-2395-" + uuid4().hex
     store = S3CompatibleStorage(
         account_id="test",
-        access_key_id="storage-test-access",
-        secret_access_key="storage-test-secret",
+        access_key_id=os.getenv("MINIO_TEST_ACCESS_KEY", "minioadmin"),
+        secret_access_key=os.getenv("MINIO_TEST_SECRET_KEY", "minioadmin"),
         bucket=bucket,
         endpoint_url=endpoint,
     )
