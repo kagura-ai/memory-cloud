@@ -1947,8 +1947,12 @@ that writes after the erasure cannot use the normal success re-queue to
 bypass the author change. Explicit admin retry or a context embedding-model
 switch still rebuilds scrubbed rows under the pseudonym; stale-run cleanup
 retains the shared-resource-point checks. A context merge (`merge_contexts`)
-copies these rows still `failed` with the marker, so the merge does not hand
-them back to the embedding sweep.
+copies these rows still `failed` with the marker, an admin context restore
+brings them back still `failed` with the marker, and a later erasure that
+restores their `details` leaves them there, so none of these hands them back
+to the embedding sweep. Survivors of an erasure before v0.129.0 carry no
+marker (they stayed `success` with no point); a merge or a context restore
+re-queues those, as before.
 
 A restore whose value equals the live value still writes its version and
 `erasure` revision row: that row records which member each key's value
