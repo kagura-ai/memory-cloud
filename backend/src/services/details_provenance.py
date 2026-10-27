@@ -373,10 +373,8 @@ def replay(
         )
         mapping: dict[str, Origin] = {}
         for key, value in _keys(after).items():
-            restored_from = _restored_from(edit, details_key_digest(key))
-            pre = (
-                _pre(versions, restored_from, i) if put_back and restored_from is not None else None
-            )
+            restored_from = _restored_from(edit, details_key_digest(key)) if put_back else None
+            pre = _pre(versions, restored_from, i) if restored_from is not None else None
             mapping[key] = _attribute(
                 key,
                 value,
