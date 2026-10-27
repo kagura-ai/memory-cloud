@@ -106,7 +106,7 @@ Ask for an action per item number. Anything not named stays as it is.
 | unpin | `update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")` |
 | delete | `forget(memory_ids=[...], context_id=...)`, one call for all |
 
-If the client does not list `create_edge` or `list_edges`, say so in one line: they are outside the core listing, callable once the MCP URL carries `?profile=full` (or `?tools=…`).
+If the client does not list `create_edge` or `list_edges`, say so in one line: each is callable once the MCP URL carries `?profile=full` (or `?tools=…`).
 
 ### 5. Apply
 
