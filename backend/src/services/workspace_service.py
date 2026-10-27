@@ -538,6 +538,10 @@ class WorkspaceService:
                 f"Deleted {external_keys_count} external API keys for workspace {workspace_id}"
             )
 
+        from services.file_storage_service import FileStorageService
+
+        files_purged = await FileStorageService(self.db).purge_workspace_files(workspace_id)
+
         # Soft delete
         workspace.deleted_at = func.now()
         workspace.updated_at = func.now()
@@ -559,6 +563,13 @@ class WorkspaceService:
             )
 
         await self.db.commit()
+
+        from services import storage_quota_service
+
+        for file_workspace_id, size in files_purged.released.items():
+            await storage_quota_service.release_storage_bytes(
+                workspace_id=file_workspace_id, size_bytes=size
+            )
 
         # Delete Qdrant points for ALL contexts (including soft-deleted)
         # Workspace deletion is permanent — clean up everything

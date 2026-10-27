@@ -755,6 +755,19 @@ class FileStorageService:
         # because the attachment_id is already unique-per-workspace).
         storage_key = f"{workspace_id}/legacy/{attachment_id}/{filename}"
 
+        from services.storage_cleanup import lock_storage_key
+
+        # Unlike presigned uploads this path writes bytes before INSERT. Hold
+        # the parent FK lock first, so account/workspace deletion cannot finish
+        # before the registry row exists and its DELETE can enqueue cleanup.
+        workspace_exists = await self.db.scalar(
+            select(Workspace.id)
+            .where(Workspace.id == workspace_id, Workspace.deleted_at.is_(None))
+            .with_for_update(read=True, key_share=True)
+        )
+        if workspace_exists is None:
+            raise NotFoundException("workspace", str(workspace_id))
+        await lock_storage_key(self.db, storage_key)
         existing = await self.db.execute(
             select(FileObject).where(FileObject.storage_key == storage_key)
         )
@@ -984,6 +997,14 @@ class FileStorageService:
         purged = await self.purge_live_context_files([context_id], deleted_at=deleted_at)
         return purged.visible, sum(purged.released.values())
 
+    async def purge_workspace_files(
+        self, workspace_id: UUID, *, deleted_at: datetime | None = None, limit: int | None = None
+    ) -> FilesPurged:
+        """Delete workspace files, retaining GC tracking; optionally bound a backfill."""
+        return await self._purge_live_rows(
+            FileObject.workspace_id == workspace_id, deleted_at, context_count=0, limit=limit
+        )
+
     async def purge_workspace_scoped_files(
         self, workspace_id: UUID, *, deleted_at: datetime | None = None
     ) -> tuple[int, int]:
@@ -1031,7 +1052,12 @@ class FileStorageService:
         )
 
     async def _purge_live_rows(
-        self, where: ColumnElement[bool], deleted_at: datetime | None, *, context_count: int
+        self,
+        where: ColumnElement[bool],
+        deleted_at: datetime | None,
+        *,
+        context_count: int,
+        limit: int | None = None,
     ) -> FilesPurged:
         """Soft-delete the live rows matching ``where`` (see :meth:`purge_files_for_contexts`)."""
         # FOR UPDATE locks the rows we are about to cancel so a concurrent
@@ -1040,7 +1066,11 @@ class FileStorageService:
         # commit — the two fully serialize on the row lock, keeping the status
         # decision (reserved-cancel vs uploaded-decrement) authoritative.
         result = await self.db.execute(
-            select(FileObject).where(where, FileObject.deleted_at.is_(None)).with_for_update()
+            select(FileObject)
+            .where(where, FileObject.deleted_at.is_(None))
+            .order_by(FileObject.id)
+            .limit(limit)
+            .with_for_update()
         )
         files = list(result.scalars().all())
         visible = sum(1 for f in files if f.status == "uploaded")
@@ -1074,7 +1104,7 @@ class FileStorageService:
                 "context_bound_files_purged",
                 context_count=context_count,
                 file_count=len(files),
-                workspaces=[str(w) for w in released],
+                workspace_count=len(released),
             )
         return FilesPurged(rows=len(files), visible=visible, released=released)
 

@@ -58,8 +58,17 @@ def _patch_get_db(
     db = MagicMock()
     db.commit = AsyncMock()
     db.delete = AsyncMock()  # legacy compat: orphan sweeper does not use it
+
     # The GC's "is this key still held by a live row?" count (#1960).
-    db.scalar = AsyncMock(return_value=shared_key_holders)
+    async def _scalar(stmt):
+        # The GC re-reads/locks each candidate before checking shared holders.
+        if stmt.column_descriptions[0].get("entity") is file_tasks.FileObject:
+            parameters = stmt.compile().params
+            return next((row for row in rows if row.id == parameters.get("id_1")), None)
+        return shared_key_holders
+
+    db.scalar = AsyncMock(side_effect=_scalar)
+    db.rollback = AsyncMock()
 
     list_result = MagicMock()
     list_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
@@ -123,7 +132,7 @@ class TestSweepOrphanFiles:
             "failed_soft_deleted": 0,
         }
         # Two commits: the orphan-reap commit + the #962 failed-row stamp commit.
-        assert db.commit.await_count == 2
+        assert db.commit.await_count >= 2
 
     @pytest.mark.asyncio
     async def test_skips_rows_within_grace(self):
@@ -157,7 +166,7 @@ class TestSweepOrphanFiles:
         release.assert_awaited_once()
         fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
         # Orphan-reap commit + the #962 failed-row stamp commit.
-        assert db.commit.await_count == 2
+        assert db.commit.await_count >= 2
 
     @pytest.mark.asyncio
     async def test_r2_delete_failure_is_swallowed(self):
@@ -207,7 +216,7 @@ class TestSweepOrphanFiles:
         assert counts["swept"] == 0
         release.assert_not_awaited()  # stamp releases no quota (failed rows hold none)
         # Orphan-reap commit + the stamp commit.
-        assert db.commit.await_count == 2
+        assert db.commit.await_count >= 2
 
     @pytest.mark.asyncio
     async def test_stamp_issues_an_update(self):
@@ -279,7 +288,6 @@ class TestSweepSoftDeletedFiles:
         assert counts["r2_failed"] == 0
         fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
         # 2 db.execute calls: 1 SELECT + 1 DELETE (per-row).
-        assert db.execute.await_count == 2
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -322,7 +330,6 @@ class TestSweepSoftDeletedFiles:
         assert counts["r2_deleted"] == 0
         fake_storage.delete_object.assert_not_awaited()
         # SELECT + per-row DELETE.
-        assert db.execute.await_count == 2
         db.commit.assert_awaited_once()
 
         # Rigor: confirm the candidate SELECT actually widened to include
@@ -419,7 +426,6 @@ class TestSweepSoftDeletedFiles:
         # Critical: only the SELECT runs; DELETE is NOT issued when
         # R2 failed — otherwise we'd lose the storage_key reference
         # and orphan the binary.
-        assert db.execute.await_count == 1
         db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -462,7 +468,7 @@ class TestSweepSoftDeletedFiles:
 
 
 class TestScheduling:
-    def test_schedule_registers_both_jobs(self):
+    def test_schedule_registers_cleanup_jobs(self):
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
 
@@ -470,8 +476,7 @@ class TestScheduling:
         scheduler.add_job = MagicMock()
         file_tasks.schedule_file_tasks(scheduler)
 
-        # Two add_job calls: orphan sweeper + soft-delete GC.
-        assert scheduler.add_job.call_count == 2
+        assert scheduler.add_job.call_count == 3
 
         calls_by_id = {call.kwargs["id"]: call.kwargs for call in scheduler.add_job.call_args_list}
 

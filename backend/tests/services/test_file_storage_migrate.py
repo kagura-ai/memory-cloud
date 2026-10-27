@@ -33,9 +33,10 @@ def fake_storage():
 
 
 @pytest.fixture
-def db():
+def db(workspace_id):
     db = MagicMock()
     db.execute = AsyncMock()
+    db.scalar = AsyncMock(return_value=workspace_id)
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
@@ -133,3 +134,24 @@ class TestMigrateAttachment:
         db.flush.assert_not_awaited()
         db.commit.assert_not_awaited()
         upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deleted_workspace_is_rejected_before_writing_bytes(
+    service, db, fake_storage, workspace_id, attachment_id
+):
+    from utils.exceptions import NotFoundException
+
+    db.scalar.return_value = None
+    with pytest.raises(NotFoundException):
+        await service.migrate_attachment(
+            workspace_id=workspace_id,
+            attachment_id=attachment_id,
+            filename="x.bin",
+            content_type="application/octet-stream",
+            size_bytes=3,
+            data=b"abc",
+            created_by="migration:test",
+        )
+    assert fake_storage.objects == {}
+    db.add.assert_not_called()
