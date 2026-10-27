@@ -182,9 +182,39 @@ async def test_late_presigned_put_keeps_marker_until_expiry_plus_grace(db_sessio
     assert await storage.head_object(key) is None
 
 
+@pytest_asyncio.fixture
+async def expired_files_from_prior_test(db_session, world, storage):
+    """Global GC also sees committed expired rows from earlier test fixtures."""
+    previous_workspace = make_workspace(owner_user_id=world[0])
+    previous_id = previous_workspace.id
+    db_session.add(previous_workspace)
+    await db_session.commit()
+    previous_world = (world[0], previous_id, None)
+    try:
+        for _ in range(3):
+            await add_file(db_session, storage, previous_world, context_bound=False)
+        await db_session.execute(
+            update(FileObject)
+            .where(FileObject.workspace_id == previous_id)
+            .values(deleted_at=utcnow() - timedelta(days=8))
+        )
+        await db_session.commit()
+        yield
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(Workspace).where(Workspace.id == previous_id))
+        await db_session.execute(
+            delete(StorageObjectDeletion).where(
+                StorageObjectDeletion.storage_key.startswith(str(previous_id) + "/")
+            )
+        )
+        await db_session.commit()
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("expired_files_from_prior_test")
 async def test_soft_workspace_and_context_delete_keep_registry_until_gc(db_session, world, storage):
-    _, key, _ = await add_file(db_session, storage, world)
+    context_file_id, key, _ = await add_file(db_session, storage, world)
     with (
         patch("db.qdrant.delete_context_points_everywhere", AsyncMock(return_value={})),
         patch("services.storage_quota_service.release_storage_bytes", AsyncMock()),
@@ -193,7 +223,9 @@ async def test_soft_workspace_and_context_delete_keep_registry_until_gc(db_sessi
     ):
         await ContextService(db_session).delete_context(world[0], world[2])
         assert await storage.head_object(key) is not None  # restore window preserved
-        _, workspace_key, _ = await add_file(db_session, storage, world, context_bound=False)
+        workspace_file_id, workspace_key, _ = await add_file(
+            db_session, storage, world, context_bound=False
+        )
         await WorkspaceService(db_session).delete_workspace(world[1], world[0])
         assert await storage.head_object(workspace_key) is not None
     await db_session.execute(
@@ -211,7 +243,16 @@ async def test_soft_workspace_and_context_delete_keep_registry_until_gc(db_sessi
         patch.object(file_tasks, "get_blob_storage", return_value=storage),
     ):
         counts = await file_tasks.sweep_soft_deleted_files()
-    assert counts["swept"] == 2
+    # This is a global sweeper: older committed fixtures may be collected too.
+    assert counts["swept"] >= 2
+    remaining_ids = list(
+        (
+            await db_session.scalars(
+                select(FileObject.id).where(FileObject.id.in_([context_file_id, workspace_file_id]))
+            )
+        ).all()
+    )
+    assert remaining_ids == []
     assert await storage.head_object(key) is None
     assert await storage.head_object(workspace_key) is None
 
