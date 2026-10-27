@@ -327,8 +327,9 @@ async def handle_create_edge(
                 return _error_response(
                     "edge_exists",
                     f"A declared edge already exists from {args.get('source_id')} to "
-                    f"{args.get('target_id')} with different values. Use update_edge to "
-                    "modify it, or pass overwrite=true to re-assert it.",
+                    f"{args.get('target_id')} with different values. Pass overwrite=true to re-assert it, or "
+                    "modify it with update_edge, outside the core profile "
+                    '(describe_tools(["update_edge"]) has its schema).',
                     existing_edge=result.existing,
                 )
 

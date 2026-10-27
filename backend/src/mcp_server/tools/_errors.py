@@ -112,7 +112,7 @@ _VERIFY_WITH: dict[str, str] = {
     "remember_batch": "recall",  # #1853: the items are remembers
     "update_memory": "reference",
     "forget": "reference",
-    "create_edge": "list_edges",
+    "create_edge": "reference",  # #2353: core lists reference, not list_edges
     "update_edge": "list_edges",
     "delete_edge": "list_edges",
     "create_context": "list_contexts",

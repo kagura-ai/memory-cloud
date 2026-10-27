@@ -378,7 +378,7 @@ By default `tools/list` returns the 22 core tools (≈ 41k characters of JSON); 
 | URL suffix | `tools/list` returns |
 |---|---|
 | *(none)* or `?profile=core` | The 22 core memory and context tools (incl. `create_edge`, `create_context`, `update_context`, `delete_context`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap`) — the default, ≈ 41k characters |
-| `?profile=full` | Everything — 72 tools, ≈ 102k characters |
+| `?profile=full` | Everything — 72 tools, ≈ 107k characters |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 
 Only the URL changes; the `Authorization` header stays as it is. The client sections above show the default URL in full; this is where the URL lives in each client's configuration:

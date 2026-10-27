@@ -1264,7 +1264,7 @@ class UpdateMemoryRequest(BaseModel):
         ),
     )
     # #2308: the acceptance half for a client that does not list create_edge
-    # (the default core profile). A graph action only: the supersedes edge is
+    # (a ?tools= allowlist; core lists it since #2353). A graph action only: the supersedes edge is
     # written and the suggestion cleared through create_edge's own path.
     accept_supersede_candidate: bool = Field(
         default=False,

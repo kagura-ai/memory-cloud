@@ -554,7 +554,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "writes a declared edge between two MEMORY ids (from recall, never context "
         "ids). edge_type, default 'related_to': 'supersedes' — source is the newer "
         "memory, target the outdated one, which is shadowed out of default recall while "
-        "the source lives (deleting the edge restores it); to accept a "
+        "the source lives (delete_edge, outside the core profile — "
+        'describe_tools(["delete_edge"]) has its schema — restores it); to accept a '
         "supersede_candidate, source_id = the memory carrying it and target_id = "
         "supersede_candidate.memory_id (the server then clears the suggestion). "
         "'related_to' — a plain link. 'depends_on' — target depends on source. "
