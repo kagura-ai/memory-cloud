@@ -46,7 +46,7 @@ class ErrorMessages:
 
     # Validation
     INVALID_INPUT = "Invalid input: {details}"
-    RESOURCE_ID_DUPLICATE = "Resource ID is already used by another context in your workspace."
+    RESOURCE_ID_DUPLICATE = "Resource ID is already used by another context on this server."
     RESOURCE_ID_IN_USE = (
         "Cannot change to private: This context has a resource_id and is used by Resource Tokens."
     )

@@ -520,8 +520,8 @@ def _parse_features_override(plan_name: str, raw: str) -> frozenset[str]:
     """Parse and validate one ``PLAN_<KEY>_FEATURES`` value (#1559).
 
     Comma-separated and whitespace-tolerant; the result REPLACES the tier's
-    ``features``. Refused at import (``ValueError``) when a name is not in
-    ``KNOWN_FEATURES`` or the set breaks a registry invariant: every tier
+    ``features``. Refused (``ValueError`` out of ``get_settings()``) when a
+    name is not in ``KNOWN_FEATURES`` or the set breaks a registry invariant: every tier
     carries ``secret_store`` (#1128), and ``resources`` implies
     ``public_contexts`` because ``setup_resource`` inserts a *public* context.
 
@@ -572,11 +572,18 @@ def _derive_feature_min_plans(tiers: dict[str, PlanTier]) -> dict[str, str]:
     return min_plans
 
 
-def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
+def _apply_settings_overrides(
+    settings: "Settings | None" = None,
+    *,
+    tiers: dict[str, PlanTier] | None = None,
+    feature_min_plans: dict[str, str] | None = None,
+) -> None:
     """Apply environment variable overrides to plan tiers.
 
     Reads override values from Settings and creates new PlanTier instances
-    with overridden values where configured. Called once at module load time.
+    with overridden values where configured. Called once per process, by
+    ``ensure_settings_overrides`` when ``get_settings()`` first builds the
+    settings (#2276).
 
     This enables OSS deployments to customize plan limits via environment
     variables without modifying source code. ``PLAN_<KEY>_FEATURES`` (#1559)
@@ -585,8 +592,12 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
     refusal text names the right minimum tier.
 
     Args:
-        settings: Settings to read from. ``None`` (the import-time call) uses
-            the process-global instance; tests pass one built in-process.
+        settings: Settings to read from. ``None`` uses the process-global
+            instance; tests pass one built in-process.
+        tiers: Registry to rewrite in place. ``None`` = the module's
+            ``PLAN_TIERS`` as bound at call time (tests patch in a copy).
+        feature_min_plans: Matrix to rewrite in place. ``None`` = the module's
+            ``FEATURE_MIN_PLANS`` as bound at call time.
 
     Raises:
         ValueError: A ``PLAN_<KEY>_FEATURES`` value names an unknown feature
@@ -596,6 +607,10 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
         from config.settings import get_settings
 
         settings = get_settings()
+    if tiers is None:
+        tiers = PLAN_TIERS
+    if feature_min_plans is None:
+        feature_min_plans = FEATURE_MIN_PLANS
 
     override_map: dict[str, dict[str, int | float | str | None]] = {
         PlanName.FREE: {
@@ -658,7 +673,7 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
 
     # Validate every tier's features BEFORE mutating the registry, so a
     # rejected override leaves the process with the untouched code defaults
-    # (the ValueError aborts the import either way).
+    # (the ValueError then refuses the settings, see ``ensure_settings_overrides``).
     features_by_plan: dict[str, frozenset[str]] = {}
     for plan_name, overrides in override_map.items():
         raw_features = overrides.pop("features")
@@ -676,27 +691,52 @@ def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
         if active_overrides:
             from dataclasses import asdict
 
-            original = PLAN_TIERS[plan_name]
+            original = tiers[plan_name]
             original_dict = asdict(original)
             original_dict.update(active_overrides)
             # Reconstruct frozen dataclass with overrides
-            PLAN_TIERS[plan_name] = PlanTier(**original_dict)
+            tiers[plan_name] = PlanTier(**original_dict)
 
     if features_by_plan:
         # In place: ``feature_denied_message`` / ``get_required_plan_for_feature``
         # read the module global, and the matrix must follow the EFFECTIVE tiers.
-        FEATURE_MIN_PLANS.clear()
-        FEATURE_MIN_PLANS.update(_derive_feature_min_plans(PLAN_TIERS))
+        feature_min_plans.clear()
+        feature_min_plans.update(_derive_feature_min_plans(tiers))
 
     logger.info(
         "plan_tier_features_effective",
         overridden=sorted(features_by_plan, key=plan_rank),
-        **{plan_name: sorted(PLAN_TIERS[plan_name].features) for plan_name in PLAN_ORDER},
+        **{plan_name: sorted(tiers[plan_name].features) for plan_name in PLAN_ORDER},
     )
 
 
-# Apply overrides from environment variables at import time
-_apply_settings_overrides()
+# The registries ``ensure_settings_overrides`` rewrites: bound here so a test
+# that patches a copy onto the module never receives the process-wide pass.
+_PROCESS_TIERS = PLAN_TIERS
+_PROCESS_FEATURE_MIN_PLANS = FEATURE_MIN_PLANS
+_overrides_applied = False
+
+
+def ensure_settings_overrides(settings: "Settings") -> None:
+    """Apply the env overrides to the registries once per process (#2276).
+
+    ``get_settings()`` calls this when it first builds the settings, before it
+    caches them, so importing this module never builds the settings (a CLI
+    can run its secret guard first) and no caller sees the registries before
+    the overrides. A rejected ``PLAN_<KEY>_FEATURES`` raises ``ValueError``
+    out of ``get_settings()``, which then caches nothing and raises again on
+    the next call, as for any other refused setting.
+
+    Args:
+        settings: The settings ``get_settings()`` has just built.
+    """
+    global _overrides_applied
+    if _overrides_applied:
+        return
+    _apply_settings_overrides(
+        settings, tiers=_PROCESS_TIERS, feature_min_plans=_PROCESS_FEATURE_MIN_PLANS
+    )
+    _overrides_applied = True
 
 
 def get_plan_tier(plan_name: str) -> PlanTier:

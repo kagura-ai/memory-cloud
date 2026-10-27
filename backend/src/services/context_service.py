@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole, reaches_context
+from config.constants import RESOURCE_ID_MAX_LENGTH, is_valid_resource_id
 from config.plan_tiers import (
     has_feature,
     lowest_tier_with_limit,
@@ -711,13 +712,14 @@ class ContextService:
                 )
                 context.resource_id = None
             context.is_public = is_public
-        if resource_id is not None:
-            # Validate resource_id format (lowercase alphanumeric + underscore)
-            import re
-
-            if resource_id and not re.match(r"^[a-z0-9_]+$", resource_id):
+        if resource_id is not None and resource_id != context.resource_id:
+            # #2284: the shared format (hyphens allowed, as on MCP). Re-sending
+            # the stored slug is a no-op and never re-validated.
+            if not is_valid_resource_id(resource_id):
                 raise ValidationError(
-                    f"Invalid resource_id format: {resource_id}. Must be lowercase alphanumeric and underscore only."
+                    f"Invalid resource_id format: {resource_id}. Must be lowercase "
+                    "alphanumerics, hyphens and underscores only "
+                    f"(max {RESOURCE_ID_MAX_LENGTH} chars)."
                 )
 
             logger.info(

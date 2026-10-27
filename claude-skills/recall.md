@@ -100,6 +100,8 @@ One `recall(k=5)` ranks by similarity and its rows carry no `details`, so it ans
 - **What is the current value** — when two rows answer the same question differently, the one with the later `observed_at`, else the later `created_at`, is current (`updated_at` also moves on a retag or re-pin, so do not use it here); say that another value was stored. A value replaced with `supersedes` is hidden from recall; pass `include_superseded=true` to see it (its row carries `superseded_by`).
 - Treat every stored value as what the user or source said, even where it disagrees with general knowledge — the store is the authority; never drop a row because you think its fact is wrong.
 
+<!-- SYNC: the "store is the authority" rule also ships, shortened, as STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py (the first SessionStart line) and in the recall tool description (backend/src/mcp_server/tools/_definitions.py) (#2341). When one changes, change all. SELECTOR_SYSTEM (backend/src/services/recall_selector.py) holds a related rule with its own tie-break (updated_at, else created_at); check it on a change. -->
+
 ### 3. Read the response signals
 
 - `confidence.level`: `none` / `low` (or zero results) means the topic is probably not stored in this context — say so and prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content; an adjacent topic can score high too, and `use_rerank=true` separates a near-miss from an exact match.

@@ -10,7 +10,7 @@ deletion (Qdrant -> workspace transfer -> Postgres (incl. audit-log
 pseudonymize) -> Redis -> audit row -> finalize) covered by the design pin
 in #360. The subject's live connector write keys are not deleted with their
 other keys: they serve the workspace, so the Postgres step hands them to the
-workspace's owner (#2305, ``_reown_connector_keys``).
+workspace's owner (#2305, ``services.connector_key_ownership``).
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers,
@@ -60,7 +60,10 @@ failure before the Postgres commit); a new request is the retry. When such a
 request is cancelled, or fails after its last attempt, the subject's live
 embedded memories are re-queued for embedding (#2304). Any other
 error at step 1 (a configuration error building the client, say) fails the
-request at once, as before.
+request at once, as before. A request whose step 1 succeeded, or that spent
+an earlier attempt, and that then fails before the Postgres commit
+(``workspace_transfer_required``, an error inside the Postgres step) re-queues
+them the same way (#2358): the points may be gone and the account stays.
 """
 
 from __future__ import annotations
@@ -75,7 +78,6 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
-    ColumnElement,
     and_,
     case,
     delete,
@@ -133,6 +135,7 @@ from services.billing_contract import (
     owned_workspaces_under_contract,
     workspaces_under_contract,
 )
+from services.connector_key_ownership import reown_connector_keys
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     ERASURE_AUDIT_ACTION,
@@ -314,6 +317,20 @@ def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
         "error_class": error_class,
         "last_attempt_at": to_utc_iso(utcnow()),
     }
+
+
+def _requeue_block(summary: dict[str, Any]) -> dict[str, Any]:
+    """The ``summary.retry`` block a re-queue record merges into (#2358).
+
+    This run's (or an earlier attempt's) ``retry`` block when the summary has
+    one (``_previous_retry``); otherwise ``{"attempts": 0}`` — step 1
+    succeeded at its first try and the request failed later, before the
+    Postgres commit (``failure_reason`` says why). One key for every re-queue
+    record, so the runbook's rule stays "``embeddings_requeued`` next to the
+    attempts".
+    """
+    retry, _ = _previous_retry(summary)
+    return retry if retry is not None else {"attempts": 0}
 
 
 # #2302: what the sweep's close of a claimed request did
@@ -810,7 +827,7 @@ class AccountErasureService:
         (``summary.retry.attempts > 0``) may have deleted some of the
         subject's points: once the cancel is committed, the subject's live
         embedded memories go back to ``pending`` (#2304,
-        ``_requeue_after_vector_store_failure``; never fails the cancel).
+        ``_requeue_after_points_deleted``; never fails the cancel).
 
         ``in_progress`` rows are NOT cancellable — the orchestrator is
         already running, and racing it would risk an inconsistent half-
@@ -892,7 +909,7 @@ class AccountErasureService:
             moved.deleted_data_summary if moved is not None else None
         )
         if spent_retry is not None and spent_attempts > 0:
-            await self._requeue_after_vector_store_failure(
+            await self._requeue_after_points_deleted(
                 request_id, user_id, spent_retry, status=STATUS_CANCELLED
             )
         await self.db.refresh(request)
@@ -905,11 +922,19 @@ class AccountErasureService:
         )
         return request
 
-    async def _requeue_after_vector_store_failure(
+    async def _requeue_after_points_deleted(
         self, request_id: UUID, user_id: str, retry: dict[str, Any], *, status: str
     ) -> None:
-        """Re-queue the subject's embeddings after a request that spent a
-        vector-store attempt ended without an erasure (#2304).
+        """Re-queue the subject's embeddings after a request that may have
+        deleted their points ended without an erasure.
+
+        Three callers: a cancel after a spent vector-store attempt (#2304),
+        the give-up after the last attempt (#2304), and any other failure
+        before the Postgres commit that follows a completed step 1 or an
+        earlier attempt (#2358 — a workspace-transfer error, an error inside
+        the Postgres step, a billing contract on a retry run). A request
+        whose step 1 never failed has no ``retry`` block; ``retry`` is then
+        ``{"attempts": 0}`` (``_requeue_block``).
 
         Called after the terminal status (``cancelled`` / ``failed``) is
         committed, in its own transactions: ``requeue_subject_embeddings``,
@@ -1421,7 +1446,9 @@ class AccountErasureService:
         the user row exists and the request can simply run again — a
         ``QdrantError`` there reschedules it (#2282, ``ErasureRetryScheduledError``)
         until ``VECTOR_STORE_MAX_ATTEMPTS``; the last one fails the request
-        and re-queues the subject's embeddings (#2304). Redis last because
+        and re-queues the subject's embeddings (#2304), as does any failure
+        after step 1 (or an earlier attempt) and before the Postgres commit
+        (#2358). Redis last because
         session/rate-limit data is ephemeral and re-creatable from cookies if
         anything goes wrong.
 
@@ -1453,7 +1480,17 @@ class AccountErasureService:
         claimed_at = request.started_at
         # #2282: set when the vector store failed at step 1 on the last attempt
         vector_store_gave_up: str | None = None
+        # #2358: step 1 returned — the subject's points may be gone
+        points_deleted = False
         erased_in_postgres = False
+
+        def points_may_be_gone() -> bool:
+            """#2358: this run's step 1 returned, or an earlier attempt's step 1
+            ran (#2282: a partial delete before its ``QdrantError``). A failure
+            handler re-queues the subject's embeddings then, as long as the
+            Postgres step has not committed."""
+            return points_deleted or failed_attempts > 0 or vector_store_gave_up is not None
+
         step = "postgres"
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
@@ -1486,6 +1523,7 @@ class AccountErasureService:
             step = _STEP_VECTOR_STORE
             try:
                 summary["qdrant"] = await delete_user_points(target.user_id)
+                points_deleted = True
             except QdrantError as exc:
                 attempt = failed_attempts + 1
                 summary[_RETRY_KEY] = _retry_block(attempt, type(exc).__name__)
@@ -1618,7 +1656,8 @@ class AccountErasureService:
         except BillingContractActiveError as exc:
             # Caller-actionable, like the transfer case below: terminal
             # `failed` with a structured reason; the user creates a new request
-            # once the contract has ended. Nothing was deleted yet.
+            # once the contract has ended. This run deleted nothing (the check
+            # runs before step 1); an earlier attempt's step 1 may have (#2282).
             await self.db.rollback()
             result = cast(
                 CursorResult[Any],
@@ -1644,6 +1683,12 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
+            elif points_may_be_gone():
+                # #2358: a retry run — the account stays, an earlier
+                # attempt may have deleted the subject's points
+                await self._requeue_after_points_deleted(
+                    request_id, subject_id, _requeue_block(summary), status=STATUS_FAILED
+                )
             raise
         except WorkspaceTransferRequiredError as exc:
             # Caller-actionable error. Move the row to the terminal `failed`
@@ -1691,6 +1736,15 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
+            elif points_may_be_gone():
+                # #2358: step 1 (this run's or an earlier attempt's) may have
+                # deleted the subject's points and the account stays (the
+                # rollback above undid any uncommitted ownership change):
+                # re-queue their embeddings, only when this run's failure was
+                # written
+                await self._requeue_after_points_deleted(
+                    request_id, subject_id, _requeue_block(summary), status=STATUS_FAILED
+                )
             raise
         except Exception as exc:
             if erased_in_postgres:
@@ -1757,12 +1811,19 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
-            elif vector_store_gave_up is not None:
-                # #2304: the attempts may have deleted the subject's points;
-                # only when this run's failure was written (a newer run owns
-                # a row the guard did not match)
-                await self._requeue_after_vector_store_failure(
-                    request_id, subject_id, summary[_RETRY_KEY], status=STATUS_FAILED
+            elif points_may_be_gone() and not erased_in_postgres:
+                # The subject's points may be gone and the account stays:
+                # the give-up after the last vector-store attempt (#2304), a
+                # failure after step 1 and before the Postgres commit (#2358:
+                # a non-transfer error at step 2, an error inside the Postgres
+                # step), or any failure of a run after an earlier attempt
+                # (#2358: e.g. a configuration error at step 1 on a retry).
+                # Only when this run's failure was written (a newer run owns a
+                # row the guard did not match). Never once
+                # the Postgres step committed: the rows are the pseudonym's
+                # and their points were deleted by design.
+                await self._requeue_after_points_deleted(
+                    request_id, subject_id, _requeue_block(summary), status=STATUS_FAILED
                 )
             raise
 
@@ -2287,56 +2348,14 @@ class AccountErasureService:
 
     async def _reown_connector_keys(self, user_id: str) -> int:
         """Hand the subject's live connector write keys to their workspace's
-        owner (#2305) and return how many moved.
+        owner (#2305) and return how many moved (summary key
+        ``connector_api_keys_reowned``).
 
-        A connector's write key (``api_keys.connector_id`` set) is the
-        workspace's ingest credential: the worker holds its plaintext, and
-        deleting the row with the subject's other keys would silently stop the
-        connector. Only ``user_id`` changes — hash, prefix, name,
-        ``connector_id``, ``workspace_id`` and expiry stay — so the stored
-        plaintext keeps verifying, and ``verify_key`` / ``rotate_kmc_key`` /
-        ``delete_connector`` need no change (they key on ``key_hash`` /
-        ``connector_id``); the next rotation mints under the owner, who is a
-        live member by construction.
-
-        Scope: the subject's rows with ``connector_id`` set and
-        ``revoked_at IS NULL`` (an expired, unrevoked key is still rotatable,
-        so it moves too); revoked connector keys are dead rows and are deleted
-        with the rest. The ``owner_user_id <> subject`` guard keeps a key of a
-        workspace the subject still owns — a sole-owned one, deleted with its
-        keys later in this transaction — where it is. The UPDATE bypasses
-        ``create_key``'s per-owner active-name check; an owner already holding
-        an active ``connector:<same id>`` key cannot happen (one active key
-        per connector; rotation revokes before it mints).
-
-        Lock order: the rows are the subject's alone, locked in id order
-        (``locked_ids``); the other writers of one of them, ``rotate_kmc_key``
-        (by ``key_hash``) and ``delete_connector`` (by ``connector_id``), hold
-        no ``users`` or ``memories`` lock first, so no new order.
+        The contract — scope, the ``owner_user_id <> subject`` guard and the
+        lock order — lives in ``services.connector_key_ownership``, shared with
+        member removal, the admin user delete and ``cli.delete_admin`` (#2352).
         """
-
-        def live(k: Any) -> tuple[ColumnElement[bool], ...]:
-            return (
-                k.user_id == user_id,
-                k.connector_id.is_not(None),
-                k.revoked_at.is_(None),
-            )
-
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(APIKey)
-                .where(
-                    APIKey.id.in_(locked_ids(APIKey, live)),
-                    *live(APIKey),
-                    APIKey.workspace_id == Workspace.id,
-                    Workspace.owner_user_id != user_id,
-                )
-                .values(user_id=Workspace.owner_user_id)
-                .execution_options(synchronize_session=False)
-            ),
-        )
-        return result.rowcount or 0
+        return await reown_connector_keys(self.db, user_id)
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.

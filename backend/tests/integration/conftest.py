@@ -23,6 +23,7 @@ import os
 from collections.abc import Generator
 
 import pytest
+import pytest_asyncio
 
 _DEFAULT_TEST_DB_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test"
 
@@ -132,3 +133,21 @@ def _restore_database_url_after_session() -> Generator[None, None, None]:
         os.environ.pop("DATABASE_URL", None)
     else:
         os.environ["DATABASE_URL"] = _PREV_DATABASE_URL
+
+
+@pytest_asyncio.fixture
+async def connector_world(db_session):
+    """Workspaces, members and connectors for the connector-key tests
+    (#2305, #2352); everything it seeded is deleted afterwards."""
+    from unittest.mock import AsyncMock, patch
+
+    from ._connector_world import _ConnectorWorld
+
+    # The auto-created write-target context would create a Qdrant collection.
+    with patch(
+        "services.context_service.ContextService._ensure_context_collection",
+        new=AsyncMock(return_value=None),
+    ):
+        world = _ConnectorWorld(db_session)
+        yield world
+        await world.cleanup()

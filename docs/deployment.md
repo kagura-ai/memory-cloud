@@ -1895,11 +1895,18 @@ embedded goes back to `pending` (count and time in
 `deleted_data_summary.retry.embeddings_requeued` / `requeued_at`; one
 embedding call per memory, worked off by the embedding sweep at its usual
 rate, older rows first; a batch waits at most 5 seconds for a row lock, then
-the re-queue stops and logs `erasure_embeddings_requeue_failed`). Not
-covered: a request that failed at this step before v0.125.0, one cancelled by
-SQL, one whose vector delete succeeded but that then failed before the
-Postgres commit (a workspace-transfer error, say), and a re-queue that
-failed; the runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
+the re-queue stops and logs `erasure_embeddings_requeue_failed`). From
+v0.129.0 (#2358) a request whose vector delete succeeded but that then failed
+before the Postgres commit (a workspace-transfer error, an error inside the
+Postgres step), and a retried request that fails for another reason (a
+billing contract that started while it waited, a configuration error at this
+step), re-queue them the same way once the `failed` row is written; its
+`retry.attempts` is 0 when this step never failed, and an admin force-erase
+does it before answering 409. A failure after the Postgres commit re-queues
+nothing (the memories are the pseudonym's). Not covered: a request that
+failed at this step before v0.125.0, one cancelled by SQL, one that failed
+before the Postgres commit before v0.129.0, and a re-queue that failed; the
+runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
 erasure runs. The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request
