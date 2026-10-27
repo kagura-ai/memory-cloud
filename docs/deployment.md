@@ -3609,9 +3609,10 @@ sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) cancel
 ```
 
 In `deploy.sh` this is Step 2: the new color is not started and traffic is not
-moved. The failing revision rolled back; revisions applied before it in the
-same run, and the autocommit steps (`CREATE INDEX CONCURRENTLY`, VALIDATE)
-that already ran, stay. `alembic current` shows where it stopped.
+moved. An upgrade runs in one transaction, so the failure rolls back every
+revision since the last commit point — the start of the run, or the last
+autocommit block (`CREATE INDEX CONCURRENTLY`, VALIDATE), which commits what
+came before it. `alembic current` shows where the upgrade now stands.
 
 **What to do.** Run the upgrade again (`alembic upgrade head`, or re-run the
 deploy). A lock held for a moment (a slow request, a Sleep run) is usually gone
@@ -3642,7 +3643,7 @@ again.
 
 **Override.** `KAGURA_MIGRATION_LOCK_TIMEOUT` sets the cap for the process that
 runs alembic: a PostgreSQL duration (`500ms`, `30s`, `2min`; a bare number is
-milliseconds). `0` turns it off (the lock wait is unbounded, as before
+milliseconds; at most 2147483647 ms). `0` turns it off (the lock wait is unbounded, as before
 v0.129.0). A longer value is a longer stall of the table while the `ALTER`
 waits. Set it in the env file the migration container reads, or on the one-off
 run (`docker compose run --rm -e KAGURA_MIGRATION_LOCK_TIMEOUT=30s ... alembic
@@ -3650,10 +3651,12 @@ upgrade head`). A value that is not a duration stops alembic before any schema
 change.
 
 - A revision that sets its own `lock_timeout` keeps it for its own statements
-  (e91 and e95: 10 s; e99, f14, f15 and f16: 5 s); the override does not change
-  those.
-- Statements inside an autocommit block (`CREATE INDEX CONCURRENTLY`) have no
-  cap: their wait for older transactions blocks neither reads nor writes.
+  (e91 and e95: 10 s; f14 and f16: 5 s); the override does not change those.
+- This setting does not reach statements inside an autocommit block. A
+  revision that wants a cap there sets its own: the backfill / VALIDATE steps
+  of e99, f14 and f15 use 5 s, and a timeout there fails the same way.
+  `CREATE INDEX CONCURRENTLY` has none: its wait for older transactions blocks
+  neither reads nor writes.
 - The setting is transaction-local, so it works through a transaction-pooling
   pgbouncer. An offline script (`alembic upgrade --sql`) does not carry it:
   `SET lock_timeout` in the `psql` session that runs the script.

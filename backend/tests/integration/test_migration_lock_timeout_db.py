@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from alembic.migration import MigrationContext
@@ -99,8 +100,9 @@ def test_turned_off_sends_no_set() -> None:
     assert _run_on_migration_connection(_first, None) == [("first transaction", "0")]
 
 
-@pytest.fixture
-def short_lock_timeout() -> Iterator[None]:
+@contextmanager
+def _short_lock_timeout() -> Iterator[None]:
+    """A 300 ms cap for the one upgrade under test, not the setup or teardown."""
     prev = os.environ.get(MIGRATION_LOCK_TIMEOUT_ENV)
     os.environ[MIGRATION_LOCK_TIMEOUT_ENV] = "300ms"
     try:
@@ -129,7 +131,7 @@ def _has_connector_id(conn: Connection) -> bool:
 
 
 class TestAlterFailsFastBehindABlocker:
-    def test_f13_alter_times_out_and_reruns_cleanly(self, short_lock_timeout: None) -> None:
+    def test_f13_alter_times_out_and_reruns_cleanly(self) -> None:
         try:
             _reset_and_upgrade_to(PRE_F13_REV)
             engine = _sync_engine()
@@ -145,7 +147,7 @@ class TestAlterFailsFastBehindABlocker:
 
                     started = time.monotonic()
                     with pytest.raises(DBAPIError) as excinfo:
-                        with _alembic_at_test_db():
+                        with _alembic_at_test_db(), _short_lock_timeout():
                             command.upgrade(_get_alembic_config(), F13_REV)
                     elapsed = time.monotonic() - started
                     blocker.rollback()

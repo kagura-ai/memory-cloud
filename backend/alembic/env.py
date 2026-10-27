@@ -6,6 +6,7 @@ Database URL is read from DATABASE_URL environment variable
 """
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -113,6 +114,10 @@ def do_run_migrations(connection) -> None:
     for ACCESS EXCLUSIVE behind a long transaction fails fast (to be rerun)
     instead of queueing every later query on the table.
     """
+    logging.getLogger("alembic.runtime.migration").info(
+        "lock_timeout %s for each migration transaction (KAGURA_MIGRATION_LOCK_TIMEOUT)",
+        lock_timeout or "off",
+    )
     install_migration_lock_timeout(connection, lock_timeout)
     context.configure(
         connection=connection,

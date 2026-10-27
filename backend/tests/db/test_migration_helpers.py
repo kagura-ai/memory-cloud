@@ -24,7 +24,7 @@ def test_default_is_a_few_seconds() -> None:
     assert migration_lock_timeout({MIGRATION_LOCK_TIMEOUT_ENV: "  "}) == "5s"
 
 
-@pytest.mark.parametrize("value", ["500", "500ms", "30s", "2min", "1h", " 10s "])
+@pytest.mark.parametrize("value", ["500", "500ms", "30s", "2min", "1h", "24d", " 10s "])
 def test_a_duration_overrides_it(value: str) -> None:
     assert migration_lock_timeout({MIGRATION_LOCK_TIMEOUT_ENV: value}) == value.strip()
 
@@ -36,7 +36,20 @@ def test_zero_turns_it_off(value: str) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["5 s", "-1", "1.5s", "5sec", "off", "5s'; DROP TABLE api_keys; --", "5s;"],
+    [
+        "5 s",
+        "-1",
+        "1.5s",
+        "5sec",
+        "500us",
+        "off",
+        "5s'; DROP TABLE api_keys; --",
+        "5s;",
+        # Non-ASCII digits, and values past PostgreSQL's int milliseconds.
+        "\uff15s",
+        "25d",
+        "2147483648",
+    ],
 )
 def test_anything_else_is_refused(value: str) -> None:
     with pytest.raises(ValueError, match=MIGRATION_LOCK_TIMEOUT_ENV):

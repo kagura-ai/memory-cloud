@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import event
@@ -47,35 +48,44 @@ from sqlalchemy.engine import Connection
 MIGRATION_LOCK_TIMEOUT_ENV = "KAGURA_MIGRATION_LOCK_TIMEOUT"
 DEFAULT_MIGRATION_LOCK_TIMEOUT = "5s"
 
-# A PostgreSQL duration: an integer with an optional time unit. The value is
-# interpolated into ``SET`` (``SET`` takes no bind parameters), so only this
-# shape is accepted.
-_DURATION = re.compile(r"(\d+)(?:us|ms|s|min|h|d)?")
+# A PostgreSQL duration: an integer with an optional time unit (none means
+# milliseconds). The value is interpolated into ``SET`` (``SET`` takes no bind
+# parameters), so only this shape is accepted: ASCII digits, no sign, no space.
+_DURATION = re.compile(r"([0-9]+)(ms|s|min|h|d)?")
+_UNIT_MS = {None: 1, "ms": 1, "s": 1_000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
+# ``lock_timeout`` is an int of milliseconds; PostgreSQL refuses anything larger.
+_MAX_MS = 2_147_483_647
 
-# ``Connection.info`` key marking a connection that already has the listener.
-_INSTALLED = "kagura_migration_lock_timeout"
+
+def _duration_ms(value: str) -> int | None:
+    """``value`` in milliseconds, or ``None`` if PostgreSQL would refuse it."""
+    match = _DURATION.fullmatch(value)
+    if match is None:
+        return None
+    ms = int(match.group(1)) * _UNIT_MS[match.group(2)]
+    return ms if ms <= _MAX_MS else None
 
 
-def migration_lock_timeout(environ: dict[str, str] | None = None) -> str | None:
+def migration_lock_timeout(environ: Mapping[str, str] | None = None) -> str | None:
     """The migration ``lock_timeout``, or ``None`` when it is turned off.
 
     Reads ``KAGURA_MIGRATION_LOCK_TIMEOUT`` (default ``5s``). ``0`` (in any
     unit) turns it off. Anything that is not an integer with an optional
-    PostgreSQL time unit raises ``ValueError`` before any schema change.
+    ``ms`` / ``s`` / ``min`` / ``h`` / ``d`` unit, or is past PostgreSQL's
+    limit (2147483647 ms), raises ``ValueError`` before any schema change.
     """
     env = os.environ if environ is None else environ
     raw = env.get(MIGRATION_LOCK_TIMEOUT_ENV, "").strip()
     if not raw:
         return DEFAULT_MIGRATION_LOCK_TIMEOUT
-    match = _DURATION.fullmatch(raw)
-    if match is None:
+    ms = _duration_ms(raw)
+    if ms is None:
         raise ValueError(
-            f"{MIGRATION_LOCK_TIMEOUT_ENV}={raw!r} is not a PostgreSQL duration "
-            "(an integer with an optional unit: us, ms, s, min, h, d; 0 turns it off)"
+            f"{MIGRATION_LOCK_TIMEOUT_ENV}={raw!r} is not a PostgreSQL lock_timeout "
+            "(an integer with an optional unit ms, s, min, h, d, at most 2147483647 ms; "
+            "0 turns it off)"
         )
-    if int(match.group(1)) == 0:
-        return None
-    return raw
+    return None if ms == 0 else raw
 
 
 def lock_timeout_statement(value: str, *, local: bool = True) -> str:
@@ -85,25 +95,30 @@ def lock_timeout_statement(value: str, *, local: bool = True) -> str:
     the session (needed inside an ``autocommit_block()``; pair it with
     ``RESET lock_timeout``).
     """
-    if not _DURATION.fullmatch(value):
-        raise ValueError(f"not a PostgreSQL duration: {value!r}")
+    if _duration_ms(value) is None:
+        raise ValueError(f"not a PostgreSQL lock_timeout: {value!r}")
     scope = "LOCAL " if local else ""
     return f"SET {scope}lock_timeout = '{value}'"
 
 
 def _is_autocommit(connection: Connection) -> bool:
-    return connection.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
+    """Whether ``connection`` runs in AUTOCOMMIT (per connection or engine-wide)."""
+    level = connection.get_execution_options().get(
+        "isolation_level", getattr(connection.dialect, "isolation_level", None)
+    )
+    return level == "AUTOCOMMIT"
 
 
 def install_migration_lock_timeout(connection: Connection, value: str | None) -> None:
     """Start every transaction on ``connection`` with ``SET LOCAL lock_timeout``.
 
     ``value`` comes from ``migration_lock_timeout()``; ``None`` installs
-    nothing. Transactions begun in AUTOCOMMIT mode (``autocommit_block()``)
+    nothing. Call it once per ``Connection`` object (env.py opens one per
+    run). Transactions begun in AUTOCOMMIT mode (``autocommit_block()``)
     are skipped: there is no transaction for ``SET LOCAL`` to last in. A
     transaction that is already open gets the setting now.
     """
-    if value is None or connection.info.get(_INSTALLED):
+    if value is None:
         return
     statement = lock_timeout_statement(value)
 
@@ -120,7 +135,6 @@ def install_migration_lock_timeout(connection: Connection, value: str | None) ->
             cursor.close()
 
     event.listen(connection, "begin", _on_begin)
-    connection.info[_INSTALLED] = True
     if connection.in_transaction() and not _is_autocommit(connection):
         connection.exec_driver_sql(statement)
 
