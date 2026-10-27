@@ -760,3 +760,27 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
     });
   });
 });
+
+
+describe("selected-row regeneration (#2379)", () => {
+  it("sends the clicked older key id even when another key is first", async () => {
+    const clickedId = "akey_0000000000000000000002";
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({ name: "newest" }),
+        makeKey({ id: clickedId, name: "clicked-older" }),
+      ],
+      target_user_role: "owner",
+    });
+    mockRegenerate.mockResolvedValue({});
+    render(<APIKeysTabPanel />);
+    const table = await screen.findByRole("table");
+    const row = within(table).getByText("clicked-older").closest("tr")!;
+    fireEvent.click(within(row).getByText("regenerate"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByText("regenerate"));
+    await waitFor(() =>
+      expect(mockRegenerate).toHaveBeenCalledWith("ws-1", "user-1", clickedId),
+    );
+  });
+});

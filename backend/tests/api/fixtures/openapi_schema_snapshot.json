@@ -27870,6 +27870,22 @@
             }
           },
           {
+            "in": "query",
+            "name": "key_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^akey_[0-9A-Za-z]{22}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,

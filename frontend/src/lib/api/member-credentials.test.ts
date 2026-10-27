@@ -11,6 +11,7 @@ import {
   deleteWorkspaceMemberAPIKeyById,
   getMemberCredentials,
   regenerateOAuthSecret,
+  regenerateAPIKey,
 } from "./member-credentials";
 
 function respond(status: number, statusText: string, body?: unknown) {
@@ -86,6 +87,23 @@ describe("member-credentials error text", () => {
     });
     await expect(createAPIKey("ws", "u", { name: "" })).rejects.toThrow(
       "Failed to create API key: HTTP 422 Unprocessable Entity",
+    );
+  });
+});
+
+
+describe("selected-key regeneration (#2379)", () => {
+  it("includes the selected public id in the authenticated request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ key: "replacement" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const keyId = "akey_0000000000000000000002";
+    await regenerateAPIKey("ws-1", "user-1", keyId);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/api-key/regenerate?key_id=${keyId}`),
+      expect.objectContaining({ method: "POST", credentials: "include" }),
     );
   });
 });

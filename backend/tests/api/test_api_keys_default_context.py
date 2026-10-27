@@ -386,6 +386,8 @@ async def test_member_regenerate_keeps_the_default_context():
         name="ws-key",
         revoked_at=None,
         default_context_id=CONTEXT_ID,
+        agent_id=None,
+        expires_at=None,
         connector_id=None,  # #1952
     )
     new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")

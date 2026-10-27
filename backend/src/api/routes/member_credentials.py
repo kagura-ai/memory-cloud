@@ -11,9 +11,10 @@ Endpoints:
 - Similar for OAuth apps
 """
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,7 +52,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
-from utils.public_id import APIKeyPublicId
+from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
 
 logger = get_logger(__name__)
 
@@ -482,10 +483,18 @@ async def regenerate_api_key(
     background_tasks: BackgroundTasks,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
+    key_id: Annotated[
+        str | None,
+        Query(
+            pattern=public_id_pattern(PublicIdPrefix.API_KEY),
+            description="Public id of the key to rotate. Omit for the newest active key (legacy).",
+        ),
+    ] = None,
 ) -> RegenerateAPIKeyResponse:
     """Regenerate API key (Permission-based).
 
-    Migration 034: Creates new key, revokes old one.
+    Creates a replacement for the selected active workspace key and revokes it.
+    Omitting ``key_id`` preserves the legacy newest-key behavior (#2379).
 
     New permission hierarchy:
     - Self: Always allowed
@@ -502,6 +511,7 @@ async def regenerate_api_key(
         background_tasks: Runs the notice after the response
         user: Current user (from auth)
         db: Database session
+        key_id: Public id of the selected key, or None for the legacy selection
 
     Returns:
         New plaintext key (shown once)
@@ -513,28 +523,31 @@ async def regenerate_api_key(
     service = MemberCredentialsService(db)
     await check_permission(service, user["user_id"], workspace_id, user_id, "regenerate")
 
-    from sqlalchemy import and_, select
+    from sqlalchemy import and_, or_, select
 
     from models.auth import APIKey
 
-    # Get old key (most recent active key)
-    result = await db.execute(
-        select(APIKey)
-        .where(
-            and_(
-                APIKey.user_id == user_id,
-                APIKey.workspace_id == workspace_id,
-                APIKey.revoked_at.is_(None),
-            )
+    # Scope the id lookup as tightly as the legacy lookup: an id from another
+    # owner/workspace, a public-bound key or an inactive key is the same 404.
+    statement = select(APIKey).where(
+        and_(
+            APIKey.user_id == user_id,
+            APIKey.workspace_id == workspace_id,
+            APIKey.revoked_at.is_(None),
+            or_(APIKey.expires_at.is_(None), APIKey.expires_at > utcnow()),
         )
-        .order_by(APIKey.created_at.desc())
-        .limit(1)
     )
+    if key_id is not None:
+        statement = statement.where(APIKey.public_id == key_id)
+    else:
+        statement = statement.order_by(APIKey.created_at.desc(), APIKey.id.desc()).limit(1)
+    # A second rotation of the same id must observe its revocation before minting.
+    result = await db.execute(statement.with_for_update())
     old_key = result.scalar_one_or_none()
 
     if not old_key:
         raise HTTPException(status_code=404, detail="API key not found")
-    # #1952: the member's newest key can be a connector's key, whose secret the
+    # #1952: the selected key can be a connector's key, whose secret the
     # connector holds; only its own rotation can hand it the replacement.
     if old_key.connector_id is not None:
         raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
@@ -545,14 +558,22 @@ async def regenerate_api_key(
 
     # Create new key
     manager = APIKeyManager(db)
-    new_plaintext_key, new_key = await manager.create_key(
-        name=old_key.name,
-        user_id=user_id,
-        workspace_id=workspace_id,
-        auto_hide_minutes=10,
-        # #2129: the MCP default is a setting of the key, not of its secret.
-        default_context_id=old_key.default_context_id,
-    )
+    try:
+        new_plaintext_key, new_key = await manager.create_key(
+            name=old_key.name,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            auto_hide_minutes=10,
+            # #2129: the MCP default is a setting of the key, not of its secret.
+            default_context_id=old_key.default_context_id,
+            agent_id=old_key.agent_id,
+        )
+    except ValueError as exc:
+        # In particular, a suspended agent must stay bound and fail closed.
+        raise BadRequestError(message=str(exc)) from exc
+
+    # Rotation changes the secret, not the binding or its exact expiration.
+    new_key.expires_at = old_key.expires_at
 
     await db.commit()
     schedule_security_notification(

@@ -287,11 +287,11 @@ export function APIKeysTabPanel() {
   };
 
   const handleConfirmRegenerateAPIKey = async () => {
-    if (!currentWorkspaceId || !userId) return;
+    if (!currentWorkspaceId || !userId || !selectedKeyId) return;
 
     try {
       setRegenerating(true);
-      await regenerateAPIKey(currentWorkspaceId, userId);
+      await regenerateAPIKey(currentWorkspaceId, userId, selectedKeyId);
       await loadCredentials();
       setShowRegenerateApiKeyDialog(false);
       toast({
@@ -646,11 +646,9 @@ export function APIKeysTabPanel() {
 
   const renderActions = (apiKey: MemberAPIKey) => (
     <div className="flex gap-2">
-      {/* Issue #626: regenerate/hide/delete target legacy singleton endpoints
-          (workspace-scoped keys only) and are suppressed for public-bound keys;
-          bound keys get a dedicated revoke instead. A connector key (#2299)
-          is rotated from its connector — the API refuses it here (422). */}
-      {!apiKey.bound_context_id && !apiKey.connector_id && (
+      {/* Public-bound keys use their dedicated revoke. Connector keys rotate
+          from their connector; the API refuses regeneration here (422). */}
+      {!apiKey.revoked_at && !apiKey.bound_context_id && !apiKey.connector_id && (
         <ActionButton
           onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
           icon={<RefreshCw className="w-4 h-4" />}

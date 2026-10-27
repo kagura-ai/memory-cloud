@@ -115,14 +115,15 @@ export async function hideAPIKey(
 }
 
 /**
- * Regenerate API key (Owner only)
+ * Regenerate a selected workspace API key (permission-based).
  */
 export async function regenerateAPIKey(
   workspaceId: string,
   userId: string,
+  keyId: string,
 ): Promise<{ key: string; key_prefix: string; key_id: string }> {
   const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key/regenerate`,
+    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key/regenerate?key_id=${encodeURIComponent(keyId)}`,
     {
       method: "POST",
       credentials: "include",
