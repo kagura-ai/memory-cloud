@@ -290,6 +290,12 @@ export default function WorkspaceStatsPage() {
             </Alert>
           )}
 
+          {(stats.erased_memories ?? 0) > 0 && (
+            <p className="mb-6 text-sm text-muted-foreground">
+              {t("erasedMemories", { count: stats.erased_memories ?? 0 })}
+            </p>
+          )}
+
           <KpiCards
             totalMemories={stats.total_memories}
             contextCount={stats.context_count}

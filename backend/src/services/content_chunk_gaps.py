@@ -118,6 +118,7 @@ def _long_plain_live(context_id: Any) -> list[Any]:
     return [
         Memory.context_id == context_id,
         Memory.deleted_at.is_(None),
+        Memory.embedding_suppressed_at.is_(None),
         func.char_length(Memory.content) >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
         Memory.resource_id.is_(None),
     ]
@@ -488,6 +489,7 @@ async def _reconcile_context(
     stmt = select(Memory.id).where(
         Memory.context_id == context_id,
         Memory.deleted_at.is_(None),
+        Memory.embedding_suppressed_at.is_(None),
         Memory.resource_id.is_(None),
         Memory.embedding_status == "success",
     )

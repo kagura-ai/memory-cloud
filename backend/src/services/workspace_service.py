@@ -1912,10 +1912,28 @@ class WorkspaceService:
                 .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES)
                 .label("stalled"),
             )
-            .where(*conditions, Memory.embedding_status == "failed")
+            .where(
+                *conditions,
+                Memory.embedding_status == "failed",
+                Memory.embedding_suppressed_at.is_(None),
+            )
             .group_by(Memory.context_id)
         )
         return {str(row.context_id): (row.unsearchable, row.stalled) for row in result.all()}
+
+    async def get_erased_memory_stats(
+        self, user_id: str, contexts: list[Context], is_workspace_owner: bool = False
+    ) -> dict[str, int]:
+        """Intentionally unindexed erasure survivors, under the same visibility rules."""
+        conditions = self._visibility_conditions(user_id, contexts, is_workspace_owner)
+        if conditions is None:
+            return {}
+        rows = await self.db.execute(
+            select(Memory.context_id, func.count(Memory.id))
+            .where(*conditions, Memory.embedding_suppressed_at.is_not(None))
+            .group_by(Memory.context_id)
+        )
+        return {str(context_id): count for context_id, count in rows.all()}
 
     def _visibility_conditions(
         self,

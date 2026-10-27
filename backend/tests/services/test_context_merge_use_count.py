@@ -286,6 +286,7 @@ async def test_an_erased_authors_row_stays_out_of_the_queue_in_the_target():
     def erased(u, c):
         row = _source_memory(u, c, embedding_status="failed", embedding_retry_count=3)
         row.embedding_error = ERASED_AUTHOR_EMBEDDING_ERROR
+        row.embedding_suppressed_at = utcnow()
         row.embedding_attempted_at = attempted
         return row
 

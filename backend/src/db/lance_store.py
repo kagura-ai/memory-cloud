@@ -43,7 +43,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Sequence
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -872,7 +872,81 @@ class LanceVectorStore:
         except Exception as e:
             raise QdrantError(f"Failed to list LanceDB points: {e}") from e
 
-    async def delete_user_points(self, user_id: str) -> dict[str, int]:
+    async def erasure_point_identities(
+        self, collection: str
+    ) -> list[tuple[str, str, str | None, datetime | None]]:
+        def run() -> list[tuple[str, str, str | None, datetime | None]]:
+            with self._lock:
+                table = self._open(collection)
+                if table is None:
+                    return []
+                count = table.count_rows()
+                if not count:
+                    return []
+                rows = table.search().select(["id", "user_id", "created_at"]).limit(count).to_list()
+                from db.qdrant import _payload_datetime
+
+                return [
+                    (row["id"], row["user_id"], None, _payload_datetime(row.get("created_at")))
+                    for row in rows
+                ]
+
+        return await asyncio.to_thread(run)
+
+    async def erasure_scope_points(
+        self, collection: str, point_ids: list[str]
+    ) -> list[tuple[str, str]]:
+        def run() -> list[tuple[str, str]]:
+            with self._lock:
+                table = self._open(collection)
+                if table is None:
+                    return []
+                where = f"id IN ({', '.join(_sql_str(pid) for pid in point_ids)})"
+                rows = (
+                    table.search()
+                    .where(where)
+                    .select(["id", "user_id"])
+                    .limit(len(point_ids))
+                    .to_list()
+                )
+                return [(row["id"], row["user_id"]) for row in rows]
+
+        return await asyncio.to_thread(run)
+
+    async def erase_point_author(
+        self,
+        collection: str,
+        point_id: str,
+        expected_author: str,
+        *,
+        replacement: str | None = None,
+    ) -> None:
+        def run() -> None:
+            with self._lock:
+                table = self._open(collection)
+                if table is None:
+                    return
+                where = f"id = {_sql_str(point_id)} AND user_id = {_sql_str(expected_author)}"
+                if replacement is None:
+                    table.delete(where)
+                else:
+                    rows = table.search().where(where).select(["payload_json"]).limit(1).to_list()
+                    if rows:
+                        payload = json.loads(rows[0]["payload_json"])
+                        payload["user_id"] = replacement
+                        table.update(
+                            where=where,
+                            values={
+                                "user_id": replacement,
+                                "payload_json": json.dumps(payload, ensure_ascii=False),
+                            },
+                        )
+
+        await asyncio.to_thread(run)
+
+    async def delete_user_points(
+        self, user_id: str, *, protected_point_ids: list[str] | None = None
+    ) -> dict[str, int]:
         """Hard-delete every point authored by ``user_id`` across collections.
 
         GDPR erasure path (#1336): closes the documented preview gap where
@@ -881,6 +955,8 @@ class LanceVectorStore:
         (not a UUID) — quote-escaped like every literal in this module.
         """
         where = f"user_id = {_sql_str(user_id)}"
+        if protected_point_ids:
+            where += f" AND id NOT IN ({', '.join(_sql_str(pid) for pid in protected_point_ids)})"
 
         def _run() -> dict[str, int]:
             deleted: dict[str, int] = {}

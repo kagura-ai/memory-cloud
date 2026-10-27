@@ -95,9 +95,15 @@ class ReindexPhase:
         chunk_requeues = 0
 
         # Batch-fetch all changed memories in one query (avoid N+1)
-        stmt = select(Memory).where(
-            Memory.id.in_(changed_memory_ids),
-            Memory.deleted_at.is_(None),
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.id.in_(changed_memory_ids),
+                Memory.deleted_at.is_(None),
+                Memory.user_id == user_id,
+                Memory.embedding_suppressed_at.is_(None),
+            )
+            .execution_options(populate_existing=True)
         )
         row = await self.db.execute(stmt)
         memory_map = {m.id: m for m in row.scalars().all()}

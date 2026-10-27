@@ -172,6 +172,7 @@ async def test_claim_returns_early_when_not_claimable():
 
 def _worker_db(execute_results):
     db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
     db.execute = AsyncMock(side_effect=list(execute_results))
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
@@ -189,6 +190,8 @@ def _memory_row(memory_id):
     memory.id = memory_id
     # the summary point is the row id (a resource row's is the indexer's)
     memory.point_id = memory_id
+    memory.embedding_suppressed_at = None
+    memory.embedding_erasure_restored_at = None
     memory.user_id = "u1"
     memory.summary = "s"
     # #2092: the run digests summary + content before it embeds; NULL = the

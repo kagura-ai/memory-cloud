@@ -29,6 +29,9 @@ async def sweep_pending_erasures() -> None:
         try:
             service = AccountErasureService(db)
             executed = await service.sweep_pending_erasures()
+            from services.vector_erasure import drain_vector_erasures
+
+            await drain_vector_erasures(db, verify_completed=True)
             if executed:
                 logger.info("erasure_sweep_executed", count=executed)
         except Exception as exc:

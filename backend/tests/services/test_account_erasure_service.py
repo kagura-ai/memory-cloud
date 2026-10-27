@@ -2025,78 +2025,55 @@ class TestBillingContractBlocksErasure:
 
 
 class TestLatePointsDeletedAfterTheCommit:
-    """#2363: a run may write a point under the raw sub between step 1 and the
-    Postgres step's row locks and stamp ``success``; the subject's points are
-    deleted once more right after the Postgres commit, best-effort."""
+    """#2391: post-commit cleanup uses durable UUID jobs, not the raw sub."""
 
     @pytest.mark.asyncio
-    async def test_the_second_delete_follows_the_postgres_commit(self):
+    async def test_durable_drain_follows_the_postgres_commit(self):
         svc = _service()
         svc._list_owned_workspaces = AsyncMock(return_value=[])
         _stub_execute_steps(svc)
-        order: list[Any] = []
-
-        async def _delete(user_id: str) -> dict[str, int]:
-            order.append(("delete_user_points", user_id))
-            return {"kagura_memories": len(order)}
-
+        order = []
         erased = svc._delete_postgres.return_value
         svc._delete_postgres.side_effect = lambda *a, **k: order.append("postgres") or erased
         svc._clear_redis = AsyncMock(side_effect=lambda *a: order.append("redis") or {})
 
-        with patch(
-            "services.account_erasure_service.delete_user_points",
-            new=AsyncMock(side_effect=_delete),
-        ):
-            await svc._execute(_execute_request(self_service=False), _user())
+        async def drain(*_a, **_k):
+            order.append("uuid-cleanup")
+            return {"completed": 3, "pending": 0}
 
-        assert order == [
-            ("delete_user_points", "u-1"),
-            "postgres",
-            ("delete_user_points", "u-1"),
-            "redis",
-        ]
-        summary = svc._finalize.await_args.args[1]
-        assert summary["qdrant"] == {"kagura_memories": 1}
-        assert summary["qdrant_after_commit"] == {"kagura_memories": 3}
-        assert "qdrant_after_commit_failed" not in summary
-
-    @pytest.mark.asyncio
-    async def test_a_failed_second_delete_does_not_fail_the_erasure(self):
-        from utils.exceptions import QdrantError
-
-        svc = _service()
-        svc._list_owned_workspaces = AsyncMock(return_value=[])
-        _stub_execute_steps(svc)
-        calls = iter([{"kagura_memories": 2}, QdrantError("store down for u-1")])
-
-        async def _delete(user_id: str) -> dict[str, int]:
-            result = next(calls)
-            if isinstance(result, Exception):
-                raise result
-            return result
-
-        request = _execute_request(self_service=False)
         with (
             patch(
                 "services.account_erasure_service.delete_user_points",
-                new=AsyncMock(side_effect=_delete),
+                AsyncMock(return_value={"kagura_memories": 1}),
             ),
-            patch("services.account_erasure_service.logger") as log,
+            patch("services.vector_erasure.drain_vector_erasures", drain),
         ):
-            await svc._execute(request, _user())
+            await svc._execute(_execute_request(self_service=False), _user())
+        assert order == ["postgres", "uuid-cleanup", "redis"]
+        assert svc._finalize.await_args.args[1]["qdrant_after_commit"] == {
+            "completed": 3,
+            "pending": 0,
+        }
 
-        svc._finalize.assert_awaited_once()
-        summary = svc._finalize.await_args.args[1]
-        assert summary["qdrant_after_commit_failed"] == "QdrantError"
-        assert "qdrant_after_commit" not in summary
-        (warning,) = [
-            c
-            for c in log.warning.call_args_list
-            if c.args[0] == "erasure_late_points_delete_failed"
-        ]
-        # no account id, no exception text (it names the account)
-        assert warning.kwargs == {"request_id": str(request.id), "error_class": "QdrantError"}
+    @pytest.mark.asyncio
+    async def test_pending_uuid_job_does_not_fail_the_erasure(self):
+        svc = _service()
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        _stub_execute_steps(svc)
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points", AsyncMock(return_value={})
+            ),
+            patch(
+                "services.vector_erasure.drain_vector_erasures",
+                AsyncMock(return_value={"completed": 0, "pending": 1}),
+            ),
+        ):
+            await svc._execute(_execute_request(self_service=False), _user())
+        assert svc._finalize.await_args.args[1]["qdrant_after_commit"] == {
+            "completed": 0,
+            "pending": 1,
+        }
 
 
 class TestFailureAfterThePostgresCommit:
@@ -2533,46 +2510,30 @@ class TestSweepClosesARequestWithoutAUserRow:
             assert "u-1" not in repr(c), c
 
     @pytest.mark.asyncio
-    async def test_a_failed_late_point_delete_still_closes_the_interrupted_run(self):
-        """#2363: the repeated step 3a never fails the close; the error class
-        goes on the summary and the log line carries the request id only."""
+    async def test_pending_uuid_cleanup_still_closes_the_interrupted_run(self):
         from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
-        from utils.exceptions import QdrantError
 
         request = _execute_request(self_service=True)
         postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
         request.deleted_data_summary = {"postgres": postgres}
         svc, statements = _sweep_with_absent_user(request)
-        del svc._delete_late_points  # the real helper, over a failing store
-        delete_points = AsyncMock(side_effect=QdrantError("u-1 down"))
-
+        del svc._delete_late_points
         with (
             patch("services.account_erasure_service._audit_salt", return_value="salt"),
-            patch("services.account_erasure_service.delete_user_points", delete_points),
-            patch("services.account_erasure_service.logger") as log,
+            patch(
+                "services.vector_erasure.drain_vector_erasures",
+                AsyncMock(return_value={"completed": 0, "pending": 1}),
+            ),
         ):
             assert await svc.sweep_pending_erasures() == 0
-
-        delete_points.assert_awaited_once_with("u-1")
         params = _close_values(statements)
-        assert (params["status"], params["failure_reason"]) == (
-            STATUS_FAILED,
-            INTERRUPTED_AFTER_POSTGRES_COMMIT,
-        )
-        assert params["deleted_data_summary"] == {
-            "postgres": postgres,
-            "qdrant_after_commit_failed": "QdrantError",
-            "redis": {"sessions": 1, "co_act": 0},
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
+        assert params["deleted_data_summary"]["qdrant_after_commit"] == {
+            "completed": 0,
+            "pending": 1,
         }
         svc._resync_interrupted_payloads.assert_awaited_once()
-        (call,) = [
-            c
-            for c in log.warning.call_args_list
-            if c.args[0] == "erasure_late_points_delete_failed"
-        ]
-        assert call.kwargs == {"request_id": str(request.id), "error_class": "QdrantError"}
-        for c in [*log.warning.call_args_list, *log.error.call_args_list]:
-            assert "u-1" not in repr(c), c
 
     @pytest.mark.parametrize("summary", [None, {"qdrant": {"kagura_memories": 0}}])
     @pytest.mark.asyncio
@@ -4434,3 +4395,20 @@ class TestRequeueSubjectEmbeddings:
             request_id=str(request_id),
             error_class="ConnectionError",
         )
+
+
+@pytest.fixture(autouse=True)
+def durable_vector_boundaries(monkeypatch):
+    # Preserve scripted DB results for the workflow-unit tests. UUID capture,
+    # failure persistence and actual conditional vector I/O have DB tests.
+    async def first_delete(_db, subject):
+        from services.account_erasure_service import delete_user_points
+
+        return await delete_user_points(subject)
+
+    monkeypatch.setattr("services.vector_erasure.delete_subject_points", first_delete)
+    monkeypatch.setattr("services.vector_erasure.capture_vector_erasure", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        "services.vector_erasure.drain_vector_erasures",
+        AsyncMock(return_value={"completed": 0, "pending": 0}),
+    )

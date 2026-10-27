@@ -197,6 +197,10 @@ def patched_external_stores():
         rate_limits_patch,
         redis_client_patch,
         session_manager_patch,
+        patch(
+            "services.security_notification_service.purge_user_notification_state",
+            AsyncMock(return_value=0),
+        ),
     ):
         yield
 
@@ -1545,7 +1549,7 @@ class TestARunInterruptedAfterThePostgresCommit:
             assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
         qdrant.assert_awaited_once()
         assert qdrant.await_args.kwargs["memory_id"] == edited_by_target
-        late_points.assert_awaited_once_with(target)
+        late_points.assert_not_awaited()
 
         closed = await _request_snapshot(db_session, request_id)
         assert closed["status"] == STATUS_FAILED
@@ -1561,7 +1565,10 @@ class TestARunInterruptedAfterThePostgresCommit:
         assert closed["deleted_data_summary"]["postgres"]["details_payload_synced"] == 1
         assert closed["deleted_data_summary"]["postgres"]["details_payload_requeue_failed"] == 0
         assert "redis" in closed["deleted_data_summary"]
-        assert closed["deleted_data_summary"]["qdrant_after_commit"] == {"kagura_memories": 1}
+        assert closed["deleted_data_summary"]["qdrant_after_commit"] == {
+            "completed": 0,
+            "pending": 0,
+        }
         assert target not in repr(closed)
         # every other row of every table it could reach is byte-identical
         assert await _everything_but(db_session, request_id) == before
@@ -3728,6 +3735,7 @@ class TestQueuedSurvivorsAreNotReEmbedded:
                     db=db_session,
                     context_id=str(queued_survivors["context_id"]),
                     workspace_id=None,
+                    include_erased=True,
                 )
                 row = (await _table_snapshot(db_session, "memories"))[memory_id]
                 assert row["embedding_status"] == "pending"
@@ -3743,18 +3751,15 @@ class TestQueuedSurvivorsAreNotReEmbedded:
             if not run.done():
                 await asyncio.wait_for(run, 15)
 
-        assert stale["add_memory_to_qdrant"].await_args.kwargs["user_id"] == target
-        stale["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
-        stale["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
+        # Author is checked again after the provider await, before any upsert.
+        stale["add_memory_to_qdrant"].assert_not_awaited()
+        stale["delete_points"].assert_not_awaited()
+        stale["delete_chunks"].assert_not_awaited()
         row = (await _table_snapshot(db_session, "memories"))[memory_id]
         assert row["user_id"] == erasure_pseudonym(target)
         if explicit_retry:
-            assert row["embedding_status"] == "pending"
-            rebuilt = await _embed_once(db_session, memory_id, build_point=True)
-            assert rebuilt["add_memory_to_qdrant"].await_args.kwargs["user_id"] == row["user_id"]
-            assert (await _table_snapshot(db_session, "memories"))[memory_id][
-                "embedding_status"
-            ] == "success"
+            # A skipped stale write must not requeue or delete the restored point.
+            assert row["embedding_status"] == "success"
         else:
             assert row["embedding_status"] == "failed"
             assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
@@ -3947,24 +3952,11 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         release.set()
         stubs = await asyncio.wait_for(run, 15)
 
-        # the residue the guard removes: a point under the raw sub
-        assert stubs["add_memory_to_qdrant"].await_args.kwargs["user_id"] == target
-        stubs["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
-        stubs["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
-        events = _info_events(stubs["logger"])
-        assert "embedding_claim_lost" in events
-        removed = next(
-            c
-            for c in stubs["logger"].info.call_args_list
-            if c.args and c.args[0] == "embedding_points_removed_after_lost_claim"
-        )
-        assert removed.kwargs["reason"] == "author_changed"
-        claim_lost = next(
-            c
-            for c in stubs["logger"].info.call_args_list
-            if c.args and c.args[0] == "embedding_claim_lost"
-        )
-        assert claim_lost.kwargs["requeued"] is False
+        # The author fence stops the stale write before the upsert; completed
+        # UUID jobs remain available for crash-gap verification.
+        stubs["add_memory_to_qdrant"].assert_not_awaited()
+        stubs["delete_points"].assert_not_awaited()
+        stubs["delete_chunks"].assert_not_awaited()
         row = (await _table_snapshot(db_session, "memories"))[memory_id]
         assert row["embedding_status"] == "failed"
         assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
@@ -4010,10 +4002,9 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         assert order == [
             ("delete_user_points", target),
             ("point_written", target, True),  # the leak: raw sub and coordinates
-            ("delete_user_points", target),  # after the commit
         ]
         summary = request.deleted_data_summary
-        assert summary["qdrant_after_commit"] == {"kagura_memories": 1}
+        assert summary["qdrant_after_commit"] == {"completed": 6, "pending": 0}
         # ``success`` at the lock: terminalized like every other survivor.
         assert summary["postgres"]["memories_embedding_dequeued"] == 5
         row = (await _table_snapshot(db_session, "memories"))[memory_id]
@@ -4086,14 +4077,20 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         stubs = await asyncio.wait_for(run, 15)
 
         assert memory_id not in await _table_snapshot(db_session, "memories")
-        stubs["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
-        stubs["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
-        removed = next(
-            c
-            for c in stubs["logger"].info.call_args_list
-            if c.args and c.args[0] == "embedding_points_removed_after_lost_claim"
+        stubs["add_memory_to_qdrant"].assert_not_awaited()
+        stubs["delete_points"].assert_not_awaited()
+        stubs["delete_chunks"].assert_not_awaited()
+        from models.vector_erasure import VectorErasureJob
+
+        assert (
+            await db_session.scalar(
+                select(VectorErasureJob.id).where(
+                    VectorErasureJob.request_id == request.id,
+                    VectorErasureJob.memory_id == memory_id,
+                )
+            )
+            is not None
         )
-        assert removed.kwargs["reason"] == "row_gone"
 
     @pytest.mark.asyncio
     async def test_the_rerun_finds_nothing_to_change(
@@ -4127,3 +4124,12 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         assert "1 completed erasure(s): would change 0, skipped 0" in capsys.readouterr().out
         sync.assert_not_awaited()
         assert await _table_snapshot(db_session, "memories") == before
+
+
+@pytest.fixture(autouse=True)
+def durable_vector_network_boundary(monkeypatch):
+    # This suite stubs Qdrant; the UUID cleanup's real API semantics are
+    # verified in test_erasure_embedding_policy_db.py.
+    monkeypatch.setattr(
+        "services.vector_erasure.list_memory_collections", AsyncMock(return_value=[])
+    )

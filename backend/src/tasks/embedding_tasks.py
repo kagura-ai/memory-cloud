@@ -24,9 +24,6 @@ async def _log_unsearchable_backlog(db) -> None:
     keyword mode. They are still counted by the dashboard and charged against
     quota, which is why the discrepancy is invisible from inside the product.
 
-    Before this, the only way to discover the condition was to query the
-    database by hand. It was found that way, with 467 rows already stuck.
-
     Best-effort: this is a diagnostic, and it must never be the reason the
     sweep does not run. Counts over the existing partial index.
 
@@ -39,20 +36,16 @@ async def _log_unsearchable_backlog(db) -> None:
     a capped workspace is not read as an unsearchable one. Rows failed before
     the prefix existed count as other.
 
-    #2363: ``erased`` counts the surviving memories an account erasure took
-    out of the queue (``ERASED_AUTHOR_EMBEDDING_ERROR``, exact match). They
-    sit at the retry ceiling by design, so they are part of ``stalled`` too,
-    but not of ``other``: they are not a provider problem. They alone do not
-    raise the warning — they stay ``failed`` for good, and a line on every
-    tick for something that needs no action would bury the signal; when it
-    fires for other rows, it carries their count.
+    ``erased`` uses the durable suppression marker, independent of error text.
+    These intentionally unindexed rows are excluded from failed/stalled provider
+    counts and cannot raise this diagnostic alone.
     """
     from sqlalchemy import func, or_
 
-    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+    from config.constants import MAX_EMBEDDING_RETRIES
     from models.memory import Memory
 
-    erased = Memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
+    erased = Memory.embedding_suppressed_at.is_not(None)
     capped = Memory.embedding_error.like("QUOTA-002:%")
     configuration = or_(Memory.embedding_error.like("CFG-%"), Memory.embedding_error.like("FEAT-%"))
     try:
@@ -61,10 +54,10 @@ async def _log_unsearchable_backlog(db) -> None:
                 select(
                     func.count().label("unsearchable"),
                     func.count()
-                    .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES)
+                    .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES, ~erased)
                     .label("stalled"),
-                    func.count().filter(capped).label("capped"),
-                    func.count().filter(configuration).label("configuration"),
+                    func.count().filter(capped, ~erased).label("capped"),
+                    func.count().filter(configuration, ~erased).label("configuration"),
                     func.count().filter(erased).label("erased"),
                 ).where(
                     Memory.embedding_status == "failed",
@@ -76,8 +69,8 @@ async def _log_unsearchable_backlog(db) -> None:
         logger.debug("unsearchable_backlog_query_failed", error=str(e))
         return
 
-    unsearchable, stalled = row.unsearchable, row.stalled
-    if unsearchable - row.erased:
+    unsearchable, stalled = row.unsearchable - row.erased, row.stalled
+    if unsearchable:
         logger.warning(
             "embedding_unsearchable_backlog",
             unsearchable=unsearchable,
@@ -85,7 +78,7 @@ async def _log_unsearchable_backlog(db) -> None:
             capped=row.capped,
             configuration=row.configuration,
             erased=row.erased,
-            other=unsearchable - row.capped - row.configuration - row.erased,
+            other=unsearchable - row.capped - row.configuration,
         )
 
 
@@ -185,6 +178,7 @@ async def sweep_pending_embeddings() -> None:
                 select(Memory.id)
                 .where(
                     Memory.deleted_at.is_(None),
+                    Memory.embedding_suppressed_at.is_(None),
                     or_(
                         and_(
                             Memory.embedding_status == "pending",

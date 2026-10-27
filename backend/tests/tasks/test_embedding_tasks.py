@@ -186,7 +186,7 @@ class TestSweepPendingEmbeddings:
         assert warnings, "the backlog was not reported"
         # #2015 D6: split by error class, so a capped workspace reads as capped.
         assert warnings[0].kwargs == {
-            "unsearchable": 467,
+            "unsearchable": 447,
             "stalled": 467,
             "capped": 400,
             "configuration": 7,
@@ -201,11 +201,9 @@ class TestSweepPendingEmbeddings:
         )
         assert "LIKE 'QUOTA-002:%'" in backlog_sql
         assert "LIKE 'CFG-%'" in backlog_sql and "LIKE 'FEAT-%'" in backlog_sql
-        # an exact match on the erased-author marker, not a prefix
-        from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
-
-        marker = ERASED_AUTHOR_EMBEDDING_ERROR.replace("'", "''")
-        assert f"memories.embedding_error = '{marker}'" in backlog_sql
+        # Durable suppression survives an overwritten provider error string.
+        assert "memories.embedding_suppressed_at IS NOT NULL" in backlog_sql
+        assert "memories.embedding_suppressed_at IS NULL" in backlog_sql
 
     @pytest.mark.asyncio
     async def test_a_healthy_deployment_stays_quiet(self):

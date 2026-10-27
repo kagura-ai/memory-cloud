@@ -312,7 +312,11 @@ async def plan_context_migration(
     count_result = await db.execute(
         select(func.count())
         .select_from(Memory)
-        .where(Memory.context_id == context_id, Memory.deleted_at.is_(None))
+        .where(
+            Memory.context_id == context_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
+        )
     )
     memory_count = int(count_result.scalar_one() or 0)
 
@@ -328,6 +332,7 @@ async def plan_context_migration(
             .where(
                 Memory.context_id == context_id,
                 Memory.deleted_at.is_(None),
+                Memory.embedding_suppressed_at.is_(None),
                 length >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
             )
         )
@@ -400,6 +405,7 @@ async def _points_live_rows_name(
         stmt = select(Memory.summary_embedding_id).where(
             Memory.summary_embedding_id.in_(wanted[i : i + batch_size]),
             Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
         )
         if other_than is not None:
             stmt = stmt.where(Memory.id != other_than)
@@ -553,7 +559,9 @@ async def reembed_context(
     last_id: UUID | None = None
     while True:
         stmt = select(Memory).where(
-            Memory.context_id == plan.context_id, Memory.deleted_at.is_(None)
+            Memory.context_id == plan.context_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
         )
         if last_id is not None:
             stmt = stmt.where(Memory.id > last_id)
@@ -587,6 +595,13 @@ async def reembed_context(
                     f"embed_batch returned {len(vectors)} vectors for {len(group)} texts"
                 )
             for memory, vector in zip(group, vectors, strict=True):
+                from services.vector_erasure import (
+                    embedding_author_current,
+                    reconcile_erased_writer,
+                )
+
+                if not await embedding_author_current(db, memory):
+                    continue
                 payload, sparse_indices, sparse_values = build_memory_point(memory)
                 payloads[memory.id] = payload
                 await add_memory_to_qdrant(
@@ -600,8 +615,12 @@ async def reembed_context(
                     sparse_values=sparse_values,
                     collection_name=plan.target_collection,
                 )
+                if await reconcile_erased_writer(db, memory):
+                    payloads.pop(memory.id, None)
+                    continue
                 embedded += 1
 
+        plain_rows = [memory for memory in plain_rows if memory.id in payloads]
         if plain_rows:
             # Not gated on plan.content_chunks_on: the writer reads the flag
             # fresh (one SELECT per page) and writes nothing while it is off.
@@ -731,6 +750,7 @@ async def rebuild_target_chunks(
             Memory.id.in_(ids[i : i + batch_size]),
             Memory.context_id == plan.context_id,
             Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
         )
         if requeue_since is not None:
             # What the switch re-queues gets its chunks from the sweep anyway.
@@ -765,7 +785,11 @@ async def rebuild_target_chunks(
                 plan.target_collection,
                 memory_ids=page,
             )
-            stmt = select(Memory.id, length).where(Memory.id.in_(page), Memory.deleted_at.is_(None))
+            stmt = select(Memory.id, length).where(
+                Memory.id.in_(page),
+                Memory.deleted_at.is_(None),
+                Memory.embedding_suppressed_at.is_(None),
+            )
             if requeue_since is not None:
                 # What switch_context_embedding re-queues is left to the sweep.
                 stmt = stmt.where(_left_by_switch(requeue_since))
@@ -822,7 +846,11 @@ async def verify_context_migration(
     result = await db.execute(
         select(Memory)
         .options(load_only(*_POINT_ID_COLUMNS))
-        .where(Memory.context_id == plan.context_id, Memory.deleted_at.is_(None))
+        .where(
+            Memory.context_id == plan.context_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
+        )
         .order_by(Memory.id)
     )
     # (memory id, point id, owns a resource point), then let go of the rows:
@@ -953,6 +981,7 @@ async def _reconcile_target_chunks(
             select(Memory.id, length).where(
                 Memory.context_id == plan.context_id,
                 Memory.deleted_at.is_(None),
+                Memory.embedding_suppressed_at.is_(None),
                 length >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
             )
         )
@@ -983,6 +1012,7 @@ async def _reconcile_target_chunks(
                     Memory.id.in_(candidates[i : i + batch_size]),
                     Memory.context_id == plan.context_id,
                     Memory.deleted_at.is_(None),
+                    Memory.embedding_suppressed_at.is_(None),
                 )
             )
             live_now.update(
@@ -1127,6 +1157,7 @@ async def switch_context_embedding(
             .where(
                 Memory.context_id == context_id,
                 Memory.deleted_at.is_(None),
+                Memory.embedding_suppressed_at.is_(None),
                 _requeued_by_switch(requeue_since),
             )
             .order_by(Memory.id)

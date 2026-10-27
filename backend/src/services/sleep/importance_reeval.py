@@ -165,6 +165,8 @@ class ImportanceReevalPhase(LLMSpendTracker):
                     update(Memory)
                     .where(
                         Memory.id == memory_id,
+                        Memory.user_id == old_memory.user_id,
+                        Memory.embedding_suppressed_at.is_(None),
                         Memory.deleted_at.is_(None),
                         not_pinned_predicate(),
                         # Tool guardrails: load_guardrails orders by the
@@ -244,6 +246,7 @@ class ImportanceReevalPhase(LLMSpendTracker):
 
         stmt = select(Memory).where(
             Memory.user_id == user_id,
+            Memory.embedding_suppressed_at.is_(None),
             Memory.deleted_at.is_(None),
             Memory.importance >= IMPORTANCE_MIN,
             Memory.importance <= IMPORTANCE_MAX,

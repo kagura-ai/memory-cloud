@@ -77,6 +77,7 @@ class ContextStats(BaseModel):
     # `stalled` is the subset nothing will retry on its own.
     unsearchable_count: int = 0
     stalled_count: int = 0
+    erased_count: int = 0
 
 
 class WorkspaceStatsResponse(BaseModel):
@@ -95,6 +96,7 @@ class WorkspaceStatsResponse(BaseModel):
     # defaults so an older frontend is unaffected.
     unsearchable_memories: int = 0
     stalled_memories: int = 0
+    erased_memories: int = 0
 
 
 # ============================================================================
@@ -190,6 +192,10 @@ async def get_workspace_stats(
             is_workspace_owner=is_workspace_owner,
         )
 
+        erased_by_context = await workspace_service.get_erased_memory_stats(
+            user_id=user_id, contexts=contexts_list, is_workspace_owner=is_workspace_owner
+        )
+
         # Separate accessible and inaccessible contexts
         accessible_contexts: list[ContextStats] = []
         inaccessible_count = 0
@@ -199,6 +205,7 @@ async def get_workspace_stats(
         # that included contexts the caller cannot see would be a side channel.
         total_unsearchable = 0
         total_stalled = 0
+        total_erased = 0
 
         # Critical Fix: Avoid N+1 query - batch fetch all context creators
         creator_ids = {ctx.created_by for ctx in contexts_list if ctx.created_by}
@@ -241,10 +248,12 @@ async def get_workspace_stats(
                         is_private=context.is_private,
                         unsearchable_count=unsearchable,
                         stalled_count=stalled,
+                        erased_count=erased_by_context.get(str(context.id), 0),
                     )
                 )
                 total_unsearchable += unsearchable
                 total_stalled += stalled
+                total_erased += erased_by_context.get(str(context.id), 0)
             else:
                 # Aggregate inaccessible private contexts
                 inaccessible_count += 1
@@ -280,6 +289,7 @@ async def get_workspace_stats(
             plan_name=workspace.plan_name,  # Issue #149
             unsearchable_memories=total_unsearchable,  # #1496, accessible only
             stalled_memories=total_stalled,  # #1496
+            erased_memories=total_erased,
         )
 
     except HTTPException:

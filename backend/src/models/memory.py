@@ -241,6 +241,13 @@ class Memory(Base):
     # Values: 'pending', 'processing', 'success', 'failed'
     embedding_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     embedding_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embedding_erasure_restored_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Erasure policy is durable even when a later failure replaces the error.
+    embedding_suppressed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Issue #979: bounded auto-requeue of transiently-failed embeddings. The
     # sweep re-claims `failed` rows while this is below MAX_EMBEDDING_RETRIES,
     # incrementing it per retry; a poison row exhausts its budget and stops.

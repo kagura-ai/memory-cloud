@@ -1085,6 +1085,9 @@ class MemoryService:
         ``create`` / ``commit``: ``remember`` commits one row, ``remember_many``
         several in one transaction. The caller owns the transaction.
         """
+        from services.erasure_write_guard import hold_remember_author
+
+        await hold_remember_author(self.db, user_id)
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: remember is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
@@ -1403,6 +1406,9 @@ class MemoryService:
         :class:`BatchCommittedError` carries the responses — the rows exist
         and the caller must say so.
         """
+        from services.erasure_write_guard import hold_remember_author
+
+        await hold_remember_author(self.db, user_id)
         # Resolved once for the whole batch (same write gate as remember; the
         # audit identity stays "remember" — the items are remembers).
         isolation = await self._get_context_isolation_params(
@@ -9700,6 +9706,7 @@ def embedding_retry_eligible_clause(now: datetime):
     retry_cutoff = now - timedelta(seconds=EMBEDDING_RETRY_BACKOFF_SECONDS)
     return and_(
         Memory.embedding_status == "failed",
+        Memory.embedding_suppressed_at.is_(None),
         Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
         embedding_clock_before(retry_cutoff),
     )
@@ -9756,7 +9763,11 @@ def _stale_processing(stale_cutoff: datetime):
 
     from models.memory import Memory
 
-    return and_(Memory.embedding_status == "processing", embedding_clock_before(stale_cutoff))
+    return and_(
+        Memory.embedding_status == "processing",
+        Memory.embedding_suppressed_at.is_(None),
+        embedding_clock_before(stale_cutoff),
+    )
 
 
 def embedding_clock_before(cutoff: datetime):
@@ -9894,6 +9905,10 @@ async def write_memory_point(
         Exception: The embedding or the vector-store write failed.
     """
     from services.resource_indexer import ResourceIndexer, owns_resource_point
+    from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+
+    if not await embedding_author_current(db, memory):
+        return None
 
     if owns_resource_point(memory):
         if on_write is not None:
@@ -9924,6 +9939,8 @@ async def write_memory_point(
             context_id=embed_context_id,
             workspace_id=embed_workspace_id,
         )
+    if not await embedding_author_current(db, memory):
+        return None
     # Payload + BM25 sparse vector (#1525: the same point every writer builds;
     # the upsert replaces the whole point, #2053).
     payload, sparse_indices, sparse_values = build_memory_point(memory)
@@ -9940,6 +9957,8 @@ async def write_memory_point(
         sparse_values=sparse_values,
         collection_name=collection_name,
     )
+    if await reconcile_erased_writer(db, memory):
+        return None
     return vector, payload
 
 
@@ -10023,6 +10042,12 @@ async def _reconcile_after_lost_claim(
             reason = "author_changed"
         else:
             return False
+        from types import SimpleNamespace
+
+        from services.vector_erasure import has_vector_erasure_scope, reconcile_erased_writer
+
+        if user_id is not None and await has_vector_erasure_scope(db, memory_id):
+            return await reconcile_erased_writer(db, SimpleNamespace(id=memory_id, user_id=user_id))
         point = await unshared_point_id(db, memory_id, point_id)
         if point is not None:
             await delete_points_from_qdrant([str(point)], collection)
@@ -10108,6 +10133,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 .where(
                     Memory.id == memory_id,
                     Memory.deleted_at.is_(None),
+                    Memory.embedding_suppressed_at.is_(None),
                     or_(
                         Memory.embedding_status == "pending",
                         # #2095: bounded by the retry budget, shared with the
@@ -10148,6 +10174,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 select(Memory).where(
                     Memory.id == memory_id,
                     Memory.deleted_at.is_(None),
+                    Memory.embedding_suppressed_at.is_(None),
                 )
             )
             memory = mem_result.scalar_one_or_none()

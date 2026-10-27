@@ -108,6 +108,8 @@ def _config(model: str, dims: int):
 def _memory(user_id: str = "u1", memory_id: UUID | None = None, summary: str = "s"):
     memory = MagicMock()
     memory.id = memory_id or uuid4()
+    memory.embedding_suppressed_at = None
+    memory.embedding_erasure_restored_at = None
     memory.user_id = user_id
     memory.summary = summary
     memory.workspace_id = uuid4()

@@ -1425,6 +1425,7 @@
         "notFound": "Sleep report not found."
       }
     },
+    "erasedMemories": "{count} memories remain outside search after their author’s account erasure. Restoring their search index requires an explicit administrator action.",
     "unsearchableTitle": "Some memories aren't searchable yet",
     "unsearchableBody": "{count} of your {total} memories were saved, but their search index couldn't be built — recall won't return them. Nothing was lost: they're still in your workspace and become searchable as soon as indexing succeeds.",
     "unsearchableStalled": "{count} of them have stopped retrying automatically and need an administrator to re-index them."

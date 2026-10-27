@@ -102,6 +102,10 @@ class TestRecoverContext:
         mock_db.execute.side_effect = [mock_context_result, mock_existing_mems, mock_config_result]
 
         with (
+            patch("services.context_restore.lock_recovery_authors", AsyncMock(return_value={})),
+            patch(
+                "services.context_restore.recovered_erasure_overrides", AsyncMock(return_value={})
+            ),
             patch("db.qdrant.get_qdrant_client", return_value=mock_client),
             patch("config.settings.get_settings") as mock_settings,
         ):

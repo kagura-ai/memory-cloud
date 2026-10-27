@@ -118,6 +118,7 @@ from models.erasure import (
     NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     STATUS_FAILED,
+    STATUS_IN_PROGRESS,
     ErasureRequest,
 )
 from models.memory import (
@@ -708,6 +709,55 @@ async def erased_pseudonyms(db: AsyncSession) -> frozenset[str]:
         elif is_pseudonym(user_id):
             pseudonyms.add(user_id)
     return frozenset(pseudonyms)
+
+
+async def erasure_request_pseudonyms(db: AsyncSession) -> dict[UUID, str]:
+    """Request UUID -> erased actor using the same legacy rules as recall.
+
+    Includes a sweep's already-absent note: an old interrupted erasure can
+    lack the Postgres marker. Mapping never trusts identifier shape alone
+    for legacy raw subjects; those are explicitly derived by metadata.
+    """
+    committed_running = (ErasureRequest.status == STATUS_IN_PROGRESS) & ran_in_postgres()
+    derive = unrepaired_erasure() | legacy_note_row() | committed_running
+    rows = await db.execute(
+        select(ErasureRequest.id, ErasureRequest.user_id, derive.label("derive")).where(
+            finalized_erasure() | unrepaired_erasure() | _never_ran() | committed_running
+        )
+    )
+    return {
+        request_id: erasure_pseudonym(subject) if needs_derive else subject
+        for request_id, subject, needs_derive in rows.all()
+        if needs_derive or is_pseudonym(subject)
+    }
+
+
+async def historical_erasure_boundaries(db: AsyncSession) -> dict[str, tuple[UUID, datetime]]:
+    """First erasure cutoff per pseudonym for historical UUID-less repair.
+
+    A later erasure of the same IdP sub never widens this boundary. Prefer
+    the Postgres scrub stamp. Legacy completion can lag the actual erase, so
+    fall back conservatively to started_at/requested_at. Ambiguous later rows
+    need captured UUID evidence; new pseudonym indexer data stays untouched.
+    """
+    from models.auth import User
+
+    mapping = await erasure_request_pseudonyms(db)
+    in_use = set(
+        (await db.execute(select(User.user_id).where(User.user_id.in_(mapping.values())))).scalars()
+    )
+    boundaries: dict[str, tuple[UUID, datetime]] = {}
+    rows = await db.execute(
+        select(ErasureRequest).where(ErasureRequest.id.in_(mapping)).order_by(ErasureRequest.id)
+    )
+    for request in rows.scalars():
+        subject = mapping[request.id]
+        cutoff = memory_scrub_at(request.deleted_data_summary)
+        if cutoff is None:
+            cutoff = to_naive_utc(request.started_at or request.requested_at)
+        if subject not in in_use and (subject not in boundaries or cutoff < boundaries[subject][1]):
+            boundaries[subject] = (request.id, cutoff)
+    return boundaries
 
 
 @dataclass(frozen=True)

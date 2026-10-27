@@ -997,8 +997,13 @@ class ContextService:
         from db.qdrant import copy_context_points, get_collection_name
         from models.config import ContextSearchConfig
         from models.memory import Memory
+
+        # Contexts precede source memories, each in id order. Refresh cached
+        # objects before permission checks or copying erasure policy fields.
+        from services.erasure_write_guard import lock_merge_contexts
         from services.permission_service import PermissionService
 
+        await lock_merge_contexts(self.db, [source_context_id, target_context_id])
         # Validate owner access to both contexts
         source = await self.get_context(user_id, source_context_id)
         target = await self.get_context(user_id, target_context_id)
@@ -1078,10 +1083,14 @@ class ContextService:
         # a credential exists — so discarding them throws away data that would
         # have come back on its own.
         result = await self.db.execute(
-            select(Memory).where(
+            select(Memory)
+            .where(
                 Memory.context_id == source_context_id,
                 Memory.deleted_at.is_(None),
             )
+            .order_by(Memory.id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
         )
         source_memories = result.scalars().all()
 
@@ -1098,8 +1107,8 @@ class ContextService:
             # #2393: an erased author's survivor stays out of the embedding
             # queue in its new context too (``failed``, the erased-author
             # marker, no retry budget), as the erasure left it; only an
-            # admin retry or a model switch brings it back.
-            erased_author = mem.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
+            # explicit admin retry with include_erased=true brings it back.
+            erased_author = mem.embedding_suppressed_at is not None
             embedded = mem.embedding_status == "success" and not erased_author
             if embedded:
                 memory_id_mapping[str(mem.id)] = str(new_id)
@@ -1165,6 +1174,8 @@ class ContextService:
                 embedding_status=(
                     "failed" if erased_author else "success" if embedded else "pending"
                 ),
+                embedding_suppressed_at=mem.embedding_suppressed_at,
+                embedding_erasure_restored_at=mem.embedding_erasure_restored_at,
                 embedding_retry_count=MAX_EMBEDDING_RETRIES if erased_author else 0,
                 embedding_error=ERASED_AUTHOR_EMBEDDING_ERROR if erased_author else None,
                 embedding_attempted_at=mem.embedding_attempted_at if erased_author else None,

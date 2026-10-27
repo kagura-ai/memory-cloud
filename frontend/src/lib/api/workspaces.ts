@@ -130,6 +130,7 @@ export interface DashboardContextStats {
   unsearchable_count?: number;
   /** Subset of the above that has stopped retrying on its own (#1496). */
   stalled_count?: number;
+  erased_count?: number;
 }
 
 export interface PrivateContextAggregation {
@@ -146,6 +147,7 @@ export interface WorkspaceStats {
   /** #1496: totals across the contexts this caller can see. */
   unsearchable_memories?: number;
   stalled_memories?: number;
+  erased_memories?: number;
 }
 
 export interface ContextStatsResponse {

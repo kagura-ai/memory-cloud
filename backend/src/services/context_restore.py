@@ -41,7 +41,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -366,10 +366,12 @@ async def restore_deleted_context(
         await db.rollback()
         return result
 
-    # #2393: an erased author's survivor comes back still out of the queue
-    # (``failed``, the erased-author marker, no retry budget); only the admin
-    # retry-failed endpoint or a model switch re-embeds it.
-    erased_author = Memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
+    # #2391: restore never clears durable suppression, even if a later error
+    # overwrote the marker. Only explicit admin include_erased may release it.
+    erased_author = or_(
+        Memory.embedding_suppressed_at.is_not(None),
+        Memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR,
+    )
     restored = await db.execute(
         update(Memory)
         .where(by_the_deletion)
@@ -511,3 +513,110 @@ async def _report_files(
                 f"The restore puts stored files at {after} bytes against the plan's "
                 f"{storage_limit}: uploads are refused until files are deleted.{lock}"
             )
+
+
+async def lock_recovery_authors(
+    db: AsyncSession, authors: set[str], *, lock: bool = True
+) -> dict[str, datetime]:
+    """Lock live actors before the point-writer lock and any context/memory lock.
+
+    A raw-author recovery that precedes erasure commits first, so the erasure
+    captures its rows. One that follows sees the durable UUID/actor evidence.
+    """
+    from models.auth import User
+
+    query = (
+        select(User.user_id, User.created_at)
+        .where(User.user_id.in_(sorted(authors)))
+        .order_by(User.id)
+    )
+    if lock:
+        query = query.with_for_update(read=True, key_share=True)
+    rows = await db.execute(query)
+    return dict(rows.all())
+
+
+async def recovered_erasure_overrides(
+    db: AsyncSession,
+    points: list[tuple[UUID, dict[str, Any]]],
+    live_authors: dict[str, datetime],
+) -> dict[UUID, dict[str, Any] | None]:
+    """Preserve erasure when a stale vector snapshot recreates an old UUID.
+
+    None means ambiguous raw-author recovery is refused; its point is kept.
+    Established captured UUIDs always stay pseudonymized/suppressed, even if
+    the subject signed up again. A genuinely new point of a new account may
+    recover normally when its creation time proves the new account cohort.
+    """
+    from models.vector_erasure import VectorErasureJob
+    from services.erasure_details import (
+        erasure_pseudonym,
+        erasure_request_pseudonyms,
+        historical_erasure_boundaries,
+    )
+    from utils.datetime import to_naive_utc, utcnow
+
+    ids = [memory_id for memory_id, _ in points]
+    jobs = (
+        await db.execute(
+            select(VectorErasureJob.memory_id, VectorErasureJob.subject_pseudonym)
+            .where(
+                VectorErasureJob.memory_id.in_(ids),
+                VectorErasureJob.captured_before_erasure.is_(True),
+            )
+            .order_by(VectorErasureJob.id)
+        )
+    ).all()
+    captured: dict[UUID, set[str]] = {}
+    for memory_id, pseudonym in jobs:
+        captured.setdefault(memory_id, set()).add(pseudonym)
+    erased = frozenset((await erasure_request_pseudonyms(db)).values())
+    boundaries = await historical_erasure_boundaries(db)
+    result: dict[UUID, dict[str, Any] | None] = {}
+    for memory_id, payload in points:
+        author = payload.get("user_id")
+        if not isinstance(author, str):
+            continue
+        derived = erasure_pseudonym(author)
+        established = captured.get(memory_id, set())
+        pseudonym = author if author in established else derived if derived in established else None
+        if pseudonym is None and derived in erased:
+            # An old raw-author point without a live account is still erased.
+            # For re-registration, an authenticated actor string alone is not
+            # enough to attribute a pre-erasure snapshot to the new account.
+            registered_at = live_authors.get(author)
+            if registered_at is not None:
+                raw_created = payload.get("created_at")
+                try:
+                    created = to_naive_utc(datetime.fromisoformat(str(raw_created)))
+                except (ValueError, TypeError):
+                    result[memory_id] = None
+                    continue
+                if created >= to_naive_utc(registered_at):
+                    continue
+            pseudonym = derived
+        if pseudonym is None and author in erased and author not in live_authors:
+            # Old pseudonym-authored snapshots need the same first-erasure
+            # boundary as historical cleanup. A later indexer write is normal
+            # workspace data; unknown timestamps stay out of automatic recovery.
+            boundary = boundaries.get(author)
+            try:
+                created = to_naive_utc(datetime.fromisoformat(str(payload.get("created_at"))))
+            except (ValueError, TypeError):
+                created = None
+            if boundary is None or created is None:
+                result[memory_id] = None
+                continue
+            if created <= boundary[1]:
+                pseudonym = author
+        if pseudonym is not None:
+            result[memory_id] = {
+                "user_id": pseudonym,
+                "details": None,
+                "embedding_status": "failed",
+                "embedding_suppressed_at": utcnow(),
+                "embedding_erasure_restored_at": None,
+                "embedding_error": ERASED_AUTHOR_EMBEDDING_ERROR,
+                "embedding_retry_count": MAX_EMBEDDING_RETRIES,
+            }
+    return result

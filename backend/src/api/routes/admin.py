@@ -1551,17 +1551,18 @@ async def retry_failed_embeddings(
     db: AsyncSession = Depends(get_db),
     context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
     workspace_id: str | None = Query(None, description="Filter by workspace ID (UUID)"),
+    include_erased: bool = Query(
+        False, description="Explicitly restore scrubbed erased-author memories"
+    ),
 ) -> dict:
     """Reset failed embeddings to pending for automatic retry.
 
-    Issue #93: Admin tool to recover from embedding failures. It also brings
-    back the surviving memories of an erased author that the erasure took out
-    of the queue (#2363, ``ERASED_AUTHOR_EMBEDDING_ERROR``): they embed under
-    the pseudonym, with no ``details``.
+    Erased-author survivors are excluded by default. ``include_erased=true``
+    explicitly restores them under their pseudonym with scrubbed details.
     """
     from uuid import UUID as PyUUID
 
-    from sqlalchemy import update
+    from sqlalchemy import case, func, update
 
     # Require at least one filter to prevent accidental mass retry
     if not context_id and not workspace_id:
@@ -1578,10 +1579,17 @@ async def retry_failed_embeddings(
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid {param_name} format") from e
 
+    if include_erased:
+        from db.point_writer_lock import hold_point_writer_lock
+
+        await hold_point_writer_lock(db)
+
     conditions = [
         Memory.embedding_status == "failed",
         Memory.deleted_at.is_(None),
     ]
+    if not include_erased:
+        conditions.append(Memory.embedding_suppressed_at.is_(None))
     if context_id:
         conditions.append(Memory.context_id == context_id)
     if workspace_id:
@@ -1589,11 +1597,27 @@ async def retry_failed_embeddings(
 
     stmt = (
         update(Memory)
-        .where(*conditions)
+        .where(
+            Memory.id.in_(
+                select(Memory.id)
+                .where(*conditions)
+                .order_by(Memory.id)
+                .with_for_update(key_share=True)
+            )
+        )
         # #979: reset the auto-retry budget too — this manual endpoint is the
         # override for rows that exhausted MAX_EMBEDDING_RETRIES, so a fresh
         # admin retry must let the sweep pick them up again.
-        .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
+        .values(
+            embedding_status="pending",
+            embedding_error=None,
+            embedding_retry_count=0,
+            embedding_erasure_restored_at=case(
+                (Memory.embedding_suppressed_at.is_not(None), func.clock_timestamp()),
+                else_=Memory.embedding_erasure_restored_at,
+            ),
+            embedding_suppressed_at=None,
+        )
     )
     result = cast(CursorResult[Any], await db.execute(stmt))
     await db.commit()
@@ -1859,8 +1883,18 @@ async def recover_context(
             "workspace_id does not match the context's workspace", error_code="REQ-103"
         )
 
+    from services.context_restore import lock_recovery_authors, recovered_erasure_overrides
+
+    authors = {
+        p.payload["user_id"]
+        for p in all_points
+        if p.payload and isinstance(p.payload.get("user_id"), str)
+    }
+    point_payloads = [(PyUUID(str(p.id)), p.payload or {}) for p in all_points]
     if request_body.dry_run:
-        # Just report what we found
+        # Apply the same erasure/cohort policy without row locks or writes.
+        live_authors = await lock_recovery_authors(db, authors, lock=False)
+        erasure_overrides = await recovered_erasure_overrides(db, point_payloads, live_authors)
 
         # Batch-check existing memory records (avoid N+1)
         point_ids = [PyUUID(str(p.id)) for p in all_points]
@@ -1872,12 +1906,21 @@ async def recover_context(
             select(ContextSearchConfig).where(ContextSearchConfig.context_id == PyUUID(context_id))
         )
         config_exists = existing_cfg.scalar_one_or_none() is not None
+        skipped = {
+            memory_id
+            for memory_id, policy in erasure_overrides.items()
+            if policy is None and memory_id not in existing_mem_ids
+        }
+        errors.extend(
+            f"Skipped memory {memory_id}: cannot verify its post-erasure author cohort"
+            for memory_id in sorted(skipped)
+        )
 
         return ContextRecoveryResponse(
             context_id=context_id,
             workspace_id=workspace_id,
             qdrant_points_found=len(all_points),
-            memories_recovered=len(all_points) - len(existing_mem_ids),
+            memories_recovered=len(all_points) - len(existing_mem_ids) - len(skipped),
             memories_already_existed=len(existing_mem_ids),
             context_record_created=not context_exists,
             search_config_restored=not config_exists,
@@ -1889,7 +1932,11 @@ async def recover_context(
     # this transaction commits they look row-less to the orphan sweep.
     from db.point_writer_lock import hold_point_writer_lock
 
+    # Users precede the global writer and context/memory locks. Recovery must
+    # serialize with erasure before trusting a raw author from an old snapshot.
+    live_authors = await lock_recovery_authors(db, authors)
     await hold_point_writer_lock(db)
+    erasure_overrides = await recovered_erasure_overrides(db, point_payloads, live_authors)
 
     # Step 3: Create Context record if missing. Read again just before the
     # writes (the lock above is shared and only keeps the orphan sweep out):
@@ -1961,6 +2008,9 @@ async def recover_context(
             continue
 
         payload = point.payload or {}
+        if mem_id in erasure_overrides and erasure_overrides[mem_id] is None:
+            errors.append(f"Skipped memory {mem_id}: cannot verify its post-erasure author cohort")
+            continue
         # #1963: a point whose payload names another workspace (or none) is
         # missed by the workspace-filtered search, so the row goes back
         # through the embedding sweep, which rewrites the point's payload.
@@ -1983,6 +2033,8 @@ async def recover_context(
                 client="admin-recovery",
                 source="admin_recovery",
             )
+            for field, value in (erasure_overrides.get(mem_id) or {}).items():
+                setattr(new_memory, field, value)
             db.add(new_memory)
             memories_recovered += 1
         except (ValueError, KeyError, TypeError) as e:

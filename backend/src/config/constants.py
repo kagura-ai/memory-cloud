@@ -239,7 +239,7 @@ EMBEDDING_RETRY_BACKOFF_SECONDS = 60
 # share it without importing each other.
 ERASED_AUTHOR_EMBEDDING_ERROR = (
     "erased_author: the author's account was erased; its vector points are "
-    "deleted by design (admin retry-failed re-embeds under the pseudonym)"
+    "deleted by design (explicit include_erased retry restores the scrubbed pseudonym)"
 )
 
 # =============================================================================

@@ -25,6 +25,7 @@ The Protocol method signatures intentionally mirror the corresponding
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -107,7 +108,26 @@ class VectorStore(Protocol):
         collection_name: str = DEFAULT_COLLECTION,
     ) -> None: ...
 
-    async def delete_user_points(self, user_id: str) -> dict[str, int]: ...
+    async def erasure_point_identities(
+        self, collection: str
+    ) -> list[tuple[str, str, str | None, datetime | None]]: ...
+
+    async def erasure_scope_points(
+        self, collection: str, point_ids: list[str]
+    ) -> list[tuple[str, str]]: ...
+
+    async def erase_point_author(
+        self,
+        collection: str,
+        point_id: str,
+        expected_author: str,
+        *,
+        replacement: str | None = None,
+    ) -> None: ...
+
+    async def delete_user_points(
+        self, user_id: str, *, protected_point_ids: list[str] | None = None
+    ) -> dict[str, int]: ...
 
     async def delete_context_points(
         self,

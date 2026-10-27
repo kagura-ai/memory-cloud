@@ -69,10 +69,11 @@ The Postgres step takes every surviving memory of the subject out of the
 embedding queue (#2363; a ``success`` row too since #2393): they are marked
 ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry budget, so the
 sweep does not write the points step 1 deleted again under the pseudonym;
-only the admin retry-failed endpoint (or an embedding-model switch of the
-context) brings them back, and a context merge copies them as they are. After the commit the subject's points are
-deleted once more, best-effort: a run may have written one between step 1 and
-the Postgres step's row locks.
+the durable suppression marker also excludes model switches, chunk repair,
+and Sleep. Only an explicit admin ``include_erased=true`` restores the scrubbed
+pseudonym; context merges inherit that policy. UUID-only cleanup jobs captured
+before cascade remove late writes after commit and are verified periodically,
+even after completion, to cover a writer crash before its post-write check.
 """
 
 from __future__ import annotations
@@ -1544,7 +1545,9 @@ class AccountErasureService:
             # re-run deletes the rest (deleting nothing is fine).
             step = _STEP_VECTOR_STORE
             try:
-                summary["qdrant"] = await delete_user_points(target.user_id)
+                from services.vector_erasure import delete_subject_points
+
+                summary["qdrant"] = await delete_subject_points(self.db, target.user_id)
                 points_deleted = True
             except QdrantError as exc:
                 attempt = failed_attempts + 1
@@ -1575,13 +1578,10 @@ class AccountErasureService:
             postgres["memory_scrub_at"] = to_utc_iso(erased.memory_scrub_at)
             summary["postgres"] = postgres
 
-            # Step 3a (#2363): an embedding run that wrote a point under the
-            # raw sub after step 1 and stamped ``success`` before the Postgres
-            # step locked the row left that point behind; terminalizing the
-            # row cannot delete an existing point. A second delete by the
-            # raw sub, after the commit, removes it. Best-effort: never fails
-            # the request (the subject is erased in Postgres).
-            step = "late_points"
+            # Step 3a (#2391): drain UUID scopes captured in the PG commit.
+            # Vector outages leave durable pending jobs, including for rows
+            # removed by cascade. The hourly sweep also rechecks retained
+            # completed scopes to catch a writer that crashed after upsert.
             summary.update(await self._delete_late_points(target.user_id, request_id))
 
             # Step 3b (#2266): the restored memories' vector payloads, after
@@ -2102,6 +2102,15 @@ class AccountErasureService:
             PlanChange, PlanChange.changed_by, user_id
         )
 
+        # Capture before cascade: UUID-only scopes survive deleted rows and
+        # a post-commit vector outage. Insert commits with the erasure itself.
+        if request_id is not None:
+            from services.vector_erasure import capture_vector_erasure
+
+            counts["vector_erasure_scopes"] = await capture_vector_erasure(
+                self.db, request_id, user_id
+            )
+
         # Workspaces owned by the user. After step 3 ran, only sole-owner
         # workspaces remain pointing here. The cascade chain wipes
         # contexts/memories/edges/etc.
@@ -2251,6 +2260,9 @@ class AccountErasureService:
         # steps. The contexts it deleted are held since the hand-over (#2278):
         # one lock phase per table, contexts before memories.
         await lock_subject_memories(self.db, user_id, deleted_by=True)
+        if request_id is not None:
+            # Include ingests committed after the pre-cascade snapshot.
+            await capture_vector_erasure(self.db, request_id, user_id)
         # #2268: from here on no edit lands on the subject's memories until
         # the commit — every revision row this erasure sees is older
         memory_scrub_at = utcnow()
@@ -2630,35 +2642,19 @@ class AccountErasureService:
         return result.rowcount or 0
 
     async def _delete_late_points(self, user_id: str, request_id: UUID | None) -> dict[str, Any]:
-        """Delete the subject's points once more, after the Postgres commit (#2363).
+        """Drain captured UUID scopes after the Postgres erasure commits.
 
-        Step 1 deletes them before anything else, but a run claiming one of
-        the subject's queued memories can write its point (raw sub, live
-        ``details``) after that and stamp ``success`` before
-        ``lock_subject_memories``. Terminalizing the row stops future runs,
-        but cannot remove a point that already reached the store. After
-        the commit no row carries the raw sub, so a run in flight writes under
-        it only if it loaded the row before the commit, and its outcome write
-        then misses the fence and it deletes its own point
-        (``memory_service._reconcile_after_lost_claim``).
-
-        Never raises: the subject is erased in Postgres by now and the request
-        must still complete. A failure is logged (request id and class only)
-        and recorded on the summary.
-
-        Returns:
-            The summary key: ``qdrant_after_commit`` with the per-collection
-            counts, or ``qdrant_after_commit_failed`` with the error class.
+        Vector failures are recorded as pending jobs and retried regardless
+        of request status. The summary is the attempt's ``{completed,pending}``
+        counts. Database failures propagate to the existing after-commit
+        failure handler; no raw identity is needed for the eventual retry.
         """
-        try:
+        from services.vector_erasure import drain_vector_erasures
+
+        if request_id is None:
+            # Internal callers without a lifecycle row have no durable retry.
             return {"qdrant_after_commit": await delete_user_points(user_id)}
-        except Exception as exc:
-            logger.warning(
-                "erasure_late_points_delete_failed",
-                request_id=str(request_id) if request_id is not None else None,
-                error_class=type(exc).__name__,
-            )
-            return {"qdrant_after_commit_failed": type(exc).__name__}
+        return {"qdrant_after_commit": await drain_vector_erasures(self.db, request_id=request_id)}
 
     async def _dequeue_surviving_embeddings(self, user_id: str) -> int:
         """Take the subject's surviving memories out of the embedding queue (#2363).
@@ -2675,9 +2671,9 @@ class AccountErasureService:
         the erased author's row automatically. A point a run wrote before the
         commit goes with ``_delete_late_points``. No automatic retry takes
         these rows again; the admin retry-failed
-        endpoint, or an embedding-model switch of the context (which re-queues
-        every row that is not ``success``), brings them back, and they then
-        embed under the pseudonym with no ``details``; a context merge copies
+        endpoint with ``include_erased=true`` explicitly brings them back, and
+        they then embed under the pseudonym with no ``details``. Model switches
+        and every automatic writer exclude the durable suppression marker; a context merge copies
         them still terminal (``ContextService.merge_contexts``). The count
         returned equals the subject's survivors (``memories_scrubbed``).
 
@@ -2711,6 +2707,7 @@ class AccountErasureService:
                 .values(
                     embedding_status="failed",
                     embedding_error=ERASED_AUTHOR_EMBEDDING_ERROR,
+                    embedding_suppressed_at=utcnow(),
                     embedding_retry_count=MAX_EMBEDDING_RETRIES,
                     # the pipeline's own clock (#1852); updated_at is an edit's
                     embedding_attempted_at=utcnow(),

@@ -196,6 +196,7 @@ async def _superseded(
     claimed_at: Any,
     *,
     check_claim: bool = True,
+    expected_author: str | None = None,
 ) -> bool:
     """Whether a newer write owns the memory's chunks now (#2041).
 
@@ -213,7 +214,10 @@ async def _superseded(
         Memory.deleted_at.is_(None),
         Memory.content == content,
         Memory.embedding_status != "pending",
+        Memory.embedding_suppressed_at.is_(None),
     ]
+    if expected_author is not None:
+        conditions.append(Memory.user_id == expected_author)
     if check_claim:
         conditions.append(Memory.embedding_attempted_at.is_not_distinct_from(claimed_at))
     async with db.begin_nested():
@@ -222,7 +226,12 @@ async def _superseded(
 
 
 async def _check_superseded(
-    db: AsyncSession, memory_id: Any, content: str | None, claim: EmbeddingClaim | None
+    db: AsyncSession,
+    memory_id: Any,
+    content: str | None,
+    claim: EmbeddingClaim | None,
+    *,
+    expected_author: str | None = None,
 ) -> bool:
     """``_superseded`` against the run's own claim, its renewals held off.
 
@@ -231,9 +240,11 @@ async def _check_superseded(
     earlier would read as a newer claim. The content check still applies.
     """
     if claim is None:
-        return await _superseded(db, memory_id, content, None, check_claim=False)
+        return await _superseded(
+            db, memory_id, content, None, check_claim=False, expected_author=expected_author
+        )
     async with claim.held() as stamp:
-        return await _superseded(db, memory_id, content, stamp)
+        return await _superseded(db, memory_id, content, stamp, expected_author=expected_author)
 
 
 async def _superseded_before_write(
@@ -246,7 +257,9 @@ async def _superseded_before_write(
     runs; a failure there writes nothing.
     """
     try:
-        superseded = await _check_superseded(db, memory.id, content, claim)
+        superseded = await _check_superseded(
+            db, memory.id, content, claim, expected_author=memory.user_id
+        )
     except Exception as e:
         logger.warning(
             "content_chunks_superseded_check_failed",
@@ -349,7 +362,9 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
     could leave a ``success`` row with no chunks (#2041).
     """
     try:
-        superseded = await _check_superseded(db, memory.id, content, None)
+        superseded = await _check_superseded(
+            db, memory.id, content, None, expected_author=memory.user_id
+        )
     except Exception as e:
         # The chunks were written; an unknown answer does not undo that.
         logger.warning(
@@ -361,10 +376,16 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
         return False
     if not superseded:
         return False
-    requeued = await requeue_embedding(db, memory.id, reason="stale_after_write")
+    from services.vector_erasure import reconcile_erased_writer
+
+    if await reconcile_erased_writer(db, memory):
+        return True
+    requeued = await requeue_embedding(
+        db, memory.id, reason="stale_after_write", expected_author=memory.user_id
+    )
     over_run = False
     if not requeued:
-        over_run = requeued = await _requeue_over_run(db, memory.id)
+        over_run = requeued = await _requeue_over_run(db, memory.id, expected_author=memory.user_id)
     logger.info(
         "content_chunks_stale_after_write",
         memory_id=str(memory.id),
@@ -374,7 +395,9 @@ async def _stale_after_write(db: AsyncSession, memory: Memory, content: str | No
     return True
 
 
-async def _requeue_over_run(db: AsyncSession, memory_id: Any) -> bool:
+async def _requeue_over_run(
+    db: AsyncSession, memory_id: Any, *, expected_author: str | None = None
+) -> bool:
     """Re-queue a row over the embedding run in flight on it (#2095).
 
     Commits on its own session (``isolated_session``): a Sleep run is one long
@@ -399,7 +422,11 @@ async def _requeue_over_run(db: AsyncSession, memory_id: Any) -> bool:
     try:
         async with isolated_session(db) as session:
             await session.execute(ROW_LOCK_TIMEOUT)
-            result = await session.execute(_requeue_statement(memory_id, include_processing=True))
+            result = await session.execute(
+                _requeue_statement(
+                    memory_id, include_processing=True, expected_author=expected_author
+                )
+            )
             await session.commit()
     except Exception as e:
         logger.warning(
@@ -408,7 +435,13 @@ async def _requeue_over_run(db: AsyncSession, memory_id: Any) -> bool:
             reason=_OVER_RUN,
             error_class=type(e).__name__,
         )
-        return await requeue_embedding(db, memory_id, reason=_OVER_RUN, include_processing=True)
+        return await requeue_embedding(
+            db,
+            memory_id,
+            reason=_OVER_RUN,
+            include_processing=True,
+            expected_author=expected_author,
+        )
     requeued = int(getattr(result, "rowcount", 0) or 0) > 0
     if requeued:
         logger.info("embedding_requeued", memory_id=str(memory_id), reason=_OVER_RUN)
@@ -475,7 +508,7 @@ async def write_content_chunks(
         Exception: with ``fail_open=False``, a failed flag lookup, embedding,
             upsert or delete.
     """
-    if _is_resource_row(memory):
+    if _is_resource_row(memory) or getattr(memory, "embedding_suppressed_at", None) is not None:
         return 0
     # #2041: what this run embeds, taken before anything is awaited.
     content = memory.content
@@ -542,7 +575,7 @@ async def write_content_chunks(
             return 0
         # #2041: an edit or a newer embedding run landed while the chunks were
         # embedded; that run writes the chunks of the current content.
-        if await _check_superseded(db, memory.id, content, claim):
+        if await _check_superseded(db, memory.id, content, claim, expected_author=memory.user_id):
             logger.info(
                 "content_chunks_skipped_superseded",
                 memory_id=str(memory.id),
@@ -648,6 +681,7 @@ def _requeue_statement(
         .where(
             Memory.id == memory_id,
             Memory.deleted_at.is_(None),
+            Memory.embedding_suppressed_at.is_(None),
             embedding_status_in(statuses),
         )
         .values(embedding_status="pending")
@@ -694,17 +728,23 @@ async def sync_content_chunk_payload(
     """
     if _is_resource_row(memory):
         return True
+    from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+
+    if not await embedding_author_current(db, memory):
+        return True
     try:
         if chunks_enabled is None:
             chunks_enabled = await content_chunks_enabled(db, memory.context_id)
         if not chunks_enabled or not chunk_points_supported():
             return True
-        return await sync_chunk_points_payload(
+        synced = await sync_chunk_points_payload(
             memory.id,
             chunk_payload_updates(base_payload),
             collection_name,
             delete_keys=[k for k in _OPTIONAL_PAYLOAD_KEYS if k not in base_payload] or None,
         )
+        await reconcile_erased_writer(db, memory)
+        return synced
     except Exception as e:
         _log_failure(memory, collection_name, e)
         return False
@@ -780,7 +820,11 @@ async def rebuild_content_chunks(
     Returns:
         The number of chunk points written.
     """
-    plain = [memory for memory in rows if not _is_resource_row(memory)]
+    plain = [
+        memory
+        for memory in rows
+        if not _is_resource_row(memory) and getattr(memory, "embedding_suppressed_at", None) is None
+    ]
     if not plain or not chunk_points_supported():
         return 0
     # #2103: the effective flag — an inactive context gets no chunks rebuilt.
@@ -853,6 +897,14 @@ async def rebuild_content_chunks(
             for start in range(0, len(jobs), CHUNK_EMBED_BATCH_SIZE):
                 part = jobs[start : start + CHUNK_EMBED_BATCH_SIZE]
                 current = part[0][0]
+                from services.vector_erasure import (
+                    embedding_author_current,
+                    reconcile_erased_writer,
+                )
+
+                part = [job for job in part if await embedding_author_current(db, job[0])]
+                if not part:
+                    continue
                 await upsert_chunk_points(
                     [
                         (
@@ -873,6 +925,8 @@ async def rebuild_content_chunks(
                     context_id=str(context_id),
                     collection_name=collection_name,
                 )
+                for memory, _, _ in part:
+                    await reconcile_erased_writer(db, memory)
                 written += len(part)
     except Exception as e:
         if current is not None:

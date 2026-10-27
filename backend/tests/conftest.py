@@ -463,3 +463,30 @@ def test_memory_data() -> dict:
         "tags": ["python", "authentication"],
         "context": {"context_id": "test-context", "file_path": "auth.py"},
     }
+
+
+@pytest.fixture(autouse=True)
+def _erasure_fences_need_a_session(monkeypatch):
+    """Keep scripted unit DBs at their prior seam; real PG tests exercise fences.
+
+    Like _capacity_gate_needs_a_session, these guards run unchanged against
+    actual sessions (and explicit AsyncSession specs) instead of consuming a
+    bare MagicMock's unrelated scripted result sequence.
+    """
+    from services import erasure_write_guard, vector_erasure
+
+    def gate(module, name, default):
+        real = getattr(module, name)
+
+        async def guarded(db, *args, **kwargs):
+            if isinstance(db, AsyncSession):
+                return await real(db, *args, **kwargs)
+            return default
+
+        monkeypatch.setattr(module, name, guarded)
+
+    gate(erasure_write_guard, "hold_remember_author", None)
+    gate(erasure_write_guard, "lock_merge_contexts", None)
+    gate(vector_erasure, "embedding_author_current", True)
+    gate(vector_erasure, "reconcile_erased_writer", False)
+    gate(vector_erasure, "has_vector_erasure_scope", False)

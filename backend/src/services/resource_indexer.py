@@ -1004,6 +1004,22 @@ class ResourceIndexer:
                 context's embedding_model/dimensions (see #338). Generated
                 embedding dim must match collection_name's dim.
         """
+        from db.point_writer_lock import hold_point_writer_lock
+
+        # Context authorship must stay stable through the event commit.
+        # Contexts precede memory locks, matching erasure's lock order.
+        fresh = (
+            await self.db.execute(
+                select(Context)
+                .where(Context.id == context.id, Context.deleted_at.is_(None))
+                .with_for_update(read=True)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if fresh is None:
+            return
+        context = fresh
+        await hold_point_writer_lock(self.db)
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
@@ -1442,6 +1458,10 @@ class ResourceIndexer:
                 version; the same one is refused as a duplicate) rebuilds it.
             QdrantError: The upsert failed.
         """
+        from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+
+        if not await embedding_author_current(self.db, memory):
+            return memory.point_id
         if not owns_resource_point(memory):
             raise ResourceRebuildError(f"Memory {memory.id} does not own a resource point")
         resource_id = cast(str, memory.resource_id)
@@ -1472,7 +1492,7 @@ class ResourceIndexer:
         content = resource_document_text(projected, doc_id)
         embed_kwargs: dict[str, Any] = {
             "text": content,
-            "user_id": str(context.created_by),
+            "user_id": memory.user_id,
             "context_id": str(context.id),
             "workspace_id": str(context.workspace_id) if context.workspace_id else None,
         }
@@ -1520,6 +1540,11 @@ class ResourceIndexer:
                 else None
             ),
         )
+        if not await embedding_author_current(self.db, memory):
+            return memory.point_id
+        # Rebuild follows the row author, including an explicit restored pseudonym.
+        if point.payload is not None:
+            point.payload["user_id"] = memory.user_id
         try:
             await self.qdrant_client.upsert(
                 collection_name=collection_name,
@@ -1529,6 +1554,7 @@ class ResourceIndexer:
         except Exception as e:
             raise QdrantError(f"Failed to upsert point: {e}") from e
 
+        await reconcile_erased_writer(self.db, memory)
         logger.info(
             "resource_point_rebuilt",
             memory_id=str(memory.id),

@@ -125,6 +125,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "context_read_attributions",
         "audit_logs",
         "erasure_requests",
+        "vector_erasure_jobs",
         "signup_allowlist",
         "signup_gate_config",
         # Closed-beta invite links (#1581) — signup-gate plumbing like the two

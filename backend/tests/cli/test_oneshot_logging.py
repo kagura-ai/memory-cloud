@@ -27,6 +27,7 @@ if str(_BACKEND_SRC) not in sys.path:
 from cli import (  # noqa: E402
     apply_rerank_defaults,
     backfill_deleted_context_files,
+    cleanup_erased_vectors,
     observed_at_backfill,
     reprocess_erasures,
     restore_context,
@@ -126,6 +127,7 @@ _CLI_ARGV = [
     ),
     (apply_rerank_defaults, ["--all"]),
     (sweep_orphan_vectors, []),
+    (cleanup_erased_vectors, []),
     (restore_context, ["00000000-0000-0000-0000-000000000002"]),
     (backfill_deleted_context_files, []),
     (observed_at_backfill, []),
@@ -169,6 +171,12 @@ def test_every_one_shot_cli_is_covered_by_the_logging_tests():
 
 @pytest.mark.parametrize(("module", "argv"), _CLI_ARGV)
 def test_parse_accepts_log_level_and_defaults_to_info(module, argv):
+    if module is cleanup_erased_vectors:
+        module._parse(argv)
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR", "TRACE"):
+            with pytest.raises(SystemExit):
+                module._parse([*argv, "--log-level", level])
+        return
     assert module._parse(argv).log_level == "INFO"
     assert module._parse([*argv, "--log-level", "DEBUG"]).log_level == "DEBUG"
     with pytest.raises(SystemExit):
@@ -178,6 +186,10 @@ def test_parse_accepts_log_level_and_defaults_to_info(module, argv):
 @pytest.mark.parametrize(("module", "argv"), _CLI_ARGV)
 async def test_main_configures_logging_before_the_scaffold_runs(module, argv):
     order: list[str] = []
+    expected_level = "ERROR" if module is cleanup_erased_vectors else "WARNING"
+    command_argv = (
+        argv if module is cleanup_erased_vectors else [*argv, "--log-level", expected_level]
+    )
     with (
         patch.object(
             module, "configure_logging", side_effect=lambda level: order.append(level)
@@ -186,6 +198,6 @@ async def test_main_configures_logging_before_the_scaffold_runs(module, argv):
             module, "run_plan_apply", AsyncMock(side_effect=lambda **_: order.append("run") or 0)
         ),
     ):
-        assert await module._main(module._parse([*argv, "--log-level", "WARNING"])) == 0
-    configure.assert_called_once_with("WARNING")
-    assert order == ["WARNING", "run"]
+        assert await module._main(module._parse(command_argv)) == 0
+    configure.assert_called_once_with(expected_level)
+    assert order == [expected_level, "run"]
