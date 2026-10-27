@@ -8,10 +8,12 @@ already stores the endpoint URL, so that is where the choice lives::
 
     /mcp/w/{workspace_id}?profile=core
     /mcp/w/{workspace_id}?tools=remember,recall,reference
+    /mcp/w/{workspace_id}?add_tools=create_edge
 
 ``tools`` is an explicit allowlist and wins over ``profile``. With neither, the
 list is the ``core`` profile (#1849 — ``DEFAULT_PROFILE``); ``profile=full`` is
-exactly ``get_tool_definitions()``. A tool left out of the list stays callable:
+exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile the
+URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
 A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
@@ -66,7 +68,7 @@ PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
 # remains one query parameter away; ``tools/call`` never reads a profile.
 DEFAULT_PROFILE = "core"
 
-# Names read from one ``tools`` value; the rest is ignored. The registry holds
+# Names read from one ``tools`` (or ``add_tools``) value; the rest is ignored. The registry holds
 # far fewer tools, so a longer list is a mistake or abuse, never a real request.
 MAX_TOOL_NAMES = 100
 
@@ -92,16 +94,45 @@ def _shown(names: list[str]) -> list[str]:
     return [name[:_SHOWN_CHARS] for name in names[:_SHOWN_NAMES]]
 
 
+def _read_names(value: str, param: str, known: set[str]) -> tuple[set[str], list[str]]:
+    """The known and the unknown names in a comma-separated ``value``.
+
+    Trimmed, case-sensitive, de-duplicated; only the first ``MAX_TOOL_NAMES``
+    are read. Unknown names (and a cut-off tail) are logged once, with
+    ``param`` naming the query parameter they came from.
+    """
+    parts = value.split(",", MAX_TOOL_NAMES)
+    truncated = len(parts) > MAX_TOOL_NAMES
+    # dict.fromkeys: de-duplicate, keep the order the client wrote.
+    requested = list(
+        dict.fromkeys(name for part in parts[:MAX_TOOL_NAMES] if (name := part.strip()))
+    )
+    unknown = [name for name in requested if name not in known]
+    if unknown or truncated:
+        logger.info(
+            "mcp_tool_profile_names_ignored",
+            param=param,
+            unknown=_shown(unknown),
+            unknown_count=len(unknown),
+            truncated=truncated,
+        )
+    return set(requested) - set(unknown), unknown
+
+
 def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     """Return the tool definitions the endpoint URL asks ``tools/list`` for.
 
-    Reads two query parameters (the first value wins when one repeats; every
+    Reads three query parameters (the first value wins when one repeats; every
     other parameter is left alone):
 
     - ``tools``: comma-separated tool names. Names are trimmed, case-sensitive
       and de-duplicated; only the first ``MAX_TOOL_NAMES`` are read. Unknown
       names are ignored and logged once.
     - ``profile``: a key of ``PROFILES``. Not read when ``tools`` is present.
+    - ``add_tools`` (#2354): names added to the profile (the given one, or
+      ``DEFAULT_PROFILE``), read like ``tools``. Unknown names are ignored and
+      logged; matching none is not an error, the profile alone still answers.
+      Ignored (and logged) when ``tools`` is present.
 
     Args:
         query_string: The raw ASGI ``scope["query_string"]`` (percent-encoded
@@ -125,24 +156,14 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     params: dict[str, str] = {}
     for key, value in parse_qsl(query_string, keep_blank_values=True):
         params.setdefault(key, value)
+    known = {tool["name"] for tool in definitions}
 
     if "tools" in params:
-        parts = params["tools"].split(",", MAX_TOOL_NAMES)
-        truncated = len(parts) > MAX_TOOL_NAMES
-        # dict.fromkeys: de-duplicate, keep the order the client wrote.
-        requested = list(
-            dict.fromkeys(name for part in parts[:MAX_TOOL_NAMES] if (name := part.strip()))
-        )
-        known = {tool["name"] for tool in definitions}
-        unknown = [name for name in requested if name not in known]
-        if unknown or truncated:
-            logger.info(
-                "mcp_tool_profile_names_ignored",
-                unknown=_shown(unknown),
-                unknown_count=len(unknown),
-                truncated=truncated,
-            )
-        wanted = set(requested) & known
+        if "add_tools" in params:
+            # The allowlist keeps its exact meaning: a URL that already names
+            # its tools is not widened by a second parameter.
+            logger.info("mcp_tool_profile_add_tools_ignored", reason="tools_present")
+        wanted, unknown = _read_names(params["tools"], "tools", known)
         if not wanted:
             named = f" (unknown: {', '.join(map(repr, _shown(unknown)))})" if unknown else ""
             raise ToolProfileError(
@@ -151,6 +172,7 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
             )
         return [tool for tool in definitions if tool["name"] in wanted]
 
+    profile = DEFAULT_PROFILE
     if "profile" in params:
         profile = params["profile"].strip()
         if profile not in PROFILES:
@@ -158,9 +180,14 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
                 f"Invalid params: unknown tool profile {profile[:_SHOWN_CHARS]!r}. "
                 f"Valid profiles: {', '.join(PROFILES)}."
             )
-        return _apply_profile(definitions, profile)
-
-    return _apply_profile(definitions, DEFAULT_PROFILE)
+    selected = PROFILES[profile]
+    added: set[str] = set()
+    if "add_tools" in params:
+        added, _ = _read_names(params["add_tools"], "add_tools", known)
+    if selected is None:  # ``full`` already lists everything ``add_tools`` could add.
+        return definitions
+    wanted = set(selected) | added
+    return [tool for tool in definitions if tool["name"] in wanted]
 
 
 def _apply_profile(definitions: list[dict], profile: str) -> list[dict]:

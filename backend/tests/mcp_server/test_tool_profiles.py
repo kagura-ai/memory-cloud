@@ -213,6 +213,110 @@ def test_other_query_parameters_are_left_alone():
     assert _names(b"session_id=mcp-1&tools=recall&x=1") == ["recall"]
 
 
+# ------------------------------------------------------------------- add_tools (#2354)
+
+
+def _core_plus(*names: str) -> list[str]:
+    wanted = set(CORE_TOOLS) | set(names)
+    return [name for name in REGISTRY if name in wanted]
+
+
+def test_add_tools_alone_adds_to_the_default_core_profile():
+    assert "get_usage" not in CORE_TOOLS
+    assert _names(b"add_tools=get_usage") == _core_plus("get_usage")
+
+
+def test_add_tools_adds_to_an_explicit_core_profile_in_registry_order():
+    assert _names(b"profile=core&add_tools=merge_contexts,list_edges") == _core_plus(
+        "list_edges", "merge_contexts"
+    )
+    # Parameter order does not matter.
+    assert _names(b"add_tools=list_edges&profile=core") == _core_plus("list_edges")
+
+
+def test_add_tools_on_the_full_profile_is_the_whole_registry():
+    assert _names(b"profile=full&add_tools=get_usage,no_such_tool") == REGISTRY
+
+
+def test_add_tools_naming_a_core_tool_changes_nothing():
+    assert _names(b"add_tools=recall,remember") == list(CORE_TOOLS)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        b"add_tools=get_usage%2Csecret_put",
+        b"add_tools=+get_usage+,%20secret_put",
+        b"add_tools=,get_usage,,secret_put,,get_usage",
+    ],
+)
+def test_add_tools_names_are_decoded_trimmed_and_deduplicated(query):
+    assert _names(query) == _core_plus("get_usage", "secret_put")
+
+
+def test_add_tools_names_are_case_sensitive():
+    assert _names(b"add_tools=Get_Usage") == list(CORE_TOOLS)
+
+
+def test_add_tools_first_value_wins_when_it_repeats():
+    assert _names(b"add_tools=get_usage&add_tools=secret_put") == _core_plus("get_usage")
+
+
+@pytest.mark.parametrize(
+    "query", [b"add_tools=no_such_tool", b"add_tools=", b"add_tools=,,", b"add_tools=%20"]
+)
+def test_add_tools_matching_nothing_is_not_an_error(query):
+    """The base profile still answers: nothing to add is not a broken URL."""
+    assert _names(query) == list(CORE_TOOLS)
+
+
+def test_add_tools_unknown_names_are_ignored_and_logged(logs):
+    assert _names(b"add_tools=get_usage,no_such_tool") == _core_plus("get_usage")
+
+    (event,) = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
+    assert event["param"] == "add_tools"
+    assert event["unknown"] == ["no_such_tool"]
+    assert event["unknown_count"] == 1
+
+
+def test_add_tools_known_names_log_nothing(logs):
+    _names(b"add_tools=get_usage")
+    _names(b"profile=core&add_tools=get_usage")
+    assert logs == []
+
+
+def test_add_tools_reads_only_the_first_names(logs):
+    padding = ",".join(f"bogus_{i}" for i in range(MAX_TOOL_NAMES))
+    # ``secret_put`` sits past the cap, so it is never read.
+    assert _names(f"add_tools=get_usage,{padding},secret_put") == _core_plus("get_usage")
+
+    (event,) = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
+    assert event["truncated"] is True
+
+
+def test_tools_wins_over_add_tools_and_the_ignored_add_tools_is_logged(logs):
+    assert _names(b"tools=recall&add_tools=get_usage") == ["recall"]
+    assert _names(b"add_tools=get_usage&profile=full&tools=recall") == ["recall"]
+
+    events = [e for e in logs if e["event"] == "mcp_tool_profile_add_tools_ignored"]
+    assert len(events) == 2
+    # The allowlist's own rules are unchanged: matching nothing is still an error.
+    with pytest.raises(ToolProfileError):
+        select_tool_definitions(b"tools=no_such_tool&add_tools=get_usage")
+
+
+def test_add_tools_does_not_rescue_an_unknown_profile():
+    with pytest.raises(ToolProfileError):
+        select_tool_definitions(b"profile=minimal&add_tools=get_usage")
+
+
+def test_add_tools_is_a_view_not_an_authorization_boundary():
+    """``tools/call`` never reads the selection: this module only filters
+    definitions, and ``add_tools`` can only widen the profile's list."""
+    for query in (b"add_tools=get_usage", b"profile=core&add_tools=secret_put"):
+        assert set(CORE_TOOLS) <= set(_names(query))
+
+
 # --------------------------------------------------------------- unknown names
 
 
