@@ -1961,7 +1961,8 @@ class Settings(BaseSettings):
 
     # Issue #1559: replace a tier's ``features`` set wholesale (comma-separated,
     # whitespace-tolerant). Validated against ``config.plan_tiers.KNOWN_FEATURES``
-    # when that module loads — an unknown name refuses to boot. ``None`` or
+    # when ``get_settings()`` first builds the settings — an unknown name
+    # refuses to boot. ``None`` or
     # blank = the dataclass default. Lets a self-host re-enable the XL-only
     # ``resources`` / ``connectors`` / ``public_contexts`` (#1551) on a lower
     # tier. Every set must keep ``secret_store``; ``resources`` requires
@@ -2303,6 +2304,14 @@ def get_settings() -> Settings:
     global _settings
 
     if _settings is None:
-        _settings = Settings()
+        settings = Settings()
+        # Issue #2276: the plan-tier env overrides are applied here, when the
+        # settings are first built, instead of when config.plan_tiers is
+        # imported. Cached only after they succeed, so a rejected
+        # PLAN_<KEY>_FEATURES refuses every call, as a refused field does.
+        from config.plan_tiers import ensure_settings_overrides
+
+        ensure_settings_overrides(settings)
+        _settings = settings
 
     return _settings

@@ -6,7 +6,7 @@ returns process-global ``PLAN_TIERS`` config and never touches the DB, so the
 a regression caught by ``MagicMock`` failing on awaited calls.
 
 Env-override coverage is via direct ``PLAN_TIERS`` monkeypatch because the
-override map is applied once, on the registry's first use; mutating
+override map is applied once, when the settings are first built; mutating
 ``os.environ`` afterwards is a no-op (see
 ``config.plan_tiers._apply_settings_overrides``).
 """

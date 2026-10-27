@@ -21,7 +21,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.constants import APP_VERSION
-from config.plan_tiers import ensure_settings_overrides
 from config.settings import get_settings
 from utils.db_helpers import is_deadlock
 from utils.exceptions import (
@@ -488,11 +487,6 @@ app = FastAPI(
 
 # Get settings
 settings = get_settings()
-
-# The plan-tier registries apply their env overrides on first use (#2276).
-# Apply them here so a bad ``PLAN_<KEY>_FEATURES`` still refuses to start the
-# API and the effective feature sets are logged at startup.
-ensure_settings_overrides()
 
 # CORS middleware
 app.add_middleware(

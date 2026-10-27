@@ -1,6 +1,6 @@
 """``PLAN_<KEY>_FEATURES`` — env override for a tier's feature set (#1559).
 
-``_apply_settings_overrides`` runs once (on first use) against the module-level
+``_apply_settings_overrides`` runs once per process against the module-level
 registry, so each test hands it a ``Settings`` built in-process and lets it
 mutate *copies* of ``PLAN_TIERS`` / ``FEATURE_MIN_PLANS`` monkeypatched onto
 the module (the gate helpers resolve those globals at call time).

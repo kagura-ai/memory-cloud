@@ -2,7 +2,7 @@
 
 Run as subprocesses: inside this pytest process the settings are already
 cached. A command that built the settings at import, before its guard ran
-(as ``config.plan_tiers`` did until #2276), would print pydantic's
+(as importing ``config.plan_tiers`` did until #2276), would print pydantic's
 ``ValidationError`` traceback instead of the ``✗`` lines.
 """
 
