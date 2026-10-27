@@ -35,6 +35,7 @@ from tests.plugin.conftest import (
     CONTEXT_ID,
     HOOK_SCRIPT,
     REPO_ROOT,
+    STORE_AUTHORITY_LINE,
     HookResult,
     PluginEnv,
     StubServer,
@@ -660,7 +661,8 @@ def test_bearer_token_env_var_sends_one_post(
     assert request.headers["User-Agent"].endswith("(codex)")
     assert request.json["params"]["name"] == "load_guardrails"
     assert request.json["params"]["arguments"] == {"context_id": CONTEXT_ID, "max_chars": 100_000}
-    context = result.specific["additionalContext"]
+    rule, _, context = result.specific["additionalContext"].partition("\n")
+    assert rule == STORE_AUTHORITY_LINE  # #2341
     assert context.startswith(
         f"Kagura Memory: 1 tool guardrails active for context {CONTEXT_ID} (fetched)"
     )
@@ -1379,8 +1381,9 @@ def test_session_index_is_rendered_for_codex(codex_env: CodexEnv, run_codex: Run
     result = run_codex(session_start())
     _assert_contract(result, "SessionStart")
     lines = result.specific["additionalContext"].split("\n")
-    assert lines[0].startswith("Memory index (5 rows, newest first;")
-    assert lines[1:] == [f"- {r['summary']} (mem: {r['memory_id'][:8]})" for r in rows]
+    assert lines[0] == STORE_AUTHORITY_LINE  # #2341
+    assert lines[1].startswith("Memory index (5 rows, newest first;")
+    assert lines[2:] == [f"- {r['summary']} (mem: {r['memory_id'][:8]})" for r in rows]
 
 
 def test_session_index_labels_foreign_rows_for_codex(
@@ -1393,7 +1396,7 @@ def test_session_index_labels_foreign_rows_for_codex(
         extra={"index": rows, "index_total_available": 1},
     )
     lines = run_codex(session_start()).specific["additionalContext"].split("\n")
-    assert lines[1] == f"- theirs (mem: {memory_id(7)[:8]}, by another member)"
+    assert lines[2] == f"- theirs (mem: {memory_id(7)[:8]}, by another member)"
 
 
 def test_session_index_is_cut_to_the_codex_token_budget(
@@ -1404,7 +1407,8 @@ def test_session_index_is_cut_to_the_codex_token_budget(
     context = result.specific["additionalContext"]
     assert hook_module.approx_tokens(context) <= 2000
     lines = context.split("\n")
-    shown = lines[1:-1]
+    assert lines[0] == STORE_AUTHORITY_LINE  # #2341
+    shown = lines[2:-1]
     assert 0 < len(shown) < 300
     assert shown[0] == f"- {rows[0]['summary']} (mem: {rows[0]['memory_id'][:8]})"
     assert lines[-1] == f"- {300 - len(shown)} more — recall to search"
