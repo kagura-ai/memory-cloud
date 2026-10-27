@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,11 +94,15 @@ async def _drain_scope(db: AsyncSession, job: CleanupScope, collections: list[st
         await db.execute(
             select(Memory.id, Memory.user_id, Memory.embedding_suppressed_at).where(
                 Memory.deleted_at.is_(None),
-                (Memory.id == job.memory_id) | (Memory.summary_embedding_id == job.point_id),
+                (Memory.id == job.memory_id)
+                | (func.coalesce(Memory.summary_embedding_id, Memory.id) == job.point_id),
             )
         )
     ).all()
-    shared = job.point_id != job.memory_id and any(row.id != job.memory_id for row in holders)
+    # A recovered resource can use its own row UUID as its summary point.
+    # Only a searchable holder keeps the shared point indexed; other erased
+    # rows must not keep each other's points alive indefinitely.
+    shared = any(row.id != job.memory_id and row.embedding_suppressed_at is None for row in holders)
     restored = any(
         row.id == job.memory_id
         and row.user_id == job.subject_pseudonym
@@ -343,18 +347,21 @@ async def _delete_subject_points(db: AsyncSession, subject: str) -> dict[str, in
     from services.account_erasure_service import delete_user_points
 
     other = aliased(Memory)
+    point_id = func.coalesce(Memory.summary_embedding_id, Memory.id)
+    other_point_id = func.coalesce(other.summary_embedding_id, other.id)
     protected = list(
         (
             await db.execute(
-                select(Memory.summary_embedding_id)
+                select(point_id)
                 .where(
                     Memory.user_id == subject,
-                    Memory.summary_embedding_id != Memory.id,
                     select(other.id)
                     .where(
-                        other.summary_embedding_id == Memory.summary_embedding_id,
+                        other_point_id == point_id,
                         other.id != Memory.id,
                         other.deleted_at.is_(None),
+                        other.embedding_suppressed_at.is_(None),
+                        other.user_id != subject,
                     )
                     .exists(),
                 )

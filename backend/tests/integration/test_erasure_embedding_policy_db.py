@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -942,3 +942,104 @@ async def test_erased_stats_preserve_private_visibility_after_error_overwrite(
         scoped_world.owner, contexts, is_workspace_owner=True
     )
     assert owner_view == {str(scoped_world.source_id): 1, str(private_id): 1}
+
+
+@pytest.mark.parametrize(
+    ("shape", "cross_workspace", "holder_policy"),
+    [
+        ("recovery_equal", False, "active"),
+        ("recovery_equal", True, "active"),
+        ("normal_source", False, "active"),
+        ("normal_source", True, "active"),
+        ("normal_holder", False, "active"),
+        ("normal_holder", True, "active"),
+        ("resource_distinct", False, "same_subject"),
+        ("resource_distinct", False, "suppressed_other"),
+        ("resource_distinct", False, "restored_other"),
+        ("unshared", False, "unshared"),
+    ],
+)
+async def test_shared_point_identity_and_active_holder_policy(
+    db_session, world, vectors, shape, cross_workspace, holder_policy
+):
+    """Every holder uses its physical summary UUID, including recovered rows."""
+    source_id = world.memory.id
+    point_id, holder_id = uuid4(), uuid4()
+    if shape == "recovery_equal":
+        point_id, source_summary, holder_summary = source_id, source_id, source_id
+    elif shape == "normal_source":
+        point_id, source_summary, holder_summary = source_id, None, source_id
+    elif shape == "normal_holder":
+        source_summary, holder_id, holder_summary = point_id, point_id, None
+    elif shape == "unshared":
+        point_id, source_summary, holder_summary = source_id, None, None
+    else:
+        source_summary = holder_summary = point_id
+    holder_author = world.subject if holder_policy == "same_subject" else "other-member"
+    holder_suppressed = (
+        utcnow().replace(tzinfo=UTC) if holder_policy == "suppressed_other" else None
+    )
+    holder_restored = utcnow().replace(tzinfo=UTC) if holder_policy == "restored_other" else None
+    if holder_policy == "restored_other":
+        holder_author = erasure_pseudonym(holder_author)
+    holder_workspace = uuid4() if cross_workspace else world.memory.workspace_id
+    untouched_point = uuid4()
+    await db_session.execute(
+        update(Memory).where(Memory.id == source_id).values(summary_embedding_id=source_summary)
+    )
+    db_session.add(
+        Memory(
+            id=holder_id,
+            summary_embedding_id=holder_summary,
+            workspace_id=holder_workspace,
+            user_id=holder_author,
+            summary="another member's workspace content",
+            content="shared resource",
+            type="note",
+            client="test",
+            embedding_status="success",
+            embedding_suppressed_at=holder_suppressed,
+            embedding_erasure_restored_at=holder_restored,
+        )
+    )
+    await db_session.commit()
+    try:
+        await put(vectors, untouched_point, "untouched-member")
+        await put(vectors, point_id, world.subject)
+        await delete_subject_points(db_session, world.subject)
+        first = await vectors.retrieve("kagura_memories", ids=[str(point_id)])
+        first_author = first[0].payload["user_id"] if first else None
+        await erase(db_session, world)
+        # A stale run may finish after the erasure committed.
+        await put(vectors, point_id, world.subject)
+        result = await drain_vector_erasures(db_session, request_id=world.request.id)
+        late = await vectors.retrieve("kagura_memories", ids=[str(point_id)])
+        expected_retained = holder_policy in {"active", "restored_other"}
+        assert (len(first), len(late)) == (int(expected_retained), int(expected_retained))
+        if expected_retained:
+            assert first_author == late[0].payload["user_id"] == world.pseudonym
+        assert result["pending"] == 0
+        untouched = await vectors.retrieve("kagura_memories", ids=[str(untouched_point)])
+        assert untouched[0].payload["user_id"] == "untouched-member"
+        current_holder = (
+            await db_session.execute(
+                select(
+                    Memory.user_id,
+                    Memory.embedding_suppressed_at,
+                    Memory.embedding_erasure_restored_at,
+                    Memory.workspace_id,
+                ).where(Memory.id == holder_id)
+            )
+        ).one()
+        assert current_holder.workspace_id == holder_workspace
+        if holder_policy == "same_subject":
+            assert current_holder.user_id == world.pseudonym
+            assert current_holder.embedding_suppressed_at is not None
+        else:
+            assert current_holder.user_id == holder_author
+            assert current_holder.embedding_suppressed_at == holder_suppressed
+            assert current_holder.embedding_erasure_restored_at == holder_restored
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(Memory).where(Memory.id == holder_id))
+        await db_session.commit()
