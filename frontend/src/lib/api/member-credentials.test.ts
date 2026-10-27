@@ -1,7 +1,7 @@
 /**
  * Error text of the member-credentials wrappers (#2202): every wrapper shows
- * the API's `detail` (HTTPException) or `message` (the app's `{error,
- * message}` envelope), and falls back to "<action>: <status text>".
+ * the API's `message` (the app's `{error, message, details}` envelope) or a
+ * plain `detail` string, and falls back to "<action>: HTTP <status>".
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -48,26 +48,44 @@ describe("member-credentials error text", () => {
     );
   });
 
-  it("prefers detail over message", async () => {
+  it("prefers message over detail, like ApiClient", async () => {
     respond(400, "Bad Request", { detail: "from detail", message: "from message" });
     await expect(regenerateOAuthSecret("ws", "u")).rejects.toThrow(
-      "from detail",
+      "from message",
     );
   });
 
-  it("falls back to the status text for a non-JSON body", async () => {
+  it("shows the 422 envelope message", async () => {
+    respond(422, "Unprocessable Entity", {
+      error: "VAL-001",
+      message: "Request validation failed",
+      details: { errors: [{ loc: ["body", "name"], msg: "field required" }] },
+    });
+    await expect(createAPIKey("ws", "u", { name: "" })).rejects.toThrow(
+      "Request validation failed",
+    );
+  });
+
+  it("falls back to the HTTP status for a non-JSON body", async () => {
     respond(502, "Bad Gateway");
     await expect(regenerateOAuthSecret("ws", "u")).rejects.toThrow(
-      "Failed to regenerate OAuth secret: Bad Gateway",
+      "Failed to regenerate OAuth secret: HTTP 502 Bad Gateway",
     );
   });
 
-  it("ignores a non-string detail (validation error list)", async () => {
+  it("falls back when the status text is empty (HTTP/2)", async () => {
+    respond(502, "");
+    await expect(getMemberCredentials("ws", "u")).rejects.toThrow(
+      /^Failed to get credentials: HTTP 502$/,
+    );
+  });
+
+  it("ignores a non-string detail", async () => {
     respond(422, "Unprocessable Entity", {
       detail: [{ loc: ["body", "name"], msg: "field required" }],
     });
     await expect(createAPIKey("ws", "u", { name: "" })).rejects.toThrow(
-      "Failed to create API key: Unprocessable Entity",
+      "Failed to create API key: HTTP 422 Unprocessable Entity",
     );
   });
 });

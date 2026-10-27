@@ -49,10 +49,10 @@ export interface MemberCredentials {
 /**
  * Throw an Error carrying the API's message for a non-OK response.
  *
- * `detail` comes from an HTTPException, `message` from the app's
- * `{error, message}` envelope (e.g. #2188's 404 "Context not found"). A body
- * without either (or one that is not JSON) falls back to `fallback` plus the
- * HTTP status text (#2202).
+ * Same precedence as `ApiClient` in `./base`: `message` from the app's
+ * `{error, message, details}` envelope (every error the API raises, 422
+ * included), then a plain `detail` string. A body with neither (or one that
+ * is not JSON) falls back to `fallback` plus the HTTP status (#2202).
  */
 async function throwResponseError(
   response: Response,
@@ -64,9 +64,9 @@ async function throwResponseError(
       ? (error as { detail?: unknown; message?: unknown })
       : {};
   const text =
-    (typeof body.detail === "string" && body.detail) ||
     (typeof body.message === "string" && body.message) ||
-    `${fallback}: ${response.statusText}`;
+    (typeof body.detail === "string" && body.detail) ||
+    `${fallback}: HTTP ${response.status} ${response.statusText}`.trimEnd();
   throw new Error(text);
 }
 
