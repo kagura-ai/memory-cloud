@@ -187,6 +187,8 @@ def _claimed(memory_id):
 def _memory_row(memory_id):
     memory = MagicMock()
     memory.id = memory_id
+    # the summary point is the row id (a resource row's is the indexer's)
+    memory.point_id = memory_id
     memory.user_id = "u1"
     memory.summary = "s"
     # #2092: the run digests summary + content before it embeds; NULL = the
@@ -228,6 +230,7 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
             _chunk_flag(False),
             _rowcount(0),
             _rowcount(0),
+            _reconcile_read(None),
         ]
     )
     original_execute = db.execute
@@ -260,8 +263,9 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
         await memory_service.process_pending_embedding(memory_id)
 
     # claim UPDATE, SELECT memory, chunk-flag SELECT, success UPDATE, the
-    # re-queue (#2061) — and nothing else after a lost claim.
-    assert len(captured) == 5
+    # re-queue (#2061), the read of the row it left alone (#2363: neither
+    # erased nor gone) — and nothing else after a lost claim.
+    assert len(captured) == 6
     sql = str(
         captured[3].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     ).upper()
@@ -476,6 +480,7 @@ async def test_a_run_that_failed_after_writing_re_queues_a_finished_newer_run():
             RuntimeError("chunk flag lookup"),  # the chunk write fails
             _rowcount(0),  # the fenced failure write: claim lost
             _rowcount(0),  # the re-queue: the newer run is still in flight
+            _reconcile_read(None),  # #2363: the row as the newer run left it
         ],
     )
     embed_svc = MagicMock()
@@ -483,7 +488,7 @@ async def test_a_run_that_failed_after_writing_re_queues_a_finished_newer_run():
 
     _, _, log = await _run_worker(memory_service, db, embed_svc)
 
-    assert len(db.captured) == 5
+    assert len(db.captured) == 6
     _assert_requeue(db.captured[4])
     assert log.info.call_args.args[0] == "embedding_claim_lost"
     assert log.info.call_args.kwargs["requeued"] is False
@@ -523,3 +528,57 @@ async def test_a_failed_re_queue_after_a_lost_claim_is_only_logged():
     warning = log.warning.call_args
     assert warning.args[0] == "embedding_requeue_failed"
     assert warning.kwargs["error_class"] == "RuntimeError"
+
+
+def _reconcile_read(embedding_error: str | None) -> MagicMock:
+    """#2363: the lost-claim reconcile's read of the row (``None``: no row)."""
+    result = MagicMock()
+    result.one_or_none = MagicMock(return_value=MagicMock(embedding_error=embedding_error))
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["success", "failure"])
+async def test_a_run_that_lost_its_claim_to_an_erasure_deletes_its_points(path: str):
+    """#2363: the erasure marked the row (raw sub gone, budget spent) after
+    deleting the author's points; this run's point went out before, so its
+    outcome write matches nothing and it deletes what it wrote — on the
+    success path and on a failure after the write alike."""
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+    from services import memory_service
+
+    memory_id = uuid4()
+    after_write = (
+        [_chunk_flag(False), _rowcount(0)]  # the fenced success write: claim lost
+        if path == "success"
+        else [RuntimeError("chunk flag lookup"), _rowcount(0)]  # the failure write: lost
+    )
+    db = _capturing_db(
+        memory_id,
+        [
+            _claimed(memory_id),
+            _memory_row(memory_id),
+            *after_write,
+            _rowcount(0),  # the re-queue moves nothing: the row is ``failed``
+            _reconcile_read(ERASED_AUTHOR_EMBEDDING_ERROR),
+        ],
+    )
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(return_value=[0.1])
+    embed_svc.model = "m"
+    delete_points, delete_chunks = AsyncMock(), AsyncMock()
+
+    with (
+        patch("db.qdrant.delete_points_from_qdrant", delete_points),
+        patch("db.qdrant.delete_chunk_points", delete_chunks),
+    ):
+        knn, tags, log = await _run_worker(memory_service, db, embed_svc)
+
+    delete_points.assert_awaited_once_with([str(memory_id)], "kagura_memories")
+    delete_chunks.assert_awaited_once_with([memory_id], "kagura_memories")
+    events = [c.args[0] for c in log.info.call_args_list]
+    assert events == ["embedding_points_removed_after_lost_claim", "embedding_claim_lost"]
+    assert log.info.call_args_list[0].kwargs["reason"] == "erased_author"
+    assert log.info.call_args.kwargs["requeued"] is False
+    knn.assert_not_awaited()
+    tags.assert_not_awaited()

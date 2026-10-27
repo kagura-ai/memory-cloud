@@ -150,7 +150,7 @@ async def test_tag_seeding_runs_after_the_seed_fence_rollback(
             patch.object(memory_service, "write_content_chunks", AsyncMock()),
             patch("neural.calibration.resolve_knn_threshold", AsyncMock(return_value=0.5)),
             patch("db.qdrant.search_memories_qdrant", AsyncMock(side_effect=_search_then_edit)),
-            patch.object(memory_service, "_requeue_after_lost_claim", requeue),
+            patch.object(memory_service, "_reconcile_after_lost_claim", requeue),
             patch.object(memory_service, "logger", mock_logger),
         ):
             await memory_service.process_pending_embedding(row.id)
