@@ -65,12 +65,12 @@ an earlier attempt, and that then fails before the Postgres commit
 (``workspace_transfer_required``, an error inside the Postgres step) re-queues
 them the same way (#2358): the points may be gone and the account stays.
 
-The Postgres step takes the subject's surviving memories that are still
-queued for an embedding (any status but ``success``) out of the queue (#2363):
-they are marked ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry
-budget, so the sweep does not write the points step 1 deleted again under the
-pseudonym; only the admin retry-failed endpoint (or an embedding-model switch
-of the context) brings them back. After the commit the subject's points are
+The Postgres step takes every surviving memory of the subject out of the
+embedding queue (#2363; a ``success`` row too since #2393): they are marked
+``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry budget, so the
+sweep does not write the points step 1 deleted again under the pseudonym;
+only the admin retry-failed endpoint (or an embedding-model switch of the
+context) brings them back, and a context merge copies them as they are. After the commit the subject's points are
 deleted once more, best-effort: a run may have written one between step 1 and
 the Postgres step's row locks.
 """
@@ -2279,10 +2279,10 @@ class AccountErasureService:
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id, details.strip))
-        # #2363: the survivors still waiting for (or retrying) their embedding
-        # leave the queue before the scrub, which takes the raw sub off them:
+        # #2363 / #2393: every survivor (a ``success`` row too) leaves the
+        # embedding queue before the scrub, which takes the raw sub off them:
         # step 1 deleted the subject's points, and the sweep must not write
-        # them again under the pseudonym.
+        # them again under the pseudonym. The count equals the survivors.
         counts["memories_embedding_dequeued"] = await self._dequeue_surviving_embeddings(user_id)
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
@@ -2668,7 +2668,9 @@ class AccountErasureService:
         these rows again; the admin retry-failed
         endpoint, or an embedding-model switch of the context (which re-queues
         every row that is not ``success``), brings them back, and they then
-        embed under the pseudonym with no ``details``.
+        embed under the pseudonym with no ``details``; a context merge copies
+        them still terminal (``ContextService.merge_contexts``). The count
+        returned equals the subject's survivors (``memories_scrubbed``).
 
         The status change also fences a run in flight: both of its outcome
         writes match ``processing`` and its own claim stamp, so it sees its

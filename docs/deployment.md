@@ -1908,7 +1908,8 @@ erasure's Postgres step also takes all of the member's surviving memories
 out of the queue (including rows already `success`, #2393): they end `failed` with `embedding_error` starting
 `erased_author:` and their retry budget spent, so the embedding sweep does
 not recreate their points under the pseudonym (count in the summary's
-`postgres.memories_embedding_dequeued`), and an embedding run already in
+`postgres.memories_embedding_dequeued`, which since #2393 equals the
+survivor count, `memories_scrubbed`), and an embedding run already in
 flight that writes after the vector delete removes its own point
 (`embedding_points_removed_after_lost_claim`). A point a run wrote between
 the vector delete and the Postgres step's row locks is removed by a second
@@ -1945,7 +1946,16 @@ including a row an earlier embedding run had already completed. An old run
 that writes after the erasure cannot use the normal success re-queue to
 bypass the author change. Explicit admin retry or a context embedding-model
 switch still rebuilds scrubbed rows under the pseudonym; stale-run cleanup
-retains the shared-resource-point checks.
+retains the shared-resource-point checks. A context merge (`merge_contexts`)
+copies these rows still `failed` with the marker, so the merge does not hand
+them back to the embedding sweep.
+
+A restore whose value equals the live value still writes its version and
+`erasure` revision row: that row records which member each key's value
+belongs to, which a later erasure of another member reads, so the result
+does not depend on the order of the erasures. The `details_restored` and
+`details_keys_reverted` counts (and `reprocess_erasures` plan/apply output)
+include these restores.
 
 **Before `--apply`, read the `failure_reason` of every `would repair`
 request** directly in the database (`SELECT id, failure_reason FROM
