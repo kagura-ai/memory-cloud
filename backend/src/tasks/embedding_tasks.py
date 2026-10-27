@@ -42,7 +42,10 @@ async def _log_unsearchable_backlog(db) -> None:
     #2363: ``erased`` counts the surviving memories an account erasure took
     out of the queue (``ERASED_AUTHOR_EMBEDDING_ERROR``, exact match). They
     sit at the retry ceiling by design, so they are part of ``stalled`` too,
-    but not of ``other``: they are not a provider problem.
+    but not of ``other``: they are not a provider problem. They alone do not
+    raise the warning — they stay ``failed`` for good, and a line on every
+    tick for something that needs no action would bury the signal; when it
+    fires for other rows, it carries their count.
     """
     from sqlalchemy import func, or_
 
@@ -74,7 +77,7 @@ async def _log_unsearchable_backlog(db) -> None:
         return
 
     unsearchable, stalled = row.unsearchable, row.stalled
-    if unsearchable:
+    if unsearchable - row.erased:
         logger.warning(
             "embedding_unsearchable_backlog",
             unsearchable=unsearchable,

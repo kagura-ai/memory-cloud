@@ -145,7 +145,7 @@ class TestSweepPendingEmbeddings:
         mock_result = MagicMock()
         mock_result.all.return_value = []
         # The backlog count reads .one(); a healthy deployment reports zero.
-        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0, erased=0)
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with (
@@ -213,7 +213,27 @@ class TestSweepPendingEmbeddings:
         mock_db = MagicMock()
         mock_result = MagicMock()
         mock_result.all.return_value = []
-        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0, erased=0)
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
+            with patch("tasks.embedding_tasks.logger") as log:
+                await sweep_pending_embeddings()
+
+        assert not [
+            c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_erased_authors_rows_alone_stay_quiet(self):
+        """#2363: an erasure's dequeued survivors stay ``failed`` for good and
+        need no action, so they alone do not raise the line on every tick."""
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_result.one.return_value = SimpleNamespace(
+            unsearchable=3, stalled=3, capped=0, configuration=0, erased=3
+        )
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with patch("db.base.get_db", mock_get_db_factory(mock_db)):
@@ -401,7 +421,7 @@ class TestFailExhaustedReclaims:
         """First, so the tick that fails a row also counts it as stalled."""
         mid = uuid4()
         backlog = MagicMock()
-        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0, erased=0)
         exhausted = MagicMock()
         exhausted.all.return_value = [(mid, 3)]
         candidates = MagicMock()
@@ -462,7 +482,7 @@ class TestFailExhaustedReclaims:
     async def test_a_failed_exhaust_update_does_not_stop_the_sweep(self):
         mid = uuid4()
         backlog = MagicMock()
-        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        backlog.one.return_value = SimpleNamespace(unsearchable=0, stalled=0, erased=0)
         candidates = MagicMock()
         candidates.all.return_value = [(mid,)]
         db = self._db(RuntimeError("lock timeout"), backlog, candidates)
