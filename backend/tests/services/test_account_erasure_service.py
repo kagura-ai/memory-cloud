@@ -127,6 +127,10 @@ def _service() -> AccountErasureService:
     db.rollback = AsyncMock()
     db.refresh = AsyncMock()
     db.execute = AsyncMock(return_value=MagicMock())  # a result, with sync methods
+    # Audit metadata is streamed through the AsyncSession API (#2348).
+    audit_rows = MagicMock()
+    audit_rows.__aiter__.return_value = []
+    db.stream = AsyncMock(return_value=audit_rows)
     email = AsyncMock()
     email.send_erasure_receipt = AsyncMock(return_value=True)
     email.send_erasure_cooling_off_started = AsyncMock(return_value=True)
@@ -2266,9 +2270,16 @@ class TestAuditLogPseudonymizationInThePostgresStep:
 
         svc = _delete_postgres_service()
         order: list[Any] = []
-        svc.db.execute = AsyncMock(
-            side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=3)
-        )
+
+        def record(stmt, *a, **k):
+            order.append(stmt)
+            result = MagicMock(rowcount=3)
+            if isinstance(stmt, Update) and str(stmt.table) == "audit_logs":
+                # The union sweep counts UPDATE RETURNING ids, not rowcount.
+                result.scalars.return_value = range(len(order) * 3, len(order) * 3 + 3)
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=record)
         svc.db.delete = AsyncMock(side_effect=lambda *a: order.append("delete"))
         svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
 
@@ -2975,9 +2986,16 @@ class TestThePostgresStepRecordsItselfOnTheRequest:
     def _recording_service() -> tuple[AccountErasureService, list[Any]]:
         svc = _delete_postgres_service()
         order: list[Any] = []
-        svc.db.execute = AsyncMock(
-            side_effect=lambda stmt, *a, **k: order.append(stmt) or MagicMock(rowcount=2)
-        )
+        from sqlalchemy.sql.dml import Update
+
+        def record(stmt, *a, **k):
+            order.append(stmt)
+            result = MagicMock(rowcount=2)
+            if isinstance(stmt, Update) and str(stmt.table) == "audit_logs":
+                result.scalars.return_value = range(len(order) * 2, len(order) * 2 + 2)
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=record)
         svc.db.delete = AsyncMock(side_effect=lambda *a: order.append("delete"))
         svc.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
         return svc, order
