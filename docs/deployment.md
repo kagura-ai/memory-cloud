@@ -1895,10 +1895,17 @@ still waiting for or retrying their embedding (`pending`, `processing`,
 not recreate their points under the pseudonym (count in the summary's
 `postgres.memories_embedding_dequeued`), and an embedding run already in
 flight that writes after the vector delete removes its own point
-(`embedding_points_removed_after_lost_claim`). The
+(`embedding_points_removed_after_lost_claim`). A point a run wrote between
+the vector delete and the Postgres step's row locks is removed by a second
+delete of the member's points right after the commit (best-effort: counts in
+the summary's `qdrant_after_commit`; a failure is logged as
+`erasure_late_points_delete_failed` and recorded as
+`qdrant_after_commit_failed`, and the request still completes). The
 `embedding_unsearchable_backlog` warning counts them as `erased`, not as a
-provider problem; only the admin retry-failed endpoint brings them back,
-embedded under the pseudonym with no `details`. Not covered: a request that
+provider problem, and they alone do not raise it. No automatic retry takes
+them again: the admin retry-failed endpoint or an embedding-model switch of
+their context brings them back, embedded under the pseudonym with no
+`details`. Not covered: a request that
 failed at this step before v0.125.0, one cancelled by SQL, one that failed
 before the Postgres commit before v0.129.0, and a re-queue that failed; the
 runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
