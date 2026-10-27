@@ -320,7 +320,9 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
     out = capsys.readouterr().out
     assert str(world["request"].id) in out
     assert "changed 1 erasure request(s): 1 memory details restored" in out
-    assert "1 revision prior(s) stripped, 0 marked scrubbed" in out
+    assert "1 revision prior(s) stripped, 0 marked scrubbed, 2 details key(s) reverted" in out
+    assert f"reverted details keys  {world['request'].id}  2 key(s) on 1 memory(ies)" in out
+    assert "details keys ambiguous" not in out
     async with _maker(async_engine)() as session:
         # the live value went back to the author's; the leftover prior is gone
         assert await _details(session, live.id) == AUTHORS
@@ -350,6 +352,9 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
             "scrub_marked": 0,
             # #2266: the payload outcome is known only after the commit
             "details_embedding_requeued": 0,
+            # #2275: the member's ``by`` and ``location``, none kept as ambiguous
+            "details_keys_reverted": 2,
+            "details_keys_ambiguous": 0,
             "request_repaired": False,
             # #2287: none of the subject's audit rows carried the account id
             "audit_logs_pseudonymized": 0,
@@ -2288,3 +2293,51 @@ async def test_an_address_two_erasures_share_is_counted_under_the_first(
         and [line.replace("would pseudonymize", "pseudonymized") for line in planned] == applied
     )
     assert all(str(first.id) not in line for line in applied)
+
+
+async def test_a_pre_v0129_ambiguous_key_is_printed_and_never_written(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2275: an erasure finalized before v0.129.0 stripped the state the
+    member wrote whole; a later member's edit above it shows a key that may
+    be theirs. The plan and the apply print it as ambiguous (count only);
+    nothing is written, no audit row, no vector-store call."""
+    p = _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], {"a": 1, "s": "x"}, 3)
+    request = _request(p, minutes=6)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(memory, 2, p, {"details": {"a": 1}}),
+                _edit(memory, 3, world["third"], STRIPPED),
+                request,
+            ]
+        )
+        await session.commit()
+    try:
+        async with _maker(async_engine)() as session:
+            before = await _snapshots(session, [])
+        line = (
+            f"details keys ambiguous  {request.id}  1 key(s) kept (stripped history, see runbook)"
+        )
+        for argv in (
+            ["--request", str(request.id)],
+            ["--request", str(request.id), "--apply", "--yes"],
+        ):
+            code, sync = await _run(async_engine, argv)
+            assert code == 0
+            out = capsys.readouterr().out
+            assert line in out
+            assert "1 completed erasure(s): would change 0, skipped 0" in out
+            assert p not in out and '"s"' not in out
+            sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+            assert await _reprocess_audit_rows(session, p) == []
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.execute(delete(Memory).where(Memory.id == memory.id))
+            await session.commit()

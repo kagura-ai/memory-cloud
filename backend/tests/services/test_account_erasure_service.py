@@ -1214,7 +1214,14 @@ class TestRestoreEditorDetailsWiring:
         restore_details.side_effect = lambda *a, **k: (
             order.append("restore"),
             SubjectDetailsErasure(
-                RestoreReport(restored=2, unavailable=1, embedding_requeued=3), StripCounts(3, 1)
+                RestoreReport(
+                    restored=2,
+                    unavailable=1,
+                    keys_reverted=5,
+                    keys_ambiguous=2,
+                    embedding_requeued=3,
+                ),
+                StripCounts(3, 1),
             ),
         )[1]
         svc = _service()
@@ -1303,6 +1310,8 @@ class TestRestoreEditorDetailsWiring:
         assert pseudonym != "raw-sub"
         assert counts["details_restored"] == 2
         assert counts["details_restored_unavailable"] == 1
+        # #2275: the per-key counts
+        assert (counts["details_keys_reverted"], counts["details_keys_ambiguous"]) == (5, 2)
         assert counts["details_embedding_requeued"] == 3
         # #2266: the payload counts come after the commit (``_execute``)
         assert not [key for key in counts if key.startswith("details_payload")]

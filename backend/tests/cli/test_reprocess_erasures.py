@@ -550,3 +550,31 @@ def test_the_memories_are_locked_before_the_audit_rows(dry_run):
 
     assert order[0] == "details"
     assert "audit" in order and "details" not in order[1:]
+
+
+def test_reverted_and_ambiguous_details_keys_are_counted_never_named(capsys):
+    """#2275: the plan and the apply name the reverted keys' count and the
+    ambiguous keys kept; the ambiguous line is printed only when there are
+    any, also for a request with nothing else to change. Counts only."""
+    other = uuid4()
+    for dry_run, verb in ((True, "would revert details keys"), (False, "reverted details keys")):
+        result = cli.ReprocessResult(dry_run=dry_run, scanned=2)
+        result.changed.append(
+            _change(details_restored=2, details_restored_unavailable=1, details_keys_reverted=4)
+        )
+        result.ambiguous.append((other, 3))
+        assert result.changes == 3  # the memories, not the keys; ambiguity is no change
+        (cli._print_plan if dry_run else cli._print_applied)(result)
+        out = capsys.readouterr().out
+        assert f"{verb}  {REQUEST_ID}  4 key(s) on 3 memory(ies)" in out
+        assert (
+            f"details keys ambiguous  {other}  3 key(s) kept (stripped history, see runbook)"
+        ) in out
+        assert ", 4 details key(s) reverted, 3 ambiguous key(s) kept" in cli._summary(result)
+
+    quiet = cli.ReprocessResult(dry_run=True, scanned=1)
+    quiet.changed.append(_change(details_stripped=1))
+    cli._print_plan(quiet)
+    out = capsys.readouterr().out
+    assert "ambiguous" not in out and "details keys" not in out
+    assert "key(s)" not in cli._summary(quiet)
