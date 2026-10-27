@@ -110,6 +110,7 @@ from models.memory import (
     Memory,
     MemoryRevision,
 )
+from services.details_provenance import DetailsEdit
 from services.memory_versions import (
     PRIOR_ERASED_KEY,
     PRIOR_RESTORED_FROM_KEY,
@@ -1039,42 +1040,6 @@ async def pseudonymize_revision_actor(db: AsyncSession, user_id: str, pseudonym:
 # ---------------------------------------------------------------------------
 # #2244: the live details an erased member wrote on another author's memory
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DetailsEdit:
-    """One ``updated`` revision of a memory's log (``_updated_rows``).
-
-    Attributes:
-        memory_id / version / id: The row's position in its memory's log.
-        actor_user_id: Who wrote the edit (raw sub, or a pseudonym once erased).
-        writer: One of ``REVISION_WRITERS``.
-        details: ``prior.details`` — the value the edit overwrote (None when
-            it was NULL, when an erasure stripped it, or when the edit did not
-            change ``details``).
-        erased: An earlier erasure stripped ``prior.details`` (it lists
-            ``details`` under ``PRIOR_ERASED_KEY``): the value is unavailable.
-        undone_by: The session rollback that reversed this edit, if any
-            (``MemoryRevision.undone_by``).
-        restored_from: On a put-back row (``erasure``, and ``rollback`` since
-            #2266), ``prior.restored_from``: the lowest version of the block
-            of edits it reverted.
-        details_changed: The edit changed ``details``
-            (``revision_edited_details``). A row that did not is still in the
-            walk (#2266): it ends a rollback block like any foreign edit, but
-            it wrote no ``details`` value.
-    """
-
-    memory_id: UUID
-    version: int
-    id: int
-    actor_user_id: str
-    writer: str
-    details: Any
-    erased: bool
-    undone_by: int | None = None
-    restored_from: int | None = None
-    details_changed: bool = True
 
 
 @dataclass(frozen=True)
