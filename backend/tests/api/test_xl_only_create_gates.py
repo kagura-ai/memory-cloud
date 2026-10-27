@@ -566,6 +566,8 @@ class TestBoundPublicKeyCreate:
             name="ws-key",
             revoked_at=None,
             default_context_id=None,
+            agent_id=None,
+            expires_at=None,
             connector_id=None,
         )
         new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")

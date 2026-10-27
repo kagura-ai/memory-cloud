@@ -229,6 +229,8 @@ class TestMemberCredentialRoutes:
             name="ws-key",
             revoked_at=None,
             default_context_id=None,
+            agent_id=None,
+            expires_at=None,
             connector_id=None,
         )
         db = MagicMock()
@@ -260,6 +262,8 @@ class TestMemberCredentialRoutes:
             name="mine",
             revoked_at=None,
             default_context_id=None,
+            agent_id=None,
+            expires_at=None,
             connector_id=None,
         )
         db = MagicMock()
