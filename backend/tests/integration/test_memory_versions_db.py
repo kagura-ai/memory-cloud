@@ -44,6 +44,7 @@ from models.memory import Memory, MemoryRevision
 from models.schemas import RememberRequest, UpdateMemoryRequest
 from services import session_rollback as sr
 from services.account_erasure_service import AccountErasureService
+from services.details_provenance import details_key_digest
 from services.erasure_details import (
     StripCounts,
     lock_subject_memories,
@@ -399,6 +400,10 @@ async def _seed_log(
     await session.commit()
 
 
+# #2275: a prior whose only key, ``by``, was the subject's, stripped per key
+_BY_GONE = {"details": {}, "erased_details_keys": [details_key_digest("by")]}
+
+
 async def _erase_revisions(session: AsyncSession, subject: str) -> str:
     """Run the revision-log erasure for ``subject``; returns their pseudonym."""
     from services.account_erasure_service import AccountErasureService
@@ -467,7 +472,8 @@ async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edite
     assert log == [
         (edited, 2, pseudonym, {"details": {"by": "author"}}),
         (edited, 3, author, {"importance": 0.4}),
-        (edited, 4, author, {"erased": ["details"]}),
+        # #2275: the subject's key leaves the prior, the (empty) rest stays
+        (edited, 4, author, _BY_GONE),
         (edited, 5, third, {"details": {"by": "author-again"}}),
         (unrelated, 3, third, {"details": {"u": 1}}),
         (unrelated, 4, third, {"details": {"u": 2}}),
@@ -504,8 +510,8 @@ async def test_a_second_erasure_finds_an_edit_the_first_one_stripped(
         log = await _log(session, edited)
     assert log == [
         (edited, 2, first_pseudonym, {"details": {"by": "author"}}),
-        (edited, 4, second_pseudonym, {"erased": ["details"]}),
-        (edited, 6, third, {"erased": ["details"]}),
+        (edited, 4, second_pseudonym, _BY_GONE),
+        (edited, 6, third, _BY_GONE),
     ]
 
 
@@ -628,8 +634,8 @@ async def test_erasure_leaves_other_users_revisions_untouched(
 
         assert stripped == StripCounts(details_stripped=2, scrub_marked=1)
         assert pseudonymized == 1
-        # a re-run matches nothing: stripped priors lack ``details`` and the
-        # authored memory's event already carries the scrubbed marker
+        # a re-run matches nothing: no prior holds a key of the subject's and
+        # the authored memory's event already carries the scrubbed marker
         assert await strip_subject_details(session, subject) == StripCounts(0, 0)
         await session.commit()
         assert await _snapshot(session, _REVISIONS_OUTSIDE, in_scope) == revisions_before
@@ -638,7 +644,7 @@ async def test_erasure_leaves_other_users_revisions_untouched(
         assert await _log(session, authored, edited) == [
             (authored, 2, third, {"erased": ["details"], "scrubbed": ["details"]}),
             (edited, 2, pseudonym, {"details": {"by": "author"}}),
-            (edited, 4, author, {"erased": ["details"]}),
+            (edited, 4, author, _BY_GONE),
         ]
         assert await _sessions(session, authored, edited) == [
             (authored, 2, "sess-s"),
@@ -1021,7 +1027,7 @@ async def test_strip_by_pseudonym_is_idempotent_after_erasure(
         erased_log = await _log(session, edited, authored)
         assert erased_log == [
             (edited, 2, pseudonym, {"details": {"by": "author"}}),
-            (edited, 4, author, {"erased": ["details"]}),
+            (edited, 4, author, _BY_GONE),
             (authored, 2, third, {"erased": ["details"], "scrubbed": ["details"]}),
         ]
 
@@ -1045,7 +1051,7 @@ async def test_strip_by_pseudonym_is_idempotent_after_erasure(
         assert await _log(session, edited, authored) == [
             *erased_log[:2],
             (edited, 6, pseudonym, {"details": {"by": "author-again"}}),
-            (edited, 8, third, {"erased": ["details"]}),
+            (edited, 8, third, _BY_GONE),
             erased_log[2],
         ]
 

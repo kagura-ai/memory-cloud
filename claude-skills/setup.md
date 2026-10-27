@@ -242,7 +242,7 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
    import os, re, sys
    URL = (r"https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])"
           r"(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%/-]*)?"
-          r"(?:\?[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*(?:&[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*)*)?")
+          r"(?:\?[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%,-]*(?:&[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%,-]*)*)?")
    NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
    UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
    PATTERNS = {"mcp_url": URL, "server_url": URL, "new_mcp_url": URL,
@@ -266,7 +266,8 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
 
    A URL is `http` or `https`; a host of letters, digits, dots and hyphens, or a bracketed IPv6
    literal (`[::1]`); an optional port; a path of letters, digits and `._~%/-`; and an optional query
-   of `key=value` pairs of the same characters — `&` only between two pairs. No quote, `$`, backtick,
+   of `key=value` pairs of the same characters, plus `,` in a value (a tool list such as
+`add_tools=list_edges,merge_contexts`) — `&` only between two pairs. No quote, `$`, backtick,
    `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile, tool profile,
    entry or marketplace name is letters, digits, `-` and `_`, and starts with a letter or digit, so it can
    never be read as an option.
@@ -384,8 +385,8 @@ Report, as a block:
 - **Form** — OAuth, Bearer key, or CLI profile (with the profile name).
 - **URL** — the entry's URL, or for a CLI profile the computed upstream URL and its base (`--server`,
   or the profile). The path (`/mcp`, or `/mcp/w/<workspace-id>`) and each query parameter
-  separately (`profile`, `guardrails`) — for a CLI profile, each with where it came from:
-  `--guardrails`, `--tool-profile`, `--server` or the profile.
+  separately (`profile`, `tools`, `add_tools`, `guardrails`) — for a CLI profile, each with where
+  it came from: `--guardrails`, `--tool-profile`, `--server` or the profile.
 - **Shadowed entries** — every other scope defining the same name, with its file and URL. Fix:
   `claude mcp remove "$(cat "<values dir>/entry_name")" -s <scope>` on the one that should not be
   there (`<scope>` is `local`, `project` or `user`). OAuth tokens are stored
@@ -468,7 +469,9 @@ Applying it:
 
 This is a change to the MCP entry, not to `server_url`: `guardrails=off` (`&guardrails=off` when the
 URL already has a query, such as `?profile=core`) — for a CLI-profile entry, a flag on the proxy
-that puts it there. How depends on the form.
+that puts it there. Every other parameter stays as it is — in particular `profile`, `tools` and
+`add_tools` (`?add_tools=list_edges` lists the core tools plus `list_edges`; next to `tools` it is
+ignored), which decide what the client lists. How depends on the form.
 
 **OAuth or Bearer-key entry** — warn before changing it, and get an explicit yes:
 

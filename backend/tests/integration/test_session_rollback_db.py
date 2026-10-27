@@ -1697,3 +1697,42 @@ async def test_a_restored_details_edit_brings_back_its_observed_at(
     kwargs = _stubs["payload"].await_args.kwargs
     assert kwargs["payload_updates"]["observed_at"] == "2024-03-07T00:00:00Z"
     assert "observed_at" not in (kwargs.get("delete_keys") or [])
+
+
+async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """#2275: an erased member added ``s``; the owner's session rewrote both
+    keys. The erasure reverts nothing live (the session's ``s`` is the
+    owner's) but removes the member's ``s`` from the session's prior — which
+    keeps ``a``. Rolling the session back then puts the owner's pre-session
+    value back without the member's key (before #2275 the whole prior was
+    gone and the rollback skipped the memory)."""
+    from services.details_provenance import details_key_digest
+    from services.erasure_details import erase_subject_details
+
+    w = world
+    erased = f"erased-{uuid.uuid4().hex[:8]}"
+    target = await w.create(w.member, None, details={"a": 1})
+    await w.update(target, erased, None, details={"a": 1, "s": 1})
+    await w.update(target, w.owner, "RB", details={"a": 2, "s": 2})
+    await w.session.commit()
+
+    result = await erase_subject_details(
+        w.session, erased, actor="e" * 64, erased_actors=frozenset()
+    )
+    await w.session.commit()
+    assert (result.restore.restored, result.strip.details_stripped) == (0, 1)
+    prior = (
+        await w.session.execute(
+            select(MemoryRevision.prior).where(
+                MemoryRevision.memory_id == target, MemoryRevision.session_id == "RB"
+            )
+        )
+    ).scalar_one()
+    assert prior == {"details": {"a": 1}, "erased_details_keys": [details_key_digest("s")]}
+
+    done = await _rollback(w, "RB", SessionPrincipal(w.owner, None), dry_run=False)
+    await w.session.commit()
+    assert done.summary["skipped_items"] == []
+    assert (await w.row(target))["details"] == {"a": 1}

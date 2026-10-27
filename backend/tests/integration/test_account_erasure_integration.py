@@ -458,6 +458,8 @@ class TestAuditLogFailureRollsThePostgresStepBack:
             "services.account_erasure_service.AccountErasureService._pseudonymize_audit_logs",
             # #2298: after the own rows' UPDATE ran in the transaction
             "services.erasure_details.pseudonymize_audit_mentions",
+            # #2275: the per-key strip of the editor arm, after the restore
+            "services.erasure_details._strip_editor_keys",
         ],
     )
     async def test_an_audit_log_failure_rolls_the_postgres_step_back(
@@ -594,6 +596,8 @@ class TestEditorDetailsRestore:
         postgres = request.deleted_data_summary["postgres"]
         assert postgres["details_restored"] == 1
         assert postgres["details_restored_unavailable"] == 0
+        # #2275: the target's ``by`` and ``location``; nothing ambiguous
+        assert (postgres["details_keys_reverted"], postgres["details_keys_ambiguous"]) == (2, 0)
         # #2266: the payload outcome, split, after the commit
         assert postgres["details_payload_synced"] == 1
         assert "details_payload_skipped" not in postgres

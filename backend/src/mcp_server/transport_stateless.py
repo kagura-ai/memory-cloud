@@ -396,8 +396,8 @@ async def handle_stateless_post(
     elif method == "tools/list":
         from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
-        # #1601: the endpoint URL (``?profile=`` / ``?tools=``) picks what is
-        # listed. A view, not an authorization boundary: ``tools/call`` below
+        # #1601: the endpoint URL (``?profile=`` / ``?tools=`` / ``?add_tools=``)
+        # picks what is listed. A view, not an authorization boundary: ``tools/call`` below
         # never reads it.
         try:
             tools = select_tool_definitions(query_string)

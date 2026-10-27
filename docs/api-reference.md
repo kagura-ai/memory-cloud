@@ -611,7 +611,7 @@ Render a context's tool guardrails for MCP clients without tool hooks — the ex
 |---|---|
 | `context_id` (required) | Context UUID; malformed → `422` `context_id must be a valid UUID: …` |
 | `target` | `export` (default) → `text/markdown`, the whole block; `instructions` → `text/plain`, exactly the `instructions` string the MCP endpoint serves this credential for this context. Anything else → `422` |
-| `profile`, `tools` | `target=instructions` only: the MCP URL's values, so the truncation suffix names the same tool the URL's `tools/list` shows |
+| `profile`, `tools`, `add_tools` | `target=instructions` only: the MCP URL's values, so the truncation suffix names the same tool the URL's `tools/list` shows |
 
 **Response (`target=export`):**
 

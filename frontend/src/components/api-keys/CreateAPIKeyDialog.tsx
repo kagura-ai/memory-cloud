@@ -150,7 +150,7 @@ export function CreateAPIKeyDialog({
           <DialogHeader>
             <DialogTitle>API Key Created Successfully</DialogTitle>
             <DialogDescription>
-              Save this API key now. You won't be able to see it again!
+              Save this API key now. You won&apos;t be able to see it again!
             </DialogDescription>
           </DialogHeader>
 
@@ -230,7 +230,7 @@ export function CreateAPIKeyDialog({
               )}
 
               <p className="text-xs text-slate-500">
-                Store this key securely. You'll need it to authenticate API
+                Store this key securely. You&apos;ll need it to authenticate API
                 requests.
               </p>
             </div>

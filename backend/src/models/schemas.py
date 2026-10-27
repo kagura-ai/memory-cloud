@@ -2295,6 +2295,10 @@ class MemberAPIKeyResponse(BaseModel):
     # #2188: set when the key is bound to an agent (it then cannot carry a
     # default context — the agent's default binding applies).
     agent_id: str | None = None
+    # #2299: set when the key is a connector's shared key
+    # (``api_keys.connector_id``, #1952). The UI classifies connector keys by
+    # this link, not by the ``connector:`` display name.
+    connector_id: str | None = None
 
 
 class MemberOAuthAppResponse(BaseModel):

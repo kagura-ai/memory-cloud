@@ -28,6 +28,9 @@ export interface MemberAPIKey {
   // #2188: set when the key is bound to an agent — the agent's default
   // binding applies, so the key cannot carry a default context.
   agent_id: string | null;
+  // #2299: set when the key is a connector's shared key (#1952). Classify
+  // connector keys by this, never by the `connector:` display name.
+  connector_id: string | null;
 }
 
 export interface MemberOAuthApp {
@@ -47,6 +50,30 @@ export interface MemberCredentials {
 }
 
 /**
+ * Throw an Error carrying the API's message for a non-OK response.
+ *
+ * Same precedence as `ApiClient` in `./base`: `message` from the app's
+ * `{error, message, details}` envelope (every error the API raises, 422
+ * included), then a plain `detail` string. A body with neither (or one that
+ * is not JSON) falls back to `fallback` plus the HTTP status (#2202).
+ */
+async function throwResponseError(
+  response: Response,
+  fallback: string,
+): Promise<never> {
+  const error: unknown = await response.json().catch(() => null);
+  const body =
+    error && typeof error === "object"
+      ? (error as { detail?: unknown; message?: unknown })
+      : {};
+  const text =
+    (typeof body.message === "string" && body.message) ||
+    (typeof body.detail === "string" && body.detail) ||
+    `${fallback}: HTTP ${response.status} ${response.statusText}`.trimEnd();
+  throw new Error(text);
+}
+
+/**
  * Get or create member credentials (Lazy initialization)
  */
 export async function getMemberCredentials(
@@ -61,7 +88,7 @@ export async function getMemberCredentials(
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to get credentials: ${response.statusText}`);
+    await throwResponseError(response, "Failed to get credentials");
   }
 
   return response.json();
@@ -83,7 +110,7 @@ export async function hideAPIKey(
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to hide API key: ${response.statusText}`);
+    await throwResponseError(response, "Failed to hide API key");
   }
 }
 
@@ -103,7 +130,7 @@ export async function regenerateAPIKey(
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to regenerate API key: ${response.statusText}`);
+    await throwResponseError(response, "Failed to regenerate API key");
   }
 
   return response.json();
@@ -144,16 +171,7 @@ export async function createAPIKey(
   );
 
   if (!response.ok) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: response.statusText }));
-    // `detail` from an HTTPException, `message` from the app's error
-    // envelope (e.g. #2188's 404 "Context not found").
-    throw new Error(
-      error.detail ||
-        error.message ||
-        `Failed to create API key: ${response.statusText}`,
-    );
+    await throwResponseError(response, "Failed to create API key");
   }
 
   return response.json();
@@ -182,12 +200,7 @@ export async function deleteWorkspaceMemberAPIKeyById(
   );
 
   if (!response.ok) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: response.statusText }));
-    throw new Error(
-      error.detail || `Failed to delete API key: ${response.statusText}`,
-    );
+    await throwResponseError(response, "Failed to delete API key");
   }
 }
 
@@ -216,8 +229,6 @@ export async function deleteWorkspaceMemberAPIKey(
  * Note: Use OAuth clients API directly
  */
 export async function hideOAuthClientSecret(clientId: string): Promise<void> {
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-
   const response = await fetch(
     `${API_BASE}/api/v1/oauth/clients/${clientId}/hide`,
     {
@@ -227,7 +238,7 @@ export async function hideOAuthClientSecret(clientId: string): Promise<void> {
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to hide OAuth app: ${response.statusText}`);
+    await throwResponseError(response, "Failed to hide OAuth app");
   }
 }
 
@@ -247,9 +258,7 @@ export async function regenerateOAuthSecret(
   );
 
   if (!response.ok) {
-    throw new Error(
-      `Failed to regenerate OAuth secret: ${response.statusText}`,
-    );
+    await throwResponseError(response, "Failed to regenerate OAuth secret");
   }
 
   return response.json();
@@ -271,6 +280,6 @@ export async function deleteOAuthApp(
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to delete OAuth app: ${response.statusText}`);
+    await throwResponseError(response, "Failed to delete OAuth app");
   }
 }

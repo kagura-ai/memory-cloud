@@ -917,6 +917,8 @@ HOSTILE_URLS = [
     "https://mcp.example.com/mcp&touch=x",
     "https://mcp.example.com/mcp?guardrails=off&",
     "https://mcp.example.com/mcp?guardrails=off&&touch=x",
+    "https://mcp.example.com/mcp?add_tools=a,b;touch x",
+    "https://mcp.example.com/mcp?add_tools=a,b&,=x",
     "https://mcp.example.com/mcp\ntouch x",
     "https://mcp.example.com/mcp\n\n",
     "https://mcp.example.com/m cp",
@@ -950,6 +952,9 @@ def test_setup_skill_value_check_rejects_shell_syntax(
         "http://localhost:8080/mcp/w/00000000-0000-0000-0000-000000000000?guardrails=off",
         "http://[::1]:8080/mcp",
         "http://127.0.0.1:8080/mcp?profile=core&guardrails=off",
+        # #2354: a tool list in a value is comma-separated.
+        "https://mcp.example.com/mcp?add_tools=list_edges,merge_contexts&guardrails=off",
+        "https://mcp.example.com/mcp?profile=core&tools=remember%2Crecall",
         "https://mcp.example.com/mcp\n",
     ],
 )

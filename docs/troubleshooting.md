@@ -13,8 +13,9 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 | `/mcp` (or `?profile=core`) | Core tools (default) — the 21 core memory and context tools (see Tool Profiles). Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out; `describe_tools` lists them |
 | `?profile=full` | All tools |
 | `?tools=…` | Exactly the names in the list |
+| `?add_tools=…` | The profile (core by default) plus the names in the list; ignored next to `?tools=` |
 
-The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).
+The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, add its name to `?add_tools=` (or to `?tools=` when the URL has an allowlist), or use `?profile=full`, then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).
 
 ## A Kagura tool fails with `invalid_token` or `insufficient_scope`
 

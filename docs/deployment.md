@@ -1734,15 +1734,31 @@ back past every erased member's edits to the last value a surviving member
 wrote, so the result is the same whichever of two such erasures is processed
 first. For each request, in one transaction:
 
-1. where the erased member wrote the live `details` of a memory someone else
-   authored, the last value someone else wrote is put back — a new version
-   with one revision row (`writer: erasure`, details unavailable); the
-   memory's vector payload (`location`) is patched right after the commit;
+1. where the erased member's `details` keys are live on a memory someone
+   else authored, each goes back to the value it had before their write, or
+   is removed when it had none — a new version with one revision row
+   (`writer: erasure`, its prior the overwritten value without their keys);
+   the memory's vector payload (`location`) is patched right after the
+   commit;
 2. their `details` are removed from every revision prior that still holds
    them. On memories they authored (scrubbed by the erasure), only revision
    rows that existed when the erasure locked them are touched (the summary's
    `memory_scrub_at`, stored since v0.124.0; for an older request its
    completion time) — what other members wrote there since stays as it is.
+
+From v0.129.0 (#2275) both steps work per top-level `details` key on memories
+other members authored: a key whose value the erased member introduced goes
+back even where a later member's edit carried it unchanged, a key a later
+member rewrote stays, a key the erased member removed stays removed, and only
+their keys leave each prior (the authored memories still lose `details`
+whole). Erasures on v0.129.0 or later do this as they run. For an erasure
+before v0.129.0 the state the member wrote was stripped whole, so a key they
+wrote that a later member's edit shows above it cannot be told from that
+member's own: the plan prints `details keys ambiguous  <request id>  N key(s)
+kept (stripped history, see runbook)` and nothing is applied for those keys.
+After upgrading to v0.129.0, run the plan (`--all`, no `--apply`) once to read
+these counts; a non-zero count is the input to a follow-up decision, not
+something to apply.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request
 whose payload, audit-log, Redis, audit-row or finalize step fails after the
@@ -1969,10 +1985,11 @@ Time memories (`type: time`) and erasure — Issue #2266:
   `details` keeps only the trigger's window (`year` / `month` / `day` /
   `hour` / `minute` / `from` / `until`); the trigger's `text`, the location
   and every other key are removed. On a time memory another member authored
-  whose `details` go back to an earlier value, that value keeps its own
-  trigger (normalized if it was written before the memory became a time
-  memory); where it has none, or is unavailable, the memory's current window
-  is merged in, without its `text`.
+  whose `details` keys go back to earlier values, a `trigger` among those
+  keys goes back to the earlier trigger (normalized if it was written before
+  the memory became a time memory); where there was none, or it is
+  unavailable, the memory's current window is merged in, without its
+  `text`.
 - **Vector payloads after the commit.** The erasure patches restored
   memories' payloads after its Postgres commit. A patch that fails re-queues
   the memory for embedding; the erasure summary counts it under
@@ -3620,6 +3637,83 @@ With it set, Sleep's judge calls on the managed lane also pass
 `platform_only`; without it Sleep keeps BYOK-then-env. The ignored rows are
 not deleted for you: each workspace owner can still list and delete their own
 stored keys (#1613).
+
+## Migration lock timeout — Issue #2300
+
+`alembic upgrade` / `alembic downgrade` start every migration transaction with
+`SET LOCAL lock_timeout` (default **5 s**). An `ALTER TABLE` needs an ACCESS
+EXCLUSIVE lock; while it waits for one behind a long transaction, every later
+query on that table queues behind it, so on a hot table (`memories`,
+`api_keys`, `audit_logs`, `memory_revisions`) one slow reader would stall the
+API. With the cap, a lock wait past 5 s fails the migration instead.
+
+**What it looks like.** The upgrade stops with SQLSTATE `55P03`:
+
+```text
+sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) canceling statement due to lock timeout
+```
+
+In `deploy.sh` this is Step 2, and the deploy retries it on its own: a run
+that fails on a lock timeout (55P03) is started again after 15 s, then after
+45 s, 3 attempts in total, each logged as `Migration attempt N/3 hit a lock
+timeout; retrying in …s`. `MIGRATION_RETRY_DELAYS` (default `"15 45"`, one
+delay per retry) changes the backoff and the number of attempts. Any other
+migration failure aborts at once. When every attempt times out, the deploy
+stops with "hit a lock timeout on all 3 attempts": the new color is not
+started and traffic is not moved.
+
+An upgrade runs in one transaction, so a timeout rolls back every revision
+since the last commit point — the start of the run, or the last autocommit
+block (`CREATE INDEX CONCURRENTLY`, VALIDATE), which commits what
+came before it. `alembic current` shows where the upgrade now stands.
+
+**What to do.** A lock held for a moment (a slow request, a Sleep run) is
+usually gone by the next attempt, which `deploy.sh` makes for you. Outside
+`deploy.sh`, run the upgrade again (`alembic upgrade head`). If it keeps
+failing, find the session holding the table:
+
+```sql
+-- sessions holding a lock on the table named in the failing statement
+SELECT a.pid, a.usename, a.application_name, a.state,
+       now() - a.xact_start AS xact_age, l.mode, left(a.query, 120) AS query
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.relation = 'api_keys'::regclass AND l.granted
+ORDER BY a.xact_start;
+
+-- the oldest open transactions on the server
+SELECT pid, usename, application_name, state,
+       now() - xact_start AS xact_age, left(query, 120) AS query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start
+LIMIT 10;
+```
+
+An `idle in transaction` session with a large `xact_age` is the usual cause.
+Let it finish, or end it (`SELECT pg_cancel_backend(<pid>)`, then
+`pg_terminate_backend(<pid>)`) once you know what it is, and run the upgrade
+again.
+
+**Override.** `KAGURA_MIGRATION_LOCK_TIMEOUT` sets the cap for the process that
+runs alembic: a PostgreSQL duration (`500ms`, `30s`, `2min`; a bare number is
+milliseconds; at most 2147483647 ms). `0` turns it off (the lock wait is unbounded, as before
+v0.129.0). A longer value is a longer stall of the table while the `ALTER`
+waits. Set it in the env file the migration container reads, or on the one-off
+run (`docker compose run --rm -e KAGURA_MIGRATION_LOCK_TIMEOUT=30s ... alembic
+upgrade head`). A value that is not a duration stops alembic before any schema
+change.
+
+- A revision that sets its own `lock_timeout` keeps it for its own statements
+  (e91 and e95: 10 s; f14 and f16: 5 s); the override does not change those.
+- This setting does not reach statements inside an autocommit block. A
+  revision that wants a cap there sets its own: the backfill / VALIDATE steps
+  of e99, f14 and f15 use 5 s, and a timeout there fails the same way.
+  `CREATE INDEX CONCURRENTLY` has none: its wait for older transactions blocks
+  neither reads nor writes.
+- The setting is transaction-local, so it works through a transaction-pooling
+  pgbouncer. An offline script (`alembic upgrade --sql`) does not carry it:
+  `SET lock_timeout` in the `psql` session that runs the script.
 
 ## Database Connection Pool — Issue #1980
 

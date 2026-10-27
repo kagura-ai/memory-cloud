@@ -1,7 +1,7 @@
 """A repeat ``setup_logger()`` must not strand loggers already cached (#2167).
 
-``setup_logger()`` runs from ``tests/conftest.py`` and again whenever
-``api.main`` is imported. With ``cache_logger_on_first_use=True`` a module
+``setup_logger()`` runs from ``tests/conftest.py``, and tests call it again
+(an ``api.main`` import no longer does, #2241). With ``cache_logger_on_first_use=True`` a module
 logger that logged before that second call holds the processor list that was
 current then. ``structlog.testing.capture_logs()`` edits the *current* list in
 place, so if the second call installed a new list, the cached logger would

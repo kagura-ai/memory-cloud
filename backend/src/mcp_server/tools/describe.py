@@ -8,7 +8,8 @@ hidden tool is, in practice, out of reach until the client's URL lists it.
 This tool is the discovery lane for that gap: without arguments it names every
 tool outside the current view with a one-line summary; with ``names`` it
 returns those tools' complete definitions so the model can decide, and tell the
-user, which URL to reconnect with (``?profile=full`` or ``?tools=a,b``).
+user, which URL to reconnect with (``?profile=full``, ``?add_tools=a,b`` or
+``?tools=a,b``).
 
 "The current view" is derived from the request URL's query, which the
 transport stores per request (``set_mcp_tool_view_query``); the registry work
@@ -38,6 +39,7 @@ SUMMARY_CHARS = 160
 URL_HINT: dict[str, str] = {
     "list_all": "?profile=full on the MCP URL lists every tool",
     "allowlist": "?tools=<name>,<name> lists exactly those (wins over profile)",
+    "add": "?add_tools=<name>,<name> lists the profile plus those (ignored next to ?tools=)",
     "note": (
         "A profile only picks what tools/list shows; most clients let the model call "
         "listed tools only, so reconnect with one of these URLs to use a hidden tool."

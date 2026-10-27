@@ -30,10 +30,13 @@ from utils.exceptions import (
     DuplicateFileError,
     MemoryCloudException,
 )
-from utils.logger import get_logger, setup_logger
+from utils.logger import ensure_logger_configured, get_logger
 
-# Setup logger first
-setup_logger()
+# Configure logging before anything below logs: building the app (route
+# imports, middleware registration) already emits log lines, and uvicorn's
+# handlers get the redacting formatter before its startup lines. Once per
+# process: a host that configured logging first keeps it (#2241).
+ensure_logger_configured()
 logger = get_logger(__name__)
 
 
@@ -77,6 +80,20 @@ async def _close_redis_on_shutdown() -> None:
         await asyncio.wait_for(redis_db.close_redis(), timeout=_REDIS_CLOSE_TIMEOUT_SECONDS)
     except Exception as exc:
         logger.warning("redis_close_failed", error_type=type(exc).__name__, error=str(exc))
+
+
+# Upper bound on closing the worker's Qdrant client at shutdown (#2241).
+_QDRANT_CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+async def _close_qdrant_on_shutdown() -> None:
+    """Close this worker's async Qdrant client; bounded, logs and never raises (#2241)."""
+    from db import qdrant as qdrant_db
+
+    try:
+        await asyncio.wait_for(qdrant_db.close_qdrant(), timeout=_QDRANT_CLOSE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("qdrant_close_failed", error_type=type(exc).__name__, error=str(exc))
 
 
 @asynccontextmanager
@@ -250,6 +267,10 @@ async def lifespan(app: FastAPI):
     # After the scheduler (its cron jobs use Redis), before close_db(). A job
     # that touches Redis after this builds a new client lazily (#1995).
     await _close_redis_on_shutdown()
+
+    # After the scheduler and the cancelled background tasks (they query
+    # Qdrant), before close_db(). A later caller builds a new client (#2241).
+    await _close_qdrant_on_shutdown()
 
     # Release blob storage (Issue #485)
     from storage.factory import close_blob_storage

@@ -66,7 +66,7 @@ def source(monkeypatch):
 
 
 async def _call(user=MOCK_USER, **query):
-    params = {"target": "export", "profile": None, "tools": None, **query}
+    params = {"target": "export", "profile": None, "tools": None, "add_tools": None, **query}
     return await guardrail_digest(user=user, db=AsyncMock(), **params)
 
 
@@ -148,13 +148,31 @@ async def test_instructions_preview_percent_encodes_the_rebuilt_tool_view_query(
 
     await _call(context_id=str(ctx), target="instructions", tools="load_guardrails&profile=full")
     await _call(context_id=str(ctx), target="instructions", profile="core", tools="recall,remember")
+    await _call(context_id=str(ctx), target="instructions", add_tools="load_guardrails")
     await _call(context_id=str(ctx), target="instructions")
 
     assert seen == [
         "tools=load_guardrails%26profile%3Dfull",
         "profile=core&tools=recall%2Cremember",
+        "add_tools=load_guardrails",
         "",
     ]
+
+
+@pytest.mark.asyncio
+async def test_instructions_preview_reads_add_tools_like_the_mcp_url(source):
+    """#2354: ``add_tools`` widens the preview's view the way it widens the URL's."""
+    ctx = uuid4()
+    source.result = _entries(ctx, "a", total=3)
+
+    added = await _call(context_id=str(ctx), target="instructions", add_tools="load_guardrails")
+    beaten = await _call(
+        context_id=str(ctx), target="instructions", tools="recall", add_tools="load_guardrails"
+    )
+
+    assert added.body.decode().endswith("(+2 more: load_guardrails(context_id))")
+    # ``tools`` wins: ``add_tools`` is ignored next to it.
+    assert beaten.body.decode().endswith("(+2 more: get_context_info(context_id))")
 
 
 @pytest.mark.asyncio

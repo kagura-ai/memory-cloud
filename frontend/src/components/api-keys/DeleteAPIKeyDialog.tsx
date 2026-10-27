@@ -84,7 +84,7 @@ export function DeleteAPIKeyDialog({
           <div className="space-y-2">
             <p className="text-sm">
               Are you sure you want to permanently delete the API key{" "}
-              <strong>"{keyName}"</strong>?
+              <strong>&quot;{keyName}&quot;</strong>?
             </p>
             <p className="text-xs text-slate-500">
               Consider revoking instead if you want to keep audit history.

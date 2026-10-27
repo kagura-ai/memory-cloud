@@ -2249,8 +2249,10 @@ class AccountErasureService:
         # the details strip below never locks, rewrites or counts rows the FK
         # cascade removes with them.
         counts["memory_tombstones_deleted"] = await self._delete_subject_tombstones(user_id)
-        # #2244: where the subject wrote the live details of a memory another
-        # member authored, put back the last value someone else wrote. FIRST
+        # #2244: where the subject wrote live details keys of a memory another
+        # member authored, put each back to its value from before their write
+        # (#2275: per key, also where a later member's whole-dict edit carried
+        # it unchanged; a key a later member rewrote stays). FIRST
         # among the memory steps: it finds the subject's edits by the raw
         # actor (pseudonymized below) and writes its own revision row under
         # the pseudonym, which the strip and the pseudonymize step never
@@ -2269,6 +2271,11 @@ class AccountErasureService:
         restore = details.restore
         counts["details_restored"] = restore.restored
         counts["details_restored_unavailable"] = restore.unavailable
+        # #2275: per key — the subject's live keys put back or removed, and
+        # the live keys kept because a state an erasure before v0.129.0
+        # stripped whole may hold their value
+        counts["details_keys_reverted"] = restore.keys_reverted
+        counts["details_keys_ambiguous"] = restore.keys_ambiguous
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id, details.strip))
@@ -2543,8 +2550,9 @@ class AccountErasureService:
         """Scrub the erased subject out of ``memory_revisions`` (#2043).
 
         Two steps of ``services.erasure_details``, in this order:
-        ``strip_subject_details`` (the subject's ``details`` leave every
-        prior; the authored memories' events are marked scrubbed — the
+        ``strip_subject_details`` (the subject's ``details`` keys leave every
+        prior that holds them, per key, #2275; the authored memories' priors
+        lose ``details`` whole and their events are marked scrubbed — the
         revision-log twin of ``_scrub_surviving_memories``, which NULLs the
         surviving memories' ``details``), then
         ``pseudonymize_revision_actor`` (the subject's own events get the

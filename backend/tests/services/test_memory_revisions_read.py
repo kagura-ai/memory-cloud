@@ -142,6 +142,23 @@ class TestReconstructVersion:
         # the marker is not a change of the field
         assert changed_fields(updates[0].prior) == ["summary"]
 
+    def test_a_per_key_stripped_prior_reads_the_remaining_keys(self) -> None:
+        """#2275: on a memory someone else authored, erasure removes only the
+        erased member's keys from ``prior.details`` (no marker): a rebuilt
+        version shows the other keys, nothing is unavailable. The erasure's
+        own row (``restored_from`` beside the stripped dict) reads the same."""
+        updates = [
+            _rev(4, {"details": {"a": 2, "c": True}, "restored_from": 2}),
+            _rev(3, {"details": {"a": 2}}),  # the erased member's ``s`` removed
+            _rev(2, {"details": {"a": 1}}),
+        ]
+        live = {**LIVE, "details": {"a": 2, "c": True}}
+        assert reconstruct_version(live, 4, updates, 3).values["details"] == {"a": 2, "c": True}
+        got = reconstruct_version(live, 4, updates, 2)
+        assert (got.values["details"], got.unavailable) == ({"a": 2}, ())
+        assert reconstruct_version(live, 4, updates, 1).values["details"] == {"a": 1}
+        assert changed_fields(updates[0].prior) == ["details"]
+
     def test_an_older_event_that_names_the_field_makes_it_available_again(self) -> None:
         updates = [
             _rev(3, {PRIOR_ERASED_KEY: ["details"]}),

@@ -117,6 +117,8 @@ def _minted_key_response(
         ),
         "default_context_name": default_context_name,
         "agent_id": str(new_key.agent_id) if new_key.agent_id else None,
+        # #2299: member mints never link a connector; kept for the shape.
+        "connector_id": str(new_key.connector_id) if new_key.connector_id else None,
     }
 
 

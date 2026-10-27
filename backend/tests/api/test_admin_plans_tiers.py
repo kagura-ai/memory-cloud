@@ -6,8 +6,9 @@ returns process-global ``PLAN_TIERS`` config and never touches the DB, so the
 a regression caught by ``MagicMock`` failing on awaited calls.
 
 Env-override coverage is via direct ``PLAN_TIERS`` monkeypatch because the
-override map is applied at module import time; mutating ``os.environ`` after
-import is a no-op (see ``config.plan_tiers._apply_settings_overrides``).
+override map is applied once, when the settings are first built; mutating
+``os.environ`` afterwards is a no-op (see
+``config.plan_tiers._apply_settings_overrides``).
 """
 
 from __future__ import annotations
@@ -144,7 +145,7 @@ def test_list_plan_tiers_exposes_new_quota_fields(client: TestClient) -> None:
 
 
 def test_list_plan_tiers_reflects_runtime_override(client: TestClient, monkeypatch) -> None:
-    """``_apply_settings_overrides`` runs at import time, so we monkeypatch
+    """``_apply_settings_overrides`` runs once per process, so we monkeypatch
     ``PLAN_TIERS`` directly to simulate an env-driven override taking
     effect. Locks in the "values from server, not hardcoded" contract.
     """

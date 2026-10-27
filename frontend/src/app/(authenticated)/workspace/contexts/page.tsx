@@ -488,7 +488,7 @@ export default function ContextsPage() {
       fetchContexts();
     } catch (err: unknown) {
       setCreateRefusal(err);
-      let errorMessage =
+      const errorMessage =
         err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates

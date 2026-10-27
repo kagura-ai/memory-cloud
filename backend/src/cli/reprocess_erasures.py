@@ -16,8 +16,8 @@ DATABASE_URL, QDRANT_*), e.g. inside the API container::
 Per erasure request that ran in Postgres (``complete``, or ``failed`` after
 its Postgres step committed), oldest first, one transaction:
 
-1. where the erased member wrote the live ``details`` of a memory someone
-   else authored, the last value someone else wrote is put back (a new
+1. where the erased member wrote live ``details`` keys of a memory someone
+   else authored, each goes back to its value from before their write (a new
    version, one ``erasure`` revision row; the vector payload's ``location``
    is patched right after the commit, and a patch that fails re-queues the
    memory for embedding, which rewrites the payload);
@@ -30,6 +30,16 @@ its Postgres step committed), oldest first, one transaction:
 The walk of 1 goes back past every erased member's edits (#2268) to the last
 value a surviving member wrote, so the result does not depend on which of
 two erasures that edited the same memory is processed first.
+
+Since v0.129.0 (#2275) 1 and 2 work per top-level ``details`` key: the keys
+whose value the erased member introduced — also where a later member's
+whole-dict edit carried them unchanged — go back (or are removed), keys a
+later member rewrote stay, and only the member's keys leave each prior.
+For an erasure that ran before v0.129.0 the state the member wrote was
+stripped whole, so a key they wrote and a later member carried cannot be
+told from the later member's own: it is kept and counted, never reverted
+(``details keys ambiguous ... kept``, printed by the plan as by the apply;
+the plan is enough to read the count).
 
 A request that changed gets one ``account_erasure_reprocess`` audit row
 (counts only). The command uses the pseudonym stored on the request. The one
@@ -201,6 +211,12 @@ class RequestChange:
     details_stripped: int
     scrub_marked: int
     embedding_requeued: int = 0
+    # #2275: the erased member's live details keys put back or removed (on
+    # ``details_restored`` + ``details_restored_unavailable`` memories), and
+    # the live keys kept because a state an erasure before v0.129.0 stripped
+    # whole may hold their value (never a change: nothing is written)
+    details_keys_reverted: int = 0
+    details_keys_ambiguous: int = 0
     # #2266: ``sync_restored_payloads``'s outcome after the commit (the
     # ``details_payload_*`` keys of the erasure summary); empty on a dry run
     payload: dict[str, int] = field(default_factory=dict)
@@ -253,6 +269,8 @@ class ReprocessResult:
     audit_kept: list[UUID] = field(default_factory=list)
     # #2298: requests with an email in use again: the rows naming it kept
     mentions_kept: list[UUID] = field(default_factory=list)
+    # #2275: requests with live details keys kept as ambiguous, and how many
+    ambiguous: list[tuple[UUID, int]] = field(default_factory=list)
 
     @property
     def changes(self) -> int:
@@ -650,6 +668,8 @@ async def _reprocess_one(
             details_stripped=strip.details_stripped,
             scrub_marked=strip.scrub_marked,
             embedding_requeued=restore.embedding_requeued,
+            details_keys_reverted=restore.keys_reverted,
+            details_keys_ambiguous=restore.keys_ambiguous,
             repaired=repaired,
             audit_logs_pseudonymized=audited,
             audit_email_recovered=email_recovered,
@@ -682,6 +702,8 @@ async def _reprocess_one(
                     "details_stripped": change.details_stripped,
                     "scrub_marked": change.scrub_marked,
                     "details_embedding_requeued": change.embedding_requeued,
+                    "details_keys_reverted": change.details_keys_reverted,
+                    "details_keys_ambiguous": change.details_keys_ambiguous,
                     "request_repaired": change.repaired,
                     "audit_logs_pseudonymized": change.audit_logs_pseudonymized,
                     "audit_mentions_pseudonymized": change.audit_mentions_pseudonymized,
@@ -708,6 +730,8 @@ async def _reprocess_one(
         details_restored_unavailable=change.details_restored_unavailable,
         details_stripped=change.details_stripped,
         scrub_marked=change.scrub_marked,
+        details_keys_reverted=change.details_keys_reverted,
+        details_keys_ambiguous=change.details_keys_ambiguous,
         request_repaired=change.repaired,
         audit_logs_pseudonymized=change.audit_logs_pseudonymized,
         audit_mentions_pseudonymized=change.audit_mentions_pseudonymized,
@@ -833,6 +857,8 @@ async def reprocess_erasures(
     def record(change: RequestChange) -> None:
         if change.audit_mentions_kept:
             result.mentions_kept.append(change.request_id)
+        if change.details_keys_ambiguous:
+            result.ambiguous.append((change.request_id, change.details_keys_ambiguous))
         if change.changes:
             result.changed.append(change)
 
@@ -954,6 +980,10 @@ def _print_plan(result: ReprocessResult) -> None:
             f"{c.details_stripped:8}  {c.scrub_marked:12}"
         )
     for c in result.changed:
+        if c.details_keys_reverted:
+            print(f"would revert details keys  {c.request_id}  {_keys_reverted(c)}")
+    _print_ambiguous(result)
+    for c in result.changed:
         if c.repaired:
             # The plan always runs as a dry run (``_oneshot.run_plan_apply``).
             print(f"would repair  {c.request_id}  {REPAIRED}")
@@ -992,6 +1022,10 @@ def _print_plan(result: ReprocessResult) -> None:
 
 
 def _print_applied(result: ReprocessResult) -> None:
+    for c in result.changed:
+        if c.details_keys_reverted:
+            print(f"reverted details keys  {c.request_id}  {_keys_reverted(c)}")
+    _print_ambiguous(result)
     for c in result.changed:
         if c.repaired:
             print(f"repaired  {c.request_id}  {REPAIRED}")
@@ -1039,6 +1073,20 @@ def _print_applied(result: ReprocessResult) -> None:
             print(line)
 
 
+def _keys_reverted(change: RequestChange) -> str:
+    memories = change.details_restored + change.details_restored_unavailable
+    return f"{change.details_keys_reverted} key(s) on {memories} memory(ies)"
+
+
+def _print_ambiguous(result: ReprocessResult) -> None:
+    """#2275: counts only — never a key name, a value or a pseudonym."""
+    for request_id, keys in result.ambiguous:
+        print(
+            f"details keys ambiguous  {request_id}  {keys} key(s) kept "
+            "(stripped history, see runbook)"
+        )
+
+
 def _audit_rows(change: RequestChange) -> str:
     line = f"{change.audit_logs_pseudonymized} row(s)"
     if change.audit_email_recovered is False:
@@ -1057,12 +1105,16 @@ def _summary(result: ReprocessResult) -> str:
     cleared = sum(c.audit_metadata_cleared for c in result.changed)
     notes = sum(c.note_repaired for c in result.changed)
     resynced = sum(c.payload_resync is not None for c in result.changed)
+    keys = sum(c.details_keys_reverted for c in result.changed)
+    ambiguous = sum(n for _, n in result.ambiguous)
     return (
         (
             f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
             f"{unavailable} cleared (unavailable), {stripped} revision prior(s) stripped, "
             f"{marked} marked scrubbed"
         )
+        + (f", {keys} details key(s) reverted" if keys else "")
+        + (f", {ambiguous} ambiguous key(s) kept" if ambiguous else "")
         + (f", {repaired} request row(s) repaired" if repaired else "")
         + (f", {audited} audit row(s) pseudonymized" if audited else "")
         + (f", {mentions} audit mention(s) pseudonymized" if mentions else "")

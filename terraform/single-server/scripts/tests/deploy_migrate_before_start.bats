@@ -13,6 +13,8 @@
 #      run has no --no-build), when the image compose would run is not the one
 #      Step 1 tagged, or is not present locally
 #   4. --rollback never runs a migration
+#   5. a migration that fails on a lock timeout (#2300) is retried with
+#      backoff, up to 3 attempts; any other failure is not retried
 #
 # deploy.sh guards `main` behind BASH_SOURCE, so the real cmd_deploy is driven
 # with every step past the image/migrate/start calls stubbed out. No docker.
@@ -57,11 +59,30 @@ setup() {
 single-server-api-green
 qdrant/qdrant:v1.19.1"
 
-    # Record every compose call; the migration exits with $MIGRATE_RC.
+    # Record every compose call; the migration exits with $MIGRATE_RC, or, when
+    # $MIGRATE_SEQ lists outcomes (lock | fail | ok, one per line), with the
+    # next one. The migration runs in a pipeline (a subshell), so the
+    # sequence lives in a file.
+    export MIGRATE_SEQ="$TMP/migrate_seq"
     dc() {
         echo "dc $*" >> "$CALLS"
         case "${1:-}" in
-            run) return "$MIGRATE_RC" ;;
+            run)
+                if [ -s "$MIGRATE_SEQ" ]; then
+                    local next
+                    next="$(head -1 "$MIGRATE_SEQ")"
+                    sed -i 1d "$MIGRATE_SEQ"
+                    case "$next" in
+                        lock)
+                            echo "sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) canceling statement due to lock timeout"
+                            return 1 ;;
+                        fail)
+                            echo "sqlalchemy.exc.ProgrammingError: column \"x\" does not exist"
+                            return 1 ;;
+                    esac
+                    return 0
+                fi
+                return "$MIGRATE_RC" ;;
             config) printf '%s\n' "$RESOLVED_IMAGES" ;;
         esac
         return 0
@@ -124,6 +145,50 @@ line_of() { grep -n -F -- "$1" "$CALLS" | head -1 | cut -d: -f1; }
     ! grep -q "dc up" "$CALLS" || return 1
     ! grep -q "marker green" "$CALLS" || return 1
     ! grep -q "caddy" "$CALLS" || return 1
+}
+
+# Migration outcomes for the next `dc run` calls, and a sleep that records.
+migrate_outcomes() {
+    printf '%s\n' "$@" > "$MIGRATE_SEQ"
+    sleep() { echo "sleep $*" >> "$CALLS"; }
+}
+
+@test "a lock timeout is retried with backoff and the deploy goes on" {
+    migrate_outcomes lock ok
+    run cmd_deploy
+    [ "$status" -eq 0 ] || return 1
+    [ "$(grep -c "alembic upgrade head" "$CALLS")" -eq 2 ] || return 1
+    [[ "$output" == *"Migration attempt 1/3 hit a lock timeout; retrying in 15s"* ]] || return 1
+    grep -qx "sleep 15" "$CALLS" || return 1
+    local migrate up
+    migrate="$(grep -n -F "alembic upgrade head" "$CALLS" | tail -1 | cut -d: -f1)"
+    up="$(line_of "dc up -d --no-deps api-green")"
+    [ -n "$up" ] && [ "$migrate" -lt "$up" ] || return 1
+}
+
+@test "a failure that is not a lock timeout is not retried" {
+    migrate_outcomes fail ok
+    run cmd_deploy
+    [ "$status" -ne 0 ] || return 1
+    [ "$(grep -c "alembic upgrade head" "$CALLS")" -eq 1 ] || return 1
+    [[ "$output" == *"alembic upgrade head failed; api-green was not started"* ]] || return 1
+    [[ "$output" != *"retrying"* ]] || return 1
+    ! grep -q "^sleep" "$CALLS" || return 1
+    ! grep -q "dc up" "$CALLS" || return 1
+}
+
+@test "three lock timeouts abort before the new color is started" {
+    migrate_outcomes lock lock lock ok
+    run cmd_deploy
+    [ "$status" -ne 0 ] || return 1
+    [ "$(grep -c "alembic upgrade head" "$CALLS")" -eq 3 ] || return 1
+    [[ "$output" == *"Migration attempt 1/3 hit a lock timeout; retrying in 15s"* ]] || return 1
+    [[ "$output" == *"Migration attempt 2/3 hit a lock timeout; retrying in 45s"* ]] || return 1
+    [[ "$output" == *"lock timeout on all 3 attempts"* ]] || return 1
+    [ "$(grep -c "^sleep" "$CALLS")" -eq 2 ] || return 1
+    grep -qx "sleep 45" "$CALLS" || return 1
+    ! grep -q "dc up" "$CALLS" || return 1
+    ! grep -q "marker green" "$CALLS" || return 1
 }
 
 registry_env() {

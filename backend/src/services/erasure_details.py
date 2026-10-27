@@ -3,7 +3,14 @@
 An ``updated`` row of ``memory_revisions`` holds in ``prior`` the values its
 edit OVERWROTE, so the ``details`` a subject wrote sit in the prior of the
 next edit that changed ``details`` after theirs — not in the subject's own
-row, whose prior is the previous writer's.
+row, whose prior is the previous writer's — and, since every write replaces
+the whole dict, in the priors of every later edit that carried their keys
+unchanged. On memories others authored the restore and the strip work per
+top-level key (#2275): ``details_provenance`` replays each memory's log and
+attributes every key's value to whoever introduced it. That replay replaces
+the whole-value walk of #2244 / #2266 (and its ``undone_by`` block heuristic
+for session rollbacks from before #2266: a value match instead, exact unless
+the rolled-back session itself re-wrote a key to an earlier value).
 
 Module functions, no service instance, so that account erasure
 (``AccountErasureService._erase_memory_revisions``), restoring an erased
@@ -19,11 +26,18 @@ past erasures by pseudonym (#2243) share one definition:
 - ``pseudonymize_revision_actor(db, user_id, pseudonym)`` — takes the raw sub
   only; a re-run by pseudonym never calls it (it would hash the hash).
 - ``restore_editor_details(db, subject, *, actor, dry_run)`` (#2244) — where
-  the subject wrote the live ``details`` of a memory someone else authored,
-  put back the last value someone else wrote. Like the strip, a function of
-  one subject string; ``actor`` is always the pseudonym.
+  the subject wrote live ``details`` keys of a memory someone else authored,
+  put each back to the value from before their write (per key since #2275:
+  a later member's whole-dict edit that carried the key unchanged does not
+  make it theirs). Like the strip, a function of one subject string;
+  ``actor`` is always the pseudonym. Each restore writes a ``writer='erasure'``
+  row whose prior is ``{"details": <the overwritten value minus the
+  subject's keys>, "erased_details_keys": <their digests>, "restored_from":
+  <version>}`` (before v0.129.0: ``{"erased": ["details"], "restored_from":
+  <version>}``).
 - ``erase_subject_details(db, subject, ...)`` (#2268) — the restore, then
-  the strip, from one read of the logs under the memory locks: what the live
+  the strip, from one read of the logs under the memory locks and one
+  ``details_provenance.plan_details_erasure`` (#2275): what the live
   erasure and the re-run call.
 - ``sync_restored_payloads(db, syncs, report)`` (#2266) — the restored
   memories' vector payloads, patched after the caller's commit: no
@@ -61,6 +75,7 @@ it.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -74,6 +89,7 @@ from sqlalchemy import (
     ColumnElement,
     CompoundSelect,
     Select,
+    Text,
     any_,
     bindparam,
     case,
@@ -106,11 +122,18 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     REVISION_KIND_UPDATED,
     REVISION_WRITER_ERASURE,
-    REVISION_WRITER_ROLLBACK,
     Memory,
     MemoryRevision,
 )
+from services.details_provenance import (
+    DetailsEdit,
+    DetailsErasurePlan,
+    PriorStrip,
+    details_key_digest,
+    plan_details_erasure,
+)
 from services.memory_versions import (
+    PRIOR_ERASED_DETAILS_KEYS_KEY,
     PRIOR_ERASED_KEY,
     PRIOR_RESTORED_FROM_KEY,
     PRIOR_SCRUBBED_KEY,
@@ -689,8 +712,9 @@ class StripCounts:
     """Rowcounts of ``strip_subject_details``.
 
     Attributes:
-        details_stripped: Revision rows whose ``prior.details`` was replaced
-            by the erased marker.
+        details_stripped: Revision rows whose ``prior.details`` lost the
+            subject's keys (memories others authored, #2275) or was replaced
+            by the erased marker (memories the subject authored).
         scrub_marked: ``updated`` rows of the subject's memories that got the
             scrubbed marker.
     """
@@ -759,31 +783,22 @@ def _authored_by(
 def strip_predicate(
     row: AliasedClass[MemoryRevision],
     subject: str,
-    held_ids: Sequence[int],
     *,
     existed_at: datetime | None = None,
 ) -> tuple[ColumnElement[bool], ...]:
-    """Revision rows whose ``prior.details`` is a value ``subject`` wrote, or
-    any ``prior.details`` on a memory ``subject`` authored.
+    """Revision rows of a memory ``subject`` authored that still hold a
+    ``prior.details`` (the authored arm: stripped whole).
 
-    ``row`` is the row under test. ``held_ids`` are the rows whose prior
-    holds a value the subject wrote on a memory they did not author
-    (``held_details_ids``, read under the memory locks). ``subject_memory_ids``
-    is a pre-filter that drives the plan from the subject's own rows; it
-    contains both arms by construction. ``prior ? 'details'`` makes a re-run
-    match nothing. ``existed_at`` bounds the authored arm only
-    (``_authored_by``): a row written after the erasure that holds the
-    subject's value — the next edit over a value they left live before
-    #2244 — is stripped whenever it was written.
+    The keys the subject wrote on memories others authored leave their
+    priors per key (``plan_details_erasure``, #2275), not through this
+    predicate. ``subject_memory_ids`` is a pre-filter that drives the plan
+    from the subject's own rows. ``prior ? 'details'`` makes a re-run match
+    nothing. ``existed_at`` bounds it (``_authored_by``).
     """
     return (
         row.memory_id.in_(subject_memory_ids(subject)),
         row.prior.has_key("details"),
-        or_(
-            row.id
-            == any_(bindparam("held_ids", list(held_ids), type_=ARRAY(BigInteger), unique=True)),
-            _authored_by(row, subject, existed_at),
-        ),
+        _authored_by(row, subject, existed_at),
     )
 
 
@@ -901,70 +916,73 @@ async def strip_subject_details(
     *,
     existed_at: datetime | None = None,
     dry_run: bool = False,
-    rows: Sequence[DetailsEdit] | None = None,
+    plan: DetailsErasurePlan | None = None,
 ) -> StripCounts:
     """Strip ``subject``'s ``details`` out of the revision log.
 
-    Two UPDATEs, in this order:
+    Three UPDATEs, in this order:
 
-    1. ``prior.details`` is removed from every revision of a memory the
-       subject authored and from every revision that holds a ``details`` the
-       subject wrote; the key is replaced by ``{"erased": ["details"]}``
+    1. On memories others authored (#2275): the subject's keys leave every
+       prior that holds them (``plan.strips``: the states in which the
+       replay attributes a key's value to the subject — written by them, or
+       carried unchanged by a later whole-dict edit, or put back over theirs
+       by a session rollback). The rest of each dict stays — a rebuilt
+       version shows the other members' keys — and the removed keys'
+       digests join ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (no key name; read
+       only by a later erasure's replay). One lock phase over all those
+       rows, in id order, then one ``jsonb - text[]`` UPDATE per distinct
+       key set (``_strip_editor_keys``).
+    2. On memories the subject authored: ``prior.details`` is removed from
+       every revision and replaced by ``{"erased": ["details"]}``
        (``PRIOR_ERASED_KEY``) so a rebuilt earlier version reports its
        details as unavailable instead of passing another value off as it.
        The overwritten text stays, as the memory text itself does.
-    2. every ``updated`` row of a memory the subject authored gets
+    3. every ``updated`` row of a memory the subject authored gets
        ``{"scrubbed": ["details"]}`` (``PRIOR_SCRUBBED_KEY``): the live
        ``details`` that a rebuild starts from is NULLed by the memory scrub,
        so no version below those events can read it either.
 
-    Which prior holds a value the subject wrote is decided by provenance,
-    the walk ``restore_targets`` uses (``held_details_ids``): a session
-    rollback or an erasure row puts back an older value and writes none of
-    its own, so the prior of the next edit above it is the value of whoever
-    wrote that older one — not the rollback's requester's (review B3).
-
-    It first locks the subject's memories (``lock_subject_memories``), so
-    no edit adds a revision to their logs until the caller commits, and
-    reads their logs under those locks. During erasure this runs BEFORE the
-    subject's events are pseudonymized (1 finds their edits by
-    ``actor_user_id``) and before the memory scrub (1 and 2 find the
-    authored memories by ``memories.user_id``).
+    Without ``plan`` it first locks the subject's memories
+    (``lock_subject_memories``), so no edit adds a revision to their logs
+    until the caller commits, and reads their logs under those locks. During
+    erasure this runs BEFORE the subject's events are pseudonymized (1 finds
+    their edits by ``actor_user_id``) and before the memory scrub (2 and 3
+    find the authored memories by ``memories.user_id``).
 
     Args:
         db: The session; the caller owns the transaction.
         subject: The raw sub during erasure, or the stored salted pseudonym
             when re-run over a past erasure (#2243).
         existed_at: On a re-run by pseudonym, the erasure's
-            ``memory_scrub_at`` (or, before #2268, its completion): the
-            authored arm of both statements then reaches only rows written
-            by then (``_authored_by``), so what surviving members wrote on
-            the scrubbed memories since stays as it is. None during erasure
-            (every row predates it).
-        dry_run: Count the rows the two UPDATEs would change; write and
-            lock nothing.
-        rows: The subject's ``_updated_rows``, read by the caller under the
-            memory locks (``erase_subject_details``, #2268); the caller
-            locked, so nothing is locked or read here. None reads them.
+            ``memory_scrub_at`` (or, before #2268, its completion): 2 and 3
+            then reach only rows written by then (``_authored_by``), so what
+            surviving members wrote on the scrubbed memories since stays as
+            it is. None during erasure (every row predates it). 1 needs no
+            bound: a key attributed to the subject is theirs whenever it was
+            written.
+        dry_run: Count the rows the UPDATEs would change; write and lock
+            nothing.
+        plan: The subject's ``plan_details_erasure``, built by the caller
+            from the logs read under the memory locks
+            (``erase_subject_details``); nothing is locked or read for 1
+            then. None builds it here.
 
     Returns:
-        The rowcounts of the two UPDATEs (or the counts they would have);
-        both 0 on a re-run.
+        The rowcounts (or the counts they would have); both 0 on a re-run.
     """
-    if rows is None:
+    if plan is None:
         if not dry_run:
             await lock_subject_memories(db, subject)
-        rows = await _updated_rows(db, subject)
-    held = held_details_ids(rows, subject)
+        plan = await plan_subject_details(db, subject)
     if dry_run:
         return StripCounts(
-            details_stripped=await _count(
-                db, lambda row: strip_predicate(row, subject, held, existed_at=existed_at)
-            ),
+            details_stripped=len(plan.strips)
+            + await _count(db, lambda row: strip_predicate(row, subject, existed_at=existed_at)),
             scrub_marked=await _count(
                 db, lambda row: scrub_mark_predicate(row, subject, existed_at=existed_at)
             ),
         )
+    editor_stripped = await _strip_editor_keys(db, plan.strips)
     stripped = cast(
         CursorResult[Any],
         await db.execute(
@@ -972,7 +990,7 @@ async def strip_subject_details(
             .where(
                 MemoryRevision.id.in_(
                     locked_revision_ids(
-                        lambda row: strip_predicate(row, subject, held, existed_at=existed_at)
+                        lambda row: strip_predicate(row, subject, existed_at=existed_at)
                     )
                 )
             )
@@ -1001,7 +1019,88 @@ async def strip_subject_details(
             )
         ),
     )
-    return StripCounts(details_stripped=stripped.rowcount or 0, scrub_marked=marked.rowcount or 0)
+    return StripCounts(
+        details_stripped=editor_stripped + (stripped.rowcount or 0),
+        scrub_marked=marked.rowcount or 0,
+    )
+
+
+async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> int:
+    """Remove each ``PriorStrip``'s keys from its row's ``prior.details`` (#2275).
+
+    The rows are locked first, all of them in one id-ordered ``FOR UPDATE``
+    (the order every revision statement takes, #2242); every one belongs
+    to a memory the caller holds. Then one UPDATE per distinct key set:
+    ``jsonb_set(prior, '{details}', prior->'details' - keys)``, and the keys'
+    digests appended to ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's
+    walk reads them as an erased member's values, not as removals). The guards
+    keep a row whose ``details`` is gone or not an object (NULL: ``-`` on a
+    scalar raises) as it is.
+
+    Returns:
+        How many rows were rewritten.
+    """
+    if not strips:
+        return 0
+    await db.execute(
+        select(MemoryRevision.id)
+        .where(
+            MemoryRevision.id
+            == any_(
+                bindparam(
+                    "strip_ids", [s.row_id for s in strips], type_=ARRAY(BigInteger), unique=True
+                )
+            )
+        )
+        .order_by(MemoryRevision.id)
+        .with_for_update()
+    )
+    groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    for strip in strips:
+        groups[strip.keys].append(strip.row_id)
+    total = 0
+    details = MemoryRevision.prior["details"]
+    for keys in sorted(groups):
+        result = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(MemoryRevision)
+                .where(
+                    MemoryRevision.id
+                    == any_(bindparam("ids", groups[keys], type_=ARRAY(BigInteger), unique=True)),
+                    MemoryRevision.prior.has_key("details"),
+                    func.jsonb_typeof(details) == "object",
+                )
+                .values(
+                    prior=func.jsonb_set(
+                        func.jsonb_set(
+                            MemoryRevision.prior,
+                            bindparam("path", ["details"], type_=ARRAY(Text), unique=True),
+                            details.op("-", return_type=JSONB)(
+                                bindparam("keys", list(keys), type_=ARRAY(Text), unique=True)
+                            ),
+                            type_=JSONB,
+                        ),
+                        bindparam(
+                            "marker_path",
+                            [PRIOR_ERASED_DETAILS_KEYS_KEY],
+                            type_=ARRAY(Text),
+                            unique=True,
+                        ),
+                        func.coalesce(
+                            MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY],
+                            type_coerce([], JSONB),
+                        ).op("||", return_type=JSONB)(
+                            type_coerce(sorted(details_key_digest(k) for k in keys), JSONB)
+                        ),
+                        type_=JSONB,
+                    )
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        total += result.rowcount or 0
+    return total
 
 
 async def pseudonymize_revision_actor(db: AsyncSession, user_id: str, pseudonym: str) -> int:
@@ -1037,64 +1136,9 @@ async def pseudonymize_revision_actor(db: AsyncSession, user_id: str, pseudonym:
 
 
 # ---------------------------------------------------------------------------
-# #2244: the live details an erased member wrote on another author's memory
+# #2244, #2275: the live details keys an erased member wrote on another
+# author's memory — per key, replayed from the log (``details_provenance``)
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DetailsEdit:
-    """One ``updated`` revision of a memory's log (``_updated_rows``).
-
-    Attributes:
-        memory_id / version / id: The row's position in its memory's log.
-        actor_user_id: Who wrote the edit (raw sub, or a pseudonym once erased).
-        writer: One of ``REVISION_WRITERS``.
-        details: ``prior.details`` — the value the edit overwrote (None when
-            it was NULL, when an erasure stripped it, or when the edit did not
-            change ``details``).
-        erased: An earlier erasure stripped ``prior.details`` (it lists
-            ``details`` under ``PRIOR_ERASED_KEY``): the value is unavailable.
-        undone_by: The session rollback that reversed this edit, if any
-            (``MemoryRevision.undone_by``).
-        restored_from: On a put-back row (``erasure``, and ``rollback`` since
-            #2266), ``prior.restored_from``: the lowest version of the block
-            of edits it reverted.
-        details_changed: The edit changed ``details``
-            (``revision_edited_details``). A row that did not is still in the
-            walk (#2266): it ends a rollback block like any foreign edit, but
-            it wrote no ``details`` value.
-    """
-
-    memory_id: UUID
-    version: int
-    id: int
-    actor_user_id: str
-    writer: str
-    details: Any
-    erased: bool
-    undone_by: int | None = None
-    restored_from: int | None = None
-    details_changed: bool = True
-
-
-@dataclass(frozen=True)
-class RestoreTarget:
-    """What ``restore_editor_details`` puts back on one memory.
-
-    Attributes:
-        memory_id: The memory.
-        details: The last ``details`` a surviving member wrote (or the
-            creation value), or None when ``unavailable``.
-        unavailable: That value was itself removed by an earlier erasure.
-        from_version: The version of the lowest edit in the trailing run of
-            erased members' details edits (the row whose prior is
-            ``details``); the erasure row records it as ``restored_from``.
-    """
-
-    memory_id: UUID
-    details: Any
-    unavailable: bool
-    from_version: int
 
 
 @dataclass(frozen=True)
@@ -1118,11 +1162,18 @@ class RestoreReport:
     and what ``sync_restored_payloads`` did after the commit (#2266).
 
     Attributes:
-        restored: Memories whose ``details`` went back to another member's
-            value (NULL included, when that value was NULL).
-        unavailable: Memories whose ``details`` became NULL (a time memory:
-            only its live trigger) because the value to go back to was
-            removed by an earlier erasure.
+        restored: Memories whose ``details`` lost the subject's keys: each
+            went back to the value from before their write, or was removed
+            when there was none (#2275; NULL when nothing is left over a
+            NULL value).
+        unavailable: Memories where the value to go back to for at least one
+            key was removed by an earlier erasure: the key was removed. Not
+            counted in ``restored``.
+        keys_reverted: The subject's live keys put back or removed, over all
+            those memories.
+        keys_ambiguous: Live keys kept because a state an erasure before
+            v0.129.0 stripped whole may hold the subject's value
+            (``plan_details_erasure``); never reverted.
         embedding_requeued: Restored live memories whose embedding had not
             succeeded, re-queued in the restore's transaction so the next
             embed writes the payload from the restored row. Always 0 on a
@@ -1151,6 +1202,8 @@ class RestoreReport:
 
     restored: int = 0
     unavailable: int = 0
+    keys_reverted: int = 0
+    keys_ambiguous: int = 0
     embedding_requeued: int = 0
     payload_synced: int = 0
     payload_skipped_tombstone: int = 0
@@ -1239,199 +1292,12 @@ def payload_counts(report: RestoreReport) -> dict[str, int]:
     }
 
 
-def _past_put_back(edits: Sequence[DetailsEdit], i: int) -> int:
-    """The index past the put-back row ``edits[i]`` and the block it reverted.
-
-    ``edits`` are one memory's ``updated`` rows, newest first — every one,
-    not only the details edits (#2266): a foreign edit of another field ends
-    a rollback block. A put-back row writes no content of its own: it puts
-    back the value from before a block of edits right below it.
-
-    - A row with ``restored_from`` (every ``erasure`` row, #2244; every
-      ``rollback`` row written since #2266) reverted every edit from that
-      version up.
-    - A ``rollback`` row without it (written before #2266) reverted the
-      contiguous rows right below it that share the ``undone_by`` of the
-      first of them — a session rollback reverses a memory's whole session
-      block or skips it, and a block is the top of the log when it is
-      reverted. Not exact: a rollback record id is reused across calls, so
-      an event the same record skipped earlier can sit right below the
-      block with the same mark. With no ``undone_by`` there (nothing to tie
-      it to), the row alone is skipped.
-    - An ``erasure`` row without it (none is written without it): the row
-      alone is skipped.
-    """
-    edit = edits[i]
-    i += 1
-    if edit.restored_from is not None:
-        while i < len(edits) and edits[i].version >= edit.restored_from:
-            i += 1
-    elif edit.writer == REVISION_WRITER_ROLLBACK:
-        mark = edits[i].undone_by if i < len(edits) else None
-        if mark is not None:
-            while i < len(edits) and edits[i].undone_by == mark:
-                i += 1
-    return i
-
-
-def _is_put_back(edit: DetailsEdit) -> bool:
-    return edit.writer in (REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK)
-
-
-def _authored_edits(edits: Sequence[DetailsEdit]) -> list[DetailsEdit]:
-    """The details edits whose written value can be live, newest first.
-
-    ``edits`` are one memory's ``updated`` rows, newest first. Each put-back
-    row is dropped together with the block it reverted (``_past_put_back``),
-    and so is every row that changed no ``details``, so the newest edit left
-    is the one that wrote the live value, and the prior of each edit left is
-    the value the next one left below it wrote.
-    """
-    authored: list[DetailsEdit] = []
-    i = 0
-    while i < len(edits):
-        if _is_put_back(edits[i]):
-            i = _past_put_back(edits, i)
-        else:
-            if edits[i].details_changed:
-                authored.append(edits[i])
-            i += 1
-    return authored
-
-
-def _writer_of_value_below(edits: Sequence[DetailsEdit], i: int) -> DetailsEdit | None:
-    """The edit that wrote the value live just above ``edits[i]`` (and
-    below), or None when it is the creation value.
-
-    The first edit of ``_authored_edits(edits[i:])``, without building the
-    list.
-    """
-    while i < len(edits):
-        if _is_put_back(edits[i]):
-            i = _past_put_back(edits, i)
-        elif edits[i].details_changed:
-            return edits[i]
-        else:
-            i += 1  # wrote no details value
-    return None
-
-
-def held_details_ids(rows: Iterable[DetailsEdit], subject: str) -> list[int]:
-    """The details edits whose prior is a value ``subject`` wrote.
-
-    Pure. ``rows`` are the ``updated`` rows of memories the subject edited
-    and did not author (``_updated_rows``), in any order; only details edits
-    can hold a value. An edit's prior is
-    the live value right before it, written by the newest authored edit
-    below it once put-back rows are dropped with their blocks — the walk of
-    ``restore_targets`` (``_authored_edits``). A rollback the subject
-    requested is therefore not their edit: the value it put back, and the
-    prior of the edit after it, is whoever wrote that value (review B3). An
-    erasure row is not either: the prior above it is the value of the edit
-    below the block it reverted. A put-back row's own prior is the value it
-    replaced, attributed the same way.
-
-    Returns:
-        The row ids, ascending. A row whose prior no longer holds
-        ``details`` (``erased``: stripped already, or an erasure row) is
-        never among them.
-    """
-    by_memory: dict[UUID, list[DetailsEdit]] = defaultdict(list)
-    for row in rows:
-        by_memory[row.memory_id].append(row)
-    held: list[int] = []
-    for memory_rows in by_memory.values():
-        edits = sorted(memory_rows, key=lambda e: (e.version, e.id), reverse=True)
-        for i, edit in enumerate(edits):
-            if not edit.details_changed or edit.erased:
-                continue  # no details prior, stripped already, or an erasure row
-            writer = _writer_of_value_below(edits, i + 1)
-            if writer is not None and writer.actor_user_id == subject:
-                held.append(edit.id)
-    return sorted(held)
-
-
-def restore_targets(
-    rows: Iterable[DetailsEdit], subject: str, *, erased_actors: Collection[str] = frozenset()
-) -> list[RestoreTarget]:
-    """Where ``subject`` wrote a memory's live ``details``: the value to put back.
-
-    Pure. ``rows`` are the ``updated`` rows of the candidate memories, in
-    any order (``_updated_rows``). Per memory, newest first by ``(version, id)``, put-back rows are
-    dropped with the blocks they reverted (``_authored_edits``): what is
-    left are the edits whose value was written by their actor, and the
-    newest of them wrote the live value. That edit must be the subject's,
-    else the live value is not theirs and the memory is left alone — a
-    rollback the subject requested put back someone else's value, and an
-    erasure row put back the value of the edit below the block it names.
-    The walk goes down the trailing run of edits by erased members — the
-    subject and every one of ``erased_actors`` (edits of other fields are
-    not among them); the prior of the run's lowest edit is the last value a
-    surviving member wrote — or the creation value, when every authored
-    details edit is by an erased member.
-
-    Whole-``details`` revert equals the per-key one: ``prior`` holds the
-    whole previous value, and every value written above that lowest edit
-    is an erased member's or one put back over theirs, so a key differs
-    between the value put back and the live one only where an erased member
-    wrote it.
-
-    When that prior was stripped by an earlier erasure, the value is
-    unavailable: the target is ``None`` with ``unavailable=True``. That is
-    the case only when the prior below the whole run is gone — the author
-    was erased too (their erasure strips every prior of the memories they
-    authored), or an erasure stripped it before its writer's edit was known
-    to be an erased member's.
-
-    ``erased_actors`` (#2243, #2268): pseudonyms of other members whose
-    erasure ran in Postgres (``erased_pseudonyms``). Their edits are walked
-    past like the subject's, so a value one of them wrote never becomes live
-    again (an erasure from before the #2235 fix left such priors behind),
-    and the result is the same whichever erasure is processed first: A then
-    B, or B then A, ends with the surviving member's value live and one
-    ``erasure`` row — the second finds the first one's row on top, drops
-    the block it names (``restored_from`` = the lowest version of the whole
-    run) and sees no edit of its subject left as the newest.
-
-    Returns:
-        One target per memory to restore, in memory id order.
-    """
-    by_memory: dict[UUID, list[DetailsEdit]] = defaultdict(list)
-    for row in rows:
-        by_memory[row.memory_id].append(row)
-    erased = {subject, *erased_actors}
-    targets: list[RestoreTarget] = []
-    for memory_id in sorted(by_memory):
-        edits = _authored_edits(
-            sorted(by_memory[memory_id], key=lambda e: (e.version, e.id), reverse=True)
-        )
-        if not edits or edits[0].actor_user_id != subject:
-            continue  # the live value must be the subject's
-        lowest = edits[0]
-        for edit in edits[1:]:
-            if edit.actor_user_id not in erased:
-                break  # a surviving member wrote the value in lowest's prior
-            lowest = edit
-        # its prior was stripped: the value from before the run is gone
-        unavailable = lowest.erased
-        targets.append(
-            RestoreTarget(
-                memory_id=memory_id,
-                details=None if unavailable else lowest.details,
-                unavailable=unavailable,
-                from_version=lowest.version,
-            )
-        )
-    return targets
-
-
 async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
     """The ``updated`` rows of the memories ``subject`` edited and did not author.
 
-    The input of both walks: ``restore_targets`` and ``held_details_ids``.
-    Every ``updated`` row, ``details_changed`` set on those that changed
-    ``details`` (#2266): a rollback block ends at the first row below it
-    that is not part of it, whatever field that row changed.
+    The input of ``plan_details_erasure`` (#2275). Every ``updated`` row,
+    ``details_changed`` set on those that changed ``details``; the replay
+    reads those only.
 
     Index-driven: the subject's rows by ``idx_memory_revisions_actor``, then
     each memory's log by ``idx_memory_revisions_memory``. A legacy row
@@ -1449,7 +1315,7 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 MemoryRevision.writer,
                 MemoryRevision.prior["details"].label("details"),
                 MemoryRevision.prior[PRIOR_ERASED_KEY].has_key("details").label("erased"),
-                MemoryRevision.undone_by,
+                MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY].label("erased_keys"),
                 MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].as_integer().label("restored_from"),
                 revision_edited_details(MemoryRevision).label("details_changed"),
             )
@@ -1472,7 +1338,7 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
             writer=row.writer,
             details=row.details,
             erased=bool(row.erased),
-            undone_by=row.undone_by,
+            erased_keys=frozenset(row.erased_keys if isinstance(row.erased_keys, list) else ()),
             restored_from=row.restored_from,
             details_changed=bool(row.details_changed),
         )
@@ -1660,6 +1526,38 @@ def _with_live_trigger(memory: Memory, value: Any) -> tuple[Any, bool]:
     return {**(value if isinstance(value, dict) else {}), "trigger": trigger_window(live)}, True
 
 
+async def plan_subject_details(
+    db: AsyncSession,
+    subject: str,
+    *,
+    erased_actors: Collection[str] = frozenset(),
+    rows: Sequence[DetailsEdit] | None = None,
+) -> DetailsErasurePlan:
+    """``plan_details_erasure`` over the logs of the memories ``subject``
+    edited and did not author (#2275).
+
+    Reads ``_updated_rows`` (unless given) and the live ``details`` and
+    author of each of those memories — under the caller's memory locks
+    during erasure, as of the statement on a dry run.
+    """
+    if rows is None:
+        rows = await _updated_rows(db, subject)
+    ids = sorted({row.memory_id for row in rows})
+    if not ids:
+        return DetailsErasurePlan()
+    live = {
+        memory_id: (details, author)
+        for memory_id, details, author in (
+            await db.execute(
+                select(Memory.id, Memory.details, Memory.user_id)
+                .where(Memory.id.in_(ids))
+                .order_by(Memory.id)
+            )
+        ).all()
+    }
+    return plan_details_erasure(rows, live, subject, erased_actors=erased_actors)
+
+
 async def restore_editor_details(
     db: AsyncSession,
     subject: str,
@@ -1667,46 +1565,49 @@ async def restore_editor_details(
     actor: str,
     dry_run: bool = False,
     erased_actors: Collection[str] = frozenset(),
-    rows: Sequence[DetailsEdit] | None = None,
+    plan: DetailsErasurePlan | None = None,
 ) -> RestoreReport:
-    """Put back the ``details`` ``subject`` wrote on memories others authored.
+    """Put back the ``details`` keys ``subject`` wrote on memories others authored.
 
-    Where the subject made the newest ``details`` edit of a memory another
-    member authored, the live ``details`` goes back to the last value someone
-    else wrote (``restore_targets``: the subject's trailing run of edits is
-    walked past; a value an earlier erasure removed gives NULL). Memories the
+    Per key (#2275, ``plan_details_erasure``): every live key whose value
+    the subject introduced — wrote, or left live under a later member's
+    whole-dict edit that carried it unchanged — goes back to the value it
+    had before their write (past every value an erased member wrote), or is
+    removed when it had none. Keys a later member rewrote stay theirs; keys
+    the subject removed stay removed. A key whose value to go back to an
+    earlier erasure stripped is removed (``unavailable``). Memories the
     subject authored are not touched here: ``_scrub_surviving_memories``
     NULLs their ``details``.
 
     Each restore is an edit of its own: ``version`` + 1, ``updated_at`` now,
     and one ``updated`` revision row with ``writer='erasure'``, ``actor`` as
-    its actor and ``{"erased": ["details"], "restored_from": <from_version>}``
-    as its prior — "details changed; the overwritten value is unavailable;
-    the edits from that version up were reverted" — so the subject's value
-    is in no prior, a later erasure can tell whose value is live,
-    ``expected_version`` protects the restored value from a stale edit, and a rebuilt version at or above the subject's edits reads
-    ``details`` as unavailable. The memory's last writer (``agent_id`` /
-    ``session_id``) becomes none. A restore that would write the live value
-    again is skipped.
+    its actor and ``{"details": <the overwritten value minus the subject's
+    keys>, "erased_details_keys": <their digests>, "restored_from":
+    <from_version>}`` as its prior — stripped like
+    every other prior, so the subject's value is in none, a later erasure
+    can tell whose keys are live, ``expected_version`` protects the restored
+    value from a stale edit, and a rebuilt version shows the other members'
+    keys. The memory's last writer (``agent_id`` / ``session_id``) becomes
+    none. A restore that would write the live value again is skipped.
 
-    Order and locks: the subject's memories are locked first, in id order
-    (``lock_subject_memories``, the order every edit and session rollback
-    takes), so the log read after it is exact and no edit lands in between.
-    During erasure this runs BEFORE ``strip_subject_details`` and
-    ``pseudonymize_revision_actor``: it finds the subject's edits by
-    ``actor_user_id == subject``, and the new row's actor is the pseudonym,
-    so neither statement touches it. The value it reads (the prior of the
-    lowest row of the subject's run) is one the strip leaves alone. The
-    locks are held until the caller commits; a subject with many edits holds
-    many rows for that long, which an erasure accepts. No vector-store call
-    happens here (#2266): a restored live row whose embedding has not
-    succeeded is re-queued in this transaction, and every restored row is
-    listed in ``report.to_sync`` for ``sync_restored_payloads``, which the
-    caller runs after its commit.
+    Order and locks: without ``plan``, the subject's memories are locked
+    first, in id order (``lock_subject_memories``, the order every edit and
+    session rollback takes), so the log read after it is exact and no edit
+    lands in between. During erasure this runs BEFORE
+    ``strip_subject_details`` and ``pseudonymize_revision_actor``: it finds
+    the subject's edits by ``actor_user_id == subject``, and the new row's
+    actor is the pseudonym. The locks are held until the caller commits. No
+    vector-store call happens here (#2266): a restored live row whose
+    embedding has not succeeded is re-queued in this transaction, and every
+    restored row is listed in ``report.to_sync`` for
+    ``sync_restored_payloads``, which the caller runs after its commit.
 
-    The resource indexer rewrites ``details`` without a revision; on such a
-    row the restore may replace the indexer's value until its next run
-    writes it again. No special case.
+    The resource indexer (and a Sleep merge) rewrites ``details`` without a
+    revision; the replay sees that change in the next edit's prior and
+    attributes it to the edit before it — when that edit is the subject's,
+    the restore puts the indexer's keys back to their older values and the
+    strip removes the indexer's values from the priors, until the indexer's
+    next run writes them again. No special case (a known residual).
 
     Args:
         db: The session; the caller owns the transaction.
@@ -1718,44 +1619,46 @@ async def restore_editor_details(
         dry_run: Compute what would change and write nothing (no row, no
             row lock: the log is read as of the statement, which a preview
             can afford); ``to_sync`` stays empty.
-        erased_actors: Pseudonyms of other erased members (``restore_targets``,
-            ``erased_pseudonyms``).
-        rows: The subject's ``_updated_rows``, read by the caller under the
-            memory locks (``erase_subject_details``, #2268); the caller
-            locked, so nothing is locked or read here. None reads them.
+        erased_actors: Pseudonyms of other erased members
+            (``erased_pseudonyms``): their values are walked past.
+        plan: The subject's plan, built by the caller under the memory locks
+            (``erase_subject_details``); nothing is locked or read for it
+            then. None builds it here.
 
     Returns:
         The counts, the restored memories and the payloads to sync.
     """
-    if rows is None:
+    if plan is None:
         locked = 0 if dry_run else await lock_subject_memories(db, subject)
-        rows = await _updated_rows(db, subject)
+        plan = await plan_subject_details(db, subject, erased_actors=erased_actors)
         logger.info("erasure_restore_locked", locked=locked)
-    report = RestoreReport()
-    targets = restore_targets(rows, subject, erased_actors=erased_actors)
-    logger.info("erasure_restore_candidates", targets=len(targets))
-    if not targets:
+    report = RestoreReport(keys_ambiguous=plan.keys_ambiguous)
+    logger.info("erasure_restore_candidates", targets=len(plan.reverts))
+    if not plan.reverts:
         return report
     memories = {
         memory.id: memory
         for memory in (
             await db.execute(
                 select(Memory)
-                .where(Memory.id.in_([t.memory_id for t in targets]))
+                .where(Memory.id.in_([r.memory_id for r in plan.reverts]))
                 .order_by(Memory.id)
                 .execution_options(populate_existing=True)
             )
         ).scalars()
     }
-    for target in targets:
-        memory = memories[target.memory_id]
-        value, trigger_kept = _with_live_trigger(memory, target.details)
+    for revert in plan.reverts:
+        memory = memories.get(revert.memory_id)
+        if memory is None:
+            continue  # gone since the plan read (never under the locks)
+        value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
         if memory.details == value:
             continue  # the live value is already the one to put back
-        if target.unavailable:
+        if revert.unavailable:
             report.unavailable += 1
         else:
             report.restored += 1
+        report.keys_reverted += len(revert.reverts)
         report.memory_ids.append(memory.id)
         if dry_run:
             continue
@@ -1768,7 +1671,11 @@ async def restore_editor_details(
             kind=REVISION_KIND_UPDATED,
             actor_user_id=actor,
             at=memory.updated_at,
-            prior={PRIOR_ERASED_KEY: ["details"], PRIOR_RESTORED_FROM_KEY: target.from_version},
+            prior={
+                "details": copy.deepcopy(revert.prior),
+                PRIOR_ERASED_DETAILS_KEYS_KEY: list(revert.erased_keys),
+                PRIOR_RESTORED_FROM_KEY: revert.from_version,
+            },
             writer=REVISION_WRITER_ERASURE,
             provenance=WriteProvenance(None, None),
         )
@@ -1777,8 +1684,9 @@ async def restore_editor_details(
         logger.info(
             "erasure_details_restored",
             memory_id=str(memory.id),
-            from_version=target.from_version,
-            unavailable=target.unavailable,
+            keys=len(revert.reverts),
+            from_version=revert.from_version,
+            unavailable=revert.unavailable,
             trigger_kept=trigger_kept,
         )
     if report.to_sync:
@@ -1809,10 +1717,10 @@ async def erase_subject_details(
     re-run (``reprocess_erasures``), in that order: ``restore_editor_details``
     then ``strip_subject_details``. The subject's memories are locked first
     (``lock_subject_memories``; free when the caller holds them already),
-    and their logs are read once under those locks: the ``erasure`` rows the
-    restore adds sit on top of each log, with nothing above them, and are
-    put-back rows whose prior holds no value — they change no
-    ``held_details_ids`` result, so the strip works from the same read.
+    their logs and live ``details`` are read once under those locks, and one
+    ``plan_details_erasure`` (#2275) drives both steps: the ``erasure`` rows
+    the restore adds sit on top of each log and hold no key of the
+    subject's, so the strip works from the same plan.
 
     Args:
         db: The session; the caller owns the transaction.
@@ -1831,11 +1739,20 @@ async def erase_subject_details(
     """
     locked = 0 if dry_run else await lock_subject_memories(db, subject)
     rows = await _updated_rows(db, subject)
-    logger.info("erasure_details_rows", locked=locked, rows=len(rows))
+    plan = await plan_subject_details(db, subject, erased_actors=erased_actors, rows=rows)
+    logger.info(
+        "erasure_details_rows",
+        locked=locked,
+        rows=len(rows),
+        memories=len(plan.memory_ids),
+        reverts=len(plan.reverts),
+        strips=len(plan.strips),
+        ambiguous=plan.keys_ambiguous,
+    )
     restore = await restore_editor_details(
-        db, subject, actor=actor, dry_run=dry_run, erased_actors=erased_actors, rows=rows
+        db, subject, actor=actor, dry_run=dry_run, erased_actors=erased_actors, plan=plan
     )
     strip = await strip_subject_details(
-        db, subject, existed_at=existed_at, dry_run=dry_run, rows=rows
+        db, subject, existed_at=existed_at, dry_run=dry_run, plan=plan
     )
     return SubjectDetailsErasure(restore=restore, strip=strip)

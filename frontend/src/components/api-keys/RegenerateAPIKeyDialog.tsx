@@ -119,7 +119,7 @@ export function RegenerateAPIKeyDialog({
               API Key Regenerated
             </DialogTitle>
             <DialogDescription>
-              Save this new API key now. You won't be able to see it again!
+              Save this new API key now. You won&apos;t be able to see it again!
             </DialogDescription>
           </DialogHeader>
 
