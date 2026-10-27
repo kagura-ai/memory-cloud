@@ -116,22 +116,21 @@ export function clampIsoToNow(iso: string): string {
   return new Date(iso).getTime() > Date.now() ? new Date().toISOString() : iso;
 }
 
-// #2129: a connector's shared key ("connector:<uuid>") never applies a
-// default context on MCP, and the API refuses to set one (422).
-const CONNECTOR_KEY_PREFIX = "connector:";
-
 /**
  * Whether the inline default-context control is offered for a key (#2129).
  *
  * The API refuses a default on a revoked key (400) and on a public-bound,
  * agent-bound or connector key (422); the control is hidden for those.
+ * A connector key is the one linked by `connector_id` (#1952, #2299) — the
+ * `connector:` name is display only, so a renamed connector key stays one
+ * and a legacy key that only looks like one is an ordinary key, as on the API.
  */
 export function canSetDefaultContext(apiKey: MemberAPIKey): boolean {
   return (
     !apiKey.revoked_at &&
     !apiKey.bound_context_id &&
     !apiKey.agent_id &&
-    !apiKey.name.startsWith(CONNECTOR_KEY_PREFIX)
+    !apiKey.connector_id
   );
 }
 

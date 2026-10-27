@@ -22,6 +22,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   APIKeysTabPanel,
+  canSetDefaultContext,
   clampIsoToNow,
   isRecentlyUsed,
   RECENT_USE_WARNING_WINDOW_MS,
@@ -106,6 +107,7 @@ function makeKey(overrides: Partial<MemberAPIKey> = {}): MemberAPIKey {
     default_context_id: null,
     default_context_name: null,
     agent_id: null,
+    connector_id: null,
     ...overrides,
   };
 }
@@ -260,6 +262,34 @@ describe("isRecentlyUsed (key clarity Phase 1)", () => {
   it("is true for a slightly-future timestamp (clock skew fail-safe)", () => {
     const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
     expect(isRecentlyUsed(oneMinuteAhead)).toBe(true);
+  });
+});
+
+describe("canSetDefaultContext — connector keys by connector_id (#2299)", () => {
+  const CONNECTOR = "33333333-3333-4333-8333-333333333333";
+
+  it("offers the control on an ordinary key", () => {
+    expect(canSetDefaultContext(makeKey())).toBe(true);
+  });
+
+  it("refuses a connector key, renamed or not", () => {
+    expect(
+      canSetDefaultContext(
+        makeKey({ name: `connector:${CONNECTOR}`, connector_id: CONNECTOR }),
+      ),
+    ).toBe(false);
+    expect(
+      canSetDefaultContext(
+        makeKey({ name: "renamed", connector_id: CONNECTOR }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a look-alike name without the link as an ordinary key", () => {
+    // The API lets such a key take a default (#1952) — so must the UI.
+    expect(
+      canSetDefaultContext(makeKey({ name: `connector:${CONNECTOR}` })),
+    ).toBe(true);
   });
 });
 
@@ -490,7 +520,18 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
 
   it.each([
     ["public-bound", { bound_context_id: CTX_A }],
-    ["connector", { name: "connector:33333333-3333-4333-8333-333333333333" }],
+    [
+      "connector",
+      {
+        name: "connector:33333333-3333-4333-8333-333333333333",
+        connector_id: "33333333-3333-4333-8333-333333333333",
+      },
+    ],
+    // #2299: a renamed connector key is still classified by its link.
+    [
+      "renamed connector",
+      { name: "renamed", connector_id: "33333333-3333-4333-8333-333333333333" },
+    ],
     ["agent-bound", { agent_id: "55555555-5555-4555-8555-555555555555" }],
   ])("offers no control for a %s key", async (_label, overrides) => {
     seed(makeKey(overrides));

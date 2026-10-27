@@ -106,6 +106,7 @@ const VISIBLE_KEY: MemberAPIKey = {
   default_context_id: null,
   default_context_name: null,
   agent_id: null,
+  connector_id: null,
 };
 
 const HIDDEN_KEY: MemberAPIKey = {
