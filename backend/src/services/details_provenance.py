@@ -167,13 +167,15 @@ class Replay:
     maps each key of ``S_i`` to its ``Origin`` (None when ``S_i`` is
     ``UNKNOWN``), ``edits[i]`` moved ``S_i`` to ``S_{i+1}``; the last state is
     the live value. ``stripped[i]`` are the digests of the keys an erasure
-    removed from ``S_i`` (an erased member's values, not removals).
+    removed from ``S_i`` (an erased member's values, not removals);
+    ``versions[i]`` is ``edits[i].version`` (ascending, for ``_pre``).
     """
 
     edits: tuple[DetailsEdit, ...]
     states: tuple[Any, ...]
     writers: tuple[dict[str, Origin] | None, ...]
     stripped: tuple[frozenset[str], ...]
+    versions: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -359,7 +361,7 @@ def replay(
             )
         writers[i + 1] = mapping
     stripped = (*(e.erased_keys for e in edits), frozenset())
-    return Replay(tuple(edits), tuple(states), tuple(writers), stripped)
+    return Replay(tuple(edits), tuple(states), tuple(writers), stripped, tuple(versions))
 
 
 def _attribute(
@@ -466,8 +468,7 @@ def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
         prior = run.states[j - 1]
         if prior is UNKNOWN or key in _keys(prior) or digest in run.stripped[j - 1]:
             return j - 1  # carried by the erasure row
-    versions = [e.version for e in run.edits]
-    return _pre(versions, producer.restored_from, j - 1)
+    return _pre(run.versions, producer.restored_from, j - 1)
 
 
 def _plan_memory(

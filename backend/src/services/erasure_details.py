@@ -30,7 +30,11 @@ past erasures by pseudonym (#2243) share one definition:
   put each back to the value from before their write (per key since #2275:
   a later member's whole-dict edit that carried the key unchanged does not
   make it theirs). Like the strip, a function of one subject string;
-  ``actor`` is always the pseudonym.
+  ``actor`` is always the pseudonym. Each restore writes a ``writer='erasure'``
+  row whose prior is ``{"details": <the overwritten value minus the
+  subject's keys>, "erased_details_keys": <their digests>, "restored_from":
+  <version>}`` (before v0.129.0: ``{"erased": ["details"], "restored_from":
+  <version>}``).
 - ``erase_subject_details(db, subject, ...)`` (#2268) — the restore, then
   the strip, from one read of the logs under the memory locks and one
   ``details_provenance.plan_details_erasure`` (#2275): what the live
