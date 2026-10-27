@@ -3608,15 +3608,24 @@ API. With the cap, a lock wait past 5 s fails the migration instead.
 sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) canceling statement due to lock timeout
 ```
 
-In `deploy.sh` this is Step 2: the new color is not started and traffic is not
-moved. An upgrade runs in one transaction, so the failure rolls back every
-revision since the last commit point — the start of the run, or the last
-autocommit block (`CREATE INDEX CONCURRENTLY`, VALIDATE), which commits what
+In `deploy.sh` this is Step 2, and the deploy retries it on its own: a run
+that fails on a lock timeout (55P03) is started again after 15 s, then after
+45 s, 3 attempts in total, each logged as `Migration attempt N/3 hit a lock
+timeout; retrying in …s`. `MIGRATION_RETRY_DELAYS` (default `"15 45"`, one
+delay per retry) changes the backoff and the number of attempts. Any other
+migration failure aborts at once. When every attempt times out, the deploy
+stops with "hit a lock timeout on all 3 attempts": the new color is not
+started and traffic is not moved.
+
+An upgrade runs in one transaction, so a timeout rolls back every revision
+since the last commit point — the start of the run, or the last autocommit
+block (`CREATE INDEX CONCURRENTLY`, VALIDATE), which commits what
 came before it. `alembic current` shows where the upgrade now stands.
 
-**What to do.** Run the upgrade again (`alembic upgrade head`, or re-run the
-deploy). A lock held for a moment (a slow request, a Sleep run) is usually gone
-by then. If it fails again, find the session holding the table:
+**What to do.** A lock held for a moment (a slow request, a Sleep run) is
+usually gone by the next attempt, which `deploy.sh` makes for you. Outside
+`deploy.sh`, run the upgrade again (`alembic upgrade head`). If it keeps
+failing, find the session holding the table:
 
 ```sql
 -- sessions holding a lock on the table named in the failing statement
