@@ -54,6 +54,9 @@ setup() {
     export PS_FILE="$TMP/ps"
     export RESTART_LOG="$TMP/restarts"
     export RESTART_RC=0
+    # #2408: the restart is opt-in now. Sections 1-3 pin the opt-in path; the
+    # last section unsets this to pin the default (no restart).
+    export BRIDGE_RESTART_ON_SWITCH=1
     : > "$PS_FILE"
     : > "$RESTART_LOG"
 
@@ -308,4 +311,42 @@ first_call_line_in() {
 
 @test "--web does not touch the bridge worker (it never changes the API color)" {
     [ "$(count_calls_in cmd_deploy_web restart_bridge_worker)" -eq 0 ] || return 1
+}
+
+# --- #2408: default is NO restart ------------------------------------------
+# The co-resident worker follows the in-place marker (#1513) on its own
+# (kagura-bridge >= v0.24.1 polls it), so a restart only costs ~30 s of 502s on
+# its public endpoint per deploy. BRIDGE_RESTART_ON_SWITCH=1 keeps the restart
+# for an older worker.
+
+@test "by default a running bridge worker is NOT restarted" {
+    unset BRIDGE_RESTART_ON_SWITCH
+    printf 'kagura-api-blue\nkagura-bridge-worker-1\n' > "$PS_FILE"
+
+    run restart_bridge_worker green
+
+    [ "$status" -eq 0 ] || return 1
+    [ ! -s "$RESTART_LOG" ] || return 1
+    [[ "$output" == *"not restarting"* ]] || return 1
+}
+
+@test "BRIDGE_RESTART_ON_SWITCH=0 is the same as unset" {
+    export BRIDGE_RESTART_ON_SWITCH=0
+    printf 'kagura-bridge-worker-1\n' > "$PS_FILE"
+
+    run restart_bridge_worker green
+
+    [ "$status" -eq 0 ] || return 1
+    [ ! -s "$RESTART_LOG" ] || return 1
+}
+
+@test "by default an absent bridge is still a plain skip" {
+    unset BRIDGE_RESTART_ON_SWITCH
+    printf 'kagura-api-blue\n' > "$PS_FILE"
+
+    run restart_bridge_worker green
+
+    [ "$status" -eq 0 ] || return 1
+    [ ! -s "$RESTART_LOG" ] || return 1
+    [[ "$output" == *"not running on this host"* ]] || return 1
 }

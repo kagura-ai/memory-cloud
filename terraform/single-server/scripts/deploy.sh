@@ -65,6 +65,12 @@ DOCKER="${DOCKER:-docker}"
 # can point at the right one (#1476).
 BRIDGE_WORKER_CONTAINER="${BRIDGE_WORKER_CONTAINER:-kagura-bridge-worker-1}"
 
+# Restart that worker on a color flip? Off by default since #2408: the marker is
+# written in place (#1513) and the worker polls it (kagura-bridge >= v0.24.1), so
+# the restart only bought ~30 s of 502s on its public endpoint per deploy. Set
+# to 1 for an older worker that reads the marker at boot only.
+BRIDGE_RESTART_ON_SWITCH="${BRIDGE_RESTART_ON_SWITCH:-0}"
+
 # ---------------------------------------------------------------------------
 # Image source (#1513)
 # ---------------------------------------------------------------------------
@@ -777,6 +783,18 @@ restart_bridge_worker() {
     # without the bridge stack must log a skip, not an error.
     if [ "$presence" -eq 1 ]; then
         log "  ${BRIDGE_WORKER_CONTAINER} is not running on this host — skipping bridge restart."
+        return 0
+    fi
+
+    # #2408: by default the worker follows the marker by itself, so the step is
+    # the pin check alone. A static pin to the drained color is still caught
+    # here, and a worker that failed to follow still shows in the post-drain
+    # fallback check, with the restart as its remediation.
+    if [ "${BRIDGE_RESTART_ON_SWITCH:-0}" != "1" ]; then
+        log "  ${BRIDGE_WORKER_CONTAINER} follows the active-color marker itself — not restarting."
+        if ! verify_bridge_pin "$new_color"; then
+            BRIDGE_STEP_DEGRADED=1
+        fi
         return 0
     fi
 

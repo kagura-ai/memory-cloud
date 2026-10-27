@@ -226,10 +226,27 @@ teardown() {
 }
 
 @test "a failed restart also marks the run degraded" {
+    export BRIDGE_RESTART_ON_SWITCH=1
     export RESTART_RC=1
     printf 'KMC_INTERNAL_URL=http://api-green:8080\n' > "$ENV_FILE_OUT"
     restart_bridge_worker green
     [ "$BRIDGE_STEP_DEGRADED" -eq 1 ] || return 1
+}
+
+# #2408: with no restart (the default) the pin check must still run — a static
+# KMC_INTERNAL_URL naming the drained color is exactly as wrong without one.
+@test "with no restart, a pin naming the DRAINED color still degrades the run" {
+    unset BRIDGE_RESTART_ON_SWITCH
+    printf 'KMC_INTERNAL_URL=http://api-blue:8080\n' > "$ENV_FILE_OUT"
+    restart_bridge_worker green
+    [ "$BRIDGE_STEP_DEGRADED" -eq 1 ] || return 1
+}
+
+@test "with no restart, an unpinned worker (follows the marker) stays clean" {
+    unset BRIDGE_RESTART_ON_SWITCH
+    printf 'KMC_INTERNAL_URL=\n' > "$ENV_FILE_OUT"
+    restart_bridge_worker green
+    [ "$BRIDGE_STEP_DEGRADED" -eq 0 ] || return 1
 }
 
 @test "an absent bridge is not degraded — the OSS single-server case" {
