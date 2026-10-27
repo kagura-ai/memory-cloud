@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Select, select
 
 from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
 from models.auth import Context, Workspace
@@ -96,28 +96,8 @@ class TestResourceIndexerNamedVectorUpsert:
 
     @pytest.fixture
     def mock_db(self):
-        db = AsyncMock()
-        # _apply_upsert issues two queries per call: (1) existing-memory lookup,
-        # (2) old-version cleanup scan. The first expects scalar_one_or_none,
-        # the second iterates result.scalars().all(). Without distinct return
-        # values, the second call sees a MagicMock from result 1 and the
-        # `if old_memories:` branch becomes non-deterministic.
-        existing = MagicMock()
-        existing.scalar_one_or_none.return_value = None
-        old_versions = MagicMock()
-        old_versions.scalars.return_value.all.return_value = []
-
-        call_count = 0
-
-        def _execute_side_effect(*_args, **_kwargs):
-            # Alternate per call: odd → existing-lookup, even → old-version scan.
-            nonlocal call_count
-            call_count += 1
-            return existing if call_count % 2 == 1 else old_versions
-
-        db.execute.side_effect = _execute_side_effect
-        db.add = MagicMock()
-        return _mock_db(db)
+        self.context = _make_context()
+        return self._db_with_existing(None, context=self.context)
 
     @pytest.fixture
     def indexer(self, mock_db):
@@ -133,7 +113,7 @@ class TestResourceIndexerNamedVectorUpsert:
         """PointStruct.vector must be {"dense": <embedding>} (named), not a bare list."""
         event = _make_event()
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         await indexer._apply_upsert(
             event, schema, context, "kagura_memories", indexer.embedding_service
@@ -160,12 +140,20 @@ class TestResourceIndexerNamedVectorUpsert:
         await indexer._apply_upsert(
             _make_event(),
             _make_schema(),
-            _make_context(),
+            self.context,
             "kagura_memories",
             indexer.embedding_service,
         )
 
-        lookup_sql = str(mock_db.execute.call_args_list[0].args[0])
+        lookups = [
+            call.args[0]
+            for call in mock_db.execute.call_args_list
+            if isinstance(call.args[0], Select)
+            and call.args[0].column_descriptions[0]["entity"] is Memory
+            and "resource_version =" in str(call.args[0])
+        ]
+        assert len(lookups) == 1
+        lookup_sql = str(lookups[0])
         assert "resource_doc_id" in lookup_sql
         assert "deleted_at IS NULL" in lookup_sql
 
@@ -174,16 +162,12 @@ class TestResourceIndexerNamedVectorUpsert:
         """#1829: on a re-index the payload memory_id is the row's id, not a
         fresh uuid4() written before the row was looked up (#1808)."""
         existing = _indexed_row()
-        lookup = MagicMock()
-        lookup.scalar_one_or_none.return_value = existing
-        old_versions = MagicMock()
-        old_versions.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [lookup, old_versions]
+        mock_db.upsert_existing = existing
 
         await indexer._apply_upsert(
             _make_event(),
             _make_schema(),
-            _make_context(),
+            self.context,
             "kagura_memories",
             indexer.embedding_service,
         )
@@ -205,7 +189,7 @@ class TestResourceIndexerNamedVectorUpsert:
         await indexer._apply_upsert(
             _make_event(),
             _make_schema(),
-            _make_context(),
+            self.context,
             "kagura_memories",
             indexer.embedding_service,
         )
@@ -225,7 +209,7 @@ class TestResourceIndexerNamedVectorUpsert:
 
         event = _make_event()
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         await indexer._apply_upsert(
             event, schema, context, "kagura_memories", indexer.embedding_service
@@ -248,7 +232,7 @@ class TestResourceIndexerNamedVectorUpsert:
         the way into the Qdrant point vector."""
         event = _make_event()
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         per_context_service = MagicMock()
         sentinel_vector = [0.777] * 512
@@ -267,7 +251,7 @@ class TestResourceIndexerNamedVectorUpsert:
         (idempotency for re-queue after Issue #324 backfill)."""
         event = _make_event()
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         await indexer._apply_upsert(
             event, schema, context, "kagura_memories", indexer.embedding_service
@@ -302,7 +286,7 @@ class TestResourceIndexerNamedVectorUpsert:
             "source_uri": "slack://c-1/T01/C01/1700000000.0001",
         }
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         await indexer._apply_upsert(
             event, schema, context, "kagura_memories", indexer.embedding_service
@@ -329,7 +313,7 @@ class TestResourceIndexerNamedVectorUpsert:
         event = _make_event()
         event.event_metadata = None
         schema = _make_schema()
-        context = _make_context()
+        context = self.context
 
         await indexer._apply_upsert(
             event, schema, context, "kagura_memories", indexer.embedding_service
@@ -340,20 +324,30 @@ class TestResourceIndexerNamedVectorUpsert:
         assert memory.source_uri is None
 
     @staticmethod
-    def _db_with_existing(existing_memory):
-        """Build a db whose first execute() returns an existing memory (update
-        path) and second returns an empty old-version scan."""
+    def _db_with_existing(existing_memory, *, context=None, old_memories=()):
+        """Return context locks and each memory query's own result, independent of order."""
         db = AsyncMock()
+        db.upsert_context = context if context is not None else _make_context()
+        db.upsert_existing = existing_memory
+        fresh_context = MagicMock()
+        fresh_context.scalar_one_or_none.return_value = db.upsert_context
         existing = MagicMock()
-        existing.scalar_one_or_none.return_value = existing_memory
         old_versions = MagicMock()
-        old_versions.scalars.return_value.all.return_value = []
-        call_count = 0
+        old_versions.scalars.return_value.all.return_value = list(old_memories)
 
-        def _side_effect(*_a, **_k):
-            nonlocal call_count
-            call_count += 1
-            return existing if call_count % 2 == 1 else old_versions
+        def _side_effect(statement, *_args, **_kwargs):
+            if isinstance(statement, Select):
+                entity = statement.column_descriptions[0]["entity"]
+                if entity is Context:
+                    assert statement.compile().params["id_1"] == db.upsert_context.id
+                    return fresh_context
+                assert entity is Memory, statement
+                if "resource_version !=" in str(statement):
+                    return old_versions
+                existing.scalar_one_or_none.return_value = db.upsert_existing
+                return existing
+            assert "pg_advisory_xact_lock_shared" in str(statement), statement
+            return MagicMock()
 
         db.execute.side_effect = _side_effect
         db.add = MagicMock()
@@ -376,7 +370,7 @@ class TestResourceIndexerNamedVectorUpsert:
             "source_uri": "slack://c-1/T01/C01/1700000000.0001",
         }
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event, _make_schema(), db.upsert_context, "kagura_memories", indexer.embedding_service
         )
 
         assert existing_memory.details["channel_id"] == "C01"
@@ -399,7 +393,7 @@ class TestResourceIndexerNamedVectorUpsert:
         event = _make_event()
         event.event_metadata = None  # no lineage this time
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event, _make_schema(), db.upsert_context, "kagura_memories", indexer.embedding_service
         )
 
         assert existing_memory.source_uri is None
@@ -423,7 +417,7 @@ class TestResourceIndexerNamedVectorUpsert:
             },
         }
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event, _make_schema(), self.context, "kagura_memories", indexer.embedding_service
         )
 
         memory = mock_db.add.call_args.args[0]
@@ -441,7 +435,7 @@ class TestResourceIndexerNamedVectorUpsert:
         event = _make_event()
         event.event_metadata = {"source_uri": "slack://" + "x" * 3000}
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event, _make_schema(), self.context, "kagura_memories", indexer.embedding_service
         )
 
         memory = mock_db.add.call_args.args[0]
@@ -454,7 +448,7 @@ class TestResourceIndexerNamedVectorUpsert:
         event = _make_event()
         event.event_metadata = {"memory_details": 0}  # falsy non-dict
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event, _make_schema(), self.context, "kagura_memories", indexer.embedding_service
         )
 
         memory = mock_db.add.call_args.args[0]
@@ -1182,7 +1176,11 @@ class TestApplyUpsertRowMetadata:
 
     async def _upsert(self, indexer, event):
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+            event,
+            _make_schema(),
+            indexer.db.upsert_context,
+            "kagura_memories",
+            indexer.embedding_service,
         )
         return indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
 
@@ -1361,7 +1359,7 @@ class TestRepointedRowDropsItsStrayPoints:
         indexer._get_or_create_state = AsyncMock(return_value=state)
         indexer._fetch_events = AsyncMock(return_value=[event])
         indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
-        indexer._get_context = AsyncMock(return_value=_make_context())
+        indexer._get_context = AsyncMock(return_value=db.upsert_context)
         indexer._existing_resource_doc_ids = AsyncMock(return_value={event.doc_id})
         indexer._plan_suspended = AsyncMock(return_value=False)
 
@@ -1589,13 +1587,7 @@ class TestProcessIncrementalSavepoints:
         """Step 6 is non-blocking: a failed cleanup rolls back only itself."""
         old = MagicMock()
         old.resource_version = 0
-        db = AsyncMock()
-        existing = MagicMock()
-        existing.scalar_one_or_none.return_value = None
-        old_versions = MagicMock()
-        old_versions.scalars.return_value.all.return_value = [old]
-        db.execute.side_effect = [existing, old_versions]
-        db.add = MagicMock()
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
         flushes = 0
 
         async def _flush():
@@ -1616,7 +1608,7 @@ class TestProcessIncrementalSavepoints:
 
         with patch("services.resource_indexer.logger") as log:
             await indexer._apply_upsert(
-                event, _make_schema(), _make_context(), self.COLLECTION, indexer.embedding_service
+                event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
             )
 
         db.begin_nested.assert_called_once()
@@ -1634,13 +1626,7 @@ class TestProcessIncrementalSavepoints:
         old = MagicMock()
         old.resource_version = 0
         order: list[str] = []
-        db = AsyncMock()
-        existing = MagicMock()
-        existing.scalar_one_or_none.return_value = None
-        old_versions = MagicMock()
-        old_versions.scalars.return_value.all.return_value = [old]
-        db.execute.side_effect = [existing, old_versions]
-        db.add = MagicMock()
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
         db.flush = AsyncMock(side_effect=lambda: order.append("flush"))
         db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
         qdrant = AsyncMock()
@@ -1653,7 +1639,7 @@ class TestProcessIncrementalSavepoints:
         event.event_metadata = None
 
         await indexer._apply_upsert(
-            event, _make_schema(), _make_context(), self.COLLECTION, indexer.embedding_service
+            event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
         )
 
         # Row flush, cleanup flush, then the old point.

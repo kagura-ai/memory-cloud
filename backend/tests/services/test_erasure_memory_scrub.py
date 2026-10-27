@@ -128,25 +128,31 @@ async def test_dequeue_surviving_embeddings_marks_all_surviving_rows_terminal() 
     from sqlalchemy.dialects import postgresql
 
     from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+    from utils.datetime import utcnow
 
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(rowcount=3))
     service = AccountErasureService.__new__(AccountErasureService)
     service.db = db
 
+    before = utcnow()
     assert await service._dequeue_surviving_embeddings("google-oauth2|erased") == 3
 
     (statement,) = (c.args[0] for c in db.execute.await_args_list)
     assert statement.get_execution_options()["synchronize_session"] is False
     compiled = statement.compile(dialect=postgresql.dialect())
     sql = str(compiled)
-    assert sql.startswith(
-        "UPDATE memories SET embedding_status=%(embedding_status)s::VARCHAR, "
-        "embedding_error=%(embedding_error)s::VARCHAR, "
-        "embedding_retry_count=%(embedding_retry_count)s::INTEGER, "
-        "embedding_attempted_at=%(embedding_attempted_at)s::TIMESTAMP WITHOUT TIME ZONE "
-        "WHERE memories.id IN (SELECT"
+    assert sql.startswith("UPDATE memories SET ")
+    assignments = sql.split(" WHERE memories.id IN (SELECT", 1)[0].removeprefix(
+        "UPDATE memories SET "
     )
+    assert set(assignments.split(", ")) == {
+        "embedding_status=%(embedding_status)s::VARCHAR",
+        "embedding_error=%(embedding_error)s::VARCHAR",
+        "embedding_retry_count=%(embedding_retry_count)s::INTEGER",
+        "embedding_attempted_at=%(embedding_attempted_at)s::TIMESTAMP WITHOUT TIME ZONE",
+        "embedding_suppressed_at=%(embedding_suppressed_at)s::TIMESTAMP WITH TIME ZONE",
+    }
     assert _memories_locked_in_id_order("memories", sql) == (
         "memories_1.user_id = %(user_id_1)s::VARCHAR"
     )
@@ -158,6 +164,9 @@ async def test_dequeue_surviving_embeddings_marks_all_surviving_rows_terminal() 
     assert params["embedding_retry_count"] == MAX_EMBEDDING_RETRIES
     assert isinstance(params["embedding_attempted_at"], datetime)
     assert params["embedding_attempted_at"].tzinfo is None
+    # Suppression is durable policy, independent of the mutable error string.
+    assert isinstance(params["embedding_suppressed_at"], datetime)
+    assert before <= params["embedding_suppressed_at"] <= utcnow()
     assert params["user_id_1"] == "google-oauth2|erased"
     assert "embedding_status_1" not in params  # successes must also stay terminal
 
