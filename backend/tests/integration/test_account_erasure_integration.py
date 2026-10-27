@@ -3436,3 +3436,543 @@ class TestEmbeddingsRequeuedAfterAFailureBeforeTheCommit:
         }
         assert await _workspace_tables(db_session) == workspaces_before
         assert await _user_exists(db_session, target)
+
+
+# ---------------------------------------------------------------------------
+# #2363: an erased member's queued survivors are not re-embedded
+# ---------------------------------------------------------------------------
+
+#: the embedding columns the dequeue writes
+_DEQUEUE_COLUMNS = (
+    "embedding_status",
+    "embedding_error",
+    "embedding_retry_count",
+    "embedding_attempted_at",
+)
+
+
+@pytest_asyncio.fixture
+async def queued_survivors(db_session: AsyncSession, erasure_scenario, bystanders):
+    """The target's memories in the auto-transferred workspace (they survive
+    the erasure) in every embedding state, with bystanders around them:
+
+    - ``queued``: the target's live rows that are not ``success`` — a pending
+      one with coordinates, a run in flight, a failed one with budget left
+      (the sweep would retry it) and an exhausted one;
+    - ``embedded``: the target's ``success`` row;
+    - ``tombstone``: the target's tombstoned pending row (hard-deleted);
+    - ``bystander_pending`` / ``bystander_success``: the other member's rows
+      in the same context;
+    - ``elsewhere``: another account's ``pending`` and ``failed`` rows in its
+      own workspace.
+    """
+    from datetime import timedelta
+
+    from models.auth import Context
+    from models.memory import Memory
+
+    target = erasure_scenario["target_user_id"]
+    other = erasure_scenario["other_user_id"]
+    workspace_id = erasure_scenario["workspace_id"]
+    context = Context(
+        id=uuid4(), workspace_id=workspace_id, name=f"ctx-{uuid4().hex[:8]}", created_by=other
+    )
+    owner = bystanders["user_id"]
+    elsewhere_ws = Workspace(
+        id=uuid4(),
+        name=f"ws-{uuid4().hex[:8]}",
+        plan_name="free",
+        owner_user_id=owner,
+        daily_api_limit=500,
+        weekly_api_limit=2500,
+    )
+    db_session.add_all([context, elsewhere_ws])
+    await db_session.flush()
+    elsewhere_ctx = Context(
+        id=uuid4(), workspace_id=elsewhere_ws.id, name=f"ctx-{uuid4().hex[:8]}", created_by=owner
+    )
+    db_session.add(elsewhere_ctx)
+    await db_session.flush()
+    long_ago = utcnow() - timedelta(hours=1)
+
+    def _memory(
+        user_id: str, status: str, *, retries: int = 0, ctx=context, ws=None, **extra
+    ) -> Memory:
+        return Memory(
+            id=uuid4(),
+            user_id=user_id,
+            workspace_id=ws or workspace_id,
+            context_id=ctx.id,
+            summary=f"{status} memory of {user_id}",
+            content="body",
+            type="note",
+            client="test",
+            embedding_status=status,
+            embedding_retry_count=retries,
+            embedding_error="earlier: provider timeout" if status == "failed" else None,
+            created_at=long_ago,
+            **{
+                "embedding_attempted_at": long_ago if status in ("failed", "processing") else None,
+                **extra,
+            },
+        )
+
+    queued = [
+        _memory(target, "pending", details={"location": {"lat": 35.0, "lon": 139.0}, "k": "v"}),
+        _memory(target, "processing", retries=1, embedding_attempted_at=utcnow()),
+        _memory(target, "failed", retries=1),
+        _memory(target, "failed", retries=3),
+    ]
+    embedded = _memory(target, "success", details={"k": "v"})
+    tombstone = _memory(target, "pending", deleted_at=utcnow())
+    bystander_pending = _memory(other, "pending")
+    bystander_success = _memory(other, "success")
+    elsewhere = [
+        _memory(owner, "pending", ctx=elsewhere_ctx, ws=elsewhere_ws.id),
+        _memory(owner, "failed", retries=1, ctx=elsewhere_ctx, ws=elsewhere_ws.id),
+    ]
+    db_session.add_all(
+        [*queued, embedded, tombstone, bystander_pending, bystander_success, *elsewhere]
+    )
+    await db_session.commit()
+    ids = {
+        "context_id": context.id,
+        "queued": [m.id for m in queued],
+        "embedded": embedded.id,
+        "tombstone": tombstone.id,
+        "bystander_pending": bystander_pending.id,
+        "bystander_success": bystander_success.id,
+        "elsewhere": [m.id for m in elsewhere],
+    }
+    elsewhere_ws_id, elsewhere_ctx_id = elsewhere_ws.id, elsewhere_ctx.id
+    yield ids
+    await db_session.rollback()
+    await db_session.execute(delete(Memory).where(Memory.context_id == elsewhere_ctx_id))
+    await db_session.execute(delete(Context).where(Context.id == elsewhere_ctx_id))
+    await db_session.execute(delete(Workspace).where(Workspace.id == elsewhere_ws_id))
+    await db_session.commit()
+
+
+async def _erase(db_session: AsyncSession, scenario: dict):
+    """An admin force-erase of the scenario's target, its payload patch stubbed."""
+    with patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()):
+        return await AccountErasureService(db_session).admin_force_erase(
+            target_user_id=scenario["target_user_id"],
+            initiator_user_id="admin-runner",
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test (#2363)",
+        )
+
+
+def _test_engine_sessions(db_session: AsyncSession):
+    """``db.base.get_db`` over the test engine: one new session per call, as
+    the sweep's worker gets in production. Returns the patch and the list of
+    sessions to close."""
+    from collections.abc import AsyncIterator
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    maker = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+    sessions: list[AsyncSession] = []
+
+    def _get_db() -> AsyncIterator[AsyncSession]:
+        async def _gen() -> AsyncIterator[AsyncSession]:
+            session = maker()
+            sessions.append(session)
+            yield session
+
+        return _gen()
+
+    return patch("db.base.get_db", side_effect=_get_db), sessions
+
+
+async def _embed_once(
+    db_session: AsyncSession,
+    memory_id,
+    *,
+    now=None,
+    embed=None,
+    build_point: bool = False,
+) -> dict:
+    """Run the sweep's worker (``process_pending_embedding``) on ``memory_id``
+    against the test database, the provider and the vector store stubbed.
+    ``now`` moves the pipeline's clock (past every backoff); ``build_point``
+    keeps the real payload builder. Returns the stubs."""
+    from contextlib import ExitStack
+
+    from services import memory_service
+
+    svc = MagicMock(model="m")
+    svc.embed = embed or AsyncMock(return_value=[0.1] * 8)
+    stubs = {
+        "embed": svc.embed,
+        "add_memory_to_qdrant": AsyncMock(),
+        "delete_points": AsyncMock(),
+        "delete_chunks": AsyncMock(),
+        "logger": MagicMock(),
+    }
+    get_db, sessions = _test_engine_sessions(db_session)
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(get_db)
+            if now is not None:
+                stack.enter_context(patch("utils.datetime.utcnow", return_value=now))
+            stack.enter_context(patch("services.embedding_service.EmbeddingService", MagicMock()))
+            stack.enter_context(
+                patch(
+                    "services.context_routing.resolve_context_routing",
+                    AsyncMock(return_value=("kagura_memories", svc)),
+                )
+            )
+            stack.enter_context(
+                patch.object(memory_service, "add_memory_to_qdrant", stubs["add_memory_to_qdrant"])
+            )
+            if not build_point:
+                stack.enter_context(
+                    patch.object(memory_service, "build_memory_point", return_value=({}, [], []))
+                )
+            stack.enter_context(patch.object(memory_service, "write_content_chunks", AsyncMock()))
+            stack.enter_context(patch.object(memory_service, "_create_knn_seed_edges", AsyncMock()))
+            stack.enter_context(
+                patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock())
+            )
+            stack.enter_context(
+                patch("db.qdrant.delete_points_from_qdrant", stubs["delete_points"])
+            )
+            stack.enter_context(patch("db.qdrant.delete_chunk_points", stubs["delete_chunks"]))
+            stack.enter_context(patch.object(memory_service, "logger", stubs["logger"]))
+            await memory_service.process_pending_embedding(memory_id)
+    finally:
+        for session in sessions:
+            await session.close()
+    return stubs
+
+
+def _info_events(logger: MagicMock) -> list[str]:
+    return [c.args[0] for c in logger.info.call_args_list if c.args]
+
+
+class TestQueuedSurvivorsAreNotReEmbedded:
+    """#2363: step 1 deletes the subject's points; a surviving memory still
+    queued for an embedding (or retrying one) is taken out of the queue in
+    the Postgres step, so the sweep does not write its point again under the
+    pseudonym. The admin retry is the only way back."""
+
+    @pytest.mark.asyncio
+    async def test_the_erasure_dequeues_only_the_subjects_queued_survivors(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        edited_by_target,
+        patched_external_stores,
+    ):
+        from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+
+        target = erasure_scenario["target_user_id"]
+        pseudonym = erasure_pseudonym(target)
+        before = await _table_snapshot(db_session, "memories")
+        started = utcnow()
+
+        request = await _erase(db_session, erasure_scenario)
+
+        assert request.status == STATUS_COMPLETE
+        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 4
+        after = await _table_snapshot(db_session, "memories")
+        for memory_id in queued_survivors["queued"]:
+            row = after[memory_id]
+            assert row["user_id"] == pseudonym
+            assert row["details"] is None
+            assert row["location_lat"] is None
+            assert row["embedding_status"] == "failed"
+            assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
+            assert row["embedding_retry_count"] == MAX_EMBEDDING_RETRIES
+            assert to_naive_utc(datetime.fromisoformat(row["embedding_attempted_at"])) >= started
+        # the embedded survivor is scrubbed; its embedding state is unchanged
+        embedded = queued_survivors["embedded"]
+        assert after[embedded]["user_id"] == pseudonym
+        assert {c: after[embedded][c] for c in _DEQUEUE_COLUMNS} == {
+            c: before[embedded][c] for c in _DEQUEUE_COLUMNS
+        }
+        assert queued_survivors["tombstone"] not in after
+        # another author's row the target edited: its details are put back
+        # (#2244), its embedding state is not the dequeue's
+        assert {c: after[edited_by_target][c] for c in _DEQUEUE_COLUMNS} == {
+            c: before[edited_by_target][c] for c in _DEQUEUE_COLUMNS
+        }
+        # every row of another account, in this workspace or another one,
+        # is byte-identical
+        others = {
+            queued_survivors["bystander_pending"],
+            queued_survivors["bystander_success"],
+            *queued_survivors["elsewhere"],
+        }
+        for memory_id in others:
+            assert after[memory_id] == before[memory_id]
+        changed = {m for m in after if after[m] != before.get(m)}
+        assert changed == {*queued_survivors["queued"], embedded, edited_by_target}
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_writes_no_point_for_them(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+    ):
+        """Neither the sweep's prefilter nor the claim takes a dequeued row,
+        however long after the erasure; the bystander's pending row next to
+        them is embedded (the control)."""
+        from datetime import timedelta
+
+        from sqlalchemy import or_
+
+        from models.memory import Memory
+        from services.embedding_claim import STALE_CLAIM_SECONDS
+        from services.memory_service import (
+            embedding_reclaim_eligible_clause,
+            embedding_reclaim_exhausted_clause,
+            embedding_retry_eligible_clause,
+        )
+
+        await _erase(db_session, erasure_scenario)
+        queued = queued_survivors["queued"]
+        before = await _table_snapshot(db_session, "memories")
+        later = utcnow() + timedelta(days=1)
+        stale_cutoff = later - timedelta(seconds=STALE_CLAIM_SECONDS)
+        candidates = (
+            (
+                await db_session.execute(
+                    select(Memory.id).where(
+                        Memory.id.in_([*queued, queued_survivors["bystander_pending"]]),
+                        Memory.deleted_at.is_(None),
+                        or_(
+                            Memory.embedding_status == "pending",
+                            embedding_reclaim_eligible_clause(stale_cutoff),
+                            embedding_retry_eligible_clause(later),
+                            # nor ``_fail_exhausted_reclaims``
+                            embedding_reclaim_exhausted_clause(stale_cutoff),
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert candidates == [queued_survivors["bystander_pending"]]
+
+        for memory_id in queued:
+            stubs = await _embed_once(db_session, memory_id, now=later)
+            stubs["embed"].assert_not_awaited()
+            stubs["add_memory_to_qdrant"].assert_not_awaited()
+        after = await _table_snapshot(db_session, "memories")
+        for memory_id in queued:
+            assert after[memory_id] == before[memory_id]
+
+        control = queued_survivors["bystander_pending"]
+        stubs = await _embed_once(db_session, control, now=later)
+        assert stubs["add_memory_to_qdrant"].await_args.kwargs["memory_id"] == control
+        assert (await _table_snapshot(db_session, "memories"))[control][
+            "embedding_status"
+        ] == "success"
+
+    @pytest.mark.asyncio
+    async def test_the_admin_retry_brings_them_back_under_the_pseudonym(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+    ):
+        from api.routes.admin import retry_failed_embeddings
+
+        pseudonym = erasure_pseudonym(erasure_scenario["target_user_id"])
+        await _erase(db_session, erasure_scenario)
+
+        response = await retry_failed_embeddings(
+            user={"user_id": "admin-runner"},
+            db=db_session,
+            context_id=str(queued_survivors["context_id"]),
+            workspace_id=None,
+        )
+
+        assert response["reset_count"] == 4
+        rows = await _table_snapshot(db_session, "memories")
+        for memory_id in queued_survivors["queued"]:
+            assert rows[memory_id]["embedding_status"] == "pending"
+            assert rows[memory_id]["embedding_error"] is None
+            assert rows[memory_id]["embedding_retry_count"] == 0
+        # the one that had coordinates: embedded under the pseudonym, no location
+        with_location = queued_survivors["queued"][0]
+        stubs = await _embed_once(db_session, with_location, build_point=True)
+        written = stubs["add_memory_to_qdrant"].await_args.kwargs
+        assert written["memory_id"] == with_location
+        assert written["user_id"] == pseudonym
+        assert written["payload"]["user_id"] == pseudonym
+        assert "location" not in written["payload"]
+        assert (await _table_snapshot(db_session, "memories"))[with_location][
+            "embedding_status"
+        ] == "success"
+
+    @pytest.mark.asyncio
+    async def test_a_run_in_flight_deletes_the_point_it_wrote_after_the_erasure(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+    ):
+        """The run loaded the row (raw sub, coordinates) before the erasure
+        and writes its point after step 1 deleted the subject's: its outcome
+        write misses the fence and it deletes that point."""
+        import asyncio
+
+        from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+
+        target = erasure_scenario["target_user_id"]
+        memory_id = queued_survivors["queued"][0]  # pending, with coordinates
+        embedding, release = asyncio.Event(), asyncio.Event()
+
+        async def _blocked_embed(*_a, **_k) -> list[float]:
+            embedding.set()
+            await release.wait()
+            return [0.1] * 8
+
+        run = asyncio.create_task(
+            _embed_once(db_session, memory_id, embed=AsyncMock(side_effect=_blocked_embed))
+        )
+        await asyncio.wait_for(embedding.wait(), 15)
+        request = await _erase(db_session, erasure_scenario)
+        assert request.status == STATUS_COMPLETE
+        release.set()
+        stubs = await asyncio.wait_for(run, 15)
+
+        # the residue the guard removes: a point under the raw sub
+        assert stubs["add_memory_to_qdrant"].await_args.kwargs["user_id"] == target
+        stubs["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
+        stubs["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
+        events = _info_events(stubs["logger"])
+        assert "embedding_claim_lost" in events
+        removed = next(
+            c
+            for c in stubs["logger"].info.call_args_list
+            if c.args and c.args[0] == "embedding_points_removed_after_lost_claim"
+        )
+        assert removed.kwargs["reason"] == "erased_author"
+        claim_lost = next(
+            c
+            for c in stubs["logger"].info.call_args_list
+            if c.args and c.args[0] == "embedding_claim_lost"
+        )
+        assert claim_lost.kwargs["requeued"] is False
+        row = (await _table_snapshot(db_session, "memories"))[memory_id]
+        assert row["embedding_status"] == "failed"
+        assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
+        assert row["user_id"] == erasure_pseudonym(target)
+
+    @pytest.mark.asyncio
+    async def test_a_run_whose_row_the_cascade_deleted_removes_its_point(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        patched_external_stores,
+    ):
+        """A row of the target's sole-owned workspace goes with the workspace
+        while a run embeds it; the run's point would be an orphan with the
+        raw sub."""
+        import asyncio
+
+        from models.auth import Context
+        from models.memory import Memory
+
+        target = erasure_scenario["target_user_id"]
+        workspace = Workspace(
+            id=uuid4(),
+            name=f"ws-{uuid4().hex[:8]}",
+            plan_name="free",
+            owner_user_id=target,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+        )
+        db_session.add(workspace)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=workspace.id, user_id=target, role=WorkspaceRole.OWNER)
+        )
+        context = Context(
+            id=uuid4(), workspace_id=workspace.id, name=f"ctx-{uuid4().hex[:8]}", created_by=target
+        )
+        db_session.add(context)
+        await db_session.flush()
+        memory = Memory(
+            id=uuid4(),
+            user_id=target,
+            workspace_id=workspace.id,
+            context_id=context.id,
+            summary="a memory of a sole-owned workspace",
+            content="body",
+            type="note",
+            client="test",
+            embedding_status="pending",
+        )
+        db_session.add(memory)
+        await db_session.commit()
+        memory_id = memory.id
+        embedding, release = asyncio.Event(), asyncio.Event()
+
+        async def _blocked_embed(*_a, **_k) -> list[float]:
+            embedding.set()
+            await release.wait()
+            return [0.1] * 8
+
+        run = asyncio.create_task(
+            _embed_once(db_session, memory_id, embed=AsyncMock(side_effect=_blocked_embed))
+        )
+        await asyncio.wait_for(embedding.wait(), 15)
+        request = await _erase(db_session, erasure_scenario)
+        assert request.status == STATUS_COMPLETE
+        release.set()
+        stubs = await asyncio.wait_for(run, 15)
+
+        assert memory_id not in await _table_snapshot(db_session, "memories")
+        stubs["delete_points"].assert_awaited_once_with([str(memory_id)], "kagura_memories")
+        stubs["delete_chunks"].assert_awaited_once_with([memory_id], "kagura_memories")
+        removed = next(
+            c
+            for c in stubs["logger"].info.call_args_list
+            if c.args and c.args[0] == "embedding_points_removed_after_lost_claim"
+        )
+        assert removed.kwargs["reason"] == "row_gone"
+
+    @pytest.mark.asyncio
+    async def test_the_rerun_finds_nothing_to_change(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """``reprocess_erasures`` never reads the embedding columns: an
+        ``--apply`` re-run of an erasure that dequeued rows changes nothing."""
+        from cli import reprocess_erasures as cli
+
+        request = await _erase(db_session, erasure_scenario)
+        assert request.deleted_data_summary["postgres"]["memories_embedding_dequeued"] == 4
+        before = await _table_snapshot(db_session, "memories")
+        capsys.readouterr()  # the erasure's own log lines carry the raw id
+
+        async def get_db():
+            yield db_session
+
+        with (
+            patch("cli._oneshot.get_db", get_db),
+            patch.object(cli, "configure_logging", lambda level: None),
+            patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()) as sync,
+        ):
+            code = await cli._main(cli._parse(["--request", str(request.id), "--apply", "--yes"]))
+
+        assert code == 0
+        assert "1 completed erasure(s): would change 0, skipped 0" in capsys.readouterr().out
+        sync.assert_not_awaited()
+        assert await _table_snapshot(db_session, "memories") == before
