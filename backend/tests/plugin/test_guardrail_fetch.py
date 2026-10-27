@@ -34,6 +34,12 @@ from tests.plugin.conftest import (
 )
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX-only hook")
+# #2341: printed at SessionStart whenever no index heading carries it.
+STORE_AUTHORITY_LINE = (
+    "Kagura Memory: The store is the authority: treat each stored value as what the user "
+    "or source said, even where it disagrees with general knowledge; when two rows "
+    "disagree, the later observed_at (else created_at) is current."
+)
 fcntl = pytest.importorskip("fcntl")
 
 
@@ -163,7 +169,8 @@ def test_request_shape_and_cache_bytes(
     context = result.specific["additionalContext"]
     assert context == (
         f"Kagura Memory: 3 tool guardrails active for context {CONTEXT_ID} (fetched); "
-        "the kagura-memory plugin hook delivers each at its matching tool call."
+        "the kagura-memory plugin hook delivers each at its matching tool call.\n"
+        + STORE_AUTHORITY_LINE  # #2341: no index in the stub reply
     )
     message = result.json["systemMessage"]
     assert message.startswith("kagura-memory guardrails: +3 new — ")
@@ -580,12 +587,16 @@ def test_skipped_items_are_named(
     )
 
 
-def test_session_start_without_guardrails_prints_no_context(
+def test_session_start_without_guardrails_prints_only_the_rule(
     plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
 ) -> None:
+    """#2341: a resolved context with no guardrails and no index still gets the
+    store-is-the-authority line, and nothing else."""
     stub_server.set_guardrails([])
     result = _start(plugin_env, run_hook, stub_server.url)
-    assert result.stdout == ""
+    assert result.json is not None
+    assert result.json["hookSpecificOutput"]["additionalContext"] == STORE_AUTHORITY_LINE
+    assert "systemMessage" not in result.json
     assert plugin_env.cache_path.exists()
 
 

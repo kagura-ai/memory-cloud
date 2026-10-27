@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
@@ -77,11 +78,12 @@ def test_index_follows_the_guardrail_line(plugin_env: PluginEnv, run_hook: RunHo
 
 
 @pytest.mark.parametrize("cached", [None, "absent", []])
-def test_no_index_leaves_the_output_unchanged(
+def test_no_index_prints_the_rule_on_its_own_line(
     plugin_env: PluginEnv, run_hook: RunHook, cached: Any
 ) -> None:
     """``index: null`` (a context above the cap), a cache without the key and an
-    empty index all print exactly what the hook printed before #2334."""
+    empty index print the guardrail line, then the store-is-the-authority line
+    once (#2341) — the agent sees the rule before any tool call."""
     guard = [item(1, "ps hangs", "Bash", match=r"\bps\b")]
     fetched = datetime.now(UTC) - timedelta(seconds=5)
     if cached == "absent":
@@ -92,8 +94,9 @@ def test_no_index_leaves_the_output_unchanged(
         )
     context = _context(run_hook(payload("SessionStart", source="startup")))
     assert "Memory index" not in context
-    assert context.startswith("Kagura Memory: 1 tool guardrails active")
-    assert "\n" not in context
+    lines = context.split("\n")
+    assert lines[0].startswith("Kagura Memory: 1 tool guardrails active")
+    assert lines[1:] == [f"Kagura Memory: {STORE_AUTHORITY}"]
 
 
 def test_old_format_1_cache_without_index_is_read(
@@ -232,13 +235,27 @@ def test_index_heading_carries_the_store_authority_rule(
     assert len(lines) == 3
 
 
-@pytest.mark.parametrize("cached", [None, []])
-def test_no_index_prints_no_rule(plugin_env: PluginEnv, run_hook: RunHook, cached: Any) -> None:
-    """The rule rides on the index heading: without an index the output is unchanged."""
-    plugin_env.write_cache(
-        [item(1, "ps hangs", "Bash", match=r"\bps\b")],
-        fetched_at=datetime.now(UTC) - timedelta(seconds=5),
-        extra={"index": cached},
-    )
+def test_index_heading_carries_the_rule_once(plugin_env: PluginEnv, run_hook: RunHook) -> None:
+    _fresh(plugin_env, index_rows(2), 2, items=[item(1, "ps hangs", "Bash", match=r"\bps\b")])
     context = _context(run_hook(payload("SessionStart", source="startup")))
-    assert "store is the authority" not in context
+    assert context.count("store is the authority") == 1
+    assert context.split("\n")[1].endswith(STORE_AUTHORITY)
+
+
+@pytest.mark.parametrize(("budget", "expected"), [(260, "rule"), (100, None)])
+def test_a_budget_cut_index_falls_back_to_the_rule_line(
+    plugin_env: PluginEnv,
+    call_main: Callable[..., Any],
+    hook_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: int,
+    expected: str | None,
+) -> None:
+    """No room for the index heading: the shorter rule line goes out when it
+    fits, and nothing when it does not."""
+    monkeypatch.setattr(hook_module.ClaudeAdapter, "render_budget_chars", budget)
+    _fresh(plugin_env, index_rows(3), 3)
+    result = call_main(payload("SessionStart", source="startup"))
+    assert result.returncode == 0
+    rule = f"Kagura Memory: {STORE_AUTHORITY}"
+    assert _context(result) == ("" if expected is None else rule)
