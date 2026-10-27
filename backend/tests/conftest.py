@@ -70,10 +70,11 @@ import models.analysis  # noqa: E402, F401  isort: skip  # Issue #494: Memory Br
 # to wrapping stdlib logging.Logger, which rejects kwargs with
 # ``TypeError: Logger._log() got an unexpected keyword argument 'X'``
 # the first time any structured-kwargs logger.info/.warning is hit.
-# Production runs setup_logger() from api/main.py:25; pytest skips that
-# entry point and imports route modules directly, so we mirror it here
-# so the project's structlog kwargs convention works uniformly across
-# both contexts (Copilot review on PR #522).
+# Production configures logging when api/main.py is imported; pytest imports
+# route modules directly, so we configure it here first, and a later api.main
+# import keeps this configuration instead of running setup_logger() again
+# (``ensure_logger_configured``, #2241). The project's structlog kwargs
+# convention then works uniformly across both contexts (#522).
 from utils.logger import setup_logger as _setup_logger  # noqa: E402
 
 _setup_logger()

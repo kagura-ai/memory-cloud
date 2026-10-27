@@ -50,7 +50,7 @@ def _names(query: bytes | str | None) -> list[str]:
 def logs():
     """The selector's log events, whatever ran earlier in the process.
 
-    A repeat ``setup_logger()`` (an ``api.main`` import) keeps the processor
+    A repeat ``setup_logger()`` (from another test) keeps the processor
     list that cached loggers hold, so ``capture_logs`` reaches them (#2167).
     """
     with structlog.testing.capture_logs() as captured:

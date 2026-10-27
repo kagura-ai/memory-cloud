@@ -14,7 +14,7 @@
  *   - Sleep quota refetched after a successful save (initial + post-save fetch)
  *   - Privacy transition AlertDialog opens on shared → private toggle and
  *     respects confirm/cancel
- *   - resource_id input filters keystrokes to lowercase + [a-z0-9_] only
+ *   - resource_id input filters keystrokes to lowercase + [a-z0-9_-] only
  *   - Skip-mode AlertDialog (#504) is closed on mount; full open/confirm/cancel
  *     flow requires opening the Radix Select trigger, which is the same
  *     happy-dom limitation documented in MCPConfigBlock.test.tsx — closed-on-mount
@@ -681,7 +681,7 @@ describe("SettingsTabPanel — privacy transition dialog", () => {
 // ---------- resource_id input filter ----------------------------------------
 
 describe("SettingsTabPanel — resource_id input validation", () => {
-  it("filters keystrokes to lowercase + [a-z0-9_] only when typing in the resource_id input", async () => {
+  it("filters keystrokes to lowercase + [a-z0-9_-] only when typing in the resource_id input", async () => {
     // resource_id input renders when:
     //   - shared (is_private=false)
     //   - not yet public (is_public=false)
@@ -698,10 +698,10 @@ describe("SettingsTabPanel — resource_id input validation", () => {
       "resourceIdPlaceholder",
     )) as HTMLInputElement;
 
-    // Mixed case + hyphen + symbol + underscore + digits → only [a-z0-9_]
-    // survives, and uppercase is lowercased before filtering.
+    // Mixed case + hyphen + symbol + underscore + digits → only [a-z0-9_-]
+    // survives (hyphens included, #2284), and uppercase is lowercased first.
     fireEvent.change(input, { target: { value: "ABC-def_123!" } });
-    expect(input.value).toBe("abcdef_123");
+    expect(input.value).toBe("abc-def_123");
   });
 });
 

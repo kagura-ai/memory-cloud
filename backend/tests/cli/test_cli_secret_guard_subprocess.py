@@ -1,8 +1,8 @@
 """Every CLI names the refused secrets without a traceback (#2264).
 
-Run as subprocesses: several commands import services that build the
-settings at import (``config.plan_tiers``), which inside this pytest process
-are already cached. A command whose guard ran too late would print pydantic's
+Run as subprocesses: inside this pytest process the settings are already
+cached. A command that built the settings at import, before its guard ran
+(as importing ``config.plan_tiers`` did until #2276), would print pydantic's
 ``ValidationError`` traceback instead of the ``✗`` lines.
 """
 

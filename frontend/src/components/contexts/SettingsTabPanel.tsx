@@ -771,7 +771,9 @@ export function SettingsTabPanel({
                       onChange={(e) => {
                         const value = e.target.value
                           .toLowerCase()
-                          .replace(/[^a-z0-9_]/g, "");
+                          // #2284: the backend's resource_id charset
+                          // (^[a-z0-9_-]+$), the same on REST and MCP.
+                          .replace(/[^a-z0-9_-]/g, "");
                         setResourceId(value);
                       }}
                       className="font-mono text-sm"

@@ -9,6 +9,7 @@ Collection design (post Single Collection Migration, Issue #334):
 - Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +51,7 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
+from db.loop_binding import keep_for_loop, owned_by_another_loop, running_loop, tag_loop
 from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_point_id
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
@@ -65,7 +67,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Singleton Qdrant client
+# The Qdrant client for the current event loop (one per worker in production;
+# see get_qdrant_client()). Callers fetch it at the point of use.
 _qdrant_client: AsyncQdrantClient | None = None
 
 # Single Collection Migration: Collection name constant
@@ -713,11 +716,18 @@ QDRANT_REST_HEADERS: dict[str, str] = {"accept-encoding": "identity"}
 
 
 def get_qdrant_client() -> AsyncQdrantClient:
-    """Get singleton Qdrant client.
+    """Get the Qdrant client for the running event loop.
 
     Issue #273 Security: Supports API key authentication for production.
     Issue #2112: asks for uncompressed responses unless
     ``qdrant_http_compression`` is set (see ``QDRANT_REST_HEADERS``).
+
+    The async client's HTTP connections belong to the loop that first used
+    them. When the running loop is not the one the current client was built
+    for, the old client is dropped without being closed and a new one is
+    built, as ``get_redis_client()`` does (#1995, #2241). A uvicorn worker
+    runs one loop, so production builds once; a client a test installs in
+    ``_qdrant_client`` is returned unchanged (see ``db.loop_binding``).
 
     Returns:
         AsyncQdrantClient instance
@@ -726,6 +736,11 @@ def get_qdrant_client() -> AsyncQdrantClient:
         QdrantError: If connection fails
     """
     global _qdrant_client
+
+    loop = running_loop()
+    if _qdrant_client is not None and not keep_for_loop(_qdrant_client, loop):
+        logger.debug("qdrant_client_rebuilt_for_new_loop")
+        _qdrant_client = None
 
     if _qdrant_client is None:
         try:
@@ -740,6 +755,7 @@ def get_qdrant_client() -> AsyncQdrantClient:
             if settings.qdrant_api_key:
                 client_kwargs["api_key"] = settings.qdrant_api_key
             _qdrant_client = AsyncQdrantClient(**client_kwargs)
+            tag_loop(_qdrant_client, loop)
             logger.info(
                 "qdrant_client_initialized",
                 url=QDRANT_URL,
@@ -749,6 +765,28 @@ def get_qdrant_client() -> AsyncQdrantClient:
             raise QdrantError(f"Failed to connect to Qdrant: {e}") from e
 
     return _qdrant_client
+
+
+async def close_qdrant() -> None:
+    """Close the Qdrant client and forget it (#2241, mirrors ``close_redis()``).
+
+    The client is closed only on the loop it belongs to; a client from another
+    loop is just dropped (its connections cannot be closed from here). The
+    module forgets the client before closing it, so it is reset even when
+    ``close()`` raises or is cancelled, and the error is raised to the caller.
+    """
+    global _qdrant_client
+
+    client = _qdrant_client
+    if client is None:
+        return
+    other_loop = owned_by_another_loop(client, asyncio.get_running_loop())
+    _qdrant_client = None
+    if other_loop:
+        logger.debug("qdrant_client_dropped_from_another_loop")
+        return
+    await client.close()
+    logger.info("qdrant_client_closed")
 
 
 def _active_store() -> "VectorStore | None":

@@ -5,13 +5,13 @@ production this is a process-wide singleton.
 """
 
 import asyncio
-import weakref
 from typing import cast
 
 import redis.asyncio as aioredis
 
 from config.database import INVALID_REDIS_URL_MESSAGE, REDIS_URL
 from config.settings import get_settings
+from db.loop_binding import keep_for_loop, owned_by_another_loop, running_loop, tag_loop
 from utils.exceptions import RedisError
 from utils.logger import get_logger
 from utils.url_redact import redis_location
@@ -21,46 +21,6 @@ logger = get_logger(__name__)
 # The client for the current event loop (one per worker in production; see
 # get_redis_client()). Callers fetch it at the point of use and never keep it.
 _redis_client: aioredis.Redis | None = None
-
-# Name of the attribute that records which loop a client belongs to (#1995).
-# It is set only on clients this module builds: a weak reference to the loop
-# that built the client, or None while it was built outside a running loop and
-# no loop has used it yet. A fake that a test puts into ``_redis_client`` has
-# no such attribute, so it is returned unchanged and never rebuilt.
-_LOOP_ATTR = "_kagura_loop"
-_UNTAGGED = object()
-
-
-def _running_loop() -> asyncio.AbstractEventLoop | None:
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return None
-
-
-def _tag_loop(client: object, loop: asyncio.AbstractEventLoop | None) -> None:
-    try:
-        setattr(client, _LOOP_ATTR, weakref.ref(loop) if loop is not None else None)
-    except (AttributeError, TypeError):
-        pass  # a stand-in without attribute support stays untagged
-
-
-def _loop_tag(client: object) -> object:
-    """The client's loop tag, or ``_UNTAGGED`` for a client this module did not build."""
-    # Read the instance dict, not getattr(): a MagicMock invents attributes.
-    return (getattr(client, "__dict__", None) or {}).get(_LOOP_ATTR, _UNTAGGED)
-
-
-def _owned_by_another_loop(client: object, loop: asyncio.AbstractEventLoop) -> bool:
-    """Whether ``client`` was built by this module for a loop other than ``loop``.
-
-    An untagged client (a test fake) and a client not yet claimed by any loop
-    are never owned by another loop.
-    """
-    tag = _loop_tag(client)
-    if tag is _UNTAGGED or tag is None:
-        return False
-    return not isinstance(tag, weakref.ref) or tag() is not loop
 
 
 def get_redis_client() -> aioredis.Redis:
@@ -82,14 +42,10 @@ def get_redis_client() -> aioredis.Redis:
     """
     global _redis_client
 
-    loop = _running_loop()
-    if _redis_client is not None and loop is not None:
-        if _loop_tag(_redis_client) is None:
-            # Built outside a running loop: the first loop that uses it owns it.
-            _tag_loop(_redis_client, loop)
-        elif _owned_by_another_loop(_redis_client, loop):
-            logger.debug("redis_client_rebuilt_for_new_loop")
-            _redis_client = None
+    loop = running_loop()
+    if _redis_client is not None and not keep_for_loop(_redis_client, loop):
+        logger.debug("redis_client_rebuilt_for_new_loop")
+        _redis_client = None
 
     if _redis_client is None:
         settings = get_settings()
@@ -124,7 +80,7 @@ def get_redis_client() -> aioredis.Redis:
 
         try:
             _redis_client = aioredis.Redis.from_pool(pool)
-            _tag_loop(_redis_client, loop)
+            tag_loop(_redis_client, loop)
             logger.info(
                 "redis_client_initialized",
                 # Host and port only: ``redact_generic_url`` keeps the query,
@@ -153,7 +109,7 @@ async def close_redis() -> None:
     client = _redis_client
     if client is None:
         return
-    other_loop = _owned_by_another_loop(client, asyncio.get_running_loop())
+    other_loop = owned_by_another_loop(client, asyncio.get_running_loop())
     _redis_client = None
     if other_loop:
         logger.debug("redis_client_dropped_from_another_loop")

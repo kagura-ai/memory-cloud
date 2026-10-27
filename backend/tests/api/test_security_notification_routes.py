@@ -88,6 +88,7 @@ def _new_key(name: str = "deploy") -> SimpleNamespace:
         bound_context_id=None,
         default_context_id=None,  # #2129
         agent_id=None,  # #2188: the member mint response carries it
+        connector_id=None,  # #2299: so do the key responses
     )
 
 

@@ -80,7 +80,8 @@ class UserRepository(BaseRepository[User]):
         if filters and "role" in filters:
             query = query.where(User.role == filters["role"])
 
-        query = query.offset(skip).limit(limit)
+        # Ordered by primary key so skip/limit pages are stable (#2241).
+        query = query.order_by(User.id).offset(skip).limit(limit)
 
         result = await self.db.execute(query)
         return list(result.scalars().all())
