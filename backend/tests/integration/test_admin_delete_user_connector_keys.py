@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
 from models.auth import User, Workspace
+from models.resource import WorkspaceConnector
 
 from ._connector_world import _key_rows, _live_connector_key, _without_owner
 
@@ -72,6 +73,15 @@ class TestConnectorKeysSurviveAdminDelete:
         )
         await db_session.flush()
         assert again.key_owner_user_id == owner
+
+        # the connector keeps its write target: the auto-created context
+        # belongs to the workspace owner, so the user's context delete spares it
+        connector = (
+            await db_session.execute(
+                select(WorkspaceConnector).where(WorkspaceConnector.id == connector_id)
+            )
+        ).scalar_one()
+        assert connector.context_id is not None
 
     @pytest.mark.asyncio
     async def test_a_workspace_the_user_owns_takes_its_connector_key_with_it(

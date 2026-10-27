@@ -46,7 +46,10 @@ def reown_connector_keys_stmt(user_id: str, *, workspace_id: UUID | None = None)
 
     Lock order: the rows are the user's alone, locked in id order
     (``locked_ids``) — the same rows the caller's following DELETE locks, so
-    no new order; the other writers of one of them, ``rotate_kmc_key`` (by
+    no new order. The lock sub-select has no owner predicate, so it also locks
+    the user's live connector keys in workspaces they own, which the guard
+    then leaves alone; harmless, since that DELETE locks those rows anyway.
+    The other writers of one of them, ``rotate_kmc_key`` (by
     ``key_hash``) and ``delete_connector`` (by ``connector_id``), queue on
     them.
     """
