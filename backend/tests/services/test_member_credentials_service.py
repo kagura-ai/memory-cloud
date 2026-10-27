@@ -148,6 +148,7 @@ class TestSerializeApiKeyLastUsed:
             bound_context_id=None,
             agent_id=None,
             default_context_id=None,
+            connector_id=None,
         )
 
     def test_serialize_includes_last_used_at_when_present(self, service):
@@ -193,6 +194,7 @@ class TestDefaultContextOnMemberKeys:
             "bound_context_id": None,
             "agent_id": None,
             "default_context_id": None,
+            "connector_id": None,
             "workspace_id": self.WORKSPACE_ID,
         }
         base.update(over)
@@ -226,6 +228,25 @@ class TestDefaultContextOnMemberKeys:
         assert out["default_context_id"] is None
         assert out["default_context_name"] is None
         assert MemberAPIKeyResponse(**out).agent_id == str(self.AGENT_ID)
+
+    def test_serialize_emits_connector_id_for_a_connector_key(self):
+        """#2299: the connector link is on the wire, whatever the key is named."""
+        connector_id = uuid4()
+        service = MemberCredentialsService(MagicMock())
+        out = service._serialize_api_key(
+            self._key(4, name="renamed", connector_id=connector_id), show_secret=False
+        )
+        assert out["connector_id"] == str(connector_id)
+        assert MemberAPIKeyResponse(**out).connector_id == str(connector_id)
+
+    def test_serialize_a_look_alike_name_without_the_link_is_not_a_connector_key(self):
+        """#2299: a legacy ``connector:`` name without ``connector_id`` is ordinary."""
+        service = MemberCredentialsService(MagicMock())
+        out = service._serialize_api_key(
+            self._key(5, name=f"connector:{uuid4()}"), show_secret=False
+        )
+        assert out["connector_id"] is None
+        assert MemberAPIKeyResponse(**out).connector_id is None
 
     @pytest.mark.asyncio
     async def test_names_are_read_once_per_context_as_the_requester(self):

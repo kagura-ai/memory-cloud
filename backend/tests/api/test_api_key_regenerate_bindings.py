@@ -66,6 +66,7 @@ def _new_key() -> SimpleNamespace:
         revoked_at=None,
         expires_at=None,
         default_context_id=None,  # #2129
+        connector_id=None,  # #2299: the response carries it
     )
 
 

@@ -144,6 +144,13 @@ class APIKeyResponse(TZAwareBaseModel):
             "no longer readable by the key's owner."
         ),
     )
+    connector_id: UUID | None = Field(
+        None,
+        description=(
+            "The connector this key is the shared write key of (#1952); null for "
+            "an ordinary key. Classify connector keys by this, not by the name (#2299)."
+        ),
+    )
 
     model_config = {"from_attributes": True}
 
@@ -209,6 +216,7 @@ def _format_key_response(key: APIKey, default_context_name: str | None = None) -
         status=status,
         default_context_id=key.default_context_id,
         default_context_name=default_context_name,
+        connector_id=key.connector_id,
     )
 
 
