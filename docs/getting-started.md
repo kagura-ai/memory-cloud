@@ -105,9 +105,10 @@ python -m src.cli.create_admin
 # account's OAuth / MCP tokens, so Redis (REDIS_URL) must be reachable.
 python -m src.cli.reset_password
 
-# Delete admin (for re-creation). When other users exist and the admin owns
-# workspaces, name who takes them over (#2371) — a member of each workspace
-# other users are in; without --transfer-to the command lists them and stops.
+# Delete admin (for re-creation). When other users exist, a workspace the admin
+# owns that they are in needs --transfer-to (one of its members) to take it
+# over; without it the command lists them and stops. A workspace only the
+# admin is in is deleted with it (#2371).
 python -m src.cli.delete_admin [--transfer-to USER_ID_OR_EMAIL]
 ```
 

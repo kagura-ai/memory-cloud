@@ -5,12 +5,11 @@ connector there. Deleting P (the "other users exist" branch) hands that
 connector's live write key to O — it still verifies, now as O — and deletes
 P's other keys. Other users' keys are untouched.
 
-#2371: the live workspaces P owns go to ``--transfer-to`` first, so their
-connector keys follow the new owner too. A workspace other users are in needs
-the target to be one of its members; one only P is in is handed over with the
-break-glass transfer. Without ``--transfer-to``, with an unknown, ambiguous or
-non-member target, nothing changes. P's memberships and its soft-deleted
-workspaces are deleted.
+#2371: a live workspace P owns that other users are in goes to
+``--transfer-to`` (one of its members) first, so its connector keys follow
+the new owner too; one only P is in is deleted with P. Without
+``--transfer-to``, with an unknown, ambiguous or non-member target, nothing
+changes. P's memberships are deleted; its soft-deleted workspaces are left.
 """
 
 from __future__ import annotations
@@ -26,10 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from cli import delete_admin
 from models.auth import AuditLog, User, Workspace, WorkspaceMember
-from services.workspace_ownership_service import (
-    FORCE_OWNERSHIP_TRANSFER_ACTION,
-    OWNERSHIP_TRANSFER_ACTION,
-)
+from services.workspace_ownership_service import OWNERSHIP_TRANSFER_ACTION
 from utils.datetime import utcnow
 
 from ._connector_world import _key_rows, _live_connector_key, _without_owner
@@ -66,7 +62,7 @@ async def transfer_audits(db_session: AsyncSession) -> AsyncIterator[list]:
     await db_session.rollback()
     await db_session.execute(
         delete(AuditLog).where(
-            AuditLog.action.in_((OWNERSHIP_TRANSFER_ACTION, FORCE_OWNERSHIP_TRANSFER_ACTION)),
+            AuditLog.action == OWNERSHIP_TRANSFER_ACTION,
             AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in workspace_ids]),
         )
     )
@@ -205,41 +201,30 @@ async def test_cli_hands_the_admins_workspace_and_connector_keys_over(
 
 
 @pytest.mark.asyncio
-async def test_a_workspace_only_the_admin_is_in_goes_to_the_target(
-    db_session: AsyncSession, connector_world, sole_password_admin, transfer_audits, capsys
+async def test_a_workspace_only_the_admin_is_in_goes_with_it(
+    db_session: AsyncSession, connector_world, sole_password_admin, capsys
 ) -> None:
     world = connector_world
     admin_id = await _password_admin(db_session, world)
     other = await world.user("other")
     solo = await world.workspace(admin_id)
     solo_id = solo.id
-    transfer_audits.append(solo_id)
-    key_id = (
-        await _live_connector_key(
-            db_session, (await world.connector(solo, by=admin_id)).connector.id
-        )
-    ).id
+    elsewhere = await world.workspace(other, **{admin_id: WorkspaceRole.MEMBER})
+    elsewhere_id = elsewhere.id
 
-    assert await _run(db_session, other) == 0
+    # nothing shared is owned, so no --transfer-to is needed
+    assert await _run(db_session) == 0
 
+    assert str(solo_id) in capsys.readouterr().out
     assert not await _exists(db_session, admin_id)
-    assert await _owner(db_session, solo_id) == other
-    assert (await _memberships(db_session, other))[solo_id] == WorkspaceRole.OWNER
-    assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == other
-    forced = (
-        await db_session.execute(
-            select(AuditLog.user_metadata).where(
-                AuditLog.action == FORCE_OWNERSHIP_TRANSFER_ACTION,
-                AuditLog.resource == f"workspace:{solo_id}",
-            )
-        )
-    ).scalar_one()
-    assert forced["reason"] == delete_admin.SOLE_MEMBER_REASON
+    assert await db_session.get(Workspace, solo_id) is None
+    assert await _memberships(db_session, admin_id) == {}
+    assert await _owner(db_session, elsewhere_id) == other
 
 
 @pytest.mark.asyncio
-async def test_soft_deleted_workspaces_and_memberships_go_with_the_admin(
-    db_session: AsyncSession, connector_world, sole_password_admin
+async def test_soft_deleted_workspaces_are_left_as_they_are(
+    db_session: AsyncSession, connector_world, sole_password_admin, capsys
 ) -> None:
     world = connector_world
     admin_id = await _password_admin(db_session, world)
@@ -249,16 +234,13 @@ async def test_soft_deleted_workspaces_and_memberships_go_with_the_admin(
     await db_session.execute(
         update(Workspace).where(Workspace.id == gone_id).values(deleted_at=utcnow())
     )
-    elsewhere = await world.workspace(owner, **{admin_id: WorkspaceRole.MEMBER})
-    elsewhere_id = elsewhere.id
 
-    # nothing live is owned, so no --transfer-to is needed
     assert await _run(db_session) == 0
 
+    assert str(gone_id) in capsys.readouterr().out
     assert not await _exists(db_session, admin_id)
-    assert await db_session.get(Workspace, gone_id) is None
-    assert await _memberships(db_session, admin_id) == {}
-    assert await _owner(db_session, elsewhere_id) == owner
+    assert await db_session.get(Workspace, gone_id) is not None
+    assert (await _memberships(db_session, owner))[gone_id] == WorkspaceRole.MEMBER
 
 
 async def _refused(db_session: AsyncSession, admin_id: str, transfer_to: str | None, capsys):
@@ -309,7 +291,7 @@ async def test_cli_refuses_a_target_outside_a_shared_workspace(
     refused = out.split("is not a member of")[1]
     assert str(ids[1]) in refused
     assert str(ids[0]) not in refused
-    assert str(ids[2]) not in refused
+    assert str(ids[2]) not in refused  # only the admin is in it: no target needed
     for ws_id in ids:
         assert await _owner(db_session, ws_id) == admin_id
 
@@ -327,7 +309,7 @@ async def test_cli_refuses_an_unknown_self_or_ambiguous_target(
     await db_session.execute(
         update(User).where(User.user_id == second).values(email=shared.upper())
     )
-    await world.workspace(admin_id)
+    await world.workspace(admin_id, **{first: WorkspaceRole.MEMBER})
 
     for target in (f"ghost_{uuid4().hex[:8]}", admin_id):
         assert "no such user" in await _refused(db_session, admin_id, target, capsys)
@@ -343,10 +325,10 @@ async def test_email_target_matches_case_insensitively(
     world = connector_world
     admin_id = await _password_admin(db_session, world)
     other = await world.user("other")
-    solo = await world.workspace(admin_id)
-    transfer_audits.append(solo.id)
-    solo_id = solo.id
+    shared = await world.workspace(admin_id, **{other: WorkspaceRole.MEMBER})
+    shared_id = shared.id
+    transfer_audits.append(shared_id)
 
-    assert await _run(db_session, f"{other}@EXAMPLE.com") == 0
+    assert await _run(db_session, f" {other}@EXAMPLE.com") == 0
 
-    assert await _owner(db_session, solo_id) == other
+    assert await _owner(db_session, shared_id) == other

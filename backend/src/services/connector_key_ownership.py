@@ -16,7 +16,6 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Update, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from models.auth import APIKey, Workspace
 from services.erasure_details import locked_ids
@@ -85,10 +84,4 @@ async def reown_connector_keys(
         CursorResult[Any],
         await db.execute(reown_connector_keys_stmt(user_id, workspace_id=workspace_id)),
     )
-    return result.rowcount or 0
-
-
-def reown_connector_keys_sync(db: Session, user_id: str) -> int:
-    """:func:`reown_connector_keys` on a sync ``Session`` (``cli.delete_admin``)."""
-    result = cast(CursorResult[Any], db.execute(reown_connector_keys_stmt(user_id)))
     return result.rowcount or 0
