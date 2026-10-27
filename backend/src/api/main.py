@@ -82,6 +82,20 @@ async def _close_redis_on_shutdown() -> None:
         logger.warning("redis_close_failed", error_type=type(exc).__name__, error=str(exc))
 
 
+# Upper bound on closing the worker's Qdrant client at shutdown (#2241).
+_QDRANT_CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+async def _close_qdrant_on_shutdown() -> None:
+    """Close this worker's async Qdrant client; bounded, logs and never raises (#2241)."""
+    from db import qdrant as qdrant_db
+
+    try:
+        await asyncio.wait_for(qdrant_db.close_qdrant(), timeout=_QDRANT_CLOSE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("qdrant_close_failed", error_type=type(exc).__name__, error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -253,6 +267,10 @@ async def lifespan(app: FastAPI):
     # After the scheduler (its cron jobs use Redis), before close_db(). A job
     # that touches Redis after this builds a new client lazily (#1995).
     await _close_redis_on_shutdown()
+
+    # After the scheduler and the cancelled background tasks (they query
+    # Qdrant), before close_db(). A later caller builds a new client (#2241).
+    await _close_qdrant_on_shutdown()
 
     # Release blob storage (Issue #485)
     from storage.factory import close_blob_storage

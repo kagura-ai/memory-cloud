@@ -9,6 +9,7 @@ Collection design (post Single Collection Migration, Issue #334):
 - Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,7 +51,7 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
-from db.loop_binding import keep_for_loop, running_loop, tag_loop
+from db.loop_binding import keep_for_loop, owned_by_another_loop, running_loop, tag_loop
 from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_point_id
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
@@ -764,6 +765,28 @@ def get_qdrant_client() -> AsyncQdrantClient:
             raise QdrantError(f"Failed to connect to Qdrant: {e}") from e
 
     return _qdrant_client
+
+
+async def close_qdrant() -> None:
+    """Close the Qdrant client and forget it (#2241, mirrors ``close_redis()``).
+
+    The client is closed only on the loop it belongs to; a client from another
+    loop is just dropped (its connections cannot be closed from here). The
+    module forgets the client before closing it, so it is reset even when
+    ``close()`` raises or is cancelled, and the error is raised to the caller.
+    """
+    global _qdrant_client
+
+    client = _qdrant_client
+    if client is None:
+        return
+    other_loop = owned_by_another_loop(client, asyncio.get_running_loop())
+    _qdrant_client = None
+    if other_loop:
+        logger.debug("qdrant_client_dropped_from_another_loop")
+        return
+    await client.close()
+    logger.info("qdrant_client_closed")
 
 
 def _active_store() -> "VectorStore | None":

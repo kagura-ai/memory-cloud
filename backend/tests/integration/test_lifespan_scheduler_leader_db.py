@@ -23,7 +23,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool
 
 import db.base as db_base
+import db.qdrant as qdrant_db
 import tasks
+import tasks.dense_vector_config as dense_vector_config
+import tasks.geo_backfill as geo_backfill
 import tasks.scheduler_leader as sl
 from config.database import to_async_database_url
 from config.settings import get_settings
@@ -49,6 +52,15 @@ def leader_on_pooled_engine(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
     monkeypatch.setattr(sl, "start_scheduler", lambda: None)
     monkeypatch.setattr(sl, "shutdown_scheduler", lambda: None)
     monkeypatch.setattr(tasks, "register_scheduled_jobs", lambda _scheduler: None)
+
+    # The lifespan's one-shot background passes would take pooled sessions of
+    # their own (and wait on Qdrant); only the leader's connection is pinned here.
+    async def _noop() -> None:
+        return None
+
+    monkeypatch.setattr(geo_backfill, "run_location_payload_backfill", _noop)
+    monkeypatch.setattr(dense_vector_config, "run_dense_vector_config_reconcile", _noop)
+    monkeypatch.setattr(qdrant_db, "ensure_chunk_of_index_on_all", _noop)
 
     calls: list[tuple[str, object]] = []
     real_stop = sl.SchedulerLeader.stop
@@ -97,6 +109,7 @@ def test_shutdown_stops_the_leader_before_close_db(
         assert leader is not None
         deadline = time.monotonic() + _ACQUIRE_TIMEOUT_SECONDS
         while not leader.is_leader:
+            # Another session on the test DB holding the leader lock lands here.
             assert time.monotonic() < deadline, "the leader never took the lock"
             time.sleep(0.05)
         assert isinstance(db_base.engine.pool, AsyncAdaptedQueuePool)
