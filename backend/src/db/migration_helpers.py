@@ -29,21 +29,44 @@ until the revision ends.
 ``SET LOCAL`` ends with its transaction, so it does not reach the statements
 inside an ``autocommit_block()``. That is deliberate for ``CREATE INDEX
 CONCURRENTLY``: its wait for older transactions does not block readers or
-writers, and a timeout there would only leave an INVALID index behind. A
-``VALIDATE CONSTRAINT`` in an autocommit block that wants a cap sets a
-session-level one itself (``lock_timeout_statement(value, local=False)``,
-then ``RESET lock_timeout``).
+writers, and a timeout there would only leave an INVALID index behind.
+
+Helpers for a revision (#2240)
+------------------------------
+New revisions call these instead of writing their own copies;
+``tests/test_check_migration_helpers.py`` holds every revision after f17 to
+that (the older ones keep their copies, allow-listed by revision id).
+
+- ``validate_constraint(table, name)``: ``VALIDATE CONSTRAINT`` in its own
+  ``autocommit_block()``, so the preceding ``NOT VALID`` add commits (and
+  releases its ACCESS EXCLUSIVE lock) before the scan, with the migration
+  ``lock_timeout`` set for the block. Call it outside any autocommit block.
+- ``session_lock_timeout(value)``: for other statements inside an
+  ``autocommit_block()`` (a batched backfill, a VALIDATE among other steps):
+  a session-level ``SET lock_timeout`` on entry and ``RESET lock_timeout``
+  on exit, the e99 / f14 / f15 form. A session-level setting needs a
+  session-pinned connection (a direct connection or the Cloud SQL proxy, not
+  a transaction-pooling pgbouncer).
+- ``index_is_invalid(name)``: whether an interrupted ``CREATE INDEX
+  CONCURRENTLY`` left ``name`` behind INVALID. A rerun's ``IF NOT EXISTS``
+  would keep such an index, so the revision drops it (``DROP INDEX
+  CONCURRENTLY IF EXISTS``) before it builds again. It reads the database,
+  so a revision that calls it does not run offline (``--sql``).
 """
 
 from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.engine import Connection
+
+from alembic import op
 
 MIGRATION_LOCK_TIMEOUT_ENV = "KAGURA_MIGRATION_LOCK_TIMEOUT"
 DEFAULT_MIGRATION_LOCK_TIMEOUT = "5s"
@@ -151,3 +174,72 @@ def reapply_migration_lock_timeout(value: str | None):
         conn.exec_driver_sql(lock_timeout_statement(value))
 
     return _callback
+
+
+# A table, constraint or index name interpolated into DDL (identifiers cannot
+# be bound parameters): lowercase ASCII, unquoted, at most 63 bytes.
+_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+
+_INVALID_INDEX_SQL = (
+    "SELECT 1 FROM pg_class c JOIN pg_index i ON c.oid = i.indexrelid "
+    "WHERE c.relname = :name AND i.indisvalid IS FALSE"
+)
+
+
+def _identifier(name: str) -> str:
+    if _IDENTIFIER.fullmatch(name) is None:
+        raise ValueError(f"not a plain lowercase SQL identifier: {name!r}")
+    return name
+
+
+@contextmanager
+def session_lock_timeout(value: str | None) -> Iterator[None]:
+    """Cap each lock wait of the statements inside an ``autocommit_block()``.
+
+    ``SET lock_timeout`` (session-level, as ``SET LOCAL`` would end with each
+    autocommitted statement) on entry, ``RESET lock_timeout`` on exit, also
+    when the body raises. ``value`` is a duration (``migration_lock_timeout()``
+    or a revision's own); ``None`` sets nothing. Use it inside the block.
+    """
+    if value is None:
+        yield
+        return
+    op.execute(sa.text(lock_timeout_statement(value, local=False)))
+    try:
+        yield
+    finally:
+        op.execute(sa.text("RESET lock_timeout"))
+
+
+def validate_constraint(table: str, name: str) -> None:
+    """``ALTER TABLE <table> VALIDATE CONSTRAINT <name>`` outside the ALTER's
+    transaction (#2073, #2079, #2240).
+
+    ``autocommit_block()`` commits the preceding transaction, releasing the
+    ``NOT VALID`` add's ACCESS EXCLUSIVE lock, so the scan holds only SHARE
+    UPDATE EXCLUSIVE (and SHARE ROW EXCLUSIVE on a foreign key's referenced
+    table). The wait for those locks is capped by the migration
+    ``lock_timeout`` (``KAGURA_MIGRATION_LOCK_TIMEOUT``); a timeout fails the
+    upgrade with SQLSTATE 55P03, to be run again. Everything before the call
+    has committed, so it must be re-runnable (``DROP CONSTRAINT IF EXISTS
+    ..., ADD ... NOT VALID``). Offline (``--sql``) the block emits ``COMMIT;``
+    / ``BEGIN;`` around the statements.
+
+    Call it outside any ``autocommit_block()``: it opens its own.
+    """
+    statement = f"ALTER TABLE {_identifier(table)} VALIDATE CONSTRAINT {_identifier(name)}"
+    with op.get_context().autocommit_block(), session_lock_timeout(migration_lock_timeout()):
+        op.execute(sa.text(statement))
+
+
+def index_is_invalid(name: str) -> bool:
+    """Whether index ``name`` exists in an INVALID state (the e62 probe).
+
+    A ``CREATE INDEX CONCURRENTLY`` that fails mid-build leaves its index with
+    ``indisvalid = false``. A rerun's ``IF NOT EXISTS`` would skip it without
+    building it, so the revision drops the leftover first. Run the probe
+    before the ``autocommit_block()`` that builds the index. It reads the
+    database, so a revision that calls it does not run offline (``--sql``).
+    """
+    row = op.get_bind().execute(sa.text(_INVALID_INDEX_SQL), {"name": name}).first()
+    return row is not None
