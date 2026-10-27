@@ -210,6 +210,18 @@ def test_combined_prior_keeps_null_and_ignores_marker_keys():
     assert values == {"details": {"k": 1}} and not erased
 
 
+def test_a_per_key_stripped_prior_is_restored_as_it_is():
+    """#2275: erasure removed only the erased member's keys from the
+    session's prior: the rest is put back (no ``prior_erased`` skip)."""
+    values, erased = combined_prior([ev(1, "updated", 2, {"details": {"a": 1}})])
+    assert values == {"details": {"a": 1}} and not erased
+    item = plan_memory(
+        [ev(1, "updated", 2, {"details": {"a": 1}})],
+        state(version=2, current={"details": {"a": 2, "s": 2}}),
+    )
+    assert (item.action, item.values) == (ACTION_RESTORE, {"details": {"a": 1}})
+
+
 def test_scrubbed_blocks_only_a_field_the_event_changed():
     """v0.113.0 review F3: ``scrubbed`` (the live details of an erased author's
     memory are gone) is on every updated event of the memory; it must not stop
