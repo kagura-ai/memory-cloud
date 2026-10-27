@@ -140,8 +140,9 @@ async def test_delete_workspace_commits_before_the_qdrant_cleanup():
         return result
 
     db = MagicMock()
-    # external API keys, users on this workspace, then (after commit) contexts
-    db.execute = AsyncMock(side_effect=[_rows([]), _rows([]), _rows([ctx])])
+    # External keys, files purged in the transaction, workspace users, then
+    # (after commit) contexts. The new file sweep must not shift the user rows.
+    db.execute = AsyncMock(side_effect=[_rows([]), _rows([]), _rows([]), _rows([ctx])])
     db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
     ws = _ws("free")
 
