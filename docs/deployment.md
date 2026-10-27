@@ -1795,7 +1795,11 @@ never started. A request whose Postgres step committed ends `failed` with
 `failure_reason` set to `after_postgres_commit: interrupted: sweep`, is
 pseudonymized like any request that failed after its Postgres step, and keeps
 the Postgres counts; the member's Redis state (sessions, rate limits, security
-notices) is cleared then, best-effort. From v0.128.0 (#2302) the sweep then
+notices) is cleared then, best-effort. From v0.129.0 (#2363) the sweep also
+repeats the second delete of the member's points that follows the commit (the
+run may have died before it; counts in `qdrant_after_commit`, a failure in
+`qdrant_after_commit_failed`); it skips it for a sub that signed up again.
+From v0.128.0 (#2302) the sweep then
 patches the vector payloads of the memories whose `details` the run put back
 (found from the restore's own `memory_revisions` rows), as the run would have,
 and records the counts in `deleted_data_summary.postgres.details_payload_*`; a
@@ -1916,7 +1920,9 @@ the vector delete and the Postgres step's row locks is removed by a second
 delete of the member's points right after the commit (best-effort: counts in
 the summary's `qdrant_after_commit`; a failure is logged as
 `erasure_late_points_delete_failed` and recorded as
-`qdrant_after_commit_failed`, and the request still completes). The
+`qdrant_after_commit_failed`, and the request still completes; the sweep's
+close of an interrupted request repeats this delete and records it the same
+way on its `failed` row). The
 `embedding_unsearchable_backlog` warning counts them as `erased`, not as a
 provider problem, and they alone do not raise it. No automatic retry takes
 them again: the admin retry-failed endpoint or an embedding-model switch of

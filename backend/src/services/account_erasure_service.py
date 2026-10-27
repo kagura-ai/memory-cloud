@@ -1110,8 +1110,9 @@ class AccountErasureService:
           a summary with ``postgres`` (written in the Postgres step's own
           transaction) means that step committed and the run was
           interrupted after it — ``failed`` with
-          ``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the subject's Redis state
-          cleared best-effort, and the vector payloads of the memories its
+          ``INTERRUPTED_AFTER_POSTGRES_COMMIT``, the subject's points deleted
+          once more (step 3a, #2363) and its Redis state cleared, both
+          best-effort, and the vector payloads of the memories its
           restore put back are patched right after (#2302,
           ``_resync_interrupted_payloads``); without it nothing ran —
           ``complete`` with the ``user_row_already_absent`` note. Either way
@@ -1119,7 +1120,7 @@ class AccountErasureService:
           with ``postgres`` is closed that way even when a user row with its
           sub exists (#2302): the subject was deleted in that transaction,
           so the user row is an account registered again since — it is never
-          run against, and its Redis keys are kept.
+          run against, and its points and Redis keys are kept.
 
         - **Stale ``pending``** (``requested_at`` older than 1h + 5min
           grace): the Redis confirm token (TTL 1h) has expired and the
@@ -1306,8 +1307,9 @@ class AccountErasureService:
         ``finalized_erasure`` — the re-run, the erased-members set — treats
         it as an erasure that ran. The subject's points are deleted once more
         (step 3a, ``_delete_late_points``, #2363: the run may have died before
-        it) and its Redis state is cleared, both best-effort; the payload patch of restored memories is re-driven
-        by the caller right after this commit (#2302,
+        it) and its Redis state is cleared, both best-effort; the payload
+        patch of restored memories is re-driven by the caller right after
+        this commit (#2302,
         ``_resync_interrupted_payloads``); the ``account_erasure`` audit row
         and the completion email are not done. When ``user_row_exists`` (the
         sub was registered again after the Postgres commit, #2302), the same
