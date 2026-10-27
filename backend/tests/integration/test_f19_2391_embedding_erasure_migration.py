@@ -23,9 +23,10 @@ MARKER = "erased_author: the author's account was erased; its vector points are 
 def test_f19_backfill_is_exact_batched_and_retryable():
     _reset_alembic_state()
     engine = _sync_engine()
+    workspace_id = uuid4()
     try:
         _upgrade_to(PRIOR)
-        erased_id, normal_id, workspace_id = uuid4(), uuid4(), uuid4()
+        erased_id, normal_id = uuid4(), uuid4()
         with engine.begin() as conn:
             for memory_id, error in [(erased_id, MARKER), (normal_id, MARKER + " extra")]:
                 conn.execute(
@@ -106,4 +107,10 @@ def test_f19_backfill_is_exact_batched_and_retryable():
                 == 0
             )
     finally:
-        engine.dispose()
+        try:
+            # Other modules share this DB; create_all cannot restore dropped columns.
+            _upgrade_to("head")
+            with engine.begin() as conn:
+                conn.execute(Memory.__table__.delete().where(Memory.workspace_id == workspace_id))
+        finally:
+            engine.dispose()
