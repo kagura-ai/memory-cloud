@@ -315,7 +315,7 @@ first_call_line_in() {
 
 # --- #2408: default is NO restart ------------------------------------------
 # The co-resident worker follows the in-place marker (#1513) on its own
-# (kagura-bridge >= v0.24.1 polls it), so a restart only costs ~30 s of 502s on
+# (a current worker polls it), so a restart only costs ~30 s of 502s on
 # its public endpoint per deploy. BRIDGE_RESTART_ON_SWITCH=1 keeps the restart
 # for an older worker.
 

@@ -66,7 +66,7 @@ DOCKER="${DOCKER:-docker}"
 BRIDGE_WORKER_CONTAINER="${BRIDGE_WORKER_CONTAINER:-kagura-bridge-worker-1}"
 
 # Restart that worker on a color flip? Off by default since #2408: the marker is
-# written in place (#1513) and the worker polls it (kagura-bridge >= v0.24.1), so
+# written in place (#1513) and a current worker polls it, so
 # the restart only bought ~30 s of 502s on its public endpoint per deploy. Set
 # to 1 for an older worker that reads the marker at boot only.
 BRIDGE_RESTART_ON_SWITCH="${BRIDGE_RESTART_ON_SWITCH:-0}"
