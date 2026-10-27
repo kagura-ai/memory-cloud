@@ -12,8 +12,8 @@ already stores the endpoint URL, so that is where the choice lives::
 
 ``tools`` is an explicit allowlist and wins over ``profile``. With neither, the
 list is the ``core`` profile (#1849 — ``DEFAULT_PROFILE``); ``profile=full`` is
-exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile the
-URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
+exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
+the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
 A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
@@ -79,7 +79,7 @@ _SHOWN_CHARS = 64
 
 
 class ToolProfileError(Exception):
-    """The URL's ``profile`` / ``tools`` selection cannot be served.
+    """The URL's ``profile`` / ``tools`` / ``add_tools`` selection cannot be served.
 
     The transports answer it with JSON-RPC ``-32602`` (invalid params);
     ``message`` is written for the person fixing their MCP configuration.
@@ -148,13 +148,10 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
             matches no known tool.
     """
     definitions = get_tool_definitions()
-    if not query_string:
-        return _apply_profile(definitions, DEFAULT_PROFILE)
-
     if isinstance(query_string, bytes):
         query_string = query_string.decode("utf-8", "replace")
     params: dict[str, str] = {}
-    for key, value in parse_qsl(query_string, keep_blank_values=True):
+    for key, value in parse_qsl(query_string or "", keep_blank_values=True):
         params.setdefault(key, value)
     known = {tool["name"] for tool in definitions}
 
@@ -162,7 +159,11 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
         if "add_tools" in params:
             # The allowlist keeps its exact meaning: a URL that already names
             # its tools is not widened by a second parameter.
-            logger.info("mcp_tool_profile_add_tools_ignored", reason="tools_present")
+            logger.info(
+                "mcp_tool_profile_add_tools_ignored",
+                reason="tools_present",
+                add_tools=params["add_tools"][:_SHOWN_CHARS],
+            )
         wanted, unknown = _read_names(params["tools"], "tools", known)
         if not wanted:
             named = f" (unknown: {', '.join(map(repr, _shown(unknown)))})" if unknown else ""
@@ -181,20 +182,13 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
                 f"Valid profiles: {', '.join(PROFILES)}."
             )
     selected = PROFILES[profile]
-    added: set[str] = set()
-    if "add_tools" in params:
-        added, _ = _read_names(params["add_tools"], "add_tools", known)
     if selected is None:  # ``full`` already lists everything ``add_tools`` could add.
         return definitions
-    wanted = set(selected) | added
+    wanted = set(selected)
+    if "add_tools" in params:
+        added, _ = _read_names(params["add_tools"], "add_tools", known)
+        wanted |= added
     return [tool for tool in definitions if tool["name"] in wanted]
-
-
-def _apply_profile(definitions: list[dict], profile: str) -> list[dict]:
-    selected = PROFILES[profile]
-    if selected is None:
-        return definitions
-    return [tool for tool in definitions if tool["name"] in selected]
 
 
 def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:

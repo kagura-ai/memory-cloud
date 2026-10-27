@@ -234,8 +234,10 @@ def test_add_tools_adds_to_an_explicit_core_profile_in_registry_order():
     assert _names(b"add_tools=list_edges&profile=core") == _core_plus("list_edges")
 
 
-def test_add_tools_on_the_full_profile_is_the_whole_registry():
+def test_add_tools_on_the_full_profile_is_the_whole_registry(logs):
     assert _names(b"profile=full&add_tools=get_usage,no_such_tool") == REGISTRY
+    # Nothing to add to ``full``: the value is not even read.
+    assert logs == []
 
 
 def test_add_tools_naming_a_core_tool_changes_nothing():
@@ -300,6 +302,7 @@ def test_tools_wins_over_add_tools_and_the_ignored_add_tools_is_logged(logs):
 
     events = [e for e in logs if e["event"] == "mcp_tool_profile_add_tools_ignored"]
     assert len(events) == 2
+    assert events[0]["add_tools"] == "get_usage"
     # The allowlist's own rules are unchanged: matching nothing is still an error.
     with pytest.raises(ToolProfileError):
         select_tool_definitions(b"tools=no_such_tool&add_tools=get_usage")

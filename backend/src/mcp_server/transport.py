@@ -1465,8 +1465,8 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
         from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
-        # #1601 / #1849: the endpoint URL (``?profile=`` / ``?tools=``) picks
-        # what is listed; without either this is the core profile. It is a
+        # #1601 / #1849 / #2354: the endpoint URL (``?profile=`` / ``?tools=`` /
+        # ``?add_tools=``) picks what is listed; without either this is the core profile. It is a
         # view, not an authorization boundary — ``tools/call`` below never
         # reads it, so an unlisted tool stays callable under the usual role
         # checks (clients, however, call listed tools only; ``describe_tools``
