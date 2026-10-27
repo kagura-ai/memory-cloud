@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import ast
-import io
 from pathlib import Path
 
 import pytest
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
 
 from alembic import op
 from db.migration_helpers import (
@@ -22,6 +19,7 @@ from db.migration_helpers import (
     session_lock_timeout,
     validate_constraint,
 )
+from tests.migration_ast import offline_sql
 
 ENV_PY = Path(__file__).resolve().parents[2] / "alembic" / "env.py"
 
@@ -144,41 +142,25 @@ class _ProbeBind:
 
 
 def _offline(fn, bind: object | None = None) -> list[str]:
-    """The offline (``--sql``) script ``fn`` emits, one statement per line."""
-    buf = io.StringIO()
-    ctx = MigrationContext.configure(
-        dialect_name="postgresql",
-        opts={"as_sql": True, "output_buffer": buf, "transactional_ddl": True},
-    )
-    if bind is not None:
-        ctx.impl.connection = bind  # type: ignore[assignment]
-    with Operations.context(ctx):
-        fn()
-    return [line.strip() for line in buf.getvalue().splitlines() if line.strip()]
+    return offline_sql(fn, None if bind is None else (lambda _buf: bind))
 
 
-def test_validate_constraint_commits_first_and_caps_the_lock_wait(monkeypatch) -> None:
-    monkeypatch.delenv(MIGRATION_LOCK_TIMEOUT_ENV, raising=False)
+@pytest.mark.parametrize("env", ["5s", "30s", "0", None])
+def test_validate_constraint_runs_in_a_transaction_of_its_own(monkeypatch, env) -> None:
+    """Commit, VALIDATE, commit: the cap is the transaction's own ``SET LOCAL``
+    (env.py), so the helper sets no session state whatever the override."""
+    if env is None:
+        monkeypatch.delenv(MIGRATION_LOCK_TIMEOUT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(MIGRATION_LOCK_TIMEOUT_ENV, env)
 
     lines = _offline(lambda: validate_constraint("memories", "ck_memories_x"))
 
     assert lines == [
         "COMMIT;",
-        "SET lock_timeout = '5s';",
-        "ALTER TABLE memories VALIDATE CONSTRAINT ck_memories_x;",
-        "RESET lock_timeout;",
         "BEGIN;",
-    ]
-
-
-def test_validate_constraint_follows_the_override(monkeypatch) -> None:
-    monkeypatch.setenv(MIGRATION_LOCK_TIMEOUT_ENV, "30s")
-    assert "SET lock_timeout = '30s';" in _offline(lambda: validate_constraint("t", "ck_t"))
-
-    monkeypatch.setenv(MIGRATION_LOCK_TIMEOUT_ENV, "0")
-    assert _offline(lambda: validate_constraint("t", "ck_t")) == [
+        "ALTER TABLE memories VALIDATE CONSTRAINT ck_memories_x;",
         "COMMIT;",
-        "ALTER TABLE t VALIDATE CONSTRAINT ck_t;",
         "BEGIN;",
     ]
 
@@ -246,5 +228,6 @@ def test_index_is_invalid_reads_pg_index(row: object, expected: bool) -> None:
     assert seen == [expected]
     ((statement, params),) = bind.calls
     assert "indisvalid IS FALSE" in statement
+    assert "pg_table_is_visible(c.oid)" in statement
     assert "c.relname = :name" in statement
     assert params == {"name": "ix_t_a"}

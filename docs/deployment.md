@@ -3672,8 +3672,8 @@ change.
   revision that wants a cap there sets its own: the backfill / VALIDATE steps
   of e99, f14 and f15 use 5 s, and a timeout there fails the same way.
   A revision added from v0.129.0 on VALIDATEs through a shared helper that
-  uses this setting for its autocommit block too (#2240), session-level, so
-  like f15's steps it needs a session-pinned connection.
+  runs the VALIDATE in a transaction of its own, so this setting caps it too
+  (#2240).
   `CREATE INDEX CONCURRENTLY` has none: its wait for older transactions blocks
   neither reads nor writes.
 - The setting is transaction-local, so it works through a transaction-pooling

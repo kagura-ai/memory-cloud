@@ -1,8 +1,9 @@
 """DB contract for the shared migration helpers (#2240).
 
-``validate_constraint`` validates outside the ALTER's transaction with the
-migration ``lock_timeout`` capping its lock wait, and resets the session
-afterwards; ``index_is_invalid`` tells an interrupted ``CREATE INDEX
+``validate_constraint`` validates in a transaction of its own: after the
+ALTER's commit, under the migration ``SET LOCAL lock_timeout`` env.py starts
+every transaction with, and committed before the revision goes on;
+``index_is_invalid`` tells an interrupted ``CREATE INDEX
 CONCURRENTLY`` leftover from a built index. Runs on a scratch table of the
 test database, dropped afterwards.
 """
@@ -20,8 +21,8 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
 
 from db.migration_helpers import (
-    MIGRATION_LOCK_TIMEOUT_ENV,
     index_is_invalid,
+    install_migration_lock_timeout,
     validate_constraint,
 )
 from tests.integration.test_alembic_migrations import _sync_engine
@@ -46,7 +47,9 @@ def engine() -> Iterator[Engine]:
 
 
 def _run(conn: Connection, fn) -> None:
-    """Run ``fn`` as a revision body: inside the migration's transaction."""
+    """Run ``fn`` as a revision body: inside the migration's transaction.
+
+    Install the lock_timeout on ``conn`` first, as env.py does."""
     ctx = MigrationContext.configure(connection=conn)
     with ctx.begin_transaction(), Operations.context(ctx):
         fn()
@@ -70,27 +73,39 @@ def _validated(conn: Connection) -> bool:
     ).scalar_one()
 
 
-def test_validate_constraint_validates_after_the_add_commits(engine, monkeypatch) -> None:
-    monkeypatch.setenv(MIGRATION_LOCK_TIMEOUT_ENV, "750ms")
+def _try_lock(engine: Engine) -> bool:
+    """Whether another session gets SHARE UPDATE EXCLUSIVE (VALIDATE's lock) now."""
+    with engine.connect() as other:
+        try:
+            other.execute(text(f"LOCK TABLE {_TABLE} IN SHARE UPDATE EXCLUSIVE MODE NOWAIT"))
+            return True
+        except DBAPIError:
+            return False
+        finally:
+            other.rollback()
+
+
+def test_validate_constraint_commits_around_the_validate(engine) -> None:
+    seen: list[bool] = []
     with engine.connect() as conn:
+        install_migration_lock_timeout(conn, "750ms")
 
         def _body() -> None:
             _add_not_valid()
             validate_constraint(_TABLE, _CHECK)
+            # The VALIDATE committed: its lock is not held to the upgrade's end.
+            seen.append(_try_lock(engine))
 
         _run(conn, _body)
-
         assert _validated(conn) is True
-        # The session-level cap is gone again after the block.
-        assert conn.exec_driver_sql("SHOW lock_timeout").scalar_one() == "0"
         conn.rollback()
+    assert seen == [True]
 
 
-def test_validate_constraint_fails_fast_behind_a_blocker_and_reruns(engine, monkeypatch) -> None:
-    monkeypatch.setenv(MIGRATION_LOCK_TIMEOUT_ENV, "300ms")
+def test_validate_constraint_fails_fast_behind_a_blocker_and_reruns(engine) -> None:
     with engine.connect() as conn:
+        install_migration_lock_timeout(conn, "300ms")
         _run(conn, _add_not_valid)
-        conn.commit()
 
         with engine.connect() as blocker:
             # SHARE UPDATE EXCLUSIVE conflicts with VALIDATE's own lock; the
@@ -108,13 +123,26 @@ def test_validate_constraint_fails_fast_behind_a_blocker_and_reruns(engine, monk
         assert getattr(excinfo.value.orig, "pgcode", None) == "55P03"
         assert elapsed < 10
         conn.rollback()
-        # The RESET ran on the way out, and the NOT VALID add stays committed.
-        assert conn.exec_driver_sql("SHOW lock_timeout").scalar_one() == "0"
+        # The NOT VALID add stays committed; the rerun validates.
         assert _validated(conn) is False
         conn.rollback()
 
         _run(conn, lambda: validate_constraint(_TABLE, _CHECK))
         assert _validated(conn) is True
+        conn.rollback()
+
+
+def test_validate_constraint_refuses_to_run_inside_an_autocommit_block(engine) -> None:
+    from alembic import op
+
+    def _body() -> None:
+        _add_not_valid()
+        with op.get_context().autocommit_block():
+            validate_constraint(_TABLE, _CHECK)
+
+    with engine.connect() as conn:
+        with pytest.raises(RuntimeError, match="outside autocommit_block"):
+            _run(conn, _body)
         conn.rollback()
 
 

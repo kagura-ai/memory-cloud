@@ -13,8 +13,9 @@ Walks every revision's AST (``tests/migration_ast.py``, the walker of
   for a session-level ``SET lock_timeout`` in an autocommit block. The
   revisions that already carry a copy are allow-listed by revision id; the
   lists only shrink.
-- ``validate_constraint`` opens its own autocommit block, so it is called
-  outside one; ``session_lock_timeout`` is entered inside one.
+- ``validate_constraint`` commits before and after its VALIDATE, so it is
+  called outside an autocommit block; ``session_lock_timeout`` is entered
+  inside one.
 """
 
 from __future__ import annotations
@@ -175,9 +176,9 @@ def test_new_revisions_call_the_shared_helper(kind: str) -> None:
 
 
 def test_validate_constraint_is_called_outside_an_autocommit_block() -> None:
-    """It opens its own block. Nested in another one, a live run fails (the
-    inner block begins on a connection whose transaction is already begun) and
-    an offline script gets a ``BEGIN;`` in the middle of the outer block."""
+    """It commits before and after the VALIDATE, and inside a block there is
+    no transaction to commit. A live run refuses it (``RuntimeError``); this
+    catches the direct form before any run."""
     sites = {
         name: call_sites(tree, {"validate_constraint"}) for name, tree in migration_trees().items()
     }
@@ -255,3 +256,27 @@ def test_a_malformed_revision_is_reported() -> None:
     assert {kind for kind, copies in _COPIES.items() if copies(tree)} == set(_COPIES)
     assert call_sites(tree, {"validate_constraint"}) == [(16, True)]
     assert call_sites(tree, {"session_lock_timeout"}) == [(13, False)]
+
+
+_ORDER_AND_FSTRING = """
+from alembic import op
+from db.migration_helpers import session_lock_timeout
+
+_DDL = "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_t_a ON t (a)"
+
+
+def upgrade():
+    op.execute(f"{_DDL}")
+    with session_lock_timeout("5s"), op.get_context().autocommit_block():
+        pass
+    with op.get_context().autocommit_block(), session_lock_timeout("5s"):
+        op.execute(f"{_DDL}")
+"""
+
+
+def test_with_items_enter_in_order_and_f_strings_are_read() -> None:
+    """An item before ``autocommit_block()`` in the same ``with`` runs in the
+    transaction; a constant read inside an f-string counts where it is read."""
+    tree = ast.parse(_ORDER_AND_FSTRING)
+    assert _concurrently_sites(tree) == [(9, False), (13, True)]
+    assert call_sites(tree, {"session_lock_timeout"}) == [(10, False), (12, True)]

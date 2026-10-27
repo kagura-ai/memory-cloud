@@ -3,9 +3,11 @@
 Every check reads ``alembic/versions`` without importing it and reports each
 site as ``(lineno, inside an autocommit block)``. "Inside" is lexical: the
 site is in the body of ``with op.get_context().autocommit_block():`` (any
-``with`` whose item calls an ``autocommit_block`` attribute). A helper
-function defined outside the block and called inside it is reported as
-outside, the safe direction.
+``with`` whose item calls an ``autocommit_block`` attribute), or in a later
+item of the same ``with``. A helper function defined outside the block and
+called inside it is reported as outside, and so is a local variable assigned
+before the block and read inside it: for the checks that want a site inside,
+the safe direction.
 
 A docstring (any bare string statement) is never a site; comments are not in
 the AST at all.
@@ -14,8 +16,13 @@ the AST at all.
 from __future__ import annotations
 
 import ast
+import io
 from collections.abc import Callable, Iterable
+from functools import cache
 from pathlib import Path
+
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 
 ALEMBIC_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 
@@ -49,9 +56,16 @@ def _walk(tree: ast.AST, report: Callable[[ast.AST, bool, ast.AST | None], bool]
     stops the descent below ``node``."""
 
     def visit(node: ast.AST, in_block: bool, parent: ast.AST | None) -> None:
-        if isinstance(node, ast.With) and any(is_autocommit_block(i) for i in node.items):
-            in_block = True
         if report(node, in_block, parent):
+            return
+        if isinstance(node, ast.With):
+            # Items enter in order: one before the autocommit_block item runs
+            # in the transaction, one after it inside the block.
+            for item in node.items:
+                visit(item, in_block, node)
+                in_block = in_block or is_autocommit_block(item)
+            for stmt in node.body:
+                visit(stmt, in_block, node)
             return
         for child in ast.iter_child_nodes(node):
             visit(child, in_block, node)
@@ -89,12 +103,16 @@ def literal_sites(
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in constants:
             sites.append((node.lineno, in_block))
             return True
+        if isinstance(parent, ast.JoinedStr):
+            # An f-string's literal parts were read with the f-string.
+            return isinstance(node, ast.Constant)
         text = literal_text(node)
         if text is None:
             return False
         if matches(text) and not isinstance(parent, ast.Expr):
             sites.append((getattr(node, "lineno", 0), in_block))
-        return True
+        # Descend into an f-string's ``{...}`` parts: a constant read there.
+        return not isinstance(node, ast.JoinedStr)
 
     _walk(tree, report)
     return sites
@@ -167,9 +185,33 @@ def revision_id(tree: ast.Module) -> str | None:
     return None
 
 
+@cache
 def migration_trees() -> dict[str, ast.Module]:
-    """Each revision file's AST, by file name."""
+    """Each revision file's AST, by file name (read once per run; do not
+    mutate the result)."""
     return {
         path.name: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for path in sorted(ALEMBIC_VERSIONS.glob("*.py"))
     }
+
+
+def offline_sql(
+    fn: Callable[[], object], bind: Callable[[io.StringIO], object] | None = None
+) -> list[str]:
+    """The offline (``--sql``, transactional) PostgreSQL script ``fn`` emits,
+    one stripped line per entry.
+
+    ``op.get_bind()`` is the offline connection (None) unless ``bind`` makes
+    one from the output buffer: offline DDL goes to the buffer, never through
+    it, so only reads see it.
+    """
+    buf = io.StringIO()
+    ctx = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": buf, "transactional_ddl": True},
+    )
+    if bind is not None:
+        ctx.impl.connection = bind(buf)  # type: ignore[assignment]
+    with Operations.context(ctx):
+        fn()
+    return [line.strip() for line in buf.getvalue().splitlines() if line.strip()]

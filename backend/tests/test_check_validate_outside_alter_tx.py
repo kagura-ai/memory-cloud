@@ -37,7 +37,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
 from tests.migration_ast import ALEMBIC_VERSIONS as _ALEMBIC_VERSIONS
-from tests.migration_ast import Site, literal_sites, migration_trees
+from tests.migration_ast import Site, literal_sites, migration_trees, offline_sql
 
 if str(_ALEMBIC_VERSIONS) not in sys.path:
     sys.path.insert(0, str(_ALEMBIC_VERSIONS))
@@ -120,17 +120,7 @@ class _RecordingBind:
 
 
 def _offline_script(module: ModuleType, direction: str) -> list[str]:
-    buf = io.StringIO()
-    ctx = MigrationContext.configure(
-        dialect_name="postgresql",
-        opts={"as_sql": True, "output_buffer": buf, "transactional_ddl": True},
-    )
-    # ``op.get_bind()`` returns ``impl.bind`` (the connection, None offline).
-    # Offline DDL goes to the buffer, never through it, so only reads see this.
-    ctx.impl.connection = _RecordingBind(buf)  # type: ignore[assignment]
-    with Operations.context(ctx):
-        getattr(module, direction)()
-    return [line.strip() for line in buf.getvalue().splitlines() if line.strip()]
+    return offline_sql(getattr(module, direction), _RecordingBind)
 
 
 @pytest.mark.parametrize(("revision", "direction"), _CASES)
