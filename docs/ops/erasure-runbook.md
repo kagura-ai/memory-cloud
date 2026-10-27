@@ -66,7 +66,7 @@ FK の依存逆順で削除:
 | `oauth_authorization_codes` | `user_id = :uid` | FK cascade なし |
 | `oauth_clients` | `owner_id = :uid` | tokens は cascade で残らず |
 | `external_api_keys` | `user_id = :uid` | Fernet 暗号化 3rd-party キー |
-| `api_keys` (`connector_id IS NOT NULL`, `revoked_at IS NULL`) | `user_id = :uid` かつ workspace の owner が本人でない | 削除せず `user_id` を workspace の `owner_user_id` に付け替え (#2305)。connector の write key は workspace のもので、worker が持つ平文はそのまま有効、以後の rotate は owner 名義で発行される。counts キー = `connector_api_keys_reowned` |
+| `api_keys` (`connector_id IS NOT NULL`, `revoked_at IS NULL`) | `user_id = :uid` かつ workspace の owner が本人でない | 削除せず `user_id` を workspace の `owner_user_id` に付け替え (#2305)。connector の write key は workspace のもので、worker が持つ平文はそのまま有効、以後の rotate は owner 名義で発行される。counts キー = `connector_api_keys_reowned`。メンバー削除・admin のユーザー削除・`delete_admin` CLI も同じ helper (`services/connector_key_ownership.py`) で owner に付け替える (#2352) |
 | `api_keys` | `user_id = :uid` | connector key 以外 (revoked の connector key を含む) |
 | `graph_memory` | `user_id = :uid` | orphan, FK cascade なし |
 | `usage_stats` | `user_id = :uid` | |
@@ -85,7 +85,7 @@ FK の依存逆順で削除:
 
 ここまでが 1 つの Postgres トランザクション。どこかで失敗すると全体が rollback され (user 行は残る)、request は marker なしの `failed` (id はそのまま) になり、新しい request で再実行できる。
 
-#2305 より前の erasure で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。key の名義人が workspace のメンバーでなくなっている connector も、同じ rotate で新しい key が owner 名義になる。lock 待ちが 5 秒を超えると `503` `CONNECTOR-003` (再試行する)。
+#2305 より前の erasure (メンバー削除・admin のユーザー削除は #2352 より前) で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。key の名義人が workspace のメンバーでなくなっている connector も、同じ rotate で新しい key が owner 名義になる。lock 待ちが 5 秒を超えると `503` `CONNECTOR-003` (再試行する)。
 
 ### 2.5 Audit logs (Step 4 の一部)
 

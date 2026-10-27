@@ -1,6 +1,8 @@
 """Delete password admin user (for re-creation).
 
 Issue #51: Password + MFA login for initial admin.
+#2352: a connector's live write key the admin holds in a workspace someone
+else owns is handed to that owner instead of being deleted.
 
 Usage:
     cd backend && python -m src.cli.delete_admin
@@ -8,18 +10,30 @@ Usage:
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import create_engine, delete, func, select  # noqa: E402
+from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
+from services.connector_key_ownership import reown_connector_keys_stmt  # noqa: E402
 
 
-def delete_admin():
+def _delete_api_keys(db: Session, user_id: str) -> None:
+    """Hand the user's live connector keys to their workspace owners (#2352),
+    then delete the rest of the user's keys."""
+    moved = cast(CursorResult[Any], db.execute(reown_connector_keys_stmt(user_id))).rowcount or 0
+    if moved:
+        print(f"  ✓ Connector write keys handed to their workspace owners: {moved}")
+    db.execute(delete(APIKey).where(APIKey.user_id == user_id))
+
+
+def delete_admin() -> None:
     print("=" * 50)
     print("Kagura Memory Cloud - Delete Password Admin")
     print("=" * 50)
@@ -51,7 +65,7 @@ def delete_admin():
                 print("  Cancelled.")
                 sys.exit(0)
 
-            db.execute(delete(APIKey).where(APIKey.user_id == admin.user_id))
+            _delete_api_keys(db, admin.user_id)
             db.delete(admin)
             db.commit()
 
@@ -62,7 +76,7 @@ def delete_admin():
                 print("  Cancelled.")
                 sys.exit(0)
 
-            db.execute(delete(APIKey).where(APIKey.user_id == admin.user_id))
+            _delete_api_keys(db, admin.user_id)
             db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == admin.user_id))
             db.execute(delete(Workspace).where(Workspace.owner_user_id == admin.user_id))
             db.delete(admin)
