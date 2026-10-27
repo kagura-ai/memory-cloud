@@ -128,6 +128,10 @@ async def _delete_admin_rows(db: AsyncSession, admin_id: str, workspace_ids: lis
     await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == admin_id))
     if workspace_ids:
         await db.execute(delete(Workspace).where(Workspace.id.in_(workspace_ids)))
+        print(
+            "  Their vector points are removed by the daily orphan sweep "
+            "(or now: python -m src.cli.sweep_orphan_vectors --apply)"
+        )
     admin = (await db.execute(select(User).where(User.user_id == admin_id))).scalar_one_or_none()
     if admin is not None:
         await db.delete(admin)
@@ -200,6 +204,8 @@ async def delete_password_admin(
             return 1
         print(f"  Workspaces to transfer to {target_id}:")
         _print_workspaces(shared)
+    elif transfer_to is not None:
+        print(f"  --transfer-to {transfer_to} is not needed: no workspace other users are in.")
     if sole:
         print("  Only the admin is in these; they are deleted with it:")
         _print_workspaces(sole)

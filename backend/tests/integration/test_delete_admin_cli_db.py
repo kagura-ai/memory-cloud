@@ -19,13 +19,15 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import create_engine, delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
 from cli import delete_admin
+from config.database import to_sync_database_url
 from models.auth import AuditLog, User, Workspace, WorkspaceMember
 from services.workspace_ownership_service import OWNERSHIP_TRANSFER_ACTION
+from tests.conftest import TEST_DATABASE_URL
 from utils.datetime import utcnow
 
 from ._connector_world import _key_rows, _live_connector_key, _without_owner
@@ -69,11 +71,11 @@ async def transfer_audits(db_session: AsyncSession) -> AsyncIterator[list]:
     await db_session.commit()
 
 
-async def _run(db_session: AsyncSession, transfer_to: str | None = None) -> int:
+async def _run(
+    db_session: AsyncSession, transfer_to: str | None = None, ask=lambda prompt: True
+) -> int:
     await db_session.commit()
-    code = await delete_admin.delete_password_admin(
-        db_session, transfer_to=transfer_to, ask=lambda prompt: True
-    )
+    code = await delete_admin.delete_password_admin(db_session, transfer_to=transfer_to, ask=ask)
     await db_session.rollback()
     db_session.expire_all()
     return code
@@ -332,3 +334,54 @@ async def test_email_target_matches_case_insensitively(
     assert await _run(db_session, f" {other}@EXAMPLE.com") == 0
 
     assert await _owner(db_session, shared_id) == other
+
+
+def _join_while_prompting(workspace_id, user_id: str):
+    """An ``ask`` that answers yes after ``user_id`` joined the workspace on
+    another connection, as a web session would while the prompt waits."""
+
+    def ask(prompt: str) -> bool:
+        engine = create_engine(to_sync_database_url(TEST_DATABASE_URL))
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO workspace_members (workspace_id, user_id, role) "
+                        "VALUES (:ws, :uid, 'member')"
+                    ),
+                    {"ws": workspace_id, "uid": user_id},
+                )
+        finally:
+            engine.dispose()
+        return True
+
+    return ask
+
+
+@pytest.mark.asyncio
+async def test_a_member_joining_while_the_prompt_waits_stops_the_delete_and_a_rerun_finishes(
+    db_session: AsyncSession, connector_world, sole_password_admin, transfer_audits, capsys
+) -> None:
+    """The shared workspace is transferred before the re-check stops the
+    delete; the re-run hands over the workspace the target joined and deletes
+    the admin."""
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    target = await world.user("target")
+    shared = await world.workspace(admin_id, **{target: WorkspaceRole.MEMBER})
+    solo = await world.workspace(admin_id)
+    shared_id, solo_id = shared.id, solo.id
+    transfer_audits.extend([shared_id, solo_id])
+
+    code = await _run(db_session, target, ask=_join_while_prompting(solo_id, target))
+
+    assert code == 1
+    assert "changed while the prompt waited" in capsys.readouterr().out
+    assert await _exists(db_session, admin_id)
+    assert await _owner(db_session, shared_id) == target
+    assert await db_session.get(Workspace, solo_id) is not None
+
+    assert await _run(db_session, target) == 0
+
+    assert not await _exists(db_session, admin_id)
+    assert await _owner(db_session, solo_id) == target
