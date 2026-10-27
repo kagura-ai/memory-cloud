@@ -10,7 +10,7 @@ deletion (Qdrant -> workspace transfer -> Postgres (incl. audit-log
 pseudonymize) -> Redis -> audit row -> finalize) covered by the design pin
 in #360. The subject's live connector write keys are not deleted with their
 other keys: they serve the workspace, so the Postgres step hands them to the
-workspace's owner (#2305, ``_reown_connector_keys``).
+workspace's owner (#2305, ``services.connector_key_ownership``).
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers,
@@ -75,7 +75,6 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
-    ColumnElement,
     and_,
     case,
     delete,
@@ -133,6 +132,7 @@ from services.billing_contract import (
     owned_workspaces_under_contract,
     workspaces_under_contract,
 )
+from services.connector_key_ownership import reown_connector_keys
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     ERASURE_AUDIT_ACTION,
@@ -2280,56 +2280,14 @@ class AccountErasureService:
 
     async def _reown_connector_keys(self, user_id: str) -> int:
         """Hand the subject's live connector write keys to their workspace's
-        owner (#2305) and return how many moved.
+        owner (#2305) and return how many moved (summary key
+        ``connector_api_keys_reowned``).
 
-        A connector's write key (``api_keys.connector_id`` set) is the
-        workspace's ingest credential: the worker holds its plaintext, and
-        deleting the row with the subject's other keys would silently stop the
-        connector. Only ``user_id`` changes — hash, prefix, name,
-        ``connector_id``, ``workspace_id`` and expiry stay — so the stored
-        plaintext keeps verifying, and ``verify_key`` / ``rotate_kmc_key`` /
-        ``delete_connector`` need no change (they key on ``key_hash`` /
-        ``connector_id``); the next rotation mints under the owner, who is a
-        live member by construction.
-
-        Scope: the subject's rows with ``connector_id`` set and
-        ``revoked_at IS NULL`` (an expired, unrevoked key is still rotatable,
-        so it moves too); revoked connector keys are dead rows and are deleted
-        with the rest. The ``owner_user_id <> subject`` guard keeps a key of a
-        workspace the subject still owns — a sole-owned one, deleted with its
-        keys later in this transaction — where it is. The UPDATE bypasses
-        ``create_key``'s per-owner active-name check; an owner already holding
-        an active ``connector:<same id>`` key cannot happen (one active key
-        per connector; rotation revokes before it mints).
-
-        Lock order: the rows are the subject's alone, locked in id order
-        (``locked_ids``); the other writers of one of them, ``rotate_kmc_key``
-        (by ``key_hash``) and ``delete_connector`` (by ``connector_id``), hold
-        no ``users`` or ``memories`` lock first, so no new order.
+        The contract — scope, the ``owner_user_id <> subject`` guard and the
+        lock order — lives in ``services.connector_key_ownership``, shared with
+        member removal, the admin user delete and ``cli.delete_admin`` (#2352).
         """
-
-        def live(k: Any) -> tuple[ColumnElement[bool], ...]:
-            return (
-                k.user_id == user_id,
-                k.connector_id.is_not(None),
-                k.revoked_at.is_(None),
-            )
-
-        result = cast(
-            CursorResult[Any],
-            await self.db.execute(
-                update(APIKey)
-                .where(
-                    APIKey.id.in_(locked_ids(APIKey, live)),
-                    *live(APIKey),
-                    APIKey.workspace_id == Workspace.id,
-                    Workspace.owner_user_id != user_id,
-                )
-                .values(user_id=Workspace.owner_user_id)
-                .execution_options(synchronize_session=False)
-            ),
-        )
-        return result.rowcount or 0
+        return await reown_connector_keys(self.db, user_id)
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.
