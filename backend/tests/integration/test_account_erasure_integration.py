@@ -1535,11 +1535,17 @@ class TestARunInterruptedAfterThePostgresCommit:
         await _age(db_session, request_id)
         before = await _everything_but(db_session, request_id)
         capsys.readouterr()
-        # #2302: the sweep re-drives the payload patch of the restored memory
-        with patch(_QDRANT_PATCH, AsyncMock()) as qdrant:
+        # #2302: the sweep re-drives the payload patch of the restored memory;
+        # #2363: and repeats the late point delete by the raw sub
+        late_points = AsyncMock(return_value={"kagura_memories": 1})
+        with (
+            patch(_QDRANT_PATCH, AsyncMock()) as qdrant,
+            patch("services.account_erasure_service.delete_user_points", late_points),
+        ):
             assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
         qdrant.assert_awaited_once()
         assert qdrant.await_args.kwargs["memory_id"] == edited_by_target
+        late_points.assert_awaited_once_with(target)
 
         closed = await _request_snapshot(db_session, request_id)
         assert closed["status"] == STATUS_FAILED
@@ -1555,6 +1561,7 @@ class TestARunInterruptedAfterThePostgresCommit:
         assert closed["deleted_data_summary"]["postgres"]["details_payload_synced"] == 1
         assert closed["deleted_data_summary"]["postgres"]["details_payload_requeue_failed"] == 0
         assert "redis" in closed["deleted_data_summary"]
+        assert closed["deleted_data_summary"]["qdrant_after_commit"] == {"kagura_memories": 1}
         assert target not in repr(closed)
         # every other row of every table it could reach is byte-identical
         assert await _everything_but(db_session, request_id) == before

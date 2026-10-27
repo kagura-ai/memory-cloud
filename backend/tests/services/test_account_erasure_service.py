@@ -2459,6 +2459,10 @@ def _sweep_with_absent_user(
     svc._load_user_or_none = AsyncMock(return_value=None)
     svc._execute = AsyncMock()
     svc._clear_redis = AsyncMock(return_value={"sessions": 1, "co_act": 0})
+    # #2363: the step 3a late point delete an interrupted close repeats
+    svc._delete_late_points = AsyncMock(
+        return_value={"qdrant_after_commit": {"kagura_memories": 2}}
+    )
     # #2302: the payload re-drive after an interrupted close (tested below)
     svc._resync_interrupted_payloads = AsyncMock()
     return svc, statements
@@ -2499,6 +2503,8 @@ class TestSweepClosesARequestWithoutAUserRow:
 
         svc._execute.assert_not_awaited()
         svc._clear_redis.assert_awaited_once_with("u-1")
+        # #2363: step 3a again, by the raw sub (the run may have died before it)
+        svc._delete_late_points.assert_awaited_once_with("u-1", request.id)
         params = _close_values(statements)
         assert params["status"] == STATUS_FAILED
         assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
@@ -2509,9 +2515,11 @@ class TestSweepClosesARequestWithoutAUserRow:
         else:
             assert "initiated_by" not in params  # the admin's id stays
         assert "completed_at" not in params
-        # the Postgres counts and the scrub time stay; the Redis counts join
+        # the Postgres counts and the scrub time stay; the late delete's and
+        # the Redis counts join
         assert params["deleted_data_summary"] == {
             "postgres": postgres,
+            "qdrant_after_commit": {"kagura_memories": 2},
             "redis": {"sessions": 1, "co_act": 0},
         }
         # guarded: a row moved since the claim is left alone
@@ -2521,6 +2529,48 @@ class TestSweepClosesARequestWithoutAUserRow:
             c for c in log.warning.call_args_list if c.args[0] == "erasure_sweep_user_row_absent"
         ]
         assert call.kwargs == {"request_id": str(request.id), "ran_in_postgres": True}
+        for c in [*log.warning.call_args_list, *log.error.call_args_list]:
+            assert "u-1" not in repr(c), c
+
+    @pytest.mark.asyncio
+    async def test_a_failed_late_point_delete_still_closes_the_interrupted_run(self):
+        """#2363: the repeated step 3a never fails the close; the error class
+        goes on the summary and the log line carries the request id only."""
+        from models.erasure import INTERRUPTED_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from utils.exceptions import QdrantError
+
+        request = _execute_request(self_service=True)
+        postgres = {"users": 1, "memory_scrub_at": "2026-10-01T12:00:00Z"}
+        request.deleted_data_summary = {"postgres": postgres}
+        svc, statements = _sweep_with_absent_user(request)
+        del svc._delete_late_points  # the real helper, over a failing store
+        delete_points = AsyncMock(side_effect=QdrantError("u-1 down"))
+
+        with (
+            patch("services.account_erasure_service._audit_salt", return_value="salt"),
+            patch("services.account_erasure_service.delete_user_points", delete_points),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            assert await svc.sweep_pending_erasures() == 0
+
+        delete_points.assert_awaited_once_with("u-1")
+        params = _close_values(statements)
+        assert (params["status"], params["failure_reason"]) == (
+            STATUS_FAILED,
+            INTERRUPTED_AFTER_POSTGRES_COMMIT,
+        )
+        assert params["deleted_data_summary"] == {
+            "postgres": postgres,
+            "qdrant_after_commit_failed": "QdrantError",
+            "redis": {"sessions": 1, "co_act": 0},
+        }
+        svc._resync_interrupted_payloads.assert_awaited_once()
+        (call,) = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "erasure_late_points_delete_failed"
+        ]
+        assert call.kwargs == {"request_id": str(request.id), "error_class": "QdrantError"}
         for c in [*log.warning.call_args_list, *log.error.call_args_list]:
             assert "u-1" not in repr(c), c
 
@@ -2542,6 +2592,7 @@ class TestSweepClosesARequestWithoutAUserRow:
             pseudonym = svc._pseudonym("u-1")
 
         svc._clear_redis.assert_not_awaited()
+        svc._delete_late_points.assert_not_awaited()  # nothing was erased
         params = _close_values(statements)
         assert params["status"] == STATUS_COMPLETE
         assert params["completed_at"] is not None
@@ -2572,7 +2623,11 @@ class TestSweepClosesARequestWithoutAUserRow:
 
         params = _close_values(statements)
         assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
-        assert params["deleted_data_summary"] == {"postgres": {"users": 1}}
+        # no ``redis`` key; the late point delete (#2363) still ran
+        assert params["deleted_data_summary"] == {
+            "postgres": {"users": 1},
+            "qdrant_after_commit": {"kagura_memories": 2},
+        }
         svc.db.commit.assert_awaited()
         (call,) = [
             c
@@ -2858,6 +2913,8 @@ class TestTheSweepNeverRunsAgainstAReRegisteredSub:
 
         svc._execute.assert_not_awaited()
         svc._clear_redis.assert_not_awaited()
+        # #2362: the sub's points are the new account's
+        svc._delete_late_points.assert_not_awaited()
         params = _close_values(statements)
         assert params["status"] == STATUS_FAILED
         assert params["failure_reason"] == INTERRUPTED_AFTER_POSTGRES_COMMIT
