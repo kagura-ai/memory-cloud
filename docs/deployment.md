@@ -1734,15 +1734,31 @@ back past every erased member's edits to the last value a surviving member
 wrote, so the result is the same whichever of two such erasures is processed
 first. For each request, in one transaction:
 
-1. where the erased member wrote the live `details` of a memory someone else
-   authored, the last value someone else wrote is put back — a new version
-   with one revision row (`writer: erasure`, details unavailable); the
-   memory's vector payload (`location`) is patched right after the commit;
+1. where the erased member's `details` keys are live on a memory someone
+   else authored, each goes back to the value it had before their write, or
+   is removed when it had none — a new version with one revision row
+   (`writer: erasure`, its prior the overwritten value without their keys);
+   the memory's vector payload (`location`) is patched right after the
+   commit;
 2. their `details` are removed from every revision prior that still holds
    them. On memories they authored (scrubbed by the erasure), only revision
    rows that existed when the erasure locked them are touched (the summary's
    `memory_scrub_at`, stored since v0.124.0; for an older request its
    completion time) — what other members wrote there since stays as it is.
+
+From v0.129.0 (#2275) both steps work per top-level `details` key on memories
+other members authored: a key whose value the erased member introduced goes
+back even where a later member's edit carried it unchanged, a key a later
+member rewrote stays, a key the erased member removed stays removed, and only
+their keys leave each prior (the authored memories still lose `details`
+whole). Erasures on v0.129.0 or later do this as they run. For an erasure
+before v0.129.0 the state the member wrote was stripped whole, so a key they
+wrote that a later member's edit shows above it cannot be told from that
+member's own: the plan prints `details keys ambiguous  <request id>  N key(s)
+kept (stripped history, see runbook)` and nothing is applied for those keys.
+After upgrading to v0.129.0, run the plan (`--all`, no `--apply`) once to read
+these counts; a non-zero count is the input to a follow-up decision, not
+something to apply.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request
 whose payload, audit-log, Redis, audit-row or finalize step fails after the
@@ -1944,10 +1960,11 @@ Time memories (`type: time`) and erasure — Issue #2266:
   `details` keeps only the trigger's window (`year` / `month` / `day` /
   `hour` / `minute` / `from` / `until`); the trigger's `text`, the location
   and every other key are removed. On a time memory another member authored
-  whose `details` go back to an earlier value, that value keeps its own
-  trigger (normalized if it was written before the memory became a time
-  memory); where it has none, or is unavailable, the memory's current window
-  is merged in, without its `text`.
+  whose `details` keys go back to earlier values, a `trigger` among those
+  keys goes back to the earlier trigger (normalized if it was written before
+  the memory became a time memory); where there was none, or it is
+  unavailable, the memory's current window is merged in, without its
+  `text`.
 - **Vector payloads after the commit.** The erasure patches restored
   memories' payloads after its Postgres commit. A patch that fails re-queues
   the memory for embedding; the erasure summary counts it under
