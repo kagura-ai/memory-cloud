@@ -22,7 +22,8 @@ revision row; the vector payload's ``location`` follows after the commit
    edited after the subject is not restored;
 7. a re-run by pseudonym (#2243) and a dry run change nothing — a strip by
    pseudonym does not take the erasure row for the subject's edit; a live
-   value already equal to the target is not rewritten.
+   value with nothing of the subject's on it is not rewritten, while a
+   restore to a value equal to the live one still writes its row (#2393).
 
 The vector store is stubbed. Every seeded row goes with its workspace.
 Not executed in the local unit run — needs the DB container.
@@ -828,7 +829,7 @@ async def test_a_live_value_equal_to_the_target_is_not_rewritten(
 ) -> None:
     """The live value is already the one someone else wrote (an unlogged
     maintenance write put it back): nothing of the subject's is left on the
-    row, so no version and no row."""
+    row, so the plan has no revert — no version and no row."""
     subject, author = world["subject"], world["author"]
     memory = _memory(world, author, AUTHORS, 2)
     async with _maker(async_engine)() as session:
@@ -1575,3 +1576,72 @@ async def test_present_malformed_restore_map_does_not_become_a_legacy_scalar(
         assert edits[-1].restored_from_by_key == {}
         plan = plan_details_erasure(edits, {memory.id: (memory.details, author)}, subject)
         assert plan.reverts == ()
+
+
+@pytest.mark.parametrize("order", [("subject", "fourth"), ("fourth", "subject")])
+async def test_a_restore_to_the_live_value_still_records_its_origin(
+    async_engine: AsyncEngine, world: dict[str, Any], order: tuple[str, str]
+) -> None:
+    """#2393: the author's memory starts as {c: 0}; T (the subject) writes
+    {a: 0}; B (fourth) changes a to "b2", then back to 0. Erasing B puts back
+    T's a = 0, which is already live: the erasure row is written all the
+    same, so the value is attributed to T, and T's erasure then removes it.
+    Either order ends with {} (T's a must not survive T's erasure)."""
+    from services.erasure_details import pseudonymize_revision_actor
+
+    subject, author, fourth = world["subject"], world["author"], world["fourth"]
+    memory = _memory(world, author, {"a": 0}, 4)
+    async with _maker(async_engine)() as session:
+        await _seed(
+            session,
+            [memory],
+            [
+                _created(world, memory, author),
+                _edit(world, memory, 2, subject, {"details": {"c": 0}}),
+                _edit(world, memory, 3, fourth, {"details": {"a": 0}}),
+                _edit(world, memory, 4, fourth, {"details": {"a": "b2"}}),
+            ],
+        )
+        outside = await _outside(session, [memory.id])
+
+    pseudonyms = {"subject": "5" * 64, "fourth": "f" * 64}
+    erased: set[str] = set()
+    for who in order:
+        async with _maker(async_engine)() as session:
+            with patch(_QDRANT, AsyncMock()):
+                result = await erase_subject_details(
+                    session, world[who], actor=pseudonyms[who], erased_actors=erased
+                )
+            await pseudonymize_revision_actor(session, world[who], pseudonyms[who])
+            await session.commit()
+        erased.add(pseudonyms[who])
+        if who == "fourth" and order[0] == "fourth":
+            # the restore to T's a = 0 equals the live value: counted, and
+            # its row carries the key's own origin
+            assert (result.restore.restored, result.restore.keys_reverted) == (1, 1)
+            async with _maker(async_engine)() as session:
+                log = await _log(session, memory.id)
+            erasure_rows = [r for r in log if r[2] == "erasure"]
+            assert len(erasure_rows) == 1
+            assert erasure_rows[0][4]["details_restored_from"] == {details_key_digest("a"): 3}
+            assert (await _live_details(async_engine, memory.id)) == {"a": 0}
+
+    async with _maker(async_engine)() as session:
+        live = await _live(session, memory.id)
+        assert live.details == {}
+        assert await _outside(session, [memory.id]) == outside
+        # a re-run by either pseudonym (reprocess_erasures) changes nothing
+        for pseudonym in erased:
+            for dry_run in (True, False):
+                again = await erase_subject_details(
+                    session, pseudonym, actor=pseudonym, erased_actors=erased, dry_run=dry_run
+                )
+                assert again.restore == RestoreReport()
+                assert again.strip == StripCounts(0, 0)
+                await session.commit()
+        assert (await _live(session, memory.id)).details == {}
+
+
+async def _live_details(engine: AsyncEngine, memory_id: uuid.UUID) -> Any:
+    async with _maker(engine)() as session:
+        return (await _live(session, memory_id)).details

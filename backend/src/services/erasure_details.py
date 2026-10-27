@@ -1167,7 +1167,8 @@ class RestoreReport:
         restored: Memories whose ``details`` lost the subject's keys: each
             went back to the value from before their write, or was removed
             when there was none (#2275; NULL when nothing is left over a
-            NULL value).
+            NULL value). Includes a restore whose value equals the live one
+            (#2393): it still writes its version and row.
         unavailable: Memories where the value to go back to for at least one
             key was removed by an earlier erasure: the key was removed. Not
             counted in ``restored``.
@@ -1600,7 +1601,9 @@ async def restore_editor_details(
     can tell whose keys are live, ``expected_version`` protects the restored
     value from a stale edit, and a rebuilt version shows the other members'
     keys. The memory's last writer (``agent_id`` / ``session_id``) becomes
-    none. A restore that would write the live value again is skipped.
+    none. A restore to a value equal to the live one still writes its
+    version and row (#2393): the row records where each key's value came
+    from, which a later erasure reads.
 
     Order and locks: without ``plan``, the subject's memories are locked
     first, in id order (``lock_subject_memories``, the order every edit and
@@ -1664,8 +1667,12 @@ async def restore_editor_details(
         if memory is None:
             continue  # gone since the plan read (never under the locks)
         value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
-        if memory.details == value:
-            continue  # the live value is already the one to put back
+        # No skip when the live value already equals the one to put back
+        # (#2393): the plan lists only memories holding a live key of the
+        # subject's, so that value is still attributed to the subject's edit.
+        # Without this row a later erasure of the member who wrote it first
+        # finds none of its own keys live, and the result depends on the
+        # erasure order.
         if revert.unavailable:
             report.unavailable += 1
         else:
