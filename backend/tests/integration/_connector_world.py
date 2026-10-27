@@ -110,6 +110,7 @@ class _ConnectorWorld:
 
     async def remove(self, workspace_id: UUID, user_id: str) -> None:
         """Remove ``user_id`` from the workspace the way the route does (#2352)."""
+        await self.db.commit()
         await WorkspaceService(self.db).remove_member(workspace_id, user_id)
         # The re-own is a Core UPDATE; reload rather than read stale ORM state.
         self.db.expire_all()
