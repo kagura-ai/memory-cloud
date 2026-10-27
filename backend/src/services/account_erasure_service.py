@@ -69,7 +69,10 @@ The Postgres step takes the subject's surviving memories that are still
 queued for an embedding (any status but ``success``) out of the queue (#2363):
 they are marked ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry
 budget, so the sweep does not write the points step 1 deleted again under the
-pseudonym; only the admin retry-failed endpoint brings them back.
+pseudonym; only the admin retry-failed endpoint (or an embedding-model switch
+of the context) brings them back. After the commit the subject's points are
+deleted once more, best-effort: a run may have written one between step 1 and
+the Postgres step's row locks.
 """
 
 from __future__ import annotations
@@ -1563,6 +1566,15 @@ class AccountErasureService:
             postgres["memory_scrub_at"] = to_utc_iso(erased.memory_scrub_at)
             summary["postgres"] = postgres
 
+            # Step 3a (#2363): an embedding run that wrote a point under the
+            # raw sub after step 1 and stamped ``success`` before the Postgres
+            # step locked the row left that point behind; the dequeue only
+            # fences runs still in flight at the lock. A second delete by the
+            # raw sub, after the commit, removes it. Best-effort: never fails
+            # the request (the subject is erased in Postgres).
+            step = "late_points"
+            summary.update(await self._delete_late_points(target.user_id, request_id))
+
             # Step 3b (#2266): the restored memories' vector payloads, after
             # the commit — no vector-store call while the subject's memories
             # are locked. A failed patch re-queues the memory for embedding.
@@ -2600,6 +2612,37 @@ class AccountErasureService:
         )
         return result.rowcount or 0
 
+    async def _delete_late_points(self, user_id: str, request_id: UUID | None) -> dict[str, Any]:
+        """Delete the subject's points once more, after the Postgres commit (#2363).
+
+        Step 1 deletes them before anything else, but a run claiming one of
+        the subject's queued memories can write its point (raw sub, live
+        ``details``) after that and stamp ``success`` before
+        ``lock_subject_memories``; ``_dequeue_surviving_embeddings`` leaves a
+        ``success`` row alone, so nothing else would remove the point. After
+        the commit no row carries the raw sub, so a run in flight writes under
+        it only if it loaded the row before the commit, and its outcome write
+        then misses the fence and it deletes its own point
+        (``memory_service._reconcile_after_lost_claim``).
+
+        Never raises: the subject is erased in Postgres by now and the request
+        must still complete. A failure is logged (request id and class only)
+        and recorded on the summary.
+
+        Returns:
+            The summary key: ``qdrant_after_commit`` with the per-collection
+            counts, or ``qdrant_after_commit_failed`` with the error class.
+        """
+        try:
+            return {"qdrant_after_commit": await delete_user_points(user_id)}
+        except Exception as exc:
+            logger.warning(
+                "erasure_late_points_delete_failed",
+                request_id=str(request_id) if request_id is not None else None,
+                error_class=type(exc).__name__,
+            )
+            return {"qdrant_after_commit_failed": type(exc).__name__}
+
     async def _dequeue_surviving_embeddings(self, user_id: str) -> int:
         """Take the subject's surviving memories out of the embedding queue (#2363).
 
@@ -2611,14 +2654,18 @@ class AccountErasureService:
         budget spent (``MAX_EMBEDDING_RETRIES``, so
         ``embedding_retry_eligible_clause`` never matches it; the reclaim
         clauses need ``processing``) and the pipeline's clock stamped. A
-        ``success`` row is left as it is: its point is gone since step 1 and
-        nothing re-queues it. The admin retry-failed endpoint is the only way
-        back; the row then embeds under the pseudonym with no ``details``.
+        ``success`` row is left as it is: its point is gone since step 1 (one
+        a run wrote after step 1 goes with ``_delete_late_points``). No
+        automatic retry takes these rows again; the admin retry-failed
+        endpoint, or an embedding-model switch of the context (which re-queues
+        every row that is not ``success``), brings them back, and they then
+        embed under the pseudonym with no ``details``.
 
         The status change also fences a run in flight: both of its outcome
         writes match ``processing`` and its own claim stamp, so it sees its
         claim lost, and a run that wrote points by then deletes them
-        (``memory_service._reconcile_after_lost_claim``). An earlier
+        (``memory_service._reconcile_after_lost_claim``: the row's author is no
+        longer the one the run wrote). An earlier
         ``embedding_error`` is overwritten: the marker is what an operator
         needs to read.
 

@@ -3858,7 +3858,7 @@ class TestQueuedSurvivorsAreNotReEmbedded:
             for c in stubs["logger"].info.call_args_list
             if c.args and c.args[0] == "embedding_points_removed_after_lost_claim"
         )
-        assert removed.kwargs["reason"] == "erased_author"
+        assert removed.kwargs["reason"] == "author_changed"
         claim_lost = next(
             c
             for c in stubs["logger"].info.call_args_list
@@ -3869,6 +3869,57 @@ class TestQueuedSurvivorsAreNotReEmbedded:
         assert row["embedding_status"] == "failed"
         assert row["embedding_error"] == ERASED_AUTHOR_EMBEDDING_ERROR
         assert row["user_id"] == erasure_pseudonym(target)
+
+    @pytest.mark.asyncio
+    async def test_a_point_written_before_the_row_locks_goes_after_the_commit(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        queued_survivors,
+        patched_external_stores,
+    ):
+        """A run embeds one of the queued survivors to ``success`` between step
+        1 and the Postgres step (here: during the workspace hand-over). The
+        dequeue leaves a ``success`` row alone, so the subject's points are
+        deleted once more, by the raw sub, after the commit."""
+        target = erasure_scenario["target_user_id"]
+        memory_id = queued_survivors["queued"][0]  # pending, with coordinates
+        order: list[tuple] = []
+        hand_over = AccountErasureService._handle_owned_workspaces
+
+        async def _delete(user_id: str) -> dict[str, int]:
+            order.append(("delete_user_points", user_id))
+            return {"kagura_memories": 1}
+
+        async def _embed_then_hand_over(self, *args, **kwargs):
+            stubs = await _embed_once(db_session, memory_id, build_point=True)
+            written = stubs["add_memory_to_qdrant"].await_args.kwargs
+            order.append(("point_written", written["user_id"], "location" in written["payload"]))
+            return await hand_over(self, *args, **kwargs)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(side_effect=_delete),
+            ),
+            patch.object(AccountErasureService, "_handle_owned_workspaces", _embed_then_hand_over),
+        ):
+            request = await _erase(db_session, erasure_scenario)
+
+        assert request.status == STATUS_COMPLETE
+        assert order == [
+            ("delete_user_points", target),
+            ("point_written", target, True),  # the leak: raw sub and coordinates
+            ("delete_user_points", target),  # after the commit
+        ]
+        summary = request.deleted_data_summary
+        assert summary["qdrant_after_commit"] == {"kagura_memories": 1}
+        # ``success`` at the lock: not dequeued, scrubbed like any survivor
+        assert summary["postgres"]["memories_embedding_dequeued"] == 3
+        row = (await _table_snapshot(db_session, "memories"))[memory_id]
+        assert row["embedding_status"] == "success"
+        assert row["user_id"] == erasure_pseudonym(target)
+        assert row["details"] is None
 
     @pytest.mark.asyncio
     async def test_a_run_whose_row_the_cascade_deleted_removes_its_point(
