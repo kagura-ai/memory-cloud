@@ -24,6 +24,7 @@
 - [Platform-Borne Connector LLM](design/platform-borne-connector-llm.md) — Design note (#1392): SaaS-default LLM lane with BYOK as override
 - [Add-On Entitlements](design/addon-entitlements.md) — Design note (#1393): grant ledger upstream of the existing addon bonus columns
 - [Admin-Definable Plan Tiers](design/admin-definable-plan-tiers.md) — Design note (#1394): DB-backed tiers beyond hardcoded S/M/L
+- [`memory_revisions` Retention](design/memory-revisions-retention.md) — Design note (#2240): prune whole per-memory logs only, never single revision rows
 
 ## Guides
 
