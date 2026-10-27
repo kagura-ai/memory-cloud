@@ -56,6 +56,7 @@ from db.loop_binding import keep_for_loop, owned_by_another_loop, running_loop, 
 from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_point_id
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
+from utils.hashing import sha256_hex
 from utils.logger import get_logger
 from utils.observed_at import parse_observed_bound
 from utils.sparse_vector import build_query_sparse_vector
@@ -2545,6 +2546,8 @@ async def delete_user_points(
         # vectors at rest on self-hosted Lite installs.
         return await _store.delete_user_points(user_id, protected_point_ids=protected_point_ids)
 
+    # #2375: SDK errors can echo the raw user filter; emit only a digest/type.
+    user_id_hash = sha256_hex(user_id)
     client = get_qdrant_client()
     deleted_per_collection: dict[str, int] = {}
 
@@ -2556,8 +2559,12 @@ async def delete_user_points(
             if c.name.startswith(KAGURA_MEMORIES_COLLECTION)
         ]
     except Exception as e:
-        logger.error("user_points_list_collections_failed", user_id=user_id, error=str(e))
-        raise QdrantError(f"Failed to list collections for user erasure: {e}") from e
+        logger.error(
+            "user_points_list_collections_failed",
+            user_id_hash=user_id_hash,
+            error_type=type(e).__name__,
+        )
+        raise QdrantError("Failed to list collections for user erasure") from None
 
     user_filter = Filter(
         must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))],
@@ -2582,17 +2589,17 @@ async def delete_user_points(
             logger.info(
                 "user_points_deleted",
                 collection=collection_name,
-                user_id=user_id,
+                user_id_hash=user_id_hash,
                 count=points_to_delete,
             )
         except Exception as e:
             logger.error(
                 "user_points_deletion_failed",
                 collection=collection_name,
-                user_id=user_id,
-                error=str(e),
+                user_id_hash=user_id_hash,
+                error_type=type(e).__name__,
             )
-            raise QdrantError(f"Failed to delete user points from {collection_name}: {e}") from e
+            raise QdrantError(f"Failed to delete user points from {collection_name}") from None
 
     return deleted_per_collection
 
