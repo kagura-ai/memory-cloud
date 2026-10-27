@@ -1908,12 +1908,12 @@ step), re-queue them the same way once the `failed` row is written; its
 `retry.attempts` is 0 when this step never failed, and an admin force-erase
 does it before answering 409. A failure after the Postgres commit re-queues
 nothing (the memories are the pseudonym's). From v0.129.0 (#2363) the
-erasure's Postgres step also takes the member's surviving memories that were
-still waiting for or retrying their embedding (`pending`, `processing`,
-`failed`) out of the queue: they end `failed` with `embedding_error` starting
+erasure's Postgres step also takes all of the member's surviving memories
+out of the queue (including rows already `success`, #2393): they end `failed` with `embedding_error` starting
 `erased_author:` and their retry budget spent, so the embedding sweep does
 not recreate their points under the pseudonym (count in the summary's
-`postgres.memories_embedding_dequeued`), and an embedding run already in
+`postgres.memories_embedding_dequeued`, which since #2393 equals the
+survivor count, `memories_scrubbed`), and an embedding run already in
 flight that writes after the vector delete removes its own point
 (`embedding_points_removed_after_lost_claim`). A point a run wrote between
 the vector delete and the Postgres step's row locks is removed by a second
@@ -1935,6 +1935,37 @@ erasure runs. The logs are `erasure_retry_scheduled` (request id, attempt,
 retry time, exception class) and, from the sweep, `erasure_sweep_retry_scheduled`.
 Nothing changes for the `reprocess_erasures` command: a rescheduled request
 has not run.
+
+**Erasure rollout for #2393.** Keep erasure execution (including admin
+force-erasure) and `reprocess_erasures` paused while old and new API,
+scheduler or CLI processes coexist. Drain the old processes before
+resuming these jobs. New erasure revisions store `details_restored_from`,
+a map from key digests to restoration versions, so later erasures replay
+each key from its own origin; key names, values and account ids are not
+added to this metadata. New code reads legacy rows without the map using
+the existing scalar `restored_from`. Older code ignores the map and can
+misattribute a restored value, so do not roll erasure executors back after
+new-format rows are written. No schema migration is required.
+
+All surviving authored rows now receive the erased-author terminal marker,
+including a row an earlier embedding run had already completed. An old run
+that writes after the erasure cannot use the normal success re-queue to
+bypass the author change. Explicit admin retry or a context embedding-model
+switch still rebuilds scrubbed rows under the pseudonym; stale-run cleanup
+retains the shared-resource-point checks. A context merge (`merge_contexts`)
+copies these rows still `failed` with the marker, an admin context restore
+brings them back still `failed` with the marker, and a later erasure that
+restores their `details` leaves them there, so none of these hands them back
+to the embedding sweep. Survivors of an erasure before v0.129.0 carry no
+marker (they stayed `success` with no point); a merge or a context restore
+re-queues those, as before.
+
+A restore whose value equals the live value still writes its version and
+`erasure` revision row: that row records which member each key's value
+belongs to, which a later erasure of another member reads, so the result
+does not depend on the order of the erasures. The `details_restored` and
+`details_keys_reverted` counts (and `reprocess_erasures` plan/apply output)
+include these restores.
 
 **Before `--apply`, read the `failure_reason` of every `would repair`
 request** directly in the database (`SELECT id, failure_reason FROM

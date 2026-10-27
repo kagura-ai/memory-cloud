@@ -274,6 +274,43 @@ async def test_an_unembedded_copy_lands_as_pending_so_the_sweep_finds_it():
 
 
 @pytest.mark.asyncio
+async def test_an_erased_authors_row_stays_out_of_the_queue_in_the_target():
+    """#2393: the erasure took the survivor out of the embedding queue on
+    purpose (its points are gone; the admin retry re-embeds it under the
+    pseudonym). A merge must not hand it back to the sweep as `pending`, and
+    a row an admin retry already re-embedded is copied like any other."""
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+
+    attempted = utcnow()
+
+    def erased(u, c):
+        row = _source_memory(u, c, embedding_status="failed", embedding_retry_count=3)
+        row.embedding_error = ERASED_AUTHOR_EMBEDDING_ERROR
+        row.embedding_attempted_at = attempted
+        return row
+
+    def other_failure(u, c):
+        row = _source_memory(u, c, embedding_status="failed", embedding_retry_count=3)
+        row.embedding_error = "provider timeout"
+        return row
+
+    result, rows, _, _ = await _run_merge(
+        [erased, other_failure, lambda u, c: _source_memory(u, c, embedding_status="success")]
+    )
+    erased_copy, failure_copy, embedded_copy = rows
+    assert (
+        erased_copy.embedding_status,
+        erased_copy.embedding_error,
+        erased_copy.embedding_retry_count,
+        erased_copy.embedding_attempted_at,
+    ) == ("failed", ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES, attempted)
+    assert (failure_copy.embedding_status, failure_copy.embedding_error) == ("pending", None)
+    assert failure_copy.embedding_retry_count == 0
+    assert embedded_copy.embedding_status == "success"
+    assert result["merged"] == 3
+
+
+@pytest.mark.asyncio
 async def test_provenance_survives_the_copy():
     """source_type defaults to "manual", and "manual" is TRUSTED.
 

@@ -118,8 +118,8 @@ async def test_delete_subject_tombstones_locks_in_id_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dequeue_surviving_embeddings_marks_the_queued_rows_terminal() -> None:
-    """#2363: the subject's surviving rows that are not ``success`` leave the
+async def test_dequeue_surviving_embeddings_marks_all_surviving_rows_terminal() -> None:
+    """#2363 / #2393: all the subject's surviving rows leave the
     embedding queue in one UPDATE, by the raw sub, locked in id order: status
     ``failed``, the erased-author marker, the retry budget spent and the
     pipeline's clock stamped. Returns the rowcount."""
@@ -148,8 +148,7 @@ async def test_dequeue_surviving_embeddings_marks_the_queued_rows_terminal() -> 
         "WHERE memories.id IN (SELECT"
     )
     assert _memories_locked_in_id_order("memories", sql) == (
-        "memories_1.user_id = %(user_id_1)s::VARCHAR "
-        "AND memories_1.embedding_status != %(embedding_status_1)s::VARCHAR"
+        "memories_1.user_id = %(user_id_1)s::VARCHAR"
     )
     params = compiled.params
     assert params["embedding_status"] == "failed"
@@ -160,7 +159,7 @@ async def test_dequeue_surviving_embeddings_marks_the_queued_rows_terminal() -> 
     assert isinstance(params["embedding_attempted_at"], datetime)
     assert params["embedding_attempted_at"].tzinfo is None
     assert params["user_id_1"] == "google-oauth2|erased"
-    assert params["embedding_status_1"] == "success"
+    assert "embedding_status_1" not in params  # successes must also stay terminal
 
 
 @pytest.mark.asyncio

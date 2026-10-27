@@ -9959,8 +9959,9 @@ async def _reconcile_after_lost_claim(
 
     - A newer run may have written the memory's summary and chunk points
       first, and this run's writes then replaced them. When that newer run is
-      done (``success``), the row goes back to ``pending`` so the sweep writes
-      them once more (``requeue_embedding`` moves only a ``success`` row).
+      done (``success``) under the same author, the row goes back to
+      ``pending`` so the sweep writes them once more. The UPDATE compares
+      the author atomically: erasure may have replaced it (#2393).
     - The row's author is no longer the one this run wrote the point under:
       the author was erased while the run was embedding it (#2363; the
       erasure pseudonymized the row after step 1 deleted the author's points,
@@ -9973,7 +9974,9 @@ async def _reconcile_after_lost_claim(
       may have written its point before this one; the row is re-queued even
       from ``processing`` (fencing that run out) so the sweep writes it again
       under the current author. A row the erasure took out of the queue
-      (``failed``) stays out.
+      (``failed``) stays out. Only an explicit admin retry or model switch
+      can have brought an erased author's row back; a newer run succeeding
+      after that must still be repaired if this run overwrote its point.
     - Any other state (re-queued by an edit or a migration switch, a newer
       run still in flight, a tombstone): left as it is.
 
@@ -9995,7 +9998,12 @@ async def _reconcile_after_lost_claim(
     if not wrote_points or collection is None or point_id is None:
         return False
     try:
-        requeued = await requeue_embedding(db, memory_id, reason="claim_lost_after_write")
+        requeued = await requeue_embedding(
+            db,
+            memory_id,
+            reason="claim_lost_after_write",
+            expected_author=user_id,
+        )
         await db.commit()
     except Exception as e:
         logger.warning(
@@ -10022,7 +10030,11 @@ async def _reconcile_after_lost_claim(
             await delete_chunk_points([memory_id], collection)
         if reason == "author_changed":
             requeued = await requeue_embedding(
-                db, memory_id, reason="claim_lost_author_changed", include_processing=True
+                db,
+                memory_id,
+                reason="claim_lost_author_changed",
+                include_processing=True,
+                expected_author=author,
             )
         await db.commit()
     except Exception as e:

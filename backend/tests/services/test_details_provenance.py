@@ -12,6 +12,8 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from services.details_provenance import (
     UNKNOWN,
     DetailsEdit,
@@ -117,6 +119,7 @@ def _apply(
                 erased=False,
                 erased_keys=frozenset(revert.erased_keys),
                 restored_from=revert.from_version,
+                restored_from_by_key=revert.restored_from_by_key,
             )
         )
         after[revert.memory_id] = (revert.result, live[revert.memory_id][1])
@@ -518,3 +521,79 @@ def test_a_put_back_over_a_stripped_state_is_ambiguous_only_above_the_subjects_e
     plan = _plan(below, {"a": 1, "s": 3}, P_S)
     assert plan.keys_ambiguous == 1
     assert [r.key for r in plan.reverts[0].reverts] == ["a"]
+
+
+def test_distinct_key_restore_versions_preserve_a_deleted_and_readded_key() -> None:
+    """#2393: a two-key put-back must not lend k the older origin of x."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, "S", {"k": 0, "x": 0}),
+        _edit(m, 3, B, {"k": 0, "x": 1}),
+        _edit(m, 4, "C", {"x": 1}),
+        _edit(m, 5, "S", {"k": 0, "x": 1}),
+    ]
+    for order in (["S", "C"], ["C", "S"]):
+        live, after = _erase_in_order(rows, {"k": 1, "x": 1}, order)
+        assert live == {"x": 0}, order
+        for subject in ("S" * 64, "C" * 64):
+            again = _plan(after, live, subject, erased_actors=frozenset({"S" * 64, "C" * 64}))
+            assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
+
+
+def test_a_stripped_put_back_walk_uses_each_keys_restore_version() -> None:
+    """#2393: after another edit, the walk must skip the restored C value
+    to B's deletion, even though x was restored from an older version."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, "S", {"k": 0, "x": 0}),
+        _edit(m, 3, B, {"k": 0, "x": 1}),
+        _edit(m, 4, "C", {"x": 1}),
+        _edit(m, 5, "S", {"k": 0, "x": 1}),
+    ]
+    state = {m: ({"k": 1, "x": 1}, AUTH)}
+    first = plan_details_erasure(rows, state, "S")
+    assert first.reverts[0].restored_from_by_key == {
+        details_key_digest("k"): 5,
+        details_key_digest("x"): 2,
+    }
+    rows, state = _apply(rows, state, first, subject="S", pseudonym="S" * 64)
+    rows.append(_edit(m, 7, "D", state[m][0]))
+    state[m] = ({"k": 2, "x": 0}, AUTH)
+    erased = {"S" * 64}
+    for subject in ("C", "D"):
+        plan = plan_details_erasure(rows, state, subject, erased_actors=erased)
+        rows, state = _apply(rows, state, plan, subject=subject, pseudonym=subject * 64)
+        erased.add(subject * 64)
+    assert state[m][0] == {"x": 0}
+
+
+def test_a_present_key_map_does_not_use_the_scalar_for_a_missing_key() -> None:
+    """An empty new map is distinct from absent legacy metadata. A put-back
+    carrying B's later value must not borrow S's old equal-valued origin."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, S, {"k": 0}),
+        _edit(m, 3, B, {"k": 1}),
+        _edit(m, 4, B, {"k": 2}),
+        replace(_rollback(m, 5, AUTH, {"k": 1}, restored_from=3), restored_from_by_key={}),
+    ]
+    run = replay(rows, {"k": 1}, AUTH, subject=S, erased={S})
+    assert run.writers[-1]["k"].actor == B
+    legacy = [*rows[:-1], replace(rows[-1], restored_from_by_key=None)]
+    assert replay(legacy, {"k": 1}, AUTH, subject=S, erased={S}).writers[-1]["k"].actor == S
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 5, 100, 2.0, "2", None, [], {}])
+def test_invalid_per_key_restore_versions_are_ignored_without_scalar_fallback(bad: Any) -> None:
+    m = uuid4()
+    row = replace(
+        _rollback(m, 5, AUTH, {}, restored_from=2),
+        restored_from_by_key={details_key_digest("k"): bad},
+    )
+    assert row.restored_from_by_key == {}
+
+
+@pytest.mark.parametrize("metadata", [[], [2], "invalid", True, {"raw-key": 2}, {2: 2}])
+def test_invalid_restore_map_shapes_and_digests_are_ignored(metadata: Any) -> None:
+    row = replace(_rollback(uuid4(), 5, AUTH, {}, restored_from=2), restored_from_by_key=metadata)
+    assert row.restored_from_by_key == {}

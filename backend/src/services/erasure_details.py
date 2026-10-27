@@ -33,8 +33,9 @@ past erasures by pseudonym (#2243) share one definition:
   ``actor`` is always the pseudonym. Each restore writes a ``writer='erasure'``
   row whose prior is ``{"details": <the overwritten value minus the
   subject's keys>, "erased_details_keys": <their digests>, "restored_from":
-  <version>}`` (before v0.129.0: ``{"erased": ["details"], "restored_from":
-  <version>}``).
+  <version>, "details_restored_from": <key digest to version>}``
+  (#2393; the per-key map takes precedence over the scalar; before v0.129.0:
+  ``{"erased": ["details"], "restored_from": <version>}``).
 - ``erase_subject_details(db, subject, ...)`` (#2268) — the restore, then
   the strip, from one read of the logs under the memory locks and one
   ``details_provenance.plan_details_erasure`` (#2275): what the live
@@ -109,6 +110,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
+from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
 from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
@@ -133,6 +135,7 @@ from services.details_provenance import (
     plan_details_erasure,
 )
 from services.memory_versions import (
+    PRIOR_DETAILS_RESTORED_FROM_KEY,
     PRIOR_ERASED_DETAILS_KEYS_KEY,
     PRIOR_ERASED_KEY,
     PRIOR_RESTORED_FROM_KEY,
@@ -1165,7 +1168,8 @@ class RestoreReport:
         restored: Memories whose ``details`` lost the subject's keys: each
             went back to the value from before their write, or was removed
             when there was none (#2275; NULL when nothing is left over a
-            NULL value).
+            NULL value). Includes a restore whose value equals the live one
+            (#2393): it still writes its version and row.
         unavailable: Memories where the value to go back to for at least one
             key was removed by an earlier erasure: the key was removed. Not
             counted in ``restored``.
@@ -1317,6 +1321,10 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
                 MemoryRevision.prior[PRIOR_ERASED_KEY].has_key("details").label("erased"),
                 MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY].label("erased_keys"),
                 MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].as_integer().label("restored_from"),
+                MemoryRevision.prior[PRIOR_DETAILS_RESTORED_FROM_KEY].label("restored_from_by_key"),
+                MemoryRevision.prior.has_key(PRIOR_DETAILS_RESTORED_FROM_KEY).label(
+                    "has_restore_map"
+                ),
                 revision_edited_details(MemoryRevision).label("details_changed"),
             )
             .join(Memory, Memory.id == MemoryRevision.memory_id)
@@ -1340,6 +1348,11 @@ async def _updated_rows(db: AsyncSession, subject: str) -> list[DetailsEdit]:
             erased=bool(row.erased),
             erased_keys=frozenset(row.erased_keys if isinstance(row.erased_keys, list) else ()),
             restored_from=row.restored_from,
+            restored_from_by_key=(
+                (row.restored_from_by_key if isinstance(row.restored_from_by_key, dict) else {})
+                if row.has_restore_map
+                else None
+            ),
             details_changed=bool(row.details_changed),
         )
         for row in rows
@@ -1360,6 +1373,10 @@ def _requeue_unembedded(memory: Memory, report: RestoreReport) -> None:
     if memory.deleted_at is not None or memory.context_id is None:
         return
     if memory.embedding_status == "success":
+        return
+    if memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR:
+        # #2393: the author was erased; the row stays out of the queue until
+        # the admin retry or a model switch (no point to rebuild for it).
         return
     memory.embedding_status = "pending"
     memory.embedding_error = None
@@ -1583,12 +1600,15 @@ async def restore_editor_details(
     and one ``updated`` revision row with ``writer='erasure'``, ``actor`` as
     its actor and ``{"details": <the overwritten value minus the subject's
     keys>, "erased_details_keys": <their digests>, "restored_from":
-    <from_version>}`` as its prior — stripped like
+    <from_version>, "details_restored_from": <key digest to version>}`` as
+    its prior (#2393) — stripped like
     every other prior, so the subject's value is in none, a later erasure
     can tell whose keys are live, ``expected_version`` protects the restored
     value from a stale edit, and a rebuilt version shows the other members'
     keys. The memory's last writer (``agent_id`` / ``session_id``) becomes
-    none. A restore that would write the live value again is skipped.
+    none. A restore to a value equal to the live one still writes its
+    version and row (#2393): the row records where each key's value came
+    from, which a later erasure reads.
 
     Order and locks: without ``plan``, the subject's memories are locked
     first, in id order (``lock_subject_memories``, the order every edit and
@@ -1652,8 +1672,21 @@ async def restore_editor_details(
         if memory is None:
             continue  # gone since the plan read (never under the locks)
         value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
-        if memory.details == value:
-            continue  # the live value is already the one to put back
+        # A value equal to the live one is still written (#2393): the plan
+        # lists only memories holding a live key of the subject's, so that
+        # value is still attributed to the subject's edit. Without this row a
+        # later erasure of the member who wrote it first finds none of its own
+        # keys live, and the result depends on the erasure order. The one
+        # exception is a revert of the trigger alone whose live window went
+        # back in: nothing of anyone else's is put back, and the row would
+        # attribute that window to the subject again, so every re-run would
+        # write another.
+        if (
+            memory.details == value
+            and trigger_kept
+            and all(r.key == "trigger" for r in revert.reverts)
+        ):
+            continue
         if revert.unavailable:
             report.unavailable += 1
         else:
@@ -1675,6 +1708,7 @@ async def restore_editor_details(
                 "details": copy.deepcopy(revert.prior),
                 PRIOR_ERASED_DETAILS_KEYS_KEY: list(revert.erased_keys),
                 PRIOR_RESTORED_FROM_KEY: revert.from_version,
+                PRIOR_DETAILS_RESTORED_FROM_KEY: revert.restored_from_by_key,
             },
             writer=REVISION_WRITER_ERASURE,
             provenance=WriteProvenance(None, None),

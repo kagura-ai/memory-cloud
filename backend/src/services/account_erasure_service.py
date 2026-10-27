@@ -65,12 +65,12 @@ an earlier attempt, and that then fails before the Postgres commit
 (``workspace_transfer_required``, an error inside the Postgres step) re-queues
 them the same way (#2358): the points may be gone and the account stays.
 
-The Postgres step takes the subject's surviving memories that are still
-queued for an embedding (any status but ``success``) out of the queue (#2363):
-they are marked ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry
-budget, so the sweep does not write the points step 1 deleted again under the
-pseudonym; only the admin retry-failed endpoint (or an embedding-model switch
-of the context) brings them back. After the commit the subject's points are
+The Postgres step takes every surviving memory of the subject out of the
+embedding queue (#2363; a ``success`` row too since #2393): they are marked
+``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry budget, so the
+sweep does not write the points step 1 deleted again under the pseudonym;
+only the admin retry-failed endpoint (or an embedding-model switch of the
+context) brings them back, and a context merge copies them as they are. After the commit the subject's points are
 deleted once more, best-effort: a run may have written one between step 1 and
 the Postgres step's row locks.
 """
@@ -1577,8 +1577,8 @@ class AccountErasureService:
 
             # Step 3a (#2363): an embedding run that wrote a point under the
             # raw sub after step 1 and stamped ``success`` before the Postgres
-            # step locked the row left that point behind; the dequeue only
-            # fences runs still in flight at the lock. A second delete by the
+            # step locked the row left that point behind; terminalizing the
+            # row cannot delete an existing point. A second delete by the
             # raw sub, after the commit, removes it. Best-effort: never fails
             # the request (the subject is erased in Postgres).
             step = "late_points"
@@ -2288,10 +2288,10 @@ class AccountErasureService:
         counts["details_embedding_requeued"] = restore.embedding_requeued
         counts.update(await self._erase_session_provenance(user_id))
         counts.update(await self._erase_memory_revisions(user_id, details.strip))
-        # #2363: the survivors still waiting for (or retrying) their embedding
-        # leave the queue before the scrub, which takes the raw sub off them:
+        # #2363 / #2393: every survivor (a ``success`` row too) leaves the
+        # embedding queue before the scrub, which takes the raw sub off them:
         # step 1 deleted the subject's points, and the sweep must not write
-        # them again under the pseudonym.
+        # them again under the pseudonym. The count equals the survivors.
         counts["memories_embedding_dequeued"] = await self._dequeue_surviving_embeddings(user_id)
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
 
@@ -2635,8 +2635,8 @@ class AccountErasureService:
         Step 1 deletes them before anything else, but a run claiming one of
         the subject's queued memories can write its point (raw sub, live
         ``details``) after that and stamp ``success`` before
-        ``lock_subject_memories``; ``_dequeue_surviving_embeddings`` leaves a
-        ``success`` row alone, so nothing else would remove the point. After
+        ``lock_subject_memories``. Terminalizing the row stops future runs,
+        but cannot remove a point that already reached the store. After
         the commit no row carries the raw sub, so a run in flight writes under
         it only if it loaded the row before the commit, and its outcome write
         then misses the fence and it deletes its own point
@@ -2663,20 +2663,23 @@ class AccountErasureService:
     async def _dequeue_surviving_embeddings(self, user_id: str) -> int:
         """Take the subject's surviving memories out of the embedding queue (#2363).
 
-        Step 1 deleted every point of the subject. A surviving memory that was
-        still ``pending``, ``processing`` or ``failed`` with retry budget left
-        would be claimed by the sweep after the commit and get its points back
-        under the pseudonym. Each such row (any status but ``success``) becomes
-        terminal: ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR``, the retry
+        Step 1 deleted every point of the subject. Every surviving memory,
+        including a ``success`` row, becomes terminal: ``failed`` with
+        ``ERASED_AUTHOR_EMBEDDING_ERROR``, the retry
         budget spent (``MAX_EMBEDDING_RETRIES``, so
         ``embedding_retry_eligible_clause`` never matches it; the reclaim
         clauses need ``processing``) and the pipeline's clock stamped. A
-        ``success`` row is left as it is: its point is gone since step 1 (one
-        a run wrote after step 1 goes with ``_delete_late_points``). No
-        automatic retry takes these rows again; the admin retry-failed
+        ``success`` row must also be terminal (#2393): an older run that lost
+        its claim can still write after a newer run succeeded and erasure
+        finished; leaving ``success`` would let its lost-claim repair requeue
+        the erased author's row automatically. A point a run wrote before the
+        commit goes with ``_delete_late_points``. No automatic retry takes
+        these rows again; the admin retry-failed
         endpoint, or an embedding-model switch of the context (which re-queues
         every row that is not ``success``), brings them back, and they then
-        embed under the pseudonym with no ``details``.
+        embed under the pseudonym with no ``details``; a context merge copies
+        them still terminal (``ContextService.merge_contexts``). The count
+        returned equals the subject's survivors (``memories_scrubbed``).
 
         The status change also fences a run in flight: both of its outcome
         writes match ``processing`` and its own claim stamp, so it sees its
@@ -2701,7 +2704,7 @@ class AccountErasureService:
                     Memory.id.in_(
                         locked_ids(
                             Memory,
-                            lambda m: (m.user_id == user_id, m.embedding_status != "success"),
+                            lambda m: (m.user_id == user_id,),
                         )
                     )
                 )
@@ -2726,7 +2729,7 @@ class AccountErasureService:
         the memory text remains workspace content, but structured personal
         payload (coordinates, arbitrary detail keys) is removed at rest. The
         subject's tombstones are gone already (``_delete_subject_tombstones``),
-        and the rows still queued for an embedding are out of the queue
+        and all surviving authored rows are terminalized
         (``_dequeue_surviving_embeddings``, #2363).
 
         A ``type='time'`` memory keeps ``{"trigger": ...}`` and nothing else

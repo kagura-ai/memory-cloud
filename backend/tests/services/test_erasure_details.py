@@ -544,6 +544,7 @@ async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_k
         "details": {"a": 2, "t": "z"},
         "erased_details_keys": [details_key_digest("s")],
         "restored_from": 2,
+        "details_restored_from": {details_key_digest("s"): 2},
     }
     assert call.kwargs["writer"] == "erasure" and call.kwargs["actor_user_id"] == "p" * 64
     assert (report.restored, report.unavailable, report.keys_reverted) == (1, 0, 1)

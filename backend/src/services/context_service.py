@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole, reaches_context
-from config.constants import RESOURCE_ID_MAX_LENGTH, is_valid_resource_id
+from config.constants import (
+    ERASED_AUTHOR_EMBEDDING_ERROR,
+    MAX_EMBEDDING_RETRIES,
+    RESOURCE_ID_MAX_LENGTH,
+    is_valid_resource_id,
+)
 from config.plan_tiers import (
     has_feature,
     lowest_tier_with_limit,
@@ -1090,7 +1095,12 @@ class ContextService:
 
         for mem in source_memories:
             new_id = uuid4()
-            embedded = mem.embedding_status == "success"
+            # #2393: an erased author's survivor stays out of the embedding
+            # queue in its new context too (``failed``, the erased-author
+            # marker, no retry budget), as the erasure left it; only an
+            # admin retry or a model switch brings it back.
+            erased_author = mem.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
+            embedded = mem.embedding_status == "success" and not erased_author
             if embedded:
                 memory_id_mapping[str(mem.id)] = str(new_id)
 
@@ -1150,10 +1160,14 @@ class ContextService:
                 # failed row may have exhausted its retry budget, and copying
                 # that verbatim would produce a memory born terminal that nothing
                 # ever retries. A new row in a new context is a new episode,
-                # which is what the budget already means elsewhere.
-                embedding_status="success" if embedded else "pending",
-                embedding_retry_count=0,
-                embedding_error=None,
+                # which is what the budget already means elsewhere. An erased
+                # author's row is the exception (#2393, above).
+                embedding_status=(
+                    "failed" if erased_author else "success" if embedded else "pending"
+                ),
+                embedding_retry_count=MAX_EMBEDDING_RETRIES if erased_author else 0,
+                embedding_error=ERASED_AUTHOR_EMBEDDING_ERROR if erased_author else None,
+                embedding_attempted_at=mem.embedding_attempted_at if erased_author else None,
                 created_at=mem.created_at,
                 updated_at=utcnow(),
             )

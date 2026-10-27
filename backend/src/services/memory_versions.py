@@ -55,6 +55,11 @@ PRIOR_SCRUBBED_KEY = "scrubbed"
 # versioned field and not a marker: ``prior_values`` and the marker readers
 # ignore it.
 PRIOR_RESTORED_FROM_KEY = "restored_from"
+# #2393: an erasure can restore each details key from a different version.
+# Map the key digest (never its name, value or actor) to its restore version;
+# provenance replay and stripped-key walks use the scalar only on legacy rows
+# without this map. Version reconstruction and rollback ignore this metadata.
+PRIOR_DETAILS_RESTORED_FROM_KEY = "details_restored_from"
 # #2275: the sha256 digests (``details_provenance.details_key_digest``, never
 # the names) of the ``details`` keys account erasure removed from this prior
 # per key — an erased member's values, not keys the edit found absent. Read
