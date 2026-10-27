@@ -60,10 +60,10 @@ failure before the Postgres commit); a new request is the retry. When such a
 request is cancelled, or fails after its last attempt, the subject's live
 embedded memories are re-queued for embedding (#2304). Any other
 error at step 1 (a configuration error building the client, say) fails the
-request at once, as before. A request whose step 1 succeeded and that then
-fails before the Postgres commit (``workspace_transfer_required``, an error
-inside the Postgres step) re-queues them the same way (#2358): the points are
-gone and the account stays.
+request at once, as before. A request whose step 1 succeeded, or that spent
+an earlier attempt, and that then fails before the Postgres commit
+(``workspace_transfer_required``, an error inside the Postgres step) re-queues
+them the same way (#2358): the points may be gone and the account stays.
 """
 
 from __future__ import annotations
@@ -323,15 +323,14 @@ def _requeue_block(summary: dict[str, Any]) -> dict[str, Any]:
     """The ``summary.retry`` block a re-queue record merges into (#2358).
 
     This run's (or an earlier attempt's) ``retry`` block when the summary has
-    one; otherwise ``{"attempts": 0}`` — step 1 succeeded at its first try
-    and the request failed later, before the Postgres commit
-    (``failure_reason`` says why). One key for every re-queue record, so the
-    runbook's rule stays "``embeddings_requeued`` next to the attempts".
+    one (``_previous_retry``); otherwise ``{"attempts": 0}`` — step 1
+    succeeded at its first try and the request failed later, before the
+    Postgres commit (``failure_reason`` says why). One key for every re-queue
+    record, so the runbook's rule stays "``embeddings_requeued`` next to the
+    attempts".
     """
-    retry = summary.get(_RETRY_KEY)
-    if isinstance(retry, dict):
-        return retry
-    return {"attempts": 0}
+    retry, _ = _previous_retry(summary)
+    return retry if retry is not None else {"attempts": 0}
 
 
 # #2302: what the sweep's close of a claimed request did
@@ -930,10 +929,11 @@ class AccountErasureService:
         deleted their points ended without an erasure.
 
         Three callers: a cancel after a spent vector-store attempt (#2304),
-        the give-up after the last attempt (#2304), and a failure before the
-        Postgres commit that follows a completed step 1 (#2358 — a
-        workspace-transfer error, an error inside the Postgres step). On the
-        last path the request may have no ``retry`` block; ``retry`` is then
+        the give-up after the last attempt (#2304), and any other failure
+        before the Postgres commit that follows a completed step 1 or an
+        earlier attempt (#2358 — a workspace-transfer error, an error inside
+        the Postgres step, a billing contract on a retry run). A request
+        whose step 1 never failed has no ``retry`` block; ``retry`` is then
         ``{"attempts": 0}`` (``_requeue_block``).
 
         Called after the terminal status (``cancelled`` / ``failed``) is
@@ -1447,7 +1447,8 @@ class AccountErasureService:
         ``QdrantError`` there reschedules it (#2282, ``ErasureRetryScheduledError``)
         until ``VECTOR_STORE_MAX_ATTEMPTS``; the last one fails the request
         and re-queues the subject's embeddings (#2304), as does any failure
-        after step 1 and before the Postgres commit (#2358). Redis last because
+        after step 1 (or an earlier attempt) and before the Postgres commit
+        (#2358). Redis last because
         session/rate-limit data is ephemeral and re-creatable from cookies if
         anything goes wrong.
 
@@ -1482,6 +1483,14 @@ class AccountErasureService:
         # #2358: step 1 returned — the subject's points may be gone
         points_deleted = False
         erased_in_postgres = False
+
+        def points_may_be_gone() -> bool:
+            """#2358: this run's step 1 returned, or an earlier attempt's step 1
+            ran (#2282: a partial delete before its ``QdrantError``). A failure
+            handler re-queues the subject's embeddings then, as long as the
+            Postgres step has not committed."""
+            return points_deleted or failed_attempts > 0 or vector_store_gave_up is not None
+
         step = "postgres"
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
@@ -1647,8 +1656,8 @@ class AccountErasureService:
         except BillingContractActiveError as exc:
             # Caller-actionable, like the transfer case below: terminal
             # `failed` with a structured reason; the user creates a new request
-            # once the contract has ended. Nothing was deleted yet (the check
-            # runs before step 1), so nothing is re-queued (#2358).
+            # once the contract has ended. This run deleted nothing (the check
+            # runs before step 1); an earlier attempt's step 1 may have (#2282).
             await self.db.rollback()
             result = cast(
                 CursorResult[Any],
@@ -1674,6 +1683,12 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
+            elif points_may_be_gone():
+                # #2358: a retry run — the account stays, an earlier
+                # attempt may have deleted the subject's points
+                await self._requeue_after_points_deleted(
+                    request_id, subject_id, _requeue_block(summary), status=STATUS_FAILED
+                )
             raise
         except WorkspaceTransferRequiredError as exc:
             # Caller-actionable error. Move the row to the terminal `failed`
@@ -1721,11 +1736,12 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
-            elif points_deleted:
-                # #2358: step 1 deleted the subject's points and the account
-                # stays (the rollback above undid any uncommitted ownership
-                # change): re-queue their embeddings, only when this run's
-                # failure was written
+            elif points_may_be_gone():
+                # #2358: step 1 (this run's or an earlier attempt's) may have
+                # deleted the subject's points and the account stays (the
+                # rollback above undid any uncommitted ownership change):
+                # re-queue their embeddings, only when this run's failure was
+                # written
                 await self._requeue_after_points_deleted(
                     request_id, subject_id, _requeue_block(summary), status=STATUS_FAILED
                 )
@@ -1795,13 +1811,15 @@ class AccountErasureService:
             await self.db.commit()
             if not result.rowcount:
                 logger.warning("erasure_failure_handler_stale_run", request_id=str(request_id))
-            elif (vector_store_gave_up is not None or points_deleted) and not erased_in_postgres:
+            elif points_may_be_gone() and not erased_in_postgres:
                 # The subject's points may be gone and the account stays:
-                # the give-up after the last vector-store attempt (#2304), or
-                # a failure after step 1 and before the Postgres commit
-                # (#2358: a non-transfer error at step 2, an error inside the
-                # Postgres step). Only when this run's failure was written (a
-                # newer run owns a row the guard did not match). Never once
+                # the give-up after the last vector-store attempt (#2304), a
+                # failure after step 1 and before the Postgres commit (#2358:
+                # a non-transfer error at step 2, an error inside the Postgres
+                # step), or any failure of a run after an earlier attempt
+                # (#2358: e.g. a configuration error at step 1 on a retry).
+                # Only when this run's failure was written (a newer run owns a
+                # row the guard did not match). Never once
                 # the Postgres step committed: the rows are the pseudonym's
                 # and their points were deleted by design.
                 await self._requeue_after_points_deleted(

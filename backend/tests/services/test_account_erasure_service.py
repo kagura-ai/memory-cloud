@@ -3813,14 +3813,18 @@ class TestRequeueAfterTheLastAttempt:
 
         requeue.assert_not_awaited()
 
+    @pytest.mark.parametrize("attempts", [None, 0, 3])
     @pytest.mark.asyncio
-    async def test_another_error_at_step_one_requeues_nothing(self):
+    async def test_another_error_at_step_one_requeues_after_an_earlier_attempt(self, attempts):
+        """This run's step 1 deleted nothing (the client raised before any
+        delete); an earlier attempt's may have (#2358)."""
         svc = _service()
         _stub_execute_steps(svc)
-        _recording_execute(svc)
+        order = _recording_execute(svc)
         request = _execute_request(self_service=True)
-        request.deleted_data_summary = {"retry": {"attempts": 3, "step": "vector_store"}}
-        requeue = AsyncMock(return_value=0)
+        if attempts is not None:
+            request.deleted_data_summary = {"retry": {"attempts": attempts, "step": "vector_store"}}
+        requeue = AsyncMock(return_value=2)
 
         with (
             patch(
@@ -3832,7 +3836,15 @@ class TestRequeueAfterTheLastAttempt:
             with pytest.raises(RuntimeError):
                 await svc._execute(request, _user())
 
-        requeue.assert_not_awaited()
+        if not attempts:
+            requeue.assert_not_awaited()
+            assert len(_erasure_request_updates(order)) == 1
+            return
+        requeue.assert_awaited_once_with(svc.db, "u-1")
+        _, summary_update = _erasure_request_updates(order)
+        retry = _summary_update_params(summary_update)["merged"]["retry"]
+        assert retry["attempts"] == 3
+        assert retry["embeddings_requeued"] == 2
 
 
 def _transfer_error() -> Any:
@@ -4015,6 +4027,59 @@ class TestRequeueAfterAFailureBeforeTheCommit:
         qdrant_delete.assert_not_awaited()
         requeue.assert_not_awaited()
         assert len(_erasure_request_updates(order)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_billing_contract_on_a_retry_run_requeues(self, owned_contracts):
+        """A contract started while the request waited for its retry: this
+        run deleted nothing, the earlier attempt may have."""
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._list_owned_workspaces = AsyncMock(return_value=[_contract_workspace()])
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        previous = {"attempts": 1, "step": "vector_store", "error_class": "QdrantError"}
+        request.deleted_data_summary = {"retry": previous}
+        requeue = _requeue_recorder(order, 3)
+
+        await self._run(svc, request, requeue, BillingContractActiveError)
+
+        requeue.assert_awaited_once_with(svc.db, "u-1")
+        failure, summary_update = _erasure_request_updates(order)
+        assert order[-6:] == ["rollback", failure, "commit", "requeue", summary_update, "commit"]
+        assert failure.compile().params["failure_reason"].startswith("billing_contract_active")
+        got = _summary_update_params(summary_update)
+        assert got["params"]["status_1"] == STATUS_FAILED
+        assert {k: v for k, v in got["merged"]["retry"].items() if k != "requeued_at"} == {
+            **previous,
+            "embeddings_requeued": 3,
+        }
+
+    @pytest.mark.parametrize("attempts", [0, 2])
+    @pytest.mark.asyncio
+    async def test_an_error_before_step_one_requeues_only_after_an_earlier_attempt(self, attempts):
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._list_owned_workspaces = AsyncMock(side_effect=RuntimeError("connection lost"))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        if attempts:
+            request.deleted_data_summary = {"retry": {"attempts": attempts}}
+        requeue = _requeue_recorder(order, 4)
+
+        await self._run(svc, request, requeue, RuntimeError)
+
+        if not attempts:
+            requeue.assert_not_awaited()
+            assert len(_erasure_request_updates(order)) == 1
+            return
+        requeue.assert_awaited_once_with(svc.db, "u-1")
+        _, summary_update = _erasure_request_updates(order)
+        retry = _summary_update_params(summary_update)["merged"]["retry"]
+        assert retry["attempts"] == attempts
+        assert retry["embeddings_requeued"] == 4
 
     @pytest.mark.asyncio
     async def test_a_failed_requeue_keeps_the_transfer_error(self):

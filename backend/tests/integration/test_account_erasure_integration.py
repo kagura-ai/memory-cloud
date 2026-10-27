@@ -3522,3 +3522,49 @@ class TestEmbeddingsRequeuedAfterAFailureBeforeTheCommit:
         }
         assert await _workspace_tables(db_session) == workspaces_before
         assert await _user_exists(db_session, target)
+
+    @pytest.mark.asyncio
+    async def test_another_error_on_a_retry_run_requeues(
+        self,
+        db_session: AsyncSession,
+        erasure_scenario,
+        subject_memories,
+        bystanders,
+        other_workspace_memories,
+        patched_external_stores,
+    ):
+        """A configuration error at step 1 of a retry run: this run deleted
+        nothing, the earlier attempts may have; the request is ``failed``
+        with its attempts, and the subject's rows are re-queued."""
+        target = erasure_scenario["target_user_id"]
+        previous = {"attempts": 2, "step": "vector_store", "error_class": "QdrantError"}
+        request_id = await _due_self_service_request(
+            db_session, erasure_scenario, summary={"retry": previous}
+        )
+        before = await _everything_but(db_session, request_id)
+        workspaces_before = await _workspace_tables(db_session)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(side_effect=RuntimeError("bad config")),
+        ):
+            assert await AccountErasureService(db_session).sweep_pending_erasures() == 0
+
+        row = await _request_snapshot(db_session, request_id)
+        assert row["status"] == STATUS_FAILED
+        assert row["failure_reason"] == "bad config"
+        retry = row["deleted_data_summary"]["retry"]
+        assert row["deleted_data_summary"] == {"retry": retry}
+        assert retry["requeued_at"].endswith("Z")
+        assert {k: v for k, v in retry.items() if k != "requeued_at"} == {
+            **previous,
+            "embeddings_requeued": 6,
+        }
+        assert (row["user_id"], row["initiated_by"]) == (target, target)
+        await _assert_requeued(db_session, before["memories"], subject_memories)
+        after = await _everything_but(db_session, request_id)
+        assert {k: v for k, v in after.items() if k != "memories"} == {
+            k: v for k, v in before.items() if k != "memories"
+        }
+        assert await _workspace_tables(db_session) == workspaces_before
+        assert await _user_exists(db_session, target)
