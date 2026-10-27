@@ -2620,6 +2620,10 @@
               }
             ]
           },
+          "erased_count": {
+            "default": 0,
+            "type": "integer"
+          },
           "is_private": {
             "default": false,
             "type": "boolean"
@@ -12245,6 +12249,10 @@
             },
             "type": "array"
           },
+          "erased_memories": {
+            "default": 0,
+            "type": "integer"
+          },
           "plan_name": {
             "type": "string"
           },
@@ -12901,6 +12909,15 @@
                   "type": "null"
                 }
               ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_erased",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
             }
           }
         ],

@@ -1,5 +1,8 @@
 """Hold the live author before quota/context locks; reject stale erased auth."""
 
+from collections.abc import Sequence
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +28,7 @@ async def hold_remember_author(db: AsyncSession, user_id: str) -> None:
         raise NotFoundException("User")
 
 
-async def lock_merge_contexts(db: AsyncSession, context_ids) -> None:
+async def lock_merge_contexts(db: AsyncSession, context_ids: Sequence[UUID]) -> None:
     from models.auth import Context
 
     # NO KEY UPDATE lets erasure's child FK checks take KEY SHARE while a

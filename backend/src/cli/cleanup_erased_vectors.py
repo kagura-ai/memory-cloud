@@ -3,9 +3,13 @@
 python -m src.cli.cleanup_erased_vectors              # plan, no writes
 python -m src.cli.cleanup_erased_vectors --apply --yes # suppress and queue
 
-Uses only finalized erasures and captured UUID scopes. Reports aggregate
-counts, never raw identifiers, payloads, emails, document names or point IDs.
+Uses erasure history and captured UUID scopes, including committed in-progress
+runs. Reports aggregate counts, never raw identifiers, payloads, emails,
+document names or point IDs.
 """
+
+# Local imports follow the executable CLI src bootstrap.
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -13,7 +17,10 @@ import argparse
 import asyncio
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
