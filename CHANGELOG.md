@@ -4,6 +4,62 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.130.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.130.0) — 2026-10-27
+
+Account erasure now keeps surviving memories outside search until an administrator explicitly restores their scrubbed index, while preserving resource indexes another live, non-suppressed memory still uses. Vector and attachment cleanup retain retry work across failures. API key regeneration rotates the key selected in the web UI.
+
+### Fixed
+
+- **Erasure logs omit raw account identifiers** ([#2375](https://github.com/kagura-ai/memory-cloud/issues/2375)): vector deletion logs record a subject digest and exception class instead of the raw subject or SDK exception text.
+- **Regenerate the selected API key** ([#2379](https://github.com/kagura-ai/memory-cloud/issues/2379)): the credentials UI sends the selected key ID. Rotation preserves its agent binding, default context and exact expiration, leaves other keys alone, and serializes competing rotations. Connector keys still rotate through their connector. Calls without `key_id` retain the legacy newest-active-key selection.
+- **Erasure scrubs audit metadata and legacy actor fallbacks** ([#2348](https://github.com/kagura-ai/memory-cloud/issues/2348)): exact subject matches in six known top-level metadata fields, and legacy raw-sub / `<sub>@api` actor values, are pseudonymized without rewriting unrelated fields or another live account's values. `reprocess_erasures` repairs historical rows, including legacy JSON that cannot be cast to JSONB.
+- **Stale erasure runs cannot delete a re-registered account** ([#2362](https://github.com/kagura-ai/memory-cloud/issues/2362)): the executor rechecks the original account row and the request's committed Postgres marker before destructive work. A replaced run preserves the completed run's counts and does not repeat subject-wide cleanup against a new account.
+- **Attachment deletion survives workspace cascades and storage outages** ([#2395](https://github.com/kagura-ai/memory-cloud/issues/2395)): deleted file registry rows enqueue object cleanup in their database transaction. A 15-minute sweep retries storage deletion, respects outstanding upload URLs and preserves objects any other registry row still references. Workspace deletion releases attachment quota; historical unregistered objects have a separate counts-first inventory command.
+- **Bridge availability during deployment** ([#2408](https://github.com/kagura-ai/memory-cloud/issues/2408)): API blue/green deployments and rollbacks no longer restart the co-resident bridge worker by default, avoiding the restart-induced interruption to its public endpoint, including Slack event webhooks.
+
+### Changed
+
+- **Erased-author indexing requires an explicit restore** ([#2391](https://github.com/kagura-ai/memory-cloud/issues/2391)): a durable suppression marker excludes erased-author survivors from ordinary retries, model changes, chunk repair and Sleep. Captured UUID scopes make post-commit vector cleanup retryable, including after the request finishes; the hourly sweep also rechecks completed scopes for late writes. Shared resource points remain available while another live, non-suppressed row uses them. An administrator can restore scrubbed search data with a scoped `include_erased=true` retry.
+- **Erasure-aware background writes and dashboard counts** ([#2397](https://github.com/kagura-ai/memory-cloud/issues/2397)): background indexing checks the current author and suppression state so stale work cannot restore an erased author's points. The dashboard reports intentionally unindexed erased memories separately from failed or stalled indexing, using the existing context visibility rules. Those memories alone do not raise the indexing backlog warning.
+
+### Migration
+
+Two additive migrations are required, in order:
+`f18_2395_file_cleanup` → `f19_2391_embedding_erasure`
+(after `f17_2298_audit_logs_user_id_idx`). Run `alembic upgrade head` using the normal deployment procedure. f18 adds the file cleanup outbox, registry index and triggers. f19 adds durable embedding suppression and vector cleanup scopes, and backfills the previous exact erased-author marker in batches.
+
+Adds the optional deployment-host environment variable `BRIDGE_RESTART_ON_SWITCH` (default: `0`). Operators using an older bridge worker that reads the active-color marker only at startup must set `BRIDGE_RESTART_ON_SWITCH=1` in the deployment script's shell environment for both deployments and rollbacks. Setting it only in the API's environment file does not configure the script. Workers that follow active-color changes require no configuration change.
+
+During the rollout, pause account erasures and the repair CLIs. Update and drain the old API, scheduler, embedding, Sleep and legacy attachment-migration processes before running repairs; older writers do not enforce the new suppression and cleanup policy. Use the API's existing database, storage and vector configuration, and keep the existing audit pseudonym salt.
+
+From `backend/`, review each read-only plan before applying:
+
+1. Repair historical request and audit metadata first:
+   `python -m src.cli.reprocess_erasures --all`
+   then `python -m src.cli.reprocess_erasures --all --apply --yes`.
+
+2. Repair historical erased-author survivors and vector points:
+   `python -m src.cli.cleanup_erased_vectors`
+   then `python -m src.cli.cleanup_erased_vectors --apply --yes`.
+   Ambiguous author cohorts remain unchanged and are reported as counts. Explicitly restored memories are not suppressed again. Vector-store failures leave durable jobs for the hourly sweep.
+
+3. For attachment objects orphaned before f18:
+   `python -m src.cli.sweep_orphan_objects`
+   then `python -m src.cli.sweep_orphan_objects --apply --yes`.
+   First drain old legacy attachment writers and wait out any previously issued, longer-lived presigned PUT URLs. The command considers only recognized application keys with no registry owner and an age of at least two days, or the configured PUT lifetime plus one hour, whichever is longer. Apply rechecks ownership and age. Versioned buckets need a separate lifecycle policy for noncurrent versions.
+
+Ordinary `POST /api/v1/admin/embedding/retry-failed` now skips erased-author survivors. To intentionally restore their scrubbed search index, specify a context or workspace filter and `include_erased=true`; for example:
+`POST /api/v1/admin/embedding/retry-failed?context_id=<uuid>&include_erased=true`.
+A context embedding-model change no longer restores those memories.
+
+### Notes
+
+For a code rollback, keep the additive schema changes in place. A schema downgrade removes durable state: f18 drops the storage cleanup queue and triggers; f19 drops all vector cleanup scopes and the suppression/restoration columns.
+
+If a schema downgrade is unavoidable, pause erasure, indexing and repair workflows first. Preserve every storage cleanup queue row, every vector cleanup scope (pending and completed), and each memory UUID's `embedding_suppressed_at` and `embedding_erasure_restored_at` values. Restore that state before resuming those workflows. Re-applying f19 does not reconstruct it: the backfill recognizes only the previous exact erased-author marker. Completed scopes are needed to detect late writes, and explicit restoration markers prevent historical repair from suppressing an intentional restore.
+
+Older code does not enforce the new suppression policy; keep erasure, indexing and repair workflows paused while it runs.
+
 ## [v0.129.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.129.0) — 2026-10-27
 
 Account erasure works per `details` key: the keys an erased member introduced go back, also where a later member's edit carried them, and only those keys leave the revision log. A failed erasure puts the member's embeddings back in the queue. A completed one keeps the sweep from recreating its points. A connector's write key now survives member removal and the admin user delete as well. Migrations wait at most 5 s for a table lock, and `deploy.sh` retries a lock timeout. `?add_tools=` widens the default tool list, and `create_edge` joins the core profile (22 tools). No migration; one operator plan run of `reprocess_erasures --all` follows the deploy.

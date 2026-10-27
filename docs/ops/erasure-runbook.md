@@ -243,7 +243,7 @@ WHERE id = '<failed-request-id>';
 
 ### v0.130.0 以前の erasure survivor / point の修復
 
-旧版が pseudonym で再 embedding した残存行や、Postgres commit 後の削除失敗を一度修復する。最初に同じ API 環境・salt で件数だけを確認する。CLI は finalized erasure の pseudonym と UUID scope に限定し、本文や識別子を表示しない。dry run は DB・vector store に書き込まない (identity fields の read は行う)。
+旧版が pseudonym で再 embedding した残存行や、Postgres commit 後の削除失敗を一度修復する。最初に同じ API 環境・salt で件数だけを確認する。CLI は committed erasure の pseudonym と UUID scope に限定し、本文や識別子を表示しない。dry run は DB・vector store に書き込まない (identity fields の read は行う)。
 
 ```bash
 python -m src.cli.cleanup_erased_vectors
@@ -437,3 +437,11 @@ bytes before inserting their registry row without this lock. Wait out any older,
 longer configured presigned PUT lifetime before inventory. Bucket versioning, if
 enabled by the operator, requires a separate lifecycle policy for noncurrent
 versions; ordinary S3 DELETE only removes the current object view.
+
+## Rolling back v0.130.0
+
+For a code rollback, keep the additive schema changes in place. A schema downgrade removes durable state: f18 drops the storage cleanup queue and triggers; f19 drops all vector cleanup scopes and the suppression/restoration columns.
+
+If a schema downgrade is unavoidable, pause erasure, indexing and repair workflows first. Preserve every storage cleanup queue row, every vector cleanup scope (pending and completed), and each memory UUID's `embedding_suppressed_at` and `embedding_erasure_restored_at` values. Restore that state before resuming those workflows. Re-applying f19 does not reconstruct it: the backfill recognizes only the previous exact erased-author marker. Completed scopes are needed to detect late writes, and explicit restoration markers prevent historical repair from suppressing an intentional restore.
+
+Older code does not enforce the new suppression policy; keep erasure, indexing and repair workflows paused while it runs.
