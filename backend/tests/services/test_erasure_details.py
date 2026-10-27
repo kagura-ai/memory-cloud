@@ -626,16 +626,19 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     assert _subs(params) == {"raw-sub"}
     assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
     assert sha256_hex("a@example.com", salt="salt") in params.values()
-    assert "EXISTS" not in sql  # the live erasure: the user row is still there
+    # Live own rows do not require an absent user; only the fallback email ownership does.
+    assert "EXISTS" not in sql[sql.index(" WHERE audit_logs.id IN") :]
+    assert "WHERE users.email = audit_logs.user_email" in sql
     # #2345: the subject's request metadata goes too
     assert params["ip_address"] is None and params["user_agent"] is None
 
 
-async def test_without_an_email_only_the_sub_is_replaced() -> None:
+async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:
     sql, params = await _audit_update([])
 
     assert sql.count("replace(") == 1
-    assert "user_email" not in sql
+    assert "user_email=CASE WHEN" in sql
+    assert "raw-sub@api" in _flat(params)
     assert _subs(params) == {"raw-sub"}
     assert params["ip_address"] is None and params["user_agent"] is None
 
@@ -645,7 +648,7 @@ async def test_every_email_given_is_replaced_the_longest_first() -> None:
 
     sql, params = await _audit_update(["a@x.io", "longer@example.com"])
 
-    assert sql.count("replace(") == 3 and sql.count("WHEN") == 2
+    assert sql.count("replace(") == 3
     values = list(params.values())
     assert values.index("longer@example.com") < values.index("a@x.io")
     for email in ("a@x.io", "longer@example.com"):
@@ -666,8 +669,9 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
     sql, params = await _audit_update([], orphaned_only=True)
     assert params["ip_address"] is None and params["user_agent"] is None
 
-    # in the locking sub-select and in the UPDATE's own WHERE
-    assert sql.count("NOT (EXISTS (SELECT") == 2
+    # Own-row absence in both WHEREs, plus ownership of a fallback actor email in SET.
+    assert sql.count("NOT (EXISTS (SELECT") == 3
+    assert "WHERE users.email = audit_logs.user_email" in sql
     assert _exists_subqueries(sql) == [
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",
@@ -757,7 +761,12 @@ def _mock_db(rowcount: int = 2) -> Any:
     from unittest.mock import AsyncMock, MagicMock
 
     db = MagicMock()
-    db.execute = AsyncMock(return_value=MagicMock(rowcount=rowcount))
+    result = MagicMock(rowcount=rowcount)
+    result.scalars.return_value = list(range(rowcount))
+    db.execute = AsyncMock(return_value=result)
+    rows = MagicMock()
+    rows.__aiter__.return_value = []
+    db.stream = AsyncMock(return_value=rows)
     return db
 
 
@@ -794,10 +803,9 @@ async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
     sql, params = await _mentions_update(["a@x.io", "longer@example.com"], ["raw-sub"])
 
     # the UPDATE's own WHERE after the locked ids: the two IN arms, no user_id
-    tail = sql.rsplit(" AND ", 1)[1]
-    assert tail.startswith("(audit_logs.user_email IN")
+    tail = sql[sql.index(" WHERE ") :]
     assert "audit_logs.user_email IN" in tail and "audit_logs.resource IN" in tail
-    assert "user_id" not in tail
+    assert "audit_logs.user_id" not in tail
     assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
     # exact values only: no substring rewrite, no cut (the bound holds)
     assert "replace(" not in sql and "left(" not in sql
@@ -805,8 +813,8 @@ async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
     assert sql.count("WHEN (audit_logs.user_email =") == 2
     assert sql.count("WHEN (audit_logs.resource =") == 3
     # the subject acted on the user_email rows: their IP / UA go (#2345)
-    assert "ip_address=CASE WHEN (audit_logs.user_email IN" in sql
-    assert "user_agent=CASE WHEN (audit_logs.user_email IN" in sql
+    assert "ip_address=CASE WHEN" in sql
+    assert "user_agent=CASE WHEN" in sql
     assert "THEN NULL ELSE audit_logs.ip_address END" in sql
     values = list(params.values())
     assert values.index("longer@example.com") < values.index("a@x.io")
@@ -818,11 +826,12 @@ async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
     assert len(f"user:{sha256_hex('raw-sub', salt='salt')}") == 69 <= 255
 
 
-async def test_mentions_by_sub_alone_leave_user_email() -> None:
+async def test_mentions_by_sub_alone_scrub_raw_subject_email_fallbacks() -> None:
     sql, params = await _mentions_update([], ["raw-sub"])
 
-    assert "user_email" not in sql
-    assert "ip_address" not in sql and "user_agent" not in sql
+    assert "user_email=CASE WHEN" in sql
+    assert "raw-sub@api" in _flat(params)
+    assert "ip_address=CASE WHEN" in sql and "user_agent=CASE WHEN" in sql
     assert "user:raw-sub" in _flat(params)
 
 
@@ -841,13 +850,18 @@ async def test_the_count_uses_the_apply_predicate() -> None:
     from services.erasure_details import count_audit_mentions
 
     db = MagicMock()
-    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=4)))
+    result = MagicMock()
+    result.scalars.return_value = [1, 2, 3, 4]
+    db.execute = AsyncMock(return_value=result)
+    rows = MagicMock()
+    rows.__aiter__.return_value = []
+    db.stream = AsyncMock(return_value=rows)
     assert await count_audit_mentions(db, ["a@x.io"], subs=["raw-sub"]) == 4
     sql, params = _compiled(db.execute.await_args.args[0])
     assert "FOR UPDATE" not in sql
     assert "audit_logs.user_email IN" in sql and "audit_logs.resource IN" in sql
     assert {"a@x.io", "user:a@x.io", "user:raw-sub"} <= _flat(params)
-    assert "user_id" not in sql
+    assert "audit_logs.user_id" not in sql
 
 
 async def test_the_trail_locks_once_then_own_rows_then_mentions() -> None:
@@ -912,7 +926,7 @@ async def test_the_dry_run_count_leaves_out_the_own_rows() -> None:
     from services.erasure_details import count_audit_mentions
 
     db = MagicMock()
-    db.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=1)))
+    db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=[1])))
     assert await count_audit_mentions(db, ["a@x.io"], exclude_user_id="raw-sub") == 1
     sql, params = _compiled(db.execute.await_args.args[0])
     assert "audit_logs.user_id != " in sql and "raw-sub" in _flat(params)

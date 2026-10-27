@@ -226,6 +226,7 @@ async def pseudonymize_audit_logs(
     emails: Collection[str] = (),
     *,
     orphaned_only: bool = False,
+    _changed_ids: set[int] | None = None,
 ) -> int:
     """Pseudonymize the ``audit_logs`` rows ``user_id`` acted in (#2287).
 
@@ -236,8 +237,10 @@ async def pseudonymize_audit_logs(
     - ``user_id`` → ``erasure_pseudonym(user_id)``, so the rows of one erased
       member still correlate with each other and with their request row.
     - ``user_email`` → its salted pseudonym only where it equals one of
-      ``emails`` (the subject's). In this codebase ``user_email`` is often
-      the *actor's* email on a row about someone else
+      ``emails`` (the subject's), the raw sub or ``<sub>@api`` (legacy
+      API-key fallback; both become the subject pseudonym). In this
+      codebase ``user_email`` is often the *actor's* email on a row about
+      someone else
       (``RoleManager.assign_role``, ``SystemAdminService.promote``/``demote``);
       a blind overwrite would misattribute it.
     - ``resource`` (conventionally ``user:{email}``): every occurrence of
@@ -275,11 +278,11 @@ async def pseudonymize_audit_logs(
     }
     for email, email_pseudonym in pseudonyms.items():
         resource = func.replace(resource, email, email_pseudonym)
-    if pseudonyms:
-        values["user_email"] = case(
-            *((AuditLog.user_email == e, p) for e, p in pseudonyms.items()),
-            else_=AuditLog.user_email,
-        )
+    values["user_email"] = case(
+        *((AuditLog.user_email == e, p) for e, p in pseudonyms.items()),
+        (_audit_sub_email(AuditLog, user_id), user_pseudonym),
+        else_=AuditLog.user_email,
+    )
     values["resource"] = func.left(
         func.replace(resource, user_id, user_pseudonym), AuditLog.resource.type.length
     )
@@ -287,12 +290,12 @@ async def pseudonymize_audit_logs(
     def own_rows(row: Any) -> tuple[ColumnElement[bool], ...]:
         return (_own_audit_rows(row, user_id, orphaned_only=orphaned_only),)
 
-    result = await db.execute(
+    stmt = (
         update(AuditLog)
         .where(AuditLog.id.in_(locked_ids(AuditLog, own_rows)), *own_rows(AuditLog))
         .values(values)
     )
-    return cast(CursorResult[Any], result).rowcount or 0
+    return await _audit_update_count(db, stmt, _changed_ids)
 
 
 def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnElement[bool]:
@@ -315,24 +318,163 @@ def audit_mention_resources(emails: Collection[str], subs: Collection[str] = ())
     return [f"user:{e}" for e in _by_length(emails)] + [f"user:{s}" for s in _by_length(subs)]
 
 
-def audit_mention_predicate(
-    row: Any, emails: Collection[str], subs: Collection[str] = ()
+AUDIT_SUBJECT_METADATA_KEYS = (
+    "target_user_id",
+    "new_owner_id",
+    "previous_owner_id",
+    "assigned_by",
+    "promoted_by",
+    "demoted_by",
+)
+
+
+def _audit_sub_guard(sub: str, *, orphaned_only: bool) -> ColumnElement[bool]:
+    """Recheck historical subjects at the write, including late re-registration."""
+    return ~exists().where(User.user_id == sub) if orphaned_only else literal(True)
+
+
+def _audit_sub_email(row: Any, sub: str) -> ColumnElement[bool]:
+    """A legacy sub fallback cannot claim an email another current user owns."""
+    return row.user_email.in_([sub, f"{sub}@api"]) & ~exists().where(
+        User.email == row.user_email, User.user_id != sub
+    )
+
+
+async def _active_audit_subs(
+    db: AsyncSession, subs: Collection[str], *, orphaned_only: bool
+) -> set[str]:
+    """Current accounts are never historical subject candidates."""
+    active = set(subs)
+    if orphaned_only and active:
+        active -= set(
+            (await db.execute(select(User.user_id).where(User.user_id.in_(active)))).scalars()
+        )
+    return active
+
+
+async def _audit_metadata_ids(
+    db: AsyncSession,
+    subs: Collection[str],
+    *,
+    orphaned_only: bool = False,
+    exclude_user_id: str | None = None,
+) -> set[int]:
+    """Stream whole legacy JSON; SQL extraction rejects valid escaped U+0000.
+
+    Only matching ids are retained. The caller locks their union with the
+    scalar-column targets, then re-reads the metadata before updating it.
+    """
+    active = await _active_audit_subs(db, subs, orphaned_only=orphaned_only)
+    if not active:
+        return set()
+    stmt = select(AuditLog.id, AuditLog.user_metadata).where(AuditLog.user_metadata.is_not(None))
+    if exclude_user_id is not None:
+        stmt = stmt.where(AuditLog.user_id != exclude_user_id)
+    rows = await db.stream(stmt, execution_options={"yield_per": 500})
+    matched: set[int] = set()
+    async for row_id, metadata in rows:
+        if isinstance(metadata, dict) and any(
+            isinstance(value := metadata.get(key), str) and value in active
+            for key in AUDIT_SUBJECT_METADATA_KEYS
+        ):
+            matched.add(row_id)
+    return matched
+
+
+async def _pseudonymize_audit_metadata(
+    db: AsyncSession, ids: Collection[int], subs: Collection[str], *, orphaned_only: bool
+) -> set[int]:
+    """Patch fresh metadata under the caller's union lock, preserving unknown JSON."""
+    if not ids:
+        return set()
+    active = await _active_audit_subs(db, subs, orphaned_only=orphaned_only)
+    if not active:
+        return set()
+    changed: set[int] = set()
+    ordered = sorted(ids)
+    for offset in range(0, len(ordered), 500):
+        rows = await db.execute(
+            select(AuditLog.id, AuditLog.user_metadata)
+            .where(AuditLog.id.in_(ordered[offset : offset + 500]))
+            .order_by(AuditLog.id)
+        )
+        for row_id, metadata in rows:
+            if not isinstance(metadata, dict):
+                continue
+            replacements = {
+                key: erasure_pseudonym(value)
+                for key in AUDIT_SUBJECT_METADATA_KEYS
+                if isinstance(value := metadata.get(key), str) and value in active
+            }
+            if not replacements:
+                continue
+            used_subs = {metadata[key] for key in replacements}
+            result = await db.execute(
+                update(AuditLog)
+                .where(
+                    AuditLog.id == row_id,
+                    *(_audit_sub_guard(sub, orphaned_only=orphaned_only) for sub in used_subs),
+                )
+                .values(user_metadata={**metadata, **replacements})
+                .returning(AuditLog.id)
+                .execution_options(synchronize_session=False)
+            )
+            changed.update(result.scalars())
+    return changed
+
+
+async def _audit_update_count(db: AsyncSession, stmt: Any, changed_ids: set[int] | None) -> int:
+    """Keep public rowcounts while the union sweep collects ids to avoid double counts."""
+    if changed_ids is not None:
+        ids = set((await db.execute(stmt.returning(AuditLog.id))).scalars())
+        changed_ids.update(ids)
+        return len(ids)
+    result = await db.execute(stmt)
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
+def audit_actor_predicate(
+    row: Any,
+    emails: Collection[str],
+    subs: Collection[str] = (),
+    *,
+    orphaned_only: bool = False,
 ) -> ColumnElement[bool] | None:
-    """Rows that name the subject by an exact value (#2298): ``user_email``
-    is one of ``emails`` (the subject acting on another member's row) or
-    ``resource`` is one of ``audit_mention_resources`` (another actor
-    acting on the subject). None when there is nothing to match."""
+    """Rows whose actor email is the erased subject, including legacy fallbacks."""
+    arms = [row.user_email.in_(_by_length(emails))] if emails else []
+    for sub in _by_length(subs):
+        arms.append(_audit_sub_email(row, sub) & _audit_sub_guard(sub, orphaned_only=orphaned_only))
+    return or_(*arms) if arms else None
+
+
+def audit_mention_predicate(
+    row: Any,
+    emails: Collection[str],
+    subs: Collection[str] = (),
+    *,
+    orphaned_only: bool = False,
+) -> ColumnElement[bool] | None:
+    """Exact scalar identifiers; metadata ids are matched separately in Python."""
     arms: list[ColumnElement[bool]] = []
     if emails:
         arms.append(row.user_email.in_(_by_length(emails)))
-    resources = audit_mention_resources(emails, subs)
-    if resources:
-        arms.append(row.resource.in_(resources))
+        arms.append(row.resource.in_(audit_mention_resources(emails)))
+    for sub in _by_length(subs):
+        identifiers = [
+            _audit_sub_email(row, sub),
+            row.resource == f"user:{sub}",
+        ]
+        arms.append(or_(*identifiers) & _audit_sub_guard(sub, orphaned_only=orphaned_only))
     return or_(*arms) if arms else None
 
 
 async def pseudonymize_audit_mentions(
-    db: AsyncSession, emails: Collection[str], *, subs: Collection[str] = ()
+    db: AsyncSession,
+    emails: Collection[str],
+    *,
+    subs: Collection[str] = (),
+    orphaned_only: bool = False,
+    _changed_ids: set[int] | None = None,
 ) -> int:
     """Pseudonymize the subject's identifiers on other actors' audit rows (#2298).
 
@@ -348,6 +490,10 @@ async def pseudonymize_audit_mentions(
       acting on the subject) → ``user:`` + the pseudonym — 69 characters,
       within the column. The acting admin's ``user_id`` / ``user_email``
       and request metadata stay (accountability evidence).
+    - Raw-sub / ``<sub>@api`` actor email fallbacks are scrubbed too, unless
+      another current user owns that exact email (their email/IP/UA stay).
+      ``orphaned_only`` rechecks current users for sub-derived rewrites.
+      Metadata is patched by ``pseudonymize_audit_trail`` under the union lock.
 
     The pseudonyms are the ones ``pseudonymize_audit_logs`` writes on the
     subject's own rows, so the two still correlate. No ``user_id``
@@ -358,36 +504,43 @@ async def pseudonymize_audit_mentions(
     Returns:
         The rowcount; 0 without a statement when there is nothing to match.
     """
-    if audit_mention_predicate(AuditLog, emails, subs) is None:
+    if audit_mention_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only) is None:
         return 0
-    values: dict[str, Any] = {}
     ordered = _by_length(emails)
-    if ordered:
-        values["user_email"] = case(
-            *((AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered),
-            else_=AuditLog.user_email,
+    email_cases = [(AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered]
+    resource_cases = [
+        (AuditLog.resource == f"user:{e}", f"user:{erasure_pseudonym(e)}") for e in ordered
+    ]
+    for sub in _by_length(subs):
+        guard = _audit_sub_guard(sub, orphaned_only=orphaned_only)
+        email_cases.append((_audit_sub_email(AuditLog, sub) & guard, erasure_pseudonym(sub)))
+        resource_cases.append(
+            ((AuditLog.resource == f"user:{sub}") & guard, f"user:{erasure_pseudonym(sub)}")
         )
-        # every SET reads the row's old values: ``user_email`` before its rewrite
-        acted = AuditLog.user_email.in_(ordered)
+    values: dict[str, Any] = {}
+    if email_cases:
+        values["user_email"] = case(*email_cases, else_=AuditLog.user_email)
+        # Every SET reads old values. Only a subject acting on this row loses request metadata.
+        acted = audit_actor_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only)
         for column in (AuditLog.ip_address, AuditLog.user_agent):
             values[column.key] = case((acted, null()), else_=column)
-    values["resource"] = case(
-        *(
-            (AuditLog.resource == f"user:{v}", f"user:{erasure_pseudonym(v)}")
-            for v in [*ordered, *_by_length(subs)]
-        ),
-        else_=AuditLog.resource,
-    )
+    if resource_cases:
+        values["resource"] = case(*resource_cases, else_=AuditLog.resource)
 
     def mentions(row: Any) -> tuple[ColumnElement[bool], ...]:
-        return (cast(ColumnElement[bool], audit_mention_predicate(row, emails, subs)),)
+        return (
+            cast(
+                ColumnElement[bool],
+                audit_mention_predicate(row, emails, subs, orphaned_only=orphaned_only),
+            ),
+        )
 
-    result = await db.execute(
+    stmt = (
         update(AuditLog)
         .where(AuditLog.id.in_(locked_ids(AuditLog, mentions)), *mentions(AuditLog))
         .values(values)
     )
-    return cast(CursorResult[Any], result).rowcount or 0
+    return await _audit_update_count(db, stmt, _changed_ids)
 
 
 async def count_audit_mentions(
@@ -396,17 +549,20 @@ async def count_audit_mentions(
     *,
     subs: Collection[str] = (),
     exclude_user_id: str | None = None,
+    orphaned_only: bool = False,
 ) -> int:
-    """What ``pseudonymize_audit_mentions`` would change (a dry run's count;
-    the same predicate, no lock). ``exclude_user_id``: the rows the own-row
+    """The trail's scalar and metadata mention rows (a dry run, no lock). ``exclude_user_id``: the rows the own-row
     UPDATE rewrites before the mentions (``pseudonymize_audit_trail``), so
     a dry run does not count them twice."""
-    predicate = audit_mention_predicate(AuditLog, emails, subs)
-    if predicate is None:
-        return 0
-    if exclude_user_id is not None:
-        predicate = predicate & (AuditLog.user_id != exclude_user_id)
-    return (await db.execute(select(func.count(AuditLog.id)).where(predicate))).scalar_one()
+    matched = await _audit_metadata_ids(
+        db, subs, orphaned_only=orphaned_only, exclude_user_id=exclude_user_id
+    )
+    predicate = audit_mention_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only)
+    if predicate is not None:
+        if exclude_user_id is not None:
+            predicate &= AuditLog.user_id != exclude_user_id
+        matched.update((await db.execute(select(AuditLog.id).where(predicate))).scalars())
+    return len(matched)
 
 
 async def pseudonymize_audit_trail(
@@ -433,6 +589,13 @@ async def pseudonymize_audit_trail(
     (the re-run: the emails a user row holds again are left out of the
     mentions, not of the subject's own rows; the sweep runs once per run).
 
+    Known top-level metadata keys are matched by exact Python string
+    comparison from streamed whole JSON (#2348): legacy JSON can contain
+    escaped U+0000 that PostgreSQL JSON extraction / JSONB casts reject.
+    Matching ids join the same ordered lock union; fresh locked metadata
+    is then patched without overwriting a concurrent writer's other keys.
+    Actual changed ids keep own/scalar/metadata overlaps counted once.
+
     Returns:
         ``(own rows, mentions)`` rowcounts.
     """
@@ -442,13 +605,17 @@ async def pseudonymize_audit_trail(
         subs = (user_id,) if user_id is not None else ()
     mentioned = tuple(emails) if mention_emails is None else tuple(mention_emails)
 
+    metadata_ids = await _audit_metadata_ids(db, subs, orphaned_only=orphaned_only)
+
     def union(row: Any) -> tuple[ColumnElement[bool], ...]:
         arms: list[ColumnElement[bool]] = []
         if user_id is not None:
             arms.append(_own_audit_rows(row, user_id, orphaned_only=orphaned_only))
-        mention = audit_mention_predicate(row, mentioned, subs)
+        mention = audit_mention_predicate(row, mentioned, subs, orphaned_only=orphaned_only)
         if mention is not None:
             arms.append(mention)
+        if metadata_ids:
+            arms.append(row.id == any_(type_coerce(sorted(metadata_ids), ARRAY(BigInteger))))
         if pseudonym is not None:
             arms.append(row.user_id == pseudonym)
         return (or_(*arms),)
@@ -456,12 +623,22 @@ async def pseudonymize_audit_trail(
     if user_id is None and pseudonym is None and not mentioned and not subs:
         return 0, 0
     await db.execute(locked_ids(AuditLog, union))
+    own_ids: set[int] = set()
+    mention_ids: set[int] = set()
     own = (
-        await pseudonymize_audit_logs(db, user_id, emails, orphaned_only=orphaned_only)
+        await pseudonymize_audit_logs(
+            db, user_id, emails, orphaned_only=orphaned_only, _changed_ids=own_ids
+        )
         if user_id is not None
         else 0
     )
-    return own, await pseudonymize_audit_mentions(db, mentioned, subs=subs)
+    mentions = await pseudonymize_audit_mentions(
+        db, mentioned, subs=subs, orphaned_only=orphaned_only, _changed_ids=mention_ids
+    )
+    patched = await _pseudonymize_audit_metadata(
+        db, metadata_ids, subs, orphaned_only=orphaned_only
+    )
+    return own, mentions + len(patched - own_ids - mention_ids)
 
 
 # The erasure's own audit row (``AccountErasureService._write_audit_log``).

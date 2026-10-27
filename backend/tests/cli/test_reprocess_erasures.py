@@ -370,14 +370,20 @@ def test_the_audit_subs_select_is_correlated_to_each_audit_row():
     rows = MagicMock()
     rows.all.return_value = []
     db.execute = AsyncMock(return_value=rows)
+    rows.__aiter__.return_value = []
+    db.stream = AsyncMock(return_value=rows)
 
     asyncio.run(cli._audit_subs(db))
 
-    sql = str(db.execute.await_args.args[0].compile(dialect=postgresql.dialect()))
-    assert sql == (
-        "SELECT DISTINCT audit_logs.user_id, EXISTS (SELECT * \nFROM users \n"
-        "WHERE users.user_id = audit_logs.user_id) AS in_use \nFROM audit_logs"
-    )
+    sql = str(db.stream.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
+    assert "WHERE users.user_id = anon_1.sub" in sql
+    assert "FROM users, " not in sql
+    assert "UNION SELECT" in sql
+    assert "user_metadata" not in sql
+    metadata_sql = str(db.stream.await_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "SELECT audit_logs.user_metadata" in metadata_sql
+    assert "CAST" not in metadata_sql and "->" not in metadata_sql
+    assert "audit_logs.user_email" in sql and "audit_logs.resource" in sql
 
 
 def test_the_dry_run_counts_what_the_apply_would_change():
