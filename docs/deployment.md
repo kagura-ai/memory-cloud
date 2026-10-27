@@ -1887,7 +1887,18 @@ billing contract that started while it waited, a configuration error at this
 step), re-queue them the same way once the `failed` row is written; its
 `retry.attempts` is 0 when this step never failed, and an admin force-erase
 does it before answering 409. A failure after the Postgres commit re-queues
-nothing (the memories are the pseudonym's). Not covered: a request that
+nothing (the memories are the pseudonym's). From v0.129.0 (#2363) the
+erasure's Postgres step also takes the member's surviving memories that were
+still waiting for or retrying their embedding (`pending`, `processing`,
+`failed`) out of the queue: they end `failed` with `embedding_error` starting
+`erased_author:` and their retry budget spent, so the embedding sweep does
+not recreate their points under the pseudonym (count in the summary's
+`postgres.memories_embedding_dequeued`), and an embedding run already in
+flight that writes after the vector delete removes its own point
+(`embedding_points_removed_after_lost_claim`). The
+`embedding_unsearchable_backlog` warning counts them as `erased`, not as a
+provider problem; only the admin retry-failed endpoint brings them back,
+embedded under the pseudonym with no `details`. Not covered: a request that
 failed at this step before v0.125.0, one cancelled by SQL, one that failed
 before the Postgres commit before v0.129.0, and a re-queue that failed; the
 runbook's manual retry section shows how to re-queue those. A cancel that races the sweep's claim answers 409 and the
@@ -2026,7 +2037,10 @@ would to a re-index.
     `POST /api/v1/admin/embedding/retry-failed?context_id=<context-id>` (system
     admin); the sweep rebuilds their vectors from the rows, and nothing has to
     be ingested again. This does not help a memory whose content is no longer
-    a JSON document;
+    a JSON document. The call resets every `failed` memory of the context,
+    including the surviving memories of an erased member that the erasure
+    took out of the queue (`erased_author:`, #2363): they are embedded again
+    under the pseudonym, with no `details`;
   - ingest the document again as a newer version (the same version is refused
     as a duplicate).
 
