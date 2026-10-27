@@ -11,6 +11,8 @@ export default defineConfig([
     // until a follow-up sweep fixes them and turns them back into errors.
     // The React Compiler rules flag effect/ref patterns whose fix can change
     // render behaviour, so each needs a reviewed change, not a mechanical one.
+    // `npm run lint` caps the warning count (--max-warnings in package.json)
+    // so it can only go down: lower the cap whenever a sweep removes some.
     rules: {
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/immutability": "warn",
@@ -26,7 +28,7 @@ export default defineConfig([
     // existing `eslint-disable-next-line no-console` comments assume this rule.
     // Warn-only for now for the same reason as above (#2202).
     rules: {
-      "no-console": "warn",
+      "no-console": ["warn", { allow: ["warn", "error"] }],
     },
   },
   globalIgnores([

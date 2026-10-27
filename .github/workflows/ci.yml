@@ -244,7 +244,8 @@ jobs:
         run: cd frontend && npx tsc --noEmit
 
       # ESLint flat config (frontend/eslint.config.mjs, #2202). Errors fail the
-      # job; rule families with pre-existing hits are warn-only for now.
+      # job; rule families with pre-existing hits are warn-only for now, and
+      # `npm run lint` caps the warning count (--max-warnings) so new ones fail.
       - name: Lint
         run: cd frontend && npm run lint
 

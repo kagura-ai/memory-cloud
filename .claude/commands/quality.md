@@ -9,7 +9,7 @@ Steps:
    ```
    make type-check
    ```
-3. Frontend lint (eslint, errors only fail):
+3. Frontend lint (eslint; errors and a warning count above the cap fail):
    ```
    cd frontend && npm run lint
    ```
