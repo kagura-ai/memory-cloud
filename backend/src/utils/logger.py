@@ -22,6 +22,9 @@ from utils.url_redact import redact_invite_tokens
 # the end of the value (DOTALL: row content may itself contain newlines,
 # and anything after it — SQLAlchemy's ``[SQL: ...]`` suffix — is cheap
 # to lose and safe-side to over-scrub).
+# Whether setup_logger() has run in this process (see ensure_logger_configured).
+_configured = False
+
 _PG_DETAIL_RE = re.compile(r"DETAIL:.*", re.DOTALL)
 _REDACTED = "DETAIL: [redacted]"
 
@@ -227,6 +230,22 @@ def setup_logger(
         logger_factory=structlog.PrintLoggerFactory(file=stream),
         cache_logger_on_first_use=True,
     )
+    global _configured
+    _configured = True
+
+
+def ensure_logger_configured() -> None:
+    """Run ``setup_logger()`` with its defaults unless it already ran in this process.
+
+    ``api.main`` calls this at import time, before the first log line of the
+    import (route modules and middleware registration log while the app is
+    built), so a uvicorn worker configures logging exactly once, as before. A
+    process that configured logging first — pytest's ``tests/conftest.py``, a
+    one-shot CLI writing to stderr — keeps its configuration instead of having
+    it replaced on every ``api.main`` import (#2241).
+    """
+    if not _configured:
+        setup_logger()
 
 
 def get_logger(name: str | None = None) -> structlog.BoundLogger:

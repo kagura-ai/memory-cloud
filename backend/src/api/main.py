@@ -30,10 +30,13 @@ from utils.exceptions import (
     DuplicateFileError,
     MemoryCloudException,
 )
-from utils.logger import get_logger, setup_logger
+from utils.logger import ensure_logger_configured, get_logger
 
-# Setup logger first
-setup_logger()
+# Configure logging before anything below logs: building the app (route
+# imports, middleware registration) already emits log lines, and uvicorn's
+# handlers get the redacting formatter before its startup lines. Once per
+# process: a host that configured logging first keeps it (#2241).
+ensure_logger_configured()
 logger = get_logger(__name__)
 
 
