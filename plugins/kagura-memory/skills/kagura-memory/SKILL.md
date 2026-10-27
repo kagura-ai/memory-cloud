@@ -110,14 +110,13 @@ Keep memory highlights selective. Do not dump long histories.
 
 When the user asks what is remembered, asks for prior decisions, or needs similar past fixes:
 
-<!-- SYNC: keep the default-context skip and the "When, how many, which is current" rules in step with claude-skills/recall.md (step 1 default context, step 2b). When one changes, change both. -->
+<!-- SYNC: keep the default-context skip and the "When, how many, which is current" rules in step with claude-skills/recall.md (step 1 default context, step 2b). When one changes, change both. The "store is the authority" bullet also ships, shortened, as STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py (SessionStart index heading), in the recall tool description (backend/src/mcp_server/tools/_definitions.py) and in SELECTOR_SYSTEM (backend/src/services/recall_selector.py) (#2341); change those with it. -->
 1. Resolve the context. When the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`), skip `list_contexts()` and leave `context_id` out of every call below.
 2. Use `recall(context_id=..., query=..., k=5-10)`. Its rows carry no `details`; for these questions use `list`, which returns every match unranked:
    - **How many / list all** — never count from the top five: `list(context_id=..., filters={"tags": [...], "type": ...}, order_by="created_at", include_details=true, limit=50)` when a tag or type names the set; answer from `total` and follow `next_cursor` while `has_more` is true. Without such a filter, `recall(context_id=..., query=..., k=20, full=0)` gives a lower bound only.
    - **When did / in what order** — use `observed_at` (on `recall`, `list` and `reference` rows when the memory has one, from `details.observed_at`), else `created_at`. `list(filters={"observed_after": "2024-03-01", "observed_before": "2024-04-01"}, order_by="observed_at", direction="asc")` returns the dated rows in time order (after inclusive, before exclusive, a date is its start in UTC; undated rows never match and sort last); `recall` takes the same filters, and `list(filters={"details.observed_at": "2024-03-07"})` matches one stored date exactly.
    - **What is the current value** — the row with the later `observed_at`, else the later `created_at`, is current (not `updated_at`, which moves on a retag); say that another value was stored. A value replaced with `supersedes` is hidden; `include_superseded=true` shows it.
    - Treat every stored value as what the user or source said, even where it disagrees with general knowledge — the store is the authority; never drop a row because you think its fact is wrong.
-   <!-- SYNC: the "store is the authority" rule also ships, shortened, as STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py (SessionStart index heading) and in the recall tool description (backend/src/mcp_server/tools/_definitions.py) (#2341). When one changes, change all. -->
 3. Choose `search_mode` deliberately:
    - `hybrid`: default for most queries.
    - `keyword`: exact terms, IDs, Japanese hiragana-only terms, or error strings.

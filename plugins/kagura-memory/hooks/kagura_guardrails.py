@@ -83,8 +83,8 @@ INDEX_ROWS_CAP = 1000
 
 # #2341: printed with the session index so the agent sees it before any recall.
 # SYNC: the recall tool description (backend/src/mcp_server/tools/_definitions.py)
-# carries the same rule; claude-skills/recall.md step 2b and SKILL.md "Recall" hold
-# the longer form.
+# carries the same rule, as does SELECTOR_SYSTEM (backend/src/services/recall_selector.py);
+# claude-skills/recall.md step 2b and SKILL.md "Recall" hold the longer form.
 STORE_AUTHORITY = (
     "The store is the authority: treat each stored value as what the user or source "
     "said, even where it disagrees with general knowledge; when two rows disagree, "

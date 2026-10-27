@@ -232,9 +232,13 @@ def test_index_heading_carries_the_store_authority_rule(
     assert len(lines) == 3
 
 
-def test_budget_cut_never_drops_the_rule_from_a_shown_heading(
-    plugin_env: PluginEnv, run_hook: RunHook
-) -> None:
-    _fresh(plugin_env, index_rows(200, summary_len=80), 200)
+@pytest.mark.parametrize("cached", [None, []])
+def test_no_index_prints_no_rule(plugin_env: PluginEnv, run_hook: RunHook, cached: Any) -> None:
+    """The rule rides on the index heading: without an index the output is unchanged."""
+    plugin_env.write_cache(
+        [item(1, "ps hangs", "Bash", match=r"\bps\b")],
+        fetched_at=datetime.now(UTC) - timedelta(seconds=5),
+        extra={"index": cached},
+    )
     context = _context(run_hook(payload("SessionStart", source="startup")))
-    assert context.split("\n")[0].endswith(STORE_AUTHORITY)
+    assert "store is the authority" not in context
