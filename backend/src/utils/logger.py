@@ -22,11 +22,11 @@ from utils.url_redact import redact_invite_tokens
 # the end of the value (DOTALL: row content may itself contain newlines,
 # and anything after it — SQLAlchemy's ``[SQL: ...]`` suffix — is cheap
 # to lose and safe-side to over-scrub).
-# Whether setup_logger() has run in this process (see ensure_logger_configured).
-_configured = False
-
 _PG_DETAIL_RE = re.compile(r"DETAIL:.*", re.DOTALL)
 _REDACTED = "DETAIL: [redacted]"
+
+# Whether setup_logger() has run in this process (see ensure_logger_configured).
+_configured = False
 
 
 def _scrub_text(text: str) -> str:
@@ -117,6 +117,22 @@ def _redacting_console_traceback(sio, exc_info) -> None:
     sio.write(_PG_DETAIL_RE.sub(_REDACTED, buffer.getvalue()))
 
 
+def _wrap_uvicorn_handlers() -> None:
+    """Give uvicorn's own handlers the redacting formatter; idempotent.
+
+    #1581: uvicorn's own loggers carry their own handlers and do NOT propagate
+    to root, so the root-handler wrap in ``setup_logger()`` never sees them —
+    and ``uvicorn.access`` prints the whole request line (path + query), i.e.
+    exactly where a closed-beta invite token travels. Wrap them the same way:
+    destination and format untouched, only the rendered text scrubbed. No-op
+    outside uvicorn.
+    """
+    for uvicorn_logger_name in ("uvicorn", "uvicorn.access"):
+        for handler in logging.getLogger(uvicorn_logger_name).handlers:
+            if not isinstance(handler.formatter, _RedactingStdlibFormatter):
+                handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
+
+
 def setup_logger(
     log_level: str | None = None,
     enable_colors: bool = True,
@@ -170,15 +186,7 @@ def setup_logger(
         stdlib_handler.setFormatter(_RedactingStdlibFormatter(logging.Formatter("%(message)s")))
         root_logger.addHandler(stdlib_handler)
 
-    # #1581: uvicorn's own loggers carry their own handlers and do NOT propagate
-    # to root, so the wrap above never sees them — and ``uvicorn.access`` prints
-    # the whole request line (path + query), i.e. exactly where a closed-beta
-    # invite token travels. Wrap them the same way: destination and format
-    # untouched, only the rendered text scrubbed. No-op outside uvicorn.
-    for uvicorn_logger_name in ("uvicorn", "uvicorn.access"):
-        for handler in logging.getLogger(uvicorn_logger_name).handlers:
-            if not isinstance(handler.formatter, _RedactingStdlibFormatter):
-                handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
+    _wrap_uvicorn_handlers()
 
     # Determine if colors should be enabled
     use_colors = enable_colors and (os.getenv("LOG_COLORIZE", "true").lower() == "true")
@@ -243,9 +251,15 @@ def ensure_logger_configured() -> None:
     process that configured logging first — pytest's ``tests/conftest.py``, a
     one-shot CLI writing to stderr — keeps its configuration instead of having
     it replaced on every ``api.main`` import (#2241).
+
+    uvicorn's handlers are wrapped either way: a process that configured
+    logging before uvicorn installed its handlers (uvicorn started from
+    inside an already configured process) still gets them redacted (#1581).
     """
     if not _configured:
         setup_logger()
+        return
+    _wrap_uvicorn_handlers()
 
 
 def get_logger(name: str | None = None) -> structlog.BoundLogger:

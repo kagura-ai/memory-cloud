@@ -50,9 +50,9 @@ def owned_by_another_loop(client: object, loop: asyncio.AbstractEventLoop) -> bo
     are never owned by another loop.
     """
     tag = _loop_tag(client)
-    if tag is _UNTAGGED or tag is None:
-        return False
-    return not isinstance(tag, weakref.ref) or tag() is not loop
+    if not isinstance(tag, weakref.ref):
+        return False  # untagged (a test fake) or not claimed by any loop yet
+    return tag() is not loop
 
 
 def keep_for_loop(client: object, loop: asyncio.AbstractEventLoop | None) -> bool:
