@@ -253,6 +253,7 @@ async def test_inactive_agent_refuses_rotation_without_committing_revocation(
     connector_world, fernet_api_key_secret
 ):
     from models.agent import Agent
+    from utils.exceptions import BadRequestError
 
     world = connector_world
     owner = await world.user("rotate-owner")
@@ -266,7 +267,7 @@ async def test_inactive_agent_refuses_rotation_without_committing_revocation(
     agent.status = "suspended"
     public_id = old.public_id
     await world.db.commit()
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(BadRequestError) as exc:
         await _rotate(world, ws, owner, public_id)
     assert exc.value.status_code == 400
     await world.db.rollback()

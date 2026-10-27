@@ -570,7 +570,7 @@ async def regenerate_api_key(
         )
     except ValueError as exc:
         # In particular, a suspended agent must stay bound and fail closed.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise BadRequestError(message=str(exc)) from exc
 
     # Rotation changes the secret, not the binding or its exact expiration.
     new_key.expires_at = old_key.expires_at
