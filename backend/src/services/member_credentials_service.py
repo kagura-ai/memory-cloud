@@ -757,4 +757,6 @@ class MemberCredentialsService:
             ),
             "default_context_name": default_context_name,
             "agent_id": str(api_key.agent_id) if api_key.agent_id else None,
+            # #2299: the connector link classifies connector keys, not the name.
+            "connector_id": str(api_key.connector_id) if api_key.connector_id else None,
         }
