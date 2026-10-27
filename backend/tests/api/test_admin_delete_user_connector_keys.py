@@ -1,9 +1,8 @@
 """Admin DELETE /admin/users/{id} keeps the user's connector keys (#2352).
 
 The user's live connector write keys go to each key's workspace owner after the
-``users`` row lock and before the ``api_keys`` count and delete, so
-``deleted.api_keys`` counts only the rows the delete removes and the response
-reports the moved keys under ``reowned``.
+``users`` row lock and before the ``api_keys`` delete, whose rowcount is
+``deleted.api_keys``; the response reports the moved keys under ``reowned``.
 """
 
 from __future__ import annotations
@@ -29,7 +28,8 @@ async def _call() -> tuple[dict, list[Any], MagicMock]:
     def _execute(stmt, *a, **k):
         order.append(stmt)
         result = MagicMock()
-        result.scalar.return_value = 3
+        result.scalar.return_value = 0
+        result.rowcount = 3 if isinstance(stmt, Delete) else 0
         result.scalars.return_value.all.return_value = []
         result.scalar_one_or_none.return_value = SimpleNamespace(email="t@example.com")
         return result
@@ -66,7 +66,7 @@ def _index(order: list[Any], predicate) -> int:
 
 
 @pytest.mark.asyncio
-async def test_reown_runs_after_the_user_lock_and_before_the_key_count_and_delete():
+async def test_reown_runs_after_the_user_lock_and_before_the_key_delete():
     response, order, _ = await _call()
 
     reown = order.index(("reown", "target-1"))
@@ -76,14 +76,11 @@ async def test_reown_runs_after_the_user_lock_and_before_the_key_count_and_delet
             not isinstance(s, tuple) and "FROM users" in _sql(s) and _sql(s).endswith("FOR UPDATE")
         ),
     )
-    key_count = _index(
-        order, lambda s: not isinstance(s, tuple) and "count(api_keys.id)" in _sql(s)
-    )
     key_delete = _index(
         order,
         lambda s: isinstance(s, Delete) and getattr(s.table, "name", None) == "api_keys",
     )
-    assert user_lock < reown < key_count < key_delete
+    assert user_lock < reown < key_delete
     assert order.count(("reown", "target-1")) == 1
 
 

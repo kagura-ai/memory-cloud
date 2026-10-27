@@ -10,24 +10,22 @@ Usage:
 
 import sys
 from pathlib import Path
-from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import create_engine, delete, func, select  # noqa: E402
-from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
-from services.connector_key_ownership import reown_connector_keys_stmt  # noqa: E402
+from services.connector_key_ownership import reown_connector_keys_sync  # noqa: E402
 
 
 def _delete_api_keys(db: Session, user_id: str) -> None:
     """Hand the user's live connector keys to their workspace owners (#2352),
     then delete the rest of the user's keys."""
-    moved = cast(CursorResult[Any], db.execute(reown_connector_keys_stmt(user_id))).rowcount or 0
+    moved = reown_connector_keys_sync(db, user_id)
     if moved:
         print(f"  ✓ Connector write keys handed to their workspace owners: {moved}")
     db.execute(delete(APIKey).where(APIKey.user_id == user_id))

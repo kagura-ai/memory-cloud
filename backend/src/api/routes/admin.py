@@ -1070,15 +1070,16 @@ async def delete_user(
         # keys; the helper's owner guard leaves those rows alone.
         reowned_connector_keys = await reown_connector_keys(db, user_id)
 
-        # Counted after the re-own, so it is the number of rows the delete removes.
-        api_key_count_result = await db.execute(
-            select(func.count(APIKey.id)).where(APIKey.user_id == user_id)
-        )
-        api_key_count = api_key_count_result.scalar() or 0
-
-        # Delete memories and API keys
+        # Delete memories and API keys; the keys are counted from the delete
+        # itself, so the re-owned ones are not among them.
         await db.execute(delete(Memory).where(Memory.user_id == user_id))
-        await db.execute(delete(APIKey).where(APIKey.user_id == user_id))
+        api_key_count = (
+            cast(
+                CursorResult[Any],
+                await db.execute(delete(APIKey).where(APIKey.user_id == user_id)),
+            ).rowcount
+            or 0
+        )
 
         # Delete OAuth2 clients owned by the user
         await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
