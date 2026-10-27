@@ -358,6 +358,14 @@ async def _audit_subs(db: AsyncSession, pseudonyms: Collection[str] | None = Non
                 or (pseudonyms is not None and sub in pseudonyms)
             ):
                 continue
+            # Legacy JSON accepts NUL and lone surrogates; a UTF-8 VARCHAR
+            # auth sub cannot contain them. Unrelated residue must not stop the sweep.
+            if "\x00" in sub:
+                continue
+            try:
+                sub.encode("utf-8")
+            except UnicodeEncodeError:
+                continue
             pseudonym = erasure_pseudonym(sub)
             if pseudonyms is None or pseudonym in pseudonyms:
                 orphans[pseudonym] = sub

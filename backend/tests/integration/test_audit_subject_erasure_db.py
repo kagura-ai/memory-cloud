@@ -35,11 +35,12 @@ def _maker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 async def subject(
     async_engine: AsyncEngine, request: pytest.FixtureRequest
 ) -> AsyncIterator[dict[str, Any]]:
-    sub = (
-        "a" * 64
-        if getattr(request, "param", None) == "hex-sub"
-        else f"audit-subject-{uuid.uuid4().hex}"
-    )
+    tag = uuid.uuid4().hex
+    subject_kind = getattr(request, "param", None)
+    sub = "a" * 64 if subject_kind == "hex-sub" else f"audit-subject-{tag}"
+    if subject_kind == "email-sub":
+        sub += "@example.invalid"
+
     with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
         pseudonym = erasure_pseudonym(sub)
         erasure = ErasureRequest(
@@ -473,3 +474,103 @@ async def test_mutual_metadata_mentions_share_one_ordered_lock_union(
             (erasure_pseudonym(first), {"target_user_id": erasure_pseudonym(second)}),
             (erasure_pseudonym(second), {"target_user_id": erasure_pseudonym(first)}),
         ]
+
+
+@pytest.mark.parametrize("historical", [False, True])
+@pytest.mark.parametrize("target_location", ["none", "metadata", "resource", "both"])
+@pytest.mark.parametrize(
+    ("subject", "fallback"), [("email-sub", "bare"), ("normal-sub", "api")], indirect=["subject"]
+)
+async def test_sub_fallback_cannot_claim_another_live_actors_email(
+    async_engine: AsyncEngine,
+    subject: dict[str, Any],
+    historical: bool,
+    target_location: str,
+    fallback: str,
+) -> None:
+    sub, pseudonym = subject["sub"], subject["p"]
+    actor = f"live-actor-{uuid.uuid4().hex}"
+    email = sub if fallback == "bare" else f"{sub}@api"
+    metadata = (
+        {"target_user_id": sub, "keep": [1, None]}
+        if target_location in {"metadata", "both"}
+        else {"keep": "other member"}
+    )
+    row = _audit(subject, actor, email=email, metadata=metadata)
+    if target_location in {"resource", "both"}:
+        row.resource = f"user:{sub}"
+    try:
+        async with _maker(async_engine)() as db:
+            db.add(User(user_id=actor, email=email, name="other actor", role="user"))
+            db.add(row)
+            await db.commit()
+            row_id = row.id
+            before = (await _snapshot(db, subject))[row_id]
+            expected_mentions = int(target_location != "none")
+            if historical:
+                plan = await cli.reprocess_erasures(db, request_id=subject["request"])
+                applied = await cli.reprocess_erasures(
+                    db, request_id=subject["request"], dry_run=False
+                )
+                for result in (plan, applied):
+                    assert (
+                        sum(c.audit_mentions_pseudonymized for c in result.changed)
+                        == expected_mentions
+                    )
+                    assert sum(c.audit_logs_pseudonymized for c in result.changed) == 0
+            else:
+                assert await pseudonymize_audit_trail(db, sub, []) == (0, expected_mentions)
+                await db.commit()
+            actual = (await _snapshot(db, subject))[row_id]
+            expected = dict(before)
+            if target_location in {"metadata", "both"}:
+                expected["user_metadata"] = {**metadata, "target_user_id": pseudonym}
+            if target_location in {"resource", "both"}:
+                expected["resource"] = f"user:{pseudonym}"
+            assert actual == expected
+            assert (actual["user_email"], actual["ip_address"], actual["user_agent"]) == (
+                email,
+                "192.0.2.4",
+                "other-agent",
+            )
+    finally:
+        async with _maker(async_engine)() as db:
+            await db.execute(delete(User).where(User.user_id == actor))
+            await db.commit()
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff", "\ud800suffix", "\x00"])
+async def test_historical_discovery_skips_invalid_auth_sub_metadata_candidates(
+    async_engine: AsyncEngine,
+    subject: dict[str, Any],
+    surrogate: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sub, pseudonym = subject["sub"], subject["p"]
+    bad = _audit(
+        subject, "unrelated-member", metadata={"target_user_id": surrogate, "keep": [surrogate]}
+    )
+    good = _audit(subject, pseudonym, metadata={"target_user_id": sub, "assigned_by": surrogate})
+    async with _maker(async_engine)() as db:
+        db.add_all([bad, good])
+        await db.commit()
+        bad_id, good_id = bad.id, good.id
+        before = await _snapshot(db, subject)
+        candidates = await cli._audit_subs(db)
+        assert candidates.orphans[pseudonym] == sub
+        plan = await cli.reprocess_erasures(db, request_id=subject["request"])
+        cli._print_plan(plan)
+        assert await _snapshot(db, subject) == before
+        applied = await cli.reprocess_erasures(db, request_id=subject["request"], dry_run=False)
+        cli._print_applied(applied)
+        for result in (plan, applied):
+            assert result.changed[0].audit_mentions_pseudonymized == 1
+        after = await _snapshot(db, subject)
+        assert after[bad_id] == before[bad_id]
+        assert after[good_id]["user_metadata"] == {
+            "target_user_id": pseudonym,
+            "assigned_by": surrogate,
+        }
+        again = await cli.reprocess_erasures(db, request_id=subject["request"], dry_run=False)
+        assert again.changes == 0
+    assert sub not in capsys.readouterr().out

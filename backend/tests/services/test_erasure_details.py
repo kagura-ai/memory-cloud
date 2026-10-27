@@ -626,7 +626,9 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     assert _subs(params) == {"raw-sub"}
     assert params["user_id"] == sha256_hex("raw-sub", salt="salt")
     assert sha256_hex("a@example.com", salt="salt") in params.values()
-    assert "EXISTS" not in sql  # the live erasure: the user row is still there
+    # Live own rows do not require an absent user; only the fallback email ownership does.
+    assert "EXISTS" not in sql[sql.index(" WHERE audit_logs.id IN") :]
+    assert "WHERE users.email = audit_logs.user_email" in sql
     # #2345: the subject's request metadata goes too
     assert params["ip_address"] is None and params["user_agent"] is None
 
@@ -636,7 +638,7 @@ async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:
 
     assert sql.count("replace(") == 1
     assert "user_email=CASE WHEN" in sql
-    assert "raw-sub@api" in params.values()
+    assert "raw-sub@api" in _flat(params)
     assert _subs(params) == {"raw-sub"}
     assert params["ip_address"] is None and params["user_agent"] is None
 
@@ -667,8 +669,9 @@ async def test_orphaned_only_never_matches_a_user_row() -> None:
     sql, params = await _audit_update([], orphaned_only=True)
     assert params["ip_address"] is None and params["user_agent"] is None
 
-    # in the locking sub-select and in the UPDATE's own WHERE
-    assert sql.count("NOT (EXISTS (SELECT") == 2
+    # Own-row absence in both WHEREs, plus ownership of a fallback actor email in SET.
+    assert sql.count("NOT (EXISTS (SELECT") == 3
+    assert "WHERE users.email = audit_logs.user_email" in sql
     assert _exists_subqueries(sql) == [
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs_1.user_id",
         "SELECT * \nFROM users \nWHERE users.user_id = audit_logs.user_id",

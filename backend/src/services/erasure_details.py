@@ -277,12 +277,11 @@ async def pseudonymize_audit_logs(
     }
     for email, email_pseudonym in pseudonyms.items():
         resource = func.replace(resource, email, email_pseudonym)
-    pseudonyms.update({user_id: user_pseudonym, f"{user_id}@api": user_pseudonym})
-    if pseudonyms:
-        values["user_email"] = case(
-            *((AuditLog.user_email == e, p) for e, p in pseudonyms.items()),
-            else_=AuditLog.user_email,
-        )
+    values["user_email"] = case(
+        *((AuditLog.user_email == e, p) for e, p in pseudonyms.items()),
+        (_audit_sub_email(AuditLog, user_id), user_pseudonym),
+        else_=AuditLog.user_email,
+    )
     values["resource"] = func.left(
         func.replace(resource, user_id, user_pseudonym), AuditLog.resource.type.length
     )
@@ -331,6 +330,13 @@ AUDIT_SUBJECT_METADATA_KEYS = (
 def _audit_sub_guard(sub: str, *, orphaned_only: bool) -> ColumnElement[bool]:
     """Recheck historical subjects at the write, including late re-registration."""
     return ~exists().where(User.user_id == sub) if orphaned_only else literal(True)
+
+
+def _audit_sub_email(row: Any, sub: str) -> ColumnElement[bool]:
+    """A legacy sub fallback cannot claim an email another current user owns."""
+    return row.user_email.in_([sub, f"{sub}@api"]) & ~exists().where(
+        User.email == row.user_email, User.user_id != sub
+    )
 
 
 async def _active_audit_subs(
@@ -436,10 +442,7 @@ def audit_actor_predicate(
     """Rows whose actor email is the erased subject, including legacy fallbacks."""
     arms = [row.user_email.in_(_by_length(emails))] if emails else []
     for sub in _by_length(subs):
-        arms.append(
-            row.user_email.in_([sub, f"{sub}@api"])
-            & _audit_sub_guard(sub, orphaned_only=orphaned_only)
-        )
+        arms.append(_audit_sub_email(row, sub) & _audit_sub_guard(sub, orphaned_only=orphaned_only))
     return or_(*arms) if arms else None
 
 
@@ -457,7 +460,7 @@ def audit_mention_predicate(
         arms.append(row.resource.in_(audit_mention_resources(emails)))
     for sub in _by_length(subs):
         identifiers = [
-            row.user_email.in_([sub, f"{sub}@api"]),
+            _audit_sub_email(row, sub),
             row.resource == f"user:{sub}",
         ]
         arms.append(or_(*identifiers) & _audit_sub_guard(sub, orphaned_only=orphaned_only))
@@ -486,7 +489,8 @@ async def pseudonymize_audit_mentions(
       acting on the subject) → ``user:`` + the pseudonym — 69 characters,
       within the column. The acting admin's ``user_id`` / ``user_email``
       and request metadata stay (accountability evidence).
-    - Raw-sub / ``<sub>@api`` actor email fallbacks are scrubbed too.
+    - Raw-sub / ``<sub>@api`` actor email fallbacks are scrubbed too, unless
+      another current user owns that exact email (their email/IP/UA stay).
       ``orphaned_only`` rechecks current users for sub-derived rewrites.
       Metadata is patched by ``pseudonymize_audit_trail`` under the union lock.
 
@@ -508,9 +512,7 @@ async def pseudonymize_audit_mentions(
     ]
     for sub in _by_length(subs):
         guard = _audit_sub_guard(sub, orphaned_only=orphaned_only)
-        email_cases.append(
-            (AuditLog.user_email.in_([sub, f"{sub}@api"]) & guard, erasure_pseudonym(sub))
-        )
+        email_cases.append((_audit_sub_email(AuditLog, sub) & guard, erasure_pseudonym(sub)))
         resource_cases.append(
             ((AuditLog.resource == f"user:{sub}") & guard, f"user:{erasure_pseudonym(sub)}")
         )
