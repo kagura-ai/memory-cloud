@@ -107,6 +107,48 @@ async def _memories(db_session, context_id: UUID) -> dict[UUID, Memory]:
 
 
 @pytest.mark.asyncio
+async def test_an_erased_authors_row_comes_back_still_out_of_the_queue(db_session, seed):
+    """#2393: the erasure took the survivor out of the embedding queue; a
+    context restore brings the row back but leaves it there (the admin
+    retry re-embeds it under the pseudonym), and every other row is queued."""
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+
+    context = seed.context()
+    db_session.add(context)
+    await db_session.flush()
+    erased = seed.memory(
+        context,
+        user_id="e" * 64,
+        embedding_status="failed",
+        embedding_retry_count=MAX_EMBEDDING_RETRIES,
+        embedding_error=ERASED_AUTHOR_EMBEDDING_ERROR,
+    )
+    other = seed.memory(
+        context, embedding_status="failed", embedding_retry_count=3, embedding_error="timeout"
+    )
+    db_session.add_all([erased, other])
+    await db_session.commit()
+    context_id, erased_id, other_id = context.id, erased.id, other.id
+
+    await _delete(db_session, context_id)
+    result = await restore_deleted_context(db_session, context_id, dry_run=False)
+
+    assert result.memories_restored == 2
+    rows = await _memories(db_session, context_id)
+    assert rows[erased_id].deleted_at is None
+    assert (
+        rows[erased_id].embedding_status,
+        rows[erased_id].embedding_error,
+        rows[erased_id].embedding_retry_count,
+    ) == ("failed", ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES)
+    assert (
+        rows[other_id].embedding_status,
+        rows[other_id].embedding_error,
+        rows[other_id].embedding_retry_count,
+    ) == ("pending", None, 0)
+
+
+@pytest.mark.asyncio
 async def test_restores_the_context_and_what_its_deletion_tombstoned(db_session, seed):
     context = seed.context()
     db_session.add(context)

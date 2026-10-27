@@ -11,7 +11,8 @@ default 30 days), so a deleted context can be brought back from them:
   (``tasks/embedding_tasks.py``) builds their points again. A memory the
   resource indexer wrote gets the indexer's point back — the document
   re-projected from the row, under the id the row names — not a vector of its
-  summary (``ResourceIndexer.rebuild_point``, #1870).
+  summary (``ResourceIndexer.rebuild_point``, #1870). An erased author's
+  survivor stays ``failed`` with the erased-author marker (#2393).
 
 "The memories the deletion tombstoned" are the context's rows with the same
 ``deleted_by`` as the context, soft-deleted at the context's ``deleted_at``.
@@ -40,11 +41,12 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
 from models.auth import AuditLog, Context, Workspace
 from models.config import ContextSearchConfig
 from models.file_objects import WorkspaceStorageUsage
@@ -364,15 +366,19 @@ async def restore_deleted_context(
         await db.rollback()
         return result
 
+    # #2393: an erased author's survivor comes back still out of the queue
+    # (``failed``, the erased-author marker, no retry budget); only the admin
+    # retry-failed endpoint or a model switch re-embeds it.
+    erased_author = Memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR
     restored = await db.execute(
         update(Memory)
         .where(by_the_deletion)
         .values(
             deleted_at=None,
             deleted_by=None,
-            embedding_status="pending",
-            embedding_retry_count=0,
-            embedding_error=None,
+            embedding_status=case((erased_author, "failed"), else_="pending"),
+            embedding_retry_count=case((erased_author, MAX_EMBEDDING_RETRIES), else_=0),
+            embedding_error=case((erased_author, ERASED_AUTHOR_EMBEDDING_ERROR), else_=None),
         )
         .execution_options(synchronize_session=False)
     )
