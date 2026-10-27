@@ -107,7 +107,12 @@ async def _handle_resource_id_duplicate_error(
     # Fallback error message
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Resource ID '{resource_id}' is already used in this workspace.",
+        # #2284: ``ux_contexts_resource_id_active`` is server-wide; a clash
+        # outside this workspace is not named (no cross-tenant disclosure).
+        detail=(
+            f"Resource ID '{resource_id}' is already used by another context on this "
+            "server (it may belong to another workspace)."
+        ),
     )
 
 
@@ -1008,10 +1013,9 @@ async def update_context(
             if not has_feature(plan_name or "", "public_contexts"):
                 raise FeatureNotAvailableError.for_feature(plan_name, "public_contexts")
 
-        # SECURITY: Validate resource_id uniqueness within workspace
-        # Issue #271 Code Review H-2: Rely on DB constraint instead of application-level check
-        # Migration 055 created: UNIQUE INDEX unique_context_resource_id_per_workspace
-        # Just let the constraint enforce uniqueness (simpler and no race condition)
+        # SECURITY: resource_id uniqueness is enforced by the DB, not here
+        # (Issue #271 H-2: no check-then-write race). ``ux_contexts_resource_id_active``
+        # (migration a96) is a server-wide partial UNIQUE index (#2284).
 
         if request.resource_id is not None:
             old_resource_id = existing_context.resource_id if existing_context else None

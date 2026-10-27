@@ -68,11 +68,21 @@ WORKSPACE_DESCRIPTION_MAX_LENGTH = 1000
 # connector flow have always accepted them, so stored slugs may contain them,
 # and a slug is only ever a URL path segment, a Redis key part or a uuid5 seed
 # — none of which treats "-" specially. Python callers use
-# ``RESOURCE_ID_RE.fullmatch`` (``match`` with ``$`` would let a trailing
-# newline through); Pydantic takes ``RESOURCE_ID_PATTERN`` as is.
+# ``is_valid_resource_id`` (a ``fullmatch``: ``match`` with ``$`` would let a
+# trailing newline through); Pydantic takes ``RESOURCE_ID_PATTERN`` as is.
 RESOURCE_ID_PATTERN = r"^[a-z0-9_-]+$"
 RESOURCE_ID_RE = re.compile(RESOURCE_ID_PATTERN)
 RESOURCE_ID_MAX_LENGTH = 255
+
+
+def is_valid_resource_id(value: object) -> bool:
+    """Whether ``value`` is a ``resource_id`` slug every surface accepts (#2284)."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= RESOURCE_ID_MAX_LENGTH
+        and RESOURCE_ID_RE.fullmatch(value) is not None
+    )
+
 
 # ============================================================================
 # Memory Content Limits

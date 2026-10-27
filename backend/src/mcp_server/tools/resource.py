@@ -18,7 +18,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 import services.resource_ingest_service as resource_ingest_service
-from config.constants import RESOURCE_ID_MAX_LENGTH, RESOURCE_ID_RE
+from config.constants import RESOURCE_ID_MAX_LENGTH, is_valid_resource_id
 from mcp_server.tools._errors import (
     CAUSE_INTERNAL_ERROR,
     _tool_exception_response,
@@ -167,7 +167,7 @@ def _validate_resource_id(resource_id: str) -> list[TextContent] | None:
             "validation_error",
             f"resource_id must be 1-{RESOURCE_ID_MAX_LENGTH} characters.",
         )
-    if not RESOURCE_ID_RE.fullmatch(resource_id):
+    if not is_valid_resource_id(resource_id):
         return _error_response(
             "validation_error",
             f"Invalid resource_id format: '{resource_id}'. "

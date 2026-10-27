@@ -245,7 +245,7 @@ Update an existing context's settings (role-gated per field).
   - `description` — string (max 500 chars)
   - `summary` — string (max 500 chars)
   - `usage_guide` — string (max 2000 chars)
-  - `resource_id` — string (lowercase alphanumeric + underscores) ⚠ note: hyphens not allowed here per description, but setup_resource/setup_connector allow hyphens for the same identifier — conflicting validation prose for one concept
+  - `resource_id` — string (lowercase alphanumeric/hyphen/underscore, max 255 chars, unique on the server — the same format as setup_resource/setup_connector and the REST context update, #2284)
   - `is_public` — boolean
   - `is_locked` — boolean
 

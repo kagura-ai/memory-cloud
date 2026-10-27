@@ -141,10 +141,11 @@ async def test_every_surface_gives_the_same_verdict(rid: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_slug_is_refused_on_mcp_and_by_the_rest_model() -> None:
+async def test_empty_slug_is_refused_everywhere() -> None:
     assert not await _mcp_update_context_accepts("")
     assert not _mcp_resource_tools_accept("")
     assert not _rest_model_accepts("")
+    assert not await _rest_service_accepts("")
     assert not _connector_accepts("")
 
 
@@ -245,3 +246,27 @@ def test_setup_connector_keeps_the_per_workspace_uniqueness() -> None:
     it sets no ``contexts.resource_id``."""
     text = _resource_id_text("setup_connector")
     assert text.startswith("Resource identifier, unique in the workspace:")
+
+
+@pytest.mark.asyncio
+async def test_rest_duplicate_outside_the_workspace_names_the_server() -> None:
+    """The REST IntegrityError path looks up the clashing context in the
+    caller's workspace only (no cross-tenant disclosure); when it is not
+    there, the message says the slug is taken on this server."""
+    from fastapi import HTTPException
+
+    from api.routes.contexts import _handle_resource_id_duplicate_error
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    result = MagicMock()
+    result.one_or_none.return_value = None
+    db.execute = AsyncMock(return_value=result)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _handle_resource_id_duplicate_error(
+            db, "products", uuid.uuid4(), exclude_context_id=uuid.uuid4()
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "on this server (it may belong to another workspace)" in str(exc_info.value.detail)
