@@ -20,8 +20,8 @@ def _all_text(name: str) -> str:
     return "\n".join(parts)
 
 
-# #2308: the accept path every client can call — core lists update_memory,
-# not create_edge.
+# #2308: the accept path every client can call — a ?tools= allowlist may list
+# update_memory without create_edge (core lists both since #2353).
 CORE_ACCEPT = "update_memory(accept_supersede_candidate=true)"
 
 

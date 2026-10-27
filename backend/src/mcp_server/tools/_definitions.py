@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars — split it), validation_error.
+Returns: {status, memory_id, scope, version, persistence?, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars — split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -366,7 +366,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, observed_at?, version, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes"), outside the core profile (describe_tools(["create_edge"])), links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
+Returns: {status, memory: {memory_id, summary, content, details, type, tags, updated_at, observed_at?, version, outgoing_links, incoming_links, supersede_candidate, …}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes") links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -703,14 +703,8 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
         },
         {
             "name": "create_edge",
-            "description": """Create a manual edge between two memories you know are related but automatic edge discovery has not connected. source_id / target_id are MEMORY UUIDs (from recall), not context UUIDs; the defaults (related_to, weight 1.0) suit most manual edges. A 'supersedes' edge is also how you ACCEPT a supersede_candidate from recall()/reference() — see edge_type.
-
-If the (source, target) pair already exists (it is unique per user):
-• auto edge (origin hebbian/semantic): your values are applied → operation 'updated' plus previous {edge_type, weight, confidence, origin}. A hebbian edge becomes origin 'declared'; a semantic edge stays 'semantic'.
-• declared edge, same values: no write → operation 'unchanged' (safe to retry).
-• declared edge, different values: error edge_exists — use update_edge, or overwrite=true.
-
-Returns: {status, operation: 'created'|'updated'|'unchanged', edge: {source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}, previous?}.""",
+            "description": """Link two memories by MEMORY id. 'supersedes': source = the newer, target = the outdated one, shadowed out of default recall; accepts any supersede_candidate. 'related_to' (default): a plain link. A declared pair with other values → edge_exists unless overwrite=true.
+Returns: {status, operation, edge, previous?}. Manual: guide(["create_edge"]).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id"],
@@ -718,12 +712,12 @@ Returns: {status, operation: 'created'|'updated'|'unchanged', edge: {source_id, 
                     "source_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "UUID of the source memory.",
+                        "description": "Source memory UUID.",
                     },
                     "target_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "UUID of the target memory.",
+                        "description": "Target memory UUID.",
                     },
                     "edge_type": {
                         "type": "string",
@@ -737,22 +731,22 @@ Returns: {status, operation: 'created'|'updated'|'unchanged', edge: {source_id, 
                             "supersedes",
                             "contradicts",
                         ],
-                        "description": "Default 'related_to'. 'depends_on': target depends on source. 'learned_from': knowledge derived from source. 'neural_association': normally automatic — prefer 'related_to' for manual edges. 'continues_from' / 'references_file': directional, producer-asserted (chat successor; chat → file overview). 'supersedes': source = the newer memory, target = the outdated one, which is shadowed out of default recall while source lives; to accept a supersede_candidate, source_id = the memory carrying it, target_id = supersede_candidate.memory_id (the server then clears the suggestion). 'contradicts': both sides stay visible, annotated — never hidden.",
+                        "description": 'Other types: guide(["create_edge"]).',
                         "default": "related_to",
                     },
                     "weight": {
                         "type": "number",
-                        "description": "Edge weight 0.0-3.0 (default 1.0). Higher = stronger.",
+                        "description": "0.0-3.0.",
                         "default": 1.0,
                     },
                     "confidence": {
                         "type": "number",
-                        "description": "Confidence 0.0-1.0 (default 1.0).",
+                        "description": "0.0-1.0.",
                         "default": 1.0,
                     },
                     "overwrite": {
                         "type": "boolean",
-                        "description": "true re-asserts an existing DECLARED edge with new values (default false → edge_exists).",
+                        "description": "Replace a declared edge's values.",
                         "default": False,
                     },
                     "context_id": {
@@ -2121,7 +2115,7 @@ Manual: guide(["changes_since"]).""",
             "readOnly": True,
             "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time — fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
 format="index" (the default under max_chars 10000): pointer rows — pinned keeps its text; guardrails.items, upcoming.results and changes.changes carry {memory_id, summary (at most 80 chars), summary_cut?, …}; no instructions.
-Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
             "inputSchema": {
                 "type": "object",

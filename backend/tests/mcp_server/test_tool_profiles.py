@@ -36,8 +36,10 @@ from mcp_server.tools._profiles import (
 # #1743 (paging / max_chars parameters on the bounded tools) took it to 34,203.
 # #1850 moved the manual into ``guide`` and trimmed every core description: 25,590.
 # #1973 added create_context / update_context / delete_context: 41,088 (from 36,617).
-# #2126 (bootstrap's format parameter) took it to 40,528.
-CORE_CHAR_BUDGET = 43_100  # (#1973) 21 core tools
+# #2126 (bootstrap's format parameter) took it to 40,528; #2341 (recall) to 41,942.
+# #2353 added create_edge (1,486 after its trim; reference, remember and bootstrap
+# moved Returns detail into their guide topics): 43,033 under the same budget.
+CORE_CHAR_BUDGET = 43_100  # (#1973, #2353) 22 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
@@ -78,6 +80,7 @@ def test_core_tools_are_the_documented_set():
         "update_memory",
         "forget",
         "explore",
+        "create_edge",
         "load_pinned",
         "recall_upcoming",
         "get_context_info",
@@ -103,6 +106,15 @@ def test_context_lifecycle_is_in_core_but_merge_and_search_config_are_not():
     assert {"create_context", "update_context", "delete_context"} <= set(CORE_TOOLS)
     assert "merge_contexts" in REGISTRY and "merge_contexts" not in CORE_TOOLS
     assert "update_search_config" in REGISTRY and "update_search_config" not in CORE_TOOLS
+
+
+def test_create_edge_is_in_core_but_the_other_edge_tools_are_not():
+    """#2353: a core client links any pair as ``supersedes`` / ``related_to``
+    without a ``describe_tools`` round trip; editing, deleting and listing
+    edges stay behind it."""
+    assert "create_edge" in CORE_TOOLS
+    for name in ("update_edge", "delete_edge", "list_edges"):
+        assert name in REGISTRY and name not in CORE_TOOLS
 
 
 def test_load_guardrails_stays_out_of_core():

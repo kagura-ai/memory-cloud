@@ -511,7 +511,7 @@ async def handle_update_memory(
             observed_at=args.get("observed_at"),  # #2330 D7
             # #1504: rejection path for a supersede suggestion.
             dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
-            # #2308: the acceptance path (create_edge is outside the core profile).
+            # #2308: the acceptance path for a client that does not list create_edge.
             accept_supersede_candidate=accept_supersede,
             # #2043: optimistic concurrency (None = last writer wins).
             expected_version=args.get("expected_version"),

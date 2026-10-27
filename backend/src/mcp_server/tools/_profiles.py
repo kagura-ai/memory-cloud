@@ -45,6 +45,7 @@ CORE_TOOLS: tuple[str, ...] = (
     "load_pinned",
     "forget",
     "explore",
+    "create_edge",
     "get_context_info",
     "list_contexts",
     "list_tags",

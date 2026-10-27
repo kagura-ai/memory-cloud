@@ -252,8 +252,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "update_memory(memory_id, accept_supersede_candidate=true), when both memories "
         "are yours (in a private context a linked account's count), writes the "
         "supersedes edge (this memory → the candidate) and shadows the old fact out "
-        "of default recall; create_edge(edge_type='supersedes'), outside the core "
-        'profile (describe_tools(["create_edge"]) has its schema), links any other '
+        "of default recall; create_edge(edge_type='supersedes') links any other "
         "pair. Reject a deliberately separate pair: "
         "update_memory(memory_id, dismiss_supersede_candidate=true). It disappears "
         "once accepted or once the candidate is deleted.\n"
@@ -479,8 +478,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "update_memory(memory_id, accept_supersede_candidate=true) when both memories are "
         "yours; reject a "
         "deliberate pair with update_memory(dismiss_supersede_candidate=true). "
-        'create_edge(edge_type="supersedes"), outside the core profile '
-        '(describe_tools(["create_edge"]) has its schema), links any pair.'
+        'create_edge(edge_type="supersedes") links any pair.'
     ),
     "reference.paging": (
         "Large memories: nothing is cut silently, and the response stays within "
@@ -549,6 +547,37 @@ GUIDE_TOPICS: dict[str, str] = {
         "min_activation}}}. related_memories is the top 10 by activation; "
         "total_activated counts nodes reached, returned those left after min_weight "
         "filtering."
+    ),
+    # --------------------------------------------------------- create_edge
+    "create_edge.types": (
+        "create_edge(source_id, target_id, edge_type?, weight?, confidence?, overwrite?) "
+        "writes a declared edge between two MEMORY ids (from recall, never context "
+        "ids). edge_type, default 'related_to': 'supersedes' — source is the newer "
+        "memory, target the outdated one, which is shadowed out of default recall while "
+        "the source lives (deleting the edge restores it); to accept a "
+        "supersede_candidate, source_id = the memory carrying it and target_id = "
+        "supersede_candidate.memory_id (the server then clears the suggestion). "
+        "'related_to' — a plain link. 'depends_on' — target depends on source. "
+        "'learned_from' — knowledge derived from source. 'contradicts' — both sides "
+        "stay visible, annotated, never hidden. 'continues_from' / 'references_file' — "
+        "directional, producer-asserted (chat successor; chat → file overview). "
+        "'neural_association' is normally automatic; prefer 'related_to' for a manual "
+        "edge. weight 0.0-3.0 (default 1.0, a full-confidence manual edge; higher = "
+        "stronger) and confidence 0.0-1.0 (default 1.0), so most calls need only the "
+        "two ids."
+    ),
+    "create_edge.existing": (
+        "The (source, target) pair is unique per user, so a repeat call is "
+        "deterministic. An auto edge (origin hebbian / semantic): your values are "
+        "applied → operation 'updated' plus previous {edge_type, weight, confidence, "
+        "origin}; a hebbian edge becomes origin 'declared', a semantic one stays "
+        "'semantic'. A declared edge with the same values: no write → operation "
+        "'unchanged' (safe to retry). A declared edge with different values: error "
+        "edge_exists — pass overwrite=true to re-assert it, or change it with "
+        'update_edge, outside the core profile (describe_tools(["update_edge"]) has '
+        "its schema). Returns: {status, operation: 'created'|'updated'|'unchanged', "
+        "edge: {source_id, target_id, edge_type, weight, confidence, origin, "
+        "created_at, last_updated}, previous?}."
     ),
     # --------------------------------------------------------- load_pinned
     "load_pinned.usage": (
@@ -677,7 +706,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "narrows the components to a subset of pinned, upcoming, changes (default all "
         "three); the context block and guardrails are not affected. Each component "
         "reports status ok | error (a failed component is {status: 'error', error}); one "
-        "failing lane sets degraded: true and the rest still return. max_chars defaults to 20,000 (characters, not tokens). Over "
+        "failing lane sets degraded: true and the rest still return. Component keys: "
+        "pinned {status, memories, total_available, truncated, cap}, upcoming {status, "
+        "results, from, truncated?}, changes {status, changes, has_more, next_cursor, "
+        "truncated?}. max_chars defaults to 20,000 (characters, not tokens). Over "
         "max_chars, context_summary leaves the pinned items first, "
         "then pinned → upcoming → changes keep the prefix that fits (truncated: true); "
         "a cut changes page's next_cursor continues from the last change kept. "
@@ -751,6 +783,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "reference": ("reference.returns", "reference.paging", "reference.versions", "ids"),
     "forget": ("forget.modes", "ids"),
     "explore": ("explore.usage", "ids"),
+    "create_edge": ("create_edge.types", "create_edge.existing", "ids"),
     "load_pinned": ("load_pinned.usage", "remember.delivery"),
     "recall_upcoming": ("time-memories",),
     "get_context_info": ("get_context_info.returns", "guardrails"),
