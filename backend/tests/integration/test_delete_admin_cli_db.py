@@ -362,9 +362,9 @@ def _join_while_prompting(workspace_id, user_id: str):
 async def test_a_member_joining_while_the_prompt_waits_stops_the_delete_and_a_rerun_finishes(
     db_session: AsyncSession, connector_world, sole_password_admin, transfer_audits, capsys
 ) -> None:
-    """The shared workspace is transferred before the re-check stops the
-    delete; the re-run hands over the workspace the target joined and deletes
-    the admin."""
+    """The re-check stops the command before anything is written; the re-run
+    hands over both workspaces (the target is now in each) and deletes the
+    admin."""
     world = connector_world
     admin_id = await _password_admin(db_session, world)
     target = await world.user("target")
@@ -378,10 +378,11 @@ async def test_a_member_joining_while_the_prompt_waits_stops_the_delete_and_a_re
     assert code == 1
     assert "changed while the prompt waited" in capsys.readouterr().out
     assert await _exists(db_session, admin_id)
-    assert await _owner(db_session, shared_id) == target
-    assert await db_session.get(Workspace, solo_id) is not None
+    assert await _owner(db_session, shared_id) == admin_id
+    assert await _owner(db_session, solo_id) == admin_id
 
     assert await _run(db_session, target) == 0
 
     assert not await _exists(db_session, admin_id)
+    assert await _owner(db_session, shared_id) == target
     assert await _owner(db_session, solo_id) == target

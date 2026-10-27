@@ -7,7 +7,10 @@ else owns is handed to that owner instead of being deleted.
 live workspace the admin owns that other users are in goes to
 ``--transfer-to`` (one of its members) first, so its connector keys follow
 the new owner; without it the delete is refused with the workspaces listed.
-One only the admin is in is deleted with it, as account erasure does.
+One only the admin is in is deleted with it, as account erasure does. A
+workspace under a running subscription stops the command (it is the admin's
+subscription, as for account erasure); so does any change to the admin's
+workspaces or the user count while the prompt waits.
 
 Usage:
     cd backend && python -m src.cli.delete_admin [--transfer-to USER] [--yes]
@@ -33,11 +36,15 @@ from cli._env_guard import require_settings  # noqa: E402
 from cli._oneshot import confirm  # noqa: E402
 from db.base import get_db  # noqa: E402
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
+from services.billing_contract import owned_workspaces_under_contract  # noqa: E402
 from services.connector_key_ownership import reown_connector_keys  # noqa: E402
 from services.password_account_service import normalize_email  # noqa: E402
 from services.workspace_ownership_service import WorkspaceOwnershipService  # noqa: E402
+from utils.logger import get_logger  # noqa: E402
 
 AUDIT_ACTOR_EMAIL = "cli@local"
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,9 +82,22 @@ async def _members(db: AsyncSession, workspace_ids: list[UUID]) -> dict[UUID, se
     return members
 
 
+async def _split(
+    db: AsyncSession, admin_id: str
+) -> tuple[list[_Ws], list[_Ws], dict[UUID, set[str]]]:
+    """The admin's live workspaces other users are in, those only it is in,
+    and every one's members."""
+    owned = await _owned_workspaces(db, admin_id)
+    members = await _members(db, [ws.id for ws in owned])
+    shared = [ws for ws in owned if members[ws.id] - {admin_id}]
+    sole = [ws for ws in owned if not members[ws.id] - {admin_id}]
+    return shared, sole, members
+
+
 async def _resolve_target(db: AsyncSession, ident: str, admin_id: str) -> str:
     """The user_id ``--transfer-to`` names (user_id, login_id or email, the
     email compared as sign-in does), or raises ``LookupError`` with why not."""
+    ident = ident.strip()
     user_ids = (
         (
             await db.execute(
@@ -117,7 +137,12 @@ async def _transfer(db: AsyncSession, shared: list[_Ws], admin_id: str, target_i
         )
 
 
-async def _delete_admin_rows(db: AsyncSession, admin_id: str, workspace_ids: list[UUID]) -> None:
+async def _delete_admin_rows(
+    db: AsyncSession,
+    admin_id: str,
+    workspace_ids: list[UUID],
+    transferred: list[UUID] | None = None,
+) -> None:
     """Hand the admin's live connector keys to their workspace owners (#2352),
     then delete its other keys, its memberships, ``workspace_ids`` and the user
     row, in one transaction."""
@@ -136,6 +161,13 @@ async def _delete_admin_rows(db: AsyncSession, admin_id: str, workspace_ids: lis
     if admin is not None:
         await db.delete(admin)
     await db.commit()
+    logger.info(
+        "cli_delete_admin",
+        user_id=admin_id,
+        workspaces_transferred=[str(ws_id) for ws_id in transferred or []],
+        workspaces_deleted=[str(ws_id) for ws_id in workspace_ids],
+        connector_api_keys_reowned=moved,
+    )
 
 
 def _print_workspaces(workspaces: list[_Ws]) -> None:
@@ -143,11 +175,32 @@ def _print_workspaces(workspaces: list[_Ws]) -> None:
         print(f"    - {ws.name} ({ws.id})")
 
 
+async def _user_count(db: AsyncSession) -> int:
+    return (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+
+
+async def _refuse_billing_contracts(db: AsyncSession, admin_id: str) -> bool:
+    """Print and return True when a live workspace the admin owns has a
+    running subscription: it is the admin's, so it must end first."""
+    under_contract = await owned_workspaces_under_contract(db, admin_id)
+    if not under_contract:
+        return False
+    print("\n✗ These workspaces have a running subscription; end it first:")
+    _print_workspaces([_Ws(ws.id, ws.name) for ws in under_contract])
+    return True
+
+
 async def _delete_solo_admin(db: AsyncSession, admin_id: str, ask: Callable[[str], bool]) -> int:
     await db.rollback()  # no transaction stays open while the prompt waits
     if not ask("  Delete admin, workspace, and all API keys?"):
         print("  Cancelled.")
         return 0
+    # Someone who signed up while the prompt waited may have joined a workspace
+    # the delete below would take with it.
+    if await _user_count(db) > 1:
+        await db.rollback()
+        print("\n✗ Another user signed up while the prompt waited; re-run.")
+        return 1
     owned = await db.execute(select(Workspace.id).where(Workspace.owner_user_id == admin_id))
     await _delete_admin_rows(db, admin_id, list(owned.scalars().all()))
     print("\n✓ Admin, workspace, and API keys deleted.")
@@ -172,17 +225,16 @@ async def delete_password_admin(
         return 1
     admin_id = admin.user_id
 
-    total_users = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+    total_users = await _user_count(db)
     print(f"\n  Login ID: {admin.login_id}")
     print(f"  Total users: {total_users}")
 
+    if await _refuse_billing_contracts(db, admin_id):
+        return 1
     if total_users <= 1:
         return await _delete_solo_admin(db, admin_id, ask)
 
-    owned = await _owned_workspaces(db, admin_id)
-    members = await _members(db, [ws.id for ws in owned])
-    shared = [ws for ws in owned if members[ws.id] - {admin_id}]
-    sole = [ws for ws in owned if not members[ws.id] - {admin_id}]
+    shared, sole, members = await _split(db, admin_id)
 
     target_id: str | None = None
     if shared:
@@ -219,13 +271,29 @@ async def delete_password_admin(
         print("  Cancelled.")
         return 0
 
+    # What changed while the prompt waited (a workspace the admin created, a
+    # member joining or leaving one, a subscription started) stops the command
+    # before anything is written.
+    now_shared, now_sole, now_members = await _split(db, admin_id)
+    target_left = target_id is not None and any(
+        target_id not in now_members[ws.id] for ws in shared
+    )
+    if now_shared != shared or now_sole != sole or target_left:
+        await db.rollback()
+        print("\n✗ The admin's workspaces changed while the prompt waited; re-run.")
+        return 1
+    if await _refuse_billing_contracts(db, admin_id):
+        await db.rollback()
+        return 1
+    await db.rollback()
+
     if target_id is not None:
         await _transfer(db, shared, admin_id, target_id)
         print(f"  ✓ Workspaces transferred to {target_id}: {len(shared)}")
         print("    (the new owner is not emailed; tell them)")
 
-    # What changed while the prompt waited: a workspace the admin created, or
-    # a member who joined one it was alone in, stops the delete.
+    # The transfers commit one by one; under the row locks, check once more
+    # that the workspaces left to delete are still the admin's alone.
     sole_ids = [ws.id for ws in sole]
     await db.execute(
         select(Workspace.id)
@@ -242,7 +310,7 @@ async def delete_password_admin(
         _print_workspaces(now_owned)
         return 1
 
-    await _delete_admin_rows(db, admin_id, sole_ids)
+    await _delete_admin_rows(db, admin_id, sole_ids, [ws.id for ws in shared])
     print("\n✓ Admin user and API keys deleted (shared workspaces preserved).")
     print("  Run: python -m src.cli.create_admin")
     return 0

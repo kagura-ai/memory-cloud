@@ -61,6 +61,7 @@ async def _run(db: MagicMock, owned, members=None, ask=lambda prompt: True) -> i
         patch.object(delete_admin, "_owned_workspaces", owned),
         patch.object(delete_admin, "_members", members or _members()),
         patch.object(delete_admin, "reown_connector_keys", side_effect=_reown),
+        patch.object(delete_admin, "owned_workspaces_under_contract", AsyncMock(return_value=[])),
     ):
         return await delete_admin.delete_password_admin(db, transfer_to=None, ask=ask)
 
@@ -139,3 +140,36 @@ async def test_main_reports_a_failure_as_an_error_line(capsys):
 
     assert code == 1
     assert "error: boom" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_a_subscription_stops_the_command_before_the_prompt(capsys):
+    db, calls = _db(2)
+    ws = SimpleNamespace(id="00000000-0000-0000-0000-0000000000cc", name="Paid")
+
+    with (
+        patch.object(delete_admin, "_password_admin", AsyncMock(return_value=_ADMIN)),
+        patch.object(delete_admin, "owned_workspaces_under_contract", AsyncMock(return_value=[ws])),
+    ):
+        code = await delete_admin.delete_password_admin(
+            db, transfer_to=None, ask=MagicMock(side_effect=AssertionError("prompted"))
+        )
+
+    assert code == 1
+    assert _writes(calls) == []
+    assert "running subscription" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_solo_path_stops_when_a_user_signed_up_while_the_prompt_waited(capsys):
+    db, calls = _db(1)
+    counts = iter([1, 2])
+
+    async def _count(session):
+        return next(counts)
+
+    with patch.object(delete_admin, "_user_count", side_effect=_count):
+        assert await _run(db, AsyncMock(return_value=[])) == 1
+
+    assert _writes(calls) == []
+    assert "signed up while the prompt waited" in capsys.readouterr().out
