@@ -41,6 +41,7 @@ from utils.exceptions import (
     ErasureTokenInvalidError,
     InitialAdminCannotBeErasedError,
     NotFoundException,
+    QdrantError,
     ValidationError,
 )
 
@@ -2071,6 +2072,9 @@ class TestFailureAfterThePostgresCommit:
         svc = _service()
         _stub_execute_steps(svc)
         svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
 
         with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
             with pytest.raises(RuntimeError):
@@ -2078,8 +2082,35 @@ class TestFailureAfterThePostgresCommit:
 
         params = self._failed_values(svc)
         assert params["failure_reason"] == "deadlock"
+        svc._requeue_after_points_deleted.assert_awaited_once()
         assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
         assert "user_id" not in params and "initiated_by" not in params
+
+
+@pytest.mark.parametrize("failing", ["_clear_redis", "_write_audit_log", "_finalize"])
+@pytest.mark.asyncio
+async def test_a_failure_after_the_postgres_commit_requeues_nothing(failing):
+    """#2358: once the Postgres step committed, the subject's rows carry the
+    pseudonym and their points were deleted by design — no re-queue."""
+    svc = _service()
+    _stub_execute_steps(svc)
+    setattr(svc, failing, AsyncMock(side_effect=RuntimeError("boom")))
+    _recording_execute(svc)
+    requeue = AsyncMock(return_value=0)
+
+    with (
+        patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 3}),
+        ),
+        patch("services.account_erasure_service.requeue_subject_embeddings", new=requeue),
+        patch("services.account_erasure_service.sync_restored_payloads", new=AsyncMock()),
+        patch("services.account_erasure_service._audit_salt", return_value="salt"),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await svc._execute(_execute_request(self_service=True), _user())
+
+    requeue.assert_not_awaited()
 
 
 def _delete_postgres_service() -> AccountErasureService:
@@ -2225,6 +2256,9 @@ class TestAuditLogPseudonymizationInThePostgresStep:
             return MagicMock(rowcount=1)
 
         svc.db.execute = AsyncMock(side_effect=_exec)
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
         with (
             patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
             patch("services.account_erasure_service.erased_pseudonyms", new=AsyncMock()),
@@ -2235,6 +2269,7 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         assert seen[-1] == failing
         svc.db.delete.assert_not_awaited()
         svc.db.commit.assert_awaited_once()  # the failure row only
+        svc._requeue_after_points_deleted.assert_awaited_once()
         params = svc.db.execute.await_args.args[0].compile().params
         assert params["failure_reason"] == "audit down"
         assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
@@ -2249,6 +2284,9 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         svc = _delete_postgres_service()
         svc._handle_owned_workspaces = AsyncMock(return_value={})
         svc._pseudonymize_audit_logs = AsyncMock(side_effect=RuntimeError("audit down"))
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
 
         with (
             patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
@@ -2259,6 +2297,7 @@ class TestAuditLogPseudonymizationInThePostgresStep:
 
         svc.db.delete.assert_not_awaited()
         svc.db.commit.assert_awaited_once()  # the failure row only
+        svc._requeue_after_points_deleted.assert_awaited_once()
         params = svc.db.execute.await_args.args[0].compile().params
         assert params["failure_reason"] == "audit down"
         assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
@@ -3053,7 +3092,7 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         _stub_execute_steps(svc)
         order = _recording_execute(svc)
         # #2304: the re-queue after the give-up has its own tests below
-        svc._requeue_after_vector_store_failure = AsyncMock()
+        svc._requeue_after_points_deleted = AsyncMock()
         request = _execute_request(self_service=True)
         request.deleted_data_summary = {"retry": {"attempts": 3, "step": "vector_store"}}
 
@@ -3114,6 +3153,9 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         _stub_execute_steps(svc)
         setattr(svc, failing, AsyncMock(side_effect=QdrantError("down")))
         order = _recording_execute(svc)
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
 
         with patch(
             "services.account_erasure_service.delete_user_points",
@@ -3138,6 +3180,9 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         _stub_execute_steps(svc)
         svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
         order = _recording_execute(svc)
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
         request = _execute_request(self_service=True)
         previous = {"attempts": 2, "step": "vector_store", "error_class": "QdrantError"}
         request.deleted_data_summary = {"retry": previous}
@@ -3166,6 +3211,9 @@ class TestAVectorStoreOutageReschedulesTheRequest:
         _stub_execute_steps(svc)
         svc._delete_postgres = AsyncMock(side_effect=RuntimeError("deadlock"))
         order = _recording_execute(svc)
+        # #2358: the re-queue after step 1 has its own tests
+        # (TestRequeueAfterAFailureBeforeTheCommit)
+        svc._requeue_after_points_deleted = AsyncMock()
         request = _execute_request(self_service=True)
         request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
 
@@ -3786,29 +3834,249 @@ class TestRequeueAfterTheLastAttempt:
 
         requeue.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_a_vector_store_error_at_a_later_step_requeues_nothing(self):
-        from utils.exceptions import QdrantError
 
-        svc = _service()
-        _stub_execute_steps(svc)
-        svc._delete_postgres = AsyncMock(side_effect=QdrantError("down"))
-        _recording_execute(svc)
-        request = _execute_request(self_service=True)
-        request.deleted_data_summary = {"retry": {"attempts": 3, "step": "vector_store"}}
-        requeue = AsyncMock(return_value=0)
+def _transfer_error() -> Any:
+    from utils.exceptions import WorkspaceTransferRequiredError
 
+    return WorkspaceTransferRequiredError(workspace_id="ws-1", member_count=2)
+
+
+def _requeue_recorder(order: list[Any], count: int = 7) -> AsyncMock:
+    return AsyncMock(side_effect=lambda db, user_id: order.append("requeue") or count)
+
+
+class TestRequeueAfterAFailureBeforeTheCommit:
+    """#2358: step 1 deleted the subject's points, then the run failed before
+    the Postgres commit (a workspace-transfer error, an error inside the
+    Postgres step): the account stays, so its live embedded memories are
+    re-queued once this run's ``failed`` row is committed."""
+
+    @staticmethod
+    async def _run(
+        svc: AccountErasureService,
+        request: ErasureRequest,
+        requeue: AsyncMock,
+        error: type[BaseException],
+    ) -> None:
         with (
             patch(
                 "services.account_erasure_service.delete_user_points",
-                new=AsyncMock(return_value={"kagura_memories": 0}),
+                new=AsyncMock(return_value={"kagura_memories": 3}),
             ),
             patch("services.account_erasure_service.requeue_subject_embeddings", new=requeue),
         ):
-            with pytest.raises(QdrantError):
+            with pytest.raises(error):
                 await svc._execute(request, _user())
 
+    @pytest.mark.parametrize("self_service", [True, False])
+    @pytest.mark.asyncio
+    async def test_a_transfer_error_requeues_after_the_failure_commit(self, self_service):
+        from models.erasure import STATUS_FAILED, STATUS_IN_PROGRESS
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=_transfer_error())
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=self_service)
+        request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
+        requeue = _requeue_recorder(order)
+
+        await self._run(svc, request, requeue, WorkspaceTransferRequiredError)
+
+        requeue.assert_awaited_once_with(svc.db, "u-1")
+        svc._delete_postgres.assert_not_awaited()
+        failure, summary_update = _erasure_request_updates(order)
+        assert order[-6:] == ["rollback", failure, "commit", "requeue", summary_update, "commit"]
+        params = failure.compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith("workspace_transfer_required")
+        # still this run's row only (#2306)
+        assert params["status_1"] == STATUS_IN_PROGRESS
+        assert params["started_at_1"] == datetime(2026, 10, 1, 12, 0)
+        # the failure row keeps the step-1 counts, no retry block of its own
+        assert params["deleted_data_summary"] == {"qdrant": {"kagura_memories": 3}}
+        assert "user_id" not in params and "initiated_by" not in params
+        got = _summary_update_params(summary_update)
+        # guarded by id + the terminal status
+        assert got["params"]["id_1"] == request.id
+        assert got["params"]["status_1"] == STATUS_FAILED
+        retry = got["merged"]["retry"]
+        assert {k: v for k, v in retry.items() if k != "requeued_at"} == {
+            "attempts": 0,
+            "embeddings_requeued": 7,
+        }
+        assert retry["requeued_at"].endswith("Z")
+        assert "u-1" not in repr(got["merged"])
+
+    @pytest.mark.asyncio
+    async def test_earlier_attempts_stay_in_the_block(self):
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=_transfer_error())
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        previous = {
+            "attempts": 2,
+            "step": "vector_store",
+            "error_class": "QdrantError",
+            "last_attempt_at": "2026-10-01T12:00:00Z",
+        }
+        request.deleted_data_summary = {"retry": previous}
+
+        await self._run(svc, request, _requeue_recorder(order, 5), WorkspaceTransferRequiredError)
+
+        failure, summary_update = _erasure_request_updates(order)
+        assert failure.compile().params["deleted_data_summary"]["retry"] == previous
+        retry = _summary_update_params(summary_update)["merged"]["retry"]
+        assert {k: v for k, v in retry.items() if k != "requeued_at"} == {
+            **previous,
+            "embeddings_requeued": 5,
+        }
+
+    @pytest.mark.parametrize(
+        ("failing", "error"),
+        [
+            # the #2244 case: the vector store fails inside the Postgres step
+            ("_delete_postgres", QdrantError("down")),
+            ("_delete_postgres", RuntimeError("deadlock")),
+            # a non-transfer error at step 2
+            ("_handle_owned_workspaces", RuntimeError("lock timeout")),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_generic_handler_requeues_after_the_failure_commit(self, failing, error):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        setattr(svc, failing, AsyncMock(side_effect=error))
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=True)
+        request.started_at = datetime(2026, 10, 1, 12, 0)  # this run's claim
+        requeue = _requeue_recorder(order)
+
+        await self._run(svc, request, requeue, type(error))
+
+        requeue.assert_awaited_once_with(svc.db, "u-1")
+        failure, summary_update = _erasure_request_updates(order)
+        assert order[-6:] == ["rollback", failure, "commit", "requeue", summary_update, "commit"]
+        params = failure.compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == str(error)
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert "erasure_requests.started_at = :started_at_1" in str(failure)
+        got = _summary_update_params(summary_update)
+        assert got["params"]["status_1"] == STATUS_FAILED
+        assert got["merged"]["retry"]["attempts"] == 0
+        assert got["merged"]["retry"]["embeddings_requeued"] == 7
+
+    @pytest.mark.parametrize("failing", ["transfer", "generic"])
+    @pytest.mark.asyncio
+    async def test_a_stale_run_requeues_nothing(self, failing):
+        """#2306: the failure UPDATE matched nothing (a newer run owns the
+        row): that run erases or re-queues itself."""
+        error: BaseException = _transfer_error() if failing == "transfer" else RuntimeError("x")
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=error)
+        order = _recording_execute(svc, rowcount=0)
+        request = _execute_request(self_service=True)
+        requeue = AsyncMock(return_value=0)
+
+        with patch("services.account_erasure_service.logger") as log:
+            await self._run(svc, request, requeue, type(error))
+
         requeue.assert_not_awaited()
+        assert len(_erasure_request_updates(order)) == 1
+        log.warning.assert_any_call("erasure_failure_handler_stale_run", request_id=str(request.id))
+
+    @pytest.mark.asyncio
+    async def test_a_billing_contract_requeues_nothing(self, owned_contracts):
+        """The contract check runs before step 1: no point was deleted."""
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._list_owned_workspaces = AsyncMock(return_value=[_contract_workspace()])
+        order = _recording_execute(svc)
+        requeue = AsyncMock(return_value=0)
+        qdrant_delete = AsyncMock()
+
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=qdrant_delete),
+            patch("services.account_erasure_service.requeue_subject_embeddings", new=requeue),
+        ):
+            with pytest.raises(BillingContractActiveError):
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        qdrant_delete.assert_not_awaited()
+        requeue.assert_not_awaited()
+        assert len(_erasure_request_updates(order)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_requeue_keeps_the_transfer_error(self):
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=_transfer_error())
+        order = _recording_execute(svc)
+        request = _execute_request(self_service=False)
+
+        with patch("services.account_erasure_service.logger") as log:
+            await self._run(
+                svc,
+                request,
+                AsyncMock(side_effect=ConnectionError("Key (user_id)=(u-1) lost")),
+                WorkspaceTransferRequiredError,
+            )
+
+        assert order[-1] == "rollback"
+        assert len(_erasure_request_updates(order)) == 1  # no summary write
+        log.error.assert_called_once_with(
+            "erasure_embeddings_requeue_failed",
+            request_id=str(request.id),
+            error_class="ConnectionError",
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_requeue_logs_carry_no_account_id(self):
+        from utils.exceptions import WorkspaceTransferRequiredError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        svc._handle_owned_workspaces = AsyncMock(side_effect=_transfer_error())
+        _recording_execute(svc)
+        request = _execute_request(self_service=True)
+
+        with patch("services.account_erasure_service.logger") as log:
+            await self._run(svc, request, AsyncMock(return_value=4), WorkspaceTransferRequiredError)
+
+        requeued = [
+            c for c in log.info.call_args_list if c.args[0] == "erasure_embeddings_requeued"
+        ]
+        assert len(requeued) == 1
+        assert requeued[0].kwargs == {"request_id": str(request.id), "memories": 4}
+
+
+class TestRequeueBlock:
+    def test_the_requests_retry_block(self):
+        from services.account_erasure_service import _requeue_block
+
+        block = {"attempts": 2, "step": "vector_store"}
+        assert _requeue_block({"qdrant": {}, "retry": block}) is block
+
+    @pytest.mark.parametrize("summary", [{}, {"qdrant": {}}, {"retry": None}, {"retry": "x"}])
+    def test_no_block_reads_as_no_failed_attempt(self, summary):
+        from services.account_erasure_service import _previous_retry, _requeue_block
+
+        block = _requeue_block(summary)
+        assert block == {"attempts": 0}
+        # a later read of the record counts no spent attempt
+        assert _previous_retry({"retry": block}) == (block, 0)
 
 
 class TestRequeueSubjectEmbeddings:
@@ -3909,7 +4177,7 @@ class TestRequeueSubjectEmbeddings:
             ),
             patch("services.account_erasure_service.logger") as log,
         ):
-            await svc._requeue_after_vector_store_failure(
+            await svc._requeue_after_points_deleted(
                 request_id, "u-1", {"attempts": 1}, status=STATUS_CANCELLED
             )
 
