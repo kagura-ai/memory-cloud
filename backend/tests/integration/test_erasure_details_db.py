@@ -1645,3 +1645,60 @@ async def test_a_restore_to_the_live_value_still_records_its_origin(
 async def _live_details(engine: AsyncEngine, memory_id: uuid.UUID) -> Any:
     async with _maker(engine)() as session:
         return (await _live(session, memory_id)).details
+
+
+async def test_a_kept_live_trigger_alone_writes_no_row_and_re_runs_stay_no_ops(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2393 review: the subject made the author's empty value a time memory
+    with a window-only trigger. Its revert removes the trigger, and the live
+    window goes back in (a time memory needs one), so the value equals the
+    live one and nothing of anyone else's is put back: no version, no row —
+    a row would attribute the window to the subject again and every re-run
+    by pseudonym would write another."""
+    subject, author = world["subject"], world["author"]
+    memory = _memory(world, author, {"trigger": TRIGGER}, 2, kind="time")
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": {}})])
+        with patch(_QDRANT, AsyncMock()):
+            pseudonym, report = await _erase_memories(session, subject)
+        assert (report.restored, report.unavailable, report.keys_reverted) == (0, 0, 0)
+        live = await _live(session, memory.id)
+        assert (live.details, live.version) == ({"trigger": TRIGGER}, 2)
+        for dry_run in (True, False, False):
+            with patch(_QDRANT, AsyncMock()):
+                again = await erase_subject_details(
+                    session, pseudonym, actor=pseudonym, erased_actors={pseudonym}, dry_run=dry_run
+                )
+            await session.commit()
+            assert again.restore == RestoreReport()
+        assert (await _live(session, memory.id)).version == 2
+        assert len(await _log(session, memory.id)) == 1
+
+
+async def test_a_restore_leaves_an_erased_authors_terminal_row_out_of_the_queue(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2393 review: the author was erased first (their survivor is terminal:
+    ``failed`` with the erased-author marker, no retry budget). A later
+    erasure of a member who edited its details restores them but must not
+    re-queue the row; only the admin retry or a model switch does."""
+    from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR, MAX_EMBEDDING_RETRIES
+
+    subject = world["subject"]
+    erased_author = "a" * 64
+    memory = _memory(world, erased_author, SUBJECTS, 2, embedding_status="failed")
+    memory.embedding_error = ERASED_AUTHOR_EMBEDDING_ERROR
+    memory.embedding_retry_count = MAX_EMBEDDING_RETRIES
+    async with _maker(async_engine)() as session:
+        await _seed(session, [memory], [_edit(world, memory, 2, subject, {"details": AUTHORS})])
+        with patch(_QDRANT, AsyncMock()):
+            _, report = await _erase_memories(session, subject)
+        assert (report.restored, report.embedding_requeued) == (1, 0)
+        live = await _live(session, memory.id)
+        assert live.details == AUTHORS
+        assert (live.embedding_status, live.embedding_error, live.embedding_retry_count) == (
+            "failed",
+            ERASED_AUTHOR_EMBEDDING_ERROR,
+            MAX_EMBEDDING_RETRIES,
+        )

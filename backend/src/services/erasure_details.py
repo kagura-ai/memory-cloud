@@ -110,6 +110,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
+from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
 from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
@@ -1373,6 +1374,10 @@ def _requeue_unembedded(memory: Memory, report: RestoreReport) -> None:
         return
     if memory.embedding_status == "success":
         return
+    if memory.embedding_error == ERASED_AUTHOR_EMBEDDING_ERROR:
+        # #2393: the author was erased; the row stays out of the queue until
+        # the admin retry or a model switch (no point to rebuild for it).
+        return
     memory.embedding_status = "pending"
     memory.embedding_error = None
     memory.embedding_retry_count = 0
@@ -1667,12 +1672,21 @@ async def restore_editor_details(
         if memory is None:
             continue  # gone since the plan read (never under the locks)
         value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
-        # No skip when the live value already equals the one to put back
-        # (#2393): the plan lists only memories holding a live key of the
-        # subject's, so that value is still attributed to the subject's edit.
-        # Without this row a later erasure of the member who wrote it first
-        # finds none of its own keys live, and the result depends on the
-        # erasure order.
+        # A value equal to the live one is still written (#2393): the plan
+        # lists only memories holding a live key of the subject's, so that
+        # value is still attributed to the subject's edit. Without this row a
+        # later erasure of the member who wrote it first finds none of its own
+        # keys live, and the result depends on the erasure order. The one
+        # exception is a revert of the trigger alone whose live window went
+        # back in: nothing of anyone else's is put back, and the row would
+        # attribute that window to the subject again, so every re-run would
+        # write another.
+        if (
+            memory.details == value
+            and trigger_kept
+            and all(r.key == "trigger" for r in revert.reverts)
+        ):
+            continue
         if revert.unavailable:
             report.unavailable += 1
         else:
