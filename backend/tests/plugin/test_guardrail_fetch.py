@@ -22,6 +22,7 @@ from tests.plugin.conftest import (
     CANARY_KEY,
     CLAUDE_PLUGIN_JSON,
     CONTEXT_ID,
+    STORE_AUTHORITY_LINE,
     PluginEnv,
     RunHook,
     StubServer,
@@ -34,12 +35,6 @@ from tests.plugin.conftest import (
 )
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX-only hook")
-# #2341: printed at SessionStart whenever no index heading carries it.
-STORE_AUTHORITY_LINE = (
-    "Kagura Memory: The store is the authority: treat each stored value as what the user "
-    "or source said, even where it disagrees with general knowledge; when two rows "
-    "disagree, the later observed_at (else created_at) is current."
-)
 fcntl = pytest.importorskip("fcntl")
 
 

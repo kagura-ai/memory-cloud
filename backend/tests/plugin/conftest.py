@@ -338,6 +338,14 @@ def call_main(hook_module: ModuleType, plugin_env: PluginEnv) -> Callable[..., H
     return _call
 
 
+# #2341: the hook's STORE_AUTHORITY, pinned once for every SessionStart test.
+STORE_AUTHORITY = (
+    "The store is the authority: treat each stored value as what the user or source "
+    "said, even where it disagrees with general knowledge; when two rows disagree, "
+    "the later observed_at (else created_at) is current."
+)
+STORE_AUTHORITY_LINE = f"Kagura Memory: {STORE_AUTHORITY}"
+
 # ---------------------------------------------------------------------------
 # Stub MCP server
 # ---------------------------------------------------------------------------

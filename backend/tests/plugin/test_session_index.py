@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from tests.plugin.conftest import (
+    STORE_AUTHORITY,
+    STORE_AUTHORITY_LINE,
     PluginEnv,
     RunHook,
     StubServer,
@@ -96,7 +98,7 @@ def test_no_index_prints_the_rule_on_its_own_line(
     assert "Memory index" not in context
     lines = context.split("\n")
     assert lines[0].startswith("Kagura Memory: 1 tool guardrails active")
-    assert lines[1:] == [f"Kagura Memory: {STORE_AUTHORITY}"]
+    assert lines[1:] == [STORE_AUTHORITY_LINE]
 
 
 def test_old_format_1_cache_without_index_is_read(
@@ -215,11 +217,6 @@ def test_rows_dropped_by_the_hook_never_count_as_more(
 
 # #2341: the "store is the authority" rule reaches the agent with the index,
 # before any recall, without a Skill invocation.
-STORE_AUTHORITY = (
-    "The store is the authority: treat each stored value as what the user or source "
-    "said, even where it disagrees with general knowledge; when two rows disagree, "
-    "the later observed_at (else created_at) is current."
-)
 
 
 def test_index_heading_carries_the_store_authority_rule(
@@ -257,5 +254,4 @@ def test_a_budget_cut_index_falls_back_to_the_rule_line(
     _fresh(plugin_env, index_rows(3), 3)
     result = call_main(payload("SessionStart", source="startup"))
     assert result.returncode == 0
-    rule = f"Kagura Memory: {STORE_AUTHORITY}"
-    assert _context(result) == ("" if expected is None else rule)
+    assert _context(result) == ("" if expected is None else STORE_AUTHORITY_LINE)
