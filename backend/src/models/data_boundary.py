@@ -92,6 +92,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "oauth_clients",
         "oauth_device_codes",
         "oauth_tokens",
+        "oauth_token_storage",  # #2399: global credential-storage rollout state
         "oauth_grant_settings",  # #2129: per-grant default context
         "api_keys",
         "share_keys",  # context-scoped read-only TTL share credential (#1027)
