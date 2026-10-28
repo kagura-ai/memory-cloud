@@ -45,6 +45,7 @@ async def _seed_workspace(
     plan_name: str = "promax",
 ) -> tuple[str, Workspace]:
     user_id = f"user-{uuid4().hex}"
+    await _add_user(db, user_id)
     workspace = Workspace(
         name=f"ws-{uuid4().hex[:8]}",
         owner_user_id=user_id,
@@ -67,6 +68,8 @@ async def _add_user(db: AsyncSession, user_id: str) -> None:
     share-locks it, #2305)."""
     from models.auth import User
 
+    if await db.scalar(select(User.user_id).where(User.user_id == user_id)) is not None:
+        return
     db.add(
         User(
             email=f"{user_id}@example.com",

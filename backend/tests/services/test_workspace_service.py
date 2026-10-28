@@ -47,6 +47,8 @@ class TestValidateRole:
 class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_create_without_api_key_no_context(self, db_session) -> None:
+        db_session.add(User(user_id="u1", email="u1@example.test"))
+        await db_session.flush()
         service = WorkspaceService(db_session)
         ws = await service.create_workspace(
             name="Test WS",
@@ -60,6 +62,8 @@ class TestCreateWorkspace:
 
     @pytest.mark.asyncio
     async def test_create_with_api_key_creates_context(self, db_session) -> None:
+        db_session.add(User(user_id="u2", email="u2@example.test"))
+        await db_session.flush()
         service = WorkspaceService(db_session)
         mock_ctx = MagicMock()
         fake_context = MagicMock()

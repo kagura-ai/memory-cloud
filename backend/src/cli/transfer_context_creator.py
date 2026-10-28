@@ -518,7 +518,14 @@ async def transfer_context_creator(
     if from_user_id == to_user_id:
         raise ValueError("--from and --to name the same user")
     users = set(
-        (await db.execute(select(User.user_id).where(User.user_id.in_([from_user_id, to_user_id]))))
+        (
+            await db.execute(
+                select(User.user_id)
+                .where(User.user_id.in_([from_user_id, to_user_id]))
+                .order_by(User.user_id)
+                .with_for_update(read=True, key_share=True)
+            )
+        )
         .scalars()
         .all()
     )

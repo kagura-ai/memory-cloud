@@ -167,6 +167,7 @@ from services.erasure_details import (
     record_resynced_payloads,
     restored_payload_syncs,
     strip_subject_details,
+    subject_memory_ids,
     sync_restored_payloads,
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
@@ -1970,6 +1971,12 @@ class AccountErasureService:
         if not workspaces:
             return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
+        # Serialize successor selection with administrative/CLI/erasure deletion.
+        # Do not acquire successor User locks after holding the subject User: the
+        # shared identity lock provides this fence without reversing user order.
+        from services.identity_link_service import lock_identity_links
+
+        await lock_identity_links(self.db)
         # Bulk-load every member row for these workspaces in one round-trip
         # and group in memory — the per-workspace SELECT pattern was an N+1
         # for users with multiple owned workspaces.
@@ -2089,6 +2096,45 @@ class AccountErasureService:
         counts: dict[str, int] = {}
         # Ownership transfers can commit, releasing the pre-vector user lock.
         await self._guard_erasure_run(target, request_id=request_id)
+
+        # #2347: the sole-owner cascade also reaches contexts/memories. Take
+        # the identity lock and one ordered union BEFORE any cascade, not just
+        # before the later authorship sweep. Admin deletion uses this order.
+        from services.identity_link_service import lock_identity_links
+
+        await lock_identity_links(self.db)
+        owned_ws = select(Workspace.id).where(Workspace.owner_user_id == user_id)
+        affected_contexts = select(Context.id).where(
+            or_(
+                Context.created_by == user_id,
+                Context.deleted_by == user_id,
+                Context.workspace_id.in_(owned_ws),
+            )
+        )
+        await self.db.execute(
+            locked_ids(
+                Context,
+                lambda c: (
+                    or_(
+                        c.created_by == user_id,
+                        c.deleted_by == user_id,
+                        c.workspace_id.in_(owned_ws),
+                    ),
+                ),
+            )
+        )
+        await self.db.execute(
+            locked_ids(
+                Memory,
+                lambda m: (
+                    or_(
+                        m.id.in_(subject_memory_ids(user_id)),
+                        m.deleted_by == user_id,
+                        m.context_id.in_(affected_contexts),
+                    ),
+                ),
+            )
+        )
 
         # Remove the OAuth grants first, through the one revoker that owns
         # the lock order (users → codes → device codes → tokens, #1770): it

@@ -29,15 +29,14 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import delete, func, or_, select  # noqa: E402
+from sqlalchemy import func, or_, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
 from cli._oneshot import confirm  # noqa: E402
 from db.base import get_db  # noqa: E402
-from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
+from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
 from services.billing_contract import owned_workspaces_under_contract  # noqa: E402
-from services.connector_key_ownership import reown_connector_keys  # noqa: E402
 from services.password_account_service import normalize_email  # noqa: E402
 from services.workspace_ownership_service import WorkspaceOwnershipService  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
@@ -122,19 +121,28 @@ async def _resolve_target(db: AsyncSession, ident: str, admin_id: str) -> str:
     return user_ids[0]
 
 
-async def _transfer(db: AsyncSession, shared: list[_Ws], admin_id: str, target_id: str) -> None:
+async def _transfer(
+    db: AsyncSession, shared: list[_Ws], admin_id: str, targets: dict[UUID, str]
+) -> None:
     """Each transfer commits on its own (the service locks the workspace row,
     re-checks the owner and the target's membership, bumps the epoch and
     writes the audit row): a failure part-way leaves every workspace with a
     live owner, and a re-run picks up the rest."""
+    from services.ownership_notifications import notify_new_owner_best_effort
+
     service = WorkspaceOwnershipService(db)
     for ws in shared:
         await service.transfer_ownership(
             workspace_id=ws.id,
             current_owner_id=admin_id,
-            target_user_id=target_id,
+            target_user_id=targets[ws.id],
             performed_by_email=AUDIT_ACTOR_EMAIL,
         )
+        # Notify each committed transfer even if a later workspace fails.
+        await notify_new_owner_best_effort(db, ws.id, targets[ws.id])
+        # The notification only reads. End its transaction, including a failed
+        # lookup, before the next transfer or deletion reuses this session.
+        await db.rollback()
 
 
 async def _delete_admin_rows(
@@ -146,27 +154,23 @@ async def _delete_admin_rows(
     """Hand the admin's live connector keys to their workspace owners (#2352),
     then delete its other keys, its memberships, ``workspace_ids`` and the user
     row, in one transaction."""
-    moved = await reown_connector_keys(db, admin_id)
-    if moved:
-        print(f"  ✓ Connector write keys handed to their workspace owners: {moved}")
-    await db.execute(delete(APIKey).where(APIKey.user_id == admin_id))
-    await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == admin_id))
-    if workspace_ids:
-        await db.execute(delete(Workspace).where(Workspace.id.in_(workspace_ids)))
-        print(
-            "  Their vector points are removed by the daily orphan sweep "
-            "(or now: python -m src.cli.sweep_orphan_vectors --apply)"
-        )
-    admin = (await db.execute(select(User).where(User.user_id == admin_id))).scalar_one_or_none()
-    if admin is not None:
-        await db.delete(admin)
+    from services.user_deletion_service import delete_user_rows, finish_user_deletion
+
+    result = await delete_user_rows(
+        db, admin_id, delete_workspace_ids=workspace_ids, preserve_created_contexts=True
+    )
     await db.commit()
+    await finish_user_deletion(result)
+    if result.connector_api_keys:
+        print(
+            f"  ✓ Connector write keys handed to their workspace owners: {result.connector_api_keys}"
+        )
     logger.info(
         "cli_delete_admin",
         user_id=admin_id,
         workspaces_transferred=[str(ws_id) for ws_id in transferred or []],
         workspaces_deleted=[str(ws_id) for ws_id in workspace_ids],
-        connector_api_keys_reowned=moved,
+        connector_api_keys_reowned=result.connector_api_keys,
     )
 
 
@@ -201,6 +205,9 @@ async def _delete_solo_admin(db: AsyncSession, admin_id: str, ask: Callable[[str
         await db.rollback()
         print("\n✗ Another user signed up while the prompt waited; re-run.")
         return 1
+    from services.user_deletion_service import lock_deletion_users
+
+    await lock_deletion_users(db, admin_id)
     owned = await db.execute(select(Workspace.id).where(Workspace.owner_user_id == admin_id))
     await _delete_admin_rows(db, admin_id, list(owned.scalars().all()))
     print("\n✓ Admin, workspace, and API keys deleted.")
@@ -209,7 +216,11 @@ async def _delete_solo_admin(db: AsyncSession, admin_id: str, ask: Callable[[str
 
 
 async def delete_password_admin(
-    db: AsyncSession, *, transfer_to: str | None, ask: Callable[[str], bool]
+    db: AsyncSession,
+    *,
+    transfer_to: str | None,
+    ask: Callable[[str], bool],
+    workspace_transfers: dict[UUID, str] | None = None,
 ) -> int:
     """Delete the password admin; returns the exit code.
 
@@ -236,28 +247,31 @@ async def delete_password_admin(
 
     shared, sole, members = await _split(db, admin_id)
 
-    target_id: str | None = None
-    if shared:
-        if transfer_to is None:
+    targets: dict[UUID, str] = {}
+    selections = workspace_transfers or {}
+    unknown = set(selections) - {ws.id for ws in shared}
+    if unknown:
+        print("\n✗ --workspace-transfer must name an owned shared workspace.")
+        return 1
+    for ws in shared:
+        ident = selections.get(ws.id, transfer_to)
+        if ident is None:
             print("\n✗ The admin owns workspaces other users are in:")
             _print_workspaces(shared)
-            print("  Re-run with --transfer-to USER (a member of each of them).")
+            print("  Re-run with --transfer-to USER or --workspace-transfer WORKSPACE=USER.")
             return 1
         try:
-            target_id = await _resolve_target(db, transfer_to, admin_id)
+            target_id = await _resolve_target(db, ident, admin_id)
         except LookupError as exc:
             print(f"\n✗ {exc}")
             return 1
-        outside = [ws for ws in shared if target_id not in members[ws.id]]
-        if outside:
+        if target_id not in members[ws.id]:
             print(f"\n✗ {target_id} is not a member of:")
-            _print_workspaces(outside)
+            _print_workspaces([ws])
             print("  Add them as a member first. Nothing was changed.")
             return 1
-        print(f"  Workspaces to transfer to {target_id}:")
-        _print_workspaces(shared)
-    elif transfer_to is not None:
-        print(f"  --transfer-to {transfer_to} is not needed: no workspace other users are in.")
+        targets[ws.id] = target_id
+        print(f"  Workspace to transfer to {target_id}: {ws.name} ({ws.id})")
     if sole:
         print("  Only the admin is in these; they are deleted with it:")
         _print_workspaces(sole)
@@ -275,9 +289,7 @@ async def delete_password_admin(
     # member joining or leaving one, a subscription started) stops the command
     # before anything is written.
     now_shared, now_sole, now_members = await _split(db, admin_id)
-    target_left = target_id is not None and any(
-        target_id not in now_members[ws.id] for ws in shared
-    )
+    target_left = any(targets[ws.id] not in now_members[ws.id] for ws in shared)
     if now_shared != shared or now_sole != sole or target_left:
         await db.rollback()
         print("\n✗ The admin's workspaces changed while the prompt waited; re-run.")
@@ -287,19 +299,23 @@ async def delete_password_admin(
         return 1
     await db.rollback()
 
-    if target_id is not None:
-        await _transfer(db, shared, admin_id, target_id)
-        print(f"  ✓ Workspaces transferred to {target_id}: {len(shared)}")
-        print("    (the new owner is not emailed; tell them)")
+    if targets:
+        await _transfer(db, shared, admin_id, targets)
+        for target_id in sorted(set(targets.values())):
+            count = sum(value == target_id for value in targets.values())
+            print(f"  ✓ Workspaces transferred to {target_id}: {count}")
 
     # The transfers commit one by one; under the row locks, check once more
     # that the workspaces left to delete are still the admin's alone.
+    from services.user_deletion_service import lock_deletion_users
+
+    await lock_deletion_users(db, admin_id)
     sole_ids = [ws.id for ws in sole]
     await db.execute(
         select(Workspace.id)
         .where(Workspace.id.in_(sole_ids))
         .order_by(Workspace.id)
-        .with_for_update()
+        .with_for_update(nowait=True)
     )
     now_owned = await _owned_workspaces(db, admin_id)
     now_members = await _members(db, sole_ids)
@@ -330,12 +346,25 @@ async def _main(args: argparse.Namespace) -> int:
             code = await delete_password_admin(
                 db,
                 transfer_to=args.transfer_to,
+                workspace_transfers=dict(args.workspace_transfer),
                 ask=lambda prompt: confirm(prompt, args.yes),
             )
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return code
+
+
+def _workspace_transfer(value: str) -> tuple[UUID, str]:
+    """Parse an explicit per-workspace successor without shell interpolation."""
+    workspace, separator, user = value.partition("=")
+    try:
+        workspace_id = UUID(workspace)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Expected WORKSPACE_UUID=USER") from exc
+    if not separator or not user.strip():
+        raise argparse.ArgumentTypeError("Expected WORKSPACE_UUID=USER")
+    return workspace_id, user.strip()
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
@@ -347,6 +376,14 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="USER",
         help="user_id, login_id or email of the member who takes over the workspaces "
         "the admin owns that other users are in",
+    )
+    parser.add_argument(
+        "--workspace-transfer",
+        action="append",
+        default=[],
+        type=_workspace_transfer,
+        metavar="WORKSPACE_UUID=USER",
+        help="per-workspace successor; repeat for different workspaces",
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
     return parser.parse_args(argv)

@@ -51,6 +51,13 @@ class _ConnectorWorld:
 
     async def workspace(self, owner: str, **members: str) -> Workspace:
         """A workspace ``owner`` owns; ``members`` maps user_id → role."""
+        # Production ownership writers require live accounts; seed real users
+        # for the convenience ids accepted by this fixture.
+        for user_id in {owner, *members}:
+            if await self.db.scalar(select(User.user_id).where(User.user_id == user_id)) is None:
+                self.db.add(User(user_id=user_id, email=f"{user_id}@example.test"))
+                self.targets.append(user_id)
+        await self.db.flush()
         workspace = Workspace(
             id=uuid4(),
             name=f"ws-{uuid4().hex[:8]}",

@@ -37,10 +37,10 @@ def reown_connector_keys_stmt(user_id: str, *, workspace_id: UUID | None = None)
     connector keys are dead rows and the caller deletes them with the rest.
     The ``owner_user_id <> user`` guard keeps a key of a workspace the user
     still owns where it is — that workspace is deleted with its keys by the
-    caller (a sole-owned workspace on erasure and in ``cli.delete_admin``,
-    every owned workspace on the admin delete) or the removal is refused (an
-    owner cannot be removed). The
-    UPDATE bypasses ``create_key``'s per-owner active-name check; an owner
+    caller (a sole-owned workspace on erasure and in ``cli.delete_admin``),
+    or the removal is refused (an owner cannot be removed). The admin API
+    transfers every owned workspace before reaching this helper.
+    The UPDATE bypasses ``create_key``'s per-owner active-name check; an owner
     already holding an active ``connector:<same id>`` key cannot happen (one
     active key per connector; rotation revokes before it mints).
 

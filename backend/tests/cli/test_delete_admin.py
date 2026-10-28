@@ -52,15 +52,19 @@ def _members(**by_ws: set[str]) -> AsyncMock:
 
 
 async def _run(db: MagicMock, owned, members=None, ask=lambda prompt: True) -> int:
-    async def _reown(session, user_id):
-        await session.execute("reown")
-        return 1
+    from services.user_deletion_service import UserDeletionResult
+
+    async def _cleanup(session, user_id, **kwargs):
+        await session.execute("cleanup")
+        return UserDeletionResult(connector_api_keys=1)
 
     with (
         patch.object(delete_admin, "_password_admin", AsyncMock(return_value=_ADMIN)),
         patch.object(delete_admin, "_owned_workspaces", owned),
         patch.object(delete_admin, "_members", members or _members()),
-        patch.object(delete_admin, "reown_connector_keys", side_effect=_reown),
+        patch("services.user_deletion_service.delete_user_rows", side_effect=_cleanup),
+        patch("services.user_deletion_service.finish_user_deletion", AsyncMock()),
+        patch("services.user_deletion_service.lock_deletion_users", AsyncMock()),
         patch.object(delete_admin, "owned_workspaces_under_contract", AsyncMock(return_value=[])),
     ):
         return await delete_admin.delete_password_admin(db, transfer_to=None, ask=ask)
@@ -70,7 +74,7 @@ def _writes(calls: list[Any]) -> list[Any]:
     return [
         getattr(c.table, "name", None) if isinstance(c, Delete) else c
         for c in calls
-        if isinstance(c, Delete) or c in ("reown", "commit")
+        if isinstance(c, Delete) or c in ("cleanup", "commit")
     ]
 
 
@@ -78,8 +82,8 @@ def _writes(calls: list[Any]) -> list[Any]:
 @pytest.mark.parametrize(
     ("total_users", "tables"),
     [
-        (2, ["reown", "api_keys", "workspace_members"]),
-        (1, ["reown", "api_keys", "workspace_members", "workspaces"]),
+        (2, ["cleanup"]),
+        (1, ["cleanup"]),
     ],
 )
 async def test_reown_runs_before_the_deletes(total_users: int, tables: list[str], capsys):
@@ -88,7 +92,7 @@ async def test_reown_runs_before_the_deletes(total_users: int, tables: list[str]
     assert await _run(db, AsyncMock(return_value=[])) == 0
 
     assert _writes(calls) == [*tables, "commit"]
-    assert calls[-2:] == [("delete", _ADMIN), "commit"]
+    assert calls[-2:] == ["cleanup", "commit"]
     assert "Connector write keys handed to their workspace owners: 1" in capsys.readouterr().out
 
 

@@ -10630,6 +10630,29 @@
         ],
         "type": "object"
       },
+      "UserDeleteRequest": {
+        "properties": {
+          "context_transfers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "type": "object"
+          },
+          "workspace_transfers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "UserInfo": {
         "properties": {
           "auth_provider": {},
@@ -14323,6 +14346,22 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UserDeleteRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

@@ -1266,15 +1266,11 @@ class TestRestoreEditorDetailsWiring:
             if sql.startswith("SELECT pg_advisory_xact_lock"):
                 order.append("link_lock")
             if sql.startswith("SELECT contexts_1.id FROM contexts AS contexts_1"):
-                # #2278: one phase over the contexts the subject created or deleted
-                assert sql.endswith(
-                    "WHERE contexts_1.created_by = :created_by_1 "
-                    "OR contexts_1.deleted_by = :deleted_by_1 ORDER BY contexts_1.id FOR UPDATE"
-                )
-                assert statement.compile().params == {
-                    "created_by_1": "raw-sub",
-                    "deleted_by_1": "raw-sub",
-                }
+                assert sql.endswith("ORDER BY contexts_1.id FOR UPDATE")
+                assert "contexts_1.created_by" in sql and "contexts_1.deleted_by" in sql
+                if "workspaces.owner_user_id" in sql:
+                    assert statement.compile().params["owner_user_id_1"] == "raw-sub"
+                assert statement.compile().params["created_by_1"] == "raw-sub"
                 order.append("contexts_lock")
             return MagicMock()
 
@@ -1302,6 +1298,8 @@ class TestRestoreEditorDetailsWiring:
         # first, after the link lock and before the hand-over's memory DELETE —
         # the order ``restore_deleted_context`` takes (context, then memories)
         assert order == [
+            "link_lock",
+            "contexts_lock",
             "link_lock",
             "contexts_lock",
             "hand_over",

@@ -270,7 +270,7 @@ class TestNotifyNewOwnerBestEffort:
         db.execute = AsyncMock(side_effect=[email_res, name_res])
         svc = MagicMock()
         svc.send_workspace_ownership_transferred = AsyncMock(return_value=True)
-        with patch.object(route_mod, "get_email_service", return_value=svc):
+        with patch("services.ownership_notifications.get_email_service", return_value=svc):
             await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
         svc.send_workspace_ownership_transferred.assert_awaited_once_with(
             to_email="new@owner.com", workspace_name="My WS"
@@ -284,7 +284,7 @@ class TestNotifyNewOwnerBestEffort:
         db.execute = AsyncMock(return_value=email_res)
         svc = MagicMock()
         svc.send_workspace_ownership_transferred = AsyncMock()
-        with patch.object(route_mod, "get_email_service", return_value=svc):
+        with patch("services.ownership_notifications.get_email_service", return_value=svc):
             await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
         svc.send_workspace_ownership_transferred.assert_not_awaited()
 
@@ -293,7 +293,7 @@ class TestNotifyNewOwnerBestEffort:
         # A failing resolution query must NOT propagate (transfer already committed).
         db = MagicMock()
         db.execute = AsyncMock(side_effect=RuntimeError("db down"))
-        with patch.object(route_mod, "get_email_service") as ges:
+        with patch("services.ownership_notifications.get_email_service") as ges:
             await route_mod._notify_new_owner_best_effort(db, WS, TARGET)  # no raise
         ges.assert_not_called()
 
@@ -311,7 +311,7 @@ class TestNotifyNewOwnerBestEffort:
         svc.send_workspace_ownership_transferred = AsyncMock(
             side_effect=RuntimeError("provider down")
         )
-        with patch.object(route_mod, "get_email_service", return_value=svc):
+        with patch("services.ownership_notifications.get_email_service", return_value=svc):
             await route_mod._notify_new_owner_best_effort(db, WS, TARGET)  # no raise
 
     @pytest.mark.asyncio
@@ -324,7 +324,7 @@ class TestNotifyNewOwnerBestEffort:
         db.execute = AsyncMock(side_effect=[email_res, name_res])
         svc = MagicMock()
         svc.send_workspace_ownership_transferred = AsyncMock(return_value=True)
-        with patch.object(route_mod, "get_email_service", return_value=svc):
+        with patch("services.ownership_notifications.get_email_service", return_value=svc):
             await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
         svc.send_workspace_ownership_transferred.assert_awaited_once_with(
             to_email="new@owner.com", workspace_name="your workspace"

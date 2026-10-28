@@ -18,13 +18,16 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Workspace
-from utils.exceptions import NotFoundException
+from utils.exceptions import ConflictError, NotFoundException
 
 
-async def lock_workspace_for_update(db: AsyncSession, workspace_id: UUID) -> Workspace:
+async def lock_workspace_for_update(
+    db: AsyncSession, workspace_id: UUID, *, nowait: bool = False
+) -> Workspace:
     """``SELECT ... FOR UPDATE`` the live (non-soft-deleted) workspace row.
 
     The lock is the single-owner synchronization point: every path that reassigns
@@ -43,21 +46,26 @@ async def lock_workspace_for_update(db: AsyncSession, workspace_id: UUID) -> Wor
     Raises:
         NotFoundException: the workspace is missing or soft-deleted (404).
     """
-    workspace = (
-        await db.execute(
-            select(Workspace)
-            .where(Workspace.id == workspace_id, Workspace.deleted_at.is_(None))
-            .with_for_update()
-            # populate_existing is load-bearing: if the row is ALREADY in this
-            # session's identity map (e.g. account_erasure loaded it with an
-            # unlocked SELECT), a plain re-SELECT returns the cached instance with
-            # its STALE attributes — the FOR UPDATE takes the DB lock but discards
-            # the freshly-read values. populate_existing forces the under-lock row
-            # to overwrite the cached attributes, so callers see committed concurrent
-            # changes (owner_user_id / ownership_epoch) and read-modify-write is safe.
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
+    try:
+        workspace = (
+            await db.execute(
+                select(Workspace)
+                .where(Workspace.id == workspace_id, Workspace.deleted_at.is_(None))
+                .with_for_update(nowait=nowait)
+                # populate_existing is load-bearing: if the row is ALREADY in this
+                # session's identity map (e.g. account_erasure loaded it with an
+                # unlocked SELECT), a plain re-SELECT returns the cached instance with
+                # its STALE attributes — the FOR UPDATE takes the DB lock but discards
+                # the freshly-read values. populate_existing forces the under-lock row
+                # to overwrite the cached attributes, so callers see committed concurrent
+                # changes (owner_user_id / ownership_epoch) and read-modify-write is safe.
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "55P03":
+            raise ConflictError("Workspace is being modified; retry the operation") from exc
+        raise
     if workspace is None:
         raise NotFoundException("Workspace")
     return workspace

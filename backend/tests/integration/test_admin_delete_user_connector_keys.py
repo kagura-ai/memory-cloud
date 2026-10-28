@@ -42,7 +42,7 @@ class TestConnectorKeysSurviveAdminDelete:
 
         world = connector_world
         target = await world.user("target")
-        owner = f"owner_{uuid4().hex[:8]}"
+        owner = await world.user("owner")
         ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
         ws_id = ws.id
         provisioned = await world.connector(ws, by=target)
@@ -84,12 +84,14 @@ class TestConnectorKeysSurviveAdminDelete:
         assert connector.context_id is not None
 
     @pytest.mark.asyncio
-    async def test_a_workspace_the_user_owns_takes_its_connector_key_with_it(
+    async def test_an_owned_workspace_requires_transfer_without_losing_its_key(
         self, db_session: AsyncSession, connector_world
     ):
+        from fastapi import HTTPException
+
         world = connector_world
         target = await world.user("target")
-        member = f"member_{uuid4().hex[:8]}"
+        member = await world.user("member")
         ws = await world.workspace(target, **{member: WorkspaceRole.ADMIN})
         ws_id = ws.id
         key_id = (
@@ -97,14 +99,12 @@ class TestConnectorKeysSurviveAdminDelete:
                 db_session, (await world.connector(ws, by=target)).connector.id
             )
         ).id
-
-        response = await _delete(db_session, target)
-
-        assert response["reowned"] == {"connector_api_keys": 0}
-        assert (
-            await db_session.execute(select(Workspace).where(Workspace.id == ws_id))
-        ).scalar_one_or_none() is None
-        assert await _key_rows(db_session, [key_id]) == {}
+        with pytest.raises(HTTPException) as error:
+            await _delete(db_session, target)
+        assert error.value.status_code == 409
+        await db_session.rollback()
+        assert await db_session.get(Workspace, ws_id) is not None
+        assert key_id in await _key_rows(db_session, [key_id])
 
     @pytest.mark.asyncio
     async def test_keys_in_two_workspaces_go_to_each_workspaces_owner(
@@ -140,7 +140,7 @@ class TestConnectorKeysSurviveAdminDelete:
     ):
         world = connector_world
         target = await world.user("target")
-        owner = f"owner_{uuid4().hex[:8]}"
+        owner = await world.user("owner")
         member = f"member_{uuid4().hex[:8]}"
         ws = await world.workspace(
             owner, **{target: WorkspaceRole.ADMIN, member: WorkspaceRole.ADMIN}

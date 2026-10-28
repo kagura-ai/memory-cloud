@@ -647,19 +647,25 @@ async def test_force_transfer_concurrent_preserves_single_owner(async_engine, db
     session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
     async def _fxfer(target: str) -> str:
-        async with session_maker() as s:
-            await WorkspaceOwnershipService(s).force_transfer_ownership(
-                workspace_id=workspace_id,
-                target_user_id=target,
-                performed_by_user_id="admin_runner",
-                performed_by_email="admin@kagura.invalid",
-                reason="concurrent break-glass",
-            )
-            return "ok"
+        for _attempt in range(3):
+            async with session_maker() as s:
+                try:
+                    await WorkspaceOwnershipService(s).force_transfer_ownership(
+                        workspace_id=workspace_id,
+                        target_user_id=target,
+                        performed_by_user_id="admin_runner",
+                        performed_by_email="admin@kagura.invalid",
+                        reason="concurrent break-glass",
+                    )
+                    return "ok"
+                except ConflictError:
+                    await s.rollback()
+                    await asyncio.sleep(0.01)
+        raise AssertionError("transfer did not succeed after contention cleared")
 
     try:
         statuses = sorted(await asyncio.gather(_fxfer(m1), _fxfer(m2)))
-        assert statuses == ["ok", "ok"]  # force has no current-owner conflict
+        assert statuses == ["ok", "ok"]  # each conflict is retried in a fresh transaction
         async with session_maker() as s:
             ws = (
                 await s.execute(select(Workspace).where(Workspace.id == workspace_id))

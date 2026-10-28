@@ -100,6 +100,46 @@ async def _password_admin(db_session: AsyncSession, world) -> str:
     return admin_id
 
 
+@pytest.mark.asyncio
+async def test_cli_accepts_a_different_successor_for_each_workspace(
+    db_session, connector_world, sole_password_admin, transfer_audits
+):
+    from models.auth import Context
+    from models.resource import WorkspaceConnector
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    first, second = await world.user("first"), await world.user("second")
+    one = await world.workspace(admin_id, **{first: "admin"})
+    two = await world.workspace(admin_id, **{second: "admin"})
+    ids = [one.id, two.id]
+    transfer_audits.extend(ids)
+    connector = (await world.connector(one, by=admin_id)).connector
+    connector_id, context_id = connector.id, connector.context_id
+    await db_session.commit()
+    assert (
+        await delete_admin.delete_password_admin(
+            db_session,
+            transfer_to=None,
+            ask=lambda _: True,
+            workspace_transfers={ids[0]: first, ids[1]: second},
+        )
+        == 0
+    )
+    db_session.expire_all()
+    assert await _owner(db_session, ids[0]) == first
+    assert await _owner(db_session, ids[1]) == second
+    assert (
+        await db_session.scalar(select(Context.created_by).where(Context.id == context_id)) == first
+    )
+    assert (
+        await db_session.scalar(
+            select(WorkspaceConnector.context_id).where(WorkspaceConnector.id == connector_id)
+        )
+        == context_id
+    )
+
+
 async def _exists(db_session: AsyncSession, user_id: str) -> bool:
     row = await db_session.execute(select(User.user_id).where(User.user_id == user_id))
     return row.scalar_one_or_none() is not None
@@ -386,3 +426,35 @@ async def test_a_member_joining_while_the_prompt_waits_stops_the_delete_and_a_re
     assert not await _exists(db_session, admin_id)
     assert await _owner(db_session, shared_id) == target
     assert await _owner(db_session, solo_id) == target
+
+
+@pytest.mark.asyncio
+async def test_cli_notifies_committed_transfer_when_later_successor_has_left(
+    db_session, connector_world, transfer_audits
+):
+    from unittest.mock import AsyncMock, patch
+
+    from utils.exceptions import BadRequestError
+
+    world = connector_world
+    owner = await world.user("owner")
+    target = await world.user("successor")
+    first = await world.workspace(owner, **{target: "admin"})
+    second = await world.workspace(owner)
+    first_id, second_id = first.id, second.id
+    transfer_audits.extend([first_id, second_id])
+    workspaces = [
+        delete_admin._Ws(first.id, first.name),
+        delete_admin._Ws(second.id, second.name),
+    ]
+    await db_session.commit()
+    notified = AsyncMock()
+    with patch("services.ownership_notifications.notify_new_owner_best_effort", notified):
+        with pytest.raises(BadRequestError):
+            await delete_admin._transfer(
+                db_session, workspaces, owner, {first_id: target, second_id: target}
+            )
+    await db_session.rollback()
+    assert await _owner(db_session, first_id) == target
+    assert await _owner(db_session, second_id) == owner
+    notified.assert_awaited_once_with(db_session, first_id, target)

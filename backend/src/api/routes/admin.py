@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +26,6 @@ from models.auth import (
     AuditLog,
     Context,
     ContextMember,
-    OAuth2Client,
     User,
     Workspace,
     WorkspaceMember,
@@ -37,7 +36,6 @@ from models.schemas import (
     UpdateWorkspaceSlotBonusResponse,
     UserWorkspaceInfo,
 )
-from services.connector_key_ownership import reown_connector_keys
 from services.email_service import get_email_service
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
@@ -1002,202 +1000,82 @@ async def update_workspace_slot_bonus(
     )
 
 
+class UserDeleteRequest(BaseModel):
+    """Explicit successors for administrative deletion (#2372).
+
+    Workspace successors also receive contexts created in that workspace;
+    context_transfers overrides that choice for individual contexts.
+    """
+
+    workspace_transfers: dict[UUID, str] = Field(default_factory=dict)
+    context_transfers: dict[UUID, str] = Field(default_factory=dict)
+
+
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: str,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    request: UserDeleteRequest | None = None,
 ):
-    """Delete a user and all their data (Admin-only).
+    """Delete personal data after explicitly transferring ownership (Admin-only).
 
-    Protection:
-    - Cannot delete initial admin (is_initial_admin=True)
-    - Cannot delete last remaining admin
-    - Cannot delete your own account
-
-    Issue #166: System Admin protection
-
-    Deletes memories, API keys (a connector's live write key is handed to its
-    workspace's owner instead, #2352), OAuth2 clients, Qdrant collection, and
-    user account.
+    Returns 409 without modifying data when an owned workspace or created
+    context lacks an eligible successor. Initial/last admin and self-deletion
+    protections remain in force. The transfer and deletion commit together.
     """
+    from services.ownership_notifications import notify_new_owner_best_effort
     from services.system_admin_service import SystemAdminService
+    from services.user_deletion_service import (
+        delete_user_rows,
+        finish_user_deletion,
+        transfer_user_ownership,
+    )
 
     admin_id = get_user_id(admin)
-
-    # Prevent self-deletion
     if admin_id == user_id:
         raise AdminProtectionError("Cannot delete your own account", reason="self_deletion")
-
-    # Issue #166: Check if user is a protected system admin
     service = SystemAdminService(db)
     can_delete, reason = await service.can_delete_admin(user_id)
     if not can_delete:
-        # ``reason`` is the documented governance message (initial/last admin);
-        # the classification is already logged inside can_delete_admin.
         raise AdminProtectionError(reason, reason="admin_protected")
-
-    async with db_transaction(db, "delete_user", "Failed to delete user"):
-        result = await db.execute(select(User).where(User.user_id == user_id))
-        target_user = result.scalar_one_or_none()
-
-        if not target_user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-        # Count data to be deleted — intentionally counts ALL rows including
-        # soft-deleted (deleted_at IS NOT NULL): the user is being hard-deleted
-        # and every owned row is removed. Do NOT add a `deleted_at IS NULL`
-        # filter here (unlike the user-stats counts, which report current
-        # holdings and exclude soft-deleted). See #871.
-        memory_count_result = await db.execute(
-            select(func.count(Memory.id)).where(Memory.user_id == user_id)
+    request = request or UserDeleteRequest()
+    try:
+        transferred = await transfer_user_ownership(
+            db,
+            user_id,
+            workspace_transfers=request.workspace_transfers,
+            context_transfers=request.context_transfers,
+            actor_email=admin.get("email") or "admin@local",
+            actor_user_id=admin_id,
         )
-        memory_count = memory_count_result.scalar() or 0
-
-        # #1784: a private context this user created may hold memories a
-        # linked account wrote. It passes to that account before the contexts
-        # the user still owns are deleted below; the user leaves its link set.
-        from services.identity_link_service import hand_over_private_contexts
-
-        # The user row first, then the link lock inside the hand-over: the
-        # order link() and account erasure use, so the three never deadlock.
-        await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
-        await hand_over_private_contexts(db, user_id)
-
-        # #2352: a connector's live write key this user holds serves the
-        # workspace — hand it to that workspace's owner before the delete below.
-        # Workspaces this user owns are hard-deleted further down with their
-        # keys; the helper's owner guard leaves those rows alone.
-        reowned_connector_keys = await reown_connector_keys(db, user_id)
-
-        # Delete memories and API keys; the keys are counted from the delete
-        # itself, so the re-owned ones are not among them.
-        await db.execute(delete(Memory).where(Memory.user_id == user_id))
-        api_key_count = (
-            cast(
-                CursorResult[Any],
-                await db.execute(delete(APIKey).where(APIKey.user_id == user_id)),
-            ).rowcount
-            or 0
-        )
-
-        # Delete OAuth2 clients owned by the user
-        await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
-
-        # Delete contexts owned by the user. Files bound to those contexts
-        # must be soft-deleted FIRST: file_objects.context_id is ON DELETE
-        # SET NULL, so leaving the rows behind would strip a private
-        # context's ACL and silently widen its files to workspace scope
-        # (any workspace viewer could then download them).
-        #
-        # Lock the target context rows FOR UPDATE while collecting their ids:
-        # an FK insert into file_objects takes a FOR KEY SHARE lock on the
-        # parent context, which conflicts with FOR UPDATE, so a concurrent
-        # reserve/complete against one of these contexts blocks until this
-        # transaction commits (by which point the context is gone and the
-        # insert fails the FK). Without the lock, a file inserted between this
-        # SELECT and the DELETE below would be SET NULL'd and widened.
-        from services.file_storage_service import FileStorageService
-
-        ctx_ids = list(
-            (
-                await db.execute(
-                    select(Context.id).where(Context.created_by == user_id).with_for_update()
-                )
-            )
-            .scalars()
-            .all()
-        )
-        released_by_ws = await FileStorageService(db).purge_files_for_contexts(ctx_ids)
-        # Workspaces owned by the user are hard-deleted below in this same
-        # transaction — only surviving workspaces need the Redis release.
-        owned_ws_ids = set(
-            (await db.execute(select(Workspace.id).where(Workspace.owner_user_id == user_id)))
-            .scalars()
-            .all()
-        )
-        # Delete EXACTLY the contexts we just purged (the FOR UPDATE snapshot),
-        # not a fresh ``created_by == user_id`` predicate. Under READ COMMITTED
-        # the latter would also delete a context the user's own session created
-        # AFTER the snapshot (e.g. in a workspace they only belong to, not own):
-        # its files were never in ``ctx_ids`` so they skipped the purge, and a
-        # ``created_by`` DELETE would SET-NULL their context_id — widening a
-        # private file into a workspace-scoped object downloadable by any viewer,
-        # with its bytes never released. Scoping the DELETE to the purged
-        # snapshot keeps purge-set == delete-set; a context raced in after the
-        # snapshot simply survives with its files intact (created_by is a plain
-        # string, not an FK, so it does not block the user delete) (v0.42 review).
-        if ctx_ids:
-            await db.execute(delete(Context).where(Context.id.in_(ctx_ids)))
-
-        # Remove user from workspace memberships
-        # #687: operation-on-deleted — full user erasure must purge memberships
-        # from soft-deleted workspaces too; otherwise a workspace restore would
-        # resurrect ghost members for an account that no longer exists.
-        await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
-
-        # Issue #1940: an admin delete is the operator's override of the
-        # running-subscription block. Collect what it overrides (soft-deleted
-        # workspaces included — they are hard-deleted below) and log it once
-        # the delete has committed (same event as admin force-erase).
-        from services.billing_contract import owned_workspaces_under_contract
-
-        overridden_ids = [
-            str(ws.id)
-            for ws in await owned_workspaces_under_contract(db, user_id, include_deleted=True)
-        ]
-
-        # Delete workspaces owned by the user
-        # #687: operation-on-deleted — hard-delete cascades over soft-deleted
-        # workspaces; the user is leaving the system entirely, so any workspace
-        # they own (active or soft-deleted) must be removed.
-        await db.execute(delete(Workspace).where(Workspace.owner_user_id == user_id))
-
-        # Note: Qdrant points are automatically cleaned up via context deletion cascade
-        # No need for legacy collection-per-user deletion
-
-        # Delete user
-        await db.delete(target_user)
+        result = await delete_user_rows(db, user_id)
         await db.commit()
-
-        if overridden_ids:
-            logger.warning(
-                "erasure_admin_override_billing_contract",
-                user_id=user_id,
-                admin_id=admin_id,
-                workspace_ids=overridden_ids,
-            )
-
-        # Redis follows the committed DB state (R5): release the purged
-        # files' quota for workspaces that survive this erasure. Fail-open
-        # on Redis errors (release_storage_bytes self-heals on reseed).
-        from services import storage_quota_service
-
-        for ws_id, size_bytes in released_by_ws.items():
-            if ws_id in owned_ws_ids:
-                continue
-            await storage_quota_service.release_storage_bytes(
-                workspace_id=ws_id, size_bytes=size_bytes
-            )
-
-        logger.info(
-            "admin_delete_user",
-            user_id=user_id,
-            email=target_user.email,
-            memories_deleted=memory_count,
-            api_keys_deleted=api_key_count,
-            connector_api_keys_reowned=reowned_connector_keys,
-        )
-
-        return {
-            "message": "User deleted successfully",
-            "user_id": user_id,
-            "deleted": {
-                "memories": memory_count,
-                "api_keys": api_key_count,
-            },
-            "reowned": {"connector_api_keys": reowned_connector_keys},
-        }
+    except DBAPIError as exc:
+        await db.rollback()
+        if getattr(exc.orig, "sqlstate", None) == "55P03":
+            raise HTTPException(409, "Workspace is being modified; retry deletion") from exc
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    await finish_user_deletion(result)
+    for workspace_id, successor in transferred.items():
+        await notify_new_owner_best_effort(db, workspace_id, successor)
+    logger.info(
+        "admin_delete_user",
+        user_id=user_id,
+        memories_deleted=result.memories,
+        api_keys_deleted=result.api_keys,
+        connector_api_keys_reowned=result.connector_api_keys,
+    )
+    return {
+        "message": "User deleted successfully",
+        "user_id": user_id,
+        "deleted": {"memories": result.memories, "api_keys": result.api_keys},
+        "reowned": {"connector_api_keys": result.connector_api_keys},
+        "transferred_workspaces": {str(k): v for k, v in transferred.items()},
+    }
 
 
 # ============================================================================

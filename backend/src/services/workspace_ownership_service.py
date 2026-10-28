@@ -93,6 +93,30 @@ class WorkspaceOwnershipService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def _lock_transfer_workspace(self, workspace_id: UUID, target_user_id: str) -> Workspace:
+        """Fence target deletion before acquiring the workspace without waiting."""
+        owner = await self.db.scalar(
+            select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
+        )
+        users = set(
+            (
+                await self.db.execute(
+                    select(User.user_id)
+                    .where(User.user_id.in_({owner, target_user_id}))
+                    .order_by(User.user_id)
+                    .with_for_update(read=True, key_share=True)
+                )
+            ).scalars()
+        )
+        if target_user_id not in users:
+            raise BadRequestError("Target user no longer exists", error_code="WS-OWNER-002")
+        # An enclosing deletion can already hold exclusive User locks. Do not
+        # wait for a workspace soft-delete that may be clearing user preferences.
+        workspace = await lock_workspace_for_update(self.db, workspace_id, nowait=True)
+        if workspace.owner_user_id != owner:
+            raise ConflictError("Workspace ownership changed concurrently; reload and retry")
+        return workspace
+
     async def transfer_ownership(
         self,
         *,
@@ -100,6 +124,8 @@ class WorkspaceOwnershipService:
         current_owner_id: str,
         target_user_id: str,
         performed_by_email: str,
+        commit: bool = True,
+        performed_by_user_id: str | None = None,
     ) -> OwnershipTransferResult:
         """Transfer ownership of ``workspace_id`` to ``target_user_id``.
 
@@ -124,6 +150,7 @@ class WorkspaceOwnershipService:
             current_owner_id: The authenticated caller (must currently own it).
             target_user_id: The member to promote to owner.
             performed_by_email: Email of the actor, for the audit row.
+            commit: False when a caller commits transfer with a larger operation.
 
         Returns:
             The transfer outcome (``changed=False`` for the idempotent no-op).
@@ -133,10 +160,10 @@ class WorkspaceOwnershipService:
             ConflictError: ownership changed concurrently (409).
             BadRequestError: target is not a member of this workspace (400).
         """
-        # 1. Lock the workspace row first — the single-owner synchronization point,
+        # 1. Fence account deletion, then take the workspace synchronization point,
         # shared with update_member_role + account_erasure via lock_workspace_for_update
         # (#1102) so every owner-mutating path serializes on the same row.
-        workspace = await lock_workspace_for_update(self.db, workspace_id)
+        workspace = await self._lock_transfer_workspace(workspace_id, target_user_id)
 
         # 2. TOCTOU close: the route's owner check ran before this lock. If the
         # owner changed in between, refuse rather than transfer on a stale premise.
@@ -207,7 +234,7 @@ class WorkspaceOwnershipService:
         self.db.add(
             AuditLog(
                 user_email=performed_by_email,
-                user_id=current_owner_id,
+                user_id=performed_by_user_id or current_owner_id,
                 action=OWNERSHIP_TRANSFER_ACTION,
                 resource=f"workspace:{workspace_id}",
                 user_metadata={
@@ -217,7 +244,10 @@ class WorkspaceOwnershipService:
                 },
             )
         )
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
 
         logger.info(
             "workspace_ownership_transferred",
@@ -276,10 +306,10 @@ class WorkspaceOwnershipService:
             NotFoundException: workspace missing or soft-deleted (404).
             BadRequestError: the target user does not exist (400, WS-OWNER-002).
         """
-        # 1. Lock the workspace row — the shared single-owner synchronization point
+        # 1. Fence account deletion, then take the shared workspace synchronization point
         # (#1102): break-glass serializes with the voluntary transfer, role change,
         # and erasure auto-transfer on the SAME FOR UPDATE row.
-        workspace = await lock_workspace_for_update(self.db, workspace_id)
+        workspace = await self._lock_transfer_workspace(workspace_id, target_user_id)
 
         # 2. Single-control path (#1101): apply the seizure on the locked row and
         # commit. The shared core (_apply_force_transfer) stages the swap + epoch
@@ -599,7 +629,9 @@ class WorkspaceOwnershipService:
 
         # Lock the workspace — the shared serialization point that every owner- and
         # request-mutating path takes (approve, cancel, initiate-supersede).
-        workspace = await lock_workspace_for_update(self.db, request.workspace_id)
+        workspace = await self._lock_transfer_workspace(
+            request.workspace_id, request.target_user_id
+        )
 
         # Re-validate the request status UNDER the lock to close the TOCTOU between
         # the pre-lock read above and here: a concurrent cancel or initiate-

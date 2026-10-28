@@ -41,8 +41,8 @@ class TestConnectorKeysSurviveMemberRemoval:
         from services.connector_provisioning import ConnectorProvisioningService
 
         world = connector_world
-        target = f"target_{uuid4().hex[:8]}"
-        owner = f"owner_{uuid4().hex[:8]}"
+        target = await world.user("target")
+        owner = await world.user("owner")
         ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
         ws_id = ws.id
 
@@ -100,8 +100,8 @@ class TestConnectorKeysSurviveMemberRemoval:
         self, db_session: AsyncSession, connector_world
     ):
         world = connector_world
-        target = f"target_{uuid4().hex[:8]}"
-        owner = f"owner_{uuid4().hex[:8]}"
+        target = await world.user("target")
+        owner = await world.user("owner")
         member = f"member_{uuid4().hex[:8]}"
         ws = await world.workspace(
             owner, **{target: WorkspaceRole.ADMIN, member: WorkspaceRole.ADMIN}
@@ -134,7 +134,7 @@ class TestConnectorKeysSurviveMemberRemoval:
         self, db_session: AsyncSession, connector_world
     ):
         world = connector_world
-        target = f"target_{uuid4().hex[:8]}"
+        target = await world.user("target")
         owner_1 = f"owner1_{uuid4().hex[:8]}"
         owner_2 = f"owner2_{uuid4().hex[:8]}"
         ws_1 = await world.workspace(owner_1, **{target: WorkspaceRole.ADMIN})
@@ -165,8 +165,8 @@ class TestConnectorKeysSurviveMemberRemoval:
         self, db_session: AsyncSession, connector_world
     ):
         world = connector_world
-        target = f"target_{uuid4().hex[:8]}"
-        owner = f"owner_{uuid4().hex[:8]}"
+        target = await world.user("target")
+        owner = await world.user("owner")
         ws = await world.workspace(owner, **{target: WorkspaceRole.ADMIN})
         ws_id = ws.id
         provisioned = await world.connector(ws, by=target)
@@ -189,7 +189,7 @@ class TestConnectorKeysSurviveMemberRemoval:
         self, db_session: AsyncSession, connector_world
     ):
         world = connector_world
-        owner = f"owner_{uuid4().hex[:8]}"
+        owner = await world.user("owner")
         member = f"member_{uuid4().hex[:8]}"
         ws = await world.workspace(owner, **{member: WorkspaceRole.ADMIN})
         ws_id = ws.id

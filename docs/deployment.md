@@ -999,17 +999,42 @@ Settings** if a notice arrives that you did not expect. A password reset signs
 the account out everywhere but does not remove its links; the reset notice
 says how many accounts are linked to it, so the owner can review them.
 
-Erasing an account, or deleting a user from the admin API, takes it out of
-its link set. A private context it created passes to a linked account that
-wrote memories there and could own it as a linked account (a workspace owner
-or admin, or a member whose `allowed_context_ids` names it), so what that
-account wrote stays readable. The leaving account's own memories in that
-context are deleted. A context no linked account wrote in is handled as for
-any erased or deleted account. The `delete_admin` command hands over or
-deletes the admin's workspaces (#2371) and removes its keys, memberships, user
-row and link, but does not hand over private contexts; the other accounts'
-rows record who made the link
-(`linked_by`), and that becomes empty when the account is gone (#1807).
+Erasing an account takes it out of its link set. A private context it created
+passes to an eligible linked contributor, so that contributor's memories stay
+readable. The leaving account's own memories in that context are deleted.
+The `delete_admin` CLI uses the same handover and file cleanup as administrative
+user deletion. Remaining contexts in surviving workspaces pass to their live
+workspace owner; sole-owned workspaces are deleted. Shared workspace transfers
+commit before final CLI cleanup, so if cleanup fails, inspect the printed
+transfers before retrying.
+
+Administrative `DELETE /api/v1/admin/users/{user_id}` requires explicit
+successors for every owned workspace and created context, including deleted
+contexts. With no selection it returns `409` and the missing `workspace_ids`
+and `context_ids`; the user and their data remain intact. Send this JSON body:
+
+```json
+{
+  "workspace_transfers": {"WORKSPACE_UUID": "SUCCESSOR_USER_ID"},
+  "context_transfers": {"CONTEXT_UUID": "SUCCESSOR_USER_ID"}
+}
+```
+
+A workspace selection also supplies its contexts' default successor; a
+context selection overrides it. Workspace successors must already be members.
+Context successors must be non-viewer members with access to that context,
+or be becoming its workspace owner in the same request. All API transfers,
+cleanup and transfer audit records commit together; notification email follows
+commit. Existing connector context bindings and other authors' memories survive.
+A soft-deleted owned workspace must first be restored and transferred separately.
+Concurrent ownership changes return `409`; refresh the selections and retry.
+
+The admin users screen currently sends a bodyless DELETE. Use the API for
+successor selections when retiring an account with owned resources. API user
+deletion and the CLI both remove the account's OAuth clients, personal memories,
+keys and memberships, preserve live connector keys under the workspace owner,
+and remove its identity link. Link provenance (`linked_by`) becomes empty when
+the account is gone (#1807).
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
 /api/v1/me/account/identity-links`, `POST

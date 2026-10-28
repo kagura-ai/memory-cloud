@@ -195,6 +195,16 @@ class ContextService:
             FeatureNotAvailableError: If the workspace plan does not carry
                 ``shared_contexts`` and ``is_private`` is False (#1644 S11)
         """
+        # Fence administrative deletion/erasure before any context or workspace lock.
+        if created_by:
+            live_creator = await self.db.scalar(
+                select(User.user_id)
+                .where(User.user_id == created_by)
+                .with_for_update(read=True, key_share=True)
+            )
+            if live_creator is None:
+                raise ValidationError("Context creator no longer exists")
+
         # Get workspace for validation
         from models.auth import Workspace, WorkspaceMember
 
@@ -2293,7 +2303,9 @@ class ContextService:
         """
 
         # Get user info
-        result = await self.db.execute(select(User).where(User.user_id == user_id))
+        result = await self.db.execute(
+            select(User).where(User.user_id == user_id).with_for_update()
+        )
         user = result.scalar_one_or_none()
 
         if not user:

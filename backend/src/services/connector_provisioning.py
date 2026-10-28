@@ -751,7 +751,9 @@ class ConnectorProvisioningService:
         ).scalar_one()
         locked = (
             await self.db.execute(
-                select(User.user_id).where(User.user_id == owner_user_id).with_for_update(read=True)
+                select(User.user_id)
+                .where(User.user_id == owner_user_id)
+                .with_for_update(read=True, key_share=True)
             )
         ).first()
         if locked is None:
@@ -1446,6 +1448,41 @@ class ConnectorProvisioningService:
                 "Connector has no KMC write key; register with a write-target context first"
             )
 
+        # #2370: lock candidate users BEFORE api_keys. Every deletion/member
+        # removal takes the departing user's exclusive lock before re-owning.
+        # A rotation therefore finishes before that sweep or observes its new
+        # owner afterwards; it cannot mint into the re-own/delete gap.
+        from models.auth import User
+
+        candidate = (
+            await self.db.execute(
+                select(APIKey.user_id).where(
+                    APIKey.key_hash == sha256_hex(current_key),
+                    APIKey.workspace_id == workspace_id,
+                )
+            )
+        ).scalar_one_or_none()
+        workspace_owner = (
+            await self.db.execute(
+                select(Workspace.owner_user_id).where(
+                    Workspace.id == workspace_id,
+                )
+            )
+        ).scalar_one()
+        candidate_users = {workspace_owner}
+        if candidate is not None:
+            candidate_users.add(candidate)
+        locked_users = set(
+            (
+                await self.db.execute(
+                    select(User.user_id)
+                    .where(User.user_id.in_(candidate_users))
+                    .order_by(User.user_id)
+                    .with_for_update(read=True, key_share=True)
+                )
+            ).scalars()
+        )
+
         # Locate the exact active APIKey row backing the stored key (matched by
         # key_hash, NOT name — create_key only enforces name uniqueness per
         # (user_id, workspace_id), so a name match could hit an unrelated user's
@@ -1516,7 +1553,7 @@ class ConnectorProvisioningService:
                     "Connector's stored KMC key matches no active API key; "
                     "re-register the connector to mint a fresh key"
                 )
-            owner_user_id = await self._live_workspace_owner(workspace_id)
+            owner_user_id = await self._locked_rotation_owner(workspace_id, locked_users)
             event = "connector_kmc_key_healed"
         else:
             # #2305 review: a key owner who is no longer a member (removed, or
@@ -1531,11 +1568,11 @@ class ConnectorProvisioningService:
                     )
                 )
             ).first()
-            if still_member is not None:
+            if still_member is not None and old_key.user_id in locked_users:
                 owner_user_id = old_key.user_id
                 event = "connector_kmc_key_rotated"
             else:
-                owner_user_id = await self._live_workspace_owner(workspace_id)
+                owner_user_id = await self._locked_rotation_owner(workspace_id, locked_users)
                 event = "connector_kmc_key_reowned_on_rotate"
             # Revoke the old key immediately — no grace period for v1. Operators
             # should schedule rotation during a maintenance window or worker pause.
@@ -1572,6 +1609,21 @@ class ConnectorProvisioningService:
             key_owner_user_id=owner_user_id,
             key_name=new_key_row.name,
         )
+
+    async def _locked_rotation_owner(self, workspace_id: UUID, locked_users: set[str]) -> str:
+        """Re-read the fallback owner without taking a user lock after key locks."""
+        owner = (
+            await self.db.execute(
+                select(Workspace.owner_user_id).where(
+                    Workspace.id == workspace_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if owner is None or owner not in locked_users:
+            raise ValidationError(
+                "Workspace ownership changed or owner is being erased; retry the rotation"
+            )
+        return owner
 
     async def _get_connector_for_resource(
         self,

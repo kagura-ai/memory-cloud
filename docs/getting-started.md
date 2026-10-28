@@ -108,9 +108,12 @@ python -m src.cli.reset_password
 # Delete admin (for re-creation). When other users exist, a workspace the admin
 # owns that they are in needs --transfer-to (one of its members) to take it
 # over; without it the command lists them and stops. A workspace only the
-# admin is in is deleted with it (#2371). The new owner is not emailed.
+# admin is in is deleted with it (#2371). Surviving contexts pass to a linked
+# contributor or their workspace owner. Ownership notifications follow commit.
+# --workspace-transfer overrides --transfer-to for an individual workspace;
+# repeat it when different workspaces have different successors.
 # --yes skips the confirmation prompt.
-python -m src.cli.delete_admin [--transfer-to USER_ID_OR_EMAIL] [--yes]
+python -m src.cli.delete_admin [--transfer-to USER_ID_OR_EMAIL] [--workspace-transfer WORKSPACE_UUID=USER_ID_OR_EMAIL] [--yes]
 ```
 
 > **Note**: Docker API container must be running. CLI reads `API_KEY_SECRET` from it.

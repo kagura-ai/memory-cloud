@@ -93,6 +93,13 @@ class WorkspaceService:
             - User can add API key later in External Keys settings
         """
         # Create workspace
+        from models.auth import User
+
+        live_owner = await self.db.scalar(
+            select(User.user_id).where(User.user_id == owner_user_id).with_for_update()
+        )
+        if live_owner is None:
+            raise ValidationError("Workspace owner no longer exists")
         workspace = Workspace(
             name=name,
             owner_user_id=owner_user_id,
@@ -942,6 +949,14 @@ class WorkspaceService:
         Raises:
             ValidationError: If trying to remove owner or role changed during operation
         """
+        # #2370: serialize with erasure/admin deletion and rotation before
+        # locking memberships or keys. Avoid member -> keys -> user versus
+        # erasure's user -> keys -> member crossing.
+        from models.auth import User
+        from services.identity_link_service import lock_identity_links
+
+        await self.db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
+        await lock_identity_links(self.db)
         # Issue #275 High: SELECT FOR UPDATE to prevent concurrent deletion
         member = await self.get_member(workspace_id, user_id, with_lock=True)
 
