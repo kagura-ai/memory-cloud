@@ -1140,7 +1140,7 @@
     "noContextsFound": "コンテキストが見つかりません。最初のコンテキストを作成して開始しましょう。",
     "privateContext": "プライベートコンテキスト",
     "sharedContext": "共有コンテキスト",
-    "othersPrivate": "その他 ({count} プライベート)",
+    "othersPrivate": "アクセスできないコンテキスト ({count})",
     "hidden": "非表示",
     "notAvailable": "なし",
     "failedToLoadStats": "統計の読み込みに失敗しました",

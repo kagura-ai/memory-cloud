@@ -32,6 +32,8 @@ A **Workspace** is the top-level organizational unit — think of it as a team o
 
 On top of the list, a private context stays open only to its creator, and a viewer only reads. Every context path applies the list — memory reads and writes, memory ids, context settings, files and listings — and a context outside it answers like one that does not exist. The list is kept when the member's role changes; a member without a list who becomes a viewer gets `[]`. A file uploaded without a context belongs to the workspace and stays visible to every member. The views that name no context follow the list too (#2325): `GET /api/v1/memory/list`, `/memory/stats` and `/memory/access-patterns` without `context_id` cover the caller's own memories in the contexts it reaches (a workspace-scoped API key: in its workspace), and the workspace totals (`GET /api/v1/workspaces/{id}/stats`, `/memory-timeline` without `context_id`) add up every context for an owner or admin and, for a member, the contexts it can open — as `/contexts/stats` does. The workspace card's `context_count` next to `max_contexts` stays the workspace-wide figure.
 
+The dashboard (`GET /api/v1/workspace/stats`) uses the authenticated request's workspace; a workspace-scoped API key cannot read the account's separately selected workspace. It names contexts, their creators and their searchability/erasure health only when the caller can open them. A member without a plan seat sees no such details until the seat is restored. Workspace-wide quota totals remain visible; the "Not accessible" row combines contexts hidden by privacy, the member's context access list or loss of a seat.
+
 ## Context
 
 A **Context** is a namespace for organizing memories — like a folder for your AI's knowledge.

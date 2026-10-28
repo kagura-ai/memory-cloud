@@ -1018,15 +1018,15 @@ class TestTheReadPathsWidenToTheLinkSetOnlyAsAMember:
 class TestALinkNeverCrossesWorkspaces:
     @pytest.mark.asyncio
     async def test_the_unscoped_memory_list_stays_the_callers_own(self, db_session):
-        """``GET /memory/list`` with no context has no workspace predicate:
-        widening it would hand over the linked account's memories from
-        workspaces the caller is not a member of."""
+        """Both accounts reach this workspace, but a context-less view remains
+        the caller's own rows: an identity link does not widen the author filter."""
         from api.routes.memory import list_memories
 
         admin, oauth = await _user(db_session), await _user(db_session)
-        elsewhere = await _workspace(db_session, admin)
+        elsewhere = await _workspace(db_session, admin, oauth)
         context = await _private_context(db_session, elsewhere, admin)
         theirs = await _memory(db_session, context, admin)
+        mine = await _memory(db_session, context, oauth)
         await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
 
         listed = await list_memories(
@@ -1050,6 +1050,7 @@ class TestALinkNeverCrossesWorkspaces:
         )
 
         ids = {str(m.id) for m in listed.memories}
+        assert ids == {str(mine.id)}
         assert str(theirs.id) not in ids
 
     @pytest.mark.asyncio
@@ -1057,16 +1058,17 @@ class TestALinkNeverCrossesWorkspaces:
         from services.memory_service import MemoryService
 
         admin, oauth = await _user(db_session), await _user(db_session)
-        elsewhere = await _workspace(db_session, admin)
+        elsewhere = await _workspace(db_session, admin, oauth)
         context = await _private_context(db_session, elsewhere, admin)
         await _memory(db_session, context, admin)
+        await _memory(db_session, context, oauth)
         await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
 
         stats = await MemoryService(db_session).get_stats(
             user_id=oauth.user_id, include_details=False
         )
 
-        assert stats.total_count == 0
+        assert stats.total_count == 1
 
 
 class TestErasingOneLinkedAccount:

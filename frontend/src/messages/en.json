@@ -1141,7 +1141,7 @@
     "noContextsFound": "No contexts found. Create your first context to get started.",
     "privateContext": "Private context",
     "sharedContext": "Shared context",
-    "othersPrivate": "Others ({count} private)",
+    "othersPrivate": "Not accessible ({count})",
     "hidden": "Hidden",
     "notAvailable": "N/A",
     "failedToLoadStats": "Failed to load statistics",

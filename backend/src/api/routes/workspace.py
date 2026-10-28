@@ -53,7 +53,7 @@ router = APIRouter(prefix="/workspace", tags=["workspace"])
 
 
 class PrivateContextAggregation(BaseModel):
-    """Aggregated statistics for inaccessible private contexts.
+    """Aggregated statistics for contexts the caller cannot open.
 
     Single Collection Migration: storage_mb removed (memory count only).
     """
@@ -92,7 +92,9 @@ class WorkspaceStatsResponse(BaseModel):
     total_memories: int  # ALL contexts (for rate limit purposes)
     context_count: int  # ALL contexts
     contexts: list[ContextStats]  # Only accessible contexts
-    private_aggregation: PrivateContextAggregation | None = None  # Inaccessible private contexts
+    private_aggregation: PrivateContextAggregation | None = (
+        None  # Inaccessible contexts (privacy or reach)
+    )
     plan_name: str  # Issue #149: Plan tier display
     # #1496: totals across the contexts this caller can see. Additive with
     # defaults so an older frontend is unaffected.
@@ -139,10 +141,13 @@ async def get_workspace_stats(
         raise AuthenticationError("User ID not found in session")
 
     try:
-        # Issue #65: Single JOIN replaces 2 sequential queries
+        # The authenticated request selects the workspace. A scoped key must
+        # not inherit the account's dashboard selection (#963, #2325).
+        workspace_id = user.get("api_key_workspace_id") or user.get("current_workspace_id")
+        # Keep the stored selection for legacy principals without this field.
         user_workspace_result = await db.execute(
             select(User, Workspace)
-            .join(Workspace, User.current_workspace_id == Workspace.id)
+            .join(Workspace, Workspace.id == (workspace_id or User.current_workspace_id))
             .where(User.user_id == user_id)
         )
         row = user_workspace_result.one_or_none()
@@ -155,13 +160,11 @@ async def get_workspace_stats(
                 plan_name="free",
             )
 
-        db_user, workspace = row
+        _, workspace = row
 
         contexts_result = await db.execute(
             select(Context)
-            .where(
-                Context.workspace_id == db_user.current_workspace_id, Context.deleted_at.is_(None)
-            )
+            .where(Context.workspace_id == workspace.id, Context.deleted_at.is_(None))
             .order_by(Context.created_at)
         )
         contexts_list = contexts_result.scalars().all()
@@ -277,7 +280,7 @@ async def get_workspace_stats(
                 total_stalled += stalled
                 total_erased += erased_by_context.get(str(context.id), 0)
             else:
-                # Aggregate inaccessible private contexts
+                # Aggregate contexts excluded by privacy or reach
                 inaccessible_count += 1
                 inaccessible_memories += memory_count
 

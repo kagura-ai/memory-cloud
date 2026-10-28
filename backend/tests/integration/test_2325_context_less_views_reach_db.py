@@ -16,11 +16,14 @@ The World and the ``_reach`` oracle are ``test_member_context_access_db``'s.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import IdentityLink, Workspace
+from config.constants import MAX_EMBEDDING_RETRIES
+from models.auth import IdentityLink, Workspace, WorkspaceMember
+from models.memory import Memory
 from tests.integration import test_member_context_access_db as mca
+from utils.datetime import utcnow
 
 # The World fixtures, re-exported for this module's tests.
 world = mca.world
@@ -194,6 +197,7 @@ async def test_dashboard_hides_context_names_until_a_member_regains_a_seat(live,
     same names without changing the member's context access list.
     """
     w: mca.World = live
+    await _seed_unhealthy_memories(w)
     async with mca._rest(w, caller) as c:
         before = await c.get("/api/v1/workspace/stats")
     assert before.status_code == 200, before.text
@@ -229,3 +233,93 @@ async def test_dashboard_hides_context_names_until_a_member_regains_a_seat(live,
         restored = await c.get("/api/v1/workspace/stats")
     assert restored.status_code == 200, restored.text
     assert restored.json()["contexts"] == before.json()["contexts"]
+
+
+async def _seed_unhealthy_memories(w: mca.World) -> None:
+    """Both reached A and unreached B have a failed/stalled memory; B has an erased one."""
+    await w.session.execute(
+        update(Memory)
+        .where(Memory.id.in_([w.mem["A"], w.mem["B"]]))
+        .values(embedding_status="failed", embedding_retry_count=MAX_EMBEDDING_RETRIES)
+    )
+    await w.session.execute(
+        update(Memory).where(Memory.id == w.mem["B_pin"]).values(embedding_suppressed_at=utcnow())
+    )
+    await w.session.commit()
+
+
+async def test_dashboard_scoped_key_uses_its_own_workspace(live) -> None:
+    """A key for X must not disclose the user's selected workspace W."""
+    w: mca.World = live
+    w.session.add(
+        WorkspaceMember(workspace_id=w.ws["x"], user_id=w.u["owner"], role=WorkspaceRole.ADMIN)
+    )
+    x_context = await w.session.get(mca.Context, w.ctx["X"])
+    assert x_context is not None
+    x_context.is_private = False
+    x_memory = mca._memory(w.ws["x"], w.ctx["X"], w.u["outsider"], "Scoped key target")
+    x_memory.embedding_status = "failed"
+    x_memory.embedding_retry_count = MAX_EMBEDDING_RETRIES
+    w.session.add(x_memory)
+    await _seed_unhealthy_memories(w)
+
+    async with mca._rest(w, "owner") as c:
+        session_stats = await c.get("/api/v1/workspace/stats")
+    assert session_stats.status_code == 200, session_stats.text
+    assert session_stats.json()["context_count"] == len(mca.CONTEXTS)
+    assert session_stats.json()["unsearchable_memories"] == 2
+
+    async with mca._rest(w, "owner", api_key_workspace_id=w.ws["x"]) as c:
+        scoped_stats = await c.get("/api/v1/workspace/stats")
+    assert scoped_stats.status_code == 200, scoped_stats.text
+    body = scoped_stats.json()
+    assert {row["context_id"] for row in body["contexts"]} == {str(w.ctx["X"])}
+    assert body["contexts"][0]["created_by"] == w.u["outsider"]
+    assert body["context_count"] == body["total_memories"] == 1
+    assert body["unsearchable_memories"] == body["stalled_memories"] == 1
+    assert body["erased_memories"] == 0
+    assert body["private_aggregation"] is None
+
+
+@pytest.mark.parametrize(
+    ("caller", "unsearchable", "erased"), [("mA", 1, 0), ("owner", 2, 1), ("m_empty", 0, 0)]
+)
+async def test_dashboard_health_counts_only_reached_contexts(
+    live, caller, unsearchable, erased
+) -> None:
+    w: mca.World = live
+    await _seed_unhealthy_memories(w)
+    async with mca._rest(w, caller) as c:
+        response = await c.get("/api/v1/workspace/stats")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["unsearchable_memories"] == unsearchable
+    assert body["stalled_memories"] == unsearchable
+    assert body["erased_memories"] == erased
+    assert sum(row["unsearchable_count"] for row in body["contexts"]) == unsearchable
+    assert sum(row["stalled_count"] for row in body["contexts"]) == unsearchable
+    assert sum(row["erased_count"] for row in body["contexts"]) == erased
+
+
+@pytest.mark.parametrize("caller", ["admin", "mA", "v_null"])
+async def test_context_less_own_views_follow_real_plan_seats(live, caller) -> None:
+    w: mca.World = live
+    mine = mca._memory(w.ws["w"], w.ctx["A"], w.u[caller], "Own reachable memory")
+    w.session.add(mine)
+    await w.session.commit()
+    before = await _own_views(w, caller)
+    assert str(mine.id) in before[0]
+    assert before[1] == before[2] == len(before[0]) > 0
+    owner_before = await _own_views(w, "owner")
+    assert owner_before[0]
+
+    workspace = await w.session.get(Workspace, w.ws["w"])
+    assert workspace is not None
+    workspace.plan_name = "free"
+    await w.session.commit()
+    assert await _own_views(w, caller) == (set(), 0, 0)
+    assert await _own_views(w, "owner") == owner_before
+
+    workspace.plan_name = "pro"
+    await w.session.commit()
+    assert await _own_views(w, caller) == before
