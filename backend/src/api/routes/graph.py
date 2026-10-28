@@ -495,7 +495,10 @@ async def create_graph_edge(
     A01). Both endpoints must be live memories in the resolved (workspace,
     context) — a missing/out-of-scope/deleted endpoint is a 404, which also
     closes the edge write-time invariant the ``/graph`` read paths defend
-    against.
+    against. A ``supersedes`` edge additionally needs both memories to be the
+    caller's own — in a private context, a linked account's too (#1803 /
+    #2313, the rule ``remember(supersedes=)`` and the supersede accept apply):
+    otherwise 403 ``AUTH-101`` and nothing is written.
 
     Status: 201 when a new edge is created; 200 for updated / unchanged; 409
     when a differing declared edge already exists (unless ``overwrite=true``).

@@ -557,7 +557,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "the source lives (delete_edge, outside the core profile — "
         'describe_tools(["delete_edge"]) has its schema — restores it); to accept a '
         "supersede_candidate, source_id = the memory carrying it and target_id = "
-        "supersede_candidate.memory_id (the server then clears the suggestion). "
+        "supersede_candidate.memory_id (the server then clears the suggestion). A "
+        "'supersedes' edge takes only your own memories at both ends (in a private "
+        "context, a linked account's too; #1803 / #2313) — with another member's at "
+        "either end: permission_denied, nothing written. update_edge, outside the core "
+        'profile (describe_tools(["update_edge"]) has its schema), applies the same '
+        "rule to an edge that is or becomes 'supersedes'. "
         "'related_to' — a plain link. 'depends_on' — target depends on source. "
         "'learned_from' — knowledge derived from source. 'contradicts' — both sides "
         "stay visible, annotated, never hidden. 'continues_from' / 'references_file' — "

@@ -165,7 +165,9 @@ version (the truth is gone) or keep returning it (the truth is buried). Since
   the superseding memory) restores full visibility. Create it by storing the
   updated fact with `remember(..., supersedes=<old_memory_id>)`, by accepting
   a `supersede_candidate` with `update_memory(accept_supersede_candidate=true)`,
-  or explicitly with `create_edge(edge_type="supersedes")`. Without an edge, a
+  or explicitly with `create_edge(edge_type="supersedes")` — each takes only
+  your own memories at both ends (in a private context, a linked account's
+  too; #1803, #2313). Without an edge, a
   judge-verified `supersede_candidate` folds the older version under the newer
   one in recall (`folded`, #2123) — the same effect, reversible, and off
   under `include_superseded=true`.

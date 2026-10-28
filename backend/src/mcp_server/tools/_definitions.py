@@ -703,7 +703,7 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
         },
         {
             "name": "create_edge",
-            "description": """Link two memories by MEMORY id. 'supersedes': source = the newer, target = the outdated one, shadowed out of default recall; accepts any supersede_candidate. 'related_to' (default): a plain link. A declared pair with other values → edge_exists unless overwrite=true.
+            "description": """Link two memories by MEMORY id. 'supersedes': source = the newer, target = the outdated one, shadowed out of default recall; accepts a supersede_candidate; both memories must be your own (permission_denied otherwise). 'related_to' (default): a plain link. A declared pair with other values → edge_exists unless overwrite=true.
 Returns: {status, operation, edge, previous?}. Manual: guide(["create_edge"]).""",
             "inputSchema": {
                 "type": "object",
@@ -759,7 +759,7 @@ Returns: {status, operation, edge, previous?}. Manual: guide(["create_edge"]).""
         },
         {
             "name": "update_edge",
-            "description": """Change an existing edge's weight and/or type (any create_edge edge_type is valid). Identify the edge by source_id + target_id (from list_edges or explore); provide at least one of weight or edge_type.
+            "description": """Change an existing edge's weight and/or type (any create_edge edge_type is valid). Identify the edge by source_id + target_id (from list_edges or explore); provide at least one of weight or edge_type. An edge that is or becomes 'supersedes' needs both memories to be your own (permission_denied otherwise).
 
 Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}}.""",
             "inputSchema": {
