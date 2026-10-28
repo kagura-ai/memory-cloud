@@ -47,7 +47,10 @@ export function userDeleteFailure(error: unknown): UserDeleteFailure {
       };
     }
   }
-  return error.message
+  // Only a refusal (4xx) carries a reason worth showing; a 5xx or a dropped
+  // connection gets the generic message.
+  const refused = error.status >= 400 && error.status < 500;
+  return refused && error.message && error.message !== "Request failed"
     ? { kind: "message", message: error.message }
     : { kind: "unknown" };
 }

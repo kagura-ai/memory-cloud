@@ -520,16 +520,7 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     from services.erasure_details import locked_ids
 
     await lock_identity_links(db)
-    link_rows = list(
-        (
-            await db.execute(
-                select(IdentityLink).where(IdentityLink.user_id.in_(linked_ids_subquery(user_id)))
-            )
-        )
-        .scalars()
-        .all()
-    )
-    others = sorted(row.user_id for row in link_rows if row.user_id != user_id)
+    link_rows, others = await _link_set(db, user_id)
     handed_over: list[uuid.UUID] = []
     if others:
         # Every context the subject created, locked in id order before any
@@ -639,20 +630,26 @@ async def private_context_takeovers(
     return takeovers
 
 
+async def _link_set(db: AsyncSession, user_id: str) -> tuple[list[IdentityLink], list[str]]:
+    """The rows of ``user_id``'s link set and, sorted, the other accounts in it
+    — the one definition the hand-over and its prediction share."""
+    link_rows = list(
+        (
+            await db.execute(
+                select(IdentityLink).where(IdentityLink.user_id.in_(linked_ids_subquery(user_id)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return link_rows, sorted(row.user_id for row in link_rows if row.user_id != user_id)
+
+
 async def predict_private_context_takeovers(
     db: AsyncSession, user_id: str, contexts: list[Any]
 ) -> dict[uuid.UUID, str]:
     """What ``hand_over_private_contexts`` would do with ``contexts`` (the
     subject's created contexts, locked by the caller), without writing. Call
     it under ``lock_identity_links`` so the link set cannot change in between."""
-    others = sorted(
-        (
-            await db.execute(
-                select(IdentityLink.user_id).where(
-                    IdentityLink.user_id.in_(linked_ids_subquery(user_id)),
-                    IdentityLink.user_id != user_id,
-                )
-            )
-        ).scalars()
-    )
+    _, others = await _link_set(db, user_id)
     return await private_context_takeovers(db, contexts, others)

@@ -465,7 +465,9 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
     db_session: AsyncSession, connector_world, sole_password_admin
 ) -> None:
     """#2417: the CLI says a soft-deleted workspace is left as it is — its
-    shared contexts and other authors' memories too (#2406 picks them up)."""
+    shared contexts and other authors' memories too (#2406 picks them up). A
+    private context of the admin's own still goes with the admin: nobody
+    could read it once its creator is gone."""
     from models.auth import Context
     from models.memory import Memory
 
@@ -500,12 +502,11 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
 
     assert not await _exists(db_session, admin_id)
     assert await db_session.get(Workspace, gone_id) is not None
-    for ctx_id in (kept_id, mine_id):
-        assert (
-            await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id))
-            == admin_id
-        )
+    assert (
+        await db_session.scalar(select(Context.created_by).where(Context.id == kept_id)) == admin_id
+    )
     assert await db_session.get(Memory, theirs_id) is not None
+    assert await db_session.scalar(select(Context.id).where(Context.id == mine_id)) is None
 
 
 @pytest.mark.asyncio

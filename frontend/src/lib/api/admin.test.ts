@@ -53,6 +53,17 @@ describe("userDeleteFailure (#2417)", () => {
     });
   });
 
+  it("keeps a server or transport failure generic", () => {
+    const server = new ApiError({
+      error: "HTTP-500",
+      message: "HTTP 500: Internal Server Error",
+      status: 500,
+    });
+    const network = new ApiError({ message: "Failed to fetch", status: 0 });
+    expect(userDeleteFailure(server)).toEqual({ kind: "unknown" });
+    expect(userDeleteFailure(network)).toEqual({ kind: "unknown" });
+  });
+
   it("knows nothing about a non-API error", () => {
     expect(userDeleteFailure(new Error("boom"))).toEqual({ kind: "unknown" });
   });

@@ -432,3 +432,51 @@ async def test_private_context_someone_else_wrote_in_takes_a_successor(connector
     db_session.expire_all()
     assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
     assert await db_session.get(Memory, theirs_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_another_accounts_soft_deleted_memory_keeps_the_private_context(
+    connector_world, db_session
+):
+    """#2417: a row another account can still restore makes the private
+    context more than the user's own, so it takes a successor instead of
+    being deleted over that row."""
+    from utils.datetime import utcnow
+
+    world = connector_world
+    target = await world.user("departing")
+    member = await world.user("member")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin", member: "admin"})
+    ws_id = workspace.id
+    ctx_id = await _context(db_session, workspace, target, private=True)
+    theirs = Memory(
+        id=uuid4(),
+        user_id=member,
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+        deleted_at=utcnow(),
+    )
+    db_session.add(theirs)
+    theirs_id = theirs.id
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(target, {"user_id": "operator"}, db_session)
+    assert error.value.detail["context_ids"] == [str(ctx_id)]
+    await db_session.rollback()
+
+    response = await delete_user(
+        target,
+        {"user_id": "operator"},
+        db_session,
+        UserDeleteRequest(context_transfers={ctx_id: member}),
+    )
+    assert response["deleted"]["contexts"] == 0
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == member
+    assert await db_session.get(Memory, theirs_id) is not None

@@ -2678,7 +2678,7 @@
         "deleteSuccess": "ユーザー{name}を正常に削除しました",
         "deleteError": "ユーザーの削除に失敗しました",
         "deleteErrorWithReason": "ユーザーの削除に失敗しました: {reason}",
-        "deleteTransferRequired": "所有権の移譲が必要です: このユーザーが所有する workspace {workspaces} 件と共有 context {contexts} 件に後継者が未指定です。先に移譲するか、admin API に workspace_transfers / context_transfers を付けて削除してください。"
+        "deleteTransferRequired": "所有権の移譲が必要です: このユーザーが所有する workspace {workspaces} 件と context {contexts} 件に後継者が未指定です。先に移譲するか、admin API に workspace_transfers / context_transfers を付けて削除してください。"
       },
       "detail": {
         "title": "ユーザー詳細",

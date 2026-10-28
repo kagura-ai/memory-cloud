@@ -66,37 +66,25 @@ _CONNECTOR_CONTEXT_IDS = select(WorkspaceConnector.context_id).where(
 
 def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
     """``c`` is a private context of ``user_id``'s own: created by it, written
-    in by nobody else, no connector's write target, and not inside a
-    soft-deleted workspace ``user_id`` owns (left as it is, #2406). Such a
-    context goes with the user; every other one it created takes a successor."""
-    # Fresh aliases: the enclosing query may already select from memories or
-    # workspaces, and auto-correlation would otherwise empty these FROMs.
-    memory, workspace = aliased(Memory), aliased(Workspace)
-    # Live rows only, the hand-over's own definition of "wrote in it".
+    in by nobody else, and no connector's write target. Such a context goes
+    with the user; every other one it created takes a successor.
+
+    "Written in by nobody else" counts another account's rows live or
+    soft-deleted: deleting the context would cascade over a row its author
+    can still restore. (The hand-over takes a context for a linked account
+    with live rows; one with only soft-deleted ones takes a successor.)
+    """
+    # A fresh alias: the enclosing query may already select from memories,
+    # and auto-correlation would otherwise empty this FROM.
+    memory = aliased(Memory)
     others_wrote = (
-        select(memory.id)
-        .where(
-            memory.context_id == c.id,
-            memory.user_id != user_id,
-            memory.deleted_at.is_(None),
-        )
-        .exists()
-    )
-    left_behind = (
-        select(workspace.id)
-        .where(
-            workspace.id == c.workspace_id,
-            workspace.owner_user_id == user_id,
-            workspace.deleted_at.is_not(None),
-        )
-        .exists()
+        select(memory.id).where(memory.context_id == c.id, memory.user_id != user_id).exists()
     )
     return and_(
         c.created_by == user_id,
         c.is_private.is_(True),
         c.id.not_in(_CONNECTOR_CONTEXT_IDS),
         ~others_wrote,
-        ~left_behind,
     )
 
 
@@ -209,7 +197,10 @@ async def transfer_user_ownership(
         raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
     contexts = [c for c in created if c.id not in taken and c.id not in personal]
     context_ids = {c.id for c in contexts}
-    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in contexts}
+    # A workspace selection is the default for the contexts created there, so
+    # one naming any workspace the user created in is well-formed, even when
+    # nothing there needs a successor any more.
+    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in created}
     if set(context_transfers) - context_ids or set(workspace_transfers) - workspace_ids:
         raise HTTPException(409, "Transfer selections no longer match the user's resources")
     missing_ws = [str(w.id) for w in workspaces if w.id not in workspace_transfers]
@@ -297,17 +288,18 @@ async def delete_user_rows(
     the user created; the CLI hands those in surviving workspaces to the workspace
     owner, leaves those in a soft-deleted workspace the user owns with it (#2406),
     and deletes sole-owned workspaces. A private context of the user's own (see
-    the module docstring) is deleted on both paths, with its files.
+    the module docstring) is deleted on both paths, with its files, wherever it is.
     """
     workspace_ids = delete_workspace_ids or []
 
     deleted_workspaces = set(workspace_ids)
 
     def doomed(c: Any) -> tuple[ColumnElement[bool]]:
-        """The contexts that go with the user: the private ones of its own,
+        """The contexts that go with the user: the private ones of its own
+        (wherever they are: nobody could read one once its creator is gone),
         plus everything in the workspaces being deleted. Any other context
-        left behind (the CLI's soft-deleted owned workspace, #2406) stays, its
-        files and other authors' memories with it."""
+        left behind (in the CLI's soft-deleted owned workspace, #2406) stays,
+        its files and other authors' memories with it."""
         return (or_(_personal(c, user_id), c.workspace_id.in_(workspace_ids)),)
 
     await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())

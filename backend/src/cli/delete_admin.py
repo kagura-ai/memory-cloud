@@ -13,10 +13,10 @@ subscription, as for account erasure); so does any change to the admin's
 workspaces or the user count while the prompt waits.
 #2417: a private context the admin created passes to a linked account that
 wrote in it (#1784); one nobody else wrote in is deleted with the admin, files
-included. Every other context the admin created in a surviving workspace (a
-shared one, a connector's write target, a private one someone else wrote in)
-passes to that workspace's owner; anything in a soft-deleted workspace the
-admin owns stays with it (#2406).
+included, wherever it is. Every other context the admin created in a surviving
+workspace (a shared one, a connector's write target, a private one someone
+else wrote in) passes to that workspace's owner; in a soft-deleted workspace
+the admin owns it stays with the workspace (#2406).
 
 Usage:
     cd backend && python -m src.cli.delete_admin [--transfer-to USER] [--yes]

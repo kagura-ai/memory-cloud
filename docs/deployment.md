@@ -1010,10 +1010,10 @@ private context another account wrote in (a linked author the hand-over could
 not pick, or a soft-deleted context) and a connector's write target
 (connectors create theirs private) keep other people's data, so they change
 hands like a shared context. The `delete_admin` CLI uses the same handover and file cleanup as
-administrative user deletion. Shared contexts the admin created in surviving
-workspaces pass to their live workspace owner; those in a soft-deleted
-workspace the admin owns stay with it (#2406); sole-owned workspaces are
-deleted. Shared workspace transfers commit before final CLI cleanup, so if
+administrative user deletion. Every other context the admin created in a
+surviving workspace passes to its live workspace owner; in a soft-deleted
+workspace the admin owns it stays with the workspace (#2406); sole-owned
+workspaces are deleted. Shared workspace transfers commit before final CLI cleanup, so if
 cleanup fails, inspect the printed transfers before retrying.
 
 Administrative `DELETE /api/v1/admin/users/{user_id}` requires explicit
