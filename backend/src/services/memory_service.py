@@ -8106,6 +8106,7 @@ class MemoryService:
         include_details: bool = True,
         time_window_hours: int = 168,
         is_shared_context: bool = False,
+        key_workspace_id: str | None = None,
     ) -> MemoryStatsResponse:
         """Get memory usage statistics with 3-level isolation.
 
@@ -8118,6 +8119,8 @@ class MemoryService:
             include_details: Include type/importance breakdown
             time_window_hours: Recent activity window in hours (default: 168 = 7 days)
             is_shared_context: If True, count all members' memories (not just user_id)
+            key_workspace_id: A workspace-scoped API key's workspace (#963); with
+                no ``context_id`` it confines the count to that workspace
 
         Returns:
             MemoryStatsResponse with counts and breakdowns
@@ -8144,6 +8147,16 @@ class MemoryService:
                 # No context: the caller's own id only — a link never reaches
                 # into a workspace the caller is not a member of.
                 base_conditions.append(Memory.user_id == user_id)
+
+        if not context_id:
+            # #2325: with no context, only the contexts the caller reaches
+            # count (the member context access list, Migration 042) — the
+            # rule /memory/list applies to the same view.
+            from services.permission_service import reachable_memory_filter
+
+            base_conditions.append(
+                await reachable_memory_filter(self.db, user_id, key_workspace_id=key_workspace_id)
+            )
 
         # Single Collection Migration: Filter by workspace_id and context_id
         if workspace_id:

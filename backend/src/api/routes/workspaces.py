@@ -1023,6 +1023,18 @@ async def _resolve_workspace_context(
         raise NotFoundException("Context", str(context_id))
 
 
+async def _opened_context_ids(
+    perm_service: PermissionService, member: WorkspaceMember, user_id: str, workspace_id: UUID
+) -> set[UUID] | None:
+    """The contexts a workspace total covers (#2325): every one for an owner
+    or admin (``None``), else the ones the member can open — its context
+    access list and context privacy, as ``get_accessible_contexts`` applies
+    them."""
+    if member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+        return None
+    return {c.id for c in await perm_service.get_accessible_contexts(user_id, workspace_id)}
+
+
 @router.get("/{workspace_id}/stats")
 async def get_workspace_stats(
     workspace_id: UUID,
@@ -1031,9 +1043,12 @@ async def get_workspace_stats(
 ):
     """Get workspace statistics.
 
+    Owners and admins total every context; a member the contexts it can
+    open (its context access list and context privacy, #2325).
+
     Returns:
-        - total_memories: Total memories across all contexts
-        - context_count: Number of contexts
+        - total_memories: Total memories across the covered contexts
+        - context_count: Number of covered contexts
         - member_count: Number of members
     """
     user = await get_current_user(request)
@@ -1043,11 +1058,14 @@ async def get_workspace_stats(
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
     # Users can access stats for any workspace they are a member of
-    await perm_service.check_workspace_access(
+    member = await perm_service.check_workspace_access(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
-    stats = await workspace_service.get_workspace_stats(workspace_id)
+    stats = await workspace_service.get_workspace_stats(
+        workspace_id,
+        context_ids=await _opened_context_ids(perm_service, member, user["user_id"], workspace_id),
+    )
 
     return stats
 
@@ -1083,11 +1101,7 @@ async def get_context_stats(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
-    context_ids: set[UUID] | None = None
-    if member.role not in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
-        context_ids = {
-            c.id for c in await perm_service.get_accessible_contexts(user["user_id"], workspace_id)
-        }
+    context_ids = await _opened_context_ids(perm_service, member, user["user_id"], workspace_id)
 
     stats = await workspace_service.get_context_stats(workspace_id, context_ids=context_ids)
 
@@ -1199,13 +1213,17 @@ async def get_workspace_memory_timeline(
         user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
     )
 
+    context_ids: set[UUID] | None = None
     if context_id is not None:
         await _resolve_workspace_context(perm_service, member, user, workspace_id, context_id)
+    else:
+        # #2325: the aggregate covers the contexts the caller can open.
+        context_ids = await _opened_context_ids(perm_service, member, user["user_id"], workspace_id)
 
     days = min(days, 90)  # Performance limit
 
     timeline = await workspace_service.get_workspace_memory_timeline(
-        workspace_id, days, context_id=context_id
+        workspace_id, days, context_id=context_id, context_ids=context_ids
     )
 
     return MemoryTimelineResponse(**timeline)

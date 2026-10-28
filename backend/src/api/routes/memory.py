@@ -44,7 +44,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import owned_by
 from services.memory_service import MemoryService
-from services.permission_service import PermissionService
+from services.permission_service import PermissionService, reachable_memory_filter
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -944,6 +944,7 @@ async def get_memory_stats(
         include_details=True,
         time_window_hours=24,
         is_shared_context=is_shared,
+        key_workspace_id=user.get("api_key_workspace_id"),
     )
 
     logger.info("memory_stats_retrieved", user_id=user_id, total=result.total_count)
@@ -1271,6 +1272,15 @@ async def list_memories(
                 # into a workspace the caller is not a member of, and nothing
                 # scopes this view to one.
                 filters.append(Memory.user_id == owner_filter)
+                # #2325: ... in the contexts the caller reaches — the member
+                # context access list (Migration 042) decides here as on every
+                # context-addressed path, so a row in a workspace the caller
+                # left or a context outside its list stays out of the view.
+                filters.append(
+                    await reachable_memory_filter(
+                        db, owner_filter, key_workspace_id=user.get("api_key_workspace_id")
+                    )
+                )
         if scope:
             filters.append(Memory.scope == scope)
         if type:
@@ -1391,6 +1401,15 @@ async def get_access_patterns(
             base_filter.append(Memory.workspace_id == target_workspace_id)
         if target_context_id:
             base_filter.append(Memory.context_id == target_context_id)
+        else:
+            # #2325: with no context, the caller's own memories in the
+            # contexts it reaches (the member context access list), as
+            # /memory/list and /memory/stats.
+            base_filter.append(
+                await reachable_memory_filter(
+                    db, user_id, key_workspace_id=user.get("api_key_workspace_id")
+                )
+            )
 
         # #1301: agent-binding read filter (context default-deny + type/source
         # subtraction) on the most-accessed page AND every aggregate — a

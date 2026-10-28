@@ -1077,11 +1077,15 @@ class WorkspaceService:
     # Workspace Statistics
     # ========================================================================
 
-    async def get_workspace_stats(self, workspace_id: UUID) -> dict[str, Any]:
+    async def get_workspace_stats(
+        self, workspace_id: UUID, *, context_ids: set[UUID] | None = None
+    ) -> dict[str, Any]:
         """Get workspace statistics.
 
         Args:
             workspace_id: Workspace ID
+            context_ids: Only these contexts (the ones the caller can open,
+                #2325); ``None`` = every context of the workspace.
 
         Returns:
             Dict with stats:
@@ -1093,6 +1097,7 @@ class WorkspaceService:
         context_count_stmt = select(func.count(Context.id)).where(
             Context.workspace_id == workspace_id,
             Context.deleted_at.is_(None),
+            *(() if context_ids is None else (Context.id.in_(context_ids),)),
         )
         context_result = await self.db.execute(context_count_stmt)
         context_count = context_result.scalar() or 0
@@ -1104,9 +1109,21 @@ class WorkspaceService:
         member_result = await self.db.execute(member_count_stmt)
         member_count = member_result.scalar() or 0
 
-        # Memories: the workspace-scoped live count shared with the quota gate
-        # and the plan page (#1946).
-        total_memories = await count_live_memories(self.db, workspace_id)
+        if context_ids is None:
+            # Memories: the workspace-scoped live count shared with the quota
+            # gate and the plan page (#1946).
+            total_memories = await count_live_memories(self.db, workspace_id)
+        else:
+            # The caller's view (#2325): live memories of the contexts it can
+            # open. The quota figure stays the workspace's.
+            scoped = await self.db.execute(
+                select(func.count(Memory.id)).where(
+                    Memory.workspace_id == workspace_id,
+                    Memory.context_id.in_(context_ids),
+                    Memory.deleted_at.is_(None),
+                )
+            )
+            total_memories = int(scoped.scalar() or 0)
 
         return {
             "context_count": context_count,
@@ -1396,7 +1413,12 @@ class WorkspaceService:
         }
 
     async def get_workspace_memory_timeline(
-        self, workspace_id: UUID, days: int = 30, context_id: UUID | None = None
+        self,
+        workspace_id: UUID,
+        days: int = 30,
+        context_id: UUID | None = None,
+        *,
+        context_ids: set[UUID] | None = None,
     ) -> dict[str, Any]:
         """Get time-series memory creation statistics for workspace.
 
@@ -1407,6 +1429,8 @@ class WorkspaceService:
             workspace_id: Workspace ID
             days: Number of days to include (default: 30, max: 90)
             context_id: Optional context ID to filter by
+            context_ids: With no ``context_id``, only these contexts (the ones
+                the caller can open, #2325); ``None`` = every context
 
         Returns:
             Dict with daily memory counts and period info
@@ -1442,6 +1466,7 @@ class WorkspaceService:
         workspace_contexts = select(Context.id).where(
             Context.workspace_id == workspace_id,
             Context.deleted_at.is_(None),
+            *(() if context_ids is None else (Context.id.in_(context_ids),)),
         )
 
         # An optional ``context_id`` filter must belong to this workspace —

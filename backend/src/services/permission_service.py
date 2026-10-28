@@ -8,8 +8,9 @@ Manages access control at workspace and context levels.
 from typing import Any, NewType, cast
 from uuid import UUID
 
-from sqlalchemy import false, select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from auth.workspace_roles import (
     ACCESS_READ,
@@ -28,6 +29,7 @@ from auth.workspace_roles import (
 )
 from db.qdrant import chunk_points_supported
 from models.auth import Context, ContextMember, Workspace, WorkspaceMember
+from models.memory import Memory
 from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
@@ -79,6 +81,51 @@ def reach_filter(member: WorkspaceMember) -> Any | None:
     if not reachable:
         return false()
     return Context.id.in_(reachable)
+
+
+async def reachable_memory_filter(
+    db: AsyncSession, user_id: str, *, key_workspace_id: UUID | str | None = None
+) -> ColumnElement[bool]:
+    """The caller's reach over ``Memory`` rows when no context is named (#2325).
+
+    One predicate from every membership of a live workspace, by the reach rule
+    (``reachable_context_ids``, Migration 042): an owner, an admin and a viewer
+    with no list reach every context of that workspace; a member or viewer
+    with a list exactly the listed contexts of that workspace; a member with
+    no list, or an empty list, nothing. A workspace the caller is not a member
+    of is out, whatever it still holds of theirs. ``false()`` when nothing is
+    reached. Privacy is not part of it: the callers restrict the rows to the
+    caller's own, and the caller's own rows are readable wherever they are.
+
+    ``key_workspace_id`` confines a workspace-scoped API key to its own
+    workspace (#963), as the context resolvers do.
+    """
+    stmt = (
+        select(
+            WorkspaceMember.workspace_id,
+            WorkspaceMember.role,
+            WorkspaceMember.allowed_context_ids,
+        )
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
+    )
+    if key_workspace_id is not None:
+        stmt = stmt.where(WorkspaceMember.workspace_id == UUID(str(key_workspace_id)))
+    open_workspaces: list[UUID] = []
+    clauses: list[ColumnElement[bool]] = []
+    for workspace_id, role, allowed in (await db.execute(stmt)).all():
+        reachable = reachable_context_ids(role, allowed)
+        if reachable is None:
+            open_workspaces.append(workspace_id)
+        elif reachable:
+            clauses.append(
+                and_(Memory.workspace_id == workspace_id, Memory.context_id.in_(reachable))
+            )
+    if open_workspaces:
+        clauses.insert(0, Memory.workspace_id.in_(open_workspaces))
+    if not clauses:
+        return false()
+    return clauses[0] if len(clauses) == 1 else or_(*clauses)
 
 
 def _reach_denied_reason(member: WorkspaceMember) -> str:

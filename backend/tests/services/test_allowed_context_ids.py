@@ -133,3 +133,69 @@ class TestRoleChangeKeepsTheList:
     async def test_an_unset_list_stays_unset(self, old_role, new_role) -> None:
         member = await self._change(old_role, None, new_role)
         assert member.allowed_context_ids is None
+
+
+class TestReachableMemoryFilter:
+    """``reachable_memory_filter`` (#2325): the caller's reach over its own
+    memories with no context given, one predicate from every membership."""
+
+    WS1 = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+    WS2 = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
+
+    @staticmethod
+    def _db(rows):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+        return db
+
+    @staticmethod
+    def _sql(clause) -> str:
+        return str(
+            clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+
+    @pytest.mark.asyncio
+    async def test_nothing_without_a_membership_that_reaches(self) -> None:
+        from services.permission_service import reachable_memory_filter
+
+        assert self._sql(await reachable_memory_filter(self._db([]), "u")) == "false"
+        rows = [
+            (self.WS1, WorkspaceRole.MEMBER, None),
+            (self.WS2, WorkspaceRole.VIEWER, []),
+        ]
+        assert self._sql(await reachable_memory_filter(self._db(rows), "u")) == "false"
+
+    @pytest.mark.asyncio
+    async def test_every_context_of_an_open_workspace(self) -> None:
+        from services.permission_service import reachable_memory_filter
+
+        rows = [(self.WS1, WorkspaceRole.OWNER, [X]), (self.WS2, WorkspaceRole.VIEWER, None)]
+        sql = self._sql(await reachable_memory_filter(self._db(rows), "u"))
+        assert "memories.workspace_id IN" in sql
+        assert str(self.WS1) in sql and str(self.WS2) in sql
+        assert "memories.context_id" not in sql
+
+    @pytest.mark.asyncio
+    async def test_exactly_the_list_in_its_workspace(self) -> None:
+        from services.permission_service import reachable_memory_filter
+
+        rows = [(self.WS1, "member", [X]), (self.WS2, WorkspaceRole.ADMIN, None)]
+        sql = self._sql(await reachable_memory_filter(self._db(rows), "u"))
+        assert f"memories.workspace_id = '{self.WS1}' AND memories.context_id IN" in sql
+        assert str(X) in sql and str(Y) not in sql
+        assert f"memories.workspace_id IN ('{self.WS2}')" in sql
+
+    @pytest.mark.asyncio
+    async def test_memberships_are_read_for_the_caller_in_live_workspaces(self) -> None:
+        from services.permission_service import reachable_memory_filter
+
+        db = self._db([])
+        await reachable_memory_filter(db, "u", key_workspace_id=self.WS1)
+        stmt = self._sql(db.execute.await_args.args[0])
+        assert "workspace_members.user_id = 'u'" in stmt
+        assert "workspaces.deleted_at IS NULL" in stmt
+        # A workspace-scoped API key reaches its own workspace only (#963).
+        assert f"workspace_members.workspace_id = '{self.WS1}'" in stmt
+        db = self._db([])
+        await reachable_memory_filter(db, "u")
+        assert "workspace_members.workspace_id =" not in self._sql(db.execute.await_args.args[0])

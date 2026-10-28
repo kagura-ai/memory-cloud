@@ -36,3 +36,17 @@ def _row(details):
 )
 def test_list_item_carries_the_details_form(details, expected):
     assert _list_memory_item(_row(details)).observed_at == expected
+
+
+@pytest.fixture(autouse=True)
+def _reach_everything():
+    """#2325: with no ``context_id`` the list also keeps to the contexts the
+    caller reaches (one membership read). These mocked-DB tests cover the other
+    filters, so that read is stubbed to reach everything; the real rule runs
+    against PostgreSQL in test_2325_context_less_views_reach_db.py."""
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import true
+
+    with patch("api.routes.memory.reachable_memory_filter", AsyncMock(return_value=true())):
+        yield

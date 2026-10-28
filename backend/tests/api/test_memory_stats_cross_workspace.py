@@ -82,8 +82,9 @@ async def test_stats_cross_workspace_probe_returns_uniform_404():
 
 @pytest.mark.asyncio
 async def test_stats_no_context_id_skips_permission_check():
-    """Without context_id the permission chokepoint is not consulted and stats
-    run unscoped (legacy behavior, no regression)."""
+    """Without context_id the context resolver is not consulted; the service
+    scopes the count to the contexts the caller reaches itself (#2325), so the
+    route forwards the key workspace and nothing else."""
     mock_db = AsyncMock()
     memory_service = MagicMock()
     memory_service.get_stats = AsyncMock(return_value=_stats_result(3))
@@ -105,6 +106,7 @@ async def test_stats_no_context_id_skips_permission_check():
         include_details=True,
         time_window_hours=24,
         is_shared_context=False,
+        key_workspace_id=None,
     )
 
 
@@ -143,6 +145,7 @@ async def test_stats_shared_context_aggregates_across_members():
         include_details=True,
         time_window_hours=24,
         is_shared_context=True,
+        key_workspace_id=None,
     )
 
 

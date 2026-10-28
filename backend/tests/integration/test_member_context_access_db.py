@@ -360,7 +360,7 @@ def _ws_of(w: World, caller: str) -> UUID:
 
 
 @contextlib.asynccontextmanager
-async def _rest(w: World, caller: str):
+async def _rest(w: World, caller: str, *, api_key_workspace_id: UUID | None = None):
     import httpx
 
     import api.routes.context_search_config as search_config_routes
@@ -387,8 +387,8 @@ async def _rest(w: World, caller: str):
     principal = {
         "user_id": w.u[caller],
         "current_workspace_id": _ws_of(w, caller),
-        "api_key_workspace_id": None,
-        "auth_type": "session",
+        "api_key_workspace_id": api_key_workspace_id,
+        "auth_type": "session" if api_key_workspace_id is None else "api_key",
     }
     app.dependency_overrides[get_user_from_api_key_or_session] = lambda: principal
     app.dependency_overrides[require_session_auth] = lambda: principal
