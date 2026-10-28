@@ -1,12 +1,12 @@
 """Run the production secret guard in every CLI entry point (#2239, #2264).
 
-``create_admin``, ``delete_admin``, ``reset_password`` and ``seed_e2e_admin``
-open their own synchronous engine from ``DATABASE_URL`` and never build
-``Settings`` on their own, so the ``ENVIRONMENT=production`` refusal of
-development-default secrets (#2225) did not reach them. Each calls
-:func:`require_settings` first, before it touches the database. The one-shot
-maintenance commands call it too (``cli._oneshot.run_plan_apply``,
-``migrate_context_embedding``, ``sync_llm_pricing``), so a refused install
+``create_admin``, ``reset_password`` and ``seed_e2e_admin`` open their own
+synchronous engine from ``DATABASE_URL`` and never build ``Settings`` on their
+own, so the ``ENVIRONMENT=production`` refusal of development-default secrets
+(#2225) did not reach them. Each calls :func:`require_settings` first, before
+it touches the database. The one-shot maintenance commands call it too
+(``cli._oneshot.run_plan_apply``, ``migrate_context_embedding``,
+``sync_llm_pricing``, ``delete_admin``), so a refused install
 stops with the variables named instead of failing later at its session.
 
 A CLI that encrypts with ``API_KEY_SECRET`` resolves that secret (environment,

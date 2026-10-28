@@ -109,11 +109,10 @@ class TestRequireSettings:
     ("module", "entry"),
     [
         (create_admin, lambda: create_admin.create_admin(skip_mcp_json=True)),
-        (delete_admin, delete_admin.delete_admin),
         (reset_password, reset_password.reset_password),
         (seed_e2e_admin, seed_e2e_admin.seed_e2e_admin),
     ],
-    ids=["create_admin", "delete_admin", "reset_password", "seed_e2e_admin"],
+    ids=["create_admin", "reset_password", "seed_e2e_admin"],
 )
 def test_each_cli_stops_before_the_database(module, entry, refused, monkeypatch, capsys) -> None:
     monkeypatch.setenv("E2E_ADMIN_LOGIN_ID", "e2e-admin")
@@ -153,6 +152,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
             "cli.migrate_context_embedding.get_db",
         ),
         (sync_llm_pricing, [], "cli.sync_llm_pricing.get_db"),
+        (delete_admin, [], "cli.delete_admin.get_db"),
     ],
     ids=[
         "apply_rerank_defaults",
@@ -163,6 +163,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
         "reprocess_erasures",
         "migrate_context_embedding",
         "sync_llm_pricing",
+        "delete_admin",
     ],
 )
 def test_each_one_shot_cli_stops_before_the_database(module, argv, get_db, refused, capsys) -> None:

@@ -1005,8 +1005,10 @@ wrote memories there and could own it as a linked account (a workspace owner
 or admin, or a member whose `allowed_context_ids` names it), so what that
 account wrote stays readable. The leaving account's own memories in that
 context are deleted. A context no linked account wrote in is handled as for
-any erased or deleted account. The `delete_admin` command only removes the
-user row and its link; the other accounts' rows record who made the link
+any erased or deleted account. The `delete_admin` command hands over or
+deletes the admin's workspaces (#2371) and removes its keys, memberships, user
+row and link, but does not hand over private contexts; the other accounts'
+rows record who made the link
 (`linked_by`), and that becomes empty when the account is gone (#1807).
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
