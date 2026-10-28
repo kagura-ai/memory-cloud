@@ -292,7 +292,7 @@ async def test_private_context_passes_to_a_linked_contributor_not_a_successor(
             UserDeleteRequest(context_transfers={ctx_id: owner}),
         )
     assert error.value.status_code == 409
-    assert "Private contexts" in str(error.value.detail)
+    assert "linked account" in str(error.value.detail)
     await db_session.rollback()
     assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == target
 
@@ -315,6 +315,17 @@ async def test_private_context_nobody_linked_wrote_in_is_deleted_with_the_user(
     private_id = await _context(db_session, workspace, target, private=True)
     shared_id = await _context(db_session, workspace, target)
     await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(
+            target,
+            {"user_id": "operator"},
+            db_session,
+            UserDeleteRequest(context_transfers={private_id: owner, shared_id: owner}),
+        )
+    assert error.value.status_code == 409
+    assert "nobody else wrote in" in str(error.value.detail)
+    await db_session.rollback()
 
     response = await delete_user(
         target,

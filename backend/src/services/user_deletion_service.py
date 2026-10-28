@@ -43,12 +43,18 @@ from services.billing_contract import ensure_no_billing_contract
 from services.connector_key_ownership import reown_connector_keys
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
-from services.identity_link_service import hand_over_private_contexts, lock_identity_links
+from services.identity_link_service import (
+    hand_over_private_contexts,
+    lock_identity_links,
+    predict_private_context_takeovers,
+)
 from services.workspace_ownership_service import WorkspaceOwnershipService
 
 PRIVATE_CONTEXT_NOT_TRANSFERABLE = (
-    "Private contexts nobody else wrote in cannot be transferred: a linked account "
-    "that wrote in one takes it over, otherwise it is deleted with the user"
+    "A private context nobody else wrote in cannot be transferred: it is deleted with the user"
+)
+PRIVATE_CONTEXT_HANDED_OVER = (
+    "A private context a linked account wrote in cannot be transferred: that account takes it over"
 )
 
 # The write targets of the workspace connectors: a context here belongs to the
@@ -66,8 +72,15 @@ def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
     # Fresh aliases: the enclosing query may already select from memories or
     # workspaces, and auto-correlation would otherwise empty these FROMs.
     memory, workspace = aliased(Memory), aliased(Workspace)
+    # Live rows only, the hand-over's own definition of "wrote in it".
     others_wrote = (
-        select(memory.id).where(memory.context_id == c.id, memory.user_id != user_id).exists()
+        select(memory.id)
+        .where(
+            memory.context_id == c.id,
+            memory.user_id != user_id,
+            memory.deleted_at.is_(None),
+        )
+        .exists()
     )
     left_behind = (
         select(workspace.id)
@@ -181,35 +194,22 @@ async def transfer_user_ownership(
             )
         ).scalars()
     )
-    private_ids = {c.id for c in created if c.is_private}
-    # Contexts before memories, the whole union in id order (#2278, #2347):
-    # the hand-over below deletes the subject's rows in the contexts it moves.
-    await db.execute(
-        locked_ids(
-            Memory,
-            lambda m: (
-                or_(
-                    m.user_id == user_id,
-                    m.context_id.in_(select(Context.id).where(Context.created_by == user_id)),
-                ),
-            ),
-        )
-    )
-    # #1784 first: a linked account that wrote in a private context takes it
-    # over. What is left either takes a successor or goes with the user.
-    await hand_over_private_contexts(db, user_id)
-    await db.flush()
-    remaining = set(
-        (await db.execute(select(Context.id).where(Context.created_by == user_id))).scalars()
-    )
+    # #1784 decides first which private contexts a linked account takes over
+    # (``delete_user_rows`` applies it after this validation, under the memory
+    # locks); of the rest, one of the user's own goes with it and everything
+    # else needs a successor. Read-only here: the common 409 must not lock or
+    # write more than the rows above.
+    taken = await predict_private_context_takeovers(db, user_id, created)
     personal = set(
         (await db.execute(select(Context.id).where(_personal(Context, user_id)))).scalars()
-    )
-    contexts = [c for c in created if c.id in remaining - personal]
-    context_ids = {c.id for c in contexts}
-    if context_transfers.keys() & (private_ids - context_ids):
+    ) - set(taken)
+    if context_transfers.keys() & taken.keys():
+        raise HTTPException(409, PRIVATE_CONTEXT_HANDED_OVER)
+    if context_transfers.keys() & personal:
         raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
-    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in created}
+    contexts = [c for c in created if c.id not in taken and c.id not in personal]
+    context_ids = {c.id for c in contexts}
+    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in contexts}
     if set(context_transfers) - context_ids or set(workspace_transfers) - workspace_ids:
         raise HTTPException(409, "Transfer selections no longer match the user's resources")
     missing_ws = [str(w.id) for w in workspaces if w.id not in workspace_transfers]
@@ -321,17 +321,6 @@ async def delete_user_rows(
             .order_by(Workspace.id)
             .with_for_update(nowait=True)
         )
-    if not preserve_created_contexts:
-        remaining = await db.scalar(
-            select(Context.id)
-            .where(Context.created_by == user_id, ~_personal(Context, user_id))
-            .limit(1)
-        )
-        owned = await db.scalar(
-            select(Workspace.id).where(Workspace.owner_user_id == user_id).limit(1)
-        )
-        if remaining is not None or owned is not None:
-            raise HTTPException(409, "Ownership changed; select successors and retry deletion")
     await db.execute(
         locked_ids(
             Context, lambda c: (or_(c.created_by == user_id, c.workspace_id.in_(workspace_ids)),)
@@ -362,6 +351,19 @@ async def delete_user_rows(
         await db.execute(select(func.count(Memory.id)).where(Memory.user_id == user_id))
     ).scalar_one()
     await hand_over_private_contexts(db, user_id)
+    if not preserve_created_contexts:
+        # The API path validated with the same rule the hand-over just applied;
+        # anything else still created by the user slipped in since.
+        remaining = await db.scalar(
+            select(Context.id)
+            .where(Context.created_by == user_id, ~_personal(Context, user_id))
+            .limit(1)
+        )
+        owned = await db.scalar(
+            select(Workspace.id).where(Workspace.owner_user_id == user_id).limit(1)
+        )
+        if remaining is not None or owned is not None:
+            raise HTTPException(409, "Ownership changed; select successors and retry deletion")
     if preserve_created_contexts:
         # The CLI's surviving shared (and connector) contexts follow their
         # workspace's surviving owner; the API path has selected successors.
