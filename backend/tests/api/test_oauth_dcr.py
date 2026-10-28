@@ -1362,3 +1362,117 @@ class TestDcrEndpointGemini:
         assert response.status_code == 400, response.text
         assert response.json()["error"] == "invalid_client_metadata"
         fake_session.add.assert_not_called()
+
+
+# --- #2410: Meta Muse ---------------------------------------------------------
+
+_MUSE_URI = "https://agent.meta.ai/api/hatch/oauth/callback"
+
+
+class TestDetectDcrProviderMuse:
+    """One fixed callback, matched as the whole URI, character for character."""
+
+    @pytest.mark.parametrize("client_name", ["Meta Muse", "Muse", "Any Client"])
+    def test_accepted(self, client_name: str):
+        assert detect_dcr_provider(_MUSE_URI, client_name) == "muse"
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            # muse.ai is not Meta's callback host (and names an unrelated service).
+            "https://muse.ai/api/hatch/oauth/callback",
+            "https://www.muse.ai/api/hatch/oauth/callback",
+            # Other meta.ai hosts and look-alikes.
+            "https://meta.ai/api/hatch/oauth/callback",
+            "https://evil.agent.meta.ai/api/hatch/oauth/callback",
+            "https://agent.meta.ai.evil.example/api/hatch/oauth/callback",
+            # Scheme, case, trailing dot, port, userinfo.
+            "http://agent.meta.ai/api/hatch/oauth/callback",
+            "HTTPS://agent.meta.ai/api/hatch/oauth/callback",
+            "https://AGENT.META.AI/api/hatch/oauth/callback",
+            "https://agent.meta.ai./api/hatch/oauth/callback",
+            "https://agent.meta.ai:443/api/hatch/oauth/callback",
+            "https://user@agent.meta.ai/api/hatch/oauth/callback",
+            # Path variants: the whole path is fixed, no prefix match.
+            "https://agent.meta.ai/api/hatch/oauth/callback/",
+            "https://agent.meta.ai/api/hatch/oauth/callback/x",
+            "https://agent.meta.ai/api/hatch/oauth/callbackx",
+            "https://agent.meta.ai/api/hatch/oauth/",
+            "https://agent.meta.ai/api/hatch/oauth/%63allback",
+            "https://agent.meta.ai/API/hatch/oauth/callback",
+            # Query, params, fragment.
+            "https://agent.meta.ai/api/hatch/oauth/callback?next=https://evil.example",
+            "https://agent.meta.ai/api/hatch/oauth/callback#x",
+            "https://agent.meta.ai/api/hatch/oauth/callback;x",
+        ],
+    )
+    def test_refused(self, redirect_uri: str):
+        assert detect_dcr_provider(redirect_uri, "Meta Muse") == "custom"
+
+    def test_muse_is_not_a_loopback_keyword(self):
+        # A loopback registration that merely says "Muse" stays refused.
+        assert detect_dcr_provider("http://localhost:8080/cb", "Muse") == "custom"
+
+
+class TestDcrEndpointMuse:
+    """``POST /api/v1/oauth/register`` with Muse's callback (#2410)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+            patch("api.routes.oauth.logger") as fake_logger,
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session, fake_logger
+
+    def test_public_pkce_client_registers(self, client):
+        response, fake_session, _ = self._register(
+            client,
+            {
+                "client_name": "Meta Muse",
+                "redirect_uris": [_MUSE_URI],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["provider"] == "muse"
+        assert body["redirect_uris"] == [_MUSE_URI]
+        fake_session.add.assert_called_once()
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "muse"
+        assert stored.redirect_uris == [_MUSE_URI]
+        assert stored.token_endpoint_auth_method == "none"
+
+    def test_muse_ai_host_is_refused(self, client):
+        response, fake_session, _ = self._register(
+            client,
+            {
+                "client_name": "Meta Muse",
+                "redirect_uris": ["https://muse.ai/api/hatch/oauth/callback"],
+            },
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()
+
+    def test_rejection_description_names_the_muse_callback(self, client):
+        response, _, _ = self._register(
+            client,
+            {"client_name": "Meta Muse", "redirect_uris": ["https://attacker.example/cb"]},
+        )
+
+        assert response.status_code == 400, response.text
+        assert _MUSE_URI in response.json()["error_description"]
