@@ -36,10 +36,12 @@ from structlog.testing import capture_logs  # noqa: E402
 
 from api.main import app  # noqa: E402
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
+from auth.oauth_token_storage import hash_oauth_token  # noqa: E402
 from models.auth import (  # noqa: E402
     OAuth2Client,
     OAuth2DeviceCode,
     OAuth2Token,
+    OAuthTokenStorage,
     User,
     Workspace,
 )
@@ -59,9 +61,12 @@ def db_factory() -> Iterator[sessionmaker]:
     engine = create_engine(
         "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
-    for model in (User, Workspace, OAuth2Client, OAuth2DeviceCode, OAuth2Token):
+    for model in (User, Workspace, OAuth2Client, OAuth2DeviceCode, OAuth2Token, OAuthTokenStorage):
         model.__table__.create(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as state_db:
+        state_db.add(OAuthTokenStorage(id=1, mode="hashed"))
+        state_db.commit()
     common: dict[str, Any] = {
         "client_secret_hash": "",
         "grant_types": [DEVICE_GRANT, "refresh_token"],
@@ -245,7 +250,9 @@ class TestDeviceResource:
 
         assert token.status_code == 200, token.text
         with db_factory() as db:
-            stored = db.query(OAuth2Token).filter_by(access_token=token.json()["access_token"])
+            stored = db.query(OAuth2Token).filter_by(
+                access_token=hash_oauth_token(token.json()["access_token"])
+            )
             assert stored.one().resource == MCP_RESOURCE
 
     def test_no_resource_issues_no_audience(
@@ -258,7 +265,9 @@ class TestDeviceResource:
 
         assert token.status_code == 200, token.text
         with db_factory() as db:
-            stored = db.query(OAuth2Token).filter_by(access_token=token.json()["access_token"])
+            stored = db.query(OAuth2Token).filter_by(
+                access_token=hash_oauth_token(token.json()["access_token"])
+            )
             assert stored.one().resource is None
 
     def test_foreign_resource_is_invalid_target(

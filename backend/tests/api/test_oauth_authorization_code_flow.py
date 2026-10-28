@@ -48,11 +48,13 @@ from api.routes.oauth import _CONSENT_CSRF_DESCRIPTION  # noqa: E402
 from auth.consent_csrf import consent_csrf_token  # noqa: E402
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
 from auth.oauth2_server import _OAuthUser  # noqa: E402
+from auth.oauth_token_storage import hash_oauth_token, token_lookup_values  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from models.auth import (  # noqa: E402
     OAuth2AuthorizationCode,
     OAuth2Client,
     OAuth2Token,
+    OAuthTokenStorage,
     User,
     Workspace,
 )
@@ -77,9 +79,19 @@ def db_factory() -> Iterator[sessionmaker]:
     engine = create_engine(
         "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
-    for model in (User, Workspace, OAuth2Client, OAuth2AuthorizationCode, OAuth2Token):
+    for model in (
+        User,
+        Workspace,
+        OAuth2Client,
+        OAuth2AuthorizationCode,
+        OAuth2Token,
+        OAuthTokenStorage,
+    ):
         model.__table__.create(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as state_db:
+        state_db.add(OAuthTokenStorage(id=1, mode="hashed"))
+        state_db.commit()
     common: dict[str, Any] = {
         "redirect_uris": [REDIRECT_URI],
         "grant_types": ["authorization_code", "refresh_token"],
@@ -297,7 +309,11 @@ def _refresh(api: TestClient, refresh_token: str, **extra: str) -> Any:
 
 def _stored_token(db_factory: sessionmaker, access_token: str) -> OAuth2Token:
     with db_factory() as db:
-        return db.query(OAuth2Token).filter_by(access_token=access_token).one()
+        return (
+            db.query(OAuth2Token)
+            .filter(OAuth2Token.access_token.in_(token_lookup_values(access_token)))
+            .one()
+        )
 
 
 def _codes(db_factory: sessionmaker) -> int:
@@ -824,7 +840,11 @@ class TestResourceBinding:
     ) -> None:
         tokens = _public_tokens(api, resource=MCP_RESOURCE)
         with db_factory() as db:
-            row = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            row = (
+                db.query(OAuth2Token)
+                .filter(OAuth2Token.access_token.in_(token_lookup_values(tokens["access_token"])))
+                .one()
+            )
             row.resource = "https://other.example/mcp"
             db.commit()
 
@@ -902,7 +922,11 @@ class TestResourceForms:
         # A token whose audience was stored in another accepted form.
         tokens = _public_tokens(api, resource=None)
         with db_factory() as db:
-            row = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            row = (
+                db.query(OAuth2Token)
+                .filter(OAuth2Token.access_token.in_(token_lookup_values(tokens["access_token"])))
+                .one()
+            )
             row.resource = stored
             db.commit()
 
@@ -978,7 +1002,9 @@ class TestSingleUse:
         assert second.json()["error"] == "invalid_grant"
         with db_factory() as db:
             assert db.query(OAuth2Token).count() == 1
-            assert db.query(OAuth2Token).one().access_token == first["access_token"]
+            assert db.query(OAuth2Token).one().access_token == hash_oauth_token(
+                first["access_token"]
+            )
         assert _codes(db_factory) == 0
 
 
@@ -1039,7 +1065,11 @@ class TestRefreshSingleUse:
         with db_factory() as db:
             # The original pair and the one refresh.
             assert db.query(OAuth2Token).count() == 2
-            original = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            original = (
+                db.query(OAuth2Token)
+                .filter(OAuth2Token.access_token.in_(token_lookup_values(tokens["access_token"])))
+                .one()
+            )
             assert original.refresh_token_revoked_at is not None
             assert original.access_token_revoked_at is not None
 

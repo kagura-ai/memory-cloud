@@ -26,6 +26,17 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **API Keys** for programmatic access (SHA-256 hashed, Fernet encrypted at rest)
 - **JWT** for session tokens (configurable expiry, HS256)
 - **HttpOnly cookies** for session storage
+- **OAuth / MCP bearer credentials**: access and refresh tokens use SHA-256
+  digest storage after the operator completes the [staged storage rollout](docs/ops/oauth-token-hash-rollout.md)
+  (#2399). The compatible bridge deployment still writes raw tokens until all
+  old readers and writers are drained. Explicit finalization converts every
+  existing token row, including revoked and expired rows, enforces hash-only
+  writes, and switches issuance to digest storage atomically. Stored digests
+  cannot be used as bearer credentials. Clients keep their existing token
+  values, expiry times, scopes and refresh rotation behavior. This is separate
+  from OAuth client-secret hashing: confidential clients already store hashed
+  client secrets, and public clients have no secret. Finalization cannot be
+  reversed into plaintext; rollback requires a hash-compatible server binary.
 - **Linking a sign-in provider** (a Google / GitHub identity added to an
   account from the profile page) completes only in the browser session that
   started it: the provider callback must carry that session's cookie, and the

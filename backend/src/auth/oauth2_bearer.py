@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import API_KEY_PREFIX
+from auth.oauth_token_storage import token_lookup_values
 from models.auth import OAuth2Token
 from utils.logger import get_logger
 
@@ -48,7 +49,10 @@ async def find_active_oauth_token(
         access_token: The Bearer token.
         db: The caller's session.
     """
-    stmt = select(OAuth2Token).where(OAuth2Token.access_token == access_token)
+    candidates = token_lookup_values(access_token)
+    if not candidates:
+        return None
+    stmt = select(OAuth2Token).where(OAuth2Token.access_token.in_(candidates))
     token = (await db.execute(stmt)).scalar_one_or_none()
 
     if token is None:

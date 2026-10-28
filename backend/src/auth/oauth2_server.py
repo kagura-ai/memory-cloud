@@ -60,6 +60,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
 from auth.oauth_scope import client_registered_scope, granted_scope
+from auth.oauth_token_storage import hash_oauth_token, issuance_storage_mode, token_lookup_values
 from auth.session import get_session_manager
 from config.settings import get_settings
 from models.auth import (
@@ -475,13 +476,23 @@ def save_token(
         logger.error("Cannot save token: user_id not found in request")
         raise ValueError("User ID required for token issuance")
 
-    # Create new token record
+    storage_mode = issuance_storage_mode(session)
+    # Keep the response dict raw: credentials are disclosed once to the client.
+    # Only persistence changes after the compatible fleet has been drained.
     oauth_token = OAuth2Token(
         client_id=client_id,
         user_id=user_id,
         token_type=token.get("token_type", "Bearer"),
-        access_token=token["access_token"],
-        refresh_token=token.get("refresh_token"),
+        access_token=(
+            hash_oauth_token(token["access_token"])
+            if storage_mode == "hashed"
+            else token["access_token"]
+        ),
+        refresh_token=(
+            hash_oauth_token(token.get("refresh_token"))
+            if storage_mode == "hashed"
+            else token.get("refresh_token")
+        ),
         scope=token.get("scope", ""),
         expires_in=token.get("expires_in", 3600),
         resource=resource,  # RFC 8707 audience (Issue #157, #1686)
@@ -917,14 +928,21 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             OAuth2Token or None
         """
         session = self.server.db_session
-        owner = session.query(OAuth2Token.user_id).filter_by(refresh_token=refresh_token).scalar()
+        candidates = token_lookup_values(refresh_token)
+        if not candidates:
+            return None
+        owner = (
+            session.query(OAuth2Token.user_id)
+            .filter(OAuth2Token.refresh_token.in_(candidates))
+            .scalar()
+        )
         if owner is not None:
             session.query(User.user_id).filter_by(user_id=owner).with_for_update(
                 read=True, key_share=True
             ).first()
         token = (
             session.query(OAuth2Token)
-            .filter_by(refresh_token=refresh_token)
+            .filter(OAuth2Token.refresh_token.in_(candidates))
             .with_for_update()
             .first()
         )
@@ -935,8 +953,9 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
 
         if token:
             logger.warning(
-                f"Refresh token invalid: token={refresh_token[:8]}..., "
-                f"revoked={token.refresh_token_revoked_at is not None}"
+                "oauth_refresh_token_invalid",
+                token_id=token.id,
+                revoked=token.refresh_token_revoked_at is not None,
             )
 
         return None

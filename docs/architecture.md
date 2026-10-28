@@ -297,7 +297,8 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **users** — User accounts
 - **api_keys** — API key management (SHA256 hashed); optional `agent_id` binds an owner-provisioned member key to a registered agent; optional `default_context_id` is the key's MCP default context (#2129)
 - **external_api_keys** — OpenAI/Cohere keys (Fernet encrypted)
-- **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server
+- **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server; access and refresh token columns hold SHA-256 digests after the staged storage migration is finalized (#2399)
+- **oauth_token_storage** — Singleton OAuth token storage mode (`bridge` / `hashed`), read on every issuance; see [OAuth token storage rollout](ops/oauth-token-hash-rollout.md)
 - **oauth_grant_settings** — Per-user, per-client grant settings (the app's MCP default context, #2129)
 - **audit_logs** — Security-relevant audit trail
 - **agents** — Workspace-scoped agent registry with lifecycle (`active | suspended | retired`) and binding enforcement mode (`shadow | enforce`)
@@ -452,7 +453,8 @@ All checks funnel through `PermissionService` in `backend/src/services/permissio
 - **API Keys**: SHA256 hash storage
 - **External API Keys**: Fernet symmetric encryption
 - **JWT Tokens**: HS256 signing (1 hour expiration)
-- **OAuth2 Secrets**: SHA256 hash storage
+- **OAuth2 client secrets**: SHA-256 hash storage for confidential clients; public clients authenticate without a client secret
+- **OAuth / MCP access and refresh tokens**: `sha256$`-prefixed SHA-256 digests in `oauth_tokens.access_token` and `oauth_tokens.refresh_token` after explicit finalization. The additive migration starts in `bridge` mode, retaining raw writes while old binaries are drained. Compatible readers accept existing raw rows and hashed rows, but a stored digest is never accepted as a bearer credential. Finalization hashes all rows, including revoked and expired tokens, validates a hash-only database constraint, and changes the durable mode to `hashed` in one transaction. Token values returned to clients, lifetimes, scopes, rotation, revocation and introspection rules are unchanged. Operators must complete the [staged rollout](ops/oauth-token-hash-rollout.md); applying the schema migration alone does not finish it.
 
 ### Signup Gate
 

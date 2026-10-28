@@ -8,6 +8,7 @@ from typing import NoReturn
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -382,6 +383,11 @@ async def async_engine():
         async with engine.begin() as conn:
             await conn.run_sync(AuthBase.metadata.create_all)
             await conn.run_sync(MemoryBase.metadata.create_all)
+            await conn.execute(
+                text(
+                    "INSERT INTO oauth_token_storage (id, mode) VALUES (1, 'hashed') ON CONFLICT (id) DO NOTHING"
+                )
+            )
     except Exception as e:
         await engine.dispose()
         _test_database_unavailable(e)

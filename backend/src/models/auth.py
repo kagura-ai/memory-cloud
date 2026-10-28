@@ -1320,18 +1320,32 @@ class OAuth2DeviceCode(Base):
         return utcnow() > self.expires_at
 
 
+class OAuthTokenStorage(Base):
+    """Singleton issuance mode; only the explicit finalizer enables hashes."""
+
+    __tablename__ = "oauth_token_storage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_oauth_token_storage_singleton"),
+        CheckConstraint("mode IN ('bridge', 'hashed')", name="ck_oauth_token_storage_mode"),
+    )
+
+
 class OAuth2Token(Base):
     """OAuth2 Access Token model.
 
-    Stores access tokens and refresh tokens issued to clients.
+    Stores tagged SHA-256 digests after explicit finalization; bridge mode
+    temporarily retains legacy plaintext for rolling-deployment compatibility.
 
     Attributes:
         id: Primary key
         client_id: Client that owns the token
         user_id: User who authorized (OAuth2 sub)
         token_type: Token type (always "Bearer")
-        access_token: Access token value (unique, random)
-        refresh_token: Refresh token value (optional, unique, random)
+        access_token: Tagged SHA-256 digest (legacy plaintext during bridge)
+        refresh_token: Tagged SHA-256 digest (optional; plaintext during bridge)
         scope: Granted scope (space-separated)
         revoked: Revocation status (False = active)
         issued_at: Token issuance timestamp
@@ -1396,9 +1410,7 @@ class OAuth2Token(Base):
 
     def __repr__(self) -> str:
         """String representation."""
-        return (
-            f"<OAuth2Token(access_token='{self.access_token[:8]}...', client='{self.client_id}')>"
-        )
+        return f"<OAuth2Token(id={self.id!r}, client={self.client_id!r})>"
 
     # ========================================================================
     # Authlib Interface Methods

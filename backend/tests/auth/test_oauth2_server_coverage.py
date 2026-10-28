@@ -62,6 +62,7 @@ from auth.oauth2_server import (  # noqa: E402
     save_token,
     share_lock_owner,
 )
+from auth.oauth_token_storage import hash_oauth_token  # noqa: E402
 from models.auth import (  # noqa: E402
     OAuth2AuthorizationCode,
     OAuth2Client,
@@ -125,6 +126,7 @@ def _make_authz_grant() -> AuthorizationCodeGrant:
     grant = AuthorizationCodeGrant.__new__(AuthorizationCodeGrant)
     grant.server = MagicMock()
     grant.server.db_session = MagicMock()
+    grant.server.db_session.execute.return_value.scalar_one.return_value = "hashed"
     return grant
 
 
@@ -132,6 +134,7 @@ def _make_refresh_grant() -> RefreshTokenGrant:
     grant = RefreshTokenGrant.__new__(RefreshTokenGrant)
     grant.server = MagicMock()
     grant.server.db_session = MagicMock()
+    grant.server.db_session.execute.return_value.scalar_one.return_value = "hashed"
     return grant
 
 
@@ -139,6 +142,7 @@ def _make_device_grant() -> DeviceAuthorizationGrant:
     grant = DeviceAuthorizationGrant.__new__(DeviceAuthorizationGrant)
     grant.server = MagicMock()
     grant.server.db_session = MagicMock()
+    grant.server.db_session.execute.return_value.scalar_one.return_value = "hashed"
     # should_slow_down records the poll with an update that matches the row.
     grant.server.db_session.query().filter_by().update.return_value = 1
     return grant
@@ -195,6 +199,7 @@ class TestSaveToken:
 
     def test_saves_token_with_user_from_request_user(self) -> None:
         session = MagicMock()
+        session.execute.return_value.scalar_one.return_value = "hashed"
         client = _make_client()
         # authorization_code path: request.user present, no credential/data.
         request = SimpleNamespace(client=client, user=SimpleNamespace(user_id="user-xyz"))
@@ -212,8 +217,8 @@ class TestSaveToken:
         assert isinstance(added, OAuth2Token)
         assert added.client_id == "oauth_test123"
         assert added.user_id == "user-xyz"
-        assert added.access_token == "at-123"
-        assert added.refresh_token == "rt-123"
+        assert added.access_token == hash_oauth_token("at-123")
+        assert added.refresh_token == hash_oauth_token("rt-123")
         assert added.scope == "memory:read"
         assert added.expires_in == 1800
         assert added.resource is None
@@ -222,6 +227,7 @@ class TestSaveToken:
 
     def test_user_id_from_credential_when_request_user_missing(self) -> None:
         session = MagicMock()
+        session.execute.return_value.scalar_one.return_value = "hashed"
         client = _make_client()
         # No .user: the user comes from request.credential.
         credential = SimpleNamespace(user_id="cred-user", resource="https://api.example.com")
@@ -241,6 +247,7 @@ class TestSaveToken:
 
     def test_resource_is_the_audience_the_grant_passes(self) -> None:
         session = MagicMock()
+        session.execute.return_value.scalar_one.return_value = "hashed"
         client = _make_client()
         # A ``resource`` in the request data is not read: the grant settles
         # the audience while it validates the token request (#1686).
@@ -258,6 +265,7 @@ class TestSaveToken:
 
     def test_raises_value_error_when_user_id_missing(self) -> None:
         session = MagicMock()
+        session.execute.return_value.scalar_one.return_value = "hashed"
         client = _make_client()
         # request.user.user_id is falsy AND no credential → ValueError branch.
         request = SimpleNamespace(client=client, user=SimpleNamespace(user_id=None))
@@ -737,7 +745,7 @@ class TestRefreshTokenGrant:
         grant = _make_refresh_grant()
         token = _make_token(refresh_token="rt-active", refresh_token_revoked_at=None)
         # The row is read with SELECT ... FOR UPDATE (#1686).
-        grant.server.db_session.query().filter_by().with_for_update().first.return_value = token
+        grant.server.db_session.query().filter().with_for_update().first.return_value = token
 
         result = grant.authenticate_refresh_token("rt-active")
         assert result is token
@@ -746,7 +754,7 @@ class TestRefreshTokenGrant:
         grant = _make_refresh_grant()
         # Revoked refresh token → is_refresh_token_active() False → None + warn.
         token = _make_token(refresh_token="rt-revoked", refresh_token_revoked_at=utcnow())
-        grant.server.db_session.query().filter_by().with_for_update().first.return_value = token
+        grant.server.db_session.query().filter().with_for_update().first.return_value = token
 
         result = grant.authenticate_refresh_token("rt-revoked")
         assert result is None
@@ -758,8 +766,8 @@ class TestRefreshTokenGrant:
         grant = _make_refresh_grant()
         session = grant.server.db_session
         token = _make_token(refresh_token="rt-active", refresh_token_revoked_at=None)
-        session.query().filter_by().scalar.return_value = "owner-1"
-        session.query().filter_by().with_for_update().first.return_value = token
+        session.query().filter().scalar.return_value = "owner-1"
+        session.query().filter().with_for_update().first.return_value = token
         session.reset_mock()
 
         assert grant.authenticate_refresh_token("rt-active") is token
@@ -772,7 +780,7 @@ class TestRefreshTokenGrant:
 
     def test_authenticate_refresh_token_not_found(self) -> None:
         grant = _make_refresh_grant()
-        grant.server.db_session.query().filter_by().with_for_update().first.return_value = None
+        grant.server.db_session.query().filter().with_for_update().first.return_value = None
 
         result = grant.authenticate_refresh_token("nope")
         assert result is None
@@ -924,6 +932,7 @@ class TestServerConstruction:
     def test_save_token_func_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         session = MagicMock()
+        session.execute.return_value.scalar_one.return_value = "hashed"
         wrapper = OAuth2AuthorizationServer(session)
 
         request = SimpleNamespace(client=_make_client(), user=SimpleNamespace(user_id="u-save"))

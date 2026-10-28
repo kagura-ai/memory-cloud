@@ -801,15 +801,23 @@ class TestDeviceSignInWithinLimits:
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
 
-        from models.auth import OAuth2Token, User, Workspace
+        from models.auth import OAuth2Token, OAuthTokenStorage, User, Workspace
 
         engine = create_engine(
             "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
         )
-        for model in (User, Workspace, OAuth2Client, OAuth2DeviceCode, OAuth2Token):
+        for model in (
+            User,
+            Workspace,
+            OAuth2Client,
+            OAuth2DeviceCode,
+            OAuth2Token,
+            OAuthTokenStorage,
+        ):
             model.__table__.create(engine)
         factory = sessionmaker(bind=engine, expire_on_commit=False)
         with factory() as db:
+            db.add(OAuthTokenStorage(id=1, mode="hashed"))
             # The approving user must exist: the approval share-locks the
             # owner's row and refuses when it is gone (#1770).
             db.add(

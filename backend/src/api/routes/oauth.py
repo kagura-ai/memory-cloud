@@ -82,6 +82,7 @@ from auth.oauth2_server import (
     validate_authorization_parameters,
 )
 from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
+from auth.oauth_token_storage import token_lookup_values, token_matches
 from auth.session import SESSION_COOKIE_NAME
 from auth.starlette_oauth2_request import StarletteOAuth2Payload, StarletteOAuth2Request
 from config.settings import get_settings
@@ -3776,7 +3777,6 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
     token, client_id, client_secret = form.token, form.client_id, form.client_secret
 
     caller_ip = request.client.host if request.client else "unknown"
-    token_prefix = token[:8] + "..."
 
     # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
@@ -3789,7 +3789,11 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
                 logger.info("oauth_introspect_unauthenticated", caller_ip=caller_ip)
                 return caller
 
-            oauth_token = db_session.query(OAuth2Token).filter_by(access_token=token).first()
+            oauth_token = (
+                db_session.query(OAuth2Token)
+                .filter(OAuth2Token.access_token.in_(token_lookup_values(token)))
+                .first()
+            )
 
             reason: str | None
             if oauth_token is None:
@@ -3807,7 +3811,6 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
                 "oauth_introspect",
                 caller_ip=caller_ip,
                 caller_client_id=caller.client_id,
-                token_prefix=token_prefix,
                 active=reason is None,
                 reason=reason,
             )
@@ -3826,7 +3829,9 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
             )
 
         except SQLAlchemyError as e:
-            logger.error("oauth_introspect_db_error", error=str(e), caller_ip=caller_ip)
+            logger.error(
+                "oauth_introspect_db_error", error_type=type(e).__name__, caller_ip=caller_ip
+            )
             db_session.rollback()
             raise HTTPException(
                 status_code=500, detail="Internal server error during token introspection"
@@ -3895,7 +3900,10 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
 
             oauth_token = (
                 db_session.query(OAuth2Token)
-                .filter((OAuth2Token.access_token == token) | (OAuth2Token.refresh_token == token))
+                .filter(
+                    OAuth2Token.access_token.in_(token_lookup_values(token))
+                    | OAuth2Token.refresh_token.in_(token_lookup_values(token))
+                )
                 .first()
             )
 
@@ -3903,16 +3911,15 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
                 logger.info(
                     "oauth_token_revoke_ignored_other_client",
                     caller_client_id=caller.client_id,
-                    token_prefix=token[:8],
                 )
             elif oauth_token is not None:
                 now = utcnow()
                 if (
-                    token == oauth_token.access_token
+                    token_matches(token, oauth_token.access_token)
                     and oauth_token.access_token_revoked_at is None
                 ):
                     oauth_token.access_token_revoked_at = now
-                if token == oauth_token.refresh_token:
+                if token_matches(token, oauth_token.refresh_token):
                     if oauth_token.refresh_token_revoked_at is None:
                         oauth_token.refresh_token_revoked_at = now
                     if oauth_token.access_token_revoked_at is None:
@@ -3921,7 +3928,6 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
                 logger.info(
                     "oauth_token_revoked",
                     caller_client_id=caller.client_id,
-                    token_prefix=token[:8],
                     token_type_hint=token_type_hint,
                 )
 
