@@ -9,17 +9,21 @@ release train and preserves selected historical development notes.
 Workspace ownership and connector key integrity: deleting a user no longer leaves a workspace, a context or a connector key without a live owner.
 
 ### Changed
-- **Administrative user deletion requires successors** ([#2372](https://github.com/kagura-ai/memory-cloud/issues/2372)): `DELETE /api/v1/admin/users/{user_id}` answers `409` with the owned workspaces and created shared contexts that still need a surviving successor, named in the request body (`workspace_transfers` / `context_transfers`); the transfers, cleanup and audit rows commit together, and other authors' memories and connector write targets survive. A workspace under a running subscription refuses with `BILLING-005` ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)).
-- **`delete_admin` hands the admin's workspaces over** ([#2371](https://github.com/kagura-ai/memory-cloud/issues/2371)): a live workspace the admin owns that other users are in goes to `--transfer-to USER` (or a per-workspace `--workspace-transfer WORKSPACE=USER`), the new owner is notified, one only the admin is in is deleted with it; the command runs on one async session, re-checks after the prompt and refuses while a subscription runs.
-- **Private contexts stay personal** ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)): on both paths a private context passes to a linked account that wrote in it, otherwise it is deleted with the user; shared contexts and connector write targets take a successor instead.
+
+- **Administrative user deletion requires successors** ([#2372](https://github.com/kagura-ai/memory-cloud/issues/2372)): `DELETE /api/v1/admin/users/{user_id}` answers `409` listing the owned workspaces (`workspace_ids`) and created contexts (`context_ids`) that still need a surviving successor; the retry names them in the request body (`workspace_transfers` / `context_transfers`). The transfers, cleanup and audit rows commit together, and other authors' memories and connector write targets survive. A workspace under a running subscription refuses with `BILLING-005` ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)).
+- **`delete_admin` hands the admin's workspaces over** ([#2371](https://github.com/kagura-ai/memory-cloud/issues/2371)): a live workspace the admin owns that other users are in goes to `--transfer-to USER` (or a per-workspace `--workspace-transfer WORKSPACE=USER`), the new owner is notified, one only the admin is in is deleted with it; the command runs on one async session, re-checks after the prompt and refuses while a subscription runs. Contexts the admin created pass to their workspace owner; a soft-deleted workspace the admin owns is left as it is, contexts included ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417); follow-up [#2406](https://github.com/kagura-ai/memory-cloud/issues/2406)).
+- **Private contexts stay personal** ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)): a private context nobody else wrote in is deleted with the user instead of being handed to a successor; one a linked account wrote in passes to that account ([#1784](https://github.com/kagura-ai/memory-cloud/issues/1784)); one holding another account's memories, and a connector's write target, take a successor like a shared context.
 
 ### Fixed
+
 - **Key rotation during a deletion** ([#2370](https://github.com/kagura-ai/memory-cloud/issues/2370)): deletion and member removal lock the departing user before re-owning connector keys, and rotation locks the candidate owners before the key rows, so a rotation can no longer mint a replacement into the re-own / delete gap.
 - **Lock order of admin deletion and the sole-owner cascade** ([#2347](https://github.com/kagura-ai/memory-cloud/issues/2347)): identity lock, then contexts, then memories in id order, with the subject's edited-only revisions in the first union.
-- **Admin users screen** ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)): the delete toast says why a delete was refused, and the CLI leaves the contexts of a soft-deleted workspace it owns with it.
+- **Admin users screen** ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)): the delete toast says why a delete was refused.
+- **Storage quota after a deletion** ([#2417](https://github.com/kagura-ai/memory-cloud/issues/2417)): the quota release skips the workspaces deleted in the same cascade, so a hard-deleted workspace no longer gets a negative Redis counter.
 
 ### Notes
-- No migration, no new environment variables. An admin user delete through the API now takes the request body described in `docs/deployment.md`; the admin users screen deletes only users who own nothing until the successor picker lands (#2420). A hard-deleted workspace no longer leaves a Redis quota counter behind.
+
+- No migration, no new environment variables. An admin user delete through the API now takes the request body described in `docs/deployment.md`; the admin users screen deletes only users who own nothing until the successor picker lands ([#2420](https://github.com/kagura-ai/memory-cloud/issues/2420)).
 
 ## [v0.130.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.130.1) — 2026-10-28
 
