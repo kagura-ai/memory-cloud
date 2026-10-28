@@ -90,6 +90,10 @@ class StarletteOAuth2Payload:
             for k, v in form.items():
                 data[k] = v
 
+        # RFC 6749 §§3.1/3.2: a single empty value is omitted for lookup.
+        # Keep datalist untouched so empty occurrences still count toward the
+        # separate duplicate guard (#2238), before scalar values are consumed.
+        data = {key: value for key, value in data.items() if value != ""}
         self._data_cache = data
         return data
 

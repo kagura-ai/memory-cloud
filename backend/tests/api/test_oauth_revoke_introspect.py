@@ -390,14 +390,15 @@ class TestMissingToken:
         assert response.status_code == 400, response.text
         assert response.json()["error"] == "invalid_request"
 
-    def test_repeated_token_last_value_wins(self, api: TestClient, db_factory) -> None:
+    def test_repeated_token_is_refused(self, api: TestClient, db_factory) -> None:
         response = api.post(
             "/api/v1/oauth/revoke",
             content=urlencode([("token", "at-b"), ("token", "at-a"), ("client_id", PUBLIC_A)]),
             headers=_FORM_HEADERS,
         )
-        assert response.status_code == 200
-        assert _stored(db_factory, "a").is_revoked()
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_request"
+        assert not _stored(db_factory, "a").is_revoked()
 
 
 class TestEmptyOptionalFields:
@@ -426,3 +427,48 @@ class TestEmptyOptionalFields:
         )
         assert response.status_code == 200, response.text
         assert response.json()["active"] is True
+
+
+class TestRepeatedEndpointFields:
+    @pytest.mark.parametrize("path", _ENDPOINTS)
+    @pytest.mark.parametrize("name", ["token", "client_id", "client_secret", "token_type_hint"])
+    @pytest.mark.parametrize("empty_first", [False, True])
+    def test_empty_duplicate_is_refused_before_authentication(
+        self, api, db_factory, path, name, empty_first
+    ):
+        from structlog.testing import capture_logs
+
+        fields = {
+            "token": "at-c",
+            "client_id": CONFIDENTIAL,
+            "client_secret": CONFIDENTIAL_SECRET,
+            "token_type_hint": "access_token",
+        }
+        value = fields.pop(name)
+        values = ["", value] if empty_first else [value, ""]
+        pairs = [*fields.items(), *((name, v) for v in values)]
+        with capture_logs() as logs:
+            response = api.post(path, content=urlencode(pairs), headers=_FORM_HEADERS)
+        assert response.status_code == 400, response.text
+        assert response.json() == {
+            "error": "invalid_request",
+            "error_description": f"Parameter {name} is included more than once",
+        }
+        rejected = [entry for entry in logs if entry.get("reason") == "repeated_parameter"]
+        assert len(rejected) == 1
+        assert rejected[0]["param"] == name
+        assert CONFIDENTIAL_SECRET not in repr(rejected)
+        assert "at-c" not in repr(rejected)
+        assert not _stored(db_factory, "c").is_revoked()
+
+
+@pytest.mark.parametrize("name", ["a", "missing"])
+@pytest.mark.parametrize("prefix", ["at", "rt"])
+@pytest.mark.parametrize("hint", ["unrecognized-type", "access_token", "refresh_token"])
+def test_revocation_hint_is_not_a_type_requirement(api, db_factory, name, prefix, hint):
+    response = _revoke(
+        api, {"token": f"{prefix}-{name}", "client_id": PUBLIC_A, "token_type_hint": hint}
+    )
+    assert response.status_code == 200, response.text
+    if name == "a":
+        assert _stored(db_factory, name).is_revoked()

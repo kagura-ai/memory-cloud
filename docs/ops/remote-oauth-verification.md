@@ -202,3 +202,42 @@ created. Keep the account and its sample context for the next review.
 Re-run on every release that touches authentication or the MCP transport, and
 before each submission or re-review. Compare the new Markdown with the last
 one in the tracking issue: a step that changes status is the thing to explain.
+
+
+## OAuth request edge cases (#2238)
+
+A request parameter that has one empty value is omitted for OAuth value lookup.
+Occurrence counting happens before that normalization: two occurrences of a
+single-valued parameter are `400 invalid_request`, even when one or both are
+empty. Authorization GET and consent POST count the original query occurrences;
+the token endpoint counts query and textual form occurrences. Revoke and
+introspect count textual form occurrences of `token`, `client_id`,
+`client_secret` and `token_type_hint`. Repeated `resource` parameters retain the
+RFC 8707 validation path. This policy preserves the duplicate guard independently
+of FastAPI's scalar query collapse and the empty-value rule in
+[RFC 6749 §§3.1 and 3.2](https://www.rfc-editor.org/rfc/rfc6749.html#section-3.1).
+
+Repeated-parameter descriptions use `Parameter <name> is included more than once`
+without a trailing period on the authorization, token and device routes and on
+revoke/introspect. Rejection logs identify parameter names, never their values.
+Malformed forms on all four preloaded-form routes return the same generic
+`invalid_request` envelope; parser messages containing body material are not
+copied into the response. Authorization error pages have the consent page's
+`no-store`, `no-cache`, `DENY` and `frame-ancestors 'none'` protections.
+
+An unknown `token_type_hint` is ignored, including for unknown tokens. This is
+required by [RFC 7009 §2.2](https://www.rfc-editor.org/rfc/rfc7009.html#section-2.2),
+and intentionally corrects the contrary proposal in #2238. The
+`unsupported_token_type` error concerns a token type the server cannot revoke;
+it is not a validation error for the optional lookup hint. Both supported access
+and refresh token types continue to be searched.
+
+DCR accepts at most 100 `redirect_uris` entries (the OpenAPI schema publishes this
+bound). Each entry must pass pattern validation and provider detection; invalid
+entries are dropped and never persisted. The response lists only accepted
+entries, preserving their order; if none survives it returns
+`invalid_client_metadata`. The limit bounds per-request URI processing; the
+existing log list limit remains ten. Manual client creation and update retain
+strict pattern validation. Authorization and DCR redirect logs both remove
+userinfo, query strings, fragments and exact-provider binding segments; URLs
+that cannot be parsed safely are represented by a fixed invalid-URI marker.

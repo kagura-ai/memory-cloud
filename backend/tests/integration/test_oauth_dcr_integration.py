@@ -756,3 +756,131 @@ class TestOAuthGrantSingleUse:
         assert response.status_code == 400, response.text
         assert response.json()["error"] == "invalid_request"
         assert self._token_count(sync_db, client_id) == 0
+
+
+@pytest.fixture(params=["bridge", "hashed"])
+def followup_storage_mode(request, sync_db):
+    """Exercise both rollout modes, restoring only this dedicated test database."""
+    from auth.oauth_token_storage import finalize_oauth_token_storage
+
+    _assert_test_db(sync_db)
+    sync_db.rollback()
+    try:
+        if request.param == "hashed":
+            with get_sync_session() as finalizer:
+                finalize_oauth_token_storage(finalizer, writers_drained=True)
+        yield request.param
+    finally:
+        # Release this test's reads before the fixture's DDL; production never
+        # resets finalized storage. This guarded test database is disposable.
+        sync_db.rollback()
+        with get_sync_session() as cleanup:
+            _assert_test_db(cleanup)
+            cleanup.execute(
+                text("ALTER TABLE oauth_tokens DROP CONSTRAINT IF EXISTS ck_oauth_tokens_hashed")
+            )
+            cleanup.execute(text("UPDATE oauth_token_storage SET mode = 'bridge' WHERE id = 1"))
+            cleanup.commit()
+
+
+@pytest.mark.parametrize("empty_first", [False, True])
+@pytest.mark.parametrize("revocation_kind", ["access_token", "refresh_token"])
+def test_followup_filtered_dcr_duplicate_exchange_and_revocation(
+    client, sync_db, followup_storage_mode, empty_first, revocation_kind
+):
+    """#2238/#2399: DCR filtering and strict duplicates preserve hashed token lifecycle."""
+    import hashlib
+    from urllib.parse import urlencode
+
+    from models.auth import OAuth2AuthorizationCode, OAuth2Token
+
+    flow = TestOAuthGrantSingleUse()
+    with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
+        registered = client.post(
+            "/api/v1/oauth/register",
+            json={
+                "client_name": "IntegrationTest Claude Code Loopback",
+                "redirect_uris": [
+                    "ftp://localhost/callback",
+                    flow._REDIRECT_URI,
+                    "https://claude.ai/cb/*/bad",
+                ],
+            },
+        )
+    assert registered.status_code == 201, registered.text
+    client_id = registered.json()["client_id"]
+    assert registered.json()["redirect_uris"] == [flow._REDIRECT_URI]
+    assert sync_db.query(OAuth2Client).filter_by(client_id=client_id).one().redirect_uris == [
+        flow._REDIRECT_URI
+    ]
+    code, verifier = flow._insert_code(sync_db, client_id)
+    values = ["", code] if empty_first else [code, ""]
+    refused = client.post(
+        "/api/v1/oauth/token",
+        content=urlencode(
+            [
+                ("grant_type", "authorization_code"),
+                ("client_id", client_id),
+                ("redirect_uri", flow._REDIRECT_URI),
+                ("code_verifier", verifier),
+                *(("code", value) for value in values),
+            ]
+        ),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"] == "invalid_request"
+    assert sync_db.query(OAuth2AuthorizationCode).filter_by(code=code).count() == 1
+    assert sync_db.query(OAuth2Token).filter_by(client_id=client_id).count() == 0
+    exchanged = flow._exchange(client, client_id, code, verifier)
+    assert exchanged.status_code == 200, exchanged.text
+    returned = exchanged.json()
+    stored = sync_db.query(OAuth2Token).filter_by(client_id=client_id).one()
+    for kind in ("access_token", "refresh_token"):
+        expected = returned[kind]
+        if followup_storage_mode == "hashed":
+            expected = "sha256$" + hashlib.sha256(expected.encode()).hexdigest()
+        assert getattr(stored, kind) == expected
+    assert (
+        sync_db.execute(text("SELECT mode FROM oauth_token_storage WHERE id = 1")).scalar_one()
+        == followup_storage_mode
+    )
+    token = returned[revocation_kind]
+    values = ["", token] if empty_first else [token, ""]
+    refused = client.post(
+        "/api/v1/oauth/revoke",
+        content=urlencode(
+            [
+                ("client_id", client_id),
+                *(("token", value) for value in values),
+            ]
+        ),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert refused.status_code == 400
+    sync_db.expire_all()
+    assert not sync_db.query(OAuth2Token).filter_by(client_id=client_id).one().is_revoked()
+    revoked = client.post(
+        "/api/v1/oauth/revoke",
+        data={
+            "client_id": client_id,
+            "token": token,
+            "token_type_hint": "unknown-hint",
+        },
+    )
+    assert revoked.status_code == 200
+    sync_db.expire_all()
+    stored = sync_db.query(OAuth2Token).filter_by(client_id=client_id).one()
+    assert stored.is_revoked()
+    assert (stored.refresh_token_revoked_at is not None) == (revocation_kind == "refresh_token")
+    if followup_storage_mode == "hashed":
+        assert (
+            sync_db.execute(
+                text(
+                    "SELECT count(*) FROM oauth_tokens "
+                    "WHERE access_token !~ '^sha256\\$[0-9a-f]{64}$' "
+                    "OR (refresh_token IS NOT NULL AND refresh_token !~ '^sha256\\$[0-9a-f]{64}$')"
+                )
+            ).scalar_one()
+            == 0
+        )

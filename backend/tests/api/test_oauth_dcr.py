@@ -1476,3 +1476,57 @@ class TestDcrEndpointMuse:
 
         assert response.status_code == 400, response.text
         assert _MUSE_URI in response.json()["error_description"]
+
+
+class TestDcrPatternFollowups:
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            "ftp://claude.ai/callback",
+            "https://claude.ai/cb/*/bad",
+            "https://*.claude.ai/callback",
+            "https://user:password@[invalid/callback",
+        ],
+    )
+    @pytest.mark.parametrize("mixed", [False, True])
+    def test_pattern_invalid_entries_are_dropped(self, invalid, mixed):
+        allowed = "https://claude.ai/api/mcp/auth_callback"
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = TestClient(app).post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude",
+                    "redirect_uris": [invalid, allowed] if mixed else [invalid],
+                },
+            )
+        assert response.status_code == (201 if mixed else 400), response.text
+        if mixed:
+            assert response.json()["redirect_uris"] == [allowed]
+            assert fake_session.add.call_args.args[0].redirect_uris == [allowed]
+        else:
+            assert response.json()["error"] == "invalid_client_metadata"
+            fake_session.add.assert_not_called()
+
+    def test_redirect_list_is_bounded_at_100(self):
+        from pydantic import ValidationError
+
+        from api.routes.oauth import DynamicClientRegistrationRequest
+
+        uri = "https://claude.ai/api/mcp/auth_callback"
+        assert len(DynamicClientRegistrationRequest(redirect_uris=[uri] * 100).redirect_uris) == 100
+        with pytest.raises(ValidationError):
+            DynamicClientRegistrationRequest(redirect_uris=[uri] * 101)
+
+    @pytest.mark.parametrize("schema", ["OAuth2ClientCreateRequest", "OAuth2ClientUpdateRequest"])
+    def test_manual_registration_keeps_strict_patterns(self, schema):
+        from pydantic import ValidationError
+
+        from api.routes import oauth
+
+        with pytest.raises(ValidationError):
+            getattr(oauth, schema)(client_name="manual", redirect_uris=["ftp://claude.ai/callback"])

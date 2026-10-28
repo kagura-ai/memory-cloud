@@ -77,3 +77,13 @@ def test_default_request_exposes_the_form() -> None:
 
     assert oauth_request.form == _FORM
     assert oauth_request.payload.client_id == "confidential"
+
+
+def test_single_empty_values_are_omitted_but_occurrences_remain():
+    payload = StarletteOAuth2Payload(
+        _request("scope=&state=&client_id=public", {"code": ""}, [("code", "")])
+    )
+    assert payload.data == {"client_id": "public"}
+    assert payload.scope is None
+    assert payload.code is None
+    assert payload.datalist == {"scope": [""], "state": [""], "client_id": ["public"], "code": [""]}

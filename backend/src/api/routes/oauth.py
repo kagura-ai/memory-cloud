@@ -64,7 +64,10 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from python_multipart.exceptions import MultipartParseError
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect
 
 from auth.consent_csrf import consent_csrf_token, consent_csrf_valid
@@ -302,7 +305,7 @@ class DynamicClientRegistrationRequest(BaseModel):
     client_name: str = Field(
         default="MCP Client", min_length=1, max_length=100, description="Client name"
     )
-    redirect_uris: list[str] = Field(..., min_length=1, description="Redirect URIs")
+    redirect_uris: list[str] = Field(..., min_length=1, max_length=100, description="Redirect URIs")
     grant_types: list[str] = Field(
         default=["authorization_code", "refresh_token"], description="Grant types"
     )
@@ -311,11 +314,6 @@ class DynamicClientRegistrationRequest(BaseModel):
     token_endpoint_auth_method: str = Field(
         default="none", description="Token endpoint auth method"
     )
-
-    @field_validator("redirect_uris")
-    @classmethod
-    def _validate_redirect_uris(cls, value: list[str]) -> list[str]:
-        return _check_redirect_uri_patterns(value)
 
 
 class OAuth2ClientUpdateRequest(BaseModel):
@@ -1049,6 +1047,15 @@ async def dynamic_client_registration(
     accepted: list[tuple[str, str]] = []
     refused: list[str] = []
     for uri in data.redirect_uris:
+        # DCR replaces refused metadata entries (#2238); manual management
+        # keeps its strict Pydantic validator. A malformed URL can raise.
+        try:
+            valid_pattern = is_valid_redirect_uri_pattern(uri)
+        except ValueError:
+            valid_pattern = False
+        if not valid_pattern:
+            refused.append(uri)
+            continue
         provider = detect_dcr_provider(uri, data.client_name)
         if provider in _DCR_ALLOWED_PROVIDERS:
             accepted.append((uri, provider))
@@ -1783,70 +1790,20 @@ def _append_query_params(url: str, extra: dict[str, str]) -> str:
 
 
 def _redact_redirect_uri_for_log(redirect_uri: str | None) -> str:
-    """Reduce a redirect_uri to a safe form for logging.
+    """Log a bounded URI without credentials, query, fragment or user binding.
 
-    Issue #218 (Copilot review): warning logs used to echo the full,
-    attacker-controlled ``redirect_uri``. Even validated URIs may carry
-    sensitive query strings (RFC 6749 §3.1.2 allows them on exact-match
-    patterns), and unvalidated probes can be arbitrarily long or contain
-    log-injection payloads. We log scheme + host + path only, capped to
-    256 characters.
-
-    Args:
-        redirect_uri: The URI to redact, or ``None``.
-
-    Returns:
-        ``"<missing>"`` if the input is empty, otherwise
-        ``"{scheme}://{netloc}{path}"`` truncated to 256 chars. Falls back
-        to a truncated raw value if URL parsing fails.
+    Both authorization and DCR use this same masking path (#2238). Invalid
+    URLs have a fixed marker: falling back to raw input could expose secrets.
     """
     if not redirect_uri:
         return "<missing>"
     try:
         parts = urlsplit(redirect_uri)
-        if parts.scheme and parts.netloc:
-            redacted = f"{parts.scheme}://{parts.netloc}{parts.path}"
-        else:
-            redacted = redirect_uri
+        if not parts.scheme or not parts.netloc or not parts.hostname:
+            return "<invalid redirect URI>"
+        _ = parts.port
     except ValueError:
-        redacted = redirect_uri
-    if len(redacted) > 256:
-        redacted = redacted[:253] + "..."
-    return redacted
-
-
-# At most this many redirect URIs are listed in one DCR warning; the count
-# fields carry the total. ``redirect_uris`` has no upper bound, so without the
-# cap one request could write an unbounded log line (#2232).
-_DCR_LOG_MAX_REDIRECT_URIS = 10
-
-# Replaces the per-user binding segment after an exact-redirect path prefix.
-_DCR_LOG_SEGMENT_MASK = "<segment>"
-
-# Replaces a whole path that holds an exact-redirect prefix only once
-# percent-decoded (``/r/user_bound_custom%2Dmcp-...``): the raw text has no
-# prefix to cut after, so nothing of it is logged.
-_DCR_LOG_ENCODED_PATH_MASK = "/<encoded binding path>"
-
-
-def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
-    """``_redact_redirect_uri_for_log`` plus a masked exact-redirect segment.
-
-    The segment after an exact-redirect provider's path prefix (Gemini's
-    ``/r/user_bound_custom-mcp-<segment>``, #2222) identifies one Google user,
-    so it is replaced with ``<segment>`` before the URI is logged (#2232). The
-    prefix is looked for anywhere in the path, case-insensitively and on any
-    host, so a refused URI from a redirector host outside the table is masked
-    too; a path that holds the prefix only once percent-decoded is replaced
-    whole. Masking runs before the 256-char cap so a long path cannot push the
-    prefix past the cut unmasked. Userinfo is dropped from the authority: a
-    refused entry may carry credentials (``detect_dcr_provider`` refuses
-    userinfo), and the #218 form is scheme + host + path.
-    """
-    try:
-        parts = urlsplit(redirect_uri)
-    except ValueError:
-        return _redact_redirect_uri_for_log(redirect_uri)
+        return "<invalid redirect URI>"
     path = parts.path
     lowered = path.lower()
     decoded = unquote(path).lower()
@@ -1859,7 +1816,29 @@ def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
             path = _DCR_LOG_ENCODED_PATH_MASK
             break
     netloc = parts.netloc.rpartition("@")[2]
-    return _redact_redirect_uri_for_log(urlunsplit(parts._replace(netloc=netloc, path=path)))
+    redacted = urlunsplit((parts.scheme, netloc, path, "", ""))
+    # Strip control characters even from refused, attacker-provided paths.
+    redacted = re.sub(r"[\x00-\x1f\x7f]", "", redacted)
+    return redacted[:253] + "..." if len(redacted) > 256 else redacted
+
+
+# At most this many redirect URIs are listed in one DCR warning; the count
+# fields carry the total. The request accepts at most 100 URIs (#2238);
+# this smaller cap keeps warning logs compact (#2232).
+_DCR_LOG_MAX_REDIRECT_URIS = 10
+
+# Replaces the per-user binding segment after an exact-redirect path prefix.
+_DCR_LOG_SEGMENT_MASK = "<segment>"
+
+# Replaces a whole path that holds an exact-redirect prefix only once
+# percent-decoded (``/r/user_bound_custom%2Dmcp-...``): the raw text has no
+# prefix to cut after, so nothing of it is logged.
+_DCR_LOG_ENCODED_PATH_MASK = "/<encoded binding path>"
+
+
+def _redact_dcr_redirect_uri_for_log(redirect_uri: str) -> str:
+    """Use the common authorization/DCR masking, including exact user bindings."""
+    return _redact_redirect_uri_for_log(redirect_uri)
 
 
 def _redact_dcr_redirect_uris_for_log(redirect_uris: list[str]) -> list[str]:
@@ -1970,6 +1949,7 @@ def _render_invalid_redirect_uri_error(
             "redirect_uri": incoming_redirect_uri or "",
         },
         status_code=400,
+        headers=_CONSENT_PAGE_HEADERS,
     )
 
 
@@ -1997,7 +1977,7 @@ def _repeated_parameter_error(name: str) -> InvalidRequestError:
 
     Shared with the token endpoint's refusal. Names only, never values.
     """
-    return InvalidRequestError(description=f"Parameter {name} is included more than once.")
+    return InvalidRequestError(description=f"Parameter {name} is included more than once")
 
 
 def _render_authorization_request_error(
@@ -2029,6 +2009,7 @@ def _render_authorization_request_error(
             "oauth_error_description": str(error.description or ""),
         },
         status_code=400,
+        headers=_CONSENT_PAGE_HEADERS,
     )
 
 
@@ -2599,10 +2580,9 @@ async def oauth_authorize_post(
 
     # Preload form data manually. The body is bounded before the session is
     # read (#2200); the device route's body-bound error is shared.
-    try:
-        await preload_form(request)
-    except _DeviceAuthorizationRequestError as e:
-        return _oauth_form_refused(request, e)
+    form_error = await _preload_oauth_form(request)
+    if form_error is not None:
+        return form_error
 
     user = get_current_user_from_session(request)
     if not user:
@@ -2809,10 +2789,9 @@ async def oauth_token(request: Request):
 
     # Preload form data manually; the device route's body-bound error is
     # shared (#2200).
-    try:
-        await preload_form(request)
-    except _DeviceAuthorizationRequestError as e:
-        return _oauth_form_refused(request, e)
+    form_error = await _preload_oauth_form(request)
+    if form_error is not None:
+        return form_error
 
     # The form carries credentials (code, code_verifier, refresh_token,
     # client_secret), so only the grant type and the parameter names are
@@ -2957,6 +2936,21 @@ class _DeviceAuthorizationRequestError(Exception):
         self.status_code = status_code
 
 
+async def _preload_oauth_form(request: Request) -> JSONResponse | None:
+    """Load a bounded OAuth form, mapping parser failures without exposing body data."""
+    try:
+        await preload_form(request)
+    except _DeviceAuthorizationRequestError as error:
+        return _oauth_form_refused(request, error)
+    except StarletteHTTPException as error:
+        if error.status_code != 400:
+            raise
+        return _oauth_form_refused(request, _DeviceAuthorizationRequestError("Malformed form body"))
+    except (MultiPartException, MultipartParseError):
+        return _oauth_form_refused(request, _DeviceAuthorizationRequestError("Malformed form body"))
+    return None
+
+
 def _oauth_form_refused(request: Request, e: _DeviceAuthorizationRequestError) -> JSONResponse:
     """Answer a form body ``preload_form`` refused (#2200) as RFC 6749 ``invalid_request``."""
     logger.info(
@@ -3019,7 +3013,7 @@ def _parse_device_authorization_form(body: bytes) -> dict[str, str]:
         if name not in DeviceAuthorizationRequest.model_fields:
             continue
         if name in fields:
-            raise _DeviceAuthorizationRequestError(f"Parameter {name} is included more than once")
+            raise _DeviceAuthorizationRequestError(str(_repeated_parameter_error(name).description))
         fields[name] = value
     return fields
 
@@ -3686,15 +3680,26 @@ async def _read_token_endpoint_form(request: Request) -> _TokenEndpointForm | JS
 
     A body over the limit is ``413`` and a client disconnect ``400``, both
     ``invalid_request``; a missing or empty ``token`` is ``400
-    invalid_request`` (``Form(...)`` answered both with a 422). As with
-    ``Form()``, a repeated field keeps its last value and an empty optional
-    field counts as absent: ``client_secret=`` next to HTTP Basic is not a
-    second authentication method.
+    invalid_request`` (``Form(...)`` answered both with a 422). Repeated
+    single-valued fields are refused before authentication, counting empty
+    occurrences too (#2238). One empty optional field counts as absent:
+    ``client_secret=`` next to HTTP Basic is not a second authentication method.
     """
-    try:
-        await preload_form(request)
-    except _DeviceAuthorizationRequestError as e:
-        return _oauth_form_refused(request, e)
+    form_error = await _preload_oauth_form(request)
+    if form_error is not None:
+        return form_error
+    for name in ("token", "client_id", "client_secret", "token_type_hint"):
+        if sum(field == name for field, _ in request.state.form_items) > 1:
+            logger.info(
+                "oauth_token_endpoint_rejected",
+                path=request.url.path,
+                reason="repeated_parameter",
+                param=name,
+            )
+            return rfc6749_error_response(
+                error="invalid_request",
+                description=str(_repeated_parameter_error(name).description),
+            )
     form_data: dict[str, str] = request.state.form_data
     token = form_data.get("token")
     if not token:
@@ -3886,6 +3891,8 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
     if isinstance(form, JSONResponse):
         return form
     token, client_id, client_secret = form.token, form.client_id, form.client_secret
+    # RFC 7009 §2.2 requires an invalid hint to be ignored. It is not an
+    # unsupported_token_type error: both actual token types are searchable.
     token_type_hint = form.token_type_hint
 
     # #1831: sync session work runs off the event loop (see _run_sync).

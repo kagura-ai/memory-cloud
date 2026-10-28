@@ -1497,7 +1497,7 @@ _SINGLE_VALUED = pytest.mark.parametrize(
 
 def _assert_repeat_page(response: Any, name: str) -> None:
     _assert_error_page(response, "invalid_request")
-    assert f"Parameter {name} is included more than once." in response.text
+    assert f"Parameter {name} is included more than once" in response.text
     # The consent page was not rendered.
     assert _page_csrf_tokens(response) == []
 
@@ -1654,3 +1654,53 @@ class TestRepeatedAuthorizationParameters:
         assert "error" not in redirect, redirect
         assert redirect["state"] == "query-state"
         assert _codes(db_factory) == 1
+
+
+class TestEmptyRepeatedParameters:
+    @pytest.mark.parametrize("method", ["get", "post"])
+    @pytest.mark.parametrize(
+        "name", ["client_id", "redirect_uri", "scope", "state", "code_challenge", "response_type"]
+    )
+    @pytest.mark.parametrize("empty_first", [False, True])
+    def test_authorize_counts_empty_occurrences(self, api, db_factory, method, name, empty_first):
+        _, challenge = _pkce()
+        params = _authorize_params(challenge=challenge)
+        value = params.pop(name)
+        values = ["", value] if empty_first else [value, ""]
+        pairs = [*params.items(), *((name, v) for v in values)]
+        url = f"/api/v1/oauth/authorize?{urlencode(pairs)}"
+        response = (
+            api.get(url, follow_redirects=False)
+            if method == "get"
+            else api.post(url, data=_consent_form(), follow_redirects=False)
+        )
+        _assert_repeat_page(response, name)
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+        assert _codes(db_factory) == 0
+
+    @pytest.mark.parametrize(
+        "name", ["grant_type", "client_id", "code", "code_verifier", "refresh_token"]
+    )
+    @pytest.mark.parametrize("empty_first", [False, True])
+    def test_token_counts_empty_occurrences(self, api, name, empty_first):
+        fields = {
+            "grant_type": "authorization_code",
+            "client_id": PUBLIC_CLIENT,
+            "code": "unconsumed-code",
+            "code_verifier": "secret-verifier",
+            "refresh_token": "secret-refresh",
+        }
+        value = fields.pop(name)
+        values = ["", value] if empty_first else [value, ""]
+        response = api.post(
+            "/api/v1/oauth/token",
+            content=urlencode([*fields.items(), *((name, v) for v in values)]),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": "invalid_request",
+            "error_description": f"Parameter {name} is included more than once",
+        }
