@@ -469,12 +469,14 @@ async def require_session_auth(
     # for dashboard continuity since #252; OAuth-vs-API-key is surfaced
     # via the ``token_kind`` field instead of a new event name.
     if api_key:
-        logger.warning(
-            "api_key_rejected_for_web_ui",
-            path=request.url.path,
-            token_kind="oauth" if is_oauth_bearer_token(api_key) else "api_key",
-            token_prefix=api_key[:8],
-        )
+        oauth_bearer = is_oauth_bearer_token(api_key)
+        log_fields = {
+            "path": request.url.path,
+            "token_kind": "oauth" if oauth_bearer else "api_key",
+        }
+        if not oauth_bearer:
+            log_fields["token_prefix"] = api_key[:8]
+        logger.warning("api_key_rejected_for_web_ui", **log_fields)
         raise HTTPException(
             status_code=403,
             # No "bearer" / "authorization" / "api_key=" in this message:
@@ -546,7 +548,7 @@ async def get_user_from_api_key_or_session(
     if api_key and is_oauth_bearer_token(api_key):
         result = await verify_oauth_bearer_token(api_key, db)
         if result is None:
-            logger.warning("invalid_oauth_bearer_attempt", token_prefix=api_key[:8])
+            logger.warning("invalid_oauth_bearer_attempt")
             raise HTTPException(status_code=401, detail="Invalid or expired Bearer token")
 
         user_id, granted_scope = result

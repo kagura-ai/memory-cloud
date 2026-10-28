@@ -455,3 +455,42 @@ class TestOAuthLookupDBFailure:
             client = TestClient(app_with_oauth_route)
             resp = client.get("/_t/read", headers={"Authorization": "Bearer randomtok"})
             assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("credential", ["OAuthSecretSentinel1234567890", "sha256$" + "c" * 64])
+def test_rejected_oauth_credential_logs_no_raw_or_digest_prefix(app_with_oauth_route, credential):
+    from structlog.testing import capture_logs
+
+    with patch("auth.dependencies.verify_oauth_bearer_token", new=AsyncMock(return_value=None)):
+        with capture_logs() as entries:
+            response = TestClient(app_with_oauth_route).get(
+                "/_t/read", headers={"Authorization": f"Bearer {credential}"}
+            )
+    assert response.status_code == 401
+    rejected = [entry for entry in entries if entry.get("event") == "invalid_oauth_bearer_attempt"]
+    assert len(rejected) == 1
+    assert rejected[0]["log_level"] == "warning"
+    assert credential[:8] not in repr(entries)
+    assert "token_prefix" not in rejected[0]
+
+
+@pytest.mark.parametrize(
+    "credential", ["OAuthSecretSentinel1234567890", "sha256$" + "c" * 64, "kagura_test_key"]
+)
+def test_session_only_rejection_never_logs_oauth_prefix(app_with_session_only_route, credential):
+    from structlog.testing import capture_logs
+
+    with capture_logs() as entries:
+        response = TestClient(app_with_session_only_route).get(
+            "/_t/web_ui", headers={"Authorization": f"Bearer {credential}"}
+        )
+    assert response.status_code == 403
+    rejected = [entry for entry in entries if entry.get("event") == "api_key_rejected_for_web_ui"]
+    assert len(rejected) == 1
+    if credential.startswith("kagura_"):
+        assert rejected[0]["token_kind"] == "api_key"
+        assert rejected[0]["token_prefix"] == credential[:8]
+    else:
+        assert rejected[0]["token_kind"] == "oauth"
+        assert credential[:8] not in repr(entries)
+        assert "token_prefix" not in rejected[0]

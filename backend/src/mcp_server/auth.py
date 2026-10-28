@@ -238,16 +238,12 @@ async def authenticate_mcp_request(
         raise AuthenticationError(
             "Malformed Authorization header: the Bearer token contains whitespace"
         )
-    # Issue #965: log at most an 8-char prefix (repo-wide redaction convention,
-    # cf. session_id[:8] / refresh_token[:8] / oauth token_prefix=token[:8]).
-    # Enough to correlate log lines without exposing usable key material. For
-    # kagura_ API keys this is the 7-char prefix + 1 body char; for opaque
-    # OAuth2 bearer tokens (no prefix) it is the first 8 token chars. Previously
-    # logged token[:20], leaking ~13 chars of entropy past the kagura_ prefix.
-    logger.debug(f"MCP auth attempt: token={token[:8]}...")
-
     # #1994: look the token up in the one store its shape names — never both.
-    if is_oauth_bearer_token(token):
+    oauth_bearer = is_oauth_bearer_token(token)
+    if oauth_bearer:
+        # #2399: OAuth tokens and their stored digests have no public prefix.
+        # Retain diagnostic events without writing any credential characters.
+        logger.debug("MCP auth attempt: method=oauth2")
         # OAuth2 access token (Issue #33)
         grant = await _verify_oauth2_token(token)
         if grant:
@@ -255,10 +251,7 @@ async def authenticate_mcp_request(
             # (``/mcp``, ``/mcp/w/<id>``, default port, host case; query ignored).
             # A token issued without ``resource`` carries no audience and is accepted.
             if grant.resource and not is_same_mcp_resource(grant.resource):
-                logger.warning(
-                    f"MCP auth failed: method=oauth2, audience {grant.resource[:200]!r} "
-                    f"is not this server's MCP resource, token={token[:8]}..."
-                )
+                logger.warning("MCP auth failed: method=oauth2, reason=audience_mismatch")
                 raise InvalidTokenError(
                     "The access token was issued for a different resource. "
                     "Re-authorize this server to get a token for it."
@@ -275,7 +268,8 @@ async def authenticate_mcp_request(
             # Issue #245: context_id is now required in tool args, not from auth
             return (grant.user_id, None, None)
     else:
-        # API key (``kagura_`` prefix)
+        # API key (``kagura_`` prefix); retain its existing #965 log convention.
+        logger.debug(f"MCP auth attempt: token={token[:8]}...")
         result = await _verify_api_key(token)
         if result:
             user_id, context_id, workspace_id = result
@@ -287,8 +281,11 @@ async def authenticate_mcp_request(
             )
             return result
 
-    # Authentication failed: one message for a miss in either store (#1994)
-    logger.warning(f"MCP auth failed: token={token[:8]}...")
+    # Authentication failed: OAuth credentials never contribute log fragments.
+    if oauth_bearer:
+        logger.warning("MCP auth failed: method=oauth2, reason=invalid_or_expired_token")
+    else:
+        logger.warning(f"MCP auth failed: token={token[:8]}...")
     raise InvalidTokenError("Invalid or expired Bearer token")
 
 

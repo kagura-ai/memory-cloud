@@ -10,6 +10,10 @@ pipeline. The fix logs at most an 8-char prefix (``kagura_`` is 7 chars, so
 this is the prefix plus a single body char — matching the repo-wide
 ``token[:8]`` redaction convention).
 
+Issue #2399 — OAuth tokens and stored digests never contribute even a prefix
+at DEBUG or WARNING, including failed audience checks. API key behavior stays
+as described above.
+
 Issue #2025 — a successful auth is per-request noise: it logs at DEBUG, never
 INFO, while a failed auth keeps its WARNING line.
 """
@@ -121,3 +125,50 @@ async def test_failed_auth_still_logs_warning(caplog):
 
     failed = [r for r in caplog.records if "MCP auth failed" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.WARNING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "credential"),
+    [
+        ("accepted", "OAuthSecretSentinel1234567890"),
+        ("invalid", "OAuthSecretSentinel1234567890"),
+        ("audience_mismatch", "OAuthSecretSentinel1234567890"),
+        ("invalid", "sha256$" + "c" * 64),
+    ],
+)
+async def test_oauth_auth_logs_no_raw_or_digest_prefix(caplog, outcome, credential):
+    """#2399: OAuth credentials have no public prefix suitable for correlation."""
+    grant = (
+        None
+        if outcome == "invalid"
+        else OAuthGrant(
+            "oauth-user",
+            "memory:read",
+            "https://other.example/mcp" if outcome == "audience_mismatch" else None,
+        )
+    )
+    with (
+        patch("mcp_server.auth._verify_oauth2_token", new=AsyncMock(return_value=grant)),
+        patch("mcp_server.auth.is_same_mcp_resource", return_value=False),
+        caplog.at_level(logging.DEBUG, logger="mcp_server.auth"),
+    ):
+        if outcome == "accepted":
+            assert await authenticate_mcp_request(f"Bearer {credential}") == (
+                "oauth-user",
+                None,
+                None,
+            )
+        else:
+            with pytest.raises(AuthenticationError):
+                await authenticate_mcp_request(f"Bearer {credential}")
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "MCP auth attempt" in logged
+    expected_event = "MCP auth success" if outcome == "accepted" else "MCP auth failed"
+    assert expected_event in logged
+    assert credential[:8] not in logged
+    assert credential not in logged
+    failed = [record for record in caplog.records if "MCP auth failed" in record.getMessage()]
+    assert [record.levelno for record in failed] == (
+        [] if outcome == "accepted" else [logging.WARNING]
+    )
