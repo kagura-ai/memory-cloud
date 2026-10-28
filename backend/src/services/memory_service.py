@@ -2054,6 +2054,8 @@ class MemoryService:
             ValueError: no live suggestion to accept, one written after this
                 memory, or either memory not the caller's own under #1803
                 (nothing written).
+            AuthorizationError: an endpoint is no longer live, in scope or
+                owned when the edge writer rechecks after resolution (nothing written).
             SupersedeEdgeConflictError: a different declared edge links the
                 pair (nothing written).
             RuntimeError: the edge or the clearing did not land as asserted;

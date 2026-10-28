@@ -39,6 +39,7 @@ from mcp_server.tools._profiles import (
 # #2126 (bootstrap's format parameter) took it to 40,528; #2341 (recall) to 41,942.
 # #2353 added create_edge (1,486 after its trim; reference, remember and bootstrap
 # moved Returns detail into their guide topics): 43,037 under the same budget.
+# #2313 added ownership guidance and trimmed create_edge: 43,087 (13 chars spare).
 CORE_CHAR_BUDGET = 43_100  # (#1973, #2353) 22 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
@@ -109,9 +110,11 @@ def test_context_lifecycle_is_in_core_but_merge_and_search_config_are_not():
 
 
 def test_create_edge_is_in_core_but_the_other_edge_tools_are_not():
-    """#2353: a core client links any pair as ``supersedes`` / ``related_to``
-    without a ``describe_tools`` round trip; editing, deleting and listing
-    edges stay behind it."""
+    """#2353: a core client links memories without a ``describe_tools`` trip.
+
+    ``supersedes`` requires both memories to be its own; ``related_to`` does not.
+    Editing, deleting and listing edges stay behind ``describe_tools``.
+    """
     assert "create_edge" in CORE_TOOLS
     for name in ("update_edge", "delete_edge", "list_edges"):
         assert name in REGISTRY and name not in CORE_TOOLS

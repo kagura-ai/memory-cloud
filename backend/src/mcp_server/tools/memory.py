@@ -676,6 +676,10 @@ async def handle_update_memory(
             )
             if e.reason == VIEWER_READ_ONLY_REASON:
                 return _viewer_read_only_response("update memories")
+            if e.reason == "supersedes_endpoint_not_owned":
+                # The candidate can become unavailable after resolution; keep
+                # the final edge owner check's uniform refusal, not a guardrail hint.
+                return _error_response("permission_denied", e.message)
             return _guardrail_author_denied("change a tool guardrail")
         except Exception:
             await db.rollback()

@@ -88,6 +88,7 @@ FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session j
 # #1973 added create_context / update_context / delete_context: core list 39,575.
 # #2353 added create_edge (1,398) and moved Returns detail of reference, remember
 # and bootstrap into the guide: core list 41,331 under an unchanged ceiling.
+# #2313 owner guidance plus create_edge trim: core list 41,381 (119 chars spare).
 CORE_LIST_BUDGET = 41_500  # (#1973, #2353) 22 core tools
 RECALL_BUDGET = 4_000  # (#1850) was 6,900
 REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
