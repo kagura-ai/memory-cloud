@@ -2222,6 +2222,11 @@ deploy apart, in this order:
    (`capacity_purge_notice_persist_failed`): that retry can repeat a warning,
    but a missing record delays deletion. No DB revert is needed after a
    failed send, so a DB outage cannot turn that failure into a deletion permit.
+   Task cancellation during sending or recording also releases the claim for
+   retry; uncommitted notice records are rolled back. A process crash or an
+   unavailable Redis during claim release can still leave a claim until its
+   45-day TTL expires. If its first/final notice record is missing, deletion
+   waits too; the banner's projected date can advance on each daily run.
 
    **Stages 2 and 3 need a real mail provider** (`EMAIL_PROVIDER=resend`).
    The default logging stub reports every mail as sent without sending
@@ -2270,7 +2275,10 @@ deploy apart, in this order:
    The corrected final warning uses a separate Redis claim (suffix
    `:warning-week` for locks first notified after day 23), so the old
    stage-29 claim cannot suppress it. The same claim deduplicates later
-   attempts, including when the old claim has expired.
+   attempts, including when the old claim has expired. An upgrade during the
+   warning week may send one extra catch-up mail: an old first notice on day
+   35 only claimed stage 29, so the first new run on day 36 sends "6 days
+   left" before the day-39/day-41 notices. The deletion date remains day 42.
    Deploy all sweep workers together before enabling the affected operation;
    an old worker still applies the old notice/deletion rules. No schema
    migration or manual notice-column reset is needed.

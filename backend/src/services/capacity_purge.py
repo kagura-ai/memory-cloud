@@ -32,6 +32,7 @@ memory-cloud owns the clock — ``workspaces.capacity_locked_since``:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -488,6 +489,10 @@ async def send_due_purge_notices(
                 cleanup_url=lock.cleanup_url,
                 contexts_url=contexts_url,
             )
+        except asyncio.CancelledError:
+            # No durable record yet: allow the next sweep to retry the warning.
+            await asyncio.shield(_release_claim(redis, key, ws_id))
+            raise
         except TimeoutError:
             # The provider may have accepted it: record this outcome, too.
             logger.warning("capacity_purge_notice_delivery_uncertain", workspace_id=str(ws_id))
@@ -505,6 +510,12 @@ async def send_due_purge_notices(
             continue
         try:
             await _record_notice(db, ws, stage=stage, now=now)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(db.rollback())
+            finally:
+                await asyncio.shield(_release_claim(redis, key, ws_id))
+            raise
         except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
             logger.warning(
                 "capacity_purge_notice_persist_failed",

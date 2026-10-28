@@ -8,6 +8,7 @@ therefore pin THIS test's workspace and treat the run counts as lower bounds.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1067,6 +1068,67 @@ class _RecordingMail:
         return True
 
 
+@pytest.mark.parametrize("phase", ["send", "record"])
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_notice_releases_claim_and_retries_safely(
+    db_session, free_ws, only_workspaces, final, phase
+) -> None:
+    """Cancellation propagates, but must not strand a first/final warning claim."""
+    from datetime import datetime, time
+
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    since = datetime.combine(utcnow().date() - timedelta(days=70), time(4))
+    now = since + timedelta(days=35)
+    ws.capacity_locked_since = since
+    ws.capacity_purge_first_notice_at = since if final else None
+    await db_session.commit()
+    redis = _Redis()
+    email = MagicMock(send_capacity_purge_notice=AsyncMock(return_value=True))
+    entered = asyncio.Event()
+
+    async def suspend(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    target, attribute = (
+        (email, "send_capacity_purge_notice") if phase == "send" else (db_session, "commit")
+    )
+    with patch.object(target, attribute, suspend):
+        task = asyncio.create_task(
+            capacity_purge.send_due_purge_notices(db_session, now=now, redis=redis, email=email)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert not redis.keys
+    await db_session.refresh(ws)
+    assert ws.capacity_purge_first_notice_at == (since if final else None)
+    assert ws.capacity_purge_final_notice_at is None
+    retry_day = now + timedelta(days=1)
+    result = await capacity_purge.send_due_purge_notices(
+        db_session, now=retry_day, redis=redis, email=email
+    )
+    assert result.sent == 1
+    await db_session.refresh(ws)
+    assert ws.capacity_purge_first_notice_at == (since if final else retry_day)
+    assert ws.capacity_purge_final_notice_at == (retry_day if final else None)
+    assert email.send_capacity_purge_notice.call_args.kwargs["purge_at"] == (
+        retry_day + timedelta(days=1 if final else 7)
+    )
+    assert not capacity_purge.purge_due(
+        since,
+        retry_day,
+        first_notice_at=ws.capacity_purge_first_notice_at,
+        final_notice_at=ws.capacity_purge_final_notice_at,
+    )
+
+
 @pytest.mark.parametrize("final", [False, True])
 @pytest.mark.asyncio
 async def test_failed_delivery_with_db_failure_never_authorizes_purge(
@@ -1258,7 +1320,6 @@ async def test_late_notice_timeline_matches_actual_deletion(
             days=start_day
         )
         redis.keys.add(capacity_purge.notice_key(ws.id, day0, 29))
-        redis.keys.add(capacity_purge.notice_key(ws.id, day0, 23))
         mail.notices.append((start_day, 7))
     await db_session.commit()
     final_day = start_day + 6 + failed_final_days
@@ -1282,7 +1343,7 @@ async def test_late_notice_timeline_matches_actual_deletion(
         patch("db.redis.get_redis_client", return_value=redis),
         patch("services.email_service.get_email_service", return_value=email),
     ):
-        for day in range(start_day, purge_day + 2):
+        for day in range(start_day + int(legacy), purge_day + 2):
             mail.day = day
             now = day0 + timedelta(days=day)
             await capacity_purge.run_capacity_purge_sweep(db_session, now=now)
@@ -1295,7 +1356,11 @@ async def test_late_notice_timeline_matches_actual_deletion(
                 assert capacity_purge.workspace_purge_at(ws, now=now) == datetime.combine(
                     now.date() + timedelta(days=1), time(4)
                 )
-    assert mail.notices == [(start_day, 7), (start_day + 4, 3), (final_day, 1)]
+    expected = [(start_day, 7)]
+    if legacy:
+        # Old code only claimed stage 29; the first new run adds a catch-up mail.
+        expected.append((start_day + 1, 6))
+    assert mail.notices == expected + [(start_day + 4, 3), (final_day, 1)]
     assert mail.completions == [purge_day]
     assert deadlines[-1][1] == datetime.combine(day0.date() + timedelta(days=purge_day), time(4))
     assert ws.capacity_locked_since is None
