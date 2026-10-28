@@ -736,6 +736,16 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
     for host in hosts
 )
 
+# Providers whose client always sends one fixed callback (issue #2410): the
+# whole redirect URI is compared as written — scheme, host, path, nothing
+# after it — so there is no prefix, segment or wildcard to widen. Meta's Muse
+# registers through RFC 7591 as a public PKCE client with this single callback
+# on agent.meta.ai. muse.ai is deliberately absent: Muse never sends it, and it
+# also names an unrelated video service.
+_PROVIDER_EXACT_URIS: dict[str, tuple[str, ...]] = {
+    "muse": ("https://agent.meta.ai/api/hatch/oauth/callback",),
+}
+
 # The Gemini redirector hosts as the registration rejection message names them
 # ("https://a, https://b or https://c").
 _GEMINI_REDIRECT_ORIGINS = tuple(f"https://{h}" for h in _PROVIDER_EXACT_REDIRECTS["gemini"][0])
@@ -792,10 +802,12 @@ _LOOPBACK_CLIENT_LABELS: tuple[str, ...] = (
 # hostname providers plus the loopback-only ones (``_LOOPBACK_PROVIDER_KEYWORDS``
 # is a superset of ``_PROVIDER_HOSTNAMES``), then the exact-redirect ones. The
 # exact-redirect providers are NOT loopback keywords: a loopback registration
-# whose ``client_name`` says "Gemini" stays refused (#2222).
+# whose ``client_name`` says "Gemini" stays refused (#2222). The exact-URI
+# providers (#2410) follow the same rule.
 _DCR_ALLOWED_PROVIDERS: tuple[str, ...] = (
     *_LOOPBACK_PROVIDER_KEYWORDS,
     *_PROVIDER_EXACT_REDIRECTS,
+    *_PROVIDER_EXACT_URIS,
 )
 
 
@@ -814,7 +826,10 @@ def _normalize_client_name(client_name: str) -> str:
 
 
 def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
-    """Return the ``_PROVIDER_EXACT_REDIRECTS`` provider ``redirect_uri`` names, or None.
+    """Return the exact-URI or exact-redirect provider ``redirect_uri`` names, or None.
+
+    An ``_PROVIDER_EXACT_URIS`` provider (#2410) matches only its listed URIs,
+    whole and as written.
 
     The raw string must be ``https://<host><prefix><segment>`` for one of the
     provider's hosts, character for character: the scheme and host are
@@ -829,6 +844,9 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     Returns:
         The provider name, or None when no exact-redirect provider matches.
     """
+    for provider, uris in _PROVIDER_EXACT_URIS.items():
+        if redirect_uri in uris:
+            return provider
     for base, provider in _EXACT_REDIRECT_BASES:
         if not redirect_uri.startswith(base):
             continue
@@ -845,7 +863,7 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
     Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
-    ``"hermes"``, ``"openclaw"``, ``"gemini"``, or ``"custom"``. The caller rejects
+    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, or ``"custom"``. The caller rejects
     ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
@@ -857,7 +875,9 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
            (Codex CLI, Hermes Agent, OpenClaw — issue #1657).
         2. Otherwise → an exact-redirect provider (``_PROVIDER_EXACT_REDIRECTS``,
            ``gemini``): exact https host + pinned path prefix + one segment,
-           compared as written (issue #2222).
+           compared as written (issue #2222); an exact-URI provider
+           (``_PROVIDER_EXACT_URIS``, ``muse``): the whole URI as written
+           (issue #2410).
         3. Otherwise → match the parsed hostname (case-insensitive) against
            ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
            as exact host or single-suffix subdomain.
@@ -957,7 +977,9 @@ async def dynamic_client_registration(
       RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
       Cursor, Codex, Hermes Agent or OpenClaw (issue #1657); gemini by an
       exact https redirect on Google's OAuth redirector hosts under
-      ``/r/user_bound_custom-mcp-`` (issue #2222). Every entry of
+      ``/r/user_bound_custom-mcp-`` (issue #2222); muse by its one exact
+      callback URI ``https://agent.meta.ai/api/hatch/oauth/callback``
+      (issue #2410). Every entry of
       ``redirect_uris`` is checked on its own (#1686); entries that fail are
       left out of the registration and only the rest are stored and echoed
       (RFC 7591 §3.2.1). Refused with ``invalid_client_metadata`` only when
@@ -1051,7 +1073,8 @@ async def dynamic_client_registration(
                 f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)}). "
                 f"Gemini must use {_GEMINI_REDIRECT_HOSTS_TEXT} with the path "
                 f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
-                "query or fragment."
+                "query or fragment. "
+                f"Muse must use exactly {_PROVIDER_EXACT_URIS['muse'][0]}."
             ),
         )
 
