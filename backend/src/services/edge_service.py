@@ -37,6 +37,7 @@ from models.memory import (
     EDGE_TYPE_SUPERSEDES,
     Memory,
 )
+from services.memory_ownership import own_memory_predicate
 from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
@@ -164,9 +165,7 @@ async def ensure_supersedes_owned(
     owner predicate widens only in private contexts, never for shared editors
     or admins. Check before both writes and idempotent suggestion self-heal.
     """
-    from services.memory_service import MemoryService
-
-    own = await MemoryService(db)._own_memory_predicate(context_id, user_id)
+    own = await own_memory_predicate(db, context_id, user_id)
     found = await db.execute(
         select(Memory.id).where(
             Memory.id.in_([source_id, target_id]),
@@ -178,7 +177,11 @@ async def ensure_supersedes_owned(
     )
     if set(found.scalars().all()) != {source_id, target_id}:
         # Uniform denial: do not reveal which endpoint is foreign or absent.
-        raise AuthorizationError(reason="supersedes_endpoint_not_owned")
+        raise AuthorizationError(
+            "A supersedes edge requires both memories to be your own "
+            "(linked accounts count only in a private context).",
+            reason="supersedes_endpoint_not_owned",
+        )
 
 
 async def create_declared_edge(

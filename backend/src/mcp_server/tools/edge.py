@@ -349,6 +349,9 @@ async def handle_create_edge(
             return _success_response(edge=result.edge, operation="created")
         except AuthorizationError as e:
             await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "create_edge", start_time, 403, current_context_id, workspace_id
+            )
             return _error_response("permission_denied", e.message)
         except _ContextNotFoundError as e:
             await db.rollback()
@@ -439,13 +442,16 @@ async def handle_update_edge(
 
             effective_type = new_edge_type or existing.edge_type
             if effective_type == EDGE_TYPE_SUPERSEDES:
-                await ensure_supersedes_owned(
-                    db,
-                    user_id=user_id,
-                    source_id=source_uuid,
-                    target_id=target_uuid,
-                    workspace_id=ws_id,
-                    context_id=ctx_id,
+                await execute_with_timeout(
+                    ensure_supersedes_owned(
+                        db,
+                        user_id=user_id,
+                        source_id=source_uuid,
+                        target_id=target_uuid,
+                        workspace_id=ws_id,
+                        context_id=ctx_id,
+                    ),
+                    operation_name="update_edge",
                 )
 
             edge = await execute_with_timeout(
@@ -486,6 +492,9 @@ async def handle_update_edge(
             return _success_response(edge=_edge_to_dict(edge))
         except AuthorizationError as e:
             await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_edge", start_time, 403, current_context_id, workspace_id
+            )
             return _error_response("permission_denied", e.message)
         except _ContextNotFoundError as e:
             await db.rollback()

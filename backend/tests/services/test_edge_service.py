@@ -24,10 +24,7 @@ def owned_supersedes_endpoints():
     The real ownership boundary is exercised against PostgreSQL in
     test_2313_supersedes_edge_owner_db.py.
     """
-    with (
-        patch("services.edge_service.ensure_supersedes_owned", new_callable=AsyncMock),
-        patch("mcp_server.tools.edge.ensure_supersedes_owned", new_callable=AsyncMock),
-    ):
+    with patch("services.edge_service.ensure_supersedes_owned", new_callable=AsyncMock):
         yield
 
 

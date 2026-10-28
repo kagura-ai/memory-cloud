@@ -252,8 +252,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "update_memory(memory_id, accept_supersede_candidate=true), when both memories "
         "are yours (in a private context a linked account's count), writes the "
         "supersedes edge (this memory → the candidate) and shadows the old fact out "
-        "of default recall; create_edge(edge_type='supersedes') links any other "
-        "pair. Reject a deliberately separate pair: "
+        "of default recall; create_edge(edge_type='supersedes') links another pair "
+        "under the same ownership rule, even without a suggestion. Reject a "
+        "deliberately separate pair: "
         "update_memory(memory_id, dismiss_supersede_candidate=true). It disappears "
         "once accepted or once the candidate is deleted.\n"
         "• folded {count, memory_ids} — older versions of the same fact that recall "
@@ -478,7 +479,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "update_memory(memory_id, accept_supersede_candidate=true) when both memories are "
         "yours; reject a "
         "deliberate pair with update_memory(dismiss_supersede_candidate=true). "
-        'create_edge(edge_type="supersedes") links any pair.'
+        'create_edge(edge_type="supersedes") links a pair without a suggestion, '
+        "but both memories must be yours (including linked accounts in a private context)."
     ),
     "reference.paging": (
         "Large memories: nothing is cut silently, and the response stays within "
@@ -562,7 +564,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "context, a linked account's too; #1803 / #2313) — with another member's at "
         "either end: permission_denied, nothing written. update_edge, outside the core "
         'profile (describe_tools(["update_edge"]) has its schema), applies the same '
-        "rule to an edge that is or becomes 'supersedes'. "
+        "rule to an edge whose resulting type is 'supersedes', including weight-only "
+        "updates; changing it to another type does not require owning both memories. "
         "'related_to' — a plain link. 'depends_on' — target depends on source. "
         "'learned_from' — knowledge derived from source. 'contradicts' — both sides "
         "stay visible, annotated, never hidden. 'continues_from' / 'references_file' — "

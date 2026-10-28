@@ -366,7 +366,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full by id, within max_chars; version=N reads an earlier version. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, content, details, version, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate, …}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes") links any pair. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
+Returns: {status, memory: {memory_id, summary, content, details, version, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate, …}}. supersede_candidate is an older near-duplicate (a suggestion): accept with update_memory(accept_supersede_candidate=true); create_edge(edge_type="supersedes") also requires both memories to be yours. Oversized fields arrive sliced or *_omitted; page with the *_offset parameters. Errors: memory_not_found, invalid_argument, validation_error.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -759,7 +759,7 @@ Returns: {status, operation, edge, previous?}. Manual: guide(["create_edge"]).""
         },
         {
             "name": "update_edge",
-            "description": """Change an existing edge's weight and/or type (any create_edge edge_type is valid). Identify the edge by source_id + target_id (from list_edges or explore); provide at least one of weight or edge_type. An edge that is or becomes 'supersedes' needs both memories to be your own (permission_denied otherwise).
+            "description": """Change an existing edge's weight and/or type (any create_edge edge_type is valid). Identify the edge by source_id + target_id (from list_edges or explore); provide at least one of weight or edge_type. An edge whose resulting type is 'supersedes' needs both memories to be your own (permission_denied otherwise).
 
 Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}}.""",
             "inputSchema": {

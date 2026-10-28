@@ -90,14 +90,16 @@ class TestOwnMemoryPredicate:
     Behaviour on Postgres (shared, private + linked) is in the integration file."""
 
     @staticmethod
-    async def _predicate(private: bool) -> str:
+    async def _predicate(private: bool | None) -> str:
         from unittest.mock import AsyncMock, MagicMock
 
         from services.memory_service import MemoryService
 
         service = MemoryService.__new__(MemoryService)
-        service._is_private_context = AsyncMock(return_value=private)  # type: ignore[method-assign]
         service.db = MagicMock()
+        service.db.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=private))
+        )
         return str(await service._own_memory_predicate(uuid4(), "u1"))
 
     @pytest.mark.asyncio
@@ -110,3 +112,9 @@ class TestOwnMemoryPredicate:
     async def test_a_private_context_widens_to_the_link_set(self):
         sql = await self._predicate(True)
         assert "identity_links" in sql
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_context_keeps_the_callers_own_memories(self):
+        sql = await self._predicate(None)
+        assert "memories.user_id = " in sql
+        assert "identity_links" not in sql

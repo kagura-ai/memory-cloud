@@ -97,6 +97,7 @@ from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.identity_link_service import link_set_reads, owned_by
+from services.memory_ownership import is_private_context, own_memory_predicate
 from services.memory_versions import (
     check_expected_version,
     record_edit,
@@ -3631,39 +3632,14 @@ class MemoryService:
         return outgoing_links, out_has_more, incoming_links, in_has_more
 
     async def _is_private_context(self, context_id: UUID | str | None) -> bool:
-        """Whether ``context_id`` is a private context, the one kind the caller
-        reads as a linked owner (#1784).
-
-        Asks for ``is_private`` being true rather than "not shared": a missing,
-        deleted or NULL context is treated as private for access, but here a
-        True widens the match to the link set, so anything unclear stays on
-        the caller's own rows. False without a context.
-        """
-        if context_id is None:
-            return False
-        uuid = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
-        result = await self.db.execute(
-            select(Context.is_private).where(
-                Context.id == uuid,
-                Context.deleted_at.is_(None),
-            )
-        )
-        return result.scalar_one_or_none() is True
+        """Whether the context allows linked-account ownership (#1784)."""
+        return await is_private_context(self.db, context_id)
 
     async def _own_memory_predicate(
         self, context_id: UUID | str | None, user_id: str
     ) -> ColumnElement[bool]:
-        """#1803: SQL predicate for "a memory ``user_id`` may name as its own".
-
-        The caller's own memory — and in a private context, whose owner is the
-        link set (#1784), one an account linked to the caller wrote. A shared
-        context keeps the caller's own memories only. Used by the writes that
-        let a caller shadow a memory: remember's declared links and
-        ``supersedes``, and the #2308 supersede accept.
-        """
-        if await self._is_private_context(context_id):
-            return owned_by(Memory.user_id, user_id)
-        return Memory.user_id == user_id
+        """Use the shared owner rule for remember links and supersede accept."""
+        return await own_memory_predicate(self.db, context_id, user_id)
 
     async def _create_declared_links(
         self,
