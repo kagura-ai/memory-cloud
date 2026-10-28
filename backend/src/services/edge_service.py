@@ -37,6 +37,7 @@ from models.memory import (
     EDGE_TYPE_SUPERSEDES,
     Memory,
 )
+from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -148,6 +149,38 @@ async def accept_supersede_candidate_if_matching(
         logger.warning("supersede_accept_check_failed", error=str(e))
 
 
+async def ensure_supersedes_owned(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    source_id: UUID,
+    target_id: UUID,
+    workspace_id: str,
+    context_id: str,
+) -> None:
+    """Require both live endpoints to be the caller's own (#1803/#2313).
+
+    Context/role access remains the transport's responsibility. The shared
+    owner predicate widens only in private contexts, never for shared editors
+    or admins. Check before both writes and idempotent suggestion self-heal.
+    """
+    from services.memory_service import MemoryService
+
+    own = await MemoryService(db)._own_memory_predicate(context_id, user_id)
+    found = await db.execute(
+        select(Memory.id).where(
+            Memory.id.in_([source_id, target_id]),
+            Memory.context_id == UUID(context_id),
+            Memory.workspace_id == UUID(workspace_id),
+            Memory.deleted_at.is_(None),
+            own,
+        )
+    )
+    if set(found.scalars().all()) != {source_id, target_id}:
+        # Uniform denial: do not reveal which endpoint is foreign or absent.
+        raise AuthorizationError(reason="supersedes_endpoint_not_owned")
+
+
 async def create_declared_edge(
     db: AsyncSession,
     *,
@@ -181,6 +214,16 @@ async def create_declared_edge(
     is accepted + cleared in the same transaction (#1403).
     """
     from repositories.neural_edge import NeuralEdgeRepository
+
+    if edge_type == EDGE_TYPE_SUPERSEDES:
+        await ensure_supersedes_owned(
+            db,
+            user_id=user_id,
+            source_id=source_id,
+            target_id=target_id,
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
 
     repo = NeuralEdgeRepository(db)
 

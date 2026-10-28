@@ -34,6 +34,20 @@ from services.edge_service import (
 )
 
 
+@pytest.fixture(autouse=True)
+def owned_supersedes_endpoints():
+    """These mocked transport/duplicate tests assume owned endpoints.
+
+    The real ownership boundary is exercised against PostgreSQL in
+    test_2313_supersedes_edge_owner_db.py.
+    """
+    with (
+        patch("services.edge_service.ensure_supersedes_owned", new_callable=AsyncMock),
+        patch("mcp_server.tools.edge.ensure_supersedes_owned", new_callable=AsyncMock),
+    ):
+        yield
+
+
 def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5, origin="hebbian"):
     """Build a minimal NeuralMemoryEdge-shaped mock for response serialization."""
     e = MagicMock()

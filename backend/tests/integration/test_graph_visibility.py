@@ -861,12 +861,16 @@ async def test_create_edge_target_in_other_context_returns_404(visibility_scenar
 
 
 @pytest.mark.asyncio
-async def test_create_supersedes_edge_accepts_stored_candidate(visibility_scenario, db_session):
+@pytest.mark.parametrize("own_target", [True, False])
+async def test_create_supersedes_edge_accepts_stored_candidate(
+    visibility_scenario, db_session, own_target
+):
     """#1403 accept path end to end: a stored supersede_candidate on the source
     memory is cleared (self-healed) when the confirming supersedes edge is
     created via REST."""
-    src_id = visibility_scenario["memory_ids"][0]
-    dst_id = visibility_scenario["memory_ids"][3]
+    # Reverse the owner's existing pair for a fresh same-owner edge.
+    src_id = visibility_scenario["memory_ids"][1]
+    dst_id = visibility_scenario["memory_ids"][0 if own_target else 3]
 
     # Seed the server-only supersede_candidate column on the source memory.
     await db_session.execute(
@@ -888,11 +892,26 @@ async def test_create_supersedes_edge_accepts_stored_candidate(visibility_scenar
             },
         )
 
-    assert response.status_code == 201, response.text
-    visibility_scenario["edge_ids"].append(await _edge_id(db_session, src_id, dst_id))
+    assert response.status_code == (201 if own_target else 403), response.text
+    if own_target:
+        visibility_scenario["edge_ids"].append(await _edge_id(db_session, src_id, dst_id))
+    else:
+        assert response.json()["error"] == "AUTH-101"
+        assert response.json()["details"] == {}
+        assert (
+            await db_session.execute(
+                select(NeuralMemoryEdge.id).where(
+                    NeuralMemoryEdge.src_id == src_id,
+                    NeuralMemoryEdge.dst_id == dst_id,
+                )
+            )
+        ).scalar_one_or_none() is None
 
     # Self-heal: the accepted suggestion is cleared on the source memory.
     stored = (
         await db_session.execute(select(Memory.supersede_candidate).where(Memory.id == src_id))
     ).scalar_one()
-    assert stored is None
+    if own_target:
+        assert stored is None
+    else:
+        assert stored == {"memory_id": str(dst_id), "similarity": 0.9}
