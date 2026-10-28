@@ -368,3 +368,56 @@ async def test_a_running_subscription_refuses_the_delete_before_any_transfer(
         == target
     )
     assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) == target
+
+
+@pytest.mark.asyncio
+async def test_private_context_someone_else_wrote_in_takes_a_successor(connector_world, db_session):
+    """#2417: a linked author the hand-over cannot pick (a viewer) still has
+    memories in the private context, so it is not the user's own: it needs a
+    successor instead of going with the user."""
+    from models.auth import IdentityLink
+
+    world = connector_world
+    target = await world.user("departing")
+    linked = await world.user("linked")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin", linked: "viewer"})
+    ws_id = workspace.id
+    ctx_id = await _context(db_session, workspace, target, private=True)
+    group = uuid4()
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=target, linked_by=target),
+            IdentityLink(group_id=group, user_id=linked, linked_by=target),
+        ]
+    )
+    theirs = Memory(
+        id=uuid4(),
+        user_id=linked,
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+    )
+    db_session.add(theirs)
+    theirs_id = theirs.id
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(target, {"user_id": "operator"}, db_session)
+    assert error.value.status_code == 409
+    assert error.value.detail["context_ids"] == [str(ctx_id)]
+    await db_session.rollback()
+
+    response = await delete_user(
+        target,
+        {"user_id": "operator"},
+        db_session,
+        UserDeleteRequest(context_transfers={ctx_id: owner}),
+    )
+    assert response["deleted"]["contexts"] == 0
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
+    assert await db_session.get(Memory, theirs_id) is not None

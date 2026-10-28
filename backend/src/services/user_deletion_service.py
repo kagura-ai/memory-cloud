@@ -4,13 +4,17 @@ The caller owns the transaction. Validate every successor before changing any
 ownership; lock users, identity links, workspaces, contexts, then memories.
 
 A private context is readable by its creator (and the accounts linked to it)
-only, so it is never handed to a successor the admin picks: a linked account
-that wrote in it takes it over (``hand_over_private_contexts``, #1784), and
-one nobody else wrote in is deleted with the user, files included, as account
-erasure does. A private context that is a connector's write target is the
-workspace's, not the creator's (connectors create theirs private): it takes a
-successor like a shared context, so the connector keeps writing. Only those
-two kinds need an explicit successor (#2417).
+only. One nobody else wrote in is the creator's own: it is never handed to a
+successor the admin picks, and is deleted with the user, files included (the
+admin delete has always removed what it does not hand over; account erasure
+keeps such a context under a pseudonymous creator instead). Before that, a
+linked account that wrote in a private context takes it over
+(``hand_over_private_contexts``, #1784). A private context someone else wrote
+in that the hand-over did not take (no eligible linked author, or the context
+is soft-deleted), and a connector's write target (connectors create theirs
+private; it is the workspace's), keep another account's data, so they take a
+successor like a shared context: the API requires one, the CLI hands them to
+the surviving workspace owner (#2417).
 """
 
 from dataclasses import dataclass, field
@@ -21,6 +25,7 @@ from fastapi import HTTPException
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from auth.workspace_roles import WorkspaceRole, reaches_context
 from models.auth import (
@@ -34,17 +39,16 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.resource import WorkspaceConnector
-from services.billing_contract import workspaces_under_contract
+from services.billing_contract import ensure_no_billing_contract
 from services.connector_key_ownership import reown_connector_keys
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
 from services.identity_link_service import hand_over_private_contexts, lock_identity_links
 from services.workspace_ownership_service import WorkspaceOwnershipService
-from utils.exceptions import BillingContractActiveError
 
 PRIVATE_CONTEXT_NOT_TRANSFERABLE = (
-    "Private contexts cannot be transferred: a linked account that wrote in one "
-    "takes it over, otherwise it is deleted with the user"
+    "Private contexts nobody else wrote in cannot be transferred: a linked account "
+    "that wrote in one takes it over, otherwise it is deleted with the user"
 )
 
 # The write targets of the workspace connectors: a context here belongs to the
@@ -55,12 +59,31 @@ _CONNECTOR_CONTEXT_IDS = select(WorkspaceConnector.context_id).where(
 
 
 def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
-    """``c`` is a private context ``user_id`` created that no connector writes
-    to: the creator's own, never a successor's."""
+    """``c`` is a private context of ``user_id``'s own: created by it, written
+    in by nobody else, no connector's write target, and not inside a
+    soft-deleted workspace ``user_id`` owns (left as it is, #2406). Such a
+    context goes with the user; every other one it created takes a successor."""
+    # Fresh aliases: the enclosing query may already select from memories or
+    # workspaces, and auto-correlation would otherwise empty these FROMs.
+    memory, workspace = aliased(Memory), aliased(Workspace)
+    others_wrote = (
+        select(memory.id).where(memory.context_id == c.id, memory.user_id != user_id).exists()
+    )
+    left_behind = (
+        select(workspace.id)
+        .where(
+            workspace.id == c.workspace_id,
+            workspace.owner_user_id == user_id,
+            workspace.deleted_at.is_not(None),
+        )
+        .exists()
+    )
     return and_(
         c.created_by == user_id,
         c.is_private.is_(True),
         c.id.not_in(_CONNECTOR_CONTEXT_IDS),
+        ~others_wrote,
+        ~left_behind,
     )
 
 
@@ -112,11 +135,12 @@ async def transfer_user_ownership(
 
     Workspace selections also supply the default successor for contexts in that
     workspace. A context-specific selection overrides that default. Soft-deleted
-    owned workspaces must be restored/transferred separately (#2406). Private
-    contexts are not transferable (see the module docstring); a selection naming
-    one is refused. An owned workspace under a running subscription refuses the
-    whole deletion (``BILLING-005``): the subscription is the user's, so it ends
-    first, as account erasure and ``cli.delete_admin`` require (#1940).
+    owned workspaces must be restored/transferred separately (#2406). A private
+    context of the user's own is not transferable (see the module docstring); a
+    selection naming one is refused. An owned workspace under a running
+    subscription refuses the whole deletion (``BILLING-005``): the subscription
+    is the user's, so it ends first, as account erasure and ``cli.delete_admin``
+    require (#1940).
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
     users = set(
@@ -145,9 +169,7 @@ async def transfer_user_ownership(
             )
         ).scalars()
     )
-    under_contract = workspaces_under_contract(workspaces)
-    if under_contract:
-        raise BillingContractActiveError([str(w.id) for w in under_contract])
+    ensure_no_billing_contract(workspaces)
     created = list(
         (
             await db.execute(
@@ -159,14 +181,35 @@ async def transfer_user_ownership(
             )
         ).scalars()
     )
+    private_ids = {c.id for c in created if c.is_private}
+    # Contexts before memories, the whole union in id order (#2278, #2347):
+    # the hand-over below deletes the subject's rows in the contexts it moves.
+    await db.execute(
+        locked_ids(
+            Memory,
+            lambda m: (
+                or_(
+                    m.user_id == user_id,
+                    m.context_id.in_(select(Context.id).where(Context.created_by == user_id)),
+                ),
+            ),
+        )
+    )
+    # #1784 first: a linked account that wrote in a private context takes it
+    # over. What is left either takes a successor or goes with the user.
+    await hand_over_private_contexts(db, user_id)
+    await db.flush()
+    remaining = set(
+        (await db.execute(select(Context.id).where(Context.created_by == user_id))).scalars()
+    )
     personal = set(
         (await db.execute(select(Context.id).where(_personal(Context, user_id)))).scalars()
     )
-    if context_transfers.keys() & personal:
-        raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
-    contexts = [c for c in created if c.id not in personal]
+    contexts = [c for c in created if c.id in remaining - personal]
     context_ids = {c.id for c in contexts}
-    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in contexts}
+    if context_transfers.keys() & (private_ids - context_ids):
+        raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
+    workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in created}
     if set(context_transfers) - context_ids or set(workspace_transfers) - workspace_ids:
         raise HTTPException(409, "Transfer selections no longer match the user's resources")
     missing_ws = [str(w.id) for w in workspaces if w.id not in workspace_transfers]
@@ -253,15 +296,17 @@ async def delete_user_rows(
     I/O is performed here. API callers have already transferred the shared contexts
     the user created; the CLI hands those in surviving workspaces to the workspace
     owner, leaves those in a soft-deleted workspace the user owns with it (#2406),
-    and deletes sole-owned workspaces. Private contexts that no linked account
-    takes over are deleted on both paths, with their files.
+    and deletes sole-owned workspaces. A private context of the user's own (see
+    the module docstring) is deleted on both paths, with its files.
     """
     workspace_ids = delete_workspace_ids or []
 
+    deleted_workspaces = set(workspace_ids)
+
     def doomed(c: Any) -> tuple[ColumnElement[bool]]:
-        """The contexts that go with the user: the personal private ones nobody
-        took over, plus everything in the workspaces being deleted. Any other
-        context left behind (the CLI's soft-deleted owned workspace) stays, its
+        """The contexts that go with the user: the private ones of its own,
+        plus everything in the workspaces being deleted. Any other context
+        left behind (the CLI's soft-deleted owned workspace, #2406) stays, its
         files and other authors' memories with it."""
         return (or_(_personal(c, user_id), c.workspace_id.in_(workspace_ids)),)
 
@@ -350,7 +395,7 @@ async def delete_user_rows(
     # Redis follows the committed state: only a workspace that survives this
     # deletion keeps a quota counter to release.
     result.released_bytes = {
-        ws_id: size for ws_id, size in released.items() if ws_id not in set(workspace_ids)
+        ws_id: size for ws_id, size in released.items() if ws_id not in deleted_workspaces
     }
     if ctx_ids:
         await db.execute(delete(Context).where(Context.id.in_(ctx_ids)))

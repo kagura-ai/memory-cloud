@@ -477,7 +477,8 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
     kept = Context(
         id=uuid4(), name="kept", workspace_id=gone_id, created_by=admin_id, is_private=False
     )
-    db_session.add(kept)
+    mine = Context(id=uuid4(), name="mine", workspace_id=gone_id, created_by=admin_id)
+    db_session.add_all([kept, mine])
     await db_session.flush()
     theirs = Memory(
         id=uuid4(),
@@ -490,7 +491,7 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
         client="test",
     )
     db_session.add(theirs)
-    kept_id, theirs_id = kept.id, theirs.id
+    kept_id, mine_id, theirs_id = kept.id, mine.id, theirs.id
     await db_session.execute(
         update(Workspace).where(Workspace.id == gone_id).values(deleted_at=utcnow())
     )
@@ -499,9 +500,11 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
 
     assert not await _exists(db_session, admin_id)
     assert await db_session.get(Workspace, gone_id) is not None
-    assert (
-        await db_session.scalar(select(Context.created_by).where(Context.id == kept_id)) == admin_id
-    )
+    for ctx_id in (kept_id, mine_id):
+        assert (
+            await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id))
+            == admin_id
+        )
     assert await db_session.get(Memory, theirs_id) is not None
 
 
@@ -560,3 +563,40 @@ async def test_quota_is_released_for_surviving_workspaces_only(
         assert await _run(db_session) == 0
 
     release.assert_awaited_once_with(workspace_id=elsewhere_id, size_bytes=20)
+
+
+@pytest.mark.asyncio
+async def test_a_private_context_someone_else_wrote_in_passes_to_the_owner(
+    db_session: AsyncSession, connector_world, sole_password_admin
+) -> None:
+    """#2417: another account's memories make a private context more than the
+    admin's own, so the CLI hands it to the workspace owner instead."""
+    from models.auth import Context
+    from models.memory import Memory
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    other = await world.user("other")
+    elsewhere = await world.workspace(other, **{admin_id: WorkspaceRole.ADMIN})
+    shared_by_use = Context(
+        id=uuid4(), name="ours", workspace_id=elsewhere.id, created_by=admin_id, is_private=True
+    )
+    db_session.add(shared_by_use)
+    await db_session.flush()
+    theirs = Memory(
+        id=uuid4(),
+        user_id=other,
+        workspace_id=elsewhere.id,
+        context_id=shared_by_use.id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+    )
+    db_session.add(theirs)
+    ctx_id, theirs_id = shared_by_use.id, theirs.id
+
+    assert await _run(db_session) == 0
+
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == other
+    assert await db_session.get(Memory, theirs_id) is not None

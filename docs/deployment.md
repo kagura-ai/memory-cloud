@@ -1002,11 +1002,14 @@ says how many accounts are linked to it, so the owner can review them.
 Erasing an account takes it out of its link set. A private context it created
 passes to an eligible linked contributor, so that contributor's memories stay
 readable. The leaving account's own memories in that context are deleted.
-A private context nobody linked wrote in is deleted with the account, files
-included: it was readable by its creator alone, so it is never handed to a
-third party. The exception is a connector's write target (connectors create
-theirs private): it belongs to the workspace and changes hands like a shared
-context, so the connector keeps writing. The `delete_admin` CLI uses the same handover and file cleanup as
+Erasure leaves any other context the account created in place under a
+pseudonymous creator. Administrative and CLI deletion instead delete a
+private context nobody else wrote in with the account, files included: it was
+readable by its creator alone, so it is never handed to a third party. A
+private context another account wrote in (a linked author the hand-over could
+not pick, or a soft-deleted context) and a connector's write target
+(connectors create theirs private) keep other people's data, so they change
+hands like a shared context. The `delete_admin` CLI uses the same handover and file cleanup as
 administrative user deletion. Shared contexts the admin created in surviving
 workspaces pass to their live workspace owner; those in a soft-deleted
 workspace the admin owns stay with it (#2406); sole-owned workspaces are
@@ -1017,8 +1020,8 @@ Administrative `DELETE /api/v1/admin/users/{user_id}` requires explicit
 successors for every owned workspace and every shared context the user
 created, including deleted contexts. With no selection it returns `409` and
 the missing `workspace_ids` and `context_ids`; the user and their data remain
-intact. A selection naming a private context is refused with `409` (see the
-rule above). An owned workspace under a running subscription refuses the
+intact. A selection naming a private context of the user's own is refused with
+`409` (see the rule above). An owned workspace under a running subscription refuses the
 deletion with `409` `BILLING-005` naming the workspaces, before anything is
 transferred: the subscription is the user's, so it ends first, as for account
 erasure and the CLI (#1940). Send this JSON body:
