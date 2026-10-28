@@ -12,11 +12,12 @@ memory-cloud owns the clock — ``workspaces.capacity_locked_since``:
   its first sighting and the stamp is kept; one within the cap, or no longer
   a candidate (re-subscribed, admin-managed), is cleared. A cleanup therefore
   restarts the 30 days.
-* ``send_due_purge_notices`` mails the owner on days 0/7/14/23/27/29 of the
-  stamp (one claim per workspace × stamp × stage in Redis, like the
+* ``send_due_purge_notices`` normally mails on days 0/7/14/23/27/29 of the
+  stamp; a late start shifts the 7/3/1-day warnings to the real deadline
+  (one claim per workspace × stamp × stage in Redis, like the
   pre-expiry notice in ``api/routes/internal_billing.py``).
   The first mail of a lock is recorded in
-  ``workspaces.capacity_purge_first_notice_at`` and the day-29 one ("1 day
+  ``workspaces.capacity_purge_first_notice_at`` and the final one ("1 day
   left") in ``workspaces.capacity_purge_final_notice_at``.
 * ``purge_expired_workspaces`` deletes the data of a workspace stamped 30
   days ago or more whose final notice went out on an earlier calendar day
@@ -92,12 +93,14 @@ def purge_at(
 
     * calendar day 30 of the stamp,
     * :data:`MIN_WARNING_DAYS` days after the lock's first notice,
-    * the day after its final (day-29) notice,
+    * the day after its valid final ("1 day left") notice,
 
     and never before the next run (today's until :data:`SWEEP_WINDOW` past
     the hour, as it may still be running). A notice not sent yet is projected onto
     the run that sends it: the first one onto the next run, the final one onto
-    the day-29 run or the next run, whichever is later (#1971). On time —
+    the day before the later of stamp + 30 / first notice + 7, or the next
+    run if later (#2321). An old prematurely recorded final notice does not
+    count. On time —
     first mail on day 0, the rest on schedule — that is day 30, and the day-29
     mail says "1 day left"; a stamp more than 23 days old at its first mail
     is purged later, and this is the date the mails, the usage payload and the
@@ -133,8 +136,12 @@ def _purge_run(
     first = first_notice_at.date() if first_notice_at is not None else next_run
     final = (
         final_notice_at.date()
-        if final_notice_at is not None
-        else max(stamp_day + timedelta(days=FINAL_NOTICE_DAY), next_run)
+        if final_notice_at is not None and _valid_final_notice(first_notice_at, final_notice_at)
+        else max(
+            stamp_day + timedelta(days=FINAL_NOTICE_DAY),
+            first + timedelta(days=MIN_WARNING_DAYS - 1),
+            next_run,
+        )
     )
     day = max(
         stamp_day + PURGE_AFTER,
@@ -268,13 +275,33 @@ def _clear_stamp(ws: Workspace) -> None:
     ws.capacity_purge_final_notice_at = None
 
 
-def notice_stage(elapsed_days: int) -> int | None:
+def notice_stage(elapsed_days: int, *, days_since_first_notice: int | None = None) -> int | None:
     """The latest :data:`NOTICE_DAYS` entry due after ``elapsed_days`` — one mail per run.
 
-    ``None`` before day 0 (a stamp in the future: clock skew).
+    When given, ``days_since_first_notice`` shifts the remaining countdown
+    to preserve the minimum warning week. Pass 0 before the first mail.
+    ``None`` keeps the original stamp-only arithmetic for callers that do
+    not have notice state. A future stamp yields ``None``.
     """
+    if days_since_first_notice is not None:
+        elapsed_days = min(
+            elapsed_days, PURGE_AFTER.days - MIN_WARNING_DAYS + days_since_first_notice
+        )
     due = [d for d in NOTICE_DAYS if d <= elapsed_days]
     return max(due) if due else None
+
+
+def _valid_final_notice(first: datetime | None, final: datetime | None) -> bool:
+    """Reject legacy final records sent before the last day of the warning week.
+
+    Before #2321 a late first mail could also be recorded as the final one,
+    even though it said "7 days left". Such a record must not authorize deletion.
+    """
+    return (
+        first is not None
+        and final is not None
+        and _days_between(first, final) >= MIN_WARNING_DAYS - 1
+    )
 
 
 def notice_key(workspace_id: UUID, locked_since: datetime, stage: int) -> str:
@@ -357,23 +384,19 @@ async def send_due_purge_notices(
     re-subscribed since the stamp run is skipped — the stamp sweep clears it
     next run. One mail per workspace per run: the LATEST due stage, so a sweep
     that missed days catches up with a single message. A failed delivery
-    releases the claim; an uncertain one (``TimeoutError``) keeps it — at
-    most once. Redis unavailable fails closed (no mail, counted as failed).
+    releases the claim; an uncertain one (``TimeoutError``) counts as possibly
+    delivered. Redis unavailable fails closed (no mail, counted as failed).
 
-    The record comes first: after the claim, ``capacity_purge_first_notice_at``
-    is set to ``now`` if this lock had none yet, and for the day-29 mail
-    ``capacity_purge_final_notice_at``, and that is COMMITTED before the mail
-    goes out. A commit that fails is rolled back, the claim released, nothing
-    sent (``capacity_purge_notice_persist_failed``, counted failed), and the
-    next workspace proceeds — a mail out with no record would hold the claim
-    while the purge never became eligible. A hard delivery failure puts both
-    columns back to their previous values (committed) and releases the claim,
-    so the purge waits for the retry; an uncertain one (``TimeoutError``)
-    keeps both. The purge waits for both columns.
+    Only after successful or uncertain delivery, record the first notice
+    (once) and, for the final mail, the final notice. A hard delivery failure
+    never writes a timestamp that could authorize deletion. If the record
+    cannot commit, roll back and release the claim for retry
+    (``capacity_purge_notice_persist_failed``). That retry may duplicate a
+    delivered warning; it cannot shorten the warning period. The purge
+    requires both recorded notices, so a lost record postpones deletion.
 
     Args:
-        db: Session to read and write with; commits the record of each mail
-            (and its revert on a failed delivery).
+        db: Session to read and write with; commits delivered notice records.
         now: The sweep's clock (naive UTC).
         redis: Async Redis client (``set(nx, ex)`` / ``delete``).
         email: An ``EmailService``.
@@ -403,7 +426,10 @@ async def send_due_purge_notices(
         if since is None:
             skipped += 1
             continue
-        stage = notice_stage(_days_between(since, now))
+        stage = notice_stage(
+            _days_between(since, now),
+            days_since_first_notice=_days_between(ws.capacity_purge_first_notice_at or now, now),
+        )
         if stage is None:
             skipped += 1
             continue
@@ -420,6 +446,15 @@ async def send_due_purge_notices(
         ws_name = ws.name
         previous = (ws.capacity_purge_first_notice_at, ws.capacity_purge_final_notice_at)
         key = notice_key(ws_id, since, stage)
+        if (
+            stage == FINAL_NOTICE_DAY
+            and previous[0] is not None
+            and _days_between(since, previous[0]) > PURGE_AFTER.days - MIN_WARNING_DAYS
+        ):
+            # The old stage-29 claim may belong to a premature "7 days left"
+            # mail. Use the same separate claim before and after correction,
+            # including retries after delivery or record failures.
+            key += ":warning-week"
         try:
             claimed = await redis.set(key, "1", nx=True, ex=NOTICE_KEY_TTL_SECONDS)
         except Exception as exc:  # noqa: BLE001 — fail closed: never risk a duplicate
@@ -433,25 +468,12 @@ async def send_due_purge_notices(
         if not claimed:
             already += 1
             continue
-        try:
-            recorded = await _record_notice(db, ws, stage=stage, now=now)
-        except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
-            logger.warning(
-                "capacity_purge_notice_persist_failed",
-                workspace_id=str(ws_id),
-                error_type=type(exc).__name__,
-            )
-            await db.rollback()
-            expired = True
-            await _release_claim(redis, key, ws_id)
-            failed += 1
-            continue
-        # After the record: this mail is the first / final notice the purge
-        # date counts from (#1971).
+        # Project the record this mail will earn. Do not persist it until
+        # delivery: a failed send plus failed DB revert could permit deletion.
         deadline = _purge_run(
             since,
-            first_notice_at=ws.capacity_purge_first_notice_at,
-            final_notice_at=ws.capacity_purge_final_notice_at,
+            first_notice_at=previous[0] or now,
+            final_notice_at=now if stage == FINAL_NOTICE_DAY else previous[1],
             now=now,
         )
         try:
@@ -467,11 +489,9 @@ async def send_due_purge_notices(
                 contexts_url=contexts_url,
             )
         except TimeoutError:
-            # The provider may have accepted it: keep the claim and the record
-            # (at most once).
+            # The provider may have accepted it: record this outcome, too.
             logger.warning("capacity_purge_notice_delivery_uncertain", workspace_id=str(ws_id))
-            sent += 1
-            continue
+            delivered = True
         except Exception as exc:  # noqa: BLE001 — implementations must not raise; be safe
             logger.warning(
                 "capacity_purge_notice_send_raised",
@@ -480,8 +500,19 @@ async def send_due_purge_notices(
             )
             delivered = False
         if not delivered:
-            if recorded and not await _revert_notice(db, ws, ws_id=ws_id, previous=previous):
-                expired = True
+            await _release_claim(redis, key, ws_id)
+            failed += 1
+            continue
+        try:
+            await _record_notice(db, ws, stage=stage, now=now)
+        except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
+            logger.warning(
+                "capacity_purge_notice_persist_failed",
+                workspace_id=str(ws_id),
+                error_type=type(exc).__name__,
+            )
+            await db.rollback()
+            expired = True
             await _release_claim(redis, key, ws_id)
             failed += 1
             continue
@@ -505,9 +536,8 @@ async def send_due_purge_notices(
     )
 
 
-async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: datetime) -> bool:
-    """Before a mail goes out: record the lock's first notice (once) and, for
-    the day-29 mail, the final one; commit if either changed (returned)."""
+async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: datetime) -> None:
+    """After delivery: record the first / final notice; commit if either changed."""
     changed = False
     if ws.capacity_purge_first_notice_at is None:
         ws.capacity_purge_first_notice_at = now
@@ -517,31 +547,6 @@ async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: da
         changed = True
     if changed:
         await db.commit()
-    return changed
-
-
-async def _revert_notice(
-    db: AsyncSession,
-    ws: Workspace,
-    *,
-    ws_id: UUID,
-    previous: tuple[datetime | None, datetime | None],
-) -> bool:
-    """The mail failed: put the first / final notice back to ``previous`` and
-    commit. ``False`` when that commit raised (rolled back, logged) — the
-    session's instances are expired then."""
-    ws.capacity_purge_first_notice_at, ws.capacity_purge_final_notice_at = previous
-    try:
-        await db.commit()
-    except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
-        logger.warning(
-            "capacity_purge_notice_revert_failed",
-            workspace_id=str(ws_id),
-            error_type=type(exc).__name__,
-        )
-        await db.rollback()
-        return False
-    return True
 
 
 def _lock_expired(locked_since: datetime | None, now: datetime) -> bool:
@@ -568,7 +573,11 @@ def _warned_long_enough(first_notice_at: datetime | None, now: datetime) -> bool
 def _warned(
     final_notice_at: datetime | None, first_notice_at: datetime | None, now: datetime
 ) -> bool:
-    return _final_notice_given(final_notice_at, now) and _warned_long_enough(first_notice_at, now)
+    return (
+        _valid_final_notice(first_notice_at, final_notice_at)
+        and _final_notice_given(final_notice_at, now)
+        and _warned_long_enough(first_notice_at, now)
+    )
 
 
 def purge_due(

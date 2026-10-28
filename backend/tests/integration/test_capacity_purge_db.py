@@ -949,6 +949,7 @@ async def test_final_notice_is_persisted_by_the_day_29_mail(
     await _over_cap(db_session, ws, ctx, owner)
     now = utcnow().replace(microsecond=0)
     ws.capacity_locked_since = now - timedelta(days=day)
+    ws.capacity_purge_first_notice_at = ws.capacity_locked_since
     await db_session.flush()
     email = MagicMock(send_capacity_purge_notice=AsyncMock(return_value=True))
 
@@ -959,15 +960,15 @@ async def test_final_notice_is_persisted_by_the_day_29_mail(
     assert counts.sent == 1
     await db_session.refresh(ws)
     assert ws.capacity_purge_final_notice_at == (now if final else None)
-    assert ws.capacity_purge_first_notice_at == now  # the first mail of this lock
+    assert ws.capacity_purge_first_notice_at == ws.capacity_locked_since
 
 
 @pytest.mark.asyncio
-async def test_notice_persist_failure_skips_the_mail_and_moves_on(
+async def test_notice_persist_failure_releases_claim_and_moves_on(
     db_session, free_ws, only_workspaces
 ) -> None:
-    """The record's commit raises for the first workspace: no mail for it,
-    its claim released, nothing recorded — and after the rollback (which
+    """The delivered mail's record fails: claim released for retry, nothing
+    recorded — and after the rollback (which
     expires every loaded row) the second workspace still gets its mail."""
     bad, bad_ctx, bad_owner = free_ws
     good, good_ctx, good_owner = await _make_free_ws(db_session)
@@ -976,6 +977,9 @@ async def test_notice_persist_failure_skips_the_mail_and_moves_on(
     await _over_cap(db_session, good, good_ctx, good_owner)
     now = utcnow().replace(microsecond=0)
     bad.capacity_locked_since = good.capacity_locked_since = now - timedelta(days=29)
+    bad.capacity_purge_first_notice_at = good.capacity_purge_first_notice_at = (
+        bad.capacity_locked_since
+    )
     await db_session.flush()
     await db_session.commit()
     bad_id, good_id, since = bad.id, good.id, bad.capacity_locked_since
@@ -1016,10 +1020,10 @@ async def test_notice_persist_failure_skips_the_mail_and_moves_on(
     recorded = [w for w in rows.values() if w.capacity_purge_final_notice_at == now]
     unrecorded = [w for w in rows.values() if w.capacity_purge_final_notice_at is None]
     assert len(recorded) == 1 and len(unrecorded) == 1
-    assert unrecorded[0].capacity_purge_first_notice_at is None
+    assert unrecorded[0].capacity_purge_first_notice_at == since
     assert capacity_purge.notice_key(unrecorded[0].id, since, 29) not in redis.keys
     assert capacity_purge.notice_key(recorded[0].id, since, 29) in redis.keys
-    assert len(recipients) == 1
+    assert len(recipients) == 2
 
 
 @pytest.mark.parametrize(("first_notice_days_ago", "purged"), [(3, False), (7, True)])
@@ -1061,6 +1065,119 @@ class _RecordingMail:
     async def send_capacity_purge_complete(self, **kwargs) -> bool:
         self.completions.append(self.day)
         return True
+
+
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.asyncio
+async def test_failed_delivery_with_db_failure_never_authorizes_purge(
+    db_session,
+    free_ws,
+    only_workspaces,
+    purge_side_effects,
+    final,
+) -> None:
+    """No false warning survives even if DB writes and next-day Redis fail."""
+    from datetime import datetime, time
+
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    since = datetime.combine(utcnow().date() - timedelta(days=70), time(4))
+    first = since if final else None
+    now = since + timedelta(days=35)
+    ws.capacity_locked_since = since
+    ws.capacity_purge_first_notice_at = first
+    await db_session.commit()
+    commit = db_session.commit
+    calls = 0
+
+    async def fail_revert():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("revert commit unavailable")
+        await commit()
+
+    redis = _Redis()
+    with patch.object(db_session, "commit", fail_revert):
+        result = await capacity_purge.send_due_purge_notices(
+            db_session,
+            now=now,
+            redis=redis,
+            email=MagicMock(send_capacity_purge_notice=AsyncMock(return_value=False)),
+        )
+    assert result.failed == 1
+    await db_session.refresh(ws)
+    assert ws.capacity_purge_first_notice_at == first
+    assert ws.capacity_purge_final_notice_at is None
+    retry_day = now + timedelta(days=7)
+    email = MagicMock(send_capacity_purge_notice=AsyncMock(return_value=True))
+    result = await capacity_purge.send_due_purge_notices(
+        db_session,
+        now=retry_day,
+        redis=MagicMock(set=AsyncMock(side_effect=ConnectionError("Redis unavailable"))),
+        email=email,
+    )
+    assert result.failed == 1
+    email.send_capacity_purge_notice.assert_not_awaited()
+    result = await purge_expired_workspaces(db_session, now=retry_day, email=_mail())
+    assert result.purged == 0
+    assert len(await _live_memories(db_session, ws)) == MEMORY_LIMIT + 1
+
+
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.asyncio
+async def test_delivered_notice_with_record_failure_retries_safely(
+    db_session,
+    free_ws,
+    only_workspaces,
+    final,
+) -> None:
+    """If recording a delivered warning fails, retry rather than authorize deletion."""
+    from datetime import datetime, time
+
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    since = datetime.combine(utcnow().date() - timedelta(days=70), time(4))
+    now = since + timedelta(days=35)
+    ws.capacity_locked_since = since
+    ws.capacity_purge_first_notice_at = since if final else None
+    await db_session.commit()
+    redis = _Redis()
+    email = MagicMock(send_capacity_purge_notice=AsyncMock(return_value=True))
+    with patch.object(db_session, "commit", AsyncMock(side_effect=RuntimeError("DB unavailable"))):
+        result = await capacity_purge.send_due_purge_notices(
+            db_session,
+            now=now,
+            redis=redis,
+            email=email,
+        )
+    assert result.failed == 1
+    email.send_capacity_purge_notice.assert_awaited_once()
+    await db_session.refresh(ws)
+    assert ws.capacity_purge_final_notice_at is None
+    assert ws.capacity_purge_first_notice_at == (since if final else None)
+    retry_day = now + timedelta(days=1)
+    result = await capacity_purge.send_due_purge_notices(
+        db_session,
+        now=retry_day,
+        redis=redis,
+        email=email,
+    )
+    assert result.sent == 1
+    await db_session.refresh(ws)
+    assert ws.capacity_purge_first_notice_at == (since if final else retry_day)
+    assert ws.capacity_purge_final_notice_at == (retry_day if final else None)
+    assert not capacity_purge.purge_due(
+        since,
+        retry_day,
+        first_notice_at=ws.capacity_purge_first_notice_at,
+        final_notice_at=ws.capacity_purge_final_notice_at,
+    )
+    assert email.send_capacity_purge_notice.call_args.kwargs["purge_at"] == (
+        retry_day + timedelta(days=1 if final else 7)
+    )
 
 
 @pytest.mark.asyncio
@@ -1109,3 +1226,76 @@ async def test_capacity_purge_timeline_over_31_days(
     assert ws.capacity_purge_first_notice_at is None
     assert ws.capacity_purge_final_notice_at is None
     assert len(await _audit_rows(db_session, ws)) == 1
+
+
+@pytest.mark.parametrize(
+    ("start_day", "failed_final_days", "legacy"),
+    [(24, 0, False), (29, 0, False), (35, 2, False), (35, 0, True)],
+)
+@pytest.mark.asyncio
+async def test_late_notice_timeline_matches_actual_deletion(
+    db_session,
+    free_ws,
+    purge_side_effects,
+    only_workspaces,
+    start_day,
+    failed_final_days,
+    legacy,
+) -> None:
+    """#2321: real rows survive until the corrected final warning + one day."""
+    from datetime import datetime, time
+
+    from config.settings import get_settings
+
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    day0 = datetime.combine(utcnow().date() - timedelta(days=70), time(4, 0, 5))
+    ws.capacity_locked_since = day0
+    mail, redis, settings = _RecordingMail(), _Redis(), get_settings()
+    if legacy:
+        ws.capacity_purge_first_notice_at = ws.capacity_purge_final_notice_at = day0 + timedelta(
+            days=start_day
+        )
+        redis.keys.add(capacity_purge.notice_key(ws.id, day0, 29))
+        redis.keys.add(capacity_purge.notice_key(ws.id, day0, 23))
+        mail.notices.append((start_day, 7))
+    await db_session.commit()
+    final_day = start_day + 6 + failed_final_days
+    purge_day = final_day + 1
+    deadlines = []
+
+    async def send(**kwargs):
+        if start_day + 6 <= mail.day < final_day:
+            return False
+        deadlines.append((mail.day, kwargs["purge_at"]))
+        return await mail.send_capacity_purge_notice(**kwargs)
+
+    email = MagicMock(
+        send_capacity_purge_notice=send,
+        send_capacity_purge_complete=mail.send_capacity_purge_complete,
+    )
+    with (
+        patch.object(settings, "capacity_purge_notice_enabled", True),
+        patch.object(settings, "capacity_purge_enabled", True),
+        patch.object(capacity_purge, "mail_provider_configured", return_value=True),
+        patch("db.redis.get_redis_client", return_value=redis),
+        patch("services.email_service.get_email_service", return_value=email),
+    ):
+        for day in range(start_day, purge_day + 2):
+            mail.day = day
+            now = day0 + timedelta(days=day)
+            await capacity_purge.run_capacity_purge_sweep(db_session, now=now)
+            await db_session.refresh(ws)
+            assert len(await _live_memories(db_session, ws)) == (
+                MEMORY_LIMIT + 1 if day < purge_day else 0
+            ), day
+            if start_day + 6 <= day < final_day:
+                assert ws.capacity_purge_final_notice_at is None
+                assert capacity_purge.workspace_purge_at(ws, now=now) == datetime.combine(
+                    now.date() + timedelta(days=1), time(4)
+                )
+    assert mail.notices == [(start_day, 7), (start_day + 4, 3), (final_day, 1)]
+    assert mail.completions == [purge_day]
+    assert deadlines[-1][1] == datetime.combine(day0.date() + timedelta(days=purge_day), time(4))
+    assert ws.capacity_locked_since is None

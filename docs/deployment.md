@@ -2203,19 +2203,25 @@ deploy apart, in this order:
    look right. One workspace that fails to evaluate is logged as
    `capacity_lock_stamp_failed` and left as it was; the others are still
    stamped or cleared (`failed` in `capacity_purge_sweep_done`).
-2. **Notify**: `CAPACITY_PURGE_NOTICE_ENABLED=true`. Mails the owner on days
+2. **Notify**: `CAPACITY_PURGE_NOTICE_ENABLED=true`. Normally mails the owner on days
    0/7/14/23/27/29 of the stamp (`capacity_purge_notice_sent`; one Redis claim
    per workspace, stamp and stage, so a missed day sends one catch-up mail,
-   not several). The first mail of a lock, once sent or possibly sent
+   not several). If the first notice is later than day 23, the remaining
+   7/3/1-day warnings follow the actual deadline: the first notice, four days
+   later, and six days later. For example, a first notice on stamp day 35
+   yields warnings on days 35/39/41 and deletion no earlier than day 42.
+   A missed final notice is sent at the next run; deletion waits until at
+   least the following calendar day. The first mail of a lock, once sent or possibly sent
    (delivery timed out), is recorded in
-   `workspaces.capacity_purge_first_notice_at`, and the day-29 mail
+   `workspaces.capacity_purge_first_notice_at`, and the final mail
    ("1 day left") in `workspaces.capacity_purge_final_notice_at`; the stamp
-   stage clears both together with the stamp. The record is committed
-   before the mail goes out. If that commit fails, no mail is sent, the
-   claim is released and the next run retries
-   (`capacity_purge_notice_persist_failed`). A mail that fails outright puts
-   both columns back as they were (`capacity_purge_notice_revert_failed` if
-   that commit fails too).
+   stage clears both together with the stamp. These records are committed
+   only after successful or uncertain delivery. A hard delivery failure
+   leaves both columns unchanged and releases the claim. If recording a
+   delivered mail fails, the claim is also released for the next run
+   (`capacity_purge_notice_persist_failed`): that retry can repeat a warning,
+   but a missing record delays deletion. No DB revert is needed after a
+   failed send, so a DB outage cannot turn that failure into a deletion permit.
 
    **Stages 2 and 3 need a real mail provider** (`EMAIL_PROVIDER=resend`).
    The default logging stub reports every mail as sent without sending
@@ -2224,13 +2230,13 @@ deploy apart, in this order:
    `capacity_purge_no_mail_provider` (warning) and skips both the notices and
    the purge, whatever the two flags say. Stamping still runs.
 3. **Purge**: `CAPACITY_PURGE_ENABLED=true`. A workspace is purged by the
-   04:00 UTC run on calendar day 30 of its stamp, provided its day-29 mail
+   04:00 UTC run on calendar day 30 of its stamp, provided its final mail
    went out on an earlier calendar day and its first mail at least 7 calendar
    days before the run. The date shown in the mails, in the web banner and
    as `capacity_lock.purge_at` on `GET /api/v1/workspace/usage/current` is
    that run: day 30 when the mails went out on schedule from day 23 or
    earlier, otherwise later (a week after the first mail, or the day after a
-   late day-29 mail), and never before the next run. The banner and the API
+   late final mail), and never before the next run. The banner and the API
    show no date while the purge cannot run (this flag or stage 2 off, or no
    real mail provider). Because of the stamp stage, the first purge happens
    no earlier than 30 days after stage 1 ran. At most 5 workspaces
@@ -2246,17 +2252,28 @@ deploy apart, in this order:
    was not recorded.
 
    **No deletion without a real warning.** A workspace on day 30 or later
-   whose day-29 mail has not gone out on an earlier calendar day, or whose
+   whose final mail has not gone out on an earlier calendar day, or whose
    first mail went out less than 7 calendar days ago, is not purged: it is
    logged as `capacity_purge_awaiting_final_notice` and counted as
    `purge_awaiting_notice` in `capacity_purge_sweep_done`. So
    `CAPACITY_PURGE_ENABLED=true` with the notices off deletes nothing; a
-   day-29 mail that fails or is sent late (a missed run catches up with it)
+   final mail that fails or is sent late (a missed run catches up with it)
    moves the purge to the run after the day it went out; and notices turned
    on late (stage 2 enabled when stamps are already weeks old) give every
    owner at least a week between the first mail and the deletion. The mails
    and the banner name that later date: a stamp 35 days old at its first
    mail gets a "7 days left" mail, not a past date.
+
+   **Upgrade from the stamp-only notice schedule (#2321).** An old final
+   record less than six calendar days after the first notice is premature:
+   it may have accompanied a "7 days left" mail. It cannot authorize deletion.
+   The corrected final warning uses a separate Redis claim (suffix
+   `:warning-week` for locks first notified after day 23), so the old
+   stage-29 claim cannot suppress it. The same claim deduplicates later
+   attempts, including when the old claim has expired.
+   Deploy all sweep workers together before enabling the affected operation;
+   an old worker still applies the old notice/deletion rules. No schema
+   migration or manual notice-column reset is needed.
 
    **Memories outside live contexts go too.** The lock counts every live
    memory of the workspace. After the contexts, the purge tombstones every
@@ -2281,11 +2298,12 @@ ORDER BY capacity_locked_since;
 ```
 
 A row with both `capacity_purge_first_notice_at` and
-`capacity_purge_final_notice_at` set whose `purge_date` is on or before a run's
+`capacity_purge_final_notice_at` set, the final date at least six calendar
+days after the first, and whose `purge_date` is on or before a run's
 date (UTC) is purged on that run, unless it is within capacity by then. A row
-with a notice column still empty is not purged yet, and its `purge_date` is
-too early (`GREATEST` skips the empty column): the banner shows a date a week
-after the next run instead.
+with an empty notice column or a premature final notice is not purged yet.
+Its `purge_date` above is only a lower bound (`GREATEST` skips empty columns):
+the banner also projects unsent notices onto future runs.
 
 **Re-subscribe or owner cleanup during a purge.** Before each context and
 after every 1,000-memory chunk, the purge reads the workspace row again and

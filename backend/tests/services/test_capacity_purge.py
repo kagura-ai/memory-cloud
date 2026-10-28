@@ -134,7 +134,9 @@ def _simulate(start_day: int, failures: frozenset[int] = frozenset()):
     for day in range(0, 80):
         run = datetime(2026, 9, 1, 4, 0, 40) + timedelta(days=day)
         before = (first, final)
-        stage = notice_stage(day)
+        stage = notice_stage(
+            day, days_since_first_notice=(run.date() - first.date()).days if first else 0
+        )
         if day >= start_day and stage is not None and stage not in claimed:
             if day not in failures:
                 claimed.add(stage)
@@ -436,6 +438,58 @@ async def test_late_first_notice_names_the_real_purge_date(age, days_left) -> No
     )
 
 
+@pytest.mark.parametrize("start_day", [24, 25, 29, 35, 60])
+@pytest.mark.asyncio
+async def test_late_start_sends_seven_three_and_one_day_notices(start_day) -> None:
+    """#2321: the final mail must actually warn of tomorrow's deletion."""
+    since = datetime(2026, 9, 1, 4, 0, 5)
+    ws, redis = _ws(since), _Redis()
+    email = _email(return_value=True)
+    notices = []
+    for day in range(start_day, start_day + 8):
+        now = since + timedelta(days=day)
+        email.send_capacity_purge_notice.reset_mock()
+        with _locked():
+            await send_due_purge_notices(_db([ws]), now=now, redis=redis, email=email)
+        if email.send_capacity_purge_notice.await_count:
+            args = email.send_capacity_purge_notice.call_args.kwargs
+            notices.append((day, args["days_left"]))
+            assert args["purge_at"] == datetime.combine(
+                since.date() + timedelta(days=start_day + 7), time(4)
+            )
+        assert purge_due(
+            since,
+            now,
+            first_notice_at=ws.capacity_purge_first_notice_at,
+            final_notice_at=ws.capacity_purge_final_notice_at,
+        ) is (day == start_day + 7)
+    assert notices == [(start_day, 7), (start_day + 4, 3), (start_day + 6, 1)]
+
+
+@pytest.mark.asyncio
+async def test_legacy_early_final_notice_is_replaced_before_purge() -> None:
+    """An old stage-29 claim must not suppress the corrected final warning."""
+    since = datetime(2026, 9, 1, 4)
+    first = since + timedelta(days=35)
+    ws, redis = _ws(since), _Redis()
+    ws.capacity_purge_first_notice_at = ws.capacity_purge_final_notice_at = first
+    redis.keys[notice_key(ws.id, since, 29)] = 1
+    now = first + timedelta(days=7)
+    assert not purge_due(since, now, first_notice_at=first, final_notice_at=first)
+    assert purge_at(since, now=now, first_notice_at=first, final_notice_at=first) == (
+        now + timedelta(days=1)
+    )
+    email = _email(return_value=True)
+    with _locked():
+        await send_due_purge_notices(_db([ws]), now=now, redis=redis, email=email)
+        await send_due_purge_notices(_db([ws]), now=now, redis=redis, email=email)
+    email.send_capacity_purge_notice.assert_awaited_once()
+    assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 1
+    assert ws.capacity_purge_final_notice_at == now
+    assert not purge_due(since, now, first_notice_at=first, final_notice_at=now)
+    assert purge_due(since, now + timedelta(days=1), first_notice_at=first, final_notice_at=now)
+
+
 @pytest.mark.parametrize(
     ("send", "stamped"),
     [
@@ -452,14 +506,15 @@ async def test_final_notice_is_recorded_on_the_workspace(send, stamped) -> None:
     since = datetime(2026, 10, 1, 4, 0, 30)
     now = datetime(2026, 10, 30, 4, 0, 0)
     ws = _ws(since)
+    ws.capacity_purge_first_notice_at = since
     db = _db([ws])
     with _locked():
         await send_due_purge_notices(
             db, now=now, redis=_Redis(), email=MagicMock(send_capacity_purge_notice=send)
         )
     assert ws.capacity_purge_final_notice_at == (now if stamped else None)
-    # Recorded (committed) before the send; a hard failure commits the revert.
-    assert db.commit.await_count == (1 if stamped else 2)
+    # Failed delivery never records a notice that could authorize deletion.
+    assert db.commit.await_count == (1 if stamped else 0)
 
 
 @pytest.mark.asyncio
@@ -501,7 +556,7 @@ async def test_first_notice_is_recorded_once_per_lock(send, recorded) -> None:
             db, now=day0, redis=redis, email=MagicMock(send_capacity_purge_notice=send)
         )
     assert ws.capacity_purge_first_notice_at == (day0 if recorded else None)
-    assert db.commit.await_count == (1 if recorded else 2)  # record, then revert
+    assert db.commit.await_count == (1 if recorded else 0)
     if not recorded:
         return
     db = _db([ws])
@@ -515,12 +570,12 @@ async def test_first_notice_is_recorded_once_per_lock(send, recorded) -> None:
 
 
 @pytest.mark.asyncio
-async def test_notice_is_committed_before_the_mail_goes_out() -> None:
-    """The record is durable before the send: a commit that fails after the
-    mail went out would leave the stage claimed but the purge never eligible."""
+async def test_notice_is_committed_only_after_delivery() -> None:
+    """A delivery attempt cannot prematurely authorize deletion."""
     since = datetime(2026, 10, 1, 4, 0, 30)
     now = datetime(2026, 10, 30, 4, 0, 0)
     ws = _ws(since)
+    ws.capacity_purge_first_notice_at = since
     db = _db([ws])
     seen: list[tuple] = []
 
@@ -539,19 +594,20 @@ async def test_notice_is_committed_before_the_mail_goes_out() -> None:
             db, now=now, redis=_Redis(), email=MagicMock(send_capacity_purge_notice=send)
         )
     assert counts.sent == 1
-    assert seen == [(now, now, 1)]
-    assert db.commit.await_count == 1  # no second commit after the send
+    assert seen == [(since, None, 0)]
+    assert ws.capacity_purge_final_notice_at == now
+    assert db.commit.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_notice_persist_failure_sends_nothing_and_moves_on() -> None:
-    """The record's commit raises: rolled back, claim released, no mail for
-    that workspace, counted failed — and the next workspace still gets its mail."""
+async def test_notice_persist_failure_releases_claim_and_moves_on() -> None:
+    """A delivered mail's record fails: release its claim for retry and move on."""
     import structlog
 
     since = datetime(2026, 10, 1, 4, 0, 30)
     now = datetime(2026, 10, 30, 4, 0, 0)
     first, second = _ws(since), _ws(since)
+    first.capacity_purge_first_notice_at = second.capacity_purge_first_notice_at = since
     db = _db([first, second])
     db.commit = AsyncMock(side_effect=[RuntimeError("db gone"), None])
     redis = _Redis()
@@ -559,7 +615,7 @@ async def test_notice_persist_failure_sends_nothing_and_moves_on() -> None:
     with _locked(), structlog.testing.capture_logs() as logs:
         counts = await send_due_purge_notices(db, now=now, redis=redis, email=email)
     assert (counts.sent, counts.failed) == (1, 1)
-    assert email.send_capacity_purge_notice.await_count == 1
+    assert email.send_capacity_purge_notice.await_count == 2
     db.rollback.assert_awaited_once()
     assert notice_key(first.id, since, 29) not in redis.keys  # released: retried tomorrow
     assert notice_key(first.id, since, 29) in redis.deleted
@@ -573,9 +629,8 @@ async def test_notice_persist_failure_sends_nothing_and_moves_on() -> None:
     "send", [AsyncMock(return_value=False), AsyncMock(side_effect=RuntimeError("smtp"))]
 )
 @pytest.mark.asyncio
-async def test_failed_delivery_reverts_the_recorded_notice(send) -> None:
-    """A hard delivery failure puts both columns back to what they were
-    (a first notice of an earlier mail is kept) and commits the revert."""
+async def test_failed_delivery_never_records_the_notice(send) -> None:
+    """A hard failure leaves both columns unchanged without needing a DB revert."""
     since = datetime(2026, 10, 1, 4, 0, 30)
     now = datetime(2026, 10, 30, 4, 0, 0)
     ws = _ws(since)
@@ -589,7 +644,7 @@ async def test_failed_delivery_reverts_the_recorded_notice(send) -> None:
     assert counts.failed == 1
     assert ws.capacity_purge_first_notice_at == since
     assert ws.capacity_purge_final_notice_at is None
-    assert db.commit.await_count == 2
+    db.commit.assert_not_awaited()
     assert notice_key(ws.id, since, 29) not in redis.keys
 
 
