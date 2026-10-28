@@ -485,7 +485,9 @@ async def test_a_member_in_another_workspace_session_writes_and_the_edge_lands_i
     assert (await _row(w, UUID(remembered["memory_id"]))).workspace_id == w.w
 
     edge_args = {"context_id": c, "source_id": str(w.decoy), "target_id": str(w.real)}
-    created = await _tool("create_edge", {**edge_args, "edge_type": "supersedes"}, w.member, w.mp)
+    # Ordinary graph edits remain available even when the memories belong to
+    # another member; supersedes has a separate owner check (#2313).
+    created = await _tool("create_edge", {**edge_args, "edge_type": "related_to"}, w.member, w.mp)
     assert created.get("status") == "success", created
     rows = await _edges(w)
     assert [(r.user_id, r.workspace_id, r.context_id) for r in rows] == [(w.member, w.w, w.ctx)]
@@ -495,6 +497,43 @@ async def test_a_member_in_another_workspace_session_writes_and_the_edge_lands_i
     deleted = await _tool("delete_edge", edge_args, w.member, w.mp)
     assert deleted.get("status") == "success", deleted
     assert await _edges(w) == []
+
+
+@pytest.mark.parametrize("foreign_endpoint", [None, "source", "target", "both"])
+async def test_cross_workspace_supersedes_requires_the_member_to_own_both_memories(
+    live, foreign_endpoint: str | None
+) -> None:
+    """Session workspace routing cannot relax either supersedes owner check."""
+    w: World = live
+    source = _memory(w.w, w.ctx, w.member, "Member's newer note")
+    target = _memory(w.w, w.ctx, w.member, "Member's older note")
+    w.session.add_all([source, target])
+    await w.session.commit()
+    source_id = w.decoy if foreign_endpoint in ("source", "both") else source.id
+    target_id = w.real if foreign_endpoint in ("target", "both") else target.id
+
+    result = await _tool(
+        "create_edge",
+        {
+            "context_id": str(w.ctx),
+            "source_id": str(source_id),
+            "target_id": str(target_id),
+            "edge_type": "supersedes",
+        },
+        w.member,
+        w.mp,
+    )
+    rows = await _edges(w)
+    if foreign_endpoint is not None:
+        assert result.get("error") == "permission_denied", result
+        assert rows == []
+        return
+
+    assert result.get("status") == "success", result
+    assert len(rows) == 1
+    edge = rows[0]
+    assert (edge.user_id, edge.workspace_id, edge.context_id) == (w.member, w.w, w.ctx)
+    assert (edge.src_id, edge.dst_id, edge.edge_type) == (source_id, target_id, "supersedes")
 
 
 # ------------------------------------------------------------- REST: viewer
