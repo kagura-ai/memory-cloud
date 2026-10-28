@@ -38,6 +38,7 @@ from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
 from services.memory_counts import count_live_memories
+from services.plan_seats import member_seat_suspended
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthenticationError
 
@@ -179,21 +180,22 @@ async def get_workspace_stats(
         # #2325: the member context access list decides which contexts are
         # listed by name, as on every context path; the others aggregate
         # with the private ones below. No membership row reaches nothing.
-        member_row = (
+        member = (
             await db.execute(
-                select(WorkspaceMember.role, WorkspaceMember.allowed_context_ids).where(
+                select(WorkspaceMember).where(
                     WorkspaceMember.workspace_id == workspace.id,
                     WorkspaceMember.user_id == user_id,
                 )
             )
-        ).one_or_none()
-        reachable = (
-            None
-            if is_workspace_owner
-            else reachable_context_ids(member_row[0], member_row[1])
-            if member_row is not None
-            else frozenset()
-        )
+        ).scalar_one_or_none()
+        if is_workspace_owner:
+            reachable = None
+        elif member is None or await member_seat_suspended(db, workspace, member):
+            # As in the context resolvers, losing a plan seat removes reach
+            # (#1943). Keep quota totals, but expose no context names or health.
+            reachable = frozenset()
+        else:
+            reachable = reachable_context_ids(member.role, member.allowed_context_ids)
 
         # Query 2: Get memory stats for all contexts (privacy-aware)
         # Issue #204: Extracted to service layer for testability

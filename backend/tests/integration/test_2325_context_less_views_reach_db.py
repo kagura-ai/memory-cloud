@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import delete
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import IdentityLink
+from models.auth import IdentityLink, Workspace
 from tests.integration import test_member_context_access_db as mca
 
 # The World fixtures, re-exported for this module's tests.
@@ -184,3 +184,48 @@ async def test_dashboard_names_only_reached_contexts(live, caller) -> None:
     # The total is unchanged by the list: the named rows plus the aggregate.
     shown = sum(row["memory_count"] for row in body["contexts"])
     assert body["total_memories"] == shown + hidden["memory_count"]
+
+
+@pytest.mark.parametrize("caller", ["admin", "mA", "v_null"])
+async def test_dashboard_hides_context_names_until_a_member_regains_a_seat(live, caller) -> None:
+    """A plan downgrade removes context reach, including dashboard names.
+
+    The quota totals remain available, and restoring a seat restores the
+    same names without changing the member's context access list.
+    """
+    w: mca.World = live
+    async with mca._rest(w, caller) as c:
+        before = await c.get("/api/v1/workspace/stats")
+    assert before.status_code == 200, before.text
+    assert before.json()["contexts"]
+
+    workspace = await w.session.get(Workspace, w.ws["w"])
+    assert workspace is not None
+    workspace.plan_name = "free"
+    await w.session.commit()
+    async with mca._rest(w, caller) as c:
+        paused = await c.get("/api/v1/workspace/stats")
+    assert paused.status_code == 200, paused.text
+    body = paused.json()
+    assert body["contexts"] == []
+    assert body["context_count"] == before.json()["context_count"]
+    assert body["total_memories"] == before.json()["total_memories"]
+    assert body["private_aggregation"] == {
+        "context_count": body["context_count"],
+        "memory_count": body["total_memories"],
+    }
+    assert body["unsearchable_memories"] == 0
+    assert body["stalled_memories"] == 0
+    assert body["erased_memories"] == 0
+
+    async with mca._rest(w, "owner") as c:
+        owner = await c.get("/api/v1/workspace/stats")
+    assert owner.status_code == 200, owner.text
+    assert len(owner.json()["contexts"]) == len(mca.CONTEXTS)
+
+    workspace.plan_name = "pro"
+    await w.session.commit()
+    async with mca._rest(w, caller) as c:
+        restored = await c.get("/api/v1/workspace/stats")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["contexts"] == before.json()["contexts"]
