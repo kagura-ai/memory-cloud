@@ -4,6 +4,31 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.132.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.132.0) — 2026-10-28
+
+Authorization and credential correctness: OAuth / MCP tokens are stored as hashes, context-less views and `supersedes` edges follow the same access and ownership rules as the rest of the API, and capacity-purge notices match the real deletion date. This release also carries the v0.133.0 milestone.
+
+### Added
+
+- **Hashed OAuth / MCP tokens** ([#2399](https://github.com/kagura-ai/memory-cloud/issues/2399)): access and refresh tokens are stored as SHA-256 digests, so a database copy no longer holds usable credentials. Token values, lifetimes, rotation and revocation are unchanged for clients. Bearer, refresh, introspection and revocation accept both legacy rows and digests during the rollout and refuse a presented digest. Token fragments are removed from REST / MCP logs.
+
+### Changed
+
+- **Owner rule for `supersedes` edges** ([#2313](https://github.com/kagura-ai/memory-cloud/issues/2313)): MCP `create_edge` / `update_edge` and REST graph creation require both memories to belong to the caller (a linked account counts only in a private context), so a shared-context editor can no longer hide another member's memory from default recall. MCP answers `permission_denied`; REST keeps its endpoint `404` checks and answers `403` `AUTH-101` for the ownership refusal. Retyping an edge away from `supersedes` stays allowed. The accept action in the memory dialog is gated separately in [#2427](https://github.com/kagura-ai/memory-cloud/issues/2427).
+- **OAuth form handling** ([#2238](https://github.com/kagura-ai/memory-cloud/issues/2238)): authorization, token, device, revocation and introspection routes refuse a repeated single-valued parameter, empty duplicates included, and answer a malformed or oversized form with a generic `invalid_request`. Authorization error pages carry the consent page's cache and framing headers. An unknown `token_type_hint` is still ignored, as RFC 7009 §2.2 requires.
+- **Dynamic client registration** ([#2238](https://github.com/kagura-ai/memory-cloud/issues/2238)): a registration accepts at most 100 redirect URIs, drops the entries that fail pattern or provider validation, and answers `invalid_client_metadata` only when none survive. Manual client editing stays strict. Redirect URIs are logged without userinfo, query, fragment or provider binding segments.
+
+### Fixed
+
+- **Context-less views follow the context access list** ([#2325](https://github.com/kagura-ai/memory-cloud/issues/2325)): the memory list, stats and access patterns without a `context_id`, and the workspace stats and timeline, count only contexts the member can open; losing a plan seat removes that reach and restoring it brings it back. A scoped API key's dashboard uses the key's own workspace. Context names, creators and health counts come only from reachable contexts; the rest is one row labelled "Not accessible".
+- **Capacity-purge notices** ([#2321](https://github.com/kagura-ai/memory-cloud/issues/2321)): when notices start late, the 7 / 3 / 1-day notices follow the actual deletion deadline instead of the lock's age, and a missed or failed final notice postpones the deletion. A premature final record written by an older worker no longer authorizes deletion.
+
+### Notes
+
+- **Migration `f20_2399_oauth_token_storage`** starts token storage in a `bridge` mode that still writes raw values, because the deploy runs Alembic before the old API processes stop. Hash-only storage needs an operator step after every old reader and writer has drained: run `PYTHONPATH=src python -m auth.oauth_token_storage --writers-drained`, then check the counts and the constraint as `docs/ops/oauth-token-hash-rollout.md` describes. Fresh installations need the same finalizer. A downgrade after hashing is refused.
+- **Capacity-purge sweep workers**: update every sweep worker before enabling the purge; an old worker still applies the old notice and deletion rules. No feature flag changes.
+- No new environment variables.
+
 ## [v0.131.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.131.0) — 2026-10-28
 
 Workspace ownership and connector key integrity: deleting a user no longer leaves a workspace, a context or a connector key without a live owner.
