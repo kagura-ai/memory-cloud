@@ -4,6 +4,18 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.130.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.130.1) — 2026-10-28
+
+Patch release: Meta's Muse can register as an MCP client through dynamic client registration.
+
+### Fixed
+
+- **Meta Muse DCR callback** ([#2410](https://github.com/kagura-ai/memory-cloud/issues/2410)): `POST /api/v1/oauth/register` accepts Muse's single callback `https://agent.meta.ai/api/hatch/oauth/callback`, compared whole and as written; `muse.ai`, other `meta.ai` hosts and scheme, case, port, path, query and fragment variants stay refused. The registration rejection message names the callback, and the API reference lists it.
+
+### Notes
+
+- No migration, no new environment variables, no operator action. Muse registers from Meta's servers under the existing 5/min/IP registration limit; an observed egress range can be exempted with `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`.
+
 ## [v0.130.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.130.0) — 2026-10-27
 
 Account erasure now keeps surviving memories outside search until an administrator explicitly restores their scrubbed index, while preserving resource indexes another live, non-suppressed memory still uses. Vector and attachment cleanup retain retry work across failures. API key regeneration rotates the key selected in the web UI.

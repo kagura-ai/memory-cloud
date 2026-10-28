@@ -12,7 +12,7 @@ from typing import Literal, get_args
 # Application Version (single source of truth for runtime)
 # ============================================================================
 
-APP_VERSION = "0.130.0"
+APP_VERSION = "0.130.1"
 
 # ============================================================================
 # Blue-green deploy colors (#1482)
