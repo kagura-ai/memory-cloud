@@ -458,3 +458,105 @@ async def test_cli_notifies_committed_transfer_when_later_successor_has_left(
     assert await _owner(db_session, first_id) == target
     assert await _owner(db_session, second_id) == owner
     notified.assert_awaited_once_with(db_session, first_id, target)
+
+
+@pytest.mark.asyncio
+async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
+    db_session: AsyncSession, connector_world, sole_password_admin
+) -> None:
+    """#2417: the CLI says a soft-deleted workspace is left as it is — its
+    shared contexts and other authors' memories too (#2406 picks them up)."""
+    from models.auth import Context
+    from models.memory import Memory
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    owner = await world.user("owner")
+    gone = await world.workspace(admin_id, **{owner: WorkspaceRole.MEMBER})
+    gone_id = gone.id
+    kept = Context(
+        id=uuid4(), name="kept", workspace_id=gone_id, created_by=admin_id, is_private=False
+    )
+    db_session.add(kept)
+    await db_session.flush()
+    theirs = Memory(
+        id=uuid4(),
+        user_id=owner,
+        workspace_id=gone_id,
+        context_id=kept.id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+    )
+    db_session.add(theirs)
+    kept_id, theirs_id = kept.id, theirs.id
+    await db_session.execute(
+        update(Workspace).where(Workspace.id == gone_id).values(deleted_at=utcnow())
+    )
+
+    assert await _run(db_session) == 0
+
+    assert not await _exists(db_session, admin_id)
+    assert await db_session.get(Workspace, gone_id) is not None
+    assert (
+        await db_session.scalar(select(Context.created_by).where(Context.id == kept_id)) == admin_id
+    )
+    assert await db_session.get(Memory, theirs_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_private_context_elsewhere_is_deleted_and_a_shared_one_reowned(
+    db_session: AsyncSession, connector_world, sole_password_admin
+) -> None:
+    """#2417: only a shared context passes to the surviving workspace owner; a
+    private one nobody linked wrote in goes with the admin."""
+    from models.auth import Context
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    other = await world.user("other")
+    elsewhere = await world.workspace(other, **{admin_id: WorkspaceRole.ADMIN})
+    private = Context(
+        id=uuid4(), name="mine", workspace_id=elsewhere.id, created_by=admin_id, is_private=True
+    )
+    shared = Context(
+        id=uuid4(), name="ours", workspace_id=elsewhere.id, created_by=admin_id, is_private=False
+    )
+    db_session.add_all([private, shared])
+    await db_session.flush()
+    private_id, shared_id = private.id, shared.id
+
+    assert await _run(db_session) == 0
+
+    assert await db_session.scalar(select(Context.id).where(Context.id == private_id)) is None
+    assert (
+        await db_session.scalar(select(Context.created_by).where(Context.id == shared_id)) == other
+    )
+
+
+@pytest.mark.asyncio
+async def test_quota_is_released_for_surviving_workspaces_only(
+    db_session: AsyncSession, connector_world, sole_password_admin
+) -> None:
+    """#2417: a hard-deleted workspace has no quota counter left to release."""
+    from unittest.mock import AsyncMock, patch
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    other = await world.user("other")
+    solo = await world.workspace(admin_id)
+    elsewhere = await world.workspace(other, **{admin_id: WorkspaceRole.ADMIN})
+    solo_id, elsewhere_id = solo.id, elsewhere.id
+
+    release = AsyncMock()
+    with (
+        patch("services.user_deletion_service.FileStorageService") as storage,
+        patch("services.storage_quota_service.release_storage_bytes", release),
+    ):
+        storage.return_value.purge_files_for_contexts = AsyncMock(
+            return_value={solo_id: 10, elsewhere_id: 20}
+        )
+        assert await _run(db_session) == 0
+
+    release.assert_awaited_once_with(workspace_id=elsewhere_id, size_bytes=20)

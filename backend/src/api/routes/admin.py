@@ -1021,8 +1021,11 @@ async def delete_user(
     """Delete personal data after explicitly transferring ownership (Admin-only).
 
     Returns 409 without modifying data when an owned workspace or created
-    context lacks an eligible successor. Initial/last admin and self-deletion
-    protections remain in force. The transfer and deletion commit together.
+    shared context lacks an eligible successor, or when an owned workspace is
+    under a running subscription (``BILLING-005``, #1940). A private context
+    passes to a linked account that wrote in it, otherwise it is deleted with
+    the user (#2417). Initial/last admin and self-deletion protections remain
+    in force. The transfer and deletion commit together.
     """
     from services.ownership_notifications import notify_new_owner_best_effort
     from services.system_admin_service import SystemAdminService
@@ -1065,14 +1068,21 @@ async def delete_user(
     logger.info(
         "admin_delete_user",
         user_id=user_id,
+        admin_id=admin_id,
         memories_deleted=result.memories,
         api_keys_deleted=result.api_keys,
+        contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
+        workspaces_transferred=[str(ws_id) for ws_id in transferred],
     )
     return {
         "message": "User deleted successfully",
         "user_id": user_id,
-        "deleted": {"memories": result.memories, "api_keys": result.api_keys},
+        "deleted": {
+            "memories": result.memories,
+            "api_keys": result.api_keys,
+            "contexts": result.contexts,
+        },
         "reowned": {"connector_api_keys": result.connector_api_keys},
         "transferred_workspaces": {str(k): v for k, v in transferred.items()},
     }

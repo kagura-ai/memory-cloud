@@ -2676,7 +2676,9 @@
         "roleUpdateError": "Failed to update user role",
         "deleteConfirm": "Delete user {name}? This will permanently delete all their memories.",
         "deleteSuccess": "User {name} deleted successfully",
-        "deleteError": "Failed to delete user"
+        "deleteError": "Failed to delete user",
+        "deleteErrorWithReason": "Failed to delete user: {reason}",
+        "deleteTransferRequired": "Ownership transfer required: {workspaces} workspace(s) and {contexts} shared context(s) this user owns still need a successor. Hand them over first, or call the admin API with workspace_transfers / context_transfers."
       },
       "detail": {
         "title": "User Detail",

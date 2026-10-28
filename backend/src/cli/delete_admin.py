@@ -11,6 +11,11 @@ One only the admin is in is deleted with it, as account erasure does. A
 workspace under a running subscription stops the command (it is the admin's
 subscription, as for account erasure); so does any change to the admin's
 workspaces or the user count while the prompt waits.
+#2417: a shared context (or a connector's write target) the admin created in
+a surviving workspace passes to that workspace's owner; one in a soft-deleted
+workspace the admin owns stays with it (#2406). Any other private context
+passes to a linked account that wrote in it (#1784), otherwise it is deleted
+with the admin, files included.
 
 Usage:
     cd backend && python -m src.cli.delete_admin [--transfer-to USER] [--yes]
@@ -170,6 +175,7 @@ async def _delete_admin_rows(
         user_id=admin_id,
         workspaces_transferred=[str(ws_id) for ws_id in transferred or []],
         workspaces_deleted=[str(ws_id) for ws_id in workspace_ids],
+        contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
     )
 

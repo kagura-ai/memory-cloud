@@ -12,13 +12,15 @@ from models.auth import AuditLog, Context, ContextMember, OAuth2Client, User, Wo
 from models.memory import Memory
 
 
-async def _context(db, workspace, creator):
+async def _context(db, workspace, creator, *, private: bool = False):
+    """A context ``creator`` made; shared unless ``private`` (#2417: only a
+    shared context takes a successor the admin picks)."""
     ctx = Context(
         id=uuid4(),
         name=f"ctx-{uuid4().hex[:8]}",
         workspace_id=workspace.id,
         created_by=creator,
-        is_private=True,
+        is_private=private,
     )
     db.add(ctx)
     await db.flush()
@@ -219,7 +221,9 @@ async def test_context_only_successor_keeps_connector_target(connector_world, db
     target = await world.user("departing")
     owner = await world.user("owner")
     workspace = await world.workspace(owner, **{target: "admin"})
-    ctx_id = await _context(db_session, workspace, target)
+    # Connectors create their write target private (#2417): it is still the
+    # workspace's, so it takes a successor like a shared context.
+    ctx_id = await _context(db_session, workspace, target, private=True)
     connector = (await world.connector(workspace, by=target)).connector
     connector_id = connector.id
     await db_session.execute(
@@ -241,3 +245,126 @@ async def test_context_only_successor_keeps_connector_target(connector_world, db
         )
         == ctx_id
     )
+
+
+@pytest.mark.asyncio
+async def test_private_context_passes_to_a_linked_contributor_not_a_successor(
+    connector_world, db_session
+):
+    """#2417: a private context is readable by its creator and the accounts
+    linked to it only, so the #1784 hand-over decides who keeps it, not the
+    admin — a selection naming one is refused."""
+    from models.auth import IdentityLink
+
+    world = connector_world
+    target = await world.user("departing")
+    linked = await world.user("linked")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin", linked: "admin"})
+    ws_id = workspace.id
+    ctx_id = await _context(db_session, workspace, target, private=True)
+    group = uuid4()
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=target, linked_by=target),
+            IdentityLink(group_id=group, user_id=linked, linked_by=target),
+        ]
+    )
+    theirs = Memory(
+        id=uuid4(),
+        user_id=linked,
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+    )
+    db_session.add(theirs)
+    theirs_id = theirs.id
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(
+            target,
+            {"user_id": "operator"},
+            db_session,
+            UserDeleteRequest(context_transfers={ctx_id: owner}),
+        )
+    assert error.value.status_code == 409
+    assert "Private contexts" in str(error.value.detail)
+    await db_session.rollback()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == target
+
+    response = await delete_user(target, {"user_id": "operator"}, db_session)
+    assert response["deleted"]["contexts"] == 0
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == linked
+    assert await db_session.get(Memory, theirs_id) is not None
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) is None
+
+
+@pytest.mark.asyncio
+async def test_private_context_nobody_linked_wrote_in_is_deleted_with_the_user(
+    connector_world, db_session
+):
+    world = connector_world
+    target = await world.user("departing")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin"})
+    private_id = await _context(db_session, workspace, target, private=True)
+    shared_id = await _context(db_session, workspace, target)
+    await db_session.commit()
+
+    response = await delete_user(
+        target,
+        {"user_id": "operator"},
+        db_session,
+        UserDeleteRequest(context_transfers={shared_id: owner}),
+    )
+    assert response["deleted"]["contexts"] == 1
+    assert await db_session.scalar(select(Context.id).where(Context.id == private_id)) is None
+    assert (
+        await db_session.scalar(select(Context.created_by).where(Context.id == shared_id)) == owner
+    )
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) is None
+
+
+@pytest.mark.asyncio
+async def test_a_running_subscription_refuses_the_delete_before_any_transfer(
+    connector_world, db_session
+):
+    """#2417 / #1940: the subscription is the user's; it ends before the
+    account goes, as account erasure and the CLI require."""
+    from sqlalchemy import update
+
+    from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+    from utils.exceptions import BillingContractActiveError
+
+    world = connector_world
+    target = await world.user("departing")
+    successor = await world.user("successor")
+    workspace = await world.workspace(target, **{successor: "admin"})
+    ws_id = workspace.id
+    await db_session.execute(
+        update(Workspace)
+        .where(Workspace.id == ws_id)
+        .values(entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING)
+    )
+    await db_session.commit()
+
+    with pytest.raises(BillingContractActiveError) as error:
+        await delete_user(
+            target,
+            {"user_id": "operator"},
+            db_session,
+            UserDeleteRequest(workspace_transfers={ws_id: successor}),
+        )
+    assert error.value.error_code == "BILLING-005"
+    assert error.value.details["workspace_ids"] == [str(ws_id)]
+    await db_session.rollback()
+    assert (
+        await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == ws_id))
+        == target
+    )
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) == target

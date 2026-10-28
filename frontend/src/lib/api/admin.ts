@@ -4,7 +4,7 @@
  * Issue #149: Plan tier enforcement - Admin management
  */
 
-import { apiClient } from "./base";
+import { ApiError, apiClient } from "./base";
 import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
 import type { PlanTier } from "@/lib/utils/planLabel";
 
@@ -15,6 +15,41 @@ import type { PlanTier } from "@/lib/utils/planLabel";
  */
 export function adminUserPath(userId: string): string {
   return `/admin/users/${encodeURIComponent(userId)}`;
+}
+
+/**
+ * Why `DELETE /api/v1/admin/users/{user_id}` failed, for the users screen's
+ * toast (#2417). Since #2372 the route answers 409 with the owned workspaces
+ * and shared contexts that still need a successor (`details.detail`); other
+ * refusals, such as a running subscription (`BILLING-005`) or admin
+ * protection, carry their reason in `message`.
+ */
+export type UserDeleteFailure =
+  | { kind: "transfer_required"; workspaces: number; contexts: number }
+  | { kind: "message"; message: string }
+  | { kind: "unknown" };
+
+export function userDeleteFailure(error: unknown): UserDeleteFailure {
+  if (!(error instanceof ApiError)) {
+    return { kind: "unknown" };
+  }
+  const detail: unknown = error.details?.detail;
+  if (detail && typeof detail === "object") {
+    const { workspace_ids, context_ids } = detail as {
+      workspace_ids?: unknown;
+      context_ids?: unknown;
+    };
+    if (Array.isArray(workspace_ids) || Array.isArray(context_ids)) {
+      return {
+        kind: "transfer_required",
+        workspaces: Array.isArray(workspace_ids) ? workspace_ids.length : 0,
+        contexts: Array.isArray(context_ids) ? context_ids.length : 0,
+      };
+    }
+  }
+  return error.message
+    ? { kind: "message", message: error.message }
+    : { kind: "unknown" };
 }
 
 export interface WorkspacePlanInfo {

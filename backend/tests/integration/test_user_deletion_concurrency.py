@@ -127,7 +127,15 @@ async def test_unexpected_late_context_rejects_cleanup_without_deleting_it(
     async def add_late_context(db, subject, **kwargs):
         # Simulate a legacy writer bypassing the supported service fence.
         async with maker() as other:
-            other.add(Context(id=context_id, workspace_id=ws_id, name="late", created_by=target))
+            other.add(
+                Context(
+                    id=context_id,
+                    workspace_id=ws_id,
+                    name="late",
+                    created_by=target,
+                    is_private=False,  # a shared one: nobody validated a successor
+                )
+            )
             await other.commit()
         return await delete_user_rows(db, subject, **kwargs)
 
@@ -237,3 +245,36 @@ async def test_erasure_auto_transfer_rechecks_successor_after_admin_deletion(
         await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == ws_id))
         == owner
     )
+
+
+@pytest.mark.asyncio
+async def test_a_late_personal_private_context_goes_with_the_user(db_session, connector_world):
+    """#2417: a private context nobody linked wrote in is the user's own, so
+    one that appears late is deleted with the user instead of blocking it."""
+    world = connector_world
+    target = await world.user("departing")
+    owner = await world.user("owner")
+    ws = await world.workspace(owner, **{target: "admin"})
+    ws_id, context_id = ws.id, uuid4()
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async def add_late_context(db, subject, **kwargs):
+        async with maker() as other:
+            other.add(
+                Context(
+                    id=context_id,
+                    workspace_id=ws_id,
+                    name="late",
+                    created_by=target,
+                    is_private=True,
+                )
+            )
+            await other.commit()
+        return await delete_user_rows(db, subject, **kwargs)
+
+    with patch("services.user_deletion_service.delete_user_rows", add_late_context):
+        response = await delete_user(target, {"user_id": "operator"}, db_session)
+    assert response["deleted"]["contexts"] == 1
+    assert await db_session.get(Context, context_id) is None
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) is None

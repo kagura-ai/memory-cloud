@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { apiClient } from "@/lib/api";
-import { adminUserPath } from "@/lib/api/admin";
+import { adminUserPath, userDeleteFailure } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Table,
@@ -164,25 +164,35 @@ export default function AdminUsersPage() {
   };
 
   const handleDeleteUser = async (userId: string, userName: string) => {
-    if (
-      !confirm(
-        `Delete user ${userName}? This will permanently delete all their memories.`,
-      )
-    ) {
+    if (!confirm(t("messages.deleteConfirm", { name: userName }))) {
       return;
     }
 
     try {
       await apiClient.delete(`/api/v1/admin/users/${userId}`);
       toast({
-        title: "Success",
-        description: `User ${userName} deleted successfully`,
+        title: tCommon("success"),
+        description: t("messages.deleteSuccess", { name: userName }),
       });
       loadUsers();
     } catch (error) {
+      // #2417: the API refuses with 409 while the user owns a workspace or a
+      // shared context (successors go in the request body, which this screen
+      // does not send yet) or a running subscription — say which.
+      const failure = userDeleteFailure(error);
       toast({
-        title: "Error",
-        description: "Failed to delete user",
+        title: tCommon("error"),
+        description:
+          failure.kind === "transfer_required"
+            ? t("messages.deleteTransferRequired", {
+                workspaces: failure.workspaces,
+                contexts: failure.contexts,
+              })
+            : failure.kind === "message"
+              ? t("messages.deleteErrorWithReason", {
+                  reason: failure.message,
+                })
+              : t("messages.deleteError"),
         variant: "destructive",
       });
     }

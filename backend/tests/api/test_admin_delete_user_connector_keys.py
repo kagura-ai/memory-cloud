@@ -29,6 +29,6 @@ async def test_response_reports_moved_and_deleted_keys_after_commit():
         patch("services.user_deletion_service.finish_user_deletion", side_effect=finish),
     ):
         response = await delete_user("target", {"user_id": "operator"}, db)
-    assert response["deleted"] == {"memories": 4, "api_keys": 3}
+    assert response["deleted"] == {"memories": 4, "api_keys": 3, "contexts": 0}
     assert response["reowned"] == {"connector_api_keys": 2}
     db.rollback.assert_not_awaited()
