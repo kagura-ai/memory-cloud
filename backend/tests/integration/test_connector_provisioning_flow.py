@@ -868,6 +868,7 @@ async def test_rotate_kmc_key_keeps_a_members_key_with_them(db_session: AsyncSes
     (the #1752 contract), whoever rotates."""
     owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     admin_id = f"admin-{uuid4().hex}"
+    await _add_user(db_session, admin_id)
     db_session.add(
         WorkspaceMember(workspace_id=workspace.id, user_id=admin_id, role=WorkspaceRole.ADMIN)
     )
@@ -893,6 +894,9 @@ async def test_rotate_kmc_key_heal_refuses_an_owner_without_a_user_row(
     user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     connector = await _provision_with_key(db_session, workspace, user_id)
     await db_session.execute(delete(APIKey).where(APIKey.connector_id == connector.id))
+
+    # Explicitly model an erased owner now that the shared fixture creates Users.
+    await db_session.execute(delete(User).where(User.user_id == user_id))
 
     with pytest.raises(ValidationError, match="being erased"):
         await ConnectorProvisioningService(db_session).rotate_kmc_key(

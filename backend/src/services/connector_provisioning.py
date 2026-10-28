@@ -1415,8 +1415,8 @@ class ConnectorProvisioningService:
         the workspace's owner, which heals a connector whose key an account
         erasure deleted before #2305. A key whose owner is no longer a member
         of the workspace is revoked as usual and its replacement minted under
-        the workspace's owner. Both share-lock the owner's ``users`` row
-        (``_live_workspace_owner``).
+        the workspace's owner. Candidate owners are key-share-locked before
+        API key rows; the fallback owner must remain in that locked set.
 
         Raises:
             NotFoundException: if no matching connector exists in workspace.
