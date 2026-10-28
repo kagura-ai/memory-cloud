@@ -703,7 +703,7 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
         },
         {
             "name": "create_edge",
-            "description": """Link two memories by MEMORY id. 'supersedes': source = the newer, target = the outdated one, shadowed out of default recall; accepts a supersede_candidate; both memories must be your own (permission_denied otherwise). 'related_to' (default): a plain link. A declared pair with other values → edge_exists unless overwrite=true.
+            "description": """Link MEMORY ids. 'supersedes': source=newer, target=outdated (shadowed from default recall); accepts a supersede_candidate; both memories must be yours (permission_denied otherwise). 'related_to' (default): plain link. Declared pair with different values → edge_exists unless overwrite=true.
 Returns: {status, operation, edge, previous?}. Manual: guide(["create_edge"]).""",
             "inputSchema": {
                 "type": "object",
