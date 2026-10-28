@@ -33,7 +33,11 @@ from models.memory import Memory
 from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_seats import ensure_context_writable, ensure_member_seated
+from services.plan_seats import (
+    ensure_context_writable,
+    ensure_member_seated,
+    member_seat_suspended,
+)
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -93,19 +97,19 @@ async def reachable_memory_filter(
     with no list reach every context of that workspace; a member or viewer
     with a list exactly the listed contexts of that workspace; a member with
     no list, or an empty list, nothing. A workspace the caller is not a member
-    of is out, whatever it still holds of theirs. ``false()`` when nothing is
-    reached. Privacy is not part of it: the callers restrict the rows to the
-    caller's own, and the caller's own rows are readable wherever they are.
+    of is out, whatever it still holds of theirs, and so is one where the
+    member has no seat on the plan (#1943) — the context resolvers refuse it
+    there too. ``false()`` when nothing is reached. A row with no context is
+    reached with the whole workspace only (owner, admin, viewer with no list):
+    a list names contexts, so it never covers one. Privacy is not part of it:
+    the callers restrict the rows to the caller's own, which stay readable in
+    any context the caller reaches, private or not.
 
     ``key_workspace_id`` confines a workspace-scoped API key to its own
     workspace (#963), as the context resolvers do.
     """
     stmt = (
-        select(
-            WorkspaceMember.workspace_id,
-            WorkspaceMember.role,
-            WorkspaceMember.allowed_context_ids,
-        )
+        select(WorkspaceMember, Workspace)
         .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
         .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
     )
@@ -113,19 +117,19 @@ async def reachable_memory_filter(
         stmt = stmt.where(WorkspaceMember.workspace_id == UUID(str(key_workspace_id)))
     open_workspaces: list[UUID] = []
     clauses: list[ColumnElement[bool]] = []
-    for workspace_id, role, allowed in (await db.execute(stmt)).all():
-        reachable = reachable_context_ids(role, allowed)
+    for member, workspace in (await db.execute(stmt)).all():
+        reachable = reachable_context_ids(member.role, member.allowed_context_ids)
+        if reachable == frozenset() or await member_seat_suspended(db, workspace, member):
+            continue
         if reachable is None:
-            open_workspaces.append(workspace_id)
-        elif reachable:
+            open_workspaces.append(workspace.id)
+        else:
             clauses.append(
-                and_(Memory.workspace_id == workspace_id, Memory.context_id.in_(reachable))
+                and_(Memory.workspace_id == workspace.id, Memory.context_id.in_(reachable))
             )
     if open_workspaces:
-        clauses.insert(0, Memory.workspace_id.in_(open_workspaces))
-    if not clauses:
-        return false()
-    return clauses[0] if len(clauses) == 1 else or_(*clauses)
+        clauses.append(Memory.workspace_id.in_(open_workspaces))
+    return or_(*clauses) if clauses else false()
 
 
 def _reach_denied_reason(member: WorkspaceMember) -> str:

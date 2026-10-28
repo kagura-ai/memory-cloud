@@ -153,3 +153,34 @@ async def test_timeline_with_a_context_id_keeps_the_per_context_rule(live) -> No
     assert inside.status_code == 200, inside.text
     assert inside.json()["memories_created_in_period"] == MEMORIES_IN["A"]
     assert outside.status_code == 404, outside.text
+
+
+@pytest.mark.parametrize("caller", [c for c in mca.ALL_CALLERS if c != "outsider"])
+async def test_dashboard_names_only_reached_contexts(live, caller) -> None:
+    """``GET /workspace/stats`` (the dashboard card) lists by name only the
+    contexts the caller reaches; the rest aggregate with the private ones,
+    and the totals still cover every context."""
+    w: mca.World = live
+    async with mca._rest(w, caller) as c:
+        r = await c.get("/api/v1/workspace/stats")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    by_id = {str(w.ctx[k]): k for k in mca.CONTEXTS}
+    named = {by_id[row["context_id"]] for row in body["contexts"]}
+    if caller == "owner":
+        expected = set(mca.CONTEXTS)
+    else:
+        # The route's own privacy rule (creator only, no identity links)
+        # under the reach rule.
+        expected = {
+            ctx
+            for ctx, (private, creator) in mca.CONTEXTS.items()
+            if (not private or creator == caller) and mca._reach(caller, ctx)
+        }
+    assert named == expected, (caller, named)
+    hidden = body["private_aggregation"] or {"context_count": 0, "memory_count": 0}
+    assert hidden["context_count"] == len(mca.CONTEXTS) - len(expected)
+    assert body["context_count"] == len(mca.CONTEXTS)
+    # The total is unchanged by the list: the named rows plus the aggregate.
+    shown = sum(row["memory_count"] for row in body["contexts"])
+    assert body["total_memories"] == shown + hidden["memory_count"]

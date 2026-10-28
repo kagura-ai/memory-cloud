@@ -16,6 +16,9 @@ from fastapi import HTTPException
 from api.routes.memory import list_memories, patch_memory
 from models.schemas import PatchMemoryRequest
 
+pytestmark = pytest.mark.usefixtures("reach_everything")
+
+
 MOCK_USER = {"user_id": "test_user_123"}
 
 
@@ -177,17 +180,3 @@ async def test_patch_route_maps_time_trigger_value_error_to_422():
             memory_service=svc,
         )
     assert exc.value.status_code == 422
-
-
-@pytest.fixture(autouse=True)
-def _reach_everything():
-    """#2325: with no ``context_id`` the list also keeps to the contexts the
-    caller reaches (one membership read). These mocked-DB tests cover the other
-    filters, so that read is stubbed to reach everything; the real rule runs
-    against PostgreSQL in test_2325_context_less_views_reach_db.py."""
-    from unittest.mock import AsyncMock, patch
-
-    from sqlalchemy import true
-
-    with patch("api.routes.memory.reachable_memory_filter", AsyncMock(return_value=true())):
-        yield

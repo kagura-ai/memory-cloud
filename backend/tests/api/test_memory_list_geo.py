@@ -15,6 +15,9 @@ import pytest
 
 from api.routes.memory import list_memories
 
+pytestmark = pytest.mark.usefixtures("reach_everything")
+
+
 MOCK_USER = {"user_id": "test_user_123"}
 
 
@@ -216,17 +219,3 @@ async def test_location_omitted_when_only_one_coordinate_present():
         offset=0,
     )
     assert response.memories[0].location is None
-
-
-@pytest.fixture(autouse=True)
-def _reach_everything():
-    """#2325: with no ``context_id`` the list also keeps to the contexts the
-    caller reaches (one membership read). These mocked-DB tests cover the other
-    filters, so that read is stubbed to reach everything; the real rule runs
-    against PostgreSQL in test_2325_context_less_views_reach_db.py."""
-    from unittest.mock import AsyncMock, patch
-
-    from sqlalchemy import true
-
-    with patch("api.routes.memory.reachable_memory_filter", AsyncMock(return_value=true())):
-        yield

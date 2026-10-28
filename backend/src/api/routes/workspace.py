@@ -32,6 +32,7 @@ from api.routes.usage import (
     calculate_usage_status,
 )
 from auth.dependencies import get_user_from_api_key_or_session
+from auth.workspace_roles import reachable_context_ids
 from db.base import get_db
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
@@ -175,6 +176,25 @@ async def get_workspace_stats(
         # Issue #165: Check if user is workspace owner
         is_workspace_owner = workspace.owner_user_id == user_id
 
+        # #2325: the member context access list decides which contexts are
+        # listed by name, as on every context path; the others aggregate
+        # with the private ones below. No membership row reaches nothing.
+        member_row = (
+            await db.execute(
+                select(WorkspaceMember.role, WorkspaceMember.allowed_context_ids).where(
+                    WorkspaceMember.workspace_id == workspace.id,
+                    WorkspaceMember.user_id == user_id,
+                )
+            )
+        ).one_or_none()
+        reachable = (
+            None
+            if is_workspace_owner
+            else reachable_context_ids(member_row[0], member_row[1])
+            if member_row is not None
+            else frozenset()
+        )
+
         # Query 2: Get memory stats for all contexts (privacy-aware)
         # Issue #204: Extracted to service layer for testability
         from services.workspace_service import WorkspaceService
@@ -225,7 +245,7 @@ async def get_workspace_stats(
                 is_workspace_owner  # Owner sees everything
                 or not context.is_private  # Shared contexts visible to all
                 or context.created_by == user_id  # Creator sees own private contexts
-            )
+            ) and (reachable is None or context.id in reachable)
 
             if is_accessible:
                 # Fetch creator's name (only for accessible contexts)

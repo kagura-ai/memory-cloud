@@ -18,6 +18,9 @@ from models.memory import Memory
 from services.capacity_lock import CapacityPolicy
 from utils.exceptions import NotFoundException
 
+pytestmark = pytest.mark.usefixtures("reach_everything")
+
+
 MOCK_USER = {"user_id": "test_user_123"}
 
 
@@ -86,8 +89,6 @@ class TestListMemoriesContextFilter:
         """Without context_id the rows are the caller's own in the contexts the
         caller reaches (#2325): the membership read's predicate is in the count
         and the page alike, and a workspace-scoped key passes its workspace."""
-        from sqlalchemy import true
-
         mem = _mock_memory_row()
         mock_db = _db_with_rows(total=1, rows=[mem])
         ws_id = uuid4()
@@ -113,7 +114,6 @@ class TestListMemoriesContextFilter:
         assert "memories.workspace_id = :workspace_id_1" in count_sql
         assert count_sql == page_sql and count_params == page_params
         assert ws_id in count_params.values()
-        assert true() is not None  # the module stub for the other tests
 
     @pytest.mark.asyncio
     async def test_no_context_id_skips_permission_check(self):
@@ -827,17 +827,3 @@ async def test_count_and_page_queries_carry_identical_filters():
         "memories.type !=",
     ):
         assert fragment in page_where, f"expected filter missing: {fragment}\n{page_where}"
-
-
-@pytest.fixture(autouse=True)
-def _reach_everything():
-    """#2325: with no ``context_id`` the list also keeps to the contexts the
-    caller reaches (one membership read). These mocked-DB tests cover the other
-    filters, so that read is stubbed to reach everything; the real rule runs
-    against PostgreSQL in test_2325_context_less_views_reach_db.py."""
-    from unittest.mock import AsyncMock, patch
-
-    from sqlalchemy import true
-
-    with patch("api.routes.memory.reachable_memory_filter", AsyncMock(return_value=true())):
-        yield
