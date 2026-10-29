@@ -4,13 +4,13 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
-## [v0.132.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.132.0) — 2026-10-28
+## [v0.132.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.132.0) — 2026-10-29
 
-Authorization and credential correctness: OAuth / MCP tokens are stored as hashes, context-less views and `supersedes` edges follow the same access and ownership rules as the rest of the API, and capacity-purge notices match the real deletion date. This release also carries the v0.133.0 milestone.
+Authorization and credential correctness: OAuth / MCP tokens move to hashed storage through a staged migration, OAuth forms refuse repeated parameters and dynamic client registration keeps only the redirect URIs that pass validation, context-less views and `supersedes` edges follow the same access and ownership rules as the rest of the API, and capacity-purge notices match the real deletion date.
 
 ### Added
 
-- **Hashed OAuth / MCP tokens** ([#2399](https://github.com/kagura-ai/memory-cloud/issues/2399)): access and refresh tokens are stored as SHA-256 digests, so a database copy no longer holds usable credentials. Token values, lifetimes, rotation and revocation are unchanged for clients. Bearer, refresh, introspection and revocation accept both legacy rows and digests during the rollout and refuse a presented digest. Token fragments are removed from REST / MCP logs.
+- **Hashed OAuth / MCP tokens** ([#2399](https://github.com/kagura-ai/memory-cloud/issues/2399)): access and refresh tokens can be stored as SHA-256 digests. The upgrade starts in a `bridge` mode that still writes raw tokens; storage becomes hash-only only after an operator runs the finalizer described under Notes, and a database copy or backup taken before that still holds usable tokens. Token values, lifetimes, rotation and revocation are unchanged for clients. Bearer, refresh, introspection and revocation look a token up by its digest or by its raw value, so unconverted rows keep working, and they refuse a presented digest. OAuth token fragments are removed from REST / MCP logs; API-key prefixes are still logged as before.
 
 ### Changed
 
