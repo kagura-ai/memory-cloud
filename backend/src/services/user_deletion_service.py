@@ -82,10 +82,16 @@ _CONNECTOR_CONTEXT_IDS = select(WorkspaceConnector.context_id).where(
 )
 
 
-def _contextless_in(m: Any, workspace_ids: list[UUID]) -> ColumnElement[bool]:
-    """``m`` is a memory row with no context in one of ``workspace_ids``:
-    no foreign key takes it with its workspace."""
-    return and_(m.workspace_id.in_(workspace_ids), m.context_id.is_(None))
+def _contextless_in(m: Any, workspaces: list[UUID] | Any) -> ColumnElement[bool]:
+    """``m`` is a memory row with no context in one of ``workspaces`` (a list
+    of ids, or a workspace id column to correlate with): no foreign key takes
+    it with its workspace."""
+    in_workspace = (
+        m.workspace_id.in_(workspaces)
+        if isinstance(workspaces, list)
+        else m.workspace_id == workspaces
+    )
+    return and_(in_workspace, m.context_id.is_(None))
 
 
 def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
@@ -160,22 +166,26 @@ async def workspace_purge_counts(
     )
     memory = aliased(Memory)
     context = aliased(Context)
-    # One level of subquery, correlated to the outer ``workspaces`` row: a
-    # nested IN-select here would not correlate and would count the memories
-    # of every workspace's contexts.
-    memories = (
+    # What the purge deletes: the memories of the workspace's contexts
+    # (whatever their own workspace_id says) and its context-less ones. Two
+    # counts, each correlated to the outer ``workspaces`` row and each able
+    # to use an index. (A select nested inside one of them would need its own
+    # ``.correlate(Workspace)``; without it ``workspaces`` joins its FROM and
+    # every workspace's contexts match.)
+    in_contexts = (
         select(func.count(memory.id))
-        .select_from(memory)
-        .outerjoin(context, context.id == memory.context_id)
-        .where(
-            or_(
-                context.workspace_id == Workspace.id,
-                and_(memory.workspace_id == Workspace.id, memory.context_id.is_(None)),
-            )
-        )
+        .join(context, context.id == memory.context_id)
+        .where(context.workspace_id == Workspace.id)
         .correlate(Workspace)
         .scalar_subquery()
     )
+    contextless = (
+        select(func.count(memory.id))
+        .where(_contextless_in(memory, Workspace.id))
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    memories = in_contexts + contextless
     rows = await db.execute(
         select(Workspace.id, Workspace.name, Workspace.deleted_at, contexts, memories)
         .where(*where)
