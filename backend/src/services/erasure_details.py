@@ -49,13 +49,26 @@ past erasures by pseudonym (#2243) share one definition:
   sweep's re-drive and the re-run's backstop).
 - ``erased_pseudonyms(db)`` (#2243, #2268) — every member whose erasure ran
   in Postgres, the restore's ``erased_actors``.
-- ``pseudonymize_audit_logs(db, user_id, emails)`` (#2287) — the subject's
+- ``pseudonymize_audit_logs(db, user_id, addresses)`` (#2287) — the subject's
   own ``audit_logs`` rows: called inside the erasure's Postgres transaction,
   and by the re-run for rows an erasure on v0.124.x or before left behind.
-- ``pseudonymize_audit_mentions(db, emails, subs=...)`` (#2298) — other
+- ``pseudonymize_audit_mentions(db, addresses, subs=...)`` (#2298) — other
   actors' rows that name the subject by an exact ``user_email`` or
   ``resource = 'user:'||email`` value; ``pseudonymize_audit_trail`` runs
   both under one id-ordered lock (the live erasure and the re-run).
+- ``email_holdings(db, subject_ids, now=..., tenures=...)`` (#2359) — which
+  addresses the subject held, and when, rebuilt from existing data: the
+  subject's email-sync audit rows (their HMACs survive erasure), the
+  account's creation or first audit row, the erasure requests' times.
+  An address is matched on another actor's row only inside the subject's
+  holding window and outside every interval another account is known to
+  have held it (``HeldAddress``, ``held_at``). Limits (fail closed): a
+  holding whose start, end or plaintext cannot be told is left raw and
+  counted (``not_recovered``; a rotated ``AUDIT_HMAC_KEY`` matches no old
+  HMAC); a row inside another holder's interval is left raw and counted
+  (``count_audit_mentions_kept``); rows an earlier run rewrote without a
+  time bound (before v0.134.0) cannot be told apart any more and stay as
+  they are.
 - ``clear_audit_request_metadata`` / ``pseudonymize_erasure_audit_initiator``
   (#2345) — the re-run's sweep of the rows that already carry the
   pseudonym: no IP / user agent, and the ``account_erasure`` row's
@@ -81,7 +94,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -91,15 +104,18 @@ from sqlalchemy import (
     CompoundSelect,
     Select,
     Text,
+    and_,
     any_,
     bindparam,
     case,
     exists,
+    false,
     func,
     literal,
     null,
     or_,
     select,
+    true,
     type_coerce,
     union,
     update,
@@ -111,6 +127,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from config.constants import ERASED_AUTHOR_EMBEDDING_ERROR
+from config.settings import get_settings
 from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
@@ -151,7 +168,7 @@ from services.payload_sync import (
 )
 from services.write_provenance import WriteProvenance
 from utils.datetime import to_naive_utc, to_utc_iso, utcnow
-from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
+from utils.hashing import SHA256_HEX_PATTERN, hmac_sha256_hex, sha256_hex
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError, normalize_trigger, trigger_window
 
@@ -220,10 +237,500 @@ def pseudonymized_request_values(account_id: str, initiated_by: str | None) -> d
     return values
 
 
+# ---------------------------------------------------------------------------
+# #2359: which addresses the subject held, and when
+# ---------------------------------------------------------------------------
+
+# ``RoleManager._sync_existing_user``'s row: the one writer of ``users.email``
+# after sign-up (``auth/roles.py``), with the HMACs of the old and new address
+EMAIL_SYNC_ACTION = "oauth_user_email_synced"
+# The erasure's own audit row (``AccountErasureService._write_audit_log``) and
+# the re-run's (``cli.reprocess_erasures``): written under the pseudonym, never
+# the subject's own activity, so never the start of a holding (#2359)
+ERASURE_AUDIT_ACTION = "account_erasure"
+REPROCESS_AUDIT_ACTION = "account_erasure_reprocess"
+ERASURE_WRITER_ACTIONS = (ERASURE_AUDIT_ACTION, REPROCESS_AUDIT_ACTION)
+# the ``resource`` prefix of a row about a member (``user:{email}``)
+USER_RESOURCE_PREFIX = "user:"
+# the sweep's crash cutoff (``sweep_pending_erasures``): a run is over by then
+ERASURE_RUN_CUTOFF = timedelta(hours=1)
+
+# closed ``[start, end]`` on ``audit_logs.created_at`` (naive UTC); None is unbounded
+Interval = tuple[datetime | None, datetime | None]
+
+
+@dataclass(frozen=True)
+class HeldAddress:
+    """An address the subject held: when, and when other accounts held it.
+
+    ``windows``: the subject's holdings. ``excluded``: intervals another
+    account is known (or, with an unknown bound, assumed) to have held the
+    same address; a row inside one is left alone even inside a window — an
+    instant both share goes to the other holder (fail closed).
+    """
+
+    email: str
+    windows: tuple[Interval, ...]
+    excluded: tuple[Interval, ...] = ()
+
+
+@dataclass(frozen=True)
+class EmailHoldings:
+    """``email_holdings``'s result: the addresses, and what it could not tell."""
+
+    addresses: tuple[HeldAddress, ...] = ()
+    # holdings left raw: an address whose plaintext no row carries (or whose
+    # HMAC no longer matches), a holding with an unknown start or end, a
+    # break in the sync chain — counts only, never a value
+    not_recovered: int = 0
+
+    @property
+    def emails(self) -> list[str]:
+        return [address.email for address in self.addresses]
+
+
+@dataclass(frozen=True)
+class Tenure:
+    """One life of the subject's account under its ids (#2359).
+
+    The live erasure passes one live tenure: ``email`` (``users.email``) and
+    ``start`` (``users.created_at``), held until ``now``. The re-run passes
+    one per erasure request of the pseudonym: ``end`` (``erasure_end``) and
+    ``email_hash`` (its ``user_email_hash``); the start is the subject's
+    first audit row after the previous tenure's end. An account erased,
+    re-created under the same sub and erased again has two.
+    """
+
+    end: datetime | None = None
+    start: datetime | None = None
+    email: str | None = None
+    email_hash: str | None = None
+
+    @property
+    def live(self) -> bool:
+        return self.email is not None
+
+
+@dataclass(frozen=True)
+class AddressRecovery:
+    """Plaintext addresses found in ``audit_logs``, by HMAC and by sha256."""
+
+    by_hmac: Mapping[str, str] = field(default_factory=dict)
+    by_sha256: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _Sync:
+    at: datetime
+    id: int
+    user_id: str
+    old: str | None
+    new: str | None
+
+
+def erasure_end(
+    summary: Mapping[str, Any] | None,
+    completed_at: datetime | None,
+    started_at: datetime | None,
+) -> datetime | None:
+    """When an erasure ran, naive UTC: ``memory_scrub_at`` (#2268, since
+    v0.124.0), else ``completed_at``, else ``started_at`` plus the sweep's
+    crash cutoff (a run is over by then); None without any.
+
+    The re-run's bound of the authored strip arm (``_existed_at``) and the
+    end of the subject's last holding in a re-run (#2359)."""
+    scrubbed = memory_scrub_at(summary)
+    if scrubbed is not None:
+        return scrubbed
+    if completed_at is not None:
+        return to_naive_utc(completed_at)
+    if started_at is not None:
+        return to_naive_utc(started_at) + ERASURE_RUN_CUTOFF
+    return None
+
+
+def _holder_end(
+    summary: Mapping[str, Any] | None,
+    completed_at: datetime | None,
+    started_at: datetime | None,
+) -> datetime | None:
+    """The latest moment ANOTHER erased account may have held its address:
+    the widest of ``erasure_end``'s bounds (fail closed)."""
+    bounds = [
+        to_naive_utc(value)
+        for value in (
+            completed_at,
+            started_at + ERASURE_RUN_CUTOFF if started_at is not None else None,
+            memory_scrub_at(summary, strict=False),
+        )
+        if value is not None
+    ]
+    return max(bounds) if bounds else None
+
+
+async def recover_addresses(
+    db: AsyncSession, *, hmacs: Collection[str] = (), sha256s: Collection[str] = ()
+) -> AddressRecovery:
+    """The plaintext addresses among the ``user_email`` values and ``user:``
+    resources of ``audit_logs`` whose ``AUDIT_HMAC_KEY`` HMAC is in ``hmacs``
+    (an email sync's ``old_value_hash`` / ``new_value_hash``) or whose
+    unsalted sha256 is in ``sha256s`` (a request's ``user_email_hash``).
+
+    One streamed pass over the distinct values (the HMAC needs the key, so
+    it is computed here, not in SQL); only matches are kept, nothing is
+    logged. A value no row carries any more (already pseudonymized) or an
+    HMAC under a rotated key matches nothing.
+    """
+    hmacs, sha256s = set(hmacs), set(sha256s)
+    if not hmacs and not sha256s:
+        return AddressRecovery()
+    key = get_settings().audit_hmac_key
+    named = func.substr(AuditLog.resource, len(USER_RESOURCE_PREFIX) + 1)
+    values = union(
+        select(AuditLog.user_email.label("value")),
+        select(named.label("value")).where(
+            AuditLog.resource.startswith(USER_RESOURCE_PREFIX, autoescape=True)
+        ),
+    ).subquery()
+    by_hmac: dict[str, str] = {}
+    by_sha256: dict[str, str] = {}
+    rows = await db.stream(select(values.c.value), execution_options={"yield_per": 500})
+    async for (value,) in rows:
+        if not value:
+            continue
+        if hmacs and (digest := hmac_sha256_hex(value, key)) in hmacs:
+            by_hmac[digest] = value
+        if sha256s and (digest := sha256_hex(value)) in sha256s:
+            by_sha256[digest] = value
+    return AddressRecovery(by_hmac, by_sha256)
+
+
+async def email_sync_hashes(db: AsyncSession, subject_ids: Collection[str]) -> set[str]:
+    """Every HMAC on the email-sync rows of ``subject_ids`` (what
+    ``recover_addresses`` must look for to rebuild their history)."""
+    if not subject_ids:
+        return set()
+    rows = await db.execute(
+        select(AuditLog.old_value_hash, AuditLog.new_value_hash).where(
+            AuditLog.action == EMAIL_SYNC_ACTION, AuditLog.user_id.in_(sorted(set(subject_ids)))
+        )
+    )
+    return {digest for pair in rows.all() for digest in pair if digest}
+
+
+async def _sync_rows(db: AsyncSession, predicate: ColumnElement[bool]) -> list[_Sync]:
+    rows = await db.execute(
+        select(
+            AuditLog.created_at,
+            AuditLog.id,
+            AuditLog.user_id,
+            AuditLog.old_value_hash,
+            AuditLog.new_value_hash,
+        )
+        .where(AuditLog.action == EMAIL_SYNC_ACTION, predicate)
+        .order_by(AuditLog.created_at, AuditLog.id)
+    )
+    return [_Sync(*row) for row in rows.all()]
+
+
+async def _first_activity(
+    db: AsyncSession, subject_ids: Sequence[str], after: datetime | None, until: datetime
+) -> datetime | None:
+    """The subject's first audit row in ``(after, until]``: one it acted in
+    or one about it by id (``user:{id}``), not an erasure's own row."""
+    stmt = select(func.min(AuditLog.created_at)).where(
+        AuditLog.user_id.in_(subject_ids)
+        | AuditLog.resource.in_([f"{USER_RESOURCE_PREFIX}{i}" for i in subject_ids]),
+        AuditLog.action.not_in(ERASURE_WRITER_ACTIONS),
+        AuditLog.created_at <= until,
+    )
+    if after is not None:
+        stmt = stmt.where(AuditLog.created_at > after)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+def _held_intervals(
+    events: Sequence[_Sync], digest: str, *, floor: datetime | None, cap: Sequence[datetime]
+) -> list[Interval]:
+    """One account's holdings of the address with HMAC ``digest`` from its
+    sync rows: from a row that set it to the next that changed it away. An
+    unknown start is ``floor`` (its ``users.created_at``, else unbounded),
+    an open end the first of ``cap`` (its erasures' ends) after the start,
+    else unbounded."""
+    out: list[Interval] = []
+    opened: datetime | None = None
+    is_open = False
+    for event in events:
+        if event.new == digest:
+            opened, is_open = event.at, True
+        elif event.old == digest:
+            out.append((opened if is_open else floor, event.at))
+            is_open = False
+    if is_open and opened is not None:
+        out.append((opened, next((end for end in sorted(cap) if end >= opened), None)))
+    return out
+
+
+async def email_holdings(
+    db: AsyncSession,
+    subject_ids: Collection[str],
+    *,
+    now: datetime,
+    tenures: Sequence[Tenure],
+    recovery: AddressRecovery | None = None,
+) -> EmailHoldings:
+    """The addresses the subject held, each with its holding windows (#2359).
+
+    From the subject's own email-sync audit rows (``EMAIL_SYNC_ACTION``, by
+    any of ``subject_ids`` — the sub, or the pseudonym once an erasure ran;
+    the HMACs survive erasure): within each tenure, the first address is
+    held from the tenure's start to the first sync, each next one from a
+    sync to the next, the last until the tenure's end. Old addresses are
+    recovered by HMAC (``recover_addresses``; ``recovery`` when the caller
+    read it once for many subjects, else read here, only when there is an
+    HMAC to look for); a re-run tenure's last one by its request's sha256.
+
+    Other accounts' known holdings of the same address become each
+    address's ``excluded`` intervals: their sync rows (and the subject's
+    own outside every tenure), a live holder from its ``users.created_at``,
+    and other erasures whose ``user_email_hash`` is the address's (to their
+    end, from an unknown start). Unknown bounds are unbounded there.
+
+    Fail closed: a holding with an unknown start or end, a break in the
+    chain (one sync's new HMAC is not the next one's old), or an earlier
+    address no plaintext matches by HMAC is left out and counted in
+    ``not_recovered``. An HMAC that matches nothing cannot be told from an
+    address no row names in plaintext any more, so the count includes those
+    too — a second run after an apply counts more of them, because the first
+    one pseudonymized the rows they were recovered from — and every earlier
+    address under a rotated ``AUDIT_HMAC_KEY``. A tenure's last address
+    whose unsalted sha256 matches no plaintext is not counted: no row names
+    it in plaintext (the hash has no key to rotate). Reads only.
+    """
+    ids = sorted(set(subject_ids))
+    now = to_naive_utc(now)
+    key = get_settings().audit_hmac_key
+    syncs = await _sync_rows(db, AuditLog.user_id.in_(ids)) if ids else []
+    if recovery is None:
+        live_digests = {hmac_sha256_hex(t.email, key) for t in tenures if t.email is not None}
+        wanted = {d for s in syncs for d in (s.old, s.new) if d} - live_digests
+        sha256s = {t.email_hash for t in tenures if t.email_hash and not t.live}
+        recovery = await recover_addresses(db, hmacs=wanted, sha256s=sha256s)
+    known = [tenure for tenure in tenures if tenure.live or tenure.end is not None]
+    # a tenure with no end: its last address, where a row still names it
+    not_recovered = sum(
+        1
+        for tenure in tenures
+        if tenure not in known and (tenure.email_hash or "") in recovery.by_sha256
+    )
+    known.sort(key=lambda t: (t.live, to_naive_utc(t.end) if t.end is not None else now))
+
+    windows: dict[str, list[Interval]] = defaultdict(list)
+    used: set[int] = set()
+    after: datetime | None = None
+    for tenure in known:
+        until = now if tenure.end is None else to_naive_utc(tenure.end)
+        start = to_naive_utc(tenure.start) if tenure.start is not None else None
+        rows = [
+            s
+            for s in syncs
+            if (after is None or s.at > after)
+            and s.at <= until
+            and (start is None or s.at >= start)
+        ]
+        used.update(s.id for s in rows)
+        if start is None:
+            start = await _first_activity(db, ids, after, until)
+        if tenure.email is not None:
+            final: str | None = tenure.email
+        else:
+            final = recovery.by_sha256.get(tenure.email_hash or "")
+        # (start, end, address, last) per holding; None: not known
+        segments: list[tuple[datetime | None, datetime, str | None, bool]] = []
+        if not rows:
+            segments.append((start, until, final, True))
+        else:
+            segments.append((start, rows[0].at, recovery.by_hmac.get(rows[0].old or ""), False))
+            for current, following in zip(rows, rows[1:], strict=False):
+                linked = current.new is not None and current.new == following.old
+                address = recovery.by_hmac.get(current.new or "") if linked else None
+                segments.append((current.at, following.at, address, False))
+            segments.append((rows[-1].at, until, final, True))
+        for seg_start, seg_end, address, last in segments:
+            if address is None and last:
+                continue  # no row names it in plaintext: nothing left raw
+            if seg_start is None or address is None:
+                not_recovered += 1
+                continue
+            windows[address].append((seg_start, seg_end))
+        after = until
+
+    if not windows:
+        return EmailHoldings((), not_recovered)
+    excluded = await _other_holdings(
+        db,
+        ids,
+        list(windows),
+        key=key,
+        used=used,
+        subject_live=any(t.live for t in known),
+    )
+    addresses = tuple(
+        HeldAddress(
+            email,
+            tuple(sorted(set(windows[email]), key=_interval_key)),
+            tuple(sorted(set(excluded.get(email, ())), key=_interval_key)),
+        )
+        for email in _by_length(windows)
+    )
+    return EmailHoldings(addresses, not_recovered)
+
+
+def _interval_key(interval: Interval) -> tuple[bool, str, bool, str]:
+    """Unbounded start first, unbounded end last (fixed-width ISO sorts as time)."""
+    start, end = interval
+    return (
+        start is not None,
+        start.isoformat(timespec="microseconds") if start is not None else "",
+        end is None,
+        end.isoformat(timespec="microseconds") if end is not None else "",
+    )
+
+
+async def _other_holdings(
+    db: AsyncSession,
+    ids: Sequence[str],
+    emails: Sequence[str],
+    *,
+    key: str,
+    used: set[int],
+    subject_live: bool,
+) -> dict[str, list[Interval]]:
+    """When accounts other than the subject held each of ``emails``."""
+    digests = {hmac_sha256_hex(email, key): email for email in emails}
+    hashes = {sha256_hex(email): email for email in emails}
+    events = [
+        s
+        for s in await _sync_rows(
+            db,
+            AuditLog.old_value_hash.in_(sorted(digests))
+            | AuditLog.new_value_hash.in_(sorted(digests)),
+        )
+        if s.id not in used
+    ]
+    accounts = sorted({s.user_id for s in events})
+    created: dict[str, datetime] = {}
+    if accounts:
+        created = dict(
+            (
+                await db.execute(
+                    select(User.user_id, User.created_at).where(User.user_id.in_(accounts))
+                )
+            ).all()
+        )
+    requests = (
+        await db.execute(
+            select(
+                ErasureRequest.user_id,
+                ErasureRequest.user_email_hash,
+                ErasureRequest.deleted_data_summary,
+                ErasureRequest.completed_at,
+                ErasureRequest.started_at,
+            ).where(
+                ErasureRequest.user_id.in_(accounts)
+                | ErasureRequest.user_email_hash.in_(sorted(hashes)),
+                (ErasureRequest.status == STATUS_COMPLETE) | ran_in_postgres(),
+            )
+        )
+    ).all()
+    ends: dict[str, list[datetime]] = defaultdict(list)
+    for user_id, _hash, summary, completed_at, started_at in requests:
+        end = _holder_end(summary, completed_at, started_at)
+        if end is not None:
+            ends[user_id].append(end)
+
+    out: dict[str, list[Interval]] = defaultdict(list)
+    by_account: dict[tuple[str, str], list[_Sync]] = defaultdict(list)
+    for event in events:
+        for digest in {event.old, event.new} & set(digests):
+            by_account[(event.user_id, digest)].append(event)
+    synced: set[tuple[str, str]] = set()
+    for (user_id, digest), account_events in by_account.items():
+        email = digests[digest]
+        synced.add((user_id, email))
+        out[email].extend(
+            _held_intervals(
+                account_events,
+                digest,
+                floor=to_naive_utc(created[user_id]) if user_id in created else None,
+                cap=ends.get(user_id, ()),
+            )
+        )
+    live = (
+        await db.execute(
+            select(User.user_id, User.email, User.created_at).where(User.email.in_(sorted(emails)))
+        )
+    ).all()
+    for user_id, email, at in live:
+        if subject_live and user_id in ids:
+            continue  # the subject itself, in its live tenure
+        own = by_account.get((user_id, hmac_sha256_hex(email, key)), [])
+        if own and own[-1].new == hmac_sha256_hex(email, key):
+            continue  # its last sync set the address: held from then, in ``out``
+        # signed up with it (or no sync row explains it): from its sign-up
+        out[email].append((to_naive_utc(at) if at is not None else None, None))
+    for user_id, email_hash, summary, completed_at, started_at in requests:
+        email = hashes.get(email_hash)
+        if email is None or user_id in ids or erasure_pseudonym(user_id) in ids:
+            continue
+        if (user_id, email) in synced or (erasure_pseudonym(user_id), email) in synced:
+            continue  # its sync rows bound it, closed at its end
+        out[email].append((None, _holder_end(summary, completed_at, started_at)))
+    return out
+
+
+def held_at(row: Any, address: HeldAddress) -> ColumnElement[bool]:
+    """``row`` was written while the subject held ``address`` and no other
+    account is known to have held it then."""
+    predicate = _within(row.created_at, address.windows)
+    if address.excluded:
+        predicate = predicate & ~_within(row.created_at, address.excluded)
+    return predicate
+
+
+def _within(column: Any, intervals: Sequence[Interval]) -> ColumnElement[bool]:
+    arms: list[ColumnElement[bool]] = []
+    for start, end in intervals:
+        bounds = [
+            *([column >= start] if start is not None else []),
+            *([column <= end] if end is not None else []),
+        ]
+        arms.append(and_(*bounds) if bounds else true())
+    return or_(*arms) if arms else false()
+
+
+def merged_addresses(addresses: Iterable[HeldAddress]) -> list[HeldAddress]:
+    """One ``HeldAddress`` per email, the longest email first (a stable
+    order: ``resource`` replacements of a longer address go first)."""
+    windows: dict[str, set[Interval]] = defaultdict(set)
+    excluded: dict[str, set[Interval]] = defaultdict(set)
+    for address in addresses:
+        windows[address.email].update(address.windows)
+        excluded[address.email].update(address.excluded)
+    return [
+        HeldAddress(
+            email,
+            tuple(sorted(windows[email], key=_interval_key)),
+            tuple(sorted(excluded[email], key=_interval_key)),
+        )
+        for email in _by_length(windows)
+    ]
+
+
 async def pseudonymize_audit_logs(
     db: AsyncSession,
     user_id: str,
-    emails: Collection[str] = (),
+    addresses: Collection[HeldAddress] = (),
     *,
     orphaned_only: bool = False,
     _changed_ids: set[int] | None = None,
@@ -237,25 +744,27 @@ async def pseudonymize_audit_logs(
     - ``user_id`` → ``erasure_pseudonym(user_id)``, so the rows of one erased
       member still correlate with each other and with their request row.
     - ``user_email`` → its salted pseudonym only where it equals one of
-      ``emails`` (the subject's), the raw sub or ``<sub>@api`` (legacy
+      ``addresses`` (the subject's: every one, without a time bound — the
+      ``user_id`` proves the row is theirs), the raw sub or ``<sub>@api`` (legacy
       API-key fallback; both become the subject pseudonym). In this
       codebase ``user_email`` is often the *actor's* email on a row about
       someone else
       (``RoleManager.assign_role``, ``SystemAdminService.promote``/``demote``);
       a blind overwrite would misattribute it.
     - ``resource`` (conventionally ``user:{email}``): every occurrence of
-      each email (first: longer, more specific), then of the raw sub, is
-      replaced by its pseudonym. The result is cut to the column's length:
+      each address (first: longer, more specific) on a row written while the
+      subject held it (``held_at``, #2359: the subject acting on whoever held
+      one of their former addresses later names that member, not them), then
+      of the raw sub, is replaced by its pseudonym. The result is cut to the column's length:
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
     - ``ip_address`` and ``user_agent`` are cleared (#2345): request metadata
       of the subject, like the request row's own, which is cleared too.
 
-    The live erasure passes the subject's one email. The re-run passes every
-    email it recovered for the account (one per request of it), or none:
-    then ``user_email`` and email occurrences in ``resource`` stay and only
-    the sub is replaced. ``orphaned_only`` (the re-run): rows whose
+    The live erasure and the re-run pass ``email_holdings``'s addresses
+    (#2359), or none: then ``user_email`` and email occurrences in
+    ``resource`` stay and only the sub is replaced. ``orphaned_only`` (the re-run): rows whose
     ``user_id`` belongs to a user row are never touched by this statement,
     even when that user row appeared after the run read the audit subs (a
     re-registration); the mention sweep (``pseudonymize_audit_mentions``)
@@ -273,11 +782,13 @@ async def pseudonymize_audit_logs(
     user_pseudonym = erasure_pseudonym(user_id)
     values: dict[str, Any] = {"user_id": user_pseudonym, "ip_address": None, "user_agent": None}
     resource: ColumnElement[str] = AuditLog.resource.expression
-    pseudonyms = {
-        email: erasure_pseudonym(email) for email in sorted(set(emails), key=lambda e: (-len(e), e))
-    }
-    for email, email_pseudonym in pseudonyms.items():
-        resource = func.replace(resource, email, email_pseudonym)
+    held = merged_addresses(addresses)
+    pseudonyms = {address.email: erasure_pseudonym(address.email) for address in held}
+    for address in held:
+        # ``replace(r, '', p)`` is ``r``: outside the holding nothing changes,
+        # and the expression grows by one call per address, not doubles
+        searched = case((held_at(AuditLog, address), address.email), else_=literal(""))
+        resource = func.replace(resource, searched, pseudonyms[address.email])
     values["user_email"] = case(
         *((AuditLog.user_email == e, p) for e, p in pseudonyms.items()),
         (_audit_sub_email(AuditLog, user_id), user_pseudonym),
@@ -309,13 +820,6 @@ def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnEle
 def _by_length(values: Iterable[str]) -> list[str]:
     """Distinct ``values``, the longest first (then alphabetical): a stable order."""
     return sorted(set(values), key=lambda v: (-len(v), v))
-
-
-def audit_mention_resources(emails: Collection[str], subs: Collection[str] = ()) -> list[str]:
-    """The ``resource`` values naming the subject (#2298): ``user:{email}``,
-    the shape every writer of a row about a member produces, and
-    ``user:{sub}`` (today only on the subject's own rows; one more value)."""
-    return [f"user:{e}" for e in _by_length(emails)] + [f"user:{s}" for s in _by_length(subs)]
 
 
 AUDIT_SUBJECT_METADATA_KEYS = (
@@ -435,13 +939,17 @@ async def _audit_update_count(db: AsyncSession, stmt: Any, changed_ids: set[int]
 
 def audit_actor_predicate(
     row: Any,
-    emails: Collection[str],
+    addresses: Collection[HeldAddress],
     subs: Collection[str] = (),
     *,
     orphaned_only: bool = False,
 ) -> ColumnElement[bool] | None:
-    """Rows whose actor email is the erased subject, including legacy fallbacks."""
-    arms = [row.user_email.in_(_by_length(emails))] if emails else []
+    """Rows whose actor email is the erased subject while they held it
+    (#2359), including legacy fallbacks."""
+    arms = [
+        (row.user_email == address.email) & held_at(row, address)
+        for address in merged_addresses(addresses)
+    ]
     for sub in _by_length(subs):
         arms.append(_audit_sub_email(row, sub) & _audit_sub_guard(sub, orphaned_only=orphaned_only))
     return or_(*arms) if arms else None
@@ -449,16 +957,25 @@ def audit_actor_predicate(
 
 def audit_mention_predicate(
     row: Any,
-    emails: Collection[str],
+    addresses: Collection[HeldAddress],
     subs: Collection[str] = (),
     *,
     orphaned_only: bool = False,
 ) -> ColumnElement[bool] | None:
-    """Exact scalar identifiers; metadata ids are matched separately in Python."""
+    """Exact scalar identifiers; metadata ids are matched separately in Python.
+
+    An address (``user_email``, or ``resource = 'user:'||email``, the shape
+    every writer of a row about a member produces) only on a row written
+    while the subject held it and no other account is known to have
+    (``held_at``, #2359); a sub (``user:{sub}``, the raw-sub email fallbacks)
+    at any time — a sub is the account's own.
+    """
     arms: list[ColumnElement[bool]] = []
-    if emails:
-        arms.append(row.user_email.in_(_by_length(emails)))
-        arms.append(row.resource.in_(audit_mention_resources(emails)))
+    for address in merged_addresses(addresses):
+        named = (row.user_email == address.email) | (
+            row.resource == f"{USER_RESOURCE_PREFIX}{address.email}"
+        )
+        arms.append(named & held_at(row, address))
     for sub in _by_length(subs):
         identifiers = [
             _audit_sub_email(row, sub),
@@ -470,7 +987,7 @@ def audit_mention_predicate(
 
 async def pseudonymize_audit_mentions(
     db: AsyncSession,
-    emails: Collection[str],
+    addresses: Collection[HeldAddress],
     *,
     subs: Collection[str] = (),
     orphaned_only: bool = False,
@@ -482,7 +999,7 @@ async def pseudonymize_audit_mentions(
     ``user_id``, ``action``, the hashes. Exact values only, never a
     substring of another actor's text:
 
-    - ``user_email`` equal to one of ``emails`` (the subject acting as an
+    - ``user_email`` equal to one of ``addresses`` (the subject acting as an
       admin on someone else's row: ``user_id`` is the target's there) →
       ``erasure_pseudonym(email)``; the subject was the actor, so the row's
       ``ip_address`` / ``user_agent`` are theirs and are cleared (#2345);
@@ -490,6 +1007,9 @@ async def pseudonymize_audit_mentions(
       acting on the subject) → ``user:`` + the pseudonym — 69 characters,
       within the column. The acting admin's ``user_id`` / ``user_email``
       and request metadata stay (accountability evidence).
+    - An address only on rows written while the subject held it and no
+      other account is known to have (``held_at``, #2359); rows outside are
+      another holder's and stay.
     - Raw-sub / ``<sub>@api`` actor email fallbacks are scrubbed too, unless
       another current user owns that exact email (their email/IP/UA stay).
       ``orphaned_only`` rechecks current users for sub-derived rewrites.
@@ -504,12 +1024,19 @@ async def pseudonymize_audit_mentions(
     Returns:
         The rowcount; 0 without a statement when there is nothing to match.
     """
-    if audit_mention_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only) is None:
+    if audit_mention_predicate(AuditLog, addresses, subs, orphaned_only=orphaned_only) is None:
         return 0
-    ordered = _by_length(emails)
-    email_cases = [(AuditLog.user_email == e, erasure_pseudonym(e)) for e in ordered]
+    held = merged_addresses(addresses)
+    email_cases = [
+        ((AuditLog.user_email == a.email) & held_at(AuditLog, a), erasure_pseudonym(a.email))
+        for a in held
+    ]
     resource_cases = [
-        (AuditLog.resource == f"user:{e}", f"user:{erasure_pseudonym(e)}") for e in ordered
+        (
+            (AuditLog.resource == f"{USER_RESOURCE_PREFIX}{a.email}") & held_at(AuditLog, a),
+            f"{USER_RESOURCE_PREFIX}{erasure_pseudonym(a.email)}",
+        )
+        for a in held
     ]
     for sub in _by_length(subs):
         guard = _audit_sub_guard(sub, orphaned_only=orphaned_only)
@@ -521,7 +1048,7 @@ async def pseudonymize_audit_mentions(
     if email_cases:
         values["user_email"] = case(*email_cases, else_=AuditLog.user_email)
         # Every SET reads old values. Only a subject acting on this row loses request metadata.
-        acted = audit_actor_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only)
+        acted = audit_actor_predicate(AuditLog, held, subs, orphaned_only=orphaned_only)
         for column in (AuditLog.ip_address, AuditLog.user_agent):
             values[column.key] = case((acted, null()), else_=column)
     if resource_cases:
@@ -531,7 +1058,7 @@ async def pseudonymize_audit_mentions(
         return (
             cast(
                 ColumnElement[bool],
-                audit_mention_predicate(row, emails, subs, orphaned_only=orphaned_only),
+                audit_mention_predicate(row, held, subs, orphaned_only=orphaned_only),
             ),
         )
 
@@ -545,7 +1072,7 @@ async def pseudonymize_audit_mentions(
 
 async def count_audit_mentions(
     db: AsyncSession,
-    emails: Collection[str],
+    addresses: Collection[HeldAddress],
     *,
     subs: Collection[str] = (),
     exclude_user_id: str | None = None,
@@ -557,7 +1084,7 @@ async def count_audit_mentions(
     matched = await _audit_metadata_ids(
         db, subs, orphaned_only=orphaned_only, exclude_user_id=exclude_user_id
     )
-    predicate = audit_mention_predicate(AuditLog, emails, subs, orphaned_only=orphaned_only)
+    predicate = audit_mention_predicate(AuditLog, addresses, subs, orphaned_only=orphaned_only)
     if predicate is not None:
         if exclude_user_id is not None:
             predicate &= AuditLog.user_id != exclude_user_id
@@ -565,14 +1092,45 @@ async def count_audit_mentions(
     return len(matched)
 
 
+async def count_audit_mentions_kept(
+    db: AsyncSession,
+    addresses: Collection[HeldAddress],
+    *,
+    exclude_user_id: str | None = None,
+) -> int:
+    """Rows naming one of the subject's ``addresses`` (``user_email`` or
+    ``user:{email}``) inside a holding window but also inside an interval
+    another account held it (#2359): left raw, counted (a read, no lock).
+    ``exclude_user_id``: the subject's own rows, whose ``user_email`` the
+    own-row UPDATE rewrites without a window."""
+    arms: list[ColumnElement[bool]] = []
+    for address in merged_addresses(addresses):
+        if not address.excluded:
+            continue
+        named = (AuditLog.user_email == address.email) | (
+            AuditLog.resource == f"{USER_RESOURCE_PREFIX}{address.email}"
+        )
+        arms.append(
+            named
+            & _within(AuditLog.created_at, address.windows)
+            & _within(AuditLog.created_at, address.excluded)
+        )
+    if not arms:
+        return 0
+    predicate = or_(*arms)
+    if exclude_user_id is not None:
+        predicate &= AuditLog.user_id != exclude_user_id
+    return (await db.execute(select(func.count(AuditLog.id)).where(predicate))).scalar_one()
+
+
 async def pseudonymize_audit_trail(
     db: AsyncSession,
     user_id: str | None,
-    emails: Collection[str],
+    addresses: Collection[HeldAddress],
     *,
     orphaned_only: bool = False,
     pseudonym: str | None = None,
-    mention_emails: Collection[str] | None = None,
+    mention_addresses: Collection[HeldAddress] | None = None,
     mention_subs: Collection[str] | None = None,
 ) -> tuple[int, int]:
     """The subject's own audit rows and the rows that mention them (#2287, #2298).
@@ -584,10 +1142,10 @@ async def pseudonymize_audit_trail(
     in its transaction): two erasures of members who acted on each other
     (one's own row is the other's mention) then queue instead of
     deadlocking. Then ``pseudonymize_audit_logs`` (when ``user_id`` is
-    given) and ``pseudonymize_audit_mentions`` with ``emails`` and
-    ``subs=[user_id]`` — or ``mention_emails`` / ``mention_subs`` when given
-    (the re-run: the emails a user row holds again are left out of the
-    mentions, not of the subject's own rows; the sweep runs once per run).
+    given) and ``pseudonymize_audit_mentions`` with ``addresses`` (each with
+    its holding windows, ``email_holdings``, #2359) and ``subs=[user_id]`` —
+    or ``mention_addresses`` / ``mention_subs`` when given (the re-run: the
+    mention sweep runs once per pseudonym per run).
 
     Known top-level metadata keys are matched by exact Python string
     comparison from streamed whole JSON (#2348): legacy JSON can contain
@@ -603,7 +1161,7 @@ async def pseudonymize_audit_trail(
         subs: Collection[str] = tuple(mention_subs)
     else:
         subs = (user_id,) if user_id is not None else ()
-    mentioned = tuple(emails) if mention_emails is None else tuple(mention_emails)
+    mentioned = tuple(addresses) if mention_addresses is None else tuple(mention_addresses)
 
     metadata_ids = await _audit_metadata_ids(db, subs, orphaned_only=orphaned_only)
 
@@ -627,7 +1185,7 @@ async def pseudonymize_audit_trail(
     mention_ids: set[int] = set()
     own = (
         await pseudonymize_audit_logs(
-            db, user_id, emails, orphaned_only=orphaned_only, _changed_ids=own_ids
+            db, user_id, addresses, orphaned_only=orphaned_only, _changed_ids=own_ids
         )
         if user_id is not None
         else 0
@@ -639,10 +1197,6 @@ async def pseudonymize_audit_trail(
         db, metadata_ids, subs, orphaned_only=orphaned_only
     )
     return own, mentions + len(patched - own_ids - mention_ids)
-
-
-# The erasure's own audit row (``AccountErasureService._write_audit_log``).
-ERASURE_AUDIT_ACTION = "account_erasure"
 
 
 def _request_metadata_rows(row: Any, pseudonym: str) -> tuple[ColumnElement[bool], ...]:

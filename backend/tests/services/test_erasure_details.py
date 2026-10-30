@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -33,6 +34,15 @@ SUBJECT = "erased-sub"
 AUTHOR = "the-author"
 OTHER = "other-member"
 PSEUDONYM = "a" * 64
+# #2359: when the subject's addresses were theirs
+HELD_SINCE = datetime(2026, 1, 1)
+
+
+def _held(emails: list[str]) -> list[Any]:
+    """The subject's addresses, held since ``HELD_SINCE``."""
+    from services.erasure_details import HeldAddress
+
+    return [HeldAddress(email, ((HELD_SINCE, None),)) for email in emails]
 
 
 def _edit(
@@ -602,7 +612,7 @@ async def _audit_update(emails: list[str], **kwargs: Any) -> tuple[str, dict]:
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(rowcount=2))
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        assert await pseudonymize_audit_logs(db, "raw-sub", emails, **kwargs) == 2
+        assert await pseudonymize_audit_logs(db, "raw-sub", _held(emails), **kwargs) == 2
     compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
     return str(compiled), compiled.params
 
@@ -631,6 +641,12 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     assert "WHERE users.email = audit_logs.user_email" in sql
     # #2345: the subject's request metadata goes too
     assert params["ip_address"] is None and params["user_agent"] is None
+    # #2359: ``user_email`` by every address, without a window (the user_id
+    # proves the row theirs); ``resource`` only while they held it
+    case_sql = sql[sql.index("user_email=CASE") : sql.index("resource=left(")]
+    assert "created_at" not in case_sql
+    assert "replace(audit_logs.resource, CASE WHEN (audit_logs.created_at >=" in sql
+    assert HELD_SINCE in params.values()
 
 
 async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:
@@ -792,7 +808,7 @@ async def _mentions_update(emails: list[str], subs: list[str]) -> tuple[str, dic
 
     db = _mock_db()
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        assert await pseudonymize_audit_mentions(db, emails, subs=subs) == 2
+        assert await pseudonymize_audit_mentions(db, _held(emails), subs=subs) == 2
     assert db.execute.await_count == 1
     return _compiled(db.execute.await_args.args[0])
 
@@ -802,15 +818,18 @@ async def test_mentions_match_exact_values_and_never_the_user_id() -> None:
 
     sql, params = await _mentions_update(["a@x.io", "longer@example.com"], ["raw-sub"])
 
-    # the UPDATE's own WHERE after the locked ids: the two IN arms, no user_id
+    # the UPDATE's own WHERE after the locked ids: exact values while the
+    # subject held them (#2359), no user_id
     tail = sql[sql.index(" WHERE ") :]
-    assert "audit_logs.user_email IN" in tail and "audit_logs.resource IN" in tail
+    assert "audit_logs.user_email = " in tail and "audit_logs.resource = " in tail
+    assert "audit_logs.created_at >= " in tail and HELD_SINCE in params.values()
     assert "audit_logs.user_id" not in tail
     assert "ORDER BY audit_logs_1.id FOR UPDATE" in sql
     # exact values only: no substring rewrite, no cut (the bound holds)
     assert "replace(" not in sql and "left(" not in sql
     # user_email: one WHEN per email; resource: one per email plus the sub
-    assert sql.count("WHEN (audit_logs.user_email =") == 2
+    email_set = sql[sql.index("user_email=CASE") : sql.index(", ip_address=CASE")]
+    assert email_set.count("WHEN (audit_logs.user_email =") == 2
     assert sql.count("WHEN (audit_logs.resource =") == 3
     # the subject acted on the user_email rows: their IP / UA go (#2345)
     assert "ip_address=CASE WHEN" in sql
@@ -856,10 +875,11 @@ async def test_the_count_uses_the_apply_predicate() -> None:
     rows = MagicMock()
     rows.__aiter__.return_value = []
     db.stream = AsyncMock(return_value=rows)
-    assert await count_audit_mentions(db, ["a@x.io"], subs=["raw-sub"]) == 4
+    assert await count_audit_mentions(db, _held(["a@x.io"]), subs=["raw-sub"]) == 4
     sql, params = _compiled(db.execute.await_args.args[0])
     assert "FOR UPDATE" not in sql
-    assert "audit_logs.user_email IN" in sql and "audit_logs.resource IN" in sql
+    assert "audit_logs.user_email = " in sql and "audit_logs.resource = " in sql
+    assert "audit_logs.created_at >= " in sql
     assert {"a@x.io", "user:a@x.io", "user:raw-sub"} <= _flat(params)
     assert "audit_logs.user_id" not in sql
 
@@ -874,7 +894,7 @@ async def test_the_trail_locks_once_then_own_rows_then_mentions() -> None:
 
     db = _mock_db(3)
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        assert await pseudonymize_audit_trail(db, "raw-sub", ["a@x.io"]) == (3, 3)
+        assert await pseudonymize_audit_trail(db, "raw-sub", _held(["a@x.io"])) == (3, 3)
 
     stmts = [c.args[0] for c in db.execute.await_args_list]
     assert [type(s) for s in stmts] == [Select, Update, Update]
@@ -882,7 +902,8 @@ async def test_the_trail_locks_once_then_own_rows_then_mentions() -> None:
     assert lock_sql.endswith("ORDER BY audit_logs_1.id FOR UPDATE")
     # the union: own rows OR the mention arms
     assert "audit_logs_1.user_id = " in lock_sql and " OR " in lock_sql
-    assert "audit_logs_1.user_email IN" in lock_sql and "audit_logs_1.resource IN" in lock_sql
+    assert "audit_logs_1.user_email = " in lock_sql and "audit_logs_1.resource = " in lock_sql
+    assert "audit_logs_1.created_at >= " in lock_sql
     assert {"raw-sub", "a@x.io", "user:a@x.io", "user:raw-sub"} <= _flat(lock_params)
     own_sql, _ = _compiled(stmts[1])
     assert "replace(" in own_sql  # pseudonymize_audit_logs
@@ -900,7 +921,10 @@ async def test_the_trail_without_a_sub_does_only_the_mentions() -> None:
 
     db = _mock_db(1)
     with patch("services.account_erasure_service._audit_salt", return_value="salt"):
-        assert await pseudonymize_audit_trail(db, None, ["a@x.io"], pseudonym=PSEUDONYM) == (0, 1)
+        assert await pseudonymize_audit_trail(db, None, _held(["a@x.io"]), pseudonym=PSEUDONYM) == (
+            0,
+            1,
+        )
 
     stmts = [c.args[0] for c in db.execute.await_args_list]
     assert [type(s) for s in stmts] == [Select, Update]
@@ -927,7 +951,7 @@ async def test_the_dry_run_count_leaves_out_the_own_rows() -> None:
 
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=[1])))
-    assert await count_audit_mentions(db, ["a@x.io"], exclude_user_id="raw-sub") == 1
+    assert await count_audit_mentions(db, _held(["a@x.io"]), exclude_user_id="raw-sub") == 1
     sql, params = _compiled(db.execute.await_args.args[0])
     assert "audit_logs.user_id != " in sql and "raw-sub" in _flat(params)
 
@@ -1012,3 +1036,75 @@ async def test_only_an_initiated_by_that_hashes_to_the_pseudonym_is_rewritten() 
                 "initiated_by": pseudonym,
                 "is_self_service": False,
             }
+
+
+# ---------------------------------------------------------------------------
+# #2359: address holdings
+# ---------------------------------------------------------------------------
+
+
+async def test_recover_addresses_matches_by_hmac_and_by_sha256_in_python() -> None:
+    """One streamed pass over the distinct ``user_email`` values and ``user:``
+    resources; only matches come back, keyed by their digest."""
+    from config.settings import get_settings
+    from services.erasure_details import recover_addresses
+    from utils.hashing import hmac_sha256_hex, sha256_hex
+
+    key = get_settings().audit_hmac_key
+    db = MagicMock()
+    rows = MagicMock()
+    rows.__aiter__.return_value = [("old@x.io",), ("last@x.io",), ("other@x.io",), ("",)]
+    db.stream = AsyncMock(return_value=rows)
+
+    found = await recover_addresses(
+        db, hmacs={hmac_sha256_hex("old@x.io", key), "0" * 64}, sha256s={sha256_hex("last@x.io")}
+    )
+
+    assert dict(found.by_hmac) == {hmac_sha256_hex("old@x.io", key): "old@x.io"}
+    assert dict(found.by_sha256) == {sha256_hex("last@x.io"): "last@x.io"}
+    sql, _ = _compiled(db.stream.await_args.args[0])
+    assert "UNION SELECT substr(audit_logs.resource" in sql and "LIKE" in sql
+
+
+async def test_recover_addresses_with_nothing_to_look_for_reads_nothing() -> None:
+    from services.erasure_details import recover_addresses
+
+    db = MagicMock()
+    db.stream = AsyncMock()
+    found = await recover_addresses(db)
+    assert not found.by_hmac and not found.by_sha256
+    db.stream.assert_not_awaited()
+
+
+def test_held_intervals_pair_each_sync_into_the_address_with_the_next_out() -> None:
+    """From a sync that set the address to the next that changed it away;
+    an unknown start is the floor, an open end the first cap after it."""
+    from services.erasure_details import _held_intervals, _Sync
+
+    def sync(day: int, old: str, new: str) -> _Sync:
+        return _Sync(datetime(2026, 1, day), day, "u", old, new)
+
+    events = [sync(2, "h", "o"), sync(5, "o", "h"), sync(8, "h", "o2"), sync(12, "o2", "h")]
+    floor, cap = datetime(2026, 1, 1), [datetime(2026, 1, 10), datetime(2026, 1, 20)]
+    assert _held_intervals(events, "h", floor=floor, cap=cap) == [
+        (floor, datetime(2026, 1, 2)),
+        (datetime(2026, 1, 5), datetime(2026, 1, 8)),
+        (datetime(2026, 1, 12), datetime(2026, 1, 20)),
+    ]
+    assert _held_intervals(events[:1], "h", floor=None, cap=[]) == [(None, datetime(2026, 1, 2))]
+    assert _held_intervals(events[1:2], "h", floor=None, cap=[]) == [(datetime(2026, 1, 5), None)]
+
+
+def test_held_at_excludes_another_holders_interval_closed_at_both_ends() -> None:
+    from models.auth import AuditLog
+    from services.erasure_details import HeldAddress, held_at
+
+    address = HeldAddress(
+        "a@x.io", ((datetime(2026, 1, 1), datetime(2026, 2, 1)),), ((datetime(2026, 1, 15), None),)
+    )
+    sql, params = _compiled(held_at(AuditLog, address))
+    # inside the window, and strictly before the other holder's (an instant
+    # both share is theirs)
+    assert sql.count("audit_logs.created_at >=") == 1 and sql.count("audit_logs.created_at <=") == 1
+    assert "audit_logs.created_at < " in sql
+    assert datetime(2026, 1, 15) in params.values()
