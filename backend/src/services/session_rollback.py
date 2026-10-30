@@ -25,8 +25,9 @@ A memory is skipped, never half-reverted, when its state is not the one the
 session left (``SKIP_CAUSES``): someone else wrote it since the session's
 first event (``modified_since``), Sleep merged or archived it
 (``merged_by_sleep``), someone else forgot it (``deleted_by_other``), the
-resource indexer owns it (``resource_row``), the caller may not write it
-(``not_permitted``), an earlier value was erased (``prior_erased``), or there
+resource indexer owns it (``resource_row``), the caller may not write it —
+under its live type or the type the rollback would put back
+(``not_permitted``) — an earlier value was erased (``prior_erased``), or there
 is nothing left to undo (``already_forgotten`` / ``already_restored``).
 
 Execution holds a per-(context, session id) advisory lock — per (context,
@@ -695,7 +696,14 @@ async def _read_batch(
             )
         ).all()
     )
-    permitted = await _permitted(db, user_id, workspace_id, scope.context_id, memories)
+    permitted = await _permitted(
+        db,
+        user_id,
+        workspace_id,
+        scope.context_id,
+        memories,
+        _restored_types(events, memories),
+    )
 
     items: list[PlanItem] = []
     for memory_id in chosen:
@@ -744,21 +752,53 @@ def _defer_extra_unforgets(items: list[PlanItem]) -> list[PlanItem]:
     return kept
 
 
+def _restored_types(
+    events: Mapping[UUID, list[SessionEvent]], memories: Mapping[UUID, Any]
+) -> dict[UUID, str | None]:
+    """The type each memory would get back, where it is not the live one.
+
+    Only memories the session did not create (a created one is forgotten,
+    nothing is put back). The value is the ``prior`` the plan restores; None
+    when that prior has no type to judge (never today: erasure marks only
+    ``details``), which ``_permitted`` denies.
+    """
+    restored: dict[UUID, str | None] = {}
+    for memory_id, session_events in events.items():
+        memory = memories.get(memory_id)
+        if memory is None or session_events[0].kind == REVISION_KIND_CREATED:
+            continue
+        updates = [e for e in session_events if e.kind == REVISION_KIND_UPDATED]
+        values, _ = combined_prior(updates)
+        if "type" in values and values["type"] != memory.type:
+            restored[memory_id] = values["type"]
+    return restored
+
+
 async def _permitted(
     db: AsyncSession,
     user_id: str,
     workspace_id: UUID,
     context_id: UUID,
     memories: dict[UUID, Any],
+    restored_types: Mapping[UUID, str | None],
 ) -> dict[UUID, bool]:
-    """forget's per-memory write check, once per (author, type, source) group."""
+    """forget's per-memory write check, once per (author, type, source) group.
+
+    A memory whose type the rollback would put back (``restored_types``) must
+    pass the check under that type too, as ``reference(version=N)`` judges
+    an earlier version's type: the binding's per-memory type filter applies
+    to the type written back, not only to the live one. A restored type that
+    is unknown (None) is denied.
+    """
     from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
     perm = PermissionService(db)
     decided: dict[tuple[str, str, str | None], bool] = {}
-    result: dict[UUID, bool] = {}
-    for memory_id, memory in memories.items():
-        group = (memory.user_id, memory.type, memory.source_type)
+
+    async def allowed(memory: Any, memory_type: str | None) -> bool:
+        if memory_type is None:
+            return False
+        group = (memory.user_id, memory_type, memory.source_type)
         if group not in decided:
             decided[group] = await perm.can_access_memory(
                 user_id=CallerId(user_id),
@@ -769,10 +809,16 @@ async def _permitted(
                 # Deny-capture identity: the rollback rewrites or removes the
                 # memory, the audit vocabulary's ``update``.
                 operation="update",
-                memory_type=memory.type,
+                memory_type=memory_type,
                 memory_source_type=memory.source_type,
             )
-        result[memory_id] = decided[group]
+        return decided[group]
+
+    result: dict[UUID, bool] = {}
+    for memory_id, memory in memories.items():
+        result[memory_id] = await allowed(memory, memory.type) and (
+            memory_id not in restored_types or await allowed(memory, restored_types[memory_id])
+        )
     return result
 
 
