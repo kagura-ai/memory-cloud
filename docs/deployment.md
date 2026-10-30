@@ -1090,7 +1090,9 @@ SELECT w.id, w.deleted_at,
        (SELECT count(*) FROM contexts c WHERE c.workspace_id = w.id) AS contexts,
        (SELECT count(*) FROM memories m
          JOIN contexts c ON c.id = m.context_id
-        WHERE c.workspace_id = w.id) AS memories
+        WHERE c.workspace_id = w.id) AS memories,
+       (SELECT count(*) FROM memories m
+        WHERE m.workspace_id = w.id AND m.context_id IS NULL) AS contextless_memories
 FROM workspaces w
 WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = w.owner_user_id)
 ORDER BY w.deleted_at NULLS FIRST;

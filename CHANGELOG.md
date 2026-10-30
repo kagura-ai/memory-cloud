@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.134.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.0) — 2026-10-30
+
+Deletion and erasure correctness: deleting a user removes the soft-deleted workspaces they owned instead of refusing, erasure audit sweeps touch an address only while the member held it, erasure and user deletion take their row locks in one order, and session rollback no longer writes stale or disallowed values. Version 0.133.0 was not released; its one change shipped in v0.132.0.
+
+### Changed
+
+- **User deletion removes soft-deleted owned workspaces** ([#2406](https://github.com/kagura-ai/memory-cloud/issues/2406)): `DELETE /api/v1/admin/users/{user_id}` and `cli.delete_admin` hard-delete the soft-deleted workspaces the user owns, with everything still in them (other members' contexts and memories included), write one `workspace_purged` audit row each with context and memory counts, and list them under `purged_workspaces`. The `409` "Restore and transfer soft-deleted owned workspaces first" is gone, and naming one of those workspaces or its contexts as a transfer target is refused. The API deletes without a preview; both CLI prompts list the workspaces with counts. Account erasure no longer waits for a successor for a soft-deleted workspace. `create_admin` refuses a login ID whose `local:` user id still owns a workspace left by an earlier deletion.
+- **Erasure audit sweeps match an address only while it was held** ([#2359](https://github.com/kagura-ai/memory-cloud/issues/2359)): the live erasure and `reprocess_erasures` rebuild the periods the member held each email address from the `oauth_user_email_synced` audit rows, so rows written while another account held the same address are left alone, and addresses the member used before an email sync are pseudonymized too. When a period cannot be established the rows stay raw: erasure summaries count them under `postgres.audit_mentions_kept` and `audit_addresses_not_recovered`, and `reprocess_erasures` prints the same counts.
+- **One lock order for erasure and user deletion** ([#2418](https://github.com/kagura-ai/memory-cloud/issues/2418)): erasure holds the subject's `users` row and takes workspace rows without waiting (short retries up to 0.75 s), so it can no longer deadlock with `DELETE /api/v1/workspaces/{id}`. A busy row reschedules the request with `503` `ERASURE-007` (`details.error_class` `LockNotAvailable` or `DeadlockDetected`) on the same attempt budget as vector-store failures, then `failed` with `409` `RES-002`. Admin user deletion answers a deadlock with the existing `409`; `delete_admin` asks for a re-run. `DELETE /api/v1/workspaces/{id}` locks the affected users right after the workspace row.
+
+### Fixed
+
+- **Session rollback payload sync** ([#2346](https://github.com/kagura-ai/memory-cloud/issues/2346)): a group whose re-read fails is rolled back and skipped instead of being patched from the values queued at restore time, and a failed group commit is rolled back so the next group reads normally. The `rollback_session` reply no longer fails after a rolled-back step.
+- **`rollback_session` checks the restored type**: a restore that would write back a memory type the caller may not write is skipped as `not_permitted`, and the dry run shows no restored fields for it.
+
+### Notes
+
+- No migration, no new environment variables. `AUDIT_HMAC_KEY` must be the key the email-sync audit rows were written with; addresses written under an earlier key stay raw and are counted as not recovered.
+- **After deploy:** run `reprocess_erasures --all` (plan), check the "kept" and "not recovered" counts, then `--all --apply --yes` once. A second plan can show a higher not-recovered count, because the first apply pseudonymized the plaintext it recovered.
+- **Leftover workspaces:** run the read-only query in `docs/deployment.md` ("Workspaces left by accounts deleted before v0.134.0"). Delete soft-deleted leftovers with the documented block and re-own live ones; until then `create_admin` refuses colliding login IDs.
+- **Monitoring:** `erasure_retry_scheduled` with a lock `error_class` means a workspace operation raced an erasure; a request that ends `failed` with `lock_conflict after 4 attempts` erased nothing in Postgres and can be requested again.
+
 ## [v0.132.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.132.0) — 2026-10-29
 
 Authorization and credential correctness: OAuth / MCP tokens move to hashed storage through a staged migration, OAuth forms refuse repeated parameters and dynamic client registration keeps only the redirect URIs that pass validation, context-less views and `supersedes` edges follow the same access and ownership rules as the rest of the API, and capacity-purge notices match the real deletion date.

@@ -218,7 +218,7 @@ v0.130.0 (#2348) への更新後は `reprocess_erasures --all` (plan) → `--all
 
 4 回目の失敗では request は `failed` になり、レスポンスは vector store 自身のエラー (502 `EXT-001`)。
 
-同じ 503 `ERASURE-007` は、workspace の譲渡 (§2.3) か Postgres ステップで他の処理が持つ lock に当たったときにも返る (v0.134.0, #2418)。そのステップは rollback され (Postgres ステップの削除は何も commit されない。それより前のステップで commit 済みの譲渡はそのまま)、request は vector store の障害と同じく `cooling_off` に戻る。`message` は `Another operation holds the account's workspaces; ...`、`details.error_class` は `LockNotAvailable` (`NOWAIT` の lock が取れなかった、55P03) か `DeadlockDetected` (40P01)。`deleted_data_summary.retry.step` は `workspaces` か `postgres`。試行回数は vector store の障害と合算で最大 4 回。4 回目も lock に当たると `failed` + `failure_reason = "lock_conflict after 4 attempts: <step>: <error_class> (another operation held the account's rows)"` になり、レスポンスは 409 `RES-002`。
+同じ 503 `ERASURE-007` は、workspace の譲渡 (§2.3) か Postgres ステップで他の処理が持つ lock に当たったときにも返る (v0.134.0, #2418)。そのステップは rollback され (Postgres ステップの削除は何も commit されない。それより前のステップで commit 済みの譲渡はそのまま)、request は vector store の障害と同じく `cooling_off` に戻る。`message` は `Another operation holds rows the erasure needs; ...`、`details.error_class` は `LockNotAvailable` (`NOWAIT` の lock が取れなかった、55P03) か `DeadlockDetected` (40P01)。`deleted_data_summary.retry.step` は `workspaces` か `postgres`。試行回数は vector store の障害と合算で最大 4 回。4 回目も lock に当たると `failed` + `failure_reason = "lock_conflict after 4 attempts: <step>: <error_class> (another operation held the account's rows)"` になり、レスポンスは 409 `RES-002`。
 
 ### 5.4 失敗時の手動再試行
 
