@@ -596,3 +596,47 @@ async def test_an_earlier_holder_erased_before_v0124_is_bounded_by_its_request(
 
     assert counts["audit_mentions_kept"] == 0
     assert await world.values(about_s) == [("admin@example.com", f"user:{_p(x)}")]
+
+
+async def test_workspace_purged_rows_follow_the_holding_and_the_sub(world: World) -> None:
+    """#2406's ``workspace_purged`` rows (user deletion): the row S wrote as
+    the acting admin gets its address pseudonymized inside S's holding; a
+    row another admin wrote about S's purged workspace keeps that admin's
+    address and gets S's pseudonym in ``user_metadata.previous_owner_id``
+    (matched by sub, at any time)."""
+    from services.user_deletion_service import WORKSPACE_PURGED_ACTION
+
+    s, other_admin, deleted = world.sub("s"), world.sub("admin"), world.sub("deleted")
+    x = world.email("x")
+    await world.user(s, x, at(0))
+    by_s = await world.row(
+        s,
+        x,
+        f"workspace:{uuid.uuid4()}",
+        at(5),
+        action=WORKSPACE_PURGED_ACTION,
+        user_metadata={"previous_owner_id": deleted, "soft_deleted": True},
+    )
+    about_s = await world.row(
+        other_admin,
+        "admin@example.com",
+        f"workspace:{uuid.uuid4()}",
+        at(6),
+        action=WORKSPACE_PURGED_ACTION,
+        user_metadata={"previous_owner_id": s, "soft_deleted": True},
+    )
+
+    counts = await world.live_erasure(s)
+
+    assert (counts["audit_logs_pseudonymized"], counts["audit_mentions_pseudonymized"]) == (1, 1)
+    async with _maker(world.engine)() as db:
+        rows = {
+            row.id: row
+            for row in (
+                await db.execute(select(AuditLog).where(AuditLog.id.in_([by_s, about_s])))
+            ).scalars()
+        }
+    assert (rows[by_s].user_id, rows[by_s].user_email) == (_p(s), _p(x))
+    assert rows[by_s].user_metadata == {"previous_owner_id": deleted, "soft_deleted": True}
+    assert (rows[about_s].user_id, rows[about_s].user_email) == (other_admin, "admin@example.com")
+    assert rows[about_s].user_metadata == {"previous_owner_id": _p(s), "soft_deleted": True}
