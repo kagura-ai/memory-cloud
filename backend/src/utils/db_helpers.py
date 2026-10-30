@@ -40,16 +40,44 @@ def is_deadlock(exc: BaseException) -> bool:
     Returns:
         True for a deadlock victim, False otherwise.
     """
+    return _has_sqlstate(exc, PG_DEADLOCK_DETECTED)
+
+
+def _has_sqlstate(exc: BaseException, sqlstate: str) -> bool:
+    """Whether the driver error under ``exc`` (``exc.orig``, or the exception
+    chained under it) carries ``sqlstate``."""
     if not isinstance(exc, DBAPIError):
         return False
     orig = exc.orig
     for candidate in (orig, getattr(orig, "__cause__", None)):
         if candidate is None:
             continue
-        sqlstate = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
-        if sqlstate == PG_DEADLOCK_DETECTED:
+        found = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if found == sqlstate:
             return True
     return False
+
+
+# SQLSTATE of a lock request that could not be granted at once: a ``NOWAIT``
+# lock held by another transaction, or a ``lock_timeout`` that ran out (#2418).
+PG_LOCK_NOT_AVAILABLE = "55P03"
+
+
+def is_lock_not_available(exc: BaseException) -> bool:
+    """Whether ``exc`` is Postgres ``lock_not_available`` (SQLSTATE ``55P03``).
+
+    Read like :func:`is_deadlock` (asyncpg ``sqlstate``, psycopg ``pgcode``,
+    on ``exc.orig`` or the driver exception chained under it). The failed
+    transaction is aborted and must be rolled back; nothing it did is
+    committed.
+
+    Args:
+        exc: Any exception.
+
+    Returns:
+        True for a lock that was not available, False otherwise.
+    """
+    return _has_sqlstate(exc, PG_LOCK_NOT_AVAILABLE)
 
 
 P = ParamSpec("P")

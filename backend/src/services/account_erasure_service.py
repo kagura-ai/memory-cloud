@@ -185,7 +185,7 @@ from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
-from utils.db_helpers import is_deadlock
+from utils.db_helpers import is_deadlock, is_lock_not_available
 from utils.exceptions import (
     BillingContractActiveError,
     ConflictError,
@@ -255,7 +255,6 @@ _RETRY_KEY = "retry"
 # #2418: a lock another transaction holds at steps 2-3 reschedules the request
 # like a vector-store failure, on the same attempt budget. The class names in
 # ``summary.retry.error_class`` (``55P03`` lock_not_available / ``40P01``).
-_PG_LOCK_NOT_AVAILABLE = "55P03"
 LOCK_CONFLICT_ERROR_CLASS = "LockNotAvailable"
 DEADLOCK_ERROR_CLASS = "DeadlockDetected"
 # the ``failure_reason`` prefix once the budget is spent on lock conflicts
@@ -375,14 +374,9 @@ def _as_lock_conflict(exc: BaseException) -> _LockConflict | None:
         return exc
     if is_deadlock(exc):
         return _LockConflict(DEADLOCK_ERROR_CLASS)
-    if isinstance(exc, DBAPIError) and _sqlstate(exc) == _PG_LOCK_NOT_AVAILABLE:
+    if is_lock_not_available(exc):
         return _LockConflict(LOCK_CONFLICT_ERROR_CLASS)
     return None
-
-
-def _sqlstate(exc: DBAPIError) -> str | None:
-    """The SQLSTATE of a driver error (asyncpg ``sqlstate``, psycopg ``pgcode``)."""
-    return getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
 
 
 def _requeue_block(summary: dict[str, Any]) -> dict[str, Any]:
@@ -2169,7 +2163,7 @@ class AccountErasureService:
                 .with_for_update(nowait=True)
             )
         except DBAPIError as exc:
-            if _sqlstate(exc) == _PG_LOCK_NOT_AVAILABLE:
+            if is_lock_not_available(exc):
                 raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
             raise
         await self.db.execute(

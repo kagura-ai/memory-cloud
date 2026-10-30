@@ -39,7 +39,6 @@ from uuid import UUID
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import func, or_, select  # noqa: E402
-from sqlalchemy.exc import DBAPIError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
@@ -49,7 +48,7 @@ from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
 from services.billing_contract import owned_workspaces_under_contract  # noqa: E402
 from services.password_account_service import normalize_email  # noqa: E402
 from services.workspace_ownership_service import WorkspaceOwnershipService  # noqa: E402
-from utils.db_helpers import is_deadlock  # noqa: E402
+from utils.db_helpers import is_deadlock, is_lock_not_available  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 AUDIT_ACTOR_EMAIL = "cli@local"
@@ -64,9 +63,7 @@ _LOCK_CONFLICT_MESSAGE = (
 
 def _is_lock_conflict(exc: BaseException) -> bool:
     """A ``55P03`` (lock_not_available) or ``40P01`` (deadlock) from Postgres."""
-    if not isinstance(exc, DBAPIError):
-        return False
-    return getattr(exc.orig, "sqlstate", None) == "55P03" or is_deadlock(exc)
+    return is_lock_not_available(exc) or is_deadlock(exc)
 
 
 logger = get_logger(__name__)
