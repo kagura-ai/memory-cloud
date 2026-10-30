@@ -152,6 +152,9 @@ from services.erasure_details import (
     ERASURE_AUDIT_ACTION,
     RestoreReport,
     StripCounts,
+    Tenure,
+    count_audit_mentions_kept,
+    email_holdings,
     erase_subject_details,
     erased_pseudonyms,
     erasure_pseudonym,
@@ -2479,10 +2482,8 @@ class AccountErasureService:
         # subject by an exact value (``user_email``, ``resource =
         # 'user:'||email``) are rewritten in the same step, under one
         # id-ordered lock over both sets; every other writer only inserts.
-        (
-            counts["audit_logs_pseudonymized"],
-            counts["audit_mentions_pseudonymized"],
-        ) = await self._pseudonymize_audit_logs(user_id, target.email)
+        # #2359: each address the subject held, only while they held it.
+        counts.update(await self._pseudonymize_audit_logs(target))
         counts["users"] = 1  # deleted below, in this transaction
 
         # #2286: "this step committed", on the request row and in the same
@@ -2921,15 +2922,36 @@ class AccountErasureService:
         result = cast(CursorResult[Any], await self.db.execute(statement))
         return result.rowcount or 0
 
-    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> tuple[int, int]:
+    async def _pseudonymize_audit_logs(self, target: User) -> dict[str, int]:
         """The subject's audit rows and the rows mentioning them
         (``erasure_details.pseudonymize_audit_trail``), in
         ``_delete_postgres``'s transaction (#2287, #2298).
 
+        #2359: the addresses are ``email_holdings``'s — the current one from
+        ``users.created_at`` (or its last email sync) until now, and every
+        earlier one recovered from the account's email-sync rows, each
+        matched on other actors' rows only while the subject held it. The
+        account's earlier tenures (erased, then re-created under the same
+        sub) are the re-run's (``reprocess_erasures``).
+
         Returns:
-            ``(own rows, mentions)`` rowcounts.
+            The ``audit_*`` counts of the request's ``postgres`` summary.
         """
-        return await pseudonymize_audit_trail(self.db, user_id, [email])
+        user_id = target.user_id
+        holdings = await email_holdings(
+            self.db,
+            [user_id, self._pseudonym(user_id)],
+            now=utcnow(),
+            tenures=[Tenure(start=target.created_at, email=target.email)],
+        )
+        kept = await count_audit_mentions_kept(self.db, holdings.addresses, exclude_user_id=user_id)
+        own, mentions = await pseudonymize_audit_trail(self.db, user_id, holdings.addresses)
+        return {
+            "audit_logs_pseudonymized": own,
+            "audit_mentions_pseudonymized": mentions,
+            "audit_mentions_kept": kept,
+            "audit_addresses_not_recovered": holdings.not_recovered,
+        }
 
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""

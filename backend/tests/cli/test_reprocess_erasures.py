@@ -319,8 +319,8 @@ def test_only_an_erasure_that_wrote_the_pseudonym_can_fail_the_probe(summary, wr
 @pytest.mark.parametrize("recovered", [True, False])
 def test_pseudonymized_audit_rows_are_reported_and_counted(capsys, recovered):
     """#2287: the subject's audit rows are a change of their own, in the plan,
-    the applied report and the summary; an email that could not be
-    recovered is named. Never the account id or the email."""
+    the applied report and the summary; address holdings that could not be
+    recovered are counted (#2359). Never the account id or the email."""
     kept = uuid4()
 
     def result(dry_run: bool) -> cli.ReprocessResult:
@@ -334,10 +334,12 @@ def test_pseudonymized_audit_rows_are_reported_and_counted(capsys, recovered):
                 details_stripped=0,
                 scrub_marked=0,
                 audit_logs_pseudonymized=2,
-                audit_email_recovered=recovered,
+                audit_addresses_not_recovered=0 if recovered else 1,
             )
         )
         r.audit_kept.append(kept)
+        if not recovered:
+            r.not_recovered.append((REQUEST_ID, 1))
         return r
 
     plan = result(True)
@@ -345,9 +347,11 @@ def test_pseudonymized_audit_rows_are_reported_and_counted(capsys, recovered):
     cli._print_plan(plan)
     cli._print_applied(result(False))
     out = capsys.readouterr().out
-    suffix = "" if recovered else ", email not recovered"
-    assert f"would pseudonymize audit rows  {REQUEST_ID}  2 row(s){suffix}\n" in out
-    assert f"pseudonymized audit rows  {REQUEST_ID}  2 row(s){suffix}\n" in out
+    assert f"would pseudonymize audit rows  {REQUEST_ID}  2 row(s)\n" in out
+    assert f"pseudonymized audit rows  {REQUEST_ID}  2 row(s)\n" in out
+    line = f"audit addresses  {REQUEST_ID}  1 {cli.NOT_RECOVERED}\n"
+    # the plan and the applied report both say what stayed raw
+    assert out.count(line) == (0 if recovered else 2)
     assert f"audit  {kept}  rows kept: the account id is in use again" in out
     assert cli._summary(plan).endswith(", 2 audit row(s) pseudonymized")
 
@@ -406,8 +410,9 @@ def test_the_dry_run_counts_what_the_apply_would_change():
 
 def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
     """#2298: the rows naming the subject are a change of their own, in the
-    plan, the applied report and the summary; an email in use again is
-    listed. Never an email or the account id."""
+    plan, the applied report and the summary; rows another account held the
+    address at the time are counted as kept (#2359). Never an email or the
+    account id."""
     kept = uuid4()
 
     def result(dry_run: bool) -> cli.ReprocessResult:
@@ -423,7 +428,7 @@ def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
                 audit_mentions_pseudonymized=3,
             )
         )
-        r.mentions_kept.append(kept)
+        r.mentions_kept.append((kept, 2))
         return r
 
     plan = result(True)
@@ -433,50 +438,8 @@ def test_pseudonymized_audit_mentions_are_reported_and_counted(capsys):
     out = capsys.readouterr().out
     assert f"would pseudonymize audit mentions  {REQUEST_ID}  3 row(s)\n" in out
     assert f"pseudonymized audit mentions  {REQUEST_ID}  3 row(s)\n" in out
-    assert f"audit mentions  {kept}  rows kept: the email is in use again" in out
+    assert f"audit mentions  {kept}  2 {cli.MENTIONS_KEPT}\n" in out
     assert cli._summary(plan).endswith(", 3 audit mention(s) pseudonymized")
-
-
-def test_the_mentioned_emails_are_matched_by_hash_in_the_database():
-    """#2298: two SELECTs (the distinct ``user_email`` values and the
-    ``user:`` resources, the prefix cut in SQL), each filtered by its
-    unsalted sha256 in SQL; the matches come back keyed by that hash."""
-    from sqlalchemy.dialects import postgresql
-
-    from utils.hashing import sha256_hex
-
-    db = MagicMock()
-    emails = MagicMock()
-    emails.scalars.return_value = iter(["a@x.io"])
-    resources = MagicMock()
-    resources.scalars.return_value = iter(["b@x.io", "a@x.io"])
-    db.execute = AsyncMock(side_effect=[emails, resources])
-    hashes = {sha256_hex("a@x.io"), sha256_hex("b@x.io"), "0" * 64}
-
-    found = asyncio.run(cli._mentioned_emails(db, hashes))
-
-    assert found == {sha256_hex("a@x.io"): "a@x.io", sha256_hex("b@x.io"): "b@x.io"}
-    (first, first_params), (second, second_params) = (
-        (str(compiled), compiled.params)
-        for compiled in (
-            c.args[0].compile(dialect=postgresql.dialect()) for c in db.execute.await_args_list
-        )
-    )
-    digest = "encode(sha256(convert_to({}, %(convert_to_1)s::VARCHAR)), %(encode_1)s::VARCHAR)"
-    assert first.startswith("SELECT DISTINCT audit_logs.user_email \nFROM audit_logs \nWHERE ")
-    assert digest.format("audit_logs.user_email") + " IN (" in first
-    assert first_params["convert_to_1"] == "UTF8" and first_params["encode_1"] == "hex"
-    assert sorted(hashes) in first_params.values()
-    assert second.startswith("SELECT DISTINCT substr(audit_logs.resource, ")
-    assert "LIKE" in second and "sha256(convert_to(substr(audit_logs.resource" in second
-    assert sorted(hashes) in second_params.values()
-
-
-def test_no_request_hashes_read_nothing():
-    db = MagicMock()
-    db.execute = AsyncMock()
-    assert asyncio.run(cli._mentioned_emails(db, set())) == {}
-    db.execute.assert_not_awaited()
 
 
 def test_cleared_request_metadata_is_reported_and_counted(capsys):
@@ -513,7 +476,12 @@ def test_the_memories_are_locked_before_the_audit_rows(dry_run):
     """#2298 review: the live erasure locks the subject's memories, then the
     audit rows; the re-run takes the same order (the details step first),
     so a re-run and a live erasure that share rows cannot deadlock."""
-    from services.erasure_details import RestoreReport, StripCounts, SubjectDetailsErasure
+    from services.erasure_details import (
+        EmailHoldings,
+        RestoreReport,
+        StripCounts,
+        SubjectDetailsErasure,
+    )
 
     order: list[str] = []
 
@@ -528,8 +496,7 @@ def test_the_memories_are_locked_before_the_audit_rows(dry_run):
     details = SubjectDetailsErasure(RestoreReport(), StripCounts(0, 0))
     with (
         patch.object(cli, "erase_subject_details", lambda *a, **k: step("details", details)),
-        patch.object(cli, "_recover_emails", lambda *a, **k: step("recover", [])),
-        patch.object(cli, "_live_emails", lambda *a, **k: step("live", set())),
+        patch.object(cli, "count_audit_mentions_kept", lambda *a, **k: step("audit", 0)),
         patch.object(cli, "_count_audit_rows", lambda *a, **k: step("audit", 0)),
         patch.object(cli, "count_audit_mentions", lambda *a, **k: step("audit", 0)),
         patch.object(cli, "pseudonymize_audit_trail", lambda *a, **k: step("audit", (0, 0))),
@@ -549,8 +516,7 @@ def test_the_memories_are_locked_before_the_audit_rows(dry_run):
                 dry_run,
                 frozenset(),
                 audit_account_id="raw-sub",
-                mentioned={},
-                swept_emails=set(),
+                holdings=EmailHoldings(),
             )
         )
 

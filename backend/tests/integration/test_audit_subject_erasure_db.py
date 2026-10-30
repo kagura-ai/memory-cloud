@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -474,6 +475,92 @@ async def test_mutual_metadata_mentions_share_one_ordered_lock_union(
             (erasure_pseudonym(first), {"target_user_id": erasure_pseudonym(second)}),
             (erasure_pseudonym(second), {"target_user_id": erasure_pseudonym(first)}),
         ]
+
+
+async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """#2359: the windowed address predicates (``held_at``) join the same
+    id-ordered lock union: two members who acted on each other — one's own
+    row is the other's mention by address — erased at once queue instead of
+    deadlocking, and a row outside the holding window stays."""
+    from services import erasure_details
+    from services.erasure_details import HeldAddress
+
+    first, second = subject["sub"], f"{subject['sub']}-second"
+    first_email, second_email = f"{first}@example.invalid", f"{second}@example.invalid"
+    held_since = datetime(2026, 1, 1)
+    async with _maker(async_engine)() as seed:
+        rows = [
+            AuditLog(
+                user_id=first,
+                user_email=first_email,
+                action=first,
+                resource=f"user:{second_email}",
+                created_at=datetime(2026, 2, 1),
+            ),
+            AuditLog(
+                user_id=second,
+                user_email=second_email,
+                action=first,
+                resource=f"user:{first_email}",
+                created_at=datetime(2026, 2, 1),
+            ),
+            # another holder's, before either held its address
+            AuditLog(
+                user_id="someone-else",
+                user_email="admin@example.invalid",
+                action=first,
+                resource=f"user:{first_email}",
+                created_at=datetime(2025, 6, 1),
+            ),
+        ]
+        seed.add_all(rows)
+        await seed.commit()
+        ids = [row.id for row in rows]
+    barrier = asyncio.Barrier(2)
+    scan = erasure_details._audit_metadata_ids
+
+    async def scan_together(*args: Any, **kwargs: Any) -> set[int]:
+        result = await scan(*args, **kwargs)
+        await barrier.wait()
+        return result
+
+    async def erase(sub: str, email: str) -> tuple[int, int]:
+        async with _maker(async_engine)() as db:
+            held = [HeldAddress(email, ((held_since, None),))]
+            result = await pseudonymize_audit_trail(db, sub, held)
+            await db.commit()
+            return result
+
+    with patch.object(erasure_details, "_audit_metadata_ids", scan_together):
+        assert await asyncio.wait_for(
+            asyncio.gather(erase(first, first_email), erase(second, second_email)), timeout=15
+        ) == [(1, 1), (1, 1)]
+    async with _maker(async_engine)() as db:
+        actual = (
+            await db.execute(
+                select(AuditLog.user_id, AuditLog.user_email, AuditLog.resource)
+                .where(AuditLog.id.in_(ids))
+                .order_by(AuditLog.id)
+            )
+        ).all()
+    assert actual == [
+        (
+            erasure_pseudonym(first),
+            erasure_pseudonym(first_email),
+            f"user:{erasure_pseudonym(second_email)}",
+        ),
+        (
+            erasure_pseudonym(second),
+            erasure_pseudonym(second_email),
+            f"user:{erasure_pseudonym(first_email)}",
+        ),
+        ("someone-else", "admin@example.invalid", f"user:{first_email}"),
+    ]
+    async with _maker(async_engine)() as db:
+        await db.execute(delete(AuditLog).where(AuditLog.id.in_(ids)))
+        await db.commit()
 
 
 @pytest.mark.parametrize("historical", [False, True])

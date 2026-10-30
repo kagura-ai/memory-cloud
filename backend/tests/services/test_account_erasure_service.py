@@ -112,6 +112,8 @@ def _user(
     return SimpleNamespace(
         user_id=user_id,
         email=email,
+        # #2359: the start of the current address's holding
+        created_at=datetime(2026, 1, 1),
         is_initial_admin=is_initial_admin,
         auth_method=auth_method,
         password_hash=password_hash,
@@ -2323,7 +2325,9 @@ class TestAuditLogPseudonymizationInThePostgresStep:
         assert {v for k, v in params.items() if k.startswith("user_id_")} == {"u-1"}
         assert params["user_id"] == pseudonym
         mention = str(order[audit[1]].compile())
-        assert "audit_logs.user_email IN" in mention and "audit_logs.resource IN" in mention
+        assert "audit_logs.user_email = " in mention and "audit_logs.resource = " in mention
+        # #2359: the address only while the subject held it (from sign-up)
+        assert "audit_logs.created_at >= " in mention
         assert counts["audit_logs_pseudonymized"] == 3
         assert counts["audit_mentions_pseudonymized"] == 3
 
@@ -2342,7 +2346,8 @@ class TestAuditLogPseudonymizationInThePostgresStep:
 
         async def _exec(stmt, *a, **k):
             if isinstance(stmt, Update) and str(stmt.table) == "audit_logs":
-                kind = "mentions" if "audit_logs.resource IN" in str(stmt) else "own"
+                # the own-row UPDATE rewrites ``resource`` by ``replace``
+                kind = "own" if "replace(" in str(stmt) else "mentions"
                 seen.append(kind)
                 if kind == failing:
                     raise RuntimeError("audit down")

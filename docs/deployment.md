@@ -1964,15 +1964,53 @@ the `user_email_hash` of one of the account's requests — two when the
 account was erased, re-created with the same id under another email and
 erased again; the rows are then handled once, under the older request). The plan lists `would
 pseudonymize audit rows <request id> <n> row(s)`, the apply report
-`pseudonymized audit rows …`; `email not recovered` means none of the rows
-carries the email the request was made under — then the account id is
-replaced and `user_email` left as it is. An account id that belongs to a user
+`pseudonymized audit rows …`. When no row carries the email the request was
+made under, the account id is replaced and `user_email` left as it is (before
+v0.134.0 the report added `email not recovered`). From v0.134.0 (#2359) the
+addresses come from the account's address history instead — see "Which
+address, and when" below. An account id that belongs to a user
 again (re-registered) is never matched — also when it gets its user row
 while the command runs: its rows may be the new account's, so they are kept and the plan prints `audit <request id> rows kept: the account
 id is in use again`. With a salt other than the erasure's, nothing matches
 and the rows stay. Rows where another member (an admin) acted on the erased
 member are not the member's own rows and are not touched, here as during the
 erasure. A second run finds nothing: the pseudonymized rows match no request.
+
+**Which address, and when — Issue #2359 (v0.134.0).** An erasure and
+`reprocess_erasures` used to match the member's address on other actors'
+audit rows at any time: rows of another account that held the same address
+before or after were rewritten too, and addresses the member had before an
+email change stayed raw. The holdings are now rebuilt from existing data, no
+migration: the member's `oauth_user_email_synced` audit rows (the HMACs of
+the old and the new address under `AUDIT_HMAC_KEY`, kept by erasure) give
+each address's holding, from the account's creation (live erasure) or its
+first audit row (re-run) to the erasure; the older addresses' plaintext is
+recovered from the table by HMAC. The live erasure looks for it among the
+member's own audit rows first (by the `user_id` index) and streams the
+distinct values of the whole `audit_logs` table only for an older address
+none of them names — inside the erasure's Postgres transaction, so on a
+large table such an erasure holds its locks longer; members who never
+changed their email are not affected. The re-run streams the table once per
+run. A row naming an address is rewritten only
+inside the member's holding and outside every interval another account is
+known to have held it (an instant both share goes to the other account).
+The member's own rows (by account id) get each address inside the member's
+holding whatever another holder's estimated interval says (outside it, an
+address on such a row may be an admin's who got it later and acted on the
+member). The erasure summary adds `postgres.audit_mentions_kept` and
+`postgres.audit_addresses_not_recovered`; the re-run prints
+`audit mentions <request id> <n> row(s) kept: …` and
+`audit addresses <request id> <n> address holding(s) not recovered …` —
+counts only. Both are left raw on purpose (fail closed): an earlier address
+whose HMAC matches no value in the table (no row names it any more, or
+`AUDIT_HMAC_KEY` changed since the sync — the count then rises on a second
+run, after the first one pseudonymized the rows), a holding with no known
+start or end, rows where another account held the address too, and in a
+re-run the rows naming the first address before the account's first audit
+row (it may not have been the member's yet). Rows an
+erasure or a re-run before v0.134.0 rewrote by address without a time bound
+cannot be told apart any more and stay as they are. After upgrading, run
+`reprocess_erasures --all` (plan) and then `--all --apply --yes` once.
 
 **A vector-store outage at the first step — Issue #2282.** The erasure's
 first step deletes the member's vectors (Qdrant, or LanceDB on Kagura Lite).
