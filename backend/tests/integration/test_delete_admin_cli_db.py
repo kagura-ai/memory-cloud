@@ -9,7 +9,8 @@ P's other keys. Other users' keys are untouched.
 ``--transfer-to`` (one of its members) first, so its connector keys follow
 the new owner too; one only P is in is deleted with P. Without
 ``--transfer-to``, with an unknown, ambiguous or non-member target, nothing
-changes. P's memberships are deleted; its soft-deleted workspaces are left.
+changes. P's memberships are deleted. #2406: a soft-deleted workspace P owns
+is hard-deleted with P, everything in it included.
 """
 
 from __future__ import annotations
@@ -65,6 +66,23 @@ async def transfer_audits(db_session: AsyncSession) -> AsyncIterator[list]:
     await db_session.execute(
         delete(AuditLog).where(
             AuditLog.action == OWNERSHIP_TRANSFER_ACTION,
+            AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in workspace_ids]),
+        )
+    )
+    await db_session.commit()
+
+
+@pytest_asyncio.fixture
+async def purge_audits(db_session: AsyncSession) -> AsyncIterator[list]:
+    """Workspace ids whose purge audit rows are deleted afterwards (#2406)."""
+    from services.user_deletion_service import WORKSPACE_PURGED_ACTION
+
+    workspace_ids: list = []
+    yield workspace_ids
+    await db_session.rollback()
+    await db_session.execute(
+        delete(AuditLog).where(
+            AuditLog.action == WORKSPACE_PURGED_ACTION,
             AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in workspace_ids]),
         )
     )
@@ -244,13 +262,14 @@ async def test_cli_hands_the_admins_workspace_and_connector_keys_over(
 
 @pytest.mark.asyncio
 async def test_a_workspace_only_the_admin_is_in_goes_with_it(
-    db_session: AsyncSession, connector_world, sole_password_admin, capsys
+    db_session: AsyncSession, connector_world, sole_password_admin, capsys, purge_audits
 ) -> None:
     world = connector_world
     admin_id = await _password_admin(db_session, world)
     other = await world.user("other")
     solo = await world.workspace(admin_id)
     solo_id = solo.id
+    purge_audits.append(solo_id)
     elsewhere = await world.workspace(other, **{admin_id: WorkspaceRole.MEMBER})
     elsewhere_id = elsewhere.id
 
@@ -265,24 +284,37 @@ async def test_a_workspace_only_the_admin_is_in_goes_with_it(
 
 
 @pytest.mark.asyncio
-async def test_soft_deleted_workspaces_are_left_as_they_are(
-    db_session: AsyncSession, connector_world, sole_password_admin, capsys
+async def test_soft_deleted_workspaces_are_deleted_with_the_admin(
+    db_session: AsyncSession, connector_world, sole_password_admin, capsys, purge_audits
 ) -> None:
+    from services.user_deletion_service import WORKSPACE_PURGED_ACTION
+
     world = connector_world
     admin_id = await _password_admin(db_session, world)
     owner = await world.user("owner")
     gone = await world.workspace(admin_id, **{owner: WorkspaceRole.MEMBER})
     gone_id = gone.id
+    purge_audits.append(gone_id)
     await db_session.execute(
         update(Workspace).where(Workspace.id == gone_id).values(deleted_at=utcnow())
     )
 
     assert await _run(db_session) == 0
 
-    assert str(gone_id) in capsys.readouterr().out
+    assert f"({gone_id}): 0 contexts, 0 memories" in capsys.readouterr().out
     assert not await _exists(db_session, admin_id)
-    assert await db_session.get(Workspace, gone_id) is not None
-    assert (await _memberships(db_session, owner))[gone_id] == WorkspaceRole.MEMBER
+    assert await db_session.get(Workspace, gone_id) is None
+    assert gone_id not in await _memberships(db_session, owner)
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == WORKSPACE_PURGED_ACTION,
+                AuditLog.resource == f"workspace:{gone_id}",
+            )
+        )
+    ).scalar_one()
+    assert (audit.user_email, audit.user_id) == ("cli@local", admin_id)
+    assert audit.user_metadata["soft_deleted"] is True
 
 
 async def _refused(db_session: AsyncSession, admin_id: str, transfer_to: str | None, capsys):
@@ -461,13 +493,12 @@ async def test_cli_notifies_committed_transfer_when_later_successor_has_left(
 
 
 @pytest.mark.asyncio
-async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
-    db_session: AsyncSession, connector_world, sole_password_admin
+async def test_contexts_in_a_soft_deleted_owned_workspace_are_deleted_with_it(
+    db_session: AsyncSession, connector_world, sole_password_admin, purge_audits
 ) -> None:
-    """#2417: the CLI says a soft-deleted workspace is left as it is — its
-    shared contexts and other authors' memories too (#2406 picks them up). A
-    private context of the admin's own still goes with the admin: nobody
-    could read it once its creator is gone."""
+    """#2406: a soft-deleted workspace the admin owns goes with it, with its
+    shared contexts and other authors' memories: none of them points at the
+    deleted admin afterwards, and none passes to anyone else."""
     from models.auth import Context
     from models.memory import Memory
 
@@ -494,6 +525,7 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
     )
     db_session.add(theirs)
     kept_id, mine_id, theirs_id = kept.id, mine.id, theirs.id
+    purge_audits.append(gone_id)
     await db_session.execute(
         update(Workspace).where(Workspace.id == gone_id).values(deleted_at=utcnow())
     )
@@ -501,11 +533,9 @@ async def test_contexts_in_a_soft_deleted_owned_workspace_stay_with_it(
     assert await _run(db_session) == 0
 
     assert not await _exists(db_session, admin_id)
-    assert await db_session.get(Workspace, gone_id) is not None
-    assert (
-        await db_session.scalar(select(Context.created_by).where(Context.id == kept_id)) == admin_id
-    )
-    assert await db_session.get(Memory, theirs_id) is not None
+    assert await db_session.get(Workspace, gone_id) is None
+    assert await db_session.scalar(select(Context.id).where(Context.id == kept_id)) is None
+    assert await db_session.scalar(select(Memory.id).where(Memory.id == theirs_id)) is None
     assert await db_session.scalar(select(Context.id).where(Context.id == mine_id)) is None
 
 

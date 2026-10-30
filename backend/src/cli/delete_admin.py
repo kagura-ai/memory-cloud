@@ -15,8 +15,11 @@ workspaces or the user count while the prompt waits.
 wrote in it (#1784); one nobody else wrote in is deleted with the admin, files
 included, wherever it is. Every other context the admin created in a surviving
 workspace (a shared one, a connector's write target, a private one someone
-else wrote in) passes to that workspace's owner; in a soft-deleted workspace
-the admin owns it stays with the workspace (#2406).
+else wrote in) passes to that workspace's owner.
+#2406: a soft-deleted workspace the admin owns is hard-deleted with it, with
+everything in it (other users' contexts and memories included): its owner
+already deleted it, so it is never handed on. Both prompts list them with
+their context and memory counts.
 
 Usage:
     cd backend && python -m src.cli.delete_admin [--transfer-to USER] [--yes]
@@ -64,15 +67,26 @@ async def _password_admin(db: AsyncSession) -> User | None:
     ).scalar_one_or_none()
 
 
-async def _owned_workspaces(db: AsyncSession, user_id: str, *, live: bool = True) -> list[_Ws]:
-    """The live (or, with ``live=False``, soft-deleted) workspaces ``user_id`` owns."""
-    deleted = Workspace.deleted_at.is_(None) if live else Workspace.deleted_at.is_not(None)
+async def _owned_workspaces(db: AsyncSession, user_id: str) -> list[_Ws]:
+    """The live workspaces ``user_id`` owns."""
     rows = await db.execute(
         select(Workspace.id, Workspace.name)
-        .where(Workspace.owner_user_id == user_id, deleted)
+        .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None))
         .order_by(Workspace.id)
     )
     return [_Ws(ws_id, name) for ws_id, name in rows.all()]
+
+
+async def _print_purged(db: AsyncSession, admin_id: str) -> None:
+    """List the soft-deleted workspaces the admin owns, which go with it (#2406)."""
+    from services.user_deletion_service import soft_deleted_owned_workspaces
+
+    purged = await soft_deleted_owned_workspaces(db, admin_id)
+    if not purged:
+        return
+    print("  Soft-deleted workspaces the admin owns are deleted with it, everything in them:")
+    for ws in purged:
+        print(f"    - {ws.name} ({ws.id}): {ws.contexts} contexts, {ws.memories} memories")
 
 
 async def _members(db: AsyncSession, workspace_ids: list[UUID]) -> dict[UUID, set[str]]:
@@ -158,8 +172,9 @@ async def _delete_admin_rows(
     transferred: list[UUID] | None = None,
 ) -> None:
     """Hand the admin's live connector keys to their workspace owners (#2352),
-    then delete its other keys, its memberships, ``workspace_ids`` and the user
-    row, in one transaction."""
+    then delete its other keys, its memberships, ``workspace_ids``, the
+    soft-deleted workspaces it owns (#2406) and the user row, in one
+    transaction."""
     from services.user_deletion_service import delete_user_rows, finish_user_deletion
 
     result = await delete_user_rows(
@@ -175,7 +190,7 @@ async def _delete_admin_rows(
         "cli_delete_admin",
         user_id=admin_id,
         workspaces_transferred=[str(ws_id) for ws_id in transferred or []],
-        workspaces_deleted=[str(ws_id) for ws_id in workspace_ids],
+        workspaces_deleted=[str(ws.id) for ws in result.purged_workspaces],
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
     )
@@ -202,6 +217,7 @@ async def _refuse_billing_contracts(db: AsyncSession, admin_id: str) -> bool:
 
 
 async def _delete_solo_admin(db: AsyncSession, admin_id: str, ask: Callable[[str], bool]) -> int:
+    await _print_purged(db, admin_id)
     await db.rollback()  # no transaction stays open while the prompt waits
     if not ask("  Delete admin, workspace, and all API keys?"):
         print("  Cancelled.")
@@ -282,10 +298,7 @@ async def delete_password_admin(
     if sole:
         print("  Only the admin is in these; they are deleted with it:")
         _print_workspaces(sole)
-    soft_deleted = await _owned_workspaces(db, admin_id, live=False)
-    if soft_deleted:
-        print("  Soft-deleted workspaces the admin owns are left as they are:")
-        _print_workspaces(soft_deleted)
+    await _print_purged(db, admin_id)
 
     await db.rollback()  # no transaction stays open while the prompt waits
     if not ask("  Delete admin user only?"):
