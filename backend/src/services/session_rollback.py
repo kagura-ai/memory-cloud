@@ -25,8 +25,9 @@ A memory is skipped, never half-reverted, when its state is not the one the
 session left (``SKIP_CAUSES``): someone else wrote it since the session's
 first event (``modified_since``), Sleep merged or archived it
 (``merged_by_sleep``), someone else forgot it (``deleted_by_other``), the
-resource indexer owns it (``resource_row``), the caller may not write it
-(``not_permitted``), an earlier value was erased (``prior_erased``), or there
+resource indexer owns it (``resource_row``), the caller may not write it —
+under its live type or the type the rollback would put back
+(``not_permitted``) — an earlier value was erased (``prior_erased``), or there
 is nothing left to undo (``already_forgotten`` / ``already_restored``).
 
 Execution holds a per-(context, session id) advisory lock — per (context,
@@ -695,7 +696,10 @@ async def _read_batch(
             )
         ).all()
     )
-    permitted = await _permitted(db, user_id, workspace_id, scope.context_id, memories)
+    check = _WriteCheck(db, user_id, workspace_id, scope.context_id)
+    permitted = {
+        memory_id: await check(memory, memory.type) for memory_id, memory in memories.items()
+    }
 
     items: list[PlanItem] = []
     for memory_id in chosen:
@@ -717,7 +721,7 @@ async def _read_batch(
                 permitted=permitted.get(memory_id, False),
                 current=versioned_snapshot(memory),
             )
-        items.append(plan_memory(session_events, state))
+        items.append(await _judge_restored_type(plan_memory(session_events, state), memory, check))
     items = _defer_extra_unforgets(items)
     events_taken = sum(len(item.event_ids) for item in items)
     return _Batch(
@@ -744,36 +748,65 @@ def _defer_extra_unforgets(items: list[PlanItem]) -> list[PlanItem]:
     return kept
 
 
-async def _permitted(
-    db: AsyncSession,
-    user_id: str,
-    workspace_id: UUID,
-    context_id: UUID,
-    memories: dict[UUID, Any],
-) -> dict[UUID, bool]:
+class _WriteCheck:
     """forget's per-memory write check, once per (author, type, source) group."""
-    from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
-    perm = PermissionService(db)
-    decided: dict[tuple[str, str, str | None], bool] = {}
-    result: dict[UUID, bool] = {}
-    for memory_id, memory in memories.items():
-        group = (memory.user_id, memory.type, memory.source_type)
-        if group not in decided:
-            decided[group] = await perm.can_access_memory(
-                user_id=CallerId(user_id),
+    def __init__(self, db: AsyncSession, user_id: str, workspace_id: UUID, context_id: UUID):
+        from services.permission_service import PermissionService
+
+        self._perm = PermissionService(db)
+        self._user_id = user_id
+        self._workspace_id = workspace_id
+        self._context_id = context_id
+        self._decided: dict[tuple[str, str, str | None], bool] = {}
+
+    async def __call__(self, memory: Any, memory_type: str | None) -> bool:
+        """Whether the caller may write ``memory`` as a memory of ``memory_type``
+        (an unknown type, None, is refused)."""
+        from services.permission_service import CallerId, MemoryAuthorId
+
+        if memory_type is None:
+            return False
+        group = (memory.user_id, memory_type, memory.source_type)
+        if group not in self._decided:
+            self._decided[group] = await self._perm.can_access_memory(
+                user_id=CallerId(self._user_id),
                 memory_user_id=MemoryAuthorId(memory.user_id),
-                workspace_id=workspace_id,
-                context_id=context_id,
+                workspace_id=self._workspace_id,
+                context_id=self._context_id,
                 access="write",
                 # Deny-capture identity: the rollback rewrites or removes the
                 # memory, the audit vocabulary's ``update``.
                 operation="update",
-                memory_type=memory.type,
+                memory_id=memory.id,
+                memory_type=memory_type,
                 memory_source_type=memory.source_type,
             )
-        result[memory_id] = decided[group]
-    return result
+        return self._decided[group]
+
+
+async def _judge_restored_type(item: PlanItem, memory: Any, check: _WriteCheck) -> PlanItem:
+    """``item``, or a ``not_permitted`` skip when it would put back a type the
+    caller may not write.
+
+    The write check judged the live type; a restore that writes another type
+    back is judged under that type too, as ``reference(version=N)`` judges an
+    earlier version's type, so the binding's per-memory type filter applies
+    to what the rollback writes. Only a planned restore is judged: a memory
+    skipped for another cause keeps that cause, and no check (nor its deny
+    audit) runs for a type that is not written.
+    """
+    if item.action != ACTION_RESTORE or "type" not in item.values:
+        return item
+    if await check(memory, item.values["type"]):
+        return item
+    return PlanItem(
+        item.memory_id,
+        item.kind,
+        ACTION_SKIP,
+        cause=CAUSE_NOT_PERMITTED,
+        event_ids=item.event_ids,
+    )
 
 
 # ---------------------------------------------------------------------------

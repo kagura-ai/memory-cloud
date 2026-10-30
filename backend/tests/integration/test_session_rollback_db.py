@@ -1738,6 +1738,142 @@ async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
     assert (await w.row(target))["details"] == {"a": 1}
 
 
+def _allow_types(*allowed: str) -> AsyncMock:
+    """A permission check whose binding allows only ``allowed`` memory types."""
+
+    async def check(**kwargs: Any) -> bool:
+        return kwargs.get("memory_type") in allowed
+
+    return AsyncMock(side_effect=check)
+
+
+async def test_a_restore_to_a_type_the_caller_may_not_write_is_skipped(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """The restored type is judged too, not only the live one: a session that
+    changed a memory from an unwritable type to a writable one cannot put the
+    unwritable type back, and the dry run does not list the restored fields."""
+    w = world
+    target = await w.create(w.member, None, type="decision", summary="original")
+    await w.update(target, w.owner, "RT", type="note", summary="by RT")
+    await w.session.commit()
+    before = await w.row(target)
+    s = SessionPrincipal(w.owner, None)
+    check = _allow_types("note")
+
+    with patch("services.permission_service.PermissionService.can_access_memory", check):
+        dry = await _rollback(w, "RT", s, dry_run=True)
+        assert dry.listed_items() == [
+            {
+                "memory_id": str(target),
+                "kind": "updated",
+                "action": "skip",
+                "cause": "not_permitted",
+            }
+        ]
+        await w.session.rollback()
+        done = await _rollback(w, "RT", s, dry_run=False)
+        await w.session.commit()
+
+    assert {c.kwargs["memory_type"] for c in check.await_args_list} == {"note", "decision"}
+    assert all(c.kwargs["access"] == "write" for c in check.await_args_list)
+    assert done.summary["skipped_items"] == [
+        {"memory_id": str(target), "kind": "updated", "cause": "not_permitted"}
+    ]
+    assert await w.row(target) == before
+    _stubs["payload"].assert_not_awaited()
+
+
+async def test_a_restore_to_a_writable_type_still_runs(world: World) -> None:
+    w = world
+    target = await w.create(w.member, None, type="decision", summary="original")
+    await w.update(target, w.owner, "RW", type="note", summary="by RW")
+    await w.session.commit()
+
+    check = _allow_types("note", "decision")
+    with patch("services.permission_service.PermissionService.can_access_memory", check):
+        done = await _rollback(w, "RW", SessionPrincipal(w.owner, None), dry_run=False)
+        await w.session.commit()
+
+    assert {c.kwargs["memory_type"] for c in check.await_args_list} == {"note", "decision"}
+    assert {c.kwargs["memory_id"] for c in check.await_args_list} == {target}
+    assert done.summary["skipped_items"] == []
+    row = await w.row(target)
+    assert (row["type"], row["summary"]) == ("decision", "original")
+
+
+async def test_a_type_change_on_a_memory_the_session_created_is_still_forgotten(
+    world: World,
+) -> None:
+    """A memory the session created is forgotten; no earlier type comes back."""
+    w = world
+    made = await w.create(w.owner, "RC", type="decision")
+    await w.update(made, w.owner, "RC", type="note")
+    await w.session.commit()
+    check = _allow_types("note")
+
+    with patch("services.permission_service.PermissionService.can_access_memory", check):
+        done = await _rollback(w, "RC", SessionPrincipal(w.owner, None), dry_run=False)
+        await w.session.commit()
+
+    assert {c.kwargs["memory_type"] for c in check.await_args_list} == {"note"}
+    assert done.summary["skipped_items"] == []
+    assert (await w.row(made))["deleted_at"] is not None
+
+
+async def test_another_skip_cause_wins_over_the_restored_type(world: World) -> None:
+    """A memory skipped for another cause keeps it; its earlier type is not
+    judged, since nothing would be written back."""
+    w = world
+    target = await w.create(w.member, None, type="decision")
+    await w.update(target, w.owner, "RO", type="note")
+    await w.update(target, w.member, "other", importance=0.1)
+    await w.session.commit()
+    before = await w.row(target)
+    check = _allow_types("note")
+
+    with patch("services.permission_service.PermissionService.can_access_memory", check):
+        done = await _rollback(w, "RO", SessionPrincipal(w.owner, None), dry_run=False)
+        await w.session.commit()
+
+    assert {c.kwargs["memory_type"] for c in check.await_args_list} == {"note"}
+    assert done.summary["skipped_items"] == [
+        {"memory_id": str(target), "kind": "updated", "cause": "modified_since"}
+    ]
+    assert await w.row(target) == before
+
+
+@pytest.mark.parametrize("allowed", [("note", "decision"), ("note",)])
+async def test_a_retyped_then_forgotten_memory_is_judged_on_its_earlier_type(
+    world: World, allowed: tuple[str, ...]
+) -> None:
+    """A session that retyped a memory and then forgot it: the un-forget puts
+    the earlier type back, so it runs only when that type may be written."""
+    w = world
+    target = await w.create(w.member, None, type="decision")
+    await w.update(target, w.owner, "RF", type="note")
+    await w.forget(target, w.owner, "RF")
+    await w.session.commit()
+    before = await w.row(target)
+
+    with patch(
+        "services.permission_service.PermissionService.can_access_memory",
+        _allow_types(*allowed),
+    ):
+        done = await _rollback(w, "RF", SessionPrincipal(w.owner, None), dry_run=False)
+        await w.session.commit()
+
+    row = await w.row(target)
+    if "decision" in allowed:
+        assert done.summary["skipped_items"] == []
+        assert (row["type"], row["deleted_at"]) == ("decision", None)
+    else:
+        assert done.summary["skipped_items"] == [
+            {"memory_id": str(target), "kind": "forgotten", "cause": "not_permitted"}
+        ]
+        assert row == before
+
+
 async def test_mcp_reply_names_the_context_after_a_session_rollback(
     world: World, _stubs: dict[str, Any]
 ) -> None:
