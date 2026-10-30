@@ -66,8 +66,15 @@ dependencies = [
     # and cryptography below; tests/test_dependency_bounds.py enforces it.
     # Authlib changes behaviour in minor releases (1.8.0 changed
     # get_allowed_scope and PKCE handling), and auth/oauth2_server.py overrides
-    # its PKCE and grant hooks, verified on 1.8 (#1701): pin the minor.
-    "authlib>=1.8.0,<1.9",  # OAuth2 server (authlib.jose is no longer used, #1708)
+    # its PKCE and grant hooks (#1701): pin the minor. Verified on 1.9.1
+    # (#2449): from 1.8.0 the modules the server subclasses or calls
+    # (rfc6749 grants / AuthorizationServer / requests / errors, rfc7636
+    # CodeChallenge, rfc8628 DeviceCodeGrant) changed in docstrings only; the
+    # 1.9 behaviour changes are in authlib.jose, OIDC, JAR (RFC 9101), the
+    # JWT bearer grant, ID-JAG and the RFC 7592 endpoint, none of which the
+    # server uses. The floor is 1.9.1: 1.9.0 fixes the other advisories against
+    # 1.8, 1.9.1 the empty-HMAC-key one (GHSA-8m4g-j4wp-wgcg).
+    "authlib>=1.9.1,<1.10",  # OAuth2 server (authlib.jose is no longer used, #1708)
     # Billing hand-off JWT (auth/billing_handoff.py): the successor of
     # authlib.jose, which Authlib 2.0 removes. The floor is 1.7.3: that
     # release added the default type checks for iss / sub / aud (before it, an

@@ -78,14 +78,17 @@ def test_auth_critical_dependency_has_upper_bound(requirement: Requirement) -> N
 @pytest.mark.parametrize(
     ("version", "allowed"),
     [
-        # #1701 overrides Authlib's PKCE and grant hooks; verified on 1.8.
-        ("1.8.0", True),
-        ("1.8.9", True),
+        # #1701 overrides Authlib's PKCE and grant hooks; verified on 1.9.1 (#2449).
+        ("1.9.1", True),
+        ("1.9.9", True),
+        # 1.9.0 still has GHSA-8m4g-j4wp-wgcg (empty HMAC key), 1.8 the rest.
+        ("1.9.0", False),
+        ("1.8.0", False),
         # Before 1.8: get_allowed_scope / PKCE behaviour the overrides do not expect.
         ("1.7.9", False),
         # The next minor, including its pre-releases, needs a deliberate bump.
-        ("1.9.0rc1", False),
-        ("1.9.0", False),
+        ("1.10.0rc1", False),
+        ("1.10.0", False),
         ("2.0.0", False),
     ],
 )
