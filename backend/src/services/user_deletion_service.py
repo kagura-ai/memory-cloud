@@ -160,13 +160,16 @@ async def workspace_purge_counts(
     )
     memory = aliased(Memory)
     context = aliased(Context)
+    # One level of subquery, correlated to the outer ``workspaces`` row: a
+    # nested IN-select here would not correlate and would count the memories
+    # of every workspace's contexts.
     memories = (
         select(func.count(memory.id))
+        .select_from(memory)
+        .outerjoin(context, context.id == memory.context_id)
         .where(
             or_(
-                memory.context_id.in_(
-                    select(context.id).where(context.workspace_id == Workspace.id)
-                ),
+                context.workspace_id == Workspace.id,
                 and_(memory.workspace_id == Workspace.id, memory.context_id.is_(None)),
             )
         )
