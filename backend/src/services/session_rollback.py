@@ -1480,7 +1480,8 @@ def _plan_payload_sync(
     sync: PayloadSync, rows: Mapping[UUID, Any] | None
 ) -> PlannedPatch[tuple[PayloadSync, dict[str, Any], list[str]]] | None:
     """``sync``'s patch from the row now (``rows``: the group's live rows, or
-    None when not read), or None when there is nothing to patch."""
+    None when ``finish`` has no session — then the patch queued at the
+    restore), or None when there is nothing to patch."""
     if rows is not None and sync.memory_id not in rows:
         return None  # forgotten or purged since: its payload is not read
     row = rows.get(sync.memory_id) if rows is not None else None
@@ -1517,7 +1518,8 @@ async def _apply_payload_sync(
 
 async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None) -> None:
     """The shared post-commit payload step (``payload_sync``, #2283) with
-    ``SwallowFailures``: a failed patch is logged and the next one goes on."""
+    ``SwallowFailures``: a failed patch is logged and the next one goes on; a
+    group whose re-read fails is not patched (#2346)."""
     if not syncs:
         return
     policy = SwallowFailures("session_rollback_payload")
@@ -1531,8 +1533,13 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
         columns=_PAYLOAD_COLUMNS,
         live_only=True,
     )
-    if policy.failed:
-        logger.warning("session_rollback_payload_syncs_failed", failed=policy.failed, of=len(syncs))
+    if policy.failed or policy.unread:
+        logger.warning(
+            "session_rollback_payload_syncs_failed",
+            failed=policy.failed,
+            unread=policy.unread,
+            of=len(syncs),
+        )
 
 
 async def _emit_access_events(result: RollbackResult) -> None:
