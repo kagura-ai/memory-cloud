@@ -2401,6 +2401,12 @@ async def test_an_address_two_erasures_share_is_left_where_they_overlap(
         assert case.email not in text_
     async with _maker(async_engine)() as session:
         assert await _audit(session, case.others + case.untouched) == before
+        # the first account's own rows are its own whatever the overlap
+        assert (await _own_rows(session, case))[0] == (
+            case.p,
+            case.email_p,
+            f"user:{case.email_p}",
+        )
 
 
 async def test_a_pre_v0129_ambiguous_key_is_printed_and_never_written(

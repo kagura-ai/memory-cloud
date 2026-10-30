@@ -104,7 +104,10 @@ address — to its end); an instant both share goes to the other account.
 Limits — fail closed, counts only (never an address, a hash or an id):
 
 - ``audit mentions <request> N row(s) kept``: rows naming an address inside
-  the account's holding and inside another account's; left raw.
+  the account's holding and inside another account's, or naming a tenure's
+  first address before the account's first audit row in that tenure (it
+  may not have been theirs yet: no user row is left to tell when the
+  account was created); left raw.
 - ``audit addresses <request> N ... not recovered``: holdings whose start,
   end or plaintext could not be told — an earlier address whose HMAC
   matches no value in the table (no row names it in plaintext any more, or
@@ -115,6 +118,13 @@ Limits — fail closed, counts only (never an address, a hash or an id):
   address that no row names in plaintext is not counted (its hash is
   unsalted: nothing is left raw), nor an address changed with no email-sync
   row to record it (unknown, as before).
+- The last holding of a tenure starts at its last email sync whatever that
+  sync's new HMAC is (only the links between earlier syncs are checked:
+  under a rotated ``AUDIT_HMAC_KEY`` every link would fail). An address
+  changed without an email-sync row is not known at all.
+- A request with no usable end (no ``memory_scrub_at``, ``completed_at`` or
+  ``started_at``) is not a tenure of its own: its holdings fall into the
+  next request's, of the same account.
 - Rows an erasure or a re-run before v0.134.0 rewrote by address without a
   time bound — possibly another holder's — carry the pseudonym and cannot
   be told apart any more: they stay as they are.
@@ -231,7 +241,7 @@ NOTE_REPAIRED = (
 # #2287: never prints the account id or the email
 AUDIT_KEPT = "rows kept: the account id is in use again"
 # #2298, #2359: never prints the email
-MENTIONS_KEPT = "row(s) kept: another account held the address at the time"
+MENTIONS_KEPT = "row(s) kept: another account held, or may have held, the address at the time"
 # #2359: never prints an address or a hash
 NOT_RECOVERED = (
     "address holding(s) not recovered, their rows left raw (no plaintext or HMAC "

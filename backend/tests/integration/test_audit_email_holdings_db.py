@@ -282,6 +282,8 @@ async def test_an_address_an_earlier_deleted_account_held(
         out = capsys.readouterr().out
         # the own row (x raw) and the admin's row about S
         assert _lines(out, f"pseudonymized audit mentions  {request}  2 row(s)")
+        # before S's first audit row: maybe not S's yet — kept and counted
+        assert _lines(out, f"audit mentions  {request}  2 {cli.MENTIONS_KEPT}")
 
     assert await world.values(about_gone, by_gone, about_s) == [
         ("admin@example.com", f"user:{x}"),
@@ -316,6 +318,13 @@ async def test_every_older_address_is_pseudonymized(
         request = await world.request(s, z, at(30))
         assert await _run(world.engine, ["--request", str(request), "--apply", "--yes"]) == 0
         assert "not recovered" not in capsys.readouterr().out
+        # a second run changes nothing; the older addresses no row names in
+        # plaintext any more are counted (as the docs say), never printed
+        assert await _run(world.engine, ["--request", str(request), "--apply", "--yes"]) == 0
+        again = capsys.readouterr().out
+        assert "would change 0" in again
+        assert _lines(again, f"audit addresses  {request}  2 {cli.NOT_RECOVERED}")
+        assert x not in again and y not in again and z not in again
 
     assert await world.values(*rows) == [
         ("admin@example.com", f"user:{_p(address)}") for address in (x, y, z)
@@ -422,4 +431,86 @@ async def test_an_hmac_that_matches_nothing_is_left_raw_and_counted(
     assert await world.values(about_x, about_y) == [
         ("admin@example.com", f"user:{x}"),
         ("admin@example.com", f"user:{_p(y)}"),
+    ]
+
+
+async def test_an_admin_who_got_a_former_address_keeps_it_on_the_subjects_row(
+    world: World,
+) -> None:
+    """#2359 gate2: ``assign_role`` writes the target's ``user_id`` and the
+    acting admin's ``user_email``. An admin who took S's former address x
+    after S left it, then acted on S, keeps x on that row; S's own row from
+    when S held x gets the pseudonym."""
+    s, admin = world.sub("s"), world.sub("admin")
+    x, y = world.email("x"), world.email("y")
+    await world.user(s, y, at(0))
+    own = await world.row(s, x, "workspace:w", at(2), action="member_add")
+    await world.sync(s, x, y, at(10))
+    await world.user(admin, x, at(1))
+    await world.sync(admin, world.email("admin"), x, at(20))
+    assigned = await world.row(s, x, f"user:{y}", at(25))
+
+    counts = await world.live_erasure(s)
+
+    assert counts["audit_addresses_not_recovered"] == 0
+    assert await world.values(own, assigned) == [
+        (_p(x), "workspace:w"),
+        (x, f"user:{_p(y)}"),
+    ]
+
+
+async def test_a_break_in_the_sync_chain_is_left_raw_and_counted(world: World) -> None:
+    """x → y, then a sync whose old HMAC is not y's (a change no row
+    recorded): the holding between the two syncs cannot be told — its rows
+    stay raw and it is counted; the holdings around it are rewritten."""
+    s, admin = world.sub("s"), world.sub("admin")
+    x, y, z, w = (world.email(n) for n in ("x", "y", "z", "w"))
+    await world.user(s, w, at(0))
+    await world.sync(s, x, y, at(10))
+    await world.sync(s, z, w, at(20))
+    rows = [
+        await world.row(admin, "admin@example.com", f"user:{address}", at(day))
+        for address, day in ((x, 5), (y, 15), (w, 25))
+    ]
+
+    counts = await world.live_erasure(s)
+
+    assert counts["audit_addresses_not_recovered"] == 1
+    assert await world.values(*rows) == [
+        ("admin@example.com", f"user:{_p(x)}"),
+        ("admin@example.com", f"user:{y}"),
+        ("admin@example.com", f"user:{_p(w)}"),
+    ]
+
+
+async def test_another_request_with_an_unreadable_end_is_counted_not_fatal(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An account's other request whose ``memory_scrub_at`` is no ISO time:
+    the run of this request goes on; that tenure's address, which rows still
+    name, is counted as not recovered and its rows stay raw."""
+    s, admin = world.sub("s"), world.sub("admin")
+    a, b = world.email("a"), world.email("b")
+    await world.user(s, a, at(0))
+    await world.row(s, a, "workspace:w", at(1), action="member_add")
+    about_a = await world.row(admin, "admin@example.com", f"user:{a}", at(2))
+    await world.erased_before_the_fix(s)
+    first = await world.request(s, a, at(10))
+    about_b = await world.row(admin, "admin@example.com", f"user:{b}", at(17))
+    second = await world.request(s, b, at(20))
+    async with _maker(world.engine)() as db:
+        await db.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == second)
+            .values(deleted_data_summary={"postgres": {"memory_scrub_at": "not-a-time"}})
+        )
+        await db.commit()
+
+    assert await _run(world.engine, ["--request", str(first), "--apply", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert _lines(out, f"audit addresses  {first}  1 {cli.NOT_RECOVERED}")
+    assert a not in out and b not in out
+    assert await world.values(about_a, about_b) == [
+        ("admin@example.com", f"user:{_p(a)}"),
+        ("admin@example.com", f"user:{b}"),
     ]

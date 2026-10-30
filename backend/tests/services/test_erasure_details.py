@@ -641,10 +641,10 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     assert "WHERE users.email = audit_logs.user_email" in sql
     # #2345: the subject's request metadata goes too
     assert params["ip_address"] is None and params["user_agent"] is None
-    # #2359: ``user_email`` by every address, without a window (the user_id
-    # proves the row theirs); ``resource`` only while they held it
+    # #2359: ``user_email`` and ``resource`` only while they held it (an
+    # admin who got a former address later and acted on them keeps it)
     case_sql = sql[sql.index("user_email=CASE") : sql.index("resource=left(")]
-    assert "created_at" not in case_sql
+    assert "audit_logs.created_at >= " in case_sql
     assert "replace(audit_logs.resource, CASE WHEN (audit_logs.created_at >=" in sql
     assert HELD_SINCE in params.values()
 

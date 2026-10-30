@@ -1924,7 +1924,13 @@ migration: the member's `oauth_user_email_synced` audit rows (the HMACs of
 the old and the new address under `AUDIT_HMAC_KEY`, kept by erasure) give
 each address's holding, from the account's creation (live erasure) or its
 first audit row (re-run) to the erasure; the older addresses' plaintext is
-recovered from the table by HMAC. A row naming an address is rewritten only
+recovered from the table by HMAC. The live erasure looks for it among the
+member's own audit rows first (by the `user_id` index) and streams the
+distinct values of the whole `audit_logs` table only for an older address
+none of them names — inside the erasure's Postgres transaction, so on a
+large table such an erasure holds its locks longer; members who never
+changed their email are not affected. The re-run streams the table once per
+run. A row naming an address is rewritten only
 inside the member's holding and outside every interval another account is
 known to have held it (an instant both share goes to the other account).
 The member's own rows (by account id) still get every address in
@@ -1936,7 +1942,9 @@ counts only. Both are left raw on purpose (fail closed): an earlier address
 whose HMAC matches no value in the table (no row names it any more, or
 `AUDIT_HMAC_KEY` changed since the sync — the count then rises on a second
 run, after the first one pseudonymized the rows), a holding with no known
-start or end, and rows where another account held the address too. Rows an
+start or end, rows where another account held the address too, and in a
+re-run the rows naming the first address before the account's first audit
+row (it may not have been the member's yet). Rows an
 erasure or a re-run before v0.134.0 rewrote by address without a time bound
 cannot be told apart any more and stay as they are. After upgrading, run
 `reprocess_erasures --all` (plan) and then `--all --apply --yes` once.
