@@ -119,8 +119,8 @@ async def test_a_shared_workspace_without_transfer_to_refuses_before_the_prompt(
 async def test_a_workspace_created_while_the_prompt_waits_stops_the_delete(capsys):
     db, calls = _db(2)
     new = SimpleNamespace(id="00000000-0000-0000-0000-0000000000bb", name="New")
-    # live owned before the prompt, soft-deleted owned, live owned after it
-    owned = AsyncMock(side_effect=[[], [], [new]])
+    # live owned before the prompt, live owned after it
+    owned = AsyncMock(side_effect=[[], [new]])
 
     assert await _run(db, owned) == 1
 
@@ -177,3 +177,33 @@ async def test_solo_path_stops_when_a_user_signed_up_while_the_prompt_waited(cap
 
     assert _writes(calls) == []
     assert "signed up while the prompt waited" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("total_users", [1, 2])
+async def test_both_prompts_list_the_soft_deleted_workspaces_deleted_with_the_admin(
+    total_users: int, capsys
+):
+    """#2406: the soft-deleted workspaces the admin owns go with it; the
+    prompt says so first, with what is in them."""
+    from uuid import UUID
+
+    from services.user_deletion_service import PurgedWorkspace
+
+    db, _ = _db(total_users)
+    gone = PurgedWorkspace(UUID(int=0xDD), "Old", True, 2, 5)
+    seen: list[str] = []
+
+    def ask(prompt: str) -> bool:
+        seen.append(capsys.readouterr().out)
+        return False
+
+    with patch(
+        "services.user_deletion_service.soft_deleted_owned_workspaces",
+        AsyncMock(return_value=[gone]),
+    ):
+        assert await _run(db, AsyncMock(return_value=[]), ask=ask) == 0
+
+    assert len(seen) == 1
+    assert f"Old ({gone.id}): 2 contexts, 5 memories" in seen[0]
+    assert "deleted with it" in seen[0]

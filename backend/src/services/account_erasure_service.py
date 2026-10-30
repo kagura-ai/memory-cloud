@@ -1946,6 +1946,8 @@ class AccountErasureService:
             members_by_ws.setdefault(m.workspace_id, []).append(m)
 
         for ws in owned:
+            if ws.deleted_at is not None:
+                continue  # soft-deleted: hard-deleted with the sole-owned ones (#2406)
             other_members = [m for m in members_by_ws.get(ws.id, []) if m.user_id != user_id]
             if not other_members:
                 continue  # sole owner — workspace will be deleted in step 4
@@ -1992,6 +1994,10 @@ class AccountErasureService:
             members_by_ws.setdefault(m.workspace_id, []).append(m)
 
         for ws in workspaces:
+            if ws.deleted_at is not None:
+                # Its owner deleted it: never handed on, hard-deleted with the
+                # sole-owned ones (#2406).
+                continue
             other_members = [m for m in members_by_ws.get(ws.id, []) if m.user_id != user_id]
             if not other_members:
                 sole_owner_count += 1

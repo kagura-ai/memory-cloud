@@ -911,7 +911,7 @@ class TestHandleOwnedWorkspaces:
     async def test_sole_owner_workspace_passes_through(self):
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1")
         rows = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER)]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
@@ -924,7 +924,7 @@ class TestHandleOwnedWorkspaces:
     async def test_other_admin_triggers_auto_transfer(self):
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=5)
         new_admin = SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN)
         rows = [
             SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
@@ -955,7 +955,7 @@ class TestHandleOwnedWorkspaces:
         # → skip the auto-transfer rather than clobber the new owner.
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=5)
         # The row as re-read UNDER the lock: ownership already moved to someone else.
         locked = SimpleNamespace(id=ws_id, owner_user_id="someone-else", ownership_epoch=9)
         rows = [
@@ -984,7 +984,7 @@ class TestHandleOwnedWorkspaces:
 
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=5)
         rows = [
             SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
             SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN),
@@ -1006,7 +1006,7 @@ class TestHandleOwnedWorkspaces:
 
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1")
         rows = [
             SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
             SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.MEMBER),
@@ -1019,6 +1019,25 @@ class TestHandleOwnedWorkspaces:
             await svc._handle_owned_workspaces("u-1", [ws])
         # The error carries member_count so the API can surface it.
         assert exc_info.value.details["member_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_soft_deleted_workspace_is_never_handed_on(self):
+        """#2406: its owner deleted it, so it is hard-deleted with the
+        sole-owned ones — no transfer, and no block for want of an admin."""
+        svc = _service()
+        ws_id = uuid4()
+        ws = SimpleNamespace(id=ws_id, deleted_at=object(), owner_user_id="u-1")
+        rows = [
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.MEMBER),
+        ]
+        svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
+        svc.db.commit = AsyncMock()
+
+        out = await svc._handle_owned_workspaces("u-1", [ws])
+
+        assert out["transferred"] == []
+        svc.db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_workspaces_short_circuits(self):
