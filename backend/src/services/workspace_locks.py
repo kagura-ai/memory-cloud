@@ -22,6 +22,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Workspace
+from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException
 
 
@@ -63,7 +64,7 @@ async def lock_workspace_for_update(
             )
         ).scalar_one_or_none()
     except DBAPIError as exc:
-        if getattr(exc.orig, "sqlstate", None) == "55P03":
+        if is_lock_not_available(exc):
             raise ConflictError("Workspace is being modified; retry the operation") from exc
         raise
     if workspace is None:

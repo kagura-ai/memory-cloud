@@ -56,6 +56,8 @@ GDPR Art.12(3) の「受領後 1 ヶ月以内」応答義務を満たすため�
 
 譲渡された workspace の connector write key のうち本人名義のものは、step 4 で新しい owner の名義に移る (#2305)。
 
+> **lock の順序 (v0.134.0, #2418)**: erasure は最初から本人の `users` 行を lock しているので、このステップと step 4 は workspace 行を待たない。順序は全経路で 1 つ: `users` 行 (user_id 順) → identity-link の advisory lock → live な workspace 行 (id 順、`users` 行を持つ間は `NOWAIT`) → soft-delete 済みの workspace 行 → contexts → memories → 子の行。本人が同時に `DELETE /workspaces/W` を実行していると、その処理は W を lock してから本人の `users` 行 (`current_workspace_id`) を更新するため、以前は 40P01 (deadlock) で erasure か workspace 削除のどちらかが失敗していた。いまは譲渡する workspace (このステップ) と本人が所有する workspace (step 4 の最初) を `NOWAIT` で lock する。memory の作成なども quota 確認で workspace 行を commit まで lock するので、取れなければ savepoint 内で最大 5 回 (待ちは合計 0.75 秒) 取り直し、それでも取れなければそのステップを rollback して request を `cooling_off` に戻す (§5.3, §5.4)。workspace の削除は、workspace 行の次に `current_workspace_id` を消す `users` 行を lock してから workspace 内の行 (external key、ファイル) に触れるので、本人が所有しない workspace の削除とも循環しない。このステップで取れない workspace を飛ばして続けることはしない (共有 workspace が step 4 の sole-owner cascade で消えるのを防ぐ)。ステップ内で 40P01 の犠牲になった場合も同じ扱い。
+
 ### 2.4 Postgres (Step 4)
 
 FK の依存逆順で削除:
@@ -216,8 +218,11 @@ v0.130.0 (#2348) への更新後は `reprocess_erasures --all` (plan) → `--all
 
 4 回目の失敗では request は `failed` になり、レスポンスは vector store 自身のエラー (502 `EXT-001`)。
 
+同じ 503 `ERASURE-007` は、workspace の譲渡 (§2.3) か Postgres ステップで他の処理が持つ lock に当たったときにも返る (v0.134.0, #2418)。そのステップは rollback され (Postgres ステップの削除は何も commit されない。それより前のステップで commit 済みの譲渡はそのまま)、request は vector store の障害と同じく `cooling_off` に戻る。`message` は `Another operation holds the account's workspaces; ...`、`details.error_class` は `LockNotAvailable` (`NOWAIT` の lock が取れなかった、55P03) か `DeadlockDetected` (40P01)。`deleted_data_summary.retry.step` は `workspaces` か `postgres`。試行回数は vector store の障害と合算で最大 4 回。4 回目も lock に当たると `failed` + `failure_reason = "lock_conflict after 4 attempts: <step>: <error_class> (another operation held the account's rows)"` になり、レスポンスは 409 `RES-002`。
+
 ### 5.4 失敗時の手動再試行
 
+- lock の競合 (§2.3、v0.134.0, #2418) も手動再試行不要: vector store の障害と同じく自動で再実行される (`deleted_data_summary.retry.step` が `workspaces` / `postgres`)。4 回とも当たった行 (`failure_reason` が `lock_conflict after 4 attempts: ` で始まる) は、本人の workspace を操作し続けている処理 (workspace の削除・譲渡・メンバー変更など) が終わってから新しい request を作る。Postgres は何も消えておらず、vector の削除が済んでいる場合の再キューは下記と同じ
 - vector store の障害 (§2.2) は手動再試行不要 (v0.125.0, #2282): request は `cooling_off` に戻り、cron sweep が 15 分以上後に最大 4 回まで自動で再実行する。`deleted_data_summary.retry.attempts` が失敗した回数。4 回とも失敗した行 (`failure_reason` が `vector_store_unavailable after 4 attempts: ` で始まる) は、障害を解消してから新しい request を作る (下記)
 - 取り消された self-service 行、または 4 回とも失敗した行の本人は、一部の collection で point が削除済みのことがある (§2.2)。v0.128.0 (#2304) からはサービスが本人の live な memory を自動で再キューする (`deleted_data_summary.retry.embeddings_requeued`)。v0.129.0 (#2358) からは、vector の削除が成功した後 Postgres の commit 前に失敗した行 (`workspace_transfer_required` 等) と、以前の試行がある行が再実行で別の理由により失敗した場合も同様 (`retry.attempts` が 0 のことがある)。判定は 1 つ: `postgres` がない `failed` 行で、summary に `qdrant` があるか `retry.attempts > 0` のものは `retry.embeddings_requeued` を持つはず。持たない行 (自動の再キューが失敗した: `erasure_embeddings_requeue_failed`、または v0.129.0 より前の行) は手動 SQL を実行する (一部のバッチが commit 済みでも手動 SQL はそのまま実行してよい: `success` 行だけを動かす)。ほかに手動の再キューが要るのは、v0.125.0 より前にこのステップで失敗した行 (`retry` がない) と SQL で取り消した行。本人のアカウントが残る場合は、本人が author の live な memory を手動で再キューして embedding sweep に point を作り直させる (memory 数だけ embedding のコストがかかる。作り直されるのは active な collection の point のみ。サービスと違い `processing` 行は動かさないが、実行中の run が終われば次の手動実行で拾える): `UPDATE memories SET embedding_status = 'pending' WHERE user_id = '<subject-sub>' AND deleted_at IS NULL AND embedding_status = 'success';`
 - 上記の手動 SQL は Postgres ステップが commit 済みの erasure (`complete`、または `deleted_data_summary.postgres` を持つ行) には実行しない (pseudonym を `<subject-sub>` に入れない): 本人の残存行は pseudonym のもので point は設計どおり削除済み、v0.129.0 (#2363 / #2393) から本人の残存行は消去前に `success` だった行も含めて意図的に終端状態にしてある (`embedding_error` が `erased_author:` で始まる)
@@ -341,8 +346,8 @@ Kagura Memory Cloud Operations
 - `erasure_admin_force_started` — admin 強制削除開始
 - `erasure_sweep_executed` — cron sweep 完了 (count 含む)
 - `erasure_execute_failed` — 実行失敗 (request_id + error 含む)
-- `erasure_retry_scheduled` — vector store の障害で request を `cooling_off` に戻した (request_id + attempt + max_attempts + scheduled_for + 例外クラス。#2282)
-- `erasure_retry_request_moved` — 上記で戻そうとした request が別の処理で状態を変えていた、または後の sweep が再 claim していた (何も書いていない。request_id のみ)。呼び出し元には vector store のエラー (502) が返る
+- `erasure_retry_scheduled` — vector store の障害 (#2282)、または workspace / Postgres ステップの lock 競合 (#2418、`error_class` が `LockNotAvailable` / `DeadlockDetected`) で request を `cooling_off` に戻した (request_id + attempt + max_attempts + scheduled_for + 例外クラス)
+- `erasure_retry_request_moved` — 上記で戻そうとした request が別の処理で状態を変えていた、または後の sweep が再 claim していた (何も書いていない。request_id のみ)。呼び出し元には元のエラーが返る (vector store なら 502、lock 競合なら 409 `RES-002`)
 - `erasure_request_cancel_lost` — ユーザーの取り消しが cron sweep の claim と競合し、行がすでに `in_progress` だった (取り消しは 409 `ERASURE-006`、erasure は実行される。request_id + 現在の status)
 - `erasure_sweep_retry_scheduled` — cron sweep 中の上記 (request_id + attempt + max_attempts + scheduled_for)。sweep は次の request に進み、実行件数には数えない
 - `erasure_failed_after_postgres_commit` — Postgres commit 後の失敗 (request_id + step + 例外クラスのみ)
@@ -366,7 +371,7 @@ Kagura Memory Cloud Operations
 監視 alert (将来):
 
 - `erasure_execute_failed` 発生 → admin に通知
-- `erasure_retry_scheduled` が続く → vector store の障害。4 回目で `failed` になる (§5.4)
+- `erasure_retry_scheduled` が続く → vector store の障害 (`error_class` が lock 系なら本人の workspace を操作し続けている処理)。4 回目で `failed` になる (§5.4)
 - `erasure_sweep_user_row_absent` (`ran_in_postgres=true`) 発生 → 中断した erasure。§5.4 を確認
 - `erasure_sweep_subject_reregistered` 発生 → 中断した erasure の後に同じ ID で再登録があった。新しいアカウントのセッションは削除していないので通常は対処不要 (本人から問い合わせがあれば状態を確認)
 - `erasure_sweep_executed count > 0` が 24h 続く → SLA 違反警告

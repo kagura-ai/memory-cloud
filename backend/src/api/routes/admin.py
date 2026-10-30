@@ -40,6 +40,7 @@ from services.email_service import get_email_service
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
+from utils.db_helpers import is_deadlock, is_lock_not_available
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
@@ -1064,7 +1065,10 @@ async def delete_user(
         await db.commit()
     except DBAPIError as exc:
         await db.rollback()
-        if getattr(exc.orig, "sqlstate", None) == "55P03":
+        # #2418: a deadlock victim (40P01) is the same "another operation
+        # holds these rows" as a NOWAIT conflict (55P03): nothing committed,
+        # the deletion can simply run again.
+        if is_lock_not_available(exc) or is_deadlock(exc):
             raise HTTPException(409, "Workspace is being modified; retry deletion") from exc
         raise
     except Exception:
@@ -1166,6 +1170,13 @@ async def admin_force_erase_user(
     After the last attempt the request is ``failed``
     (``vector_store_unavailable after N attempts``) and the error is the
     vector store's own (502).
+
+    Rows busy (#2418): the same 503 ``ERASURE-007`` when the workspace
+    hand-over or the Postgres step meets a row lock another operation holds
+    (``error_class`` ``LockNotAvailable`` or ``DeadlockDetected``); that step
+    is rolled back and the request rescheduled on the same attempt budget.
+    After the last attempt the request is ``failed``
+    (``lock_conflict after N attempts``) and the error is 409 ``RES-002``.
 
     This endpoint replaces the older `DELETE /admin/users/{user_id}` for
     new integrations. The old route is kept temporarily for backward

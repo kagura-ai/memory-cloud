@@ -65,6 +65,14 @@ an earlier attempt, and that then fails before the Postgres commit
 (``workspace_transfer_required``, an error inside the Postgres step) re-queues
 them the same way (#2358): the points may be gone and the account stays.
 
+Steps 2 and 3 hold the subject's ``users`` row (#2418), so they never wait on
+a workspace row: the subject's own workspace delete locks the workspace and
+then updates that ``users`` row. They take the live workspace rows ``NOWAIT``
+(the order is in ``identity_link_service.lock_identity_links``); a busy one,
+or a deadlock this run is the victim of, rolls the step back and reschedules
+the request like a vector-store failure, on the same attempt budget, until it
+fails with ``lock_conflict after N attempts: ...``.
+
 The Postgres step takes every surviving memory of the subject out of the
 embedding queue (#2363; a ``success`` row too since #2393): they are marked
 ``failed`` with ``ERASED_AUTHOR_EMBEDDING_ERROR`` and no retry budget, so the
@@ -81,9 +89,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -100,7 +109,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.session import get_session_manager
@@ -177,8 +186,10 @@ from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
+from utils.db_helpers import is_deadlock, is_lock_not_available
 from utils.exceptions import (
     BillingContractActiveError,
+    ConflictError,
     EmailDispatchError,
     ErasureAlreadyInProgressError,
     ErasureForbiddenError,
@@ -241,6 +252,26 @@ VECTOR_STORE_MAX_ATTEMPTS = 4
 # that carries the attempts across runs.
 _STEP_VECTOR_STORE = "vector_store"
 _RETRY_KEY = "retry"
+
+# #2418: a lock another transaction holds at steps 2-3 reschedules the request
+# like a vector-store failure, on the same attempt budget. The class names in
+# ``summary.retry.error_class`` (``55P03`` lock_not_available / ``40P01``).
+LOCK_CONFLICT_ERROR_CLASS = "LockNotAvailable"
+DEADLOCK_ERROR_CLASS = "DeadlockDetected"
+# the ``failure_reason`` prefix once the budget is spent on lock conflicts
+LOCK_CONFLICT_GAVE_UP = "lock_conflict after "
+
+# #2418: a NOWAIT workspace lock that loses to a short holder (a memory
+# create keeps its workspace row locked from its quota check until it
+# commits) is tried again inside the step, each try under a savepoint, before
+# the step gives up: 0.05 + 0.1 + 0.2 + 0.4 s of sleep at most. Sleeping is
+# not waiting on a lock, so a transaction that waits on the users row this
+# one holds (DELETE /workspaces/W) is in no lock cycle; it waits that much
+# longer, then gets the row when the step rolls back.
+WORKSPACE_LOCK_TRIES = 5
+WORKSPACE_LOCK_BACKOFF_SECONDS = 0.05
+
+_T = TypeVar("_T")
 
 # #2304: rows per re-queue statement after a cancelled or failed vector-store
 # retry — bounds the lock set of each UPDATE; one commit per batch.
@@ -323,15 +354,47 @@ def _previous_retry(summary: dict[str, Any] | None) -> tuple[dict[str, Any] | No
     return retry, attempts
 
 
-def _retry_block(attempts: int, error_class: str) -> dict[str, Any]:
-    """``summary.retry`` after a vector-store failure (#2282): counts and the
-    exception class only — no account id, no exception text."""
+def _retry_block(
+    attempts: int, error_class: str, *, step: str = _STEP_VECTOR_STORE
+) -> dict[str, Any]:
+    """``summary.retry`` after a vector-store failure (#2282) or a lock
+    conflict at steps 2-3 (#2418): counts, the step and the exception class
+    only — no account id, no exception text."""
     return {
         "attempts": attempts,
-        "step": _STEP_VECTOR_STORE,
+        "step": step,
         "error_class": error_class,
         "last_attempt_at": to_utc_iso(utcnow()),
     }
+
+
+class _LockConflict(ConflictError):
+    """#2418: a row erasure steps 2-3 do not wait for is held by another
+    transaction (a ``NOWAIT`` lock lost its race: ``55P03``), or Postgres
+    broke a lock cycle with this transaction as the victim (``40P01``).
+    The step's transaction is rolled back, so ``_execute`` reschedules the
+    request (``ErasureRetryScheduledError``) while attempts are left, and
+    fails it with this error (409) after the last one."""
+
+    def __init__(self, error_class: str) -> None:
+        super().__init__("Another operation holds rows the erasure needs")
+        self.error_class = error_class
+
+
+def _as_lock_conflict(exc: BaseException) -> _LockConflict | None:
+    """``exc`` as a :class:`_LockConflict` when it is one — raised by the
+    steps themselves, or a ``55P03`` / ``40P01`` from Postgres — else None."""
+    if isinstance(exc, _LockConflict):
+        return exc
+    if is_deadlock(exc):
+        conflict = _LockConflict(DEADLOCK_ERROR_CLASS)
+    elif is_lock_not_available(exc):
+        conflict = _LockConflict(LOCK_CONFLICT_ERROR_CLASS)
+    else:
+        return None
+    # keep the database error under it: the moved-row path re-raises it alone
+    conflict.__cause__ = exc
+    return conflict
 
 
 def _requeue_block(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1487,8 +1550,9 @@ class AccountErasureService:
         anything goes wrong.
 
         Raises:
-            ErasureRetryScheduledError: The vector store failed at step 1 with
-                attempts left; the row is ``cooling_off`` again.
+            ErasureRetryScheduledError: The vector store failed at step 1, or
+                a row lock another operation holds stopped step 2 or 3
+                (#2418), with attempts left; the row is ``cooling_off`` again.
         """
         summary: dict[str, Any] = {}
         # Read before any failure: the handlers below roll back first, which
@@ -1514,6 +1578,8 @@ class AccountErasureService:
         claimed_at = request.started_at
         # #2282: set when the vector store failed at step 1 on the last attempt
         vector_store_gave_up: str | None = None
+        # #2418: set when a lock conflict at steps 2-3 spent the last attempt
+        retry_gave_up: str | None = None
         # #2358: step 1 returned — the subject's points may be gone
         points_deleted = False
         erased_in_postgres = False
@@ -1581,15 +1647,42 @@ class AccountErasureService:
                 vector_store_gave_up = f"vector_store_unavailable after {attempt} attempts: {exc}"
                 raise
 
-            # Step 2: workspace ownership transfer / abort gate
-            step = "workspaces"
-            summary["workspaces"] = await self._handle_owned_workspaces(
-                target.user_id, owned_workspaces
-            )
+            # #2418: steps 2 and 3 hold the subject's ``users`` row and take the
+            # workspace rows NOWAIT (the subject's own DELETE /workspaces/W
+            # holds W, then updates that ``users`` row). A lock they lose, or
+            # a deadlock this run is the victim of, rolls the step back with
+            # nothing of it committed: the request is rescheduled like a
+            # vector-store failure, on the same attempt budget.
+            try:
+                # Step 2: workspace ownership transfer / abort gate
+                step = "workspaces"
+                summary["workspaces"] = await self._handle_owned_workspaces(
+                    target.user_id, owned_workspaces
+                )
 
-            # Step 3: Postgres deletes (FK-safe order)
-            step = "postgres"
-            erased = await self._delete_postgres(target, request_id=request_id)
+                # Step 3: Postgres deletes (FK-safe order)
+                step = "postgres"
+                erased = await self._delete_postgres(target, request_id=request_id)
+            except (_LockConflict, DBAPIError) as exc:
+                conflict = _as_lock_conflict(exc)
+                if conflict is None:
+                    raise
+                attempt = failed_attempts + 1
+                summary[_RETRY_KEY] = _retry_block(attempt, conflict.error_class, step=step)
+                if attempt < VECTOR_STORE_MAX_ATTEMPTS:
+                    raise ErasureRetryScheduledError(
+                        request_id=str(request_id),
+                        attempt=attempt,
+                        max_attempts=VECTOR_STORE_MAX_ATTEMPTS,
+                        scheduled_for=utcnow() + VECTOR_STORE_RETRY_DELAY,
+                        error_class=conflict.error_class,
+                        lock_conflict=True,
+                    ) from conflict
+                retry_gave_up = (
+                    f"{LOCK_CONFLICT_GAVE_UP}{attempt} attempts: {step}: "
+                    f"{conflict.error_class} (another operation held the account's rows)"
+                )
+                raise conflict from exc
             erased_in_postgres = True  # committed: no step below can undo it
             postgres: dict[str, int | str | None] = dict(erased.counts)
             # #2268: the re-run's bound for the subject's authored memories
@@ -1686,11 +1779,12 @@ class AccountErasureService:
             return
         except ErasureRetryScheduledError as exc:
             # #2282: nothing was erased in Postgres; the request goes back to
-            # the sweep's queue. The summary is the retry block alone (step 1
-            # is the first summary write, so there is nothing else to keep,
-            # and no ``postgres`` key can be on the row before that step's
-            # commit). Guarded by ``status = in_progress`` like the sweep's
-            # close, and by this run's ``started_at``: a row moved meanwhile,
+            # the sweep's queue. The summary is the retry block alone (no
+            # ``postgres`` key can be on the row before that step's commit,
+            # and the re-run writes every other key again; #2418: also after
+            # a lock conflict at steps 2-3). Guarded by ``status =
+            # in_progress`` like the sweep's close, and by this run's
+            # ``started_at``: a row moved meanwhile,
             # or claimed again by a later sweep (this run outlived the stale
             # cutoff), is not overwritten.
             await self.db.rollback()
@@ -1718,11 +1812,12 @@ class AccountErasureService:
                 logger.warning("erasure_retry_request_moved", request_id=str(request_id))
                 original = exc.__cause__
                 # invariant: step 1 raises this error ``from`` the QdrantError,
-                # so a moved row never falls through to the 503 below (which
-                # would promise a retry nobody scheduled)
-                if not isinstance(original, QdrantError):
+                # steps 2-3 ``from`` the lock conflict (#2418, a 409), so a
+                # moved row never falls through to the 503 below (which would
+                # promise a retry nobody scheduled)
+                if not isinstance(original, QdrantError | _LockConflict):
                     raise RuntimeError(
-                        "ErasureRetryScheduledError without a QdrantError cause"
+                        "ErasureRetryScheduledError without a QdrantError or lock-conflict cause"
                     ) from exc
                 # its own cause stays as it was (the client's error)
                 raise original from original.__cause__
@@ -1853,7 +1948,7 @@ class AccountErasureService:
             # #2282: the retry budget is spent (a retryable failure with
             # attempts left raised ErasureRetryScheduledError above); nothing
             # was erased in Postgres, a new request is the retry
-            failure_reason = vector_store_gave_up or str(exc)
+            failure_reason = vector_store_gave_up or retry_gave_up or str(exc)
             values: dict[str, Any] = {
                 "status": STATUS_FAILED,
                 "failure_reason": failure_reason[:1000],
@@ -1969,6 +2064,22 @@ class AccountErasureService:
               column, so user_id is the deterministic-ordering criterion.
             - Member(s) but no other admin -> raise WorkspaceTransferRequiredError.
             - Sole owner -> no transfer; workspace will be deleted in step 4.
+
+        Lock order (#2418, ``lock_identity_links``): the subject's ``users``
+        row (held since ``_guard_erasure_run``) -> the identity-link lock ->
+        each workspace to hand on, in id order (sorted here), ``NOWAIT``
+        (``_lock_without_waiting``). This transaction holds a ``users`` row,
+        so it never waits on a workspace row: the subject's own
+        ``DELETE /workspaces/W`` holds W and then updates that ``users`` row.
+        A workspace still busy after the tries raises :class:`_LockConflict`
+        and stops the step (``_execute`` reschedules the request); it is not
+        skipped, or a shared workspace could be left to the sole-owner
+        cascade of step 3.
+
+        Raises:
+            WorkspaceTransferRequiredError: Members but no other admin.
+            _LockConflict: A workspace to hand on is locked by another
+                transaction.
         """
         transfers: list[dict[str, str]] = []
         sole_owner_count = 0
@@ -1979,6 +2090,8 @@ class AccountErasureService:
         # Serialize successor selection with administrative/CLI/erasure deletion.
         # Do not acquire successor User locks after holding the subject User: the
         # shared identity lock provides this fence without reversing user order.
+        # Order: users -> link lock -> live workspaces (id, NOWAIT) -> soft-deleted
+        # workspaces -> contexts -> memories -> child rows (#2418).
         from services.identity_link_service import lock_identity_links
 
         await lock_identity_links(self.db)
@@ -1993,7 +2106,7 @@ class AccountErasureService:
         for m in members_result.scalars().all():
             members_by_ws.setdefault(m.workspace_id, []).append(m)
 
-        for ws in workspaces:
+        for ws in sorted(workspaces, key=lambda w: w.id):
             if ws.deleted_at is not None:
                 # Its owner deleted it: never handed on, hard-deleted with the
                 # sole-owned ones (#2406).
@@ -2018,8 +2131,13 @@ class AccountErasureService:
             # FOR UPDATE row — the workspaces were loaded by an UNLOCKED SELECT
             # (_list_owned_workspaces), so without this the epoch read-modify-write
             # below could race a concurrent transfer and lose an increment.
+            # #2418: NOWAIT — this transaction holds the subject's users row.
+            # A _LockConflict stops the step, never ``continue``: a skipped
+            # shared workspace would still be owned by the subject at step 3.
             try:
-                locked_ws = await lock_workspace_for_update(self.db, ws.id)
+                locked_ws = await self._lock_without_waiting(
+                    lambda workspace_id=ws.id: self._lock_workspace_nowait(workspace_id)
+                )
             except NotFoundException:
                 # The workspace was soft-deleted concurrently (it will be cascade-
                 # cleaned anyway) — nothing to auto-transfer. A benign race must NOT
@@ -2045,6 +2163,66 @@ class AccountErasureService:
             await self.db.commit()
 
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
+
+    async def _lock_without_waiting(self, lock: Callable[[], Awaitable[_T]]) -> _T:
+        """Run ``lock``, a ``NOWAIT`` lock that raises :class:`_LockConflict`
+        on a busy row, under a savepoint; on a conflict roll back to it, sleep
+        and try again, ``WORKSPACE_LOCK_TRIES`` times in all (#2418).
+
+        Raises:
+            _LockConflict: Still busy after the last try.
+        """
+        for attempt in range(WORKSPACE_LOCK_TRIES):
+            try:
+                async with self.db.begin_nested():
+                    return await lock()
+            except _LockConflict:
+                if attempt + 1 == WORKSPACE_LOCK_TRIES:
+                    raise
+            await asyncio.sleep(WORKSPACE_LOCK_BACKOFF_SECONDS * 2**attempt)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _lock_workspace_nowait(self, workspace_id: UUID) -> Workspace:
+        """``lock_workspace_for_update`` ``NOWAIT``, a busy row as
+        :class:`_LockConflict` (step 2, #2418)."""
+        try:
+            return await lock_workspace_for_update(self.db, workspace_id, nowait=True)
+        except ConflictError as exc:
+            if isinstance(exc, _LockConflict):
+                raise
+            raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
+
+    async def _lock_live_owned_workspaces_nowait(self, user_id: str) -> None:
+        """The live workspaces ``user_id`` owns, in id order, ``NOWAIT``
+        (step 3, #2418)."""
+        try:
+            await self.db.execute(
+                select(Workspace.id)
+                .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None))
+                .order_by(Workspace.id)
+                .with_for_update(nowait=True)
+            )
+        except DBAPIError as exc:
+            if is_lock_not_available(exc):
+                raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
+            raise
+
+    async def _lock_owned_workspaces(self, user_id: str) -> None:
+        """Lock the workspaces ``user_id`` owns in id order (#2418): the live
+        ones ``NOWAIT`` (``_lock_without_waiting``), then the soft-deleted
+        ones (waiting).
+
+        Raises:
+            _LockConflict: A live one is still locked by another transaction
+                after the tries.
+        """
+        await self._lock_without_waiting(lambda: self._lock_live_owned_workspaces_nowait(user_id))
+        await self.db.execute(
+            select(Workspace.id)
+            .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_not(None))
+            .order_by(Workspace.id)
+            .with_for_update()
+        )
 
     async def _guard_erasure_run(
         self, target: User, *, request_id: UUID | None, lock_request: bool = False
@@ -2112,6 +2290,14 @@ class AccountErasureService:
         from services.identity_link_service import lock_identity_links
 
         await lock_identity_links(self.db)
+        # #2418: the workspaces the subject owns, before the context union —
+        # the order admin deletion takes (``delete_user_rows``). The live ones
+        # NOWAIT: this transaction holds the subject's users row, and the
+        # subject's own DELETE /workspaces/W holds W and then updates it. The
+        # soft-deleted ones wait: no owner mutation or workspace delete takes
+        # them (``lock_workspace_for_update`` locks live rows only), and the
+        # deleted-workspace file repair locks them SKIP LOCKED holding no user.
+        await self._lock_owned_workspaces(user_id)
         owned_ws = select(Workspace.id).where(Workspace.owner_user_id == user_id)
         affected_contexts = select(Context.id).where(
             or_(

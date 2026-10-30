@@ -1013,7 +1013,12 @@ hands like a shared context. The `delete_admin` CLI uses the same handover and f
 administrative user deletion. Every other context the admin created in a
 surviving workspace passes to its live workspace owner; sole-owned
 workspaces are deleted. Shared workspace transfers commit before final CLI cleanup, so if
-cleanup fails, inspect the printed transfers before retrying.
+cleanup fails, inspect the printed transfers before retrying. A deletion that
+meets a row another operation holds (a lock it does not wait for, or a
+deadlock Postgres resolved against it, #2418) commits nothing: the API answers
+409 "Workspace is being modified; retry deletion", and the CLI prints
+"another operation holds the admin's rows; re-run" and exits 1, keeping the
+transfers it already committed.
 
 A soft-deleted workspace the deleted account owns is hard-deleted with it, on
 both the API and the CLI path (#2406); account erasure already hard-deleted
@@ -2026,7 +2031,16 @@ first run included, roughly three to four hours of outage) the request ends
 `failed` with `failure_reason` starting `vector_store_unavailable after 4
 attempts:` and keeps its ids; create a new request once the vector store is
 back. Any other error at that step (a configuration error building the
-client, say) fails the request at once, as before. An admin force-erase that
+client, say) fails the request at once, as before. From v0.134.0 (#2418) the
+workspace and Postgres steps take the subject's workspace rows without
+waiting (the erasure holds the subject's `users` row, which the subject's own
+workspace delete updates after locking the workspace). A lock lost to a short
+holder (a memory create locks its workspace row until it commits) is tried
+again for up to 0.75 s; one still busy rolls that
+step back and reschedules the request the same way, on the same attempt
+budget (`retry.step` `workspaces` / `postgres`, `error_class`
+`LockNotAvailable` / `DeadlockDetected`); after the last attempt it ends
+`failed` with `failure_reason` starting `lock_conflict after 4 attempts:`. An admin force-erase that
 hits the outage answers 503 `ERASURE-007` with `request_id` and
 `scheduled_for` in `details`; the request is kept and the sweep runs it, so
 do not retry the call (a second one answers 409 while the request waits), and

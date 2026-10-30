@@ -10,6 +10,7 @@ deterministic.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -121,6 +122,11 @@ def _user(
     )
 
 
+@asynccontextmanager
+async def _savepoint():
+    yield
+
+
 def _service() -> AccountErasureService:
     db = MagicMock()
     db.add = MagicMock()
@@ -129,6 +135,9 @@ def _service() -> AccountErasureService:
     db.rollback = AsyncMock()
     db.refresh = AsyncMock()
     db.execute = AsyncMock(return_value=MagicMock())  # a result, with sync methods
+    # #2418: a savepoint that lets the body's exception through (a bare
+    # MagicMock's __aexit__ would swallow it)
+    db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
     # Audit metadata is streamed through the AsyncSession API (#2348).
     audit_rows = MagicMock()
     audit_rows.__aiter__.return_value = []
@@ -4456,3 +4465,294 @@ def durable_vector_boundaries(monkeypatch):
         "services.vector_erasure.drain_vector_erasures",
         AsyncMock(return_value={"completed": 0, "pending": 0}),
     )
+
+
+# ---------------------------------------------------------------------------
+# #2418: a lock conflict at steps 2-3 reschedules the request
+# ---------------------------------------------------------------------------
+
+
+def _db_error(sqlstate: str) -> Any:
+    from sqlalchemy.exc import DBAPIError
+
+    return DBAPIError("SELECT 1", {}, SimpleNamespace(sqlstate=sqlstate))
+
+
+class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
+    """#2418: steps 2 and 3 hold the subject's ``users`` row, so they take
+    live workspace rows ``NOWAIT`` and turn a busy one into ``_LockConflict``."""
+
+    @pytest.mark.asyncio
+    async def test_step_two_locks_nowait_in_id_order_and_stops_at_a_busy_one(self):
+        from services.account_erasure_service import _LockConflict
+        from utils.exceptions import ConflictError
+
+        svc = _service()
+        low, high = sorted([uuid4(), uuid4()])
+        first = SimpleNamespace(id=low, deleted_at=None, owner_user_id="u-1", ownership_epoch=1)
+        second = SimpleNamespace(id=high, deleted_at=None, owner_user_id="u-1", ownership_epoch=1)
+        rows = [
+            SimpleNamespace(workspace_id=ws, user_id=user, role=role)
+            for ws in (low, high)
+            for user, role in (("u-1", WorkspaceRole.OWNER), ("u-2", WorkspaceRole.ADMIN))
+        ]
+        members = MagicMock()
+        members.scalars.return_value.all.return_value = rows
+        svc.db.execute = AsyncMock(return_value=members)
+        svc.db.commit = AsyncMock()
+
+        async def locking(db, workspace_id, **kwargs):
+            if workspace_id == low:
+                return first
+            raise ConflictError("Workspace is being modified")
+
+        lock = AsyncMock(side_effect=locking)
+        with (
+            patch("services.account_erasure_service.lock_workspace_for_update", lock),
+            patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep,
+        ):
+            with pytest.raises(_LockConflict) as caught:
+                # handed in out of order: locked in id order all the same
+                await svc._handle_owned_workspaces("u-1", [second, first])
+
+        # the busy one is tried WORKSPACE_LOCK_TRIES times, sleeping between
+        assert [c.args[1] for c in lock.await_args_list] == [low] + [high] * 5
+        assert all(c.kwargs == {"nowait": True} for c in lock.await_args_list)
+        assert [c.args[0] for c in sleep.await_args_list] == [0.05, 0.1, 0.2, 0.4]
+        assert svc.db.begin_nested.call_count == 6  # one savepoint per try
+        # stopped, not skipped: nothing is committed (the caller rolls back)
+        svc.db.commit.assert_not_awaited()
+        assert caught.value.error_class == "LockNotAvailable"
+        assert isinstance(caught.value.__cause__, ConflictError)
+
+    @pytest.mark.asyncio
+    async def test_step_three_locks_live_workspaces_nowait_then_soft_deleted_ones(self):
+        from sqlalchemy.dialects import postgresql
+
+        svc = _service()
+        statements: list[Any] = []
+        svc.db.execute = AsyncMock(side_effect=lambda stmt, *a, **k: statements.append(stmt))
+
+        await svc._lock_owned_workspaces("u-1")
+
+        live, soft_deleted = (str(s.compile(dialect=postgresql.dialect())) for s in statements)
+        assert "workspaces.deleted_at IS NULL" in live
+        assert live.endswith("ORDER BY workspaces.id FOR UPDATE NOWAIT")
+        assert "workspaces.deleted_at IS NOT NULL" in soft_deleted
+        assert soft_deleted.endswith("ORDER BY workspaces.id FOR UPDATE")
+
+    @pytest.mark.asyncio
+    async def test_step_three_turns_a_lost_nowait_into_a_lock_conflict(self):
+        from services.account_erasure_service import _LockConflict
+
+        svc = _service()
+        svc.db.execute = AsyncMock(side_effect=_db_error("55P03"))
+
+        with patch("services.account_erasure_service.asyncio.sleep", AsyncMock()):
+            with pytest.raises(_LockConflict) as caught:
+                await svc._lock_owned_workspaces("u-1")
+        # tried 5 times, the soft-deleted ones never reached
+        assert svc.db.execute.await_count == 5
+        assert caught.value.error_class == "LockNotAvailable"
+
+    @pytest.mark.asyncio
+    async def test_a_short_holder_is_waited_out_by_the_tries(self):
+        """A memory create keeps its workspace row locked until it commits:
+        the second try gets it, and the step goes on."""
+        svc = _service()
+        busy_once = AsyncMock(side_effect=[_db_error("55P03"), MagicMock(), MagicMock()])
+        svc.db.execute = busy_once
+
+        with patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep:
+            await svc._lock_owned_workspaces("u-1")
+
+        sleep.assert_awaited_once_with(0.05)
+        assert busy_once.await_count == 3  # live (busy), live, soft-deleted
+
+    @pytest.mark.asyncio
+    async def test_step_three_passes_any_other_database_error_on(self):
+        from sqlalchemy.exc import DBAPIError
+
+        svc = _service()
+        svc.db.execute = AsyncMock(side_effect=_db_error("57014"))
+
+        with pytest.raises(DBAPIError):
+            await svc._lock_owned_workspaces("u-1")
+
+
+class TestALockConflictAtStepsTwoAndThreeReschedules:
+    """#2418: ``_LockConflict``, a ``55P03`` or a ``40P01`` from step 2 or 3
+    rolls the step back and reschedules the request on the vector store's
+    attempt budget; the last attempt fails it with ``lock_conflict after``."""
+
+    @staticmethod
+    def _failing(svc: AccountErasureService, step: str, exc: BaseException) -> None:
+        if step == "workspaces":
+            svc._handle_owned_workspaces = AsyncMock(side_effect=exc)
+        else:
+            svc._delete_postgres = AsyncMock(side_effect=exc)
+
+    @pytest.mark.parametrize("step", ["workspaces", "postgres"])
+    @pytest.mark.parametrize(
+        ("cause", "error_class"),
+        [
+            ("conflict", "LockNotAvailable"),
+            ("55P03", "LockNotAvailable"),
+            ("40P01", "DeadlockDetected"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_first_conflict_reschedules(self, step, cause, error_class):
+        from services.account_erasure_service import (
+            VECTOR_STORE_MAX_ATTEMPTS,
+            _LockConflict,
+        )
+        from utils.exceptions import ErasureRetryScheduledError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        exc = _LockConflict("LockNotAvailable") if cause == "conflict" else _db_error(cause)
+        self._failing(svc, step, exc)
+        request = _execute_request(self_service=False)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(ErasureRetryScheduledError) as caught:
+                await svc._execute(request, _user())
+
+        if step == "workspaces":
+            svc._delete_postgres.assert_not_awaited()
+        svc._finalize.assert_not_awaited()
+        stmt = _request_update(order)
+        assert order[-3:] == ["rollback", stmt, "commit"]
+        params = stmt.compile().params
+        assert params["status"] == STATUS_COOLING_OFF
+        retry = params["deleted_data_summary"]["retry"]
+        assert params["deleted_data_summary"] == {"retry": retry}
+        assert {k: v for k, v in retry.items() if k != "last_attempt_at"} == {
+            "attempts": 1,
+            "step": step,
+            "error_class": error_class,
+        }
+        assert "failure_reason" not in params
+        err = caught.value
+        assert (err.status_code, err.error_code) == (503, "ERASURE-007")
+        assert err.details["error_class"] == error_class
+        assert err.details["max_attempts"] == VECTOR_STORE_MAX_ATTEMPTS
+        assert str(err).startswith("Another operation holds rows the erasure needs")
+        assert isinstance(err.__cause__, _LockConflict)
+        if cause != "conflict":
+            # the database error stays under the conflict built from it
+            assert err.__cause__.__cause__ is exc
+
+    @pytest.mark.asyncio
+    async def test_it_shares_the_vector_store_budget(self):
+        from utils.exceptions import ErasureRetryScheduledError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        self._failing(svc, "postgres", _db_error("55P03"))
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"retry": {"attempts": 2, "step": "vector_store"}}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(ErasureRetryScheduledError) as caught:
+                await svc._execute(request, _user())
+
+        assert caught.value.attempt == 3
+        retry = _request_update(order).compile().params["deleted_data_summary"]["retry"]
+        assert (retry["attempts"], retry["step"]) == (3, "postgres")
+
+    @pytest.mark.asyncio
+    async def test_the_last_attempt_fails_the_request(self):
+        from models.erasure import FAILURE_AFTER_POSTGRES_COMMIT, STATUS_FAILED
+        from services.account_erasure_service import _LockConflict
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        svc._requeue_after_points_deleted = AsyncMock()
+        self._failing(svc, "workspaces", _db_error("40P01"))
+        request = _execute_request(self_service=True)
+        request.deleted_data_summary = {"retry": {"attempts": 3, "step": "postgres"}}
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(_LockConflict):
+                await svc._execute(request, _user())
+
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"] == (
+            "lock_conflict after 4 attempts: workspaces: DeadlockDetected "
+            "(another operation held the account's rows)"
+        )
+        assert not params["failure_reason"].startswith(FAILURE_AFTER_POSTGRES_COMMIT)
+        assert params["deleted_data_summary"]["retry"]["attempts"] == 4
+        # the account stays and step 1 ran: the embeddings are re-queued
+        svc._requeue_after_points_deleted.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_any_other_database_error_fails_at_once(self):
+        from sqlalchemy.exc import DBAPIError
+
+        from models.erasure import STATUS_FAILED
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        svc._requeue_after_points_deleted = AsyncMock()
+        self._failing(svc, "postgres", _db_error("23505"))
+        request = _execute_request(self_service=False)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(DBAPIError):
+                await svc._execute(request, _user())
+
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["deleted_data_summary"].get("retry") is None
+
+    @pytest.mark.asyncio
+    async def test_a_row_moved_meanwhile_answers_the_conflict(self):
+        from services.account_erasure_service import _LockConflict
+        from utils.exceptions import ConflictError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        _recording_execute(svc, rowcount=0)
+        self._failing(svc, "postgres", _db_error("55P03"))
+        request = _execute_request(self_service=False)
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(return_value={"kagura_memories": 0}),
+            ),
+            patch("services.account_erasure_service.logger") as log,
+        ):
+            with pytest.raises(ConflictError) as caught:
+                await svc._execute(request, _user())
+
+        assert isinstance(caught.value, _LockConflict)
+        assert caught.value.status_code == 409
+        assert str(caught.value) == "Another operation holds rows the erasure needs"
+        # the 55P03 is kept under it (re-raised ``from`` its own cause)
+        from sqlalchemy.exc import DBAPIError
+
+        assert isinstance(caught.value.__cause__, DBAPIError)
+        events = [c.args[0] for c in log.warning.call_args_list]
+        assert "erasure_retry_request_moved" in events
+        assert "erasure_retry_scheduled" not in events
