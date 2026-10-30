@@ -1432,7 +1432,7 @@ class ErasureRetryScheduledError(MemoryCloudException):
     ):
         when = to_utc_iso(scheduled_for)
         cause = (
-            "Another operation holds the account's workspaces"
+            "Another operation holds rows the erasure needs"
             if lock_conflict
             else "The vector store is unavailable"
         )

@@ -528,6 +528,26 @@ class WorkspaceService:
         workspace = await lock_workspace_for_update(self.db, workspace_id)
         ensure_no_billing_contract([workspace])
 
+        # Issue #218: the users whose current workspace this is, locked in
+        # user_id order right after the workspace row and before any row of
+        # it (#2418). Their preference is cleared below. An account erasure
+        # holds its subject's users row and then deletes the subject's rows
+        # in workspaces it does not own (external keys, files): taking them
+        # here first means this transaction never holds a workspace-scoped
+        # row while it waits on a users row.
+        users = (
+            (
+                await self.db.execute(
+                    select(User)
+                    .where(User.current_workspace_id == workspace_id)
+                    .order_by(User.user_id)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+
         # Issue #223: Delete external API keys (hard delete to allow re-creation)
         # The unique constraint is (user_id, key_name), so we need to delete them
         # to allow the same user to create the same key in a new workspace.
@@ -555,11 +575,6 @@ class WorkspaceService:
 
         # Issue #218: Clear current_workspace_id for all users who had this workspace as current
         # This ensures they get a new workspace auto-created on next login
-        result = await self.db.execute(
-            select(User).where(User.current_workspace_id == workspace_id)
-        )
-        users = result.scalars().all()
-
         for user in users:
             user.current_workspace_id = None
             # Issue #246: current_context_id removed

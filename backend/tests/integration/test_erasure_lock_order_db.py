@@ -95,21 +95,41 @@ async def _until_blocked(maker, pid_of, timeout: float = 15) -> None:
 
 
 @contextmanager
-def _workspace_delete_paused():
-    """``delete_workspace`` stops after it locked W and deleted its external
-    keys, before it clears the ``users`` rows' ``current_workspace_id``."""
+def _workspace_delete_paused(at: str = "lock"):
+    """``delete_workspace`` stops holding its workspace row: right after it
+    locked it (``at="lock"``: nothing else held yet), or after it deleted its
+    external keys and purged its files (``at="purge"``: the users rows it
+    clears are locked by then, #2418; before, it locked them only at the end)."""
+    import services.workspace_service as workspace_module
+
     holding, release = asyncio.Event(), asyncio.Event()
     holder: dict = {}
-    original = FileStorageService.purge_workspace_files
 
-    async def paused(self, workspace_id, **kwargs):
-        result = await original(self, workspace_id, **kwargs)
-        holder["pid"] = await _pid(self.db)
+    async def pause(db) -> None:
+        holder["pid"] = await _pid(db)
         holding.set()
         await asyncio.wait_for(release.wait(), 30)
+
+    if at == "lock":
+        original_lock = workspace_module.lock_workspace_for_update
+
+        async def paused_lock(db, workspace_id, **kwargs):
+            workspace = await original_lock(db, workspace_id, **kwargs)
+            await pause(db)
+            return workspace
+
+        with patch.object(workspace_module, "lock_workspace_for_update", paused_lock):
+            yield holding, release, holder
+        return
+
+    original_purge = FileStorageService.purge_workspace_files
+
+    async def paused_purge(self, workspace_id, **kwargs):
+        result = await original_purge(self, workspace_id, **kwargs)
+        await pause(self.db)
         return result
 
-    with patch.object(FileStorageService, "purge_workspace_files", paused):
+    with patch.object(FileStorageService, "purge_workspace_files", paused_purge):
         yield holding, release, holder
 
 
@@ -450,6 +470,114 @@ async def test_admin_deletion_of_the_successor_waits_for_the_erasure_transfer(
 
 
 # ---------------------------------------------------------------------------
+# A short holder is waited out; a workspace the subject does not own
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_step_two_waits_out_a_short_holder(db_session, connector_world):
+    """A memory create keeps its workspace row locked from its quota check
+    until it commits. Step 2 tries its NOWAIT lock again for a moment, so a
+    holder that commits within it does not cost an erasure attempt."""
+    world = connector_world
+    subject = await world.user("subject")
+    successor = await world.user("successor")
+    ws_id = (await world.workspace(subject, **{successor: "admin"})).id
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async def step_two() -> dict:
+        async with maker() as db:
+            await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
+            owned = list(
+                (
+                    await db.execute(select(Workspace).where(Workspace.owner_user_id == subject))
+                ).scalars()
+            )
+            result = await AccountErasureService(db)._handle_owned_workspaces(subject, owned)
+            await db.commit()
+            return result
+
+    async with maker() as holder:
+        await holder.execute(select(Workspace.id).where(Workspace.id == ws_id).with_for_update())
+        erasing = asyncio.create_task(step_two())
+        await asyncio.sleep(0.15)  # the first tries lose
+        assert not erasing.done()
+        await holder.commit()
+    result = await asyncio.wait_for(erasing, 15)
+
+    assert result["transferred"] == [{"workspace_id": str(ws_id), "new_owner_user_id": successor}]
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_workspace_the_subject_does_not_own_never_deadlocks_the_erasure(
+    db_session, connector_world
+):
+    """Cycle D: O deletes W2, the subject's current workspace, which holds
+    the subject's external key. The delete locks the users rows it updates
+    right after W2, before the keys, so it never holds a key while it waits on
+    ``users[S]``, and the erasure (which deletes the subject's keys while
+    holding ``users[S]``) never waits on the delete."""
+    from models.auth import ExternalAPIKey
+
+    world = connector_world
+    owner = await world.user("owner")
+    subject = await world.user("subject")
+    ws_id = (await world.workspace(owner, **{subject: "member"})).id
+    db_session.add(
+        ExternalAPIKey(
+            key_name="openai",
+            provider="openai",
+            encrypted_value="x",
+            user_id=subject,
+            workspace_id=ws_id,
+        )
+    )
+    await _current_workspace(db_session, subject, ws_id)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async def delete_ws() -> None:
+        async with maker() as db:
+            await WorkspaceService(db).delete_workspace(ws_id, deleted_by=owner)
+
+    async def erase() -> None:
+        async with maker() as db:
+            await AccountErasureService(db).admin_force_erase(
+                target_user_id=subject,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test",
+            )
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        _workspace_delete_paused("purge") as (holding, release, holder),
+    ):
+        try:
+            deleting = asyncio.create_task(delete_ws())
+            tasks.append(deleting)
+            await asyncio.wait_for(holding.wait(), 15)
+            erasing = asyncio.create_task(erase())
+            tasks.append(erasing)
+            await _done_or_waiting_on(maker, erasing, holder)
+            release.set()
+            erasure_result, delete_result = await asyncio.wait_for(
+                asyncio.gather(erasing, deleting, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert delete_result is None, delete_result
+    assert erasure_result is None, erasure_result
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == subject)) is None
+    deleted_at = await db_session.scalar(select(Workspace.deleted_at).where(Workspace.id == ws_id))
+    assert deleted_at is not None
+
+
+# ---------------------------------------------------------------------------
 # The order itself: a lock trace of every holder
 # ---------------------------------------------------------------------------
 
@@ -459,9 +587,11 @@ _ROW_LOCK = re.compile(
 _FIRST_FROM = re.compile(r"\bFROM (\w+)")
 _DML = re.compile(r"^\s*(UPDATE|DELETE FROM) (\w+)")
 
-# rank of each phase in the global order; ``users_dml`` (an UPDATE / DELETE of
-# a users row) is checked by the users rules only, not by the phase order:
-# ``delete_workspace`` updates ``users`` after its workspace row by design
+# rank of each phase in the global order after the users rows. The users
+# rows have rules of their own (``_order_violations``): they come first, except
+# in ``delete_workspace``, which locks them right after its workspace row and
+# before any row in it (``users`` first would make it wait on the workspace
+# while holding users rows).
 # ``ws_soft`` is not ranked against the contexts: admin deletion locks the
 # contexts the user created (``transfer_user_ownership``) before
 # ``delete_user_rows`` locks the soft-deleted workspaces, and that order is
@@ -469,12 +599,14 @@ _DML = re.compile(r"^\s*(UPDATE|DELETE FROM) (\w+)")
 # owner's users row (erasure, admin and CLI deletion) or SKIP LOCKED (the
 # deleted-workspace file repair), so two waiters on one always serialize on
 # that users row first. It is still ordered after the live ones.
-_RANK = {"users": 0, "link": 1, "ws_live": 2, "contexts": 4, "memories": 5}
+_RANK = {"link": 1, "ws_live": 2, "contexts": 4, "memories": 5}
 
 
 @dataclass(frozen=True)
 class _Lock:
-    kind: str  # users | users_dml | link | ws_live | ws_soft | contexts | memories | other
+    # users | users_dml | link | ws_live | ws_soft | contexts | memories
+    # | other (a locking SELECT of another table) | child (its UPDATE / DELETE)
+    kind: str
     nowait: bool
     sql: str
 
@@ -508,6 +640,9 @@ def _classify(statement: str, parameters: object) -> _Lock | None:
         return _Lock("users_dml", False, sql)
     lock = _ROW_LOCK.search(sql)
     if lock is None:
+        if dml and dml.group(2) not in ("workspaces", "contexts", "memories"):
+            # the rows it writes stay locked: workspace-scoped child rows
+            return _Lock("child", False, sql)
         return None
     nowait = lock.group(2) == " NOWAIT"
     if lock.group(2) == " SKIP LOCKED":
@@ -575,6 +710,9 @@ def _order_violations(transaction: list[_Lock]) -> list[str]:
         if lock.kind in ("users", "users_dml"):
             if linked and not user_before_link:
                 problems.append(f"users lock after the link lock: {lock.sql[:160]}")
+            if not holds_user and seen & {"child", "other", "contexts", "memories"}:
+                # ``delete_workspace``: after its workspace row, before its rows
+                problems.append(f"users lock after a workspace-scoped row: {lock.sql[:160]}")
             holds_user = True
             if not linked:
                 user_before_link = True
@@ -616,8 +754,15 @@ def test_the_rules_catch_each_inversion():
     assert _order_violations(tx(("users", False), ("contexts", False), ("ws_soft", False))) == []
     # a re-lock of a users row the transaction already holds is fine
     assert _order_violations(tx(("users", False), ("link", False), ("users", False))) == []
-    # delete_workspace: the workspace row, then the users UPDATE
-    assert _order_violations(tx(("ws_live", False), ("users_dml", False))) == []
+    # delete_workspace: the workspace row, the users rows, then its rows
+    assert (
+        _order_violations(
+            tx(("ws_live", False), ("users", False), ("child", False), ("users_dml", False))
+        )
+        == []
+    )
+    # ... not its rows first: it would hold them while waiting on a users row
+    assert _order_violations(tx(("ws_live", False), ("child", False), ("users_dml", False)))
 
 
 @pytest.mark.asyncio
@@ -733,5 +878,6 @@ async def test_linking_member_removal_and_workspace_delete_take_the_global_order
     assert [("users", False), ("link", False)] == [
         k for k in kinds[0] if k[0] in ("users", "link")
     ][:2]
-    # delete_workspace: its workspace row, then the users preference UPDATE
-    assert any(tx[:1] == [("ws_live", False)] and ("users_dml", False) in tx for tx in kinds), kinds
+    # delete_workspace: its workspace row, then the users whose preference it
+    # clears, before any of its rows
+    assert any(tx[:2] == [("ws_live", False), ("users", False)] for tx in kinds), kinds

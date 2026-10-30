@@ -1171,6 +1171,13 @@ async def admin_force_erase_user(
     (``vector_store_unavailable after N attempts``) and the error is the
     vector store's own (502).
 
+    Rows busy (#2418): the same 503 ``ERASURE-007`` when the workspace
+    hand-over or the Postgres step meets a row lock another operation holds
+    (``error_class`` ``LockNotAvailable`` or ``DeadlockDetected``); that step
+    is rolled back and the request rescheduled on the same attempt budget.
+    After the last attempt the request is ``failed``
+    (``lock_conflict after N attempts``) and the error is 409 ``RES-002``.
+
     This endpoint replaces the older `DELETE /admin/users/{user_id}` for
     new integrations. The old route is kept temporarily for backward
     compatibility. It does not remove all OAuth artifacts, and its vector

@@ -10,6 +10,7 @@ deterministic.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -121,6 +122,11 @@ def _user(
     )
 
 
+@asynccontextmanager
+async def _savepoint():
+    yield
+
+
 def _service() -> AccountErasureService:
     db = MagicMock()
     db.add = MagicMock()
@@ -129,6 +135,9 @@ def _service() -> AccountErasureService:
     db.rollback = AsyncMock()
     db.refresh = AsyncMock()
     db.execute = AsyncMock(return_value=MagicMock())  # a result, with sync methods
+    # #2418: a savepoint that lets the body's exception through (a bare
+    # MagicMock's __aexit__ would swallow it)
+    db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
     # Audit metadata is streamed through the AsyncSession API (#2348).
     audit_rows = MagicMock()
     audit_rows.__aiter__.return_value = []
@@ -4492,14 +4501,25 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
         svc.db.execute = AsyncMock(return_value=members)
         svc.db.commit = AsyncMock()
 
-        lock = AsyncMock(side_effect=[first, ConflictError("Workspace is being modified")])
-        with patch("services.account_erasure_service.lock_workspace_for_update", lock):
+        async def locking(db, workspace_id, **kwargs):
+            if workspace_id == low:
+                return first
+            raise ConflictError("Workspace is being modified")
+
+        lock = AsyncMock(side_effect=locking)
+        with (
+            patch("services.account_erasure_service.lock_workspace_for_update", lock),
+            patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep,
+        ):
             with pytest.raises(_LockConflict) as caught:
                 # handed in out of order: locked in id order all the same
                 await svc._handle_owned_workspaces("u-1", [second, first])
 
-        assert [c.args[1] for c in lock.await_args_list] == [low, high]
+        # the busy one is tried WORKSPACE_LOCK_TRIES times, sleeping between
+        assert [c.args[1] for c in lock.await_args_list] == [low] + [high] * 5
         assert all(c.kwargs == {"nowait": True} for c in lock.await_args_list)
+        assert [c.args[0] for c in sleep.await_args_list] == [0.05, 0.1, 0.2, 0.4]
+        assert svc.db.begin_nested.call_count == 6  # one savepoint per try
         # stopped, not skipped: nothing is committed (the caller rolls back)
         svc.db.commit.assert_not_awaited()
         assert caught.value.error_class == "LockNotAvailable"
@@ -4528,9 +4548,26 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
         svc = _service()
         svc.db.execute = AsyncMock(side_effect=_db_error("55P03"))
 
-        with pytest.raises(_LockConflict):
+        with patch("services.account_erasure_service.asyncio.sleep", AsyncMock()):
+            with pytest.raises(_LockConflict) as caught:
+                await svc._lock_owned_workspaces("u-1")
+        # tried 5 times, the soft-deleted ones never reached
+        assert svc.db.execute.await_count == 5
+        assert caught.value.error_class == "LockNotAvailable"
+
+    @pytest.mark.asyncio
+    async def test_a_short_holder_is_waited_out_by_the_tries(self):
+        """A memory create keeps its workspace row locked until it commits:
+        the second try gets it, and the step goes on."""
+        svc = _service()
+        busy_once = AsyncMock(side_effect=[_db_error("55P03"), MagicMock(), MagicMock()])
+        svc.db.execute = busy_once
+
+        with patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep:
             await svc._lock_owned_workspaces("u-1")
-        svc.db.execute.assert_awaited_once()  # the soft-deleted ones are not reached
+
+        sleep.assert_awaited_once_with(0.05)
+        assert busy_once.await_count == 3  # live (busy), live, soft-deleted
 
     @pytest.mark.asyncio
     async def test_step_three_passes_any_other_database_error_on(self):
@@ -4605,8 +4642,11 @@ class TestALockConflictAtStepsTwoAndThreeReschedules:
         assert (err.status_code, err.error_code) == (503, "ERASURE-007")
         assert err.details["error_class"] == error_class
         assert err.details["max_attempts"] == VECTOR_STORE_MAX_ATTEMPTS
-        assert str(err).startswith("Another operation holds the account's workspaces")
+        assert str(err).startswith("Another operation holds rows the erasure needs")
         assert isinstance(err.__cause__, _LockConflict)
+        if cause != "conflict":
+            # the database error stays under the conflict built from it
+            assert err.__cause__.__cause__ is exc
 
     @pytest.mark.asyncio
     async def test_it_shares_the_vector_store_budget(self):
@@ -4708,6 +4748,11 @@ class TestALockConflictAtStepsTwoAndThreeReschedules:
 
         assert isinstance(caught.value, _LockConflict)
         assert caught.value.status_code == 409
+        assert str(caught.value) == "Another operation holds rows the erasure needs"
+        # the 55P03 is kept under it (re-raised ``from`` its own cause)
+        from sqlalchemy.exc import DBAPIError
+
+        assert isinstance(caught.value.__cause__, DBAPIError)
         events = [c.args[0] for c in log.warning.call_args_list]
         assert "erasure_retry_request_moved" in events
         assert "erasure_retry_scheduled" not in events

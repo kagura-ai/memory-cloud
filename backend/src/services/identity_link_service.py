@@ -85,9 +85,12 @@ async def lock_identity_links(db: AsyncSession) -> None:
 
     Take it AFTER every ``users`` row lock: never lock a ``users`` row after
     this lock unless the transaction already holds that row. A transaction
-    holding a ``users`` row never waits on a workspace (or workspace-scoped)
-    row: ``WorkspaceService.delete_workspace`` holds the workspace row and
-    then updates ``users.current_workspace_id``.
+    holding a ``users`` row never waits on a workspace row (account erasure
+    retries its ``NOWAIT`` briefly under savepoints instead). The one
+    exception to "users first" is ``WorkspaceService.delete_workspace``: it
+    locks its workspace row, then the ``users`` rows whose
+    ``current_workspace_id`` it clears, before any workspace-scoped row, so it
+    never holds such a row while it waits on a ``users`` row.
     """
     await db.execute(_LINK_LOCK_SQL)
 

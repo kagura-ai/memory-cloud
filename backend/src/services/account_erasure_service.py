@@ -89,9 +89,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -260,6 +261,18 @@ DEADLOCK_ERROR_CLASS = "DeadlockDetected"
 # the ``failure_reason`` prefix once the budget is spent on lock conflicts
 LOCK_CONFLICT_GAVE_UP = "lock_conflict after "
 
+# #2418: a NOWAIT workspace lock that loses to a short holder (a memory
+# create keeps its workspace row locked from its quota check until it
+# commits) is tried again inside the step, each try under a savepoint, before
+# the step gives up: 0.05 + 0.1 + 0.2 + 0.4 s of sleep at most. Sleeping is
+# not waiting on a lock, so a transaction that waits on the users row this
+# one holds (DELETE /workspaces/W) is in no lock cycle; it waits that much
+# longer, then gets the row when the step rolls back.
+WORKSPACE_LOCK_TRIES = 5
+WORKSPACE_LOCK_BACKOFF_SECONDS = 0.05
+
+_T = TypeVar("_T")
+
 # #2304: rows per re-queue statement after a cancelled or failed vector-store
 # retry — bounds the lock set of each UPDATE; one commit per batch.
 EMBEDDING_REQUEUE_BATCH = 500
@@ -359,11 +372,12 @@ class _LockConflict(ConflictError):
     """#2418: a row erasure steps 2-3 do not wait for is held by another
     transaction (a ``NOWAIT`` lock lost its race: ``55P03``), or Postgres
     broke a lock cycle with this transaction as the victim (``40P01``).
-    The step's transaction is rolled back with nothing of it committed, so
-    the request is rescheduled (``ErasureRetryScheduledError``)."""
+    The step's transaction is rolled back, so ``_execute`` reschedules the
+    request (``ErasureRetryScheduledError``) while attempts are left, and
+    fails it with this error (409) after the last one."""
 
     def __init__(self, error_class: str) -> None:
-        super().__init__("Another operation holds the account's rows; the erasure runs again")
+        super().__init__("Another operation holds rows the erasure needs")
         self.error_class = error_class
 
 
@@ -373,10 +387,14 @@ def _as_lock_conflict(exc: BaseException) -> _LockConflict | None:
     if isinstance(exc, _LockConflict):
         return exc
     if is_deadlock(exc):
-        return _LockConflict(DEADLOCK_ERROR_CLASS)
-    if is_lock_not_available(exc):
-        return _LockConflict(LOCK_CONFLICT_ERROR_CLASS)
-    return None
+        conflict = _LockConflict(DEADLOCK_ERROR_CLASS)
+    elif is_lock_not_available(exc):
+        conflict = _LockConflict(LOCK_CONFLICT_ERROR_CLASS)
+    else:
+        return None
+    # keep the database error under it: the moved-row path re-raises it alone
+    conflict.__cause__ = exc
+    return conflict
 
 
 def _requeue_block(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1992,11 +2010,8 @@ class AccountErasureService:
     # ------------------------------------------------------------------
 
     async def _list_owned_workspaces(self, user_id: str) -> list[Workspace]:
-        """All workspaces this user owns (drives the ownership-transfer / member
-        checks), in id order: step 2 locks them in this order (#2418)."""
-        result = await self.db.execute(
-            select(Workspace).where(Workspace.owner_user_id == user_id).order_by(Workspace.id)
-        )
+        """All workspaces this user owns (drives the ownership-transfer / member checks)."""
+        result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
         return list(result.scalars().all())
 
     async def _check_no_blocking_workspace_transfers(self, user_id: str) -> None:
@@ -2052,11 +2067,12 @@ class AccountErasureService:
 
         Lock order (#2418, ``lock_identity_links``): the subject's ``users``
         row (held since ``_guard_erasure_run``) -> the identity-link lock ->
-        each workspace to hand on, in id order, ``NOWAIT``. This transaction
-        holds a ``users`` row, so it never waits on a workspace row: the
-        subject's own ``DELETE /workspaces/W`` holds W and then updates that
-        ``users`` row. A busy workspace raises :class:`_LockConflict` and
-        stops the step (``_execute`` reschedules the request); it is not
+        each workspace to hand on, in id order (sorted here), ``NOWAIT``
+        (``_lock_without_waiting``). This transaction holds a ``users`` row,
+        so it never waits on a workspace row: the subject's own
+        ``DELETE /workspaces/W`` holds W and then updates that ``users`` row.
+        A workspace still busy after the tries raises :class:`_LockConflict`
+        and stops the step (``_execute`` reschedules the request); it is not
         skipped, or a shared workspace could be left to the sole-owner
         cascade of step 3.
 
@@ -2116,12 +2132,12 @@ class AccountErasureService:
             # (_list_owned_workspaces), so without this the epoch read-modify-write
             # below could race a concurrent transfer and lose an increment.
             # #2418: NOWAIT — this transaction holds the subject's users row.
+            # A _LockConflict stops the step, never ``continue``: a skipped
+            # shared workspace would still be owned by the subject at step 3.
             try:
-                locked_ws = await lock_workspace_for_update(self.db, ws.id, nowait=True)
-            except ConflictError as exc:
-                # Stop the step, never ``continue``: a skipped shared
-                # workspace would still be owned by the subject at step 3.
-                raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
+                locked_ws = await self._lock_without_waiting(
+                    lambda workspace_id=ws.id: self._lock_workspace_nowait(workspace_id)
+                )
             except NotFoundException:
                 # The workspace was soft-deleted concurrently (it will be cascade-
                 # cleaned anyway) — nothing to auto-transfer. A benign race must NOT
@@ -2148,13 +2164,37 @@ class AccountErasureService:
 
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
-    async def _lock_owned_workspaces(self, user_id: str) -> None:
-        """Lock the workspaces ``user_id`` owns in id order (#2418): the live
-        ones ``NOWAIT``, then the soft-deleted ones (waiting).
+    async def _lock_without_waiting(self, lock: Callable[[], Awaitable[_T]]) -> _T:
+        """Run ``lock``, a ``NOWAIT`` lock that raises :class:`_LockConflict`
+        on a busy row, under a savepoint; on a conflict roll back to it, sleep
+        and try again, ``WORKSPACE_LOCK_TRIES`` times in all (#2418).
 
         Raises:
-            _LockConflict: A live one is locked by another transaction.
+            _LockConflict: Still busy after the last try.
         """
+        for attempt in range(WORKSPACE_LOCK_TRIES):
+            try:
+                async with self.db.begin_nested():
+                    return await lock()
+            except _LockConflict:
+                if attempt + 1 == WORKSPACE_LOCK_TRIES:
+                    raise
+            await asyncio.sleep(WORKSPACE_LOCK_BACKOFF_SECONDS * 2**attempt)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _lock_workspace_nowait(self, workspace_id: UUID) -> Workspace:
+        """``lock_workspace_for_update`` ``NOWAIT``, a busy row as
+        :class:`_LockConflict` (step 2, #2418)."""
+        try:
+            return await lock_workspace_for_update(self.db, workspace_id, nowait=True)
+        except ConflictError as exc:
+            if isinstance(exc, _LockConflict):
+                raise
+            raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
+
+    async def _lock_live_owned_workspaces_nowait(self, user_id: str) -> None:
+        """The live workspaces ``user_id`` owns, in id order, ``NOWAIT``
+        (step 3, #2418)."""
         try:
             await self.db.execute(
                 select(Workspace.id)
@@ -2166,6 +2206,17 @@ class AccountErasureService:
             if is_lock_not_available(exc):
                 raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
             raise
+
+    async def _lock_owned_workspaces(self, user_id: str) -> None:
+        """Lock the workspaces ``user_id`` owns in id order (#2418): the live
+        ones ``NOWAIT`` (``_lock_without_waiting``), then the soft-deleted
+        ones (waiting).
+
+        Raises:
+            _LockConflict: A live one is still locked by another transaction
+                after the tries.
+        """
+        await self._lock_without_waiting(lambda: self._lock_live_owned_workspaces_nowait(user_id))
         await self.db.execute(
             select(Workspace.id)
             .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_not(None))
