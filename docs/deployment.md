@@ -1011,10 +1011,21 @@ not pick, or a soft-deleted context) and a connector's write target
 (connectors create theirs private) keep other people's data, so they change
 hands like a shared context. The `delete_admin` CLI uses the same handover and file cleanup as
 administrative user deletion. Every other context the admin created in a
-surviving workspace passes to its live workspace owner; in a soft-deleted
-workspace the admin owns it stays with the workspace (#2406); sole-owned
+surviving workspace passes to its live workspace owner; sole-owned
 workspaces are deleted. Shared workspace transfers commit before final CLI cleanup, so if
 cleanup fails, inspect the printed transfers before retrying.
+
+A soft-deleted workspace the deleted account owns is hard-deleted with it, on
+both the API and the CLI path, and by account erasure (#2406). Its owner
+already deleted it, so it is never handed to a successor: everything in it
+goes, other members' contexts, memories, keys and files included. The CLI
+prompt lists these workspaces with their context and memory counts; the API
+response lists them under `purged_workspaces`. Each hard-deleted workspace
+writes a `workspace_purged` `audit_logs` row (actor, previous owner, counts)
+in the deletion's transaction. Its file rows go with it and the stored
+objects are queued for deletion (#2395). Its vector points are deleted
+after the commit, best-effort; the daily `sweep_orphan_vectors` removes any
+point that call leaves, so the points are not part of the cascade.
 
 Administrative `DELETE /api/v1/admin/users/{user_id}` requires explicit
 successors for every owned workspace and every shared context the user
@@ -1039,8 +1050,9 @@ Context successors must be non-viewer members with access to that context,
 or be becoming its workspace owner in the same request. All API transfers,
 cleanup and transfer audit records commit together; notification email follows
 commit. Existing connector context bindings and other authors' memories survive.
-A soft-deleted owned workspace must first be restored and transferred separately.
-Concurrent ownership changes return `409`; refresh the selections and retry.
+A soft-deleted owned workspace takes no successor: it is hard-deleted with the
+user (see above), and a selection naming it or a context in it is refused with
+`409`. Concurrent ownership changes return `409`; refresh the selections and retry.
 
 The admin users screen currently sends a bodyless DELETE and shows the `409`
 reason (how many workspaces and shared contexts still need a successor, or
@@ -1056,6 +1068,43 @@ The endpoints, for a deployment that scripts it: `GET`/`POST
 /api/v1/me/account/identity-links/unlink` and `POST
 /api/v1/me/account/identity-links/leave`, browser session only (an API key
 or OAuth bearer token is refused with `403`).
+
+### Workspaces left by accounts deleted before v0.134.0 (Issue #2406)
+
+Before #2406, `cli.delete_admin` left the soft-deleted workspaces the admin
+owned in place, still naming the deleted account as owner. Count them with
+this read-only query (`psql` against the application database):
+
+```sql
+SELECT w.id, w.deleted_at,
+       (SELECT count(*) FROM contexts c WHERE c.workspace_id = w.id) AS contexts,
+       (SELECT count(*) FROM memories m
+         JOIN contexts c ON c.id = m.context_id
+        WHERE c.workspace_id = w.id) AS memories
+FROM workspaces w
+WHERE w.deleted_at IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = w.owner_user_id)
+ORDER BY w.deleted_at;
+```
+
+Each row is a workspace its owner deleted and nobody can reach. To remove
+one, delete its row with a backup at hand, one id at a time:
+
+```sql
+BEGIN;
+DELETE FROM workspaces
+ WHERE id = 'WORKSPACE_UUID'
+   AND deleted_at IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = owner_user_id);
+-- expect DELETE 1, then
+COMMIT;
+```
+
+The foreign keys cascade to its contexts, memories, keys, members and file
+rows; the file rows queue their stored objects for deletion (#2395), and the
+next `sweep_orphan_vectors` run removes the vector points. Until a leftover
+is removed, `create_admin` refuses a login ID whose `local:<login_id>`
+user_id is still a workspace owner.
 
 ### Moving ownership instead (Issue #1783)
 
