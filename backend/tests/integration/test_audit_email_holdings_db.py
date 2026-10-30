@@ -263,9 +263,15 @@ async def test_an_address_an_earlier_deleted_account_held(
     world: World, capsys: pytest.CaptureFixture[str], path: str
 ) -> None:
     """X held x and was deleted (no user row, never erased); S signed up
-    with x later. X's rows — before S existed — stay raw."""
-    s, gone, admin = world.sub("s"), world.sub("gone"), world.sub("admin")
+    with x later. X's rows — before S existed — stay raw. K held x even
+    earlier, by sync rows: its row is K's, so the re-run does not count it
+    among the rows that may have been S's."""
+    s, gone, admin, k = world.sub("s"), world.sub("gone"), world.sub("admin"), world.sub("k")
     x = world.email("x")
+    await world.user(k, world.email("k2"), at(-10))
+    await world.sync(k, world.email("k1"), x, at(-3))
+    await world.sync(k, x, world.email("k2"), at(-2))
+    about_k = await world.row(admin, "admin@example.com", f"user:{x}", at(-2.5))
     about_gone = await world.row(admin, "admin@example.com", f"user:{x}", at(1))
     by_gone = await world.row(gone, x, "workspace:w", at(2), action="member_add")
     await world.user(s, x, at(5))
@@ -285,7 +291,8 @@ async def test_an_address_an_earlier_deleted_account_held(
         # before S's first audit row: maybe not S's yet — kept and counted
         assert _lines(out, f"audit mentions  {request}  2 {cli.MENTIONS_KEPT}")
 
-    assert await world.values(about_gone, by_gone, about_s) == [
+    assert await world.values(about_k, about_gone, by_gone, about_s) == [
+        ("admin@example.com", f"user:{x}"),
         ("admin@example.com", f"user:{x}"),
         (x, "workspace:w"),
         ("admin@example.com", f"user:{_p(x)}"),
@@ -514,3 +521,78 @@ async def test_another_request_with_an_unreadable_end_is_counted_not_fatal(
         ("admin@example.com", f"user:{_p(a)}"),
         ("admin@example.com", f"user:{b}"),
     ]
+
+
+async def test_an_address_held_again_after_a_change_is_rewritten_in_both_holdings(
+    world: World,
+) -> None:
+    """A → B → A: the live erasure knows A in plaintext, so its earlier
+    holding is rewritten too, even when no row of the subject's names A."""
+    s, admin = world.sub("s"), world.sub("admin")
+    a, b = world.email("a"), world.email("b")
+    await world.user(s, a, at(0))
+    await world.sync(s, a, b, at(10))
+    await world.sync(s, b, a, at(20))
+    rows = [
+        await world.row(admin, "admin@example.com", f"user:{address}", at(day))
+        for address, day in ((a, 5), (b, 15), (a, 25))
+    ]
+
+    counts = await world.live_erasure(s)
+
+    assert counts["audit_addresses_not_recovered"] == 0
+    assert await world.values(*rows) == [
+        ("admin@example.com", f"user:{_p(address)}") for address in (a, b, a)
+    ]
+
+
+async def test_a_sync_the_database_stamped_after_the_apps_now_still_counts(
+    world: World,
+) -> None:
+    """The live tenure takes every later sync whatever this process's clock
+    says (the database's clock stamps the rows): a sync stamped ahead of
+    ``utcnow()`` still ends the earlier holding."""
+    s, admin = world.sub("s"), world.sub("admin")
+    a, b = world.email("a"), world.email("b")
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    await world.user(s, b, at(0))
+    await world.sync(s, a, b, future)
+    about_a = await world.row(admin, "admin@example.com", f"user:{a}", at(5))
+
+    await world.live_erasure(s)
+
+    assert await world.values(about_a) == [("admin@example.com", f"user:{_p(a)}")]
+
+
+async def test_an_earlier_holder_erased_before_v0124_is_bounded_by_its_request(
+    world: World,
+) -> None:
+    """Another account erased on a version whose request row kept the raw
+    sub (its audit rows carry the pseudonym) synced into x: its holding ends
+    at its request's end, so S's later rows naming x are S's."""
+    s, admin = world.sub("s"), world.sub("admin")
+    gone = world.sub("gone")
+    x = world.email("x")
+    await world.sync(_p(gone), world.email("o"), x, at(1))
+    async with _maker(world.engine)() as db:
+        legacy = ErasureRequest(
+            id=uuid.uuid4(),
+            user_id=gone,
+            user_email_hash=sha256_hex(x),
+            initiated_by="admin-x",
+            is_self_service=False,
+            reason_code="other",
+            status="complete",
+            completed_at=at(5).replace(tzinfo=UTC),
+            deleted_data_summary={"postgres": {"memories_scrubbed": 0}},
+        )
+        db.add(legacy)
+        await db.commit()
+    world.requests.append(legacy.id)
+    await world.user(s, x, at(10))
+    about_s = await world.row(admin, "admin@example.com", f"user:{x}", at(12))
+
+    counts = await world.live_erasure(s)
+
+    assert counts["audit_mentions_kept"] == 0
+    assert await world.values(about_s) == [("admin@example.com", f"user:{_p(x)}")]

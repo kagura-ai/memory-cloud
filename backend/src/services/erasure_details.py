@@ -340,14 +340,22 @@ class _Sync:
 def erasure_end(
     summary: Mapping[str, Any] | None,
     completed_at: datetime | None,
-    started_at: datetime | None,
+    started_at: datetime | None = None,
 ) -> datetime | None:
-    """When an erasure ran, naive UTC: ``memory_scrub_at`` (#2268, since
-    v0.124.0), else ``completed_at``, else ``started_at`` plus the sweep's
-    crash cutoff (a run is over by then); None without any.
+    """When an erasure ran, naive UTC: the re-run's bound of the authored
+    strip arm (``_authored_by``) and the end of the subject's last address
+    holding in a re-run (#2359).
 
-    The re-run's bound of the authored strip arm (``_existed_at``) and the
-    end of the subject's last holding in a re-run (#2359)."""
+    ``memory_scrub_at`` (#2268): when the erasure locked the subject's
+    memories — every row it saw is older, every later edit waited for its
+    commit. A request from before v0.124.0 has only ``completed_at``, a few
+    statements later (a row written in between holds at most the scrubbed
+    value; erring that way only marks it). A request that failed after its
+    Postgres step before v0.124.0 has neither: its ``started_at`` plus an
+    hour (#2268 review) — the sweep's own crash cutoff, so the scrub ran
+    before it and every row the erasure saw is older. Rows surviving members
+    wrote on the subject's memories within that hour are stripped and marked
+    too; later ones are left alone. Without ``started_at``, no bound."""
     scrubbed = memory_scrub_at(summary)
     if scrubbed is not None:
         return scrubbed
@@ -408,10 +416,15 @@ async def recover_addresses(
     if near:
         scopes.append(AuditLog.user_id.in_(sorted(set(near))))
     scopes.append(None)
+    checked: set[str] = set()
     for scope in scopes:
         if set(by_hmac) >= hmacs and set(by_sha256) >= sha256s:
             break
         async for value in _audit_values(db, scope):
+            if value in checked:
+                continue
+            if scope is not None:
+                checked.add(value)
             if hmacs and (digest := hmac_sha256_hex(value, key)) in hmacs:
                 by_hmac[digest] = value
             if sha256s and (digest := sha256_hex(value)) in sha256s:
@@ -542,11 +555,15 @@ async def email_holdings(
     now = to_naive_utc(now)
     key = get_settings().audit_hmac_key
     syncs = await _sync_rows(db, AuditLog.user_id.in_(ids)) if ids else []
+    # a live tenure's address is known in plaintext: also where the subject
+    # held it before (A → B → A), whatever the table still names
+    live = {hmac_sha256_hex(t.email, key): t.email for t in tenures if t.email is not None}
     if recovery is None:
-        live_digests = {hmac_sha256_hex(t.email, key) for t in tenures if t.email is not None}
-        wanted = {d for s in syncs for d in (s.old, s.new) if d} - live_digests
+        wanted = {d for s in syncs for d in (s.old, s.new) if d} - set(live)
         sha256s = {t.email_hash for t in tenures if t.email_hash and not t.live}
         recovery = await recover_addresses(db, hmacs=wanted, sha256s=sha256s, near=ids)
+    if live:
+        recovery = AddressRecovery({**recovery.by_hmac, **live}, recovery.by_sha256)
     known = [tenure for tenure in tenures if tenure.live or tenure.end is not None]
     # a tenure with no end: its last address, where a row still names it
     not_recovered = sum(
@@ -563,11 +580,13 @@ async def email_holdings(
     for tenure in known:
         until = now if tenure.end is None else to_naive_utc(tenure.end)
         start = to_naive_utc(tenure.start) if tenure.start is not None else None
+        # the live tenure takes every later sync: the database's clock, not
+        # this process's ``now``, stamped them
         rows = [
             s
             for s in syncs
             if (after is None or s.at > after)
-            and s.at <= until
+            and (tenure.live or s.at <= until)
             and (start is None or s.at >= start)
         ]
         used.update(s.id for s in rows)
@@ -673,6 +692,9 @@ async def _other_holdings(
                 )
             ).all()
         )
+    # every erasure that ran (one row per erasure: a small table): a request
+    # row from before v0.124.0 may still store the raw sub while the
+    # account's audit rows carry its pseudonym, so it is keyed by both
     requests = (
         await db.execute(
             select(
@@ -681,11 +703,7 @@ async def _other_holdings(
                 ErasureRequest.deleted_data_summary,
                 ErasureRequest.completed_at,
                 ErasureRequest.started_at,
-            ).where(
-                ErasureRequest.user_id.in_(accounts)
-                | ErasureRequest.user_email_hash.in_(sorted(hashes)),
-                (ErasureRequest.status == STATUS_COMPLETE) | ran_in_postgres(),
-            )
+            ).where((ErasureRequest.status == STATUS_COMPLETE) | ran_in_postgres())
         )
     ).all()
     ends: dict[str, list[datetime]] = defaultdict(list)
@@ -693,6 +711,8 @@ async def _other_holdings(
         end = _holder_end(summary, completed_at, started_at)
         if end is not None:
             ends[user_id].append(end)
+            if not is_pseudonym(user_id):
+                ends[erasure_pseudonym(user_id)].append(end)
 
     out: dict[str, list[Interval]] = defaultdict(list)
     by_account: dict[tuple[str, str], list[_Sync]] = defaultdict(list)
@@ -1182,9 +1202,13 @@ async def count_audit_mentions_kept(
         )
         if address.owners:
             overlap = overlap & AuditLog.user_id.not_in(address.owners)
+        # a row a known other holder wrote while it held the address is that
+        # holder's, not an unknown one: only the rest is uncertain
         before = _within(AuditLog.created_at, address.uncertain) & ~_within(
             AuditLog.created_at, address.windows
         )
+        if address.excluded:
+            before = before & ~_within(AuditLog.created_at, address.excluded)
         arms.append(named & (overlap | before))
     if not arms:
         return 0

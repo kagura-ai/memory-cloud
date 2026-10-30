@@ -179,6 +179,7 @@ from services.erasure_details import (  # noqa: E402
     AUDIT_SUBJECT_METADATA_KEYS,
     ERASURE_AUDIT_ACTION,
     REPROCESS_AUDIT_ACTION,
+    USER_RESOURCE_PREFIX,
     EmailHoldings,
     PayloadSync,
     RestoreReport,
@@ -247,8 +248,6 @@ NOT_RECOVERED = (
     "address holding(s) not recovered, their rows left raw (no plaintext or HMAC "
     "match, or an unknown start or end; see the module docstring)"
 )
-# the ``resource`` prefix of a row about a member (``user:{email}``)
-USER_RESOURCE = "user:"
 
 
 @dataclass
@@ -370,7 +369,7 @@ async def _audit_subs(db: AsyncSession, pseudonyms: Collection[str] | None = Non
     if pseudonyms is not None and not pseudonyms:
         return AuditSubs({}, {})
     email = AuditLog.user_email
-    named = func.substr(AuditLog.resource, len(USER_RESOURCE) + 1)
+    named = func.substr(AuditLog.resource, len(USER_RESOURCE_PREFIX) + 1)
     candidates = union(
         select(AuditLog.user_id.label("sub")),
         select(email.label("sub")),
@@ -378,7 +377,7 @@ async def _audit_subs(db: AsyncSession, pseudonyms: Collection[str] | None = Non
             email.endswith("@api", autoescape=True)
         ),
         select(named.label("sub")).where(
-            AuditLog.resource.startswith(USER_RESOURCE, autoescape=True)
+            AuditLog.resource.startswith(USER_RESOURCE_PREFIX, autoescape=True)
         ),
     ).subquery()
     rows = await db.stream(
@@ -453,27 +452,9 @@ async def _count_audit_rows(db: AsyncSession, account_id: str) -> int:
     ).scalar_one()
 
 
-def _existed_at(
-    summary: dict[str, Any] | None,
-    completed_at: datetime | None,
-    started_at: datetime | None = None,
-) -> datetime | None:
-    """The bound of the authored arm of the strip (``_authored_by``), naive UTC.
-
-    ``memory_scrub_at`` (#2268): when the erasure locked the subject's
-    memories — every row it saw is older, every later edit waited for its
-    commit. A request from before v0.124.0 has only ``completed_at``, a few
-    statements later (a row written in between holds at most the scrubbed
-    value; erring that way only marks it). A request that failed after its
-    Postgres step before v0.124.0 has neither: its ``started_at`` plus an
-    hour (#2268 review) — the sweep's own crash cutoff, so the scrub ran
-    before it and every row the erasure saw is older. Rows surviving members
-    wrote on the subject's memories within that hour are stripped and marked
-    too; later ones are left alone. Without ``started_at``, no bound.
-    The same bound ends the subject's last address holding (#2359,
-    ``erasure_end``).
-    """
-    return erasure_end(summary, completed_at, started_at)
+# The bound of the authored arm of the strip (``_authored_by``) and the end of
+# the subject's last address holding (#2359): ``erasure_end``'s docstring.
+_existed_at = erasure_end
 
 
 def _tenure_end(
@@ -668,10 +649,11 @@ async def _reprocess_one(
         )
         audited, mentions, kept = 0, 0, 0
         sweep = holdings is not None
-        # the subject's own rows (by the account id) take every address of
-        # theirs, without a window (the account id proves the row theirs),
-        # so no own row is left for the mention UPDATE (the dry run's count
-        # leaves them all out)
+        # the subject's own rows (by the account id) take its addresses inside
+        # its holdings (outside them an address on its row may be an admin's
+        # who got it later, ``user_id`` being the target's); the mention
+        # UPDATE then finds no own row of its windows (the dry run's count
+        # leaves the own rows out)
         addresses = holdings.addresses if holdings is not None else ()
         subs = [audit_account_id] if audit_account_id is not None and sweep else []
         if sweep:

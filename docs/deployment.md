@@ -1933,8 +1933,10 @@ changed their email are not affected. The re-run streams the table once per
 run. A row naming an address is rewritten only
 inside the member's holding and outside every interval another account is
 known to have held it (an instant both share goes to the other account).
-The member's own rows (by account id) still get every address in
-`user_email`. The erasure summary adds `postgres.audit_mentions_kept` and
+The member's own rows (by account id) get each address inside the member's
+holding whatever another holder's estimated interval says (outside it, an
+address on such a row may be an admin's who got it later and acted on the
+member). The erasure summary adds `postgres.audit_mentions_kept` and
 `postgres.audit_addresses_not_recovered`; the re-run prints
 `audit mentions <request id> <n> row(s) kept: …` and
 `audit addresses <request id> <n> address holding(s) not recovered …` —
