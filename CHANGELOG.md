@@ -17,14 +17,14 @@ Deletion and erasure correctness: deleting a user removes the soft-deleted works
 ### Fixed
 
 - **Session rollback payload sync** ([#2346](https://github.com/kagura-ai/memory-cloud/issues/2346)): a group whose re-read fails is rolled back and skipped instead of being patched from the values queued at restore time, and a failed group commit is rolled back so the next group reads normally. The `rollback_session` reply no longer fails after a rolled-back step.
-- **`rollback_session` checks the restored type**: a restore that would write back a memory type the caller may not write is skipped as `not_permitted`, and the dry run shows no restored fields for it.
+- **`rollback_session` checks the restored type** ([#2432](https://github.com/kagura-ai/memory-cloud/pull/2432)): a restore that would write back a memory type the caller may not write is skipped as `not_permitted`, and the dry run shows no restored fields for it.
 
 ### Notes
 
 - No migration, no new environment variables. `AUDIT_HMAC_KEY` must be the key the email-sync audit rows were written with; addresses written under an earlier key stay raw and are counted as not recovered.
 - **After deploy:** run `reprocess_erasures --all` (plan), check the "kept" and "not recovered" counts, then `--all --apply --yes` once. A second plan can show a higher not-recovered count, because the first apply pseudonymized the plaintext it recovered.
 - **Leftover workspaces:** run the read-only query in `docs/deployment.md` ("Workspaces left by accounts deleted before v0.134.0"). Delete soft-deleted leftovers with the documented block and re-own live ones; until then `create_admin` refuses colliding login IDs.
-- **Monitoring:** `erasure_retry_scheduled` with a lock `error_class` means a workspace operation raced an erasure; a request that ends `failed` with `lock_conflict after 4 attempts` erased nothing in Postgres and can be requested again.
+- **Monitoring:** `erasure_retry_scheduled` with a lock `error_class` means a workspace operation raced an erasure; a request that ends `failed` with `lock_conflict after 4 attempts` deleted nothing in Postgres, but its vector points are already gone and any workspace hand-overs from the workspaces step stay committed; request the erasure again to finish it.
 
 ## [v0.132.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.132.0) — 2026-10-29
 
