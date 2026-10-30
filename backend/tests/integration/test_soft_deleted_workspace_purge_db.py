@@ -52,6 +52,22 @@ async def purge_audits(db_session: AsyncSession) -> AsyncIterator[list[UUID]]:
     await db_session.commit()
 
 
+@pytest_asyncio.fixture
+async def storage_keys(db_session: AsyncSession) -> AsyncIterator[list[str]]:
+    """Storage keys whose deletion-queue rows (#2395, queued by the
+    ``file_objects`` delete trigger where it is installed) are removed
+    afterwards, so the queue other tests drain starts empty."""
+    from models.file_objects import StorageObjectDeletion
+
+    keys: list[str] = []
+    yield keys
+    await db_session.rollback()
+    await db_session.execute(
+        delete(StorageObjectDeletion).where(StorageObjectDeletion.storage_key.in_(keys))
+    )
+    await db_session.commit()
+
+
 @pytest.fixture
 def vectors():
     """The vector store calls made after the commit."""
@@ -103,7 +119,7 @@ async def _count(db, model, *where) -> int:
 
 @pytest.mark.asyncio
 async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
-    connector_world, db_session, purge_audits, vectors
+    connector_world, db_session, purge_audits, vectors, storage_keys
 ):
     world = connector_world
     target = await world.user("departing")
@@ -116,6 +132,7 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     for ctx, author in ((shared, target), (shared, other), (theirs, other), (None, other)):
         await _memory(db_session, gone_id, ctx, author)
     await world.personal_key(other, gone)
+    storage_keys.append(f"files/{uuid4()}")
     db_session.add(
         FileObject(
             workspace_id=gone_id,
@@ -124,7 +141,7 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
             size_bytes=3,
             content_type="text/plain",
             filename="a.txt",
-            storage_key=f"files/{uuid4()}",
+            storage_key=storage_keys[0],
             status="uploaded",
             created_by=other,
             deleted_at=utcnow(),
