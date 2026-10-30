@@ -81,10 +81,12 @@ def test_auth_critical_dependency_has_upper_bound(requirement: Requirement) -> N
         # #1701 overrides Authlib's PKCE and grant hooks; verified on 1.9.1 (#2449).
         ("1.9.1", True),
         ("1.9.9", True),
-        # 1.9.0 still has GHSA-8m4g-j4wp-wgcg (empty HMAC key), 1.8 the rest.
+        # The floor is a security floor (#2449): 1.9.0 still has
+        # GHSA-8m4g-j4wp-wgcg (empty HMAC key), 1.8 and older the other
+        # advisories. (Before 1.8 the get_allowed_scope / PKCE behaviour also
+        # differs from what the overrides expect, #1701.)
         ("1.9.0", False),
         ("1.8.0", False),
-        # Before 1.8: get_allowed_scope / PKCE behaviour the overrides do not expect.
         ("1.7.9", False),
         # The next minor, including its pre-releases, needs a deliberate bump.
         ("1.10.0rc1", False),

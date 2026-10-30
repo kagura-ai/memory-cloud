@@ -172,7 +172,7 @@ class TestPkceCodeVerifierEnforcement:
     ``result`` parameter (``self, grant, result``).
     ``_invoke_validate_code_verifier`` introspects the live signature and
     passes a ``MagicMock`` for ``result`` when needed. pyproject.toml pins
-    authlib to 1.8.x since #1705, so only the 1.4+ signature is installed.
+    authlib to 1.9.x (#1705, #2449), so only the 1.4+ signature is installed.
     """
 
     @staticmethod
