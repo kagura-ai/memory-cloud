@@ -233,6 +233,11 @@ async def handle_rollback_session(
             context = await _resolve_context(
                 db, user_id, context_id, write_role="roll back sessions"
             )
+            # Read now: the dry run's rollback, and the payload step's after a
+            # failed re-read or commit (#2346), expire the row, and reading it
+            # then would lazy-load outside the async session's greenlet.
+            context_fields = _context_response_fields(context)
+            workspace_id_of_context = context.workspace_id
             role = await context_role(db, user_id, context_id)
             if role not in (ContextRole.OWNER, ContextRole.EDITOR):
                 return _error_response(
@@ -279,7 +284,7 @@ async def handle_rollback_session(
                 rollback_session(
                     db,
                     scope=scope,
-                    workspace_id=context.workspace_id,
+                    workspace_id=workspace_id_of_context,
                     requested_by=user_id,
                     dry_run=dry_run,
                     classify=classify_cause,
@@ -365,7 +370,7 @@ async def handle_rollback_session(
             "events": result.events,
             "remaining": result.remaining,
             **({"rollback_id": result.rollback_id} if result.rollback_id is not None else {}),
-            **_context_response_fields(context),
+            **context_fields,
         }
         items = result.listed_items()
         listing: dict[str, Any] = {"items": items}
