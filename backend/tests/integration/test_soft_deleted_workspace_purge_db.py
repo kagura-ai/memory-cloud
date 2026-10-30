@@ -409,3 +409,32 @@ async def test_a_locked_soft_deleted_workspace_is_waited_for(
     response = await asyncio.wait_for(task, 15)
 
     assert [ws["id"] for ws in response["purged_workspaces"]] == [str(gone_id)]
+
+
+@pytest.mark.asyncio
+async def test_purge_counts_cover_only_each_workspace_s_own_rows(connector_world, db_session):
+    """The counts in the prompt and the audit row are per workspace: another
+    workspace's contexts and memories never add to them."""
+    from services.user_deletion_service import workspace_purge_counts
+
+    world = connector_world
+    owner = await world.user("owner")
+    counted = await world.workspace(owner)
+    other = await world.workspace(owner)
+    counted_id, other_id = counted.id, other.id
+    mine = await _context(db_session, counted_id, owner)
+    for ctx in (mine, mine, None):
+        await _memory(db_session, counted_id, ctx, owner)
+    theirs = await _context(db_session, other_id, owner)
+    for ctx in (theirs, theirs, theirs, theirs, None):
+        await _memory(db_session, other_id, ctx, owner)
+    await db_session.flush()
+
+    one = await workspace_purge_counts(db_session, Workspace.id == counted_id)
+    both = await workspace_purge_counts(db_session, Workspace.id.in_([counted_id, other_id]))
+
+    assert [(ws.contexts, ws.memories) for ws in one] == [(1, 3)]
+    assert {ws.id: (ws.contexts, ws.memories) for ws in both} == {
+        counted_id: (1, 3),
+        other_id: (1, 5),
+    }
