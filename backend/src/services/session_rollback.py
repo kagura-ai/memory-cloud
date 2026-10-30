@@ -696,14 +696,10 @@ async def _read_batch(
             )
         ).all()
     )
-    permitted = await _permitted(
-        db,
-        user_id,
-        workspace_id,
-        scope.context_id,
-        memories,
-        _restored_types(events, memories),
-    )
+    check = _WriteCheck(db, user_id, workspace_id, scope.context_id)
+    permitted = {
+        memory_id: await check(memory, memory.type) for memory_id, memory in memories.items()
+    }
 
     items: list[PlanItem] = []
     for memory_id in chosen:
@@ -725,7 +721,7 @@ async def _read_batch(
                 permitted=permitted.get(memory_id, False),
                 current=versioned_snapshot(memory),
             )
-        items.append(plan_memory(session_events, state))
+        items.append(await _judge_restored_type(plan_memory(session_events, state), memory, check))
     items = _defer_extra_unforgets(items)
     events_taken = sum(len(item.event_ids) for item in items)
     return _Batch(
@@ -752,74 +748,65 @@ def _defer_extra_unforgets(items: list[PlanItem]) -> list[PlanItem]:
     return kept
 
 
-def _restored_types(
-    events: Mapping[UUID, list[SessionEvent]], memories: Mapping[UUID, Any]
-) -> dict[UUID, str | None]:
-    """The type each memory would get back, where it is not the live one.
+class _WriteCheck:
+    """forget's per-memory write check, once per (author, type, source) group."""
 
-    Only memories the session did not create (a created one is forgotten,
-    nothing is put back). The value is the ``prior`` the plan restores; None
-    when that prior has no type to judge (never today: erasure marks only
-    ``details``), which ``_permitted`` denies.
-    """
-    restored: dict[UUID, str | None] = {}
-    for memory_id, session_events in events.items():
-        memory = memories.get(memory_id)
-        if memory is None or session_events[0].kind == REVISION_KIND_CREATED:
-            continue
-        updates = [e for e in session_events if e.kind == REVISION_KIND_UPDATED]
-        values, _ = combined_prior(updates)
-        if "type" in values and values["type"] != memory.type:
-            restored[memory_id] = values["type"]
-    return restored
+    def __init__(self, db: AsyncSession, user_id: str, workspace_id: UUID, context_id: UUID):
+        from services.permission_service import PermissionService
 
+        self._perm = PermissionService(db)
+        self._user_id = user_id
+        self._workspace_id = workspace_id
+        self._context_id = context_id
+        self._decided: dict[tuple[str, str, str | None], bool] = {}
 
-async def _permitted(
-    db: AsyncSession,
-    user_id: str,
-    workspace_id: UUID,
-    context_id: UUID,
-    memories: dict[UUID, Any],
-    restored_types: Mapping[UUID, str | None],
-) -> dict[UUID, bool]:
-    """forget's per-memory write check, once per (author, type, source) group.
+    async def __call__(self, memory: Any, memory_type: str | None) -> bool:
+        """Whether the caller may write ``memory`` as a memory of ``memory_type``
+        (an unknown type, None, is refused)."""
+        from services.permission_service import CallerId, MemoryAuthorId
 
-    A memory whose type the rollback would put back (``restored_types``) must
-    pass the check under that type too, as ``reference(version=N)`` judges
-    an earlier version's type: the binding's per-memory type filter applies
-    to the type written back, not only to the live one. A restored type that
-    is unknown (None) is denied.
-    """
-    from services.permission_service import CallerId, MemoryAuthorId, PermissionService
-
-    perm = PermissionService(db)
-    decided: dict[tuple[str, str, str | None], bool] = {}
-
-    async def allowed(memory: Any, memory_type: str | None) -> bool:
         if memory_type is None:
             return False
         group = (memory.user_id, memory_type, memory.source_type)
-        if group not in decided:
-            decided[group] = await perm.can_access_memory(
-                user_id=CallerId(user_id),
+        if group not in self._decided:
+            self._decided[group] = await self._perm.can_access_memory(
+                user_id=CallerId(self._user_id),
                 memory_user_id=MemoryAuthorId(memory.user_id),
-                workspace_id=workspace_id,
-                context_id=context_id,
+                workspace_id=self._workspace_id,
+                context_id=self._context_id,
                 access="write",
                 # Deny-capture identity: the rollback rewrites or removes the
                 # memory, the audit vocabulary's ``update``.
                 operation="update",
+                memory_id=memory.id,
                 memory_type=memory_type,
                 memory_source_type=memory.source_type,
             )
-        return decided[group]
+        return self._decided[group]
 
-    result: dict[UUID, bool] = {}
-    for memory_id, memory in memories.items():
-        result[memory_id] = await allowed(memory, memory.type) and (
-            memory_id not in restored_types or await allowed(memory, restored_types[memory_id])
-        )
-    return result
+
+async def _judge_restored_type(item: PlanItem, memory: Any, check: _WriteCheck) -> PlanItem:
+    """``item``, or a ``not_permitted`` skip when it would put back a type the
+    caller may not write.
+
+    The write check judged the live type; a restore that writes another type
+    back is judged under that type too, as ``reference(version=N)`` judges an
+    earlier version's type, so the binding's per-memory type filter applies
+    to what the rollback writes. Only a planned restore is judged: a memory
+    skipped for another cause keeps that cause, and no check (nor its deny
+    audit) runs for a type that is not written.
+    """
+    if item.action != ACTION_RESTORE or "type" not in item.values:
+        return item
+    if await check(memory, item.values["type"]):
+        return item
+    return PlanItem(
+        item.memory_id,
+        item.kind,
+        ACTION_SKIP,
+        cause=CAUSE_NOT_PERMITTED,
+        event_ids=item.event_ids,
+    )
 
 
 # ---------------------------------------------------------------------------
