@@ -1736,3 +1736,56 @@ async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
     await w.session.commit()
     assert done.summary["skipped_items"] == []
     assert (await w.row(target))["details"] == {"a": 1}
+
+
+async def test_mcp_reply_names_the_context_after_a_session_rollback(
+    world: World, _stubs: dict[str, Any]
+) -> None:
+    """The reply's context fields come from the resolved context row, which a
+    session rollback expires: the dry run's own rollback, and the payload
+    step's after a failed re-read (#2346), must not make building the reply
+    lazy-load it (MissingGreenlet on the async session)."""
+    from mcp_server.tools import session_rollback as tool
+
+    w = world
+    target = await w.create(w.member, None, tags=["orig"])
+    await w.update(target, w.owner, "CR", tags=["session"])
+    await w.session.commit()
+
+    async def resolve(*_a: Any, **_k: Any) -> Context | None:
+        # The real row, read in the call's transaction like _resolve_context.
+        return await w.session.get(Context, w.context_id)
+
+    async def fake_get_db() -> AsyncIterator[AsyncSession]:
+        yield w.session
+
+    async def failing_read(db: AsyncSession, *_a: Any, **_k: Any) -> dict[Any, Any]:
+        await db.execute(text("SELECT 1 / 0"))  # a real failed statement
+        return {}
+
+    async def call(dry_run: bool) -> dict[str, Any]:
+        with (
+            patch("db.base.get_db", fake_get_db),
+            patch.object(tool, "_resolve_context", AsyncMock(side_effect=resolve)),
+            patch.object(tool, "_log_tool_usage", AsyncMock()),
+            patch(
+                "services.session_rollback.context_role",
+                AsyncMock(return_value=ContextRole.EDITOR),
+            ),
+            patch("services.payload_sync.share_lock_rows", failing_read),
+        ):
+            out = await tool.handle_rollback_session(
+                {"context_id": str(w.context_id), "session_id": "CR", "dry_run": dry_run},
+                w.owner,
+                w.workspace_id,
+            )
+        return json.loads(out[0].text)
+
+    dry = await call(True)
+    assert dry["status"] == "dry_run"
+    assert (dry["context_id"], dry["context_name"]) == (str(w.context_id), "sessions")
+    done = await call(False)
+    assert done["status"] == "rolled_back", done
+    assert (done["context_id"], done["context_name"]) == (str(w.context_id), "sessions")
+    assert (await w.row(target))["tags"] == ["orig"]
+    _stubs["payload"].assert_not_awaited()  # the unread group is not patched
