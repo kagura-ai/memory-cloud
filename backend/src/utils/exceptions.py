@@ -1407,14 +1407,17 @@ class ErasureAlreadyInProgressError(MemoryCloudException):
 
 
 class ErasureRetryScheduledError(MemoryCloudException):
-    """The vector store failed at an erasure's first step; the request is
-    rescheduled (503, #2282).
+    """The vector store failed at an erasure's first step (#2282), or a row
+    lock another operation holds stopped its workspace or Postgres step
+    (#2418); the request is rescheduled (503).
 
-    Nothing was erased (the vector-store delete is the first step), so the
-    request goes back to ``cooling_off`` with ``scheduled_for`` = the retry
-    time and the hourly sweep runs it again. ``attempt`` counts the failed
-    attempts so far (1-based); the service gives up after its maximum and
-    marks the request ``failed`` instead of raising this.
+    Nothing was erased in Postgres (the vector-store delete is the first
+    step; a lock conflict rolls its step back), so the request goes back to
+    ``cooling_off`` with ``scheduled_for`` = the retry time and the hourly
+    sweep runs it again. ``attempt`` counts the failed attempts so far
+    (1-based, both causes on one budget); the service gives up after its
+    maximum and marks the request ``failed`` instead of raising this.
+    ``lock_conflict`` picks the message.
     """
 
     def __init__(
@@ -1425,10 +1428,16 @@ class ErasureRetryScheduledError(MemoryCloudException):
         max_attempts: int,
         scheduled_for: datetime,
         error_class: str,
+        lock_conflict: bool = False,
     ):
         when = to_utc_iso(scheduled_for)
+        cause = (
+            "Another operation holds the account's workspaces"
+            if lock_conflict
+            else "The vector store is unavailable"
+        )
         super().__init__(
-            "The vector store is unavailable; the erasure request is kept and "
+            f"{cause}; the erasure request is kept and "
             f"will run again on the first hourly sweep after {when}.",
             status_code=503,
             error_code="ERASURE-007",

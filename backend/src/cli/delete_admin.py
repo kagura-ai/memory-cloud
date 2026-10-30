@@ -39,6 +39,7 @@ from uuid import UUID
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import func, or_, select  # noqa: E402
+from sqlalchemy.exc import DBAPIError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
@@ -48,9 +49,25 @@ from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
 from services.billing_contract import owned_workspaces_under_contract  # noqa: E402
 from services.password_account_service import normalize_email  # noqa: E402
 from services.workspace_ownership_service import WorkspaceOwnershipService  # noqa: E402
+from utils.db_helpers import is_deadlock  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 AUDIT_ACTOR_EMAIL = "cli@local"
+
+# #2418: a NOWAIT lock lost to another transaction (55P03), or this run chosen
+# as a deadlock victim (40P01). The failing transaction is rolled back; any
+# workspace transfer committed before it stays.
+_LOCK_CONFLICT_MESSAGE = (
+    "another operation holds the admin's rows; re-run (workspace transfers already committed stay)"
+)
+
+
+def _is_lock_conflict(exc: BaseException) -> bool:
+    """A ``55P03`` (lock_not_available) or ``40P01`` (deadlock) from Postgres."""
+    if not isinstance(exc, DBAPIError):
+        return False
+    return getattr(exc.orig, "sqlstate", None) == "55P03" or is_deadlock(exc)
+
 
 logger = get_logger(__name__)
 
@@ -370,6 +387,9 @@ async def _main(args: argparse.Namespace) -> int:
                 ask=lambda prompt: confirm(prompt, args.yes),
             )
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero
+        if _is_lock_conflict(exc):
+            print(f"error: {_LOCK_CONFLICT_MESSAGE}", file=sys.stderr)
+            return 1
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return code

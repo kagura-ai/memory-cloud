@@ -71,7 +71,24 @@ _LINK_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 
 async def lock_identity_links(db: AsyncSession) -> None:
     """Serialize with every other link, unlink and hand-over until this
-    transaction ends. Take it AFTER any ``users`` row lock."""
+    transaction ends. Transaction-scoped and re-entrant: taking it again in
+    the same transaction is free.
+
+    The one lock order for user deletion, account erasure, member removal and
+    linking (#2418)::
+
+        users rows (user_id order, all at once)
+          -> this lock
+          -> live workspace rows (id order; NOWAIT whenever a users row is held)
+          -> soft-deleted workspace rows (may wait: only SKIP LOCKED peers)
+          -> contexts (id) -> memories (id) -> child rows -> audit rows
+
+    Take it AFTER every ``users`` row lock: never lock a ``users`` row after
+    this lock unless the transaction already holds that row. A transaction
+    holding a ``users`` row never waits on a workspace (or workspace-scoped)
+    row: ``WorkspaceService.delete_workspace`` holds the workspace row and
+    then updates ``users.current_workspace_id``.
+    """
     await db.execute(_LINK_LOCK_SQL)
 
 

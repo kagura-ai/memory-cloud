@@ -147,6 +147,30 @@ async def test_main_reports_a_failure_as_an_error_line(capsys):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["55P03", "40P01"])
+async def test_main_reports_a_lock_conflict_as_a_re_run(capsys, sqlstate):
+    """#2418: another transaction held the admin's rows (a lost NOWAIT) or
+    chose this run as a deadlock victim: re-run, the committed transfers stay."""
+    from sqlalchemy.exc import DBAPIError
+
+    async def _get_db():
+        yield MagicMock()
+
+    error = DBAPIError("SELECT 1", {}, SimpleNamespace(sqlstate=sqlstate))
+    with (
+        patch.object(delete_admin, "require_settings"),
+        patch.object(delete_admin, "get_db", _get_db),
+        patch.object(delete_admin, "delete_password_admin", AsyncMock(side_effect=error)),
+    ):
+        code = await delete_admin._main(delete_admin._parse([]))
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "another operation holds the admin's rows; re-run" in err
+    assert "SELECT 1" not in err
+
+
+@pytest.mark.asyncio
 async def test_a_subscription_stops_the_command_before_the_prompt(capsys):
     db, calls = _db(2)
     ws = SimpleNamespace(id="00000000-0000-0000-0000-0000000000cc", name="Paid")
