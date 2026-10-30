@@ -5,9 +5,10 @@ to data the owner chose to remove, and a row left behind keeps pointing at an
 account that no longer exists. ``DELETE /admin/users/{id}``, ``cli.delete_admin``
 and account erasure all take them with the user, with the cascade the CLI uses
 for a live workspace only the user is in (#2372): its contexts, memories, keys,
-members and file rows go in the same transaction, one ``workspace_purged``
-audit row per workspace records it, and its vector points are deleted after the
-commit (``sweep_orphan_vectors`` removes any that a failed call leaves).
+members and file rows go in the same transaction (its memories with no
+context too), one ``workspace_purged`` audit row per workspace records it,
+and its vector points are not asked for again: they went when it was
+soft-deleted, and ``sweep_orphan_vectors`` removes any that call left.
 A live owned workspace still needs a successor, and a soft-deleted workspace
 someone else owns is left alone.
 """
@@ -74,7 +75,7 @@ async def _context(db, workspace_id, creator, *, private: bool = False) -> UUID:
     return ctx.id
 
 
-async def _memory(db, workspace_id, context_id, author) -> UUID:
+async def _memory(db, workspace_id, context_id: UUID | None, author) -> UUID:
     memory = Memory(
         id=uuid4(),
         user_id=author,
@@ -112,7 +113,7 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     purge_audits.append(gone_id)
     shared = await _context(db_session, gone_id, target)
     theirs = await _context(db_session, gone_id, other, private=True)
-    for ctx, author in ((shared, target), (shared, other), (theirs, other)):
+    for ctx, author in ((shared, target), (shared, other), (theirs, other), (None, other)):
         await _memory(db_session, gone_id, ctx, author)
     await world.personal_key(other, gone)
     db_session.add(
@@ -133,6 +134,11 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     foreign = await world.workspace(other, **{target: WorkspaceRole.MEMBER})
     foreign_id = foreign.id
     foreign_ctx = await _context(db_session, foreign_id, other)
+    # A private context of the user's own in a live workspace goes too, and
+    # its points are deleted after the commit.
+    live = await world.workspace(other, **{target: WorkspaceRole.MEMBER})
+    live_id = live.id
+    mine = await _context(db_session, live_id, target, private=True)
     await _soft_delete(db_session, gone_id)
     await _soft_delete(db_session, foreign_id)
     await db_session.commit()
@@ -140,7 +146,7 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     response = await delete_user(target, {"user_id": "operator"}, db_session)
 
     assert response["purged_workspaces"] == [
-        {"id": str(gone_id), "name": gone.name, "contexts": 2, "memories": 3}
+        {"id": str(gone_id), "name": gone.name, "contexts": 2, "memories": 4}
     ]
     db_session.expire_all()
     assert await db_session.scalar(select(User.user_id).where(User.user_id == target)) is None
@@ -163,12 +169,11 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
         "previous_owner_id": target,
         "soft_deleted": True,
         "contexts": 2,
-        "memories": 3,
+        "memories": 4,
+        "billing_contract_active": False,
     }
-    assert {call.args for call in vectors.await_args_list} >= {
-        (str(gone_id), str(shared)),
-        (str(gone_id), str(theirs)),
-    }
+    assert [call.args for call in vectors.await_args_list] == [(str(live_id), str(mine))]
+    assert await db_session.get(Context, mine) is None
     # Untouched: the other owner's soft-deleted workspace and its context.
     foreign_row = await db_session.get(Workspace, foreign_id)
     assert foreign_row is not None and foreign_row.owner_user_id == other
@@ -180,6 +185,43 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     assert again.value.status_code == 404
     await db_session.rollback()
     assert await db_session.get(Workspace, foreign_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_purged_workspace_still_marked_as_billed_is_flagged(
+    connector_world, db_session, purge_audits, vectors
+):
+    """A soft-deleted workspace never blocks the deletion (#1940), but one
+    deleted before that rule may still be charged: its audit row says so."""
+    from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+
+    world = connector_world
+    target = await world.user("departing")
+    gone = await world.workspace(target)
+    gone_id = gone.id
+    purge_audits.append(gone_id)
+    await db_session.execute(
+        update(Workspace)
+        .where(Workspace.id == gone_id)
+        .values(
+            deleted_at=utcnow(),
+            plan_name="pro",
+            entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+        )
+    )
+    await db_session.commit()
+
+    await delete_user(target, {"user_id": "operator"}, db_session)
+
+    db_session.expire_all()
+    assert await db_session.get(Workspace, gone_id) is None
+    metadata = await db_session.scalar(
+        select(AuditLog.user_metadata).where(
+            AuditLog.action == WORKSPACE_PURGED_ACTION,
+            AuditLog.resource == f"workspace:{gone_id}",
+        )
+    )
+    assert metadata["billing_contract_active"] is True
 
 
 @pytest.mark.asyncio
@@ -294,7 +336,59 @@ async def test_create_admin_sees_a_workspace_left_under_its_user_id(db_session):
         with Session(engine) as sync_db:
             assert _leftover_owned_workspaces(sync_db, owner) == 1
             assert _leftover_owned_workspaces(sync_db, f"{owner}-other") == 0
+            # An existing account is not a leftover's owner.
+            sync_db.add(User(user_id=owner, email=f"{owner[6:]}@local"))
+            sync_db.flush()
+            assert _leftover_owned_workspaces(sync_db, owner) == 0
+            sync_db.rollback()
     finally:
         engine.dispose()
         await db_session.execute(delete(Workspace).where(Workspace.id == leftover.id))
         await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_locked_soft_deleted_workspace_is_waited_for(
+    connector_world, db_session, purge_audits, vectors
+):
+    """The deleted-workspace file repair locks a soft-deleted workspace row
+    while it works; the deletion waits for it instead of failing NOWAIT
+    (which, in the CLI, would come after its transfers had committed)."""
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    world = connector_world
+    target = await world.user("departing")
+    gone = await world.workspace(target)
+    gone_id = gone.id
+    purge_audits.append(gone_id)
+    await _soft_delete(db_session, gone_id)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async with maker() as holder:
+        await holder.execute(select(Workspace.id).where(Workspace.id == gone_id).with_for_update())
+
+        async def remove():
+            async with maker() as db:
+                return await delete_user(target, {"user_id": "operator"}, db)
+
+        task = asyncio.create_task(remove())
+        async with maker() as observer:
+            for _ in range(500):
+                waiting = await observer.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype IN "
+                        "('tuple', 'transactionid')"
+                    )
+                )
+                if waiting or task.done():
+                    break
+                await asyncio.sleep(0.01)
+        assert not task.done(), "the deletion did not wait for the row lock"
+        await holder.rollback()
+    response = await asyncio.wait_for(task, 15)
+
+    assert [ws["id"] for ws in response["purged_workspaces"]] == [str(gone_id)]

@@ -19,12 +19,14 @@ the surviving workspace owner (#2417).
 A soft-deleted workspace the user owns goes with the user on both paths
 (#2406): its owner already deleted it, so it is never handed to a successor.
 It is hard-deleted like a live workspace only the user is in (the CLI's
-#2372 cascade): its contexts and their files first, then the workspace row,
-whose foreign keys cascade to its memories, keys, members, invitations and
-file rows (the #2395 trigger queues the stored objects). One
-``workspace_purged`` audit row per hard-deleted workspace commits with it,
-and ``finish_user_deletion`` deletes the contexts' vector points after the
-commit; ``sweep_orphan_vectors`` removes any point a failed call leaves.
+#2372 cascade): its contexts and their files first (their memories cascade
+from the contexts), its memories with no context, then the workspace row,
+whose foreign keys cascade to its keys, members, invitations and file rows
+(the #2395 trigger queues the stored objects). One
+``workspace_purged`` audit row per hard-deleted workspace commits with it.
+Its vector points went when it was soft-deleted; ``sweep_orphan_vectors``
+removes any that call left (``finish_user_deletion`` deletes the points of
+the other contexts deleted here after the commit).
 """
 
 from dataclasses import dataclass, field
@@ -50,7 +52,7 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.resource import WorkspaceConnector
-from services.billing_contract import ensure_no_billing_contract
+from services.billing_contract import ensure_no_billing_contract, workspaces_under_contract
 from services.connector_key_ownership import reown_connector_keys
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
@@ -78,6 +80,12 @@ PRIVATE_CONTEXT_HANDED_OVER = (
 _CONNECTOR_CONTEXT_IDS = select(WorkspaceConnector.context_id).where(
     WorkspaceConnector.context_id.is_not(None)
 )
+
+
+def _contextless_in(m: Any, workspace_ids: list[UUID]) -> ColumnElement[bool]:
+    """``m`` is a memory row with no context in one of ``workspace_ids``:
+    no foreign key takes it with its workspace."""
+    return and_(m.workspace_id.in_(workspace_ids), m.context_id.is_(None))
 
 
 def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
@@ -154,8 +162,14 @@ async def workspace_purge_counts(
     context = aliased(Context)
     memories = (
         select(func.count(memory.id))
-        .join(context, context.id == memory.context_id)
-        .where(context.workspace_id == Workspace.id)
+        .where(
+            or_(
+                memory.context_id.in_(
+                    select(context.id).where(context.workspace_id == Workspace.id)
+                ),
+                and_(memory.workspace_id == Workspace.id, memory.context_id.is_(None)),
+            )
+        )
         .correlate(Workspace)
         .scalar_subquery()
     )
@@ -244,7 +258,7 @@ async def transfer_user_ownership(
         (
             await db.execute(
                 select(Workspace)
-                .where(Workspace.owner_user_id == user_id)
+                .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None))
                 .order_by(Workspace.id)
                 .with_for_update(nowait=True)
                 .execution_options(populate_existing=True)
@@ -252,9 +266,18 @@ async def transfer_user_ownership(
         ).scalars()
     )
     ensure_no_billing_contract(workspaces)
-    # The soft-deleted ones go with the user, everything in them included.
-    purged = {w.id for w in workspaces if w.deleted_at is not None}
-    workspaces = [w for w in workspaces if w.id not in purged]
+    # The soft-deleted ones go with the user, everything in them included
+    # (``delete_user_rows`` locks them). With the live ones locked, none can
+    # join this set before that.
+    purged = set(
+        (
+            await db.execute(
+                select(Workspace.id).where(
+                    Workspace.owner_user_id == user_id, Workspace.deleted_at.is_not(None)
+                )
+            )
+        ).scalars()
+    )
     created = list(
         (
             await db.execute(
@@ -391,16 +414,36 @@ async def delete_user_rows(
     await lock_identity_links(db)
     # Block FK inserts of new contexts before collecting the cascade union.
     # NOWAIT also avoids workspace-delete -> user-preference lock crossings.
-    # Every workspace the user still owns is locked, so none can be
-    # soft-deleted (which takes the same row lock) between the read below and
-    # the delete: the soft-deleted set read under the lock is final.
+    # The live workspaces the user still owns are locked too, so none can be
+    # soft-deleted (which takes the same row lock) after the read below: the
+    # soft-deleted set read next is final.
     await db.execute(
         select(Workspace.id)
-        .where(or_(Workspace.id.in_(workspace_ids), Workspace.owner_user_id == user_id))
+        .where(
+            or_(
+                Workspace.id.in_(workspace_ids),
+                and_(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None)),
+            )
+        )
         .order_by(Workspace.id)
         .with_for_update(nowait=True)
     )
-    soft_deleted = {w.id for w in await soft_deleted_owned_workspaces(db, user_id)}
+    # The soft-deleted ones (#2406) wait instead: no owner mutation reaches
+    # them (``lock_workspace_for_update`` takes live rows only), and the
+    # deleted-workspace file repair (``purge_deleted_workspace_files``) locks
+    # one at a time with SKIP LOCKED and no user lock, so waiting cannot
+    # deadlock, where a NOWAIT would fail a CLI run after its transfers had
+    # committed.
+    soft_deleted = set(
+        (
+            await db.execute(
+                select(Workspace.id)
+                .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_not(None))
+                .order_by(Workspace.id)
+                .with_for_update()
+            )
+        ).scalars()
+    )
     workspace_ids = sorted(set(workspace_ids) | soft_deleted)
     deleted_workspaces = set(workspace_ids)
     await db.execute(
@@ -415,6 +458,7 @@ async def delete_user_rows(
             lambda m: (
                 or_(
                     m.user_id == user_id,
+                    _contextless_in(m, workspace_ids),
                     m.context_id.in_(
                         select(Context.id).where(
                             or_(
@@ -485,12 +529,15 @@ async def delete_user_rows(
     ctx_ids = list((await db.execute(locked_ids(Context, doomed))).scalars())
     result.contexts = len(ctx_ids)
     if ctx_ids:
+        # A soft-deleted workspace's points went when it was deleted
+        # (``WorkspaceService.delete_workspace``); ``sweep_orphan_vectors``
+        # takes any that call left, so only the other contexts are asked.
         result.deleted_contexts = [
             (ws_id, ctx_id)
             for ws_id, ctx_id in (
                 await db.execute(
                     select(Context.workspace_id, Context.id)
-                    .where(Context.id.in_(ctx_ids))
+                    .where(Context.id.in_(ctx_ids), Context.workspace_id.not_in(list(soft_deleted)))
                     .order_by(Context.id)
                 )
             ).all()
@@ -506,6 +553,33 @@ async def delete_user_rows(
     await db.execute(delete(ContextMember).where(ContextMember.user_id == user_id))
     await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
     if workspace_ids:
+        # ``memories.workspace_id`` has no foreign key: a row with no context
+        # would outlive its workspace.
+        await db.execute(
+            delete(Memory).where(
+                Memory.id.in_(locked_ids(Memory, lambda m: (_contextless_in(m, workspace_ids),)))
+            )
+        )
+        # The callers refuse a live workspace under a running subscription;
+        # a soft-deleted one never blocks (#1940), but one deleted before that
+        # rule may still be charged, so its purge says so, as the erasure
+        # override log does.
+        under_contract = {
+            ws.id
+            for ws in workspaces_under_contract(
+                list(
+                    (
+                        await db.execute(select(Workspace).where(Workspace.id.in_(workspace_ids)))
+                    ).scalars()
+                ),
+                include_deleted=True,
+            )
+        }
+        if under_contract:
+            logger.warning(
+                "user_deletion_purged_workspaces_under_contract",
+                workspace_ids=sorted(str(ws_id) for ws_id in under_contract),
+            )
         # The audit trail commits (or rolls back) with the purge itself.
         db.add_all(
             [
@@ -519,6 +593,7 @@ async def delete_user_rows(
                         "soft_deleted": ws.soft_deleted,
                         "contexts": ws.contexts,
                         "memories": ws.memories,
+                        "billing_contract_active": ws.id in under_contract,
                     },
                 )
                 for ws in result.purged_workspaces

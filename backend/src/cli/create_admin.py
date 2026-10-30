@@ -87,7 +87,12 @@ def _leftover_owned_workspaces(db: Session, user_id: str) -> int:
     behind (``owner_user_id`` has no foreign key)."""
     return (
         db.execute(
-            select(func.count()).select_from(Workspace).where(Workspace.owner_user_id == user_id)
+            select(func.count())
+            .select_from(Workspace)
+            .where(
+                Workspace.owner_user_id == user_id,
+                ~select(User.id).where(User.user_id == user_id).exists(),
+            )
         ).scalar()
         or 0
     )
