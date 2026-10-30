@@ -352,6 +352,24 @@ class TestRollbackApplyChecksThePointAgain:
 
         write.assert_not_awaited()
 
+    async def test_a_failed_reread_never_writes_the_queued_values(self):
+        """#2346: the queued values may be older than an edit committed since."""
+        from services import session_rollback as sr
+
+        sync = sr.PayloadSync(uuid4(), "coll", ("tags",), {"tags": ["stale"]}, (), False)
+        db = MagicMock(commit=AsyncMock(), rollback=AsyncMock())
+        with (
+            patch(
+                "services.payload_sync.share_lock_rows",
+                AsyncMock(side_effect=RuntimeError("read")),
+            ),
+            patch("db.qdrant.update_memory_payload_in_qdrant", new_callable=AsyncMock) as write,
+        ):
+            await sr._apply_payload_syncs([sync], db)
+
+        write.assert_not_awaited()
+        db.rollback.assert_awaited_once()
+
 
 def test_scope_is_not_editable_by_update_or_patch():
     """``scope`` is not a metadata edit, so the sync never writes it."""

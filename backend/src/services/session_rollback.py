@@ -787,7 +787,8 @@ class PayloadSync:
 
     ``fields`` are the restored versioned fields; ``updates`` /
     ``delete_keys`` the patch built from the row at the restore, used only
-    when ``finish`` cannot re-read the row.
+    when ``finish`` has no session to re-read the row with (a re-read that
+    fails skips the patch, #2346).
     """
 
     memory_id: UUID
@@ -1425,8 +1426,9 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
     built from the rows as they are now, read ``FOR SHARE``: an edit that
     committed after the rollback is not overwritten by the restored values,
     and one still in flight (it holds the row lock while it patches the
-    payload) finishes first. Without it the patches queued at the restore are
-    applied as they are.
+    payload) finishes first. A group whose re-read fails is not patched
+    (#2346): the queued values may be older than such an edit. Without
+    ``db`` the patches queued at the restore are applied as they are.
     """
     if result.forgotten_points and result.collection:
         from db.qdrant import delete_points_from_qdrant

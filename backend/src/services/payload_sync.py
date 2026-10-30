@@ -17,7 +17,9 @@ that way:
   ``PlannedPatch``) and applies it (``apply``: the vector-store call);
 - what happens when a read, a patch or the group's commit fails is the
   caller's ``PayloadFailurePolicy``: ``SwallowFailures`` (log and go on; the
-  payload keeps its old values until the row's next edit or re-embed) or
+  payload keeps its old values until the row's next edit or re-embed; a
+  group that cannot be read is skipped, never patched from values queued
+  before an edit that may have committed since) or
   ``RequeueEmbeddingOnFailure`` (the row goes back to the embedding queue,
   whose upsert rewrites the whole payload from the row).
 
@@ -97,12 +99,17 @@ class SwallowFailures:
     """Log and go on: the payload keeps its old values until the row's next
     edit or re-embed (session rollback's policy).
 
-    A failed read plans the group from what the caller queued; the read's
-    transaction is rolled back first. Events are ``<prefix>_reread_failed``,
-    ``<prefix>_sync_failed`` and ``<prefix>_tx_end_failed``.
+    A group whose read fails is rolled back and skipped (#2346): what the
+    caller queued may be older than an edit committed since, so it is not
+    written. A group whose commit fails is rolled back, so the next group's
+    read runs in a fresh transaction. A rollback that fails too is logged
+    (``<prefix>_tx_end_failed``), never raised. Events are
+    ``<prefix>_reread_failed``, ``<prefix>_sync_failed`` and
+    ``<prefix>_tx_end_failed``; logs carry ids only, never values.
 
     Attributes:
-        failed: Patches that failed.
+        failed: Patches that failed, and rows of groups that could not be
+            read (not patched).
     """
 
     def __init__(self, event_prefix: str) -> None:
@@ -110,9 +117,14 @@ class SwallowFailures:
         self.failed = 0
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
-        logger.warning(f"{self.event_prefix}_reread_failed", error_class=type(exc).__name__)
         await _rollback_or_log(db, self.event_prefix)
-        return True
+        self.failed += len(ids)
+        logger.warning(
+            f"{self.event_prefix}_reread_failed",
+            memory_ids=[str(i) for i in ids],
+            error_class=type(exc).__name__,
+        )
+        return False
 
     async def patch_failed(
         self, db: AsyncSession | None, patch: PlannedPatch[Any], exc: Exception
@@ -127,6 +139,7 @@ class SwallowFailures:
 
     async def commit_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> None:
         _log_tx_end_failed(self.event_prefix, exc)
+        await _rollback_or_log(db, self.event_prefix)
 
 
 class RequeueEmbeddingOnFailure:
