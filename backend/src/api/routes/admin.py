@@ -1024,8 +1024,11 @@ async def delete_user(
     shared context lacks an eligible successor, or when an owned workspace is
     under a running subscription (``BILLING-005``, #1940). A private context
     passes to a linked account that wrote in it, otherwise it is deleted with
-    the user (#2417). Initial/last admin and self-deletion protections remain
-    in force. The transfer and deletion commit together.
+    the user (#2417). A soft-deleted workspace the user owns takes no
+    successor: it is hard-deleted with the user, everything in it included,
+    and listed under ``purged_workspaces`` (#2406). Initial/last admin and
+    self-deletion protections remain in force. The transfer and deletion
+    commit together.
     """
     from services.ownership_notifications import notify_new_owner_best_effort
     from services.system_admin_service import SystemAdminService
@@ -1052,7 +1055,12 @@ async def delete_user(
             actor_email=admin.get("email") or "admin@local",
             actor_user_id=admin_id,
         )
-        result = await delete_user_rows(db, user_id)
+        result = await delete_user_rows(
+            db,
+            user_id,
+            actor_email=admin.get("email") or "admin@local",
+            actor_user_id=admin_id,
+        )
         await db.commit()
     except DBAPIError as exc:
         await db.rollback()
@@ -1074,6 +1082,7 @@ async def delete_user(
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
         workspaces_transferred=[str(ws_id) for ws_id in transferred],
+        workspaces_purged=[str(ws.id) for ws in result.purged_workspaces],
     )
     return {
         "message": "User deleted successfully",
@@ -1085,6 +1094,7 @@ async def delete_user(
         },
         "reowned": {"connector_api_keys": result.connector_api_keys},
         "transferred_workspaces": {str(k): v for k, v in transferred.items()},
+        "purged_workspaces": [ws.summary() for ws in result.purged_workspaces],
     }
 
 
@@ -1159,7 +1169,11 @@ async def admin_force_erase_user(
 
     This endpoint replaces the older `DELETE /admin/users/{user_id}` for
     new integrations. The old route is kept temporarily for backward
-    compatibility but does NOT clean Qdrant or all OAuth artifacts.
+    compatibility. It does not remove all OAuth artifacts, and its vector
+    cleanup is not a cascade: it deletes the points of the contexts it
+    deletes after the commit, best-effort, and the daily
+    ``sweep_orphan_vectors`` removes every point it leaves (the user's own
+    memories in surviving contexts, a failed call).
     """
     from services.account_erasure_service import AccountErasureService
 

@@ -78,6 +78,21 @@ def _resolve_mcp_json_path() -> Path | None:
     return None
 
 
+def _leftover_owned_workspaces(db: Session, user_id: str) -> int:
+    """How many workspaces, soft-deleted ones included, still name ``user_id``
+    as their owner although no such account exists (#2406).
+
+    The admin's user_id is derived from its login ID, so a new admin with a
+    deleted one's login ID would silently own whatever that deletion left
+    behind (``owner_user_id`` has no foreign key)."""
+    return (
+        db.execute(
+            select(func.count()).select_from(Workspace).where(Workspace.owner_user_id == user_id)
+        ).scalar()
+        or 0
+    )
+
+
 def _create_workspace(db: Session, user_id: str) -> Workspace:
     """Create personal workspace and membership for admin."""
     workspace = Workspace(
@@ -250,6 +265,14 @@ def create_admin(skip_mcp_json: bool = False):
         login_id = input("  Login ID: ").strip()
         if not login_id or len(login_id) > 255:
             print("✗ Login ID must be 1-255 characters.")
+            sys.exit(1)
+        leftover = _leftover_owned_workspaces(db, f"local:{login_id}")
+        if leftover:
+            print(
+                f"✗ {leftover} workspace(s) left by a deleted account still name "
+                f"local:{login_id} as their owner."
+            )
+            print("  Choose another login ID, or clean them up first (docs/deployment.md, #2406).")
             sys.exit(1)
 
         # Password (retry on failure)
