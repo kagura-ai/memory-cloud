@@ -9,6 +9,8 @@ workspace rows → contexts → memories → child rows. A transaction holding a
 and the ``users`` rows after (``current_workspace_id``). Erasure holds the
 subject's ``users`` row from its first step, so at steps 2 and 3 it takes the
 workspace rows ``NOWAIT`` and reschedules the request when one is busy.
+Steps 2 and 3 are one transaction: step 2 reads the owned workspaces under the
+identity-link lock and nothing is committed before step 3's commit.
 Each test drives two real Postgres sessions and waits on
 ``pg_blocking_pids`` before releasing the paused one.
 """
@@ -20,6 +22,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -27,7 +30,7 @@ from sqlalchemy import event, func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.admin import delete_user
-from models.auth import User, Workspace
+from models.auth import User, Workspace, WorkspaceMember
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
     STATUS_COOLING_OFF,
@@ -204,14 +207,7 @@ async def test_step_two_refuses_a_workspace_its_delete_holds(db_session, connect
         async with maker() as db:
             try:
                 await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
-                owned = list(
-                    (
-                        await db.execute(
-                            select(Workspace).where(Workspace.owner_user_id == subject)
-                        )
-                    ).scalars()
-                )
-                return await AccountErasureService(db)._handle_owned_workspaces(subject, owned)
+                return await AccountErasureService(db)._handle_owned_workspaces(subject)
             finally:
                 await db.rollback()
 
@@ -277,12 +273,7 @@ async def test_step_two_that_got_the_workspace_first_finishes_its_transfer(
     async def step_two() -> dict:
         async with maker() as db:
             await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
-            owned = list(
-                (
-                    await db.execute(select(Workspace).where(Workspace.owner_user_id == subject))
-                ).scalars()
-            )
-            result = await AccountErasureService(db)._handle_owned_workspaces(subject, owned)
+            result = await AccountErasureService(db)._handle_owned_workspaces(subject)
             await db.commit()
             return result
 
@@ -328,11 +319,15 @@ async def test_step_three_reschedules_on_a_workspace_its_delete_holds(db_session
     """A sole-owned W: step 2 has nothing to hand on, and step 3's deletes
     of W's rows would wait on the delete that holds W while erasure holds
     ``users[S]``. Step 3 takes the owned workspaces ``NOWAIT`` first and the
-    request is rescheduled; nothing is erased and the delete completes."""
+    request is rescheduled; nothing is erased and the delete completes. The
+    shared workspace step 2 handed on is rolled back with step 3: one
+    transaction, so the hand-over is not left behind."""
     world = connector_world
     subject = await world.user("subject")
+    successor = await world.user("successor")
     ws = await world.workspace(subject)
     ws_id = ws.id
+    shared_id = (await world.workspace(subject, **{successor: "admin"})).id
     await _current_workspace(db_session, subject, ws_id)
     await db_session.commit()
     maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
@@ -389,6 +384,250 @@ async def test_step_three_reschedules_on_a_workspace_its_delete_holds(db_session
     assert await db_session.scalar(select(User.user_id).where(User.user_id == subject)) == subject
     deleted_at = await db_session.scalar(select(Workspace.deleted_at).where(Workspace.id == ws_id))
     assert deleted_at is not None
+    shared = (
+        await db_session.execute(
+            select(Workspace.owner_user_id, Workspace.ownership_epoch).where(
+                Workspace.id == shared_id
+            )
+        )
+    ).one()
+    assert shared.owner_user_id == subject  # the hand-over was rolled back too
+    assert shared.ownership_epoch == 0
+    roles = dict(
+        (
+            await db_session.execute(
+                select(WorkspaceMember.user_id, WorkspaceMember.role).where(
+                    WorkspaceMember.workspace_id == shared_id
+                )
+            )
+        ).all()
+    )
+    assert roles == {subject: "owner", successor: "admin"}
+
+
+# ---------------------------------------------------------------------------
+# Owner changes towards the subject while the erasure runs
+# ---------------------------------------------------------------------------
+
+
+async def _member_rows(world, workspace_id, author: str):
+    """A context and a memory ``author`` wrote in ``workspace_id``."""
+    from models.auth import Context
+    from models.memory import Memory
+
+    context = Context(
+        id=uuid4(), workspace_id=workspace_id, name=f"ctx-{uuid4().hex[:8]}", created_by=author
+    )
+    world.db.add(context)
+    await world.db.flush()
+    memory = Memory(
+        id=uuid4(),
+        user_id=author,
+        workspace_id=workspace_id,
+        context_id=context.id,
+        summary="a member's memory",
+        content="body",
+        type="note",
+        client="test",
+        version=1,
+        embedding_status="success",
+    )
+    world.db.add(memory)
+    await world.db.flush()
+    return context.id, memory.id
+
+
+async def _rows_present(db, context_id, memory_id) -> tuple[bool, bool]:
+    from models.auth import Context
+    from models.memory import Memory
+
+    context = await db.scalar(select(Context.id).where(Context.id == context_id))
+    memory = await db.scalar(select(Memory.id).where(Memory.id == memory_id))
+    return context is not None, memory is not None
+
+
+async def _done_or_blocked(maker, task: asyncio.Task, pid_of, timeout: float = 15) -> None:
+    """Until ``task`` finished or its backend (``pid_of()``) waits on a lock."""
+
+    async def poll() -> None:
+        while not task.done():
+            pid = pid_of()
+            if pid is not None and await _is_blocked(maker, pid):
+                return
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+def _force_erase(maker, user_id: str):
+    async def erase():
+        async with maker() as db:
+            return await AccountErasureService(db).admin_force_erase(
+                target_user_id=user_id,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test",
+            )
+
+    return erase()
+
+
+async def _request_of(db, user_id: str) -> ErasureRequest:
+    from services.account_erasure_service import _audit_salt
+    from utils.hashing import sha256_hex
+
+    # a complete request carries the pseudonym, a failed one the raw id
+    ids = [user_id, sha256_hex(user_id, salt=_audit_salt())]
+    return (
+        await db.execute(
+            select(ErasureRequest)
+            .where(ErasureRequest.user_id.in_(ids))
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_a_transfer_to_the_subject_waits_for_the_erasure(db_session, connector_world):
+    """S hands W1 on to B at step 2; while the run is between steps 2 and 3,
+    O transfers W2 to S (an admin there). The transfer waits on ``users[S]``,
+    which the run holds until its one commit, and then finds S gone: W2 stays
+    O's with M's context and memory."""
+    from services.workspace_ownership_service import WorkspaceOwnershipService
+    from utils.exceptions import BadRequestError
+
+    world = connector_world
+    subject = await world.user("subject")
+    successor = await world.user("successor")
+    owner = await world.user("owner")
+    member = await world.user("member")
+    handed_id = (await world.workspace(subject, **{successor: "admin"})).id
+    kept_id = (await world.workspace(owner, **{subject: "admin", member: "member"})).id
+    context_id, memory_id = await _member_rows(world, kept_id, member)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    transfer_pid: int | None = None
+    original = AccountErasureService._delete_postgres
+
+    async def paused_step_three(self, target, **kwargs):
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return await original(self, target, **kwargs)
+
+    async def transfer():
+        nonlocal transfer_pid
+        async with maker() as db:
+            transfer_pid = await _pid(db)
+            return await WorkspaceOwnershipService(db).transfer_ownership(
+                workspace_id=kept_id,
+                current_owner_id=owner,
+                target_user_id=subject,
+                performed_by_email="owner@example.test",
+            )
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_delete_postgres", paused_step_three),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            transferring = asyncio.create_task(transfer())
+            tasks.append(transferring)
+            await _done_or_blocked(maker, transferring, lambda: transfer_pid)
+            release.set()
+            erasure_result, transfer_result = await asyncio.wait_for(
+                asyncio.gather(erasing, transferring, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not isinstance(erasure_result, BaseException), erasure_result
+    assert erasure_result.status == "complete"
+    assert isinstance(transfer_result, BadRequestError), transfer_result
+    assert transfer_result.error_code == "WS-OWNER-002"
+    kept = await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == kept_id))
+    assert kept == owner
+    assert await _rows_present(db_session, context_id, memory_id) == (True, True)
+    handed = await db_session.scalar(
+        select(Workspace.owner_user_id).where(Workspace.id == handed_id)
+    )
+    assert handed == successor
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_handed_to_the_subject_during_step_one_is_handed_on(
+    db_session, connector_world
+):
+    """Two erasures: A's hands W to S (the lowest-id admin) while S's run is
+    in step 1. S's step 2 reads the workspaces S owns under the identity-link
+    lock, so it hands W on to B instead of deleting it with S's sole-owned
+    ones: W stays, with M's context and memory."""
+    world = connector_world
+    first = await world.user("handover-a-owner")
+    subject = await world.user("handover-b-subject")
+    admin = await world.user("handover-c-admin")
+    member = await world.user("handover-d-member")
+    ws_id = (
+        await world.workspace(first, **{subject: "admin", admin: "admin", member: "member"})
+    ).id
+    context_id, memory_id = await _member_rows(world, ws_id, member)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    import services.vector_erasure as vector_module
+
+    original = vector_module.delete_subject_points
+
+    async def paused_step_one(db, user_id: str) -> dict:
+        # after the vector pass released its point-writer lock (it serializes
+        # the erasures' first steps), before S's step 2
+        result = await original(db, user_id)
+        if user_id == subject:
+            holding.set()
+            await asyncio.wait_for(release.wait(), 30)
+        return result
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(vector_module, "delete_subject_points", paused_step_one),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            # the other erasure runs to its commit while S is in step 1
+            first_result = await asyncio.wait_for(_force_erase(maker, first), 30)
+            between = await db_session.scalar(
+                select(Workspace.owner_user_id)
+                .where(Workspace.id == ws_id)
+                .execution_options(populate_existing=True)
+            )
+            release.set()
+            erasure_result = await asyncio.wait_for(erasing, 30)
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert first_result.status == "complete"
+    assert between == subject
+    assert erasure_result.status == "complete"
+    owner_now = await db_session.scalar(
+        select(Workspace.owner_user_id)
+        .where(Workspace.id == ws_id)
+        .execution_options(populate_existing=True)
+    )
+    assert owner_now == admin
+    assert await _rows_present(db_session, context_id, memory_id) == (True, True)
+    request = await _request_of(db_session, subject)
+    assert request.deleted_data_summary["workspaces"]["transferred"] == [
+        {"workspace_id": str(ws_id), "new_owner_user_id": admin}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +664,7 @@ async def test_admin_deletion_of_the_successor_waits_for_the_erasure_transfer(
     async def auto_transfer() -> dict:
         async with maker() as db:
             await db.execute(select(User.id).where(User.user_id == owner).with_for_update())
-            owned = list(
-                (await db.execute(select(Workspace).where(Workspace.id == ws_id))).scalars()
-            )
-            result = await AccountErasureService(db)._handle_owned_workspaces(owner, owned)
+            result = await AccountErasureService(db)._handle_owned_workspaces(owner)
             await db.commit()
             return result
 
@@ -489,12 +725,7 @@ async def test_step_two_waits_out_a_short_holder(db_session, connector_world):
     async def step_two() -> dict:
         async with maker() as db:
             await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
-            owned = list(
-                (
-                    await db.execute(select(Workspace).where(Workspace.owner_user_id == subject))
-                ).scalars()
-            )
-            result = await AccountErasureService(db)._handle_owned_workspaces(subject, owned)
+            result = await AccountErasureService(db)._handle_owned_workspaces(subject)
             await db.commit()
             return result
 

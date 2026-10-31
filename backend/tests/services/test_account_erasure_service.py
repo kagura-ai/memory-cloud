@@ -924,8 +924,9 @@ class TestHandleOwnedWorkspaces:
         rows = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER)]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
-        out = await svc._handle_owned_workspaces("u-1", [ws])
+        out = await svc._handle_owned_workspaces("u-1")
         assert out["sole_owner_workspaces"] == 1
         assert out["transferred"] == []
 
@@ -941,6 +942,7 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
         # #1102: the auto-transfer takes the SHARED workspace-row lock (returning
         # the same locked row) so it serializes with transfer_ownership.
@@ -948,8 +950,10 @@ class TestHandleOwnedWorkspaces:
             "services.account_erasure_service.lock_workspace_for_update",
             AsyncMock(return_value=ws),
         ) as lock:
-            out = await svc._handle_owned_workspaces("u-1", [ws])
+            out = await svc._handle_owned_workspaces("u-1")
         lock.assert_awaited_once()
+        # step 3 commits the hand-over with its deletes, in one transaction
+        svc.db.commit.assert_not_awaited()
         assert ws.owner_user_id == "u-2"
         assert new_admin.role == "owner"
         assert len(out["transferred"]) == 1
@@ -973,12 +977,13 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
         with patch(
             "services.account_erasure_service.lock_workspace_for_update",
             AsyncMock(return_value=locked),
         ):
-            out = await svc._handle_owned_workspaces("u-1", [ws])
+            out = await svc._handle_owned_workspaces("u-1")
 
         assert out["transferred"] == []
         assert locked.owner_user_id == "someone-else"  # untouched
@@ -1000,12 +1005,13 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
         with patch(
             "services.account_erasure_service.lock_workspace_for_update",
             AsyncMock(side_effect=NotFoundException("Workspace")),
         ):
-            out = await svc._handle_owned_workspaces("u-1", [ws])
+            out = await svc._handle_owned_workspaces("u-1")
 
         assert out["transferred"] == []  # skipped, no exception bubbled
 
@@ -1023,9 +1029,10 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
         with pytest.raises(WorkspaceTransferRequiredError) as exc_info:
-            await svc._handle_owned_workspaces("u-1", [ws])
+            await svc._handle_owned_workspaces("u-1")
         # The error carries member_count so the API can surface it.
         assert exc_info.value.details["member_count"] == 2
 
@@ -1042,8 +1049,9 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
-        out = await svc._handle_owned_workspaces("u-1", [ws])
+        out = await svc._handle_owned_workspaces("u-1")
 
         assert out["transferred"] == []
         svc.db.commit.assert_not_awaited()
@@ -1051,12 +1059,56 @@ class TestHandleOwnedWorkspaces:
     @pytest.mark.asyncio
     async def test_no_workspaces_short_circuits(self):
         svc = _service()
-        # No bulk-load issued when there are no workspaces — verify execute
-        # is never awaited.
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        # The identity-link lock only: no member bulk-load when the subject
+        # owns no workspace under it.
         svc.db.execute = AsyncMock()
-        out = await svc._handle_owned_workspaces("u-1", [])
+        out = await svc._handle_owned_workspaces("u-1")
         assert out == {"transferred": [], "sole_owner_workspaces": 0}
-        svc.db.execute.assert_not_awaited()
+        (call,) = svc.db.execute.await_args_list
+        assert "pg_advisory_xact_lock" in str(call.args[0])
+        svc._list_owned_workspaces.assert_awaited_once_with("u-1")
+
+    @pytest.mark.asyncio
+    async def test_the_owned_workspaces_are_read_after_the_identity_link_lock(self):
+        """The workspaces to hand on are read under the identity-link lock,
+        not taken from the caller: one handed to the subject before the lock
+        (another erasure's hand-over) is handed on too."""
+        svc = _service()
+        ws_id = uuid4()
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=1)
+        members = [
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN),
+        ]
+        statements: list[str] = []
+
+        async def execute(statement, *args, **kwargs):
+            sql = str(statement)
+            statements.append(sql)
+            result = MagicMock()
+            if "FROM workspace_members" in sql:
+                result.scalars.return_value.all.return_value = members
+            elif "FROM workspaces" in sql:
+                result.scalars.return_value.all.return_value = [ws]
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=execute)
+        with patch(
+            "services.account_erasure_service.lock_workspace_for_update",
+            AsyncMock(return_value=ws),
+        ):
+            out = await svc._handle_owned_workspaces("u-1")
+
+        lock_at = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        owned_at = next(
+            i
+            for i, sql in enumerate(statements)
+            if "FROM workspaces" in sql and "workspaces.owner_user_id = " in sql
+        )
+        assert lock_at < owned_at
+        assert out["transferred"] == [{"workspace_id": str(ws_id), "new_owner_user_id": "u-2"}]
+        svc.db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2019,6 +2071,67 @@ class TestBillingContractBlocksErasure:
         params = failed_update.compile().params
         assert params["status"] == STATUS_FAILED
         assert params["failure_reason"].startswith("billing_contract_active")
+
+    @pytest.mark.asyncio
+    async def test_step_two_checks_the_contracts_of_what_it_reads(self):
+        """The workspaces step 2 reads under the identity-link lock are
+        checked again: one the subject came to own during step 1 refuses a
+        self-service erasure before step 3 (nothing of step 2 commits)."""
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        _stub_execute_steps(svc)
+        svc._requeue_after_points_deleted = AsyncMock()
+        order = _recording_execute(svc)
+        late = _contract_workspace()
+
+        async def hand_over(user_id, *, listed):
+            listed.append(late)
+            return {"transferred": [], "sole_owner_workspaces": 1}
+
+        svc._handle_owned_workspaces = AsyncMock(side_effect=hand_over)
+
+        with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+            with pytest.raises(BillingContractActiveError) as caught:
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        assert caught.value.details["workspace_ids"] == [str(late.id)]
+        svc._delete_postgres.assert_not_awaited()
+        assert "rollback" in order
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith("billing_contract_active")
+        # step 1 ran: the subject's embeddings are re-queued
+        svc._requeue_after_points_deleted.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_force_erase_logs_a_contract_step_two_read(self):
+        svc = _service()
+        early = _contract_workspace()
+        late = _contract_workspace()
+        svc._list_owned_workspaces = AsyncMock(return_value=[early])
+        _stub_execute_steps(svc)
+
+        async def hand_over(user_id, *, listed):
+            listed.extend([early, late])
+            return {"transferred": [], "sole_owner_workspaces": 2}
+
+        svc._handle_owned_workspaces = AsyncMock(side_effect=hand_over)
+
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+            patch("services.account_erasure_service.logger") as mock_logger,
+        ):
+            await svc._execute(_execute_request(self_service=False), _user())
+
+        (override,) = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "erasure_admin_override_billing_contract"
+        ]
+        assert override.kwargs["workspace_ids"] == [str(early.id), str(late.id)]
 
     @pytest.mark.asyncio
     async def test_sweep_ignores_a_soft_deleted_contract_workspace(self):
@@ -4500,6 +4613,7 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
         members.scalars.return_value.all.return_value = rows
         svc.db.execute = AsyncMock(return_value=members)
         svc.db.commit = AsyncMock()
+        svc._list_owned_workspaces = AsyncMock(return_value=[second, first])
 
         async def locking(db, workspace_id, **kwargs):
             if workspace_id == low:
@@ -4512,8 +4626,8 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
             patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep,
         ):
             with pytest.raises(_LockConflict) as caught:
-                # handed in out of order: locked in id order all the same
-                await svc._handle_owned_workspaces("u-1", [second, first])
+                # listed out of order: locked in id order all the same
+                await svc._handle_owned_workspaces("u-1")
 
         # the busy one is tried WORKSPACE_LOCK_TRIES times, sleeping between
         assert [c.args[1] for c in lock.await_args_list] == [low] + [high] * 5
@@ -4724,6 +4838,36 @@ class TestALockConflictAtStepsTwoAndThreeReschedules:
         params = _request_update(order).compile().params
         assert params["status"] == STATUS_FAILED
         assert params["deleted_data_summary"].get("retry") is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_postgres_step_records_no_hand_over(self):
+        """Steps 2 and 3 are one transaction: when step 3 fails, step 2's
+        hand-overs are rolled back with it, so the failed row's summary does
+        not list them."""
+        from sqlalchemy.exc import DBAPIError
+
+        svc = _service()
+        _stub_execute_steps(svc)
+        order = _recording_execute(svc)
+        svc._requeue_after_points_deleted = AsyncMock()
+        handed = {
+            "transferred": [{"workspace_id": str(uuid4()), "new_owner_user_id": "u-2"}],
+            "sole_owner_workspaces": 0,
+        }
+        svc._handle_owned_workspaces = AsyncMock(return_value=handed)
+        self._failing(svc, "postgres", _db_error("23505"))
+        request = _execute_request(self_service=False)
+
+        with patch(
+            "services.account_erasure_service.delete_user_points",
+            new=AsyncMock(return_value={"kagura_memories": 0}),
+        ):
+            with pytest.raises(DBAPIError):
+                await svc._execute(request, _user())
+
+        svc._handle_owned_workspaces.assert_awaited_once_with(_user().user_id, listed=[])
+        summary = _request_update(order).compile().params["deleted_data_summary"]
+        assert "workspaces" not in summary
 
     @pytest.mark.asyncio
     async def test_a_row_moved_meanwhile_answers_the_conflict(self):
