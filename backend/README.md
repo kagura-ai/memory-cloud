@@ -130,7 +130,7 @@ backend/
 - **Vector DB**: Qdrant 1.19 (qdrant-client 1.18 accepts servers 1.17–1.19; a volume from an older server is upgraded one minor at a time — `docs/ops/qdrant-upgrade-runbook.md`)
 - **Cache**: Redis 7+
 - **Graph Memory**: NetworkX 3.0+
-- **Authentication**: OAuth2 and JWT (Authlib 1.8)
+- **Authentication**: OAuth2 and JWT (Authlib 1.9)
 - **LLM APIs**: OpenAI (embeddings), Cohere (reranking)
 - **Testing**: pytest, pytest-asyncio, pytest-cov
 - **Type Checking**: Pyright

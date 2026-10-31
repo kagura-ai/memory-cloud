@@ -520,7 +520,7 @@ The admin-configurable signup gate (`backend/src/services/signup_gate_service.py
 | **Cache** | Redis | 7+ |
 | **Frontend** | Next.js | 16 |
 | **ORM** | SQLAlchemy | 2.1 (async) |
-| **Auth** | Authlib | 1.8 |
+| **Auth** | Authlib | 1.9 |
 | **AI** | OpenAI API | Latest |
 | **Reranking** | Cohere API | Latest |
 | **Graph** | NetworkX | 3.0+ |
