@@ -2073,6 +2073,67 @@ class TestBillingContractBlocksErasure:
         assert params["failure_reason"].startswith("billing_contract_active")
 
     @pytest.mark.asyncio
+    async def test_step_two_checks_the_contracts_of_what_it_reads(self):
+        """The workspaces step 2 reads under the identity-link lock are
+        checked again: one the subject came to own during step 1 refuses a
+        self-service erasure before step 3 (nothing of step 2 commits)."""
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        _stub_execute_steps(svc)
+        svc._requeue_after_points_deleted = AsyncMock()
+        order = _recording_execute(svc)
+        late = _contract_workspace()
+
+        async def hand_over(user_id, *, listed):
+            listed.append(late)
+            return {"transferred": [], "sole_owner_workspaces": 1}
+
+        svc._handle_owned_workspaces = AsyncMock(side_effect=hand_over)
+
+        with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+            with pytest.raises(BillingContractActiveError) as caught:
+                await svc._execute(_execute_request(self_service=True), _user())
+
+        assert caught.value.details["workspace_ids"] == [str(late.id)]
+        svc._delete_postgres.assert_not_awaited()
+        assert "rollback" in order
+        params = _request_update(order).compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith("billing_contract_active")
+        # step 1 ran: the subject's embeddings are re-queued
+        svc._requeue_after_points_deleted.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_force_erase_logs_a_contract_step_two_read(self):
+        svc = _service()
+        early = _contract_workspace()
+        late = _contract_workspace()
+        svc._list_owned_workspaces = AsyncMock(return_value=[early])
+        _stub_execute_steps(svc)
+
+        async def hand_over(user_id, *, listed):
+            listed.extend([early, late])
+            return {"transferred": [], "sole_owner_workspaces": 2}
+
+        svc._handle_owned_workspaces = AsyncMock(side_effect=hand_over)
+
+        with (
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
+            patch("services.account_erasure_service.logger") as mock_logger,
+        ):
+            await svc._execute(_execute_request(self_service=False), _user())
+
+        (override,) = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "erasure_admin_override_billing_contract"
+        ]
+        assert override.kwargs["workspace_ids"] == [str(early.id), str(late.id)]
+
+    @pytest.mark.asyncio
     async def test_sweep_ignores_a_soft_deleted_contract_workspace(self):
         """Only live workspaces block; a deleted one is hard-deleted with the
         account (billing's read of it already answers 404 → cancel)."""
@@ -4804,7 +4865,7 @@ class TestALockConflictAtStepsTwoAndThreeReschedules:
             with pytest.raises(DBAPIError):
                 await svc._execute(request, _user())
 
-        svc._handle_owned_workspaces.assert_awaited_once_with(_user().user_id)
+        svc._handle_owned_workspaces.assert_awaited_once_with(_user().user_id, listed=[])
         summary = _request_update(order).compile().params["deleted_data_summary"]
         assert "workspaces" not in summary
 
