@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.134.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.2) — 2026-10-31
+
+Account erasure hands workspaces on in the same transaction as its Postgres deletes.
+
+### Fixed
+- **Erasure hand-over in one transaction** ([#2454](https://github.com/kagura-ai/memory-cloud/pull/2454)): account erasure reads the workspaces the member owns under its row locks and hands them on in the same transaction as its Postgres deletes, so a request that is rescheduled or fails leaves no hand-over behind.
+
+### Notes
+- No migration, no new environment variables. Replaces the v0.134.0 monitoring note: after `lock_conflict after 4 attempts` nothing from the workspaces step is committed either. A deployment coming from v0.132.0 also picks up v0.134.0's operator steps.
+
 ## [v0.134.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.1) — 2026-10-31
 
 Dependency patch release on top of v0.134.0: backend and frontend packages move past their published advisories.
