@@ -1173,8 +1173,9 @@ async def admin_force_erase_user(
 
     Rows busy (#2418): the same 503 ``ERASURE-007`` when the workspace
     hand-over or the Postgres step meets a row lock another operation holds
-    (``error_class`` ``LockNotAvailable`` or ``DeadlockDetected``); that step
-    is rolled back and the request rescheduled on the same attempt budget.
+    (``error_class`` ``LockNotAvailable`` or ``DeadlockDetected``); both
+    steps are one transaction, rolled back together (no hand-over stays),
+    and the request is rescheduled on the same attempt budget.
     After the last attempt the request is ``failed``
     (``lock_conflict after N attempts``) and the error is 409 ``RES-002``.
 

@@ -13,9 +13,9 @@ other keys: they serve the workspace, so the Postgres step hands them to the
 workspace's owner (#2305, ``services.connector_key_ownership``).
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
-Each step commits when it completes (workspace ownership transfers,
-Postgres deletes with the audit-log pseudonymization, audit-row insert,
-finalize),
+Each step commits when it completes (workspace ownership transfers
+together with the Postgres deletes and the audit-log pseudonymization,
+audit-row insert, finalize),
 so a failure in step N leaves steps 1..N-1 already persisted. This is
 deliberate — partial progress is recorded in ``deleted_data_summary``
 and is what ops needs for manual reconciliation. On any raise:
@@ -67,11 +67,15 @@ them the same way (#2358): the points may be gone and the account stays.
 
 Steps 2 and 3 hold the subject's ``users`` row (#2418), so they never wait on
 a workspace row: the subject's own workspace delete locks the workspace and
-then updates that ``users`` row. They take the live workspace rows ``NOWAIT``
-(the order is in ``identity_link_service.lock_identity_links``); a busy one,
-or a deadlock this run is the victim of, rolls the step back and reschedules
-the request like a vector-store failure, on the same attempt budget, until it
-fails with ``lock_conflict after N attempts: ...``.
+then updates that ``users`` row. They are one transaction: step 2 reads the
+workspaces the subject owns under the identity-link lock and its hand-overs
+commit with step 3's deletes, so every owner change made after the run's first
+lock either waits for its commit or is seen by step 2. They take the live
+workspace rows ``NOWAIT`` (the order is in
+``identity_link_service.lock_identity_links``); a busy one, or a deadlock this
+run is the victim of, rolls both steps back (the hand-overs too) and
+reschedules the request like a vector-store failure, on the same attempt
+budget, until it fails with ``lock_conflict after N attempts: ...``.
 
 The Postgres step takes every surviving memory of the subject out of the
 embedding queue (#2363; a ``success`` row too since #2393): they are marked
@@ -1649,18 +1653,19 @@ class AccountErasureService:
 
             # #2418: steps 2 and 3 hold the subject's ``users`` row and take the
             # workspace rows NOWAIT (the subject's own DELETE /workspaces/W
-            # holds W, then updates that ``users`` row). A lock they lose, or
-            # a deadlock this run is the victim of, rolls the step back with
-            # nothing of it committed: the request is rescheduled like a
-            # vector-store failure, on the same attempt budget.
+            # holds W, then updates that ``users`` row). They are one
+            # transaction: step 2 reads the owned workspaces again under the
+            # identity-link lock (``owned_workspaces`` above is for the billing
+            # check only) and its hand-overs commit with step 3's deletes. A
+            # lock they lose, or a deadlock this run is the victim of, rolls
+            # both back with nothing committed: the request is rescheduled
+            # like a vector-store failure, on the same attempt budget.
             try:
                 # Step 2: workspace ownership transfer / abort gate
                 step = "workspaces"
-                summary["workspaces"] = await self._handle_owned_workspaces(
-                    target.user_id, owned_workspaces
-                )
+                workspaces_summary = await self._handle_owned_workspaces(target.user_id)
 
-                # Step 3: Postgres deletes (FK-safe order)
+                # Step 3: Postgres deletes (FK-safe order), and the commit
                 step = "postgres"
                 erased = await self._delete_postgres(target, request_id=request_id)
             except (_LockConflict, DBAPIError) as exc:
@@ -1684,6 +1689,8 @@ class AccountErasureService:
                 )
                 raise conflict from exc
             erased_in_postgres = True  # committed: no step below can undo it
+            # the hand-overs committed with the deletes: only now in the summary
+            summary["workspaces"] = workspaces_summary
             postgres: dict[str, int | str | None] = dict(erased.counts)
             # #2268: the re-run's bound for the subject's authored memories
             postgres["memory_scrub_at"] = to_utc_iso(erased.memory_scrub_at)
@@ -2010,8 +2017,15 @@ class AccountErasureService:
     # ------------------------------------------------------------------
 
     async def _list_owned_workspaces(self, user_id: str) -> list[Workspace]:
-        """All workspaces this user owns (drives the ownership-transfer / member checks)."""
-        result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
+        """All workspaces this user owns (drives the ownership-transfer / member checks).
+
+        ``populate_existing``: step 2 reads them again later in the run, and a
+        row already in the session must show what is committed now."""
+        result = await self.db.execute(
+            select(Workspace)
+            .where(Workspace.owner_user_id == user_id)
+            .execution_options(populate_existing=True)
+        )
         return list(result.scalars().all())
 
     async def _check_no_blocking_workspace_transfers(self, user_id: str) -> None:
@@ -2052,9 +2066,7 @@ class AccountErasureService:
                     workspace_id=str(ws.id), member_count=len(other_members)
                 )
 
-    async def _handle_owned_workspaces(
-        self, user_id: str, workspaces: list[Workspace]
-    ) -> dict[str, Any]:
+    async def _handle_owned_workspaces(self, user_id: str) -> dict[str, Any]:
         """Transfer ownership where possible, refuse where not.
 
         Per Q4 design:
@@ -2064,6 +2076,13 @@ class AccountErasureService:
               column, so user_id is the deterministic-ordering criterion.
             - Member(s) but no other admin -> raise WorkspaceTransferRequiredError.
             - Sole owner -> no transfer; workspace will be deleted in step 4.
+
+        The workspaces are the ones ``user_id`` owns when the identity-link
+        lock is taken, read here: every other hand-over (another erasure's
+        step 2, admin and CLI deletion) runs under that lock, and the other
+        owner changes wait on the subject's ``users`` row. Nothing is
+        committed here: ``_delete_postgres`` commits the hand-overs with the
+        deletes, so a failure or a lock conflict there rolls them back too.
 
         Lock order (#2418, ``lock_identity_links``): the subject's ``users``
         row (held since ``_guard_erasure_run``) -> the identity-link lock ->
@@ -2084,9 +2103,6 @@ class AccountErasureService:
         transfers: list[dict[str, str]] = []
         sole_owner_count = 0
 
-        if not workspaces:
-            return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
-
         # Serialize successor selection with administrative/CLI/erasure deletion.
         # Do not acquire successor User locks after holding the subject User: the
         # shared identity lock provides this fence without reversing user order.
@@ -2095,12 +2111,19 @@ class AccountErasureService:
         from services.identity_link_service import lock_identity_links
 
         await lock_identity_links(self.db)
+        # Read under the lock, not before step 1: a workspace handed to the
+        # subject meanwhile (another erasure's step 2) is handed on too.
+        workspaces = await self._list_owned_workspaces(user_id)
+        if not workspaces:
+            return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
         # Bulk-load every member row for these workspaces in one round-trip
         # and group in memory — the per-workspace SELECT pattern was an N+1
         # for users with multiple owned workspaces.
         ws_ids = [ws.id for ws in workspaces]
         members_result = await self.db.execute(
-            select(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(ws_ids))
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id.in_(ws_ids))
+            .execution_options(populate_existing=True)
         )
         members_by_ws: dict[Any, list[WorkspaceMember]] = {}
         for m in members_result.scalars().all():
@@ -2157,11 +2180,9 @@ class AccountErasureService:
             locked_ws.ownership_epoch = locked_ws.ownership_epoch + 1
             transfers.append({"workspace_id": str(ws.id), "new_owner_user_id": new_owner.user_id})
 
-        # Commit so the cascade on workspace delete (step 4) sees the new
-        # owner_user_id rather than the about-to-be-deleted user_id.
-        if transfers:
-            await self.db.commit()
-
+        # No commit: step 3 runs in this transaction (its owned-workspace
+        # deletes see the new owner_user_id) and commits the hand-overs with
+        # the deletes.
         return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
 
     async def _lock_without_waiting(self, lock: Callable[[], Awaitable[_T]]) -> _T:
@@ -2281,7 +2302,9 @@ class AccountErasureService:
 
         user_id = target.user_id
         counts: dict[str, int] = {}
-        # Ownership transfers can commit, releasing the pre-vector user lock.
+        # The users row is held since ``_execute``'s first guard (step 2
+        # commits nothing), so this re-take is free; it still checks the
+        # request's marker in this transaction.
         await self._guard_erasure_run(target, request_id=request_id)
 
         # #2347: the sole-owner cascade also reaches contexts/memories. Take

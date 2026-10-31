@@ -215,11 +215,8 @@ async def test_erasure_auto_transfer_rechecks_successor_after_admin_deletion(
         async with maker() as db:
             transfer_pid = await db.scalar(text("SELECT pg_backend_pid()"))
             await db.execute(select(User.id).where(User.user_id == owner).with_for_update())
-            owned = list(
-                (await db.execute(select(Workspace).where(Workspace.id == ws_id))).scalars()
-            )
             started.set()
-            return await AccountErasureService(db)._handle_owned_workspaces(owner, owned)
+            return await AccountErasureService(db)._handle_owned_workspaces(owner)
 
     tasks = []
     with patch("services.user_deletion_service.delete_user_rows", pause_cleanup):

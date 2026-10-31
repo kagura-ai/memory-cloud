@@ -2038,8 +2038,9 @@ workspace and Postgres steps take the subject's workspace rows without
 waiting (the erasure holds the subject's `users` row, which the subject's own
 workspace delete updates after locking the workspace). A lock lost to a short
 holder (a memory create locks its workspace row until it commits) is tried
-again for up to 0.75 s; one still busy rolls that
-step back and reschedules the request the same way, on the same attempt
+again for up to 0.75 s; one still busy rolls the
+workspace and Postgres steps back (one transaction from v0.134.2: no
+hand-over stays committed) and reschedules the request the same way, on the same attempt
 budget (`retry.step` `workspaces` / `postgres`, `error_class`
 `LockNotAvailable` / `DeadlockDetected`); after the last attempt it ends
 `failed` with `failure_reason` starting `lock_conflict after 4 attempts:`. An admin force-erase that
