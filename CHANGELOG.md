@@ -4,6 +4,17 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.134.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.1) — 2026-10-31
+
+Dependency patch release on top of v0.134.0: backend and frontend packages move past their published advisories.
+
+### Changed
+- **Backend dependencies** ([#2449](https://github.com/kagura-ai/memory-cloud/issues/2449)): Authlib 1.8.0 → 1.9.1 (the bound is now `>=1.9.1,<1.10`; the OAuth server code Authlib 1.9 touches is unchanged or docstring-only, and `authlib.jose` stays unused), joserfc → 1.7.7 (floor `>=1.7.6`), filelock → 4.2.5, setuptools → 84.2.1, opentelemetry-api → 1.45.2.
+- **Frontend dependencies** ([#2449](https://github.com/kagura-ai/memory-cloud/issues/2449)): zod → 4.6.7; happy-dom (tests only) → 21.0.4.
+
+### Notes
+- No migration, no new environment variables. Deploying v0.134.1 also deploys everything in v0.134.0, so its operator steps (below) apply to a deployment coming from v0.132.0.
+
 ## [v0.134.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.0) — 2026-10-30
 
 Deletion and erasure correctness: deleting a user removes the soft-deleted workspaces they owned instead of refusing, erasure audit sweeps touch an address only while the member held it, erasure and user deletion take their row locks in one order, and session rollback no longer writes stale or disallowed values. Version 0.133.0 was not released; its one change shipped in v0.132.0.
