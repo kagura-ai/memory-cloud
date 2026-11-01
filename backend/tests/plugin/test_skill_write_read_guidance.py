@@ -150,3 +150,36 @@ def test_skill_copies_point_at_the_short_copies(relative):
     text = _flat(relative)
     assert "STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py" in text
     assert "backend/src/mcp_server/tools/_definitions.py" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_keeps_each_personal_fact_with_its_specifics(relative):
+    """#2465: a conversation yields one memory per stated fact, values verbatim."""
+    text = _remember_rules(relative)
+    assert "One fact per memory, specifics verbatim." in text
+    assert "a per-item price and a total are two facts; keep both" in text
+    assert "Never merge several personal facts into one summary." in text
+    assert "not generic advice" in text
+    assert "Write many items with one `remember_batch` call." in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_resolves_relative_dates_into_the_content(relative):
+    """#2465: ``observed_at`` stays the material's date, not the resolved one."""
+    text = _remember_rules(relative)
+    assert "Resolve relative dates." in text
+    assert "`observed_at` stays the material's date" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+@pytest.mark.parametrize("memory_type", ["fact", "preference", "event", "time"])
+def test_remember_vocabulary_covers_general_knowledge(relative, memory_type):
+    assert f"- `{memory_type}`: " in _remember_rules(relative)
+
+
+def test_a_personal_fact_rule_does_not_contradict_the_pii_rule():
+    """#2465: every stated name is kept, so the rule matches the Codex wording."""
+    for relative in (REMEMBER, "claude-skills/guide.md", CODEX):
+        text = _flat(relative)
+        assert "unnecessary PII" in text
+        assert "credentials or PII" not in text

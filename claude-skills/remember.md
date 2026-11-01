@@ -32,8 +32,16 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
   - `troubleshooting`: Error fixes, workarounds, environment-specific gotchas
   - `learning`: General learnings, benchmark results, tool limitations
   - `note`: Status updates, milestone notes, roadmap changes
+  - `fact`: A stated fact about the user, a person, a thing or a place ("The user's dog is named Max")
+  - `preference`: A like, dislike, habit or opinion the user states
+  - `event`: Something that happened, with when it happened ("Attended Sam's dinner party on 2023-05-12")
+  - `time`: A forward-looking plan, deadline or appointment. Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
 - Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most. **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`); no spelling variants of the same tag.
+
+**One fact per memory, specifics verbatim.** When the material is a conversation, save first what the user said about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own memory, with every name, number, date, place and quantity exactly as stated (a per-item price and a total are two facts; keep both). Never merge several personal facts into one summary. Save the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure), not generic advice. Write many items with one `remember_batch` call.
+
+**Resolve relative dates.** Turn "last Tuesday", "two weeks ago" or "next month" into the absolute date implied by the material's date and put it in `content`; `observed_at` stays the material's date.
 
 **Store what the material states, as it states it.** Do not fact-check it, add a note that a statement is wrong or outdated, or add dates, end years or qualifiers the material does not contain — the stored value is what the user or source said, and a later reader treats the store as the authority. When the material itself corrects an earlier statement, store the correction as it is worded there.
 
@@ -46,11 +54,11 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 - Good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."
 - Bad: "Discussed auth errors in today's meeting." / "JSONB index optimization" (too narrow — it will not match "database performance")
 
-Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or PII; coordinates go in `details.location` only.
+Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or unnecessary PII; coordinates go in `details.location` only.
 
 ### 3. Save
 
-Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. Say each thing once — the user waits while it is written:
+Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`), about 20 items a call; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:
 
 - `content` (required): only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary — when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - `context_summary`: one sentence on when to recall it, not a second summary. Search reads it, so keep it rather than drop it.

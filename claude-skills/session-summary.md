@@ -16,7 +16,7 @@ The user waits while each memory is written, so the mode sets how much is writte
 
 | Mode | Candidates | Fields per item | 4a pin / 4b tool guardrail | 4c keep touched memories current |
 |------|-----------|-----------------|----------------------------|----------------------------------|
-| `light` | up to 3, decisions and traps first | `summary` + tags; `content` one short line (the evidence or source); no `context_summary` (put the search terms in the summary instead). A `supersedes` the user picked still applies | skipped | only the completed follow-up offer |
+| `light` | up to 3, decisions and traps first | `summary` + tags; `content` one short line (the evidence or source); no `context_summary` (put the search terms in the summary instead). A `supersedes` the user picked still applies, and so does `details.observed_at` | skipped | only the completed follow-up offer |
 | `standard` | up to 7 | the fields in step 4 | proposed when one applies | runs |
 | `deep` | about 15 (one `remember_batch` call holds about 20) | `standard` + `linked_memory_ids` to related memories, and a supersede pair proposed per item — both only from ids already in this session's results, no extra recall — and dated follow-ups as `type="time"` | considered for every item | runs |
 
@@ -46,7 +46,12 @@ Review the conversation and categorize knowledge into one of the canonical types
 | `troubleshooting` | Error solutions, workarounds, environment-specific fixes | 0.5-0.7 |
 | `learning` | SDK benchmark results, performance findings, tool limitations | 0.6-0.8 |
 | `note` | Milestone status, roadmap changes, issue relationships | 0.6-0.8 |
-| `time` | Forward-looking / dated follow-ups (a deadline, "re-check on date X", a scheduled flag flip). Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it at the right time instead of letting it decay into the backlog. | 0.6-0.8 |
+| `fact` | A stated fact about the user, a person, a thing or a place | 0.6-0.8 |
+| `preference` | A like, dislike, habit or opinion the user states | 0.6-0.8 |
+| `event` | Something that happened, with when it happened | 0.6-0.8 |
+| `time` | Forward-looking plans and dated follow-ups (a deadline, an appointment, "re-check on date X", a scheduled flag flip). Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it at the right time instead of letting it decay into the backlog. | 0.6-0.8 |
+
+**A conversation about the user's own life** (not a development session): propose every distinct fact the user stated about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own candidate, with every name, number, date and quantity exactly as stated (a per-item price and a total are two facts). The mode's candidate count limits development knowledge only, not these. Include the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure).
 
 ### 3. Get the target context
 
@@ -69,6 +74,7 @@ For each kept item (a batch item or a single `remember`), set the fields below. 
 - **summary**: Searchable conclusion (not process), with the terms a later search would use. 100-250 chars.
 - **content**: Required. Only what the summary leaves out — the why, the evidence, numbers, the rejected option. Never restate the summary; when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - **type**: From the table above
+- **details.observed_at**: the session's date as `YYYY-MM-DD` when the conversation is dated (the date the fact was stated, never today's date); resolve relative dates ("last Tuesday") into the content.
 - **importance**: Based on reusability across future sessions
 - **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. Reuse the spellings `list_tags(context_id=...)` returns; `tags_normalize=true` covers drift, so no spelling variants.
 - **context_summary**: One sentence — when to recall it. Not a second summary. (`light` leaves it out.)

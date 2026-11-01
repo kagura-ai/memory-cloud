@@ -196,3 +196,42 @@ def test_save_skills_always_send_content():
         assert "short line naming the evidence or source" in text, name
     assert "- **content**: Required." in texts["session-summary"]
     assert "`content` (required)" in texts["remember"] and "`content` (required)" in texts["codex"]
+
+
+def _modes(text: str) -> dict[str, str]:
+    table = text.split("## Save modes", 1)[1].split("`auto` picks", 1)[0]
+    rows = (line for line in table.splitlines() if line.startswith("| `"))
+    return {row.split("`")[1]: row for row in rows}
+
+
+def test_session_summary_keeps_every_personal_fact_outside_the_mode_count():
+    """#2466: the count limits development knowledge; development counts stay."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    step = text.split("### 2. Identify what to remember", 1)[1].split("\n### ", 1)[0]
+    for memory_type in ("fact", "preference", "event"):
+        assert f"| `{memory_type}` | " in step
+    assert "**A conversation about the user's own life** (not a development session)" in step
+    assert "The mode's candidate count limits development knowledge only" in step
+    modes = _modes(text)
+    assert "up to 3" in modes["light"]
+    assert "up to 7" in modes["standard"]
+    assert "about 15" in modes["deep"]
+
+
+def test_session_summary_stamps_observed_at_in_every_mode():
+    """#2466: ``auto`` picks ``light`` for a short conversation, so it keeps the date."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    save = text.split("### 4. Save each item", 1)[1].split("\n### ", 1)[0]
+    assert "- **details.observed_at**: the session's date as `YYYY-MM-DD`" in save
+    assert save.index("- **type**") < save.index("- **details.observed_at**")
+    assert save.index("- **details.observed_at**") < save.index("- **importance**")
+    assert "and so does `details.observed_at`" in _modes(text)["light"]
+
+
+def test_codex_session_summary_carries_the_personal_fact_rules():
+    """#2466: the Codex skill's "Session Summary" section is the SYNC copy."""
+    text = CODEX_SKILL.read_text(encoding="utf-8")
+    section = _section(text, "## Session Summary")
+    assert "The mode's item count limits development knowledge only" in section
+    assert "`details.observed_at`" in section
+    assert "and so does `details.observed_at`" in section
