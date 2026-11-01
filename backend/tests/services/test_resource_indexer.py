@@ -572,14 +572,99 @@ class TestApplyDeleteCollectionRouting:
     async def test_delete_specific_version_uses_passed_collection_name(self, indexer):
         event = _make_event()
         event.version = 5
-        await indexer._apply_delete(
-            event, _make_context(), "kagura_memories_qwen3_embedding_4b_2560"
-        )
+        row = _indexed_row()
+        indexer.db.execute.return_value.scalar_one_or_none.return_value = row
+        with patch(
+            "services.resource_indexer.unshared_point_id",
+            AsyncMock(side_effect=lambda _db, _memory_id, point_id: point_id),
+        ):
+            await indexer._apply_delete(
+                event, _make_context(), "kagura_memories_qwen3_embedding_4b_2560"
+            )
         assert indexer.qdrant_client.delete.await_count == 1
         assert (
             indexer.qdrant_client.delete.await_args.kwargs["collection_name"]
             == "kagura_memories_qwen3_embedding_4b_2560"
         )
+
+
+class TestApplyDeleteVersionFollowsTheSharedPointRule:
+    """#2248: ``version=N`` deletes the version's point by the rule of the
+    other delete paths (``unshared_point_id``). The row goes either way."""
+
+    COLLECTION = "kagura_memories"
+
+    def _indexer(self, row):
+        db = _mock_db()
+        db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: row))
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            return ResourceIndexer(db)
+
+    @staticmethod
+    def _event():
+        event = _make_event()
+        event.version = 5
+        return event
+
+    async def _delete(self, indexer, unshared):
+        with (
+            patch("services.resource_indexer.unshared_point_id", unshared),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            await indexer._apply_delete(self._event(), _make_context(), self.COLLECTION)
+        return log
+
+    @staticmethod
+    def _version_point():
+        from services.resource_indexer import resource_point_id
+
+        return resource_point_id("res_test", "doc_1", 5)
+
+    @pytest.mark.asyncio
+    async def test_the_contexts_row_alone_names_the_point_so_it_goes(self):
+        row = _indexed_row()
+        indexer = self._indexer(row)
+        unshared = AsyncMock(side_effect=lambda _db, _memory_id, point_id: point_id)
+
+        await self._delete(indexer, unshared)
+
+        unshared.assert_awaited_once_with(indexer.db, row.id, self._version_point())
+        indexer.qdrant_client.delete.assert_awaited_once_with(
+            collection_name=self.COLLECTION,
+            points_selector=[str(self._version_point())],
+        )
+        indexer.db.delete.assert_awaited_once_with(row)
+
+    @pytest.mark.asyncio
+    async def test_no_row_in_this_context_keeps_the_point(self):
+        indexer = self._indexer(None)
+        unshared = AsyncMock()
+
+        log = await self._delete(indexer, unshared)
+
+        unshared.assert_not_awaited()
+        indexer.qdrant_client.delete.assert_not_awaited()
+        indexer.db.delete.assert_not_awaited()
+        kept = [
+            c for c in log.info.call_args_list if c.args[0] == "qdrant_delete_version_point_kept"
+        ]
+        assert kept[0].kwargs["point_id"] == str(self._version_point())
+        assert kept[0].kwargs["has_row"] is False
+
+    @pytest.mark.asyncio
+    async def test_another_live_row_keeps_the_point_and_the_row_still_goes(self):
+        row = _indexed_row()
+        indexer = self._indexer(row)
+
+        log = await self._delete(indexer, AsyncMock(return_value=None))
+
+        indexer.qdrant_client.delete.assert_not_awaited()
+        indexer.db.delete.assert_awaited_once_with(row)
+        indexer.db.flush.assert_awaited_once()
+        kept = [
+            c for c in log.info.call_args_list if c.args[0] == "qdrant_delete_version_point_kept"
+        ]
+        assert kept[0].kwargs["has_row"] is True
 
 
 class TestProcessIncrementalResolvesRoutingOncePerBatch:
@@ -2337,5 +2422,78 @@ class TestOldVersionPointSharedAfterSlugRelease:
             await db_session.rollback()
             await db_session.execute(delete(Memory).where(Memory.context_id == released_id))
             await db_session.execute(delete(Context).where(Context.id == released_id))
+            await db_session.commit()
+            await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
+
+
+class TestApplyDeleteVersionAgainstTheDb:
+    """#2248, against the real DB: ``version=N`` keeps the version's point
+    while another context's live row names it, and deletes it otherwise."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("other_row_names_it", [True, False])
+    async def test_the_point_goes_only_when_no_other_live_row_names_it(
+        self, db_session, other_row_names_it
+    ):
+        from sqlalchemy import delete
+
+        from services.resource_indexer import resource_point_id
+
+        ws_id, ctx_id, resource_pk, slug, owner = await _seed_indexed_resource(db_session, [])
+        point = resource_point_id(slug, "doc_1", 1)
+        other = Context(
+            id=uuid4(),
+            workspace_id=ws_id,
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=owner,
+            is_private=False,
+        )
+        db_session.add(other)
+        await db_session.flush()
+
+        def _row(context_id):
+            return Memory(
+                id=uuid4(),
+                user_id=owner,
+                workspace_id=ws_id,
+                context_id=context_id,
+                summary="an indexed document",
+                content='{"title": "v1"}',
+                details={"resource_id": slug, "doc_id": "doc_1", "version": 1},
+                type="resource_data",
+                source="resource_ingest",
+                client="resource_indexer",
+                embedding_status="success",
+                summary_embedding_id=point,
+            )
+
+        row, other_row = _row(ctx_id), _row(other.id)
+        db_session.add(row)
+        if other_row_names_it:
+            db_session.add(other_row)
+        await db_session.commit()
+        row_id, other_row_id, other_id = row.id, other_row.id, other.id
+        context = await db_session.get(Context, ctx_id)
+        try:
+            indexer, _ = _db_indexer(db_session)
+            event = _make_event()
+            event.resource_id, event.version, event.op = slug, 1, "delete"
+
+            await indexer._apply_delete(event, context, "kagura_memories")
+            await db_session.commit()
+
+            assert await db_session.get(Memory, row_id) is None
+            if other_row_names_it:
+                indexer.qdrant_client.delete.assert_not_awaited()
+                assert await db_session.get(Memory, other_row_id) is not None
+            else:
+                indexer.qdrant_client.delete.assert_awaited_once_with(
+                    collection_name="kagura_memories",
+                    points_selector=[str(point)],
+                )
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(Memory).where(Memory.context_id == other_id))
+            await db_session.execute(delete(Context).where(Context.id == other_id))
             await db_session.commit()
             await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)

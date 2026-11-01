@@ -341,8 +341,8 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     skips the lookup. Not scoped by context on purpose: the row to find is one
     in ANOTHER context that shares the collection. Served by the partial index
     idx_memories_summary_embedding_live (#1869). The rule ``forget``, the
-    Sleep archive and merge (#2065) and the indexer's old-version cleanup
-    (#2248) delete a memory's point by.
+    Sleep archive and merge (#2065), and the indexer's old-version cleanup and
+    ``version=N`` delete (#2248) delete a memory's point by.
 
     One context indexes a resource at a time (#2248, #2254).
     ``contexts.resource_id`` is unique among live contexts
@@ -1524,7 +1524,7 @@ class ResourceIndexer:
         never leaves it needing a rollback.
 
         Best effort: a failure is logged and the rest goes on; a crash before
-        the drain leaves strays the sweep removes (``no_row``).
+        the drain leaves strays the sweep removes.
         """
         retired, self._retired = self._retired, []
         if not retired:
@@ -1813,23 +1813,9 @@ class ResourceIndexer:
                 # Delete specific version (new behavior)
                 # ================================================================
 
-                # Delete from Qdrant
                 # Bugfix: Use UUID format like in upsert
                 point_id_str = f"{event.resource_id}:{event.doc_id}:v{event.version}"
                 point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
-
-                await self.qdrant_client.delete(
-                    collection_name=collection_name,
-                    points_selector=[str(point_id_uuid)],
-                )
-
-                # Code quality: Use info for important business events
-                logger.info(
-                    "qdrant_delete_version",
-                    point_id=str(point_id_uuid),
-                    point_id_source=point_id_str,
-                    collection=collection_name,
-                )
 
                 # Delete from Memory table with 3-level isolation
                 # Performance: Use generated columns (Migration 061) instead of JSONB search
@@ -1843,6 +1829,34 @@ class ResourceIndexer:
                     )
                 )
                 memory = result.scalar_one_or_none()
+
+                # The rule ``forget`` and the Sleep archive and merge delete a
+                # point by (``unshared_point_id``), which needs this context's
+                # row. A point kept here is left to the orphan sweep.
+                unshared_point = (
+                    await unshared_point_id(self.db, memory.id, point_id_uuid) if memory else None
+                )
+                if unshared_point is None:
+                    logger.info(
+                        "qdrant_delete_version_point_kept",
+                        point_id=str(point_id_uuid),
+                        point_id_source=point_id_str,
+                        collection=collection_name,
+                        has_row=memory is not None,
+                    )
+                else:
+                    await self.qdrant_client.delete(
+                        collection_name=collection_name,
+                        points_selector=[str(unshared_point)],
+                    )
+
+                    # Code quality: Use info for important business events
+                    logger.info(
+                        "qdrant_delete_version",
+                        point_id=str(point_id_uuid),
+                        point_id_source=point_id_str,
+                        collection=collection_name,
+                    )
 
                 if memory:
                     await self.db.delete(memory)
