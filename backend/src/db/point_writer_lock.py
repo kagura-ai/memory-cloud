@@ -14,7 +14,9 @@ point first and commit the row that owns it afterwards:
 For as long as such a transaction is open, its points look orphaned to every
 other session. Each of those writers therefore holds this advisory lock
 *shared* until its transaction ends, and the sweep takes it *exclusively*
-before the look that precedes a delete. The embedding-model switch also takes
+before the look that precedes a delete. ``forget`` does the same after its
+commit, once per call (#2201): up to 50 ms of waiting, at most 2 s held, else
+it leaves its points to the sweep. The embedding-model switch also takes
 it exclusively while changing routing, so a restore either finishes under
 the old route first or resolves the new route after the switch.
 
@@ -44,7 +46,8 @@ async def hold_point_writer_lock(db: AsyncSession) -> None:
     """Keep the sweep's delete pass out until this transaction ends.
 
     Call it before the first point is written. Shared: writers do not block
-    each other, only the sweep's delete pass (seconds, once a day).
+    each other, only the sweep's delete pass (seconds, once a day) and
+    ``forget``'s post-commit delete (normally milliseconds, per call).
     """
     await db.execute(_SHARED_SQL)
 

@@ -7,7 +7,7 @@ call shares one budget, the ``forget`` timeout (``MCP_TIMEOUT_FORGET``, default
 15 s); an id that does not fit comes back ``not_attempted``. Each of the 50
 memories has a summary point, two content chunk points and two edges.
 
-Measured locally (5 runs): median ~3.5 s, max ~3.6 s for the 50 ids, so the
+Measured locally (5 runs): median ~1.8 s, max ~2.0 s for the 50 ids, so the
 15 s default stays. The default run checks the behaviour under a generous
 budget and logs the wall time; the timing bound — the real default budget,
 and the batch under 10 s, the threshold #2201 set for raising it — is
@@ -49,8 +49,6 @@ PERF_OPT_IN = os.getenv("RUN_PERF_TESTS") == "1"
 PERF_BATCH_S = 10.0
 # The default run's budget: generous, so only behaviour is checked.
 _RELAXED_BUDGET_S = 120.0
-# The cancel test's budget: the stalled point delete holds the id until then.
-_CANCEL_BUDGET_S = 5.0
 perf_logger = logging.getLogger(__name__)
 _DIM = 8
 _VEC = [1.0, 0, 0, 0, 0, 0, 0, 0]
@@ -245,10 +243,10 @@ async def test_a_healthy_50_id_batch_fits_the_forget_budget(world: World):
     assert chunks.count == 0
 
 
-async def test_a_cancel_at_the_point_delete_leaves_a_tombstone_not_a_blind_row(world: World):
-    """The batch deadline cancels an id while its point delete stalls: the row
-    is already committed as deleted (reported ``deleted``) and its point is
-    left for the orphan sweep — never a live row without its vector."""
+async def test_a_stalled_point_delete_is_bounded_and_leaves_the_tombstones(world: World):
+    """The vector store stalls after the commits: the batch still answers, every
+    id ``deleted``, and the points are left for the orphan sweep — never a
+    live row without its vector."""
     import asyncio
 
     from models.memory import Memory
@@ -260,29 +258,21 @@ async def test_a_cancel_at_the_point_delete_leaves_a_tombstone_not_a_blind_row(w
         await never.wait()
 
     with (
-        patch("services.memory_service.delete_memory_from_qdrant", stall),
-        # Generous: the first id must reach its commit before the deadline,
-        # even on a slow runner (it takes ~40 ms locally).
-        patch("mcp_server.tools.memory.get_tool_timeout", return_value=_CANCEL_BUDGET_S),
+        patch("db.qdrant.delete_points_from_qdrant", stall),
+        patch("services.memory_service.FORGET_POINT_DELETE_TIMEOUT_SECONDS", 0.5),
     ):
         body, elapsed = await _forget(world, ids)
 
-    assert elapsed < _CANCEL_BUDGET_S + 5.0
-    assert body["results"][0] == {"memory_id": str(ids[0]), "status": "deleted"}
-    assert body["results"][1]["error"] == "not_attempted"
-    rows = dict(
-        (
-            await world.session.execute(
-                select(Memory.id, Memory.deleted_at).where(Memory.id.in_(ids))
-            )
-        ).all()
-    )
-    assert rows[ids[0]] is not None  # committed tombstone
-    assert rows[ids[1]] is None  # not attempted: live, with its point
-    left = {
-        str(p.id) for p in await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
-    }
-    assert left == {str(ids[0]), str(ids[1])}
+    assert elapsed < 30.0
+    assert [r["status"] for r in body["results"]] == ["deleted", "deleted"]
+    live = (
+        await world.session.execute(
+            select(func.count()).where(Memory.id.in_(ids), Memory.deleted_at.is_(None))
+        )
+    ).scalar_one()
+    assert live == 0
+    left = await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
+    assert {str(p.id) for p in left} == {str(i) for i in ids}
 
 
 async def test_a_row_restored_after_the_commit_keeps_its_point(world: World, async_engine):

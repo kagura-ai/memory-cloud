@@ -1725,7 +1725,13 @@ Two things keep the two stores in step:
   points of such a memory are ones written before the resource indexer took
   the row over, holding text it no longer has
   ([#2101](https://github.com/kagura-ai/memory-cloud/issues/2101)). Set
-  `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off.
+  `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off. `forget`
+  also relies on the sweep: it deletes its points after its commit, and when a
+  point writer holds the lock or the vector store stalls it logs
+  `forget_point_delete_deferred` and leaves them for this run
+  ([#2201](https://github.com/kagura-ai/memory-cloud/issues/2201)). With the
+  scheduled run off, those points stay until you run the sweep yourself; they
+  are not recall hits, but they do take candidate slots.
 
 The scheduled run refuses to delete more than half of the points it scanned
 and logs `orphan_vector_sweep_refused` instead: that is what a sweep pointed

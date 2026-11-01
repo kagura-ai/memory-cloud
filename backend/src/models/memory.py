@@ -598,7 +598,7 @@ class Memory(Base):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         # Issue #1869: partial B-tree for the shared-point check that runs once
-        # per forgotten row (MemoryService._delete_memory_point): "does another
+        # per forgotten row (MemoryService._point_to_delete): "does another
         # live row name this point?" filters by summary_embedding_id alone,
         # across contexts. Partial on live rows that have a point, which is
         # exactly the predicate of that query (migration

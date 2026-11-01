@@ -1537,8 +1537,6 @@ async def handle_forget(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Delete memories (soft delete)."""
-    from types import SimpleNamespace
-
     from db.base import get_db
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
@@ -1555,8 +1553,6 @@ async def handle_forget(
 
     start_time = time.time()
     async for db in get_db():
-        # Set once the delete starts: a failure after it may follow the commit.
-        attempt_start = None
         try:
             current_context_id = _resolve_context_id(args["context_id"])
 
@@ -1565,20 +1561,8 @@ async def handle_forget(
             current_context = await _resolve_context(
                 db, user_id, current_context_id, operation="forget", write_role="delete memories"
             )
-            # A rollback below expires the ORM row; keep what the reply and
-            # the touch read from it.
-            context_fields = {
-                "context_id": str(current_context.id) if current_context else None,
-                "context_name": current_context.name if current_context else None,
-            }
-            touch_target = (
-                SimpleNamespace(id=current_context.id, last_used_at=current_context.last_used_at)
-                if current_context
-                else None
-            )
 
             service = MemoryService(db)
-            attempt_start = utcnow()
             result = await execute_with_timeout(
                 service.forget(
                     request,
@@ -1591,41 +1575,34 @@ async def handle_forget(
                 operation_name="forget",
             )
 
-            return await _forget_single_success(
-                db,
-                user_id,
-                workspace_id,
-                start_time,
-                current_context_id,
-                touch_target,
-                context_fields,
-                [str(mid) for mid in result.memory_ids],
+            await _log_tool_usage(
+                db, user_id, "forget", start_time, 200, current_context_id, workspace_id
             )
+            # #1257 review: forget is a memory op too — deletion-only
+            # maintenance still counts as using the context.
+            await _touch_context_last_used(db, current_context)
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=_dumps(
+                        {
+                            "status": "success",
+                            "deleted_count": result.deleted_count,
+                            "memory_ids": [str(mid) for mid in result.memory_ids],
+                            **_session_response_field(),  # #2044
+                            "context_id": str(current_context.id) if current_context else None,
+                            "context_name": current_context.name if current_context else None,
+                        }
+                    ),
+                )
+            ]
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
         except Exception:
             await db.rollback()
-            if attempt_start is not None and request.memory_id is not None:
-                # #2201: the service commits before its audit row and its
-                # point delete, so a failure or a timeout after that commit
-                # left the memory deleted — report it as the batch form does.
-                try:
-                    committed = await _forgotten_by(db, request.memory_id, user_id, attempt_start)
-                except Exception:
-                    logger.warning("forget_commit_check_failed", exc_info=True)
-                    committed = False
-                if committed:
-                    return await _forget_single_success(
-                        db,
-                        user_id,
-                        workspace_id,
-                        start_time,
-                        current_context_id,
-                        touch_target,
-                        context_fields,
-                        [str(request.memory_id)],
-                    )
             await _log_tool_usage(
                 db, user_id, "forget", start_time, 500, args.get("context_id"), workspace_id
             )
@@ -1633,39 +1610,6 @@ async def handle_forget(
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
-
-
-async def _forget_single_success(
-    db: Any,
-    user_id: str,
-    workspace_id: UUID | None,
-    start_time: float,
-    context_id: UUID | None,
-    touch_target: Any,
-    context_fields: dict[str, Any],
-    memory_ids: list[str],
-) -> list[TextContent]:
-    """The single forget's success tail: usage row, context touch, commit, reply."""
-    await _log_tool_usage(db, user_id, "forget", start_time, 200, context_id, workspace_id)
-    # #1257 review: forget is a memory op too — deletion-only maintenance
-    # still counts as using the context.
-    if touch_target is not None:
-        await _touch_context_last_used(db, touch_target)
-    await db.commit()
-    return [
-        TextContent(
-            type="text",
-            text=_dumps(
-                {
-                    "status": "success",
-                    "deleted_count": len(memory_ids),
-                    "memory_ids": memory_ids,
-                    **_session_response_field(),  # #2044
-                    **context_fields,
-                }
-            ),
-        )
-    ]
 
 
 # #2127: forget(memory_ids=[...]) — the single form applied per id.
@@ -1793,9 +1737,8 @@ async def _handle_forget_many(
     """``forget(memory_ids=[...])``: each id is forgotten exactly as
     ``forget(memory_id=...)`` would forget it, and reported on its own row.
 
-    ``MemoryService.forget`` commits each id itself (its search point is
-    removed after that commit, #2201), so every id is its own transaction, as a
-    sequence of single forgets would be: an id that raises is rolled back
+    ``MemoryService.forget`` commits each id itself, so every id is its own
+    transaction, as a sequence of single forgets would be: an id that raises is rolled back
     alone and the others stay deleted. ``deleted`` / ``skipped`` (not found,
     not yours, already gone — one word, so the row is no existence oracle) /
     ``error``. One usage row and one context touch for the whole call.
@@ -1811,10 +1754,13 @@ async def _handle_forget_many(
     back, then ``deleted`` if its commit had landed, else ``error`` /
     ``timeout`` with a correlation id — exactly what the single form reports
     for the same event, and that row's help says to verify before retrying.
-    A cancel between the commit and the point delete reports ``deleted``: the
-    row is a committed tombstone, and the orphan sweep removes its point.
     A rollback that fails after such a cancel still flips ``session_ok`` and
     ends the loop — keep that bail-out if the rollback path changes.
+
+    #2201: the search points of the committed ids go once, after the loop
+    (``delete_forgotten_points``), not per id: that step takes the global
+    point-writer lock. It has its own short bound, which comes after the
+    budget like the usage row, and it fails soft to the orphan sweep.
     """
     from types import SimpleNamespace
 
@@ -1851,6 +1797,7 @@ async def _handle_forget_many(
 
             service = MemoryService(db)
             results: list[dict[str, Any]] = []
+            forgotten_points: list[tuple[UUID, UUID, str]] = []
             session_ok = True
             budget_left = True
             budget = get_tool_timeout("forget")
@@ -1876,6 +1823,7 @@ async def _handle_forget_many(
                             current_context_id=current_context_id,
                             key_workspace_id=get_mcp_key_workspace_scope(),
                             current_workspace_id=workspace_id,
+                            point_queue=forgotten_points,
                         ),
                         timeout=remaining,
                         operation_name="forget",
@@ -1903,6 +1851,9 @@ async def _handle_forget_many(
                         "status": "deleted" if result.deleted_count else "skipped",
                     }
                 )
+
+            if forgotten_points:
+                await service.delete_forgotten_points(forgotten_points)
 
             deleted = [r["memory_id"] for r in results if r["status"] == "deleted"]
             skipped = sum(1 for r in results if r["status"] == "skipped")

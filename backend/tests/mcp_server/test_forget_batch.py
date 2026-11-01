@@ -418,34 +418,35 @@ async def test_single_form_response_is_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_single_form_reports_a_delete_that_committed_before_a_timeout():
-    """#2201: the service commits before its audit row and point delete, so a
-    timeout after the commit left the memory deleted — the single form says
-    so, as the batch form does, instead of a timeout for a done delete."""
-    mid = uuid4()
-    body, _, mocks = await _call(
-        {"memory_id": str(mid)}, _forgetter({mid: TimeoutError()}), forgotten=True
-    )
-    assert body["status"] == "success"
-    assert body["deleted_count"] == 1
-    assert body["memory_ids"] == [str(mid)]
-    mocks.db.rollback.assert_awaited_once()
-    assert mocks.forgotten_by.await_args.args[1:3] == (mid, "u1")
-    assert mocks.log.await_args.args[4] == 200
-    mocks.touch.assert_awaited_once()
+async def test_the_batch_deletes_its_points_once_after_the_loop():
+    """#2201: that step takes the global point-writer lock, so a batch queues
+    its ids' points and takes it once, whatever the ids' outcomes."""
+    a, b, c = uuid4(), uuid4(), uuid4()
+    calls: list[str] = []
 
+    async def forget(request, **kwargs):
+        calls.append("forget")
+        if request.memory_id == b:
+            raise RuntimeError("boom")
+        kwargs["point_queue"].append((request.memory_id, request.memory_id, "c"))
+        return SimpleNamespace(deleted_count=1, memory_ids=[request.memory_id])
 
-@pytest.mark.asyncio
-async def test_single_form_raises_when_the_delete_did_not_commit():
-    mid = uuid4()
-    with pytest.raises(TimeoutError):
-        await _call({"memory_id": str(mid)}, _forgetter({mid: TimeoutError()}), forgotten=False)
+    async def drain(queued):
+        calls.append("drain")
+        assert [entry[0] for entry in queued] == [a, c]
 
-
-@pytest.mark.asyncio
-async def test_single_query_form_is_not_reported_deleted_on_a_failure():
-    """The commit check names one id; a query forget's failure still raises."""
     service = MagicMock()
-    service.forget = AsyncMock(side_effect=TimeoutError())
-    with pytest.raises(TimeoutError):
-        await _call({"query": "old notes"}, service, forgotten=True)
+    service.forget = AsyncMock(side_effect=forget)
+    service.delete_forgotten_points = AsyncMock(side_effect=drain)
+    body, _, _ = await _call({"memory_ids": [str(a), str(b), str(c)]}, service)
+    assert calls == ["forget", "forget", "forget", "drain"]
+    assert body["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_nothing_queued_takes_no_lock():
+    a = uuid4()
+    service = _forgetter({a: 0})
+    service.delete_forgotten_points = AsyncMock()
+    await _call({"memory_ids": [str(a)]}, service)
+    service.delete_forgotten_points.assert_not_awaited()

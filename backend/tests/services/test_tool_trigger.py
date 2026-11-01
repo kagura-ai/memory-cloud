@@ -395,7 +395,7 @@ async def test_patch_explicit_null_details_on_a_guardrail_row_requires_editor(se
 
 async def _forget(service, memory):
     with (
-        patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()),
+        patch.object(service, "delete_forgotten_points", new=AsyncMock()),
         patch("services.memory_service.resolve_collection_name", new=AsyncMock(return_value="c")),
         patch("repositories.neural_edge.NeuralEdgeRepository") as edge_repo,
         patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
@@ -462,7 +462,7 @@ async def _forget_by_query(service, memories):
     search.degraded = False
     service.recall = AsyncMock(return_value=search)
     with (
-        patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()),
+        patch.object(service, "delete_forgotten_points", new=AsyncMock()),
         patch("services.memory_service.resolve_collection_name", new=AsyncMock(return_value="c")),
         patch("repositories.neural_edge.NeuralEdgeRepository") as edge_repo,
         patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
