@@ -72,7 +72,7 @@ async def _recall(args: dict[str, Any]) -> tuple[dict, Any]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall", b"profile=typo"])
+@pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall"])
 async def test_requested_where_explore_is_not_listed_says_how_to_list_it(query):
     set_mcp_tool_view_query(query)
 
@@ -81,8 +81,18 @@ async def test_requested_where_explore_is_not_listed_says_how_to_list_it(query):
     assert reply["status"] == "success"
     assert request.include_explore_hints is False
     assert "explore_hints" not in reply
-    assert "?add_tools=explore" in reply["explore_hints_omitted"]
-    assert "?profile=full" in reply["explore_hints_omitted"]
+    assert "add_tools=explore" in reply["explore_hints_omitted"]
+    assert "profile=full" in reply["explore_hints_omitted"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_url_reports_its_own_error():
+    set_mcp_tool_view_query(b"profile=typo")
+
+    reply, request = await _recall({"include_explore_hints": True})
+
+    assert request.include_explore_hints is False
+    assert "unknown tool profile 'typo'" in reply["explore_hints_omitted"]
 
 
 @pytest.mark.asyncio

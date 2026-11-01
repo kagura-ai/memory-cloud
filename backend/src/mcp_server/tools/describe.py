@@ -41,8 +41,9 @@ URL_HINT: dict[str, str] = {
     "allowlist": "?tools=<name>,<name> lists exactly those (wins over profile)",
     "add": "?add_tools=<name>,<name> lists the profile plus those (ignored next to ?tools=)",
     "note": (
-        "A profile only picks what tools/list shows; most clients let the model call "
-        "listed tools only, so reconnect with one of these URLs to use a hidden tool."
+        "A profile picks what tools/list shows; most clients let the model call listed "
+        "tools only, and the server refuses an unlisted explore, so reconnect with one "
+        "of these URLs to use a hidden tool."
     ),
 }
 

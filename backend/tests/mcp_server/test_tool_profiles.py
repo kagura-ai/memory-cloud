@@ -23,9 +23,8 @@ from mcp_server.tools._profiles import (
     OPT_IN_TOOLS,
     PROFILES,
     ToolProfileError,
-    not_listed_message,
+    not_listed_reason,
     select_tool_definitions,
-    url_lists_tool,
 )
 
 # Measured after #1602 trimmed the descriptions: the ``core`` list serializes to
@@ -144,34 +143,45 @@ def test_opt_in_tools_are_registered_and_outside_core():
 
 
 @pytest.mark.parametrize(
-    ("query", "listed"),
+    "query",
     [
-        (None, True),  # no request: a direct call, no URL to hold against it
-        (b"", False),
-        (b"profile=core", False),
-        (b"tools=recall", False),
-        (b"profile=typo", False),  # a broken selection lists nothing
-        (b"tools=bogus", False),
-        (b"profile=full", True),
-        (b"add_tools=explore", True),
-        ("tools=explore", True),
+        None,  # no request: a direct call, no URL to hold against it
+        b"profile=full",
+        b"add_tools=explore",
+        "tools=explore",
     ],
 )
-def test_url_lists_tool(query, listed):
-    assert url_lists_tool("explore", query) is listed
+def test_a_url_that_lists_the_tool_has_no_reason(query):
+    assert not_listed_reason("explore", query) is None
 
 
-def test_not_listed_message_names_every_opt_in():
-    """``?tools=`` wins over both others, so a URL holding it needs its own line."""
-    message = not_listed_message("explore")
-    assert "?add_tools=explore" in message
-    assert "?profile=full" in message
-    assert "?tools=" in message
+@pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall"])
+def test_the_reason_names_every_opt_in(query):
+    """``tools=`` wins over both others, so a URL holding it needs its own line.
+    No ``?``: pasted behind ``?context=<uuid>`` it would corrupt that value."""
+    reason = not_listed_reason("explore", query)
+    assert reason is not None
+    assert "add_tools=explore" in reason
+    assert "profile=full" in reason
+    assert "tools=" in reason
+    assert "?" not in reason
+
+
+@pytest.mark.parametrize(
+    ("query", "named"), [(b"profile=typo", "'typo'"), (b"tools=bogus", "'bogus'")]
+)
+def test_a_broken_url_gets_the_error_tools_list_fails_with(query, named):
+    """The opt-in cannot work until the selection is fixed, so the reason is that."""
+    with pytest.raises(ToolProfileError) as listing:
+        select_tool_definitions(query)
+    reason = not_listed_reason("explore", query)
+    assert reason == listing.value.message
+    assert reason is not None and named in reason
 
 
 def test_load_guardrails_stays_out_of_core():
     """Client hooks call ``load_guardrails`` through ``tools/call`` (a profile
-    is a view and never gates a call); a core client's model has no reason to
+    is a view, and only ``OPT_IN_TOOLS`` are gated); a core client's model has no reason to
     call it, so it does not pay for the schema on every session."""
     assert "load_guardrails" in REGISTRY
     assert "load_guardrails" not in CORE_TOOLS
@@ -378,7 +388,7 @@ def test_add_tools_does_not_rescue_an_unknown_profile():
 
 
 def test_add_tools_is_a_view_not_an_authorization_boundary():
-    """``tools/call`` never reads the selection: this module only filters
+    """``tools/call`` does not read the selection (``OPT_IN_TOOLS`` aside): this module only filters
     definitions, and ``add_tools`` can only widen the profile's list."""
     for query in (b"add_tools=get_usage", b"profile=core&add_tools=secret_put"):
         assert set(CORE_TOOLS) <= set(_names(query))

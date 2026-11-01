@@ -13,8 +13,8 @@ already stores the endpoint URL, so that is where the choice lives::
 ``tools`` is an explicit allowlist and wins over ``profile``. With neither, the
 list is the ``core`` profile (#1849 — ``DEFAULT_PROFILE``); ``profile=full`` is
 exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
-the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
-``describe_tools`` names the hidden ones and returns their schemas on request.
+the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable
+(``OPT_IN_TOOLS`` aside, below): ``describe_tools`` names the hidden ones and returns their schemas on request.
 
 A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``,
 so a tool left out of the list stays callable, subject to the same role checks
@@ -74,7 +74,8 @@ OPT_IN_TOOLS: frozenset[str] = frozenset({"explore"})
 PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
 
 # What ``tools/list`` returns when the URL selects nothing (#1849). ``full``
-# remains one query parameter away; ``tools/call`` never reads a profile.
+# remains one query parameter away; ``tools/call`` reads the URL for
+# ``OPT_IN_TOOLS`` only.
 DEFAULT_PROFILE = "core"
 
 # Names read from one ``tools`` (or ``add_tools``) value; the rest is ignored. The registry holds
@@ -209,23 +210,24 @@ def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:
     return frozenset(tool["name"] for tool in select_tool_definitions(query_string))
 
 
-def url_lists_tool(name: str, query_string: bytes | str | None) -> bool:
-    """Whether this URL's ``tools/list`` names ``name``.
+def not_listed_reason(name: str, query_string: bytes | str | None) -> str | None:
+    """Why this URL's ``tools/list`` does not name ``name``, for the caller to act on.
 
-    ``None`` is no request at all (a direct call), which has no URL to hold
-    against the tool. A broken selection lists nothing, so it lists no tool.
+    ``None`` when it does, and for a ``query_string`` of ``None``: no request (a
+    direct call) has no URL to hold against the tool. A broken selection answers
+    with the error ``tools/list`` fails with, since the opt-in cannot work until
+    that is fixed. The parameters are named without their ``?``: the URL may
+    already have a query.
     """
     if query_string is None:
-        return True
+        return None
     try:
-        return name in tool_view_names(query_string)
-    except ToolProfileError:
-        return False
-
-
-def not_listed_message(name: str) -> str:
-    """What a caller is told about a tool its URL does not list; names the opt-in."""
+        if name in tool_view_names(query_string):
+            return None
+    except ToolProfileError as e:
+        return e.message
     return (
-        f"{name} is not listed on this connection: ?add_tools={name} or ?profile=full "
-        f"on the MCP URL lists it (a URL with ?tools= ignores both: add {name} to that list)."
+        f"{name} is not listed on this connection: add_tools={name} or profile=full in "
+        f"the MCP URL's query lists it (a URL with tools= ignores both: add {name} to "
+        "that list)."
     )

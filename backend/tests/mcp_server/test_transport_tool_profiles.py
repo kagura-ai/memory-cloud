@@ -526,9 +526,8 @@ async def test_explore_on_a_url_that_does_not_list_it_names_the_opt_in(
     error = _tool_error(await _call_explore(asgi, era, query))
 
     assert error["error"] == "tool_not_listed"
-    assert "?add_tools=explore" in error["message"]
-    assert "?profile=full" in error["message"]
-    assert "?tools=" in error["message"]
+    assert "add_tools=explore" in error["message"]
+    assert "profile=full" in error["message"]
     assert "reconnect" in error["help"]
     assert explore_handler == []
 

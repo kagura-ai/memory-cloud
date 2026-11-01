@@ -32,7 +32,7 @@ from mcp_server.tools._helpers import (
     reset_mcp_capacity_policy,
     set_mcp_capacity_policy,
 )
-from mcp_server.tools._profiles import OPT_IN_TOOLS, not_listed_message, url_lists_tool
+from mcp_server.tools._profiles import OPT_IN_TOOLS, not_listed_reason
 
 logger = logging.getLogger(__name__)
 
@@ -595,12 +595,12 @@ async def execute_tool_call(
         )
 
     # #2470: before the rate limit, like an unknown tool: this call did no work.
-    if tool_name in OPT_IN_TOOLS and not url_lists_tool(tool_name, get_mcp_tool_view_query()):
-        return _error_response(
-            "tool_not_listed",
-            not_listed_message(tool_name),
-            help="Change the MCP URL, then reconnect.",
-        )
+    if tool_name in OPT_IN_TOOLS:
+        reason = not_listed_reason(tool_name, get_mcp_tool_view_query())
+        if reason is not None:
+            return _error_response(
+                "tool_not_listed", reason, help="Change the MCP URL, then reconnect."
+            )
 
     # #1742: both transports check this too; a direct caller gets the same
     # refusal instead of a TypeError from the handler. ``null`` means no
