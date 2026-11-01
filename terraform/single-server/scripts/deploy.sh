@@ -1080,7 +1080,7 @@ wait_for_web_readiness() {
 
         # /api/health is a dedicated 200 endpoint (frontend/src/app/api/health/route.ts).
         # We use `node -e ...` (not curl) because the kagura-web image is
-        # node:20-alpine and ships without curl — the Dockerfile HEALTHCHECK
+        # node on Alpine and ships without curl — the Dockerfile HEALTHCHECK
         # uses the same node-based probe, so we ride that contract literally.
         # `timeout 3` (coreutils) bounds the per-iteration wait; node http.get
         # would otherwise inherit the system socket timeout if the server hangs.
