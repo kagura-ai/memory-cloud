@@ -543,8 +543,7 @@ GUIDE_TOPICS: dict[str, str] = {
     # ----------------------------------------------------------------- explore
     "explore.usage": (
         "Opt-in: not in the core profile, so ?add_tools=explore or ?profile=full on "
-        "the MCP URL lists it; a call on a URL that does not list it fails with "
-        "tool_not_listed. recall ranks by query relevance; explore by graph activation from the seed "
+        "the MCP URL lists it. recall ranks by query relevance; explore by graph activation from the seed "
         "(spreading activation over the Neural Memory graph). Use it after recall() "
         "to widen context, or for 'what else is related to X?'. depth: max hops "
         "(default 2, max 5): 1 = direct connections; 3+ reaches further but is slower "

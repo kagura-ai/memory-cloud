@@ -6,8 +6,8 @@ server — the session-based Streamable HTTP handler and the stateless MCP
 2026-07-28 handler — with and without a query string, against the real tool
 registry, down to the error shape each transport answers with.
 
-The profile is a *view*: the last section pins that ``tools/call`` does not look
-at it, for every tool but ``OPT_IN_TOOLS`` (#2470), and what those answer.
+The profile is a *view*: the last section pins that ``tools/call`` never looks
+at it.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import pytest
 import mcp_server.transport as transport
 from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._annotations import TOOL_ANNOTATIONS
-from mcp_server.tools._helpers import set_mcp_tool_view_query
 from mcp_server.tools._profiles import CORE_TOOLS
 from mcp_server.transport import TOOLS_LIST_TTL_MS, handle_streamable_http_post, mcp_asgi_app
 from mcp_server.transport_stateless import handle_stateless_post
@@ -478,7 +477,7 @@ async def test_tools_call_ignores_the_profile(monkeypatch, drive, query):
 
 @pytest.fixture
 def explore_handler(monkeypatch):
-    """The real dispatcher with ``explore`` stubbed: reached, or refused before it."""
+    """The real dispatcher with ``explore`` stubbed, to see the call reach it."""
     import mcp_server.tools as tools_mod
 
     calls: list[dict] = []
@@ -490,24 +489,13 @@ def explore_handler(monkeypatch):
     registry = tools_mod._build_registry()
     registry["explore"] = fake_explore
     monkeypatch.setattr(tools_mod, "_TOOL_REGISTRY", registry)
-    set_mcp_tool_view_query(None)
-    yield calls
-    set_mcp_tool_view_query(None)
+    return calls
 
 
-def _tool_error(send: _Recorder) -> dict:
-    assert send.status == 200
-    assert send.body["result"]["isError"] is True
-    return json.loads(send.body["result"]["content"][0]["text"])
-
-
-async def _call_explore(asgi, era: str, query: bytes) -> _Recorder:
-    """Through ``mcp_asgi_app``: the auth seam is what stores the URL's query."""
-    arguments = {"context_id": "00000000-0000-4000-8000-000000000001"}
+async def _through_the_app(asgi, era: str, query: bytes, method: str, **params) -> _Recorder:
     if era == "session":
-        body = _legacy_request("tools/call", name="explore", arguments=arguments)
-        return await asgi(body, {b"mcp-session-id": b"sess-1"}, query)
-    body = _modern_request("tools/call", name="explore", arguments=arguments)
+        return await asgi(_legacy_request(method, **params), {b"mcp-session-id": b"sess-1"}, query)
+    body = _modern_request(method, **params)
     return await asgi(body, _modern_headers(body), query)
 
 
@@ -517,40 +505,37 @@ ERAS = pytest.mark.parametrize("era", ["session", "stateless"])
 @pytest.mark.asyncio
 @ERAS
 @pytest.mark.parametrize(
-    "query", [b"", b"profile=core", b"tools=recall,reference"], ids=["default", "core", "allowlist"]
+    ("query", "listed"),
+    [
+        (b"", False),
+        (b"profile=core", False),
+        (b"profile=full", True),
+        (b"add_tools=explore", True),
+        (b"tools=recall,explore", True),
+    ],
 )
-async def test_explore_on_a_url_that_does_not_list_it_names_the_opt_in(
-    asgi, explore_handler, era, query
-):
-    """#2470: the server used to run it; the client's next list would not have it."""
-    error = _tool_error(await _call_explore(asgi, era, query))
+async def test_explore_is_listed_only_where_the_url_opts_in(asgi, era, query, listed):
+    """#2470."""
+    send = await _through_the_app(asgi, era, query, "tools/list")
 
-    assert error["error"] == "tool_not_listed"
-    assert "add_tools=explore" in error["message"]
-    assert "profile=full" in error["message"]
-    assert "reconnect" in error["help"]
-    assert explore_handler == []
+    assert ("explore" in _listed(send)) is listed
 
 
 @pytest.mark.asyncio
 @ERAS
-@pytest.mark.parametrize(
-    "query", [b"profile=full", b"add_tools=explore", b"tools=explore"], ids=lambda q: q.decode()
-)
-async def test_explore_runs_on_a_url_that_lists_it(asgi, explore_handler, era, query):
-    send = await _call_explore(asgi, era, query)
+@pytest.mark.parametrize("query", [b"", b"profile=core", b"profile=full"])
+async def test_explore_still_runs_on_a_url_that_does_not_list_it(asgi, explore_handler, era, query):
+    """#2470 changes the list only: ``KaguraMemory.explore()`` in the Python SDK
+    calls this tool over ``tools/call`` on the plain URL."""
+    send = await _through_the_app(
+        asgi,
+        era,
+        query,
+        "tools/call",
+        name="explore",
+        arguments={"context_id": "00000000-0000-4000-8000-000000000001"},
+    )
 
     assert send.status == 200
     assert not send.body["result"].get("isError")
-    assert len(explore_handler) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_direct_call_has_no_url_to_hold_against_the_tool(explore_handler):
-    """No request (the contextvar was never set): the refusal needs a URL."""
-    from mcp_server.tools import execute_tool_call
-
-    await execute_tool_call(
-        "explore", {"context_id": "00000000-0000-4000-8000-000000000001"}, "user-1"
-    )
     assert len(explore_handler) == 1

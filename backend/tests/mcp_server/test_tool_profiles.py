@@ -20,7 +20,6 @@ from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._profiles import (
     CORE_TOOLS,
     MAX_TOOL_NAMES,
-    OPT_IN_TOOLS,
     PROFILES,
     ToolProfileError,
     not_listed_reason,
@@ -134,14 +133,6 @@ def test_explore_is_opt_in():
     assert "explore" in _names("tools=recall,explore")
 
 
-def test_opt_in_tools_are_registered_and_outside_core():
-    """The dispatcher refuses these unlisted (#2470), so a core tool here would
-    refuse every default client, and a name that is not registered guards nothing."""
-    assert OPT_IN_TOOLS == {"explore"}
-    assert OPT_IN_TOOLS <= set(REGISTRY)
-    assert not OPT_IN_TOOLS & set(CORE_TOOLS)
-
-
 @pytest.mark.parametrize(
     "query",
     [
@@ -181,7 +172,7 @@ def test_a_broken_url_gets_the_error_tools_list_fails_with(query, named):
 
 def test_load_guardrails_stays_out_of_core():
     """Client hooks call ``load_guardrails`` through ``tools/call`` (a profile
-    is a view, and only ``OPT_IN_TOOLS`` are gated); a core client's model has no reason to
+    is a view and never gates a call); a core client's model has no reason to
     call it, so it does not pay for the schema on every session."""
     assert "load_guardrails" in REGISTRY
     assert "load_guardrails" not in CORE_TOOLS
@@ -388,7 +379,7 @@ def test_add_tools_does_not_rescue_an_unknown_profile():
 
 
 def test_add_tools_is_a_view_not_an_authorization_boundary():
-    """``tools/call`` does not read the selection (``OPT_IN_TOOLS`` aside): this module only filters
+    """``tools/call`` never reads the selection: this module only filters
     definitions, and ``add_tools`` can only widen the profile's list."""
     for query in (b"add_tools=get_usage", b"profile=core&add_tools=secret_put"):
         assert set(CORE_TOOLS) <= set(_names(query))

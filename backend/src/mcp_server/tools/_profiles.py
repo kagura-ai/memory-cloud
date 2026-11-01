@@ -13,16 +13,14 @@ already stores the endpoint URL, so that is where the choice lives::
 ``tools`` is an explicit allowlist and wins over ``profile``. With neither, the
 list is the ``core`` profile (#1849 — ``DEFAULT_PROFILE``); ``profile=full`` is
 exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
-the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable
-(``OPT_IN_TOOLS`` aside, below): ``describe_tools`` names the hidden ones and returns their schemas on request.
+the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
+``describe_tools`` names the hidden ones and returns their schemas on request.
 
-A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``,
-so a tool left out of the list stays callable, subject to the same role checks
-as before. The one exception is ``OPT_IN_TOOLS`` (#2470): ``execute_tool_call``
-answers ``tool_not_listed`` for those on a URL that does not list them, so a
-client holding an old tool list learns what to change. That is a pointer, not a
-restriction: anyone can change their URL. Do not use a profile to restrict what
-a key can do — that is what workspace and context roles are for.
+A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
+and nothing else: ``tools/call`` never reads it, so a tool left out of the list
+stays callable, subject to the same role checks as before. Do not use a profile
+to restrict what a key can do — that is what workspace and context roles are
+for.
 """
 
 from urllib.parse import parse_qsl
@@ -64,18 +62,11 @@ CORE_TOOLS: tuple[str, ...] = (
     "bootstrap",
 )
 
-# Tools a call must find listed by its own URL (#2470). A client on the default
-# URL may hold a list from when these were in ``core``, and a silent success would
-# hide that its next ``tools/list`` no longer has them. Keep this to tools that
-# left ``core``: client hooks call ``load_guardrails`` unlisted, on purpose.
-OPT_IN_TOOLS: frozenset[str] = frozenset({"explore"})
-
 # ``None`` = no filter. Insertion order is the order error messages list them in.
 PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
 
 # What ``tools/list`` returns when the URL selects nothing (#1849). ``full``
-# remains one query parameter away; ``tools/call`` reads the URL for
-# ``OPT_IN_TOOLS`` only.
+# remains one query parameter away; ``tools/call`` never reads a profile.
 DEFAULT_PROFILE = "core"
 
 # Names read from one ``tools`` (or ``add_tools``) value; the rest is ignored. The registry holds

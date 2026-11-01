@@ -1,7 +1,7 @@
 """``describe_tools`` and the core default of ``tools/list`` (#1849).
 
-A profile is a view: a tool left out of ``tools/list`` stays callable
-(``OPT_IN_TOOLS`` aside), but a model cannot call what it has never seen. ``describe_tools`` lists what the
+A profile is a view: a tool left out of ``tools/list`` stays callable, but a
+model cannot call what it has never seen. ``describe_tools`` lists what the
 URL left out and returns the hidden tools' complete definitions on request,
 reading the request's view from the contextvar the transport sets.
 """
