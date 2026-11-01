@@ -33,8 +33,8 @@ Use this after deployments, tool description changes, or MCP server updates.
 
 - The MCP server is running and connected.
 - **The connection lists every tool.** `tools/list` defaults to the 21-tool core profile, and most
-  clients let the model call listed tools only — `merge_contexts` and the Sleep, file, resource and
-  edge rows (all but `create_edge`) are outside it.
+  clients let the model call listed tools only — `explore`, `merge_contexts` and the Sleep, file,
+  resource and edge rows (all but `create_edge`) are outside it.
   Connect with the full list: put `?profile=full` on the endpoint URL
   (`https://<your-domain>/mcp/w/<workspace-id>?profile=full`, or `&profile=full` when the URL
   already has a query), or pass `--tool-profile full` to the `kagura-mcp` stdio bridge. A profile
