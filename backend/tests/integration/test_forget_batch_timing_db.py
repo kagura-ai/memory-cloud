@@ -7,7 +7,7 @@ call shares one budget, the ``forget`` timeout (``MCP_TIMEOUT_FORGET``, default
 15 s); an id that does not fit comes back ``not_attempted``. Each of the 50
 memories has a summary point, two content chunk points and two edges.
 
-Measured locally (5 runs): median ~2.0 s, max ~2.2 s for the 50 ids, so the
+Measured locally (5 runs): median ~3.5 s, max ~3.6 s for the 50 ids, so the
 15 s default stays. The default run checks the behaviour under a generous
 budget and logs the wall time; the timing bound — the real default budget,
 and the batch under 10 s, the threshold #2201 set for raising it — is
