@@ -20,7 +20,7 @@ list_contexts()
 
 `list_contexts()` returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first, 100 per page (when `has_more` is true, pass `next_cursor` as `cursor`). If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
 
-If only one context exists, use it. If multiple, pick the one whose name best matches the current project. When names alone don't settle it, call `get_context_info(context_id=...)` for the candidate only — do not load details for every context. If still unclear, ask the user.
+If only one context exists, use it. If multiple, pick the one whose name best matches the current project; a conversation about the user's own life goes to the context the user names or a private one (`is_private`), not a shared project context. When names alone don't settle it, call `get_context_info(context_id=...)` for the candidate only — do not load details for every context. If still unclear, ask the user.
 
 ### 2. Parse the input
 
@@ -35,13 +35,13 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
   - `fact`: A stated fact about the user, a person, a thing or a place ("The user's dog is named Max")
   - `preference`: A like, dislike, habit or opinion the user states
   - `event`: Something that happened, with when it happened ("Attended Sam's dinner party on 2023-05-12")
-  - `time`: A forward-looking plan, deadline or appointment. Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it
+  - `time`: A forward-looking plan, deadline or appointment with a date. Set `details={"trigger": {"year": 2026, "month": 11, "day": 3}}` (integers, `year` required) so `recall_upcoming` surfaces it. A plan with no date is a `fact`
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
 - Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most. **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`); no spelling variants of the same tag.
 
-**One fact per memory, specifics verbatim.** When the material is a conversation, save first what the user said about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own memory, with every name, number, date, place and quantity exactly as stated (a per-item price and a total are two facts; keep both). Never merge several personal facts into one summary. Save the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure), not generic advice. Write many items with one `remember_batch` call.
+**One fact per memory, specifics verbatim.** When the material is a conversation, save first what the user said about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own memory, with every name, number, date, place and quantity exactly as stated (a per-item price and a total are two facts; keep both). Never merge several personal facts into one summary. Save the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure), not generic advice. A name or value inside a stated fact is the fact itself; contact details, home addresses, and account, card or ID numbers stay out, as do secrets and credentials. Write many items with one `remember_batch` call.
 
-**Resolve relative dates.** Turn "last Tuesday", "two weeks ago" or "next month" into the absolute date implied by the material's date and put it in `content`; `observed_at` stays the material's date.
+**Resolve relative dates.** Turn "last Tuesday", "two weeks ago" or "next month" into the absolute date implied by the material's date and put it in `content`; `observed_at` stays the material's date. Keep the stated phrase beside it ("two weeks ago (2024-03-06)"): this is the one exception to "as it states it". With no material date, leave the phrase as stated.
 
 **Store what the material states, as it states it.** Do not fact-check it, add a note that a statement is wrong or outdated, or add dates, end years or qualifiers the material does not contain — the stored value is what the user or source said, and a later reader treats the store as the authority. When the material itself corrects an earlier statement, store the correction as it is worded there.
 
@@ -49,16 +49,16 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 
 **When the fact held.** If the material is dated (a session date, a document date, a meeting date), put that date in `details.observed_at` as a date only, `YYYY-MM-DD` (`"2024-03-07"`, no time or offset, so exact filters and sorting work) — the date the fact was stated, never the time you write it. Leave it out when the material has no date. `observed_at="2024-03-07"` as an argument stores the same thing. `recall` / `list` filter it with `observed_after` / `observed_before`, `list(order_by="observed_at")` sorts by it, and `list(filters={"details.observed_at": ...})` matches it exactly.
 
-**Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
+**Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters. A single stated fact can be shorter (50 characters or more): name who or what it is about so it stands alone.
 
 - Good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."
 - Bad: "Discussed auth errors in today's meeting." / "JSONB index optimization" (too narrow — it will not match "database performance")
 
-Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or unnecessary PII; coordinates go in `details.location` only.
+Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or PII; coordinates go in `details.location` only.
 
 ### 3. Save
 
-Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`), about 20 items a call; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:
+Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`). Keep a call to about 20 items and split a longer list; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:
 
 - `content` (required): only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary — when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - `context_summary`: one sentence on when to recall it, not a second summary. Search reads it, so keep it rather than drop it.

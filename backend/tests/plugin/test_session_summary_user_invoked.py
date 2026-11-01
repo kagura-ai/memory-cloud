@@ -212,6 +212,7 @@ def test_session_summary_keeps_every_personal_fact_outside_the_mode_count():
         assert f"| `{memory_type}` | " in step
     assert "**A conversation about the user's own life** (not a development session)" in step
     assert "The mode's candidate count limits development knowledge only" in step
+    assert "Keep development knowledge to the mode's candidate count" in step
     modes = _modes(text)
     assert "up to 3" in modes["light"]
     assert "up to 7" in modes["standard"]
@@ -226,6 +227,12 @@ def test_session_summary_stamps_observed_at_in_every_mode():
     assert save.index("- **type**") < save.index("- **details.observed_at**")
     assert save.index("- **details.observed_at**") < save.index("- **importance**")
     assert "and so does `details.observed_at`" in _modes(text)["light"]
+    # A time item without its trigger is a rejected write, in any mode.
+    assert "`details.trigger` on a `time` item" in _modes(text)["light"]
+    # A live session is dated today, so the rule cannot forbid today's date.
+    assert "never today's date" not in text
+    # ``light`` content is one evidence line, so a resolved date goes in the summary.
+    assert "into the content (`light`: the summary)" in save
 
 
 def test_codex_session_summary_carries_the_personal_fact_rules():
@@ -235,3 +242,6 @@ def test_codex_session_summary_carries_the_personal_fact_rules():
     assert "The mode's item count limits development knowledge only" in section
     assert "`details.observed_at`" in section
     assert "and so does `details.observed_at`" in section
+    assert "`details.trigger` on a `time` item" in section
+    assert "never today's date" not in section
+    assert "into the content (`light`: the summary)" in section
