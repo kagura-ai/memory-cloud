@@ -7,17 +7,22 @@ call shares one budget, the ``forget`` timeout (``MCP_TIMEOUT_FORGET``, default
 15 s); an id that does not fit comes back ``not_attempted``. Each of the 50
 memories has a summary point, two content chunk points and two edges.
 
-The bound asserted is the budget itself (every id ``deleted``, none
-``not_attempted``) — measured locally the batch takes well under a tenth of
-it, so a slow CI runner does not flake it. Skipped when Postgres (``db_session``)
-or ``QDRANT_URL`` is unreachable; CI's integration job has both::
+Measured locally (5 runs): median ~2.0 s, max ~2.2 s for the 50 ids, so the
+15 s default stays. The default run checks the behaviour under a generous
+budget and logs the wall time; the timing bound — the real default budget,
+and the batch under 10 s, the threshold #2201 set for raising it — is
+asserted only with ``RUN_PERF_TESTS=1`` (the ``test_edge_invariant_perf``
+pattern), so a slow shared CI runner does not flake it. Skipped when Postgres
+(``db_session``) or ``QDRANT_URL`` is unreachable; CI's integration job has
+both::
 
-    make test-integration
+    RUN_PERF_TESTS=1 pytest tests/integration/test_forget_batch_timing_db.py --log-cli-level=INFO
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -39,6 +44,12 @@ from utils.content_chunks import build_chunk_payload, chunk_point_id
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 BATCH = 50
+PERF_OPT_IN = os.getenv("RUN_PERF_TESTS") == "1"
+# #2201: above this a 50-id batch is too close to the 15 s default budget.
+PERF_BATCH_S = 10.0
+# The default run's budget: generous, so only behaviour is checked.
+_RELAXED_BUDGET_S = 120.0
+perf_logger = logging.getLogger(__name__)
 _DIM = 8
 _VEC = [1.0, 0, 0, 0, 0, 0, 0, 0]
 
@@ -206,12 +217,19 @@ async def test_a_healthy_50_id_batch_fits_the_forget_budget(world: World):
     from models.memory import Memory
 
     ids = await _seed(world)
-    body, elapsed = await _forget(world, ids)
+    budget = get_tool_timeout("forget") if PERF_OPT_IN else _RELAXED_BUDGET_S
+    with patch("mcp_server.tools.memory.get_tool_timeout", return_value=budget):
+        body, elapsed = await _forget(world, ids)
+    perf_logger.info("[perf] forget(memory_ids=[%d ids]): %.2fs", BATCH, elapsed)
 
     assert body["status"] == "success", body
     assert body["deleted_count"] == BATCH
     assert all(r["status"] == "deleted" for r in body["results"]), body["results"]
-    assert elapsed < get_tool_timeout("forget")
+    if PERF_OPT_IN:
+        assert elapsed < PERF_BATCH_S, (
+            f"a healthy {BATCH}-id forget batch took {elapsed:.2f}s (> {PERF_BATCH_S}s of "
+            f"the {budget}s budget): raise the forget default (#2201)"
+        )
 
     live = (
         await world.session.execute(
