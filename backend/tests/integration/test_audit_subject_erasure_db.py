@@ -628,6 +628,22 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
         ),
         pytest.param(
             "actor-{t}",
+            "ann{t}@example.invalid",
+            "other-{t}",
+            "jo|ann{t}@example.invalid",
+            "jo|ann{t}@example.invalid",
+            id="address-ends-with-the-actors-after-a-pipe",
+        ),
+        pytest.param(
+            "1000{t}",
+            "actor{t}@example.invalid",
+            "auth0|1000{t}",
+            "other{t}@example.invalid",
+            "auth0|1000{t}",
+            id="sub-ends-with-the-actors-after-a-pipe",
+        ),
+        pytest.param(
+            "actor-{t}",
             "a.b{t}@example.invalid",
             "other-{t}",
             "a-b{t}@example.invalid",
@@ -636,6 +652,7 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
         ),
     ],
 )
+@pytest.mark.parametrize("named_member_first", [False, True])
 async def test_own_row_resource_leaves_a_longer_value_for_its_own_subject(
     async_engine: AsyncEngine,
     subject: dict[str, Any],
@@ -644,10 +661,11 @@ async def test_own_row_resource_leaves_a_longer_value_for_its_own_subject(
     other: str,
     other_email: str,
     named: str,
+    named_member_first: bool,
 ) -> None:
     """An identifier embedded in a longer one is not the subject's: the own-row
     rewrite leaves it whole, so the exact mention match of the member the row
-    names still finds it, whichever of the two is processed first."""
+    names still finds it. The order of the two changes nothing."""
     tag = uuid.uuid4().hex
     actor, actor_email = actor.format(t=tag), actor_email.format(t=tag)
     other, other_email = other.format(t=tag), other_email.format(t=tag)
@@ -673,30 +691,13 @@ async def test_own_row_resource_leaves_a_longer_value_for_its_own_subject(
             resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row_id))
             return counts, resource
 
-    actor_counts, after_actor = await erase(actor, actor_email)
-    other_counts, after_other = await erase(other, other_email)
-    assert after_actor == f"user:{named}"
-    assert after_other == f"user:{erasure_pseudonym(named)}"
-    assert (actor_counts, other_counts) == ((1, 0), (0, 1))
-
-
-async def test_own_row_resource_rewrites_every_standalone_occurrence(
-    async_engine: AsyncEngine, subject: dict[str, Any]
-) -> None:
-    sub, pseudonym = subject["sub"], subject["p"]
-    email = f"{sub}@example.invalid"
-    row = _audit(subject, sub, email=email)
-    row.resource = f"user:{sub}|{email}|{sub}"
-    row.created_at = datetime(2026, 2, 1)
-    with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
-        async with _maker(async_engine)() as db:
-            db.add(row)
-            await db.commit()
-            held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
-            assert await pseudonymize_audit_trail(db, sub, held) == (1, 0)
-            await db.commit()
-            resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id))
-        assert resource == f"user:{pseudonym}|{erasure_pseudonym(email)}|{pseudonym}"
+    subjects = [(actor, actor_email), (other, other_email)]
+    counts: dict[str, tuple[int, int]] = {}
+    resource = ""
+    for sub, email in reversed(subjects) if named_member_first else subjects:
+        counts[sub], resource = await erase(sub, email)
+    assert resource == f"user:{erasure_pseudonym(named)}"
+    assert counts == {actor: (1, 0), other: (0, 1)}
 
 
 async def test_own_row_resource_outside_a_user_value_rewrites_any_occurrence(
@@ -707,17 +708,18 @@ async def test_own_row_resource_outside_a_user_value_rewrites_any_occurrence(
     sub, pseudonym = subject["sub"], subject["p"]
     email = f"{sub}@example.invalid"
     row = _audit(subject, sub, email=email)
-    row.resource = f"note:{email}-old,{sub}-old"
+    row.resource = f"note:{email}-old,{sub}-old|{email}"
     row.created_at = datetime(2026, 2, 1)
     with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
         async with _maker(async_engine)() as db:
             db.add(row)
             await db.commit()
             held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
-            await pseudonymize_audit_trail(db, sub, held)
+            assert await pseudonymize_audit_trail(db, sub, held) == (1, 0)
             await db.commit()
             resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id))
-        assert resource == f"note:{erasure_pseudonym(email)}-old,{pseudonym}-old"
+        email_p = erasure_pseudonym(email)
+        assert resource == f"note:{email_p}-old,{pseudonym}-old|{email_p}"
 
 
 async def test_own_row_resource_outside_the_holding_keeps_the_address(

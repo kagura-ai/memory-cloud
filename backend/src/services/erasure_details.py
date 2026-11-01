@@ -835,11 +835,11 @@ async def pseudonymize_audit_logs(
       (``held_at``, #2359: the subject acting on whoever held one of their
       former addresses later names that member, not them), then the raw sub,
       is replaced by its pseudonym (``_rewrite_own_resource``). Under ``user:``
-      only a whole value is: ``user:joann@x.io`` names another member than
-      ``ann@x.io``, and the exact match of ``pseudonymize_audit_mentions``
-      has to find it unchanged whichever erasure runs first. Any other
-      resource has no exact match to keep: every occurrence goes there. The
-      result is cut to the column's length:
+      only the whole value is, the rule of ``audit_mention_predicate``:
+      ``user:joann@x.io`` names another member than ``ann@x.io``, and the
+      exact match of ``pseudonymize_audit_mentions`` has to find it unchanged
+      whichever erasure runs first. Any other resource has no exact match to
+      keep: every occurrence goes there. The result is cut to the column's length:
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
@@ -914,17 +914,17 @@ def _rewrite_own_resource(
     resource: ColumnElement[str], value: str, replacement: Any
 ) -> ColumnElement[str]:
     """``resource`` with ``value``, literally, replaced by ``replacement``:
-    after ``user:`` the whole of a ``|``-separated value, elsewhere any
-    occurrence (``pseudonymize_audit_logs``). The pattern reads the stored
-    column, which an earlier call for another value leaves ``user:`` or not.
-    An empty ``value`` is ``resource``: its pattern would match everywhere."""
+    after ``user:`` only as the whole value, elsewhere any occurrence
+    (``pseudonymize_audit_logs``). The pattern reads the stored column, which
+    an earlier call for another value leaves ``user:`` or not. An empty
+    ``value`` is ``resource``: its pattern would match everywhere."""
     if not value:
         return resource
     escaped = re.escape(value)
     pattern = case(
         (
             AuditLog.resource.startswith(USER_RESOURCE_PREFIX),
-            rf"(?<=^{USER_RESOURCE_PREFIX}|\|){escaped}(?=\||$)",
+            rf"(?<=^{USER_RESOURCE_PREFIX}){escaped}$",
         ),
         else_=escaped,
     )

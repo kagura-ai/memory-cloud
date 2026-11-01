@@ -1140,7 +1140,7 @@ async def audit_case(async_engine: AsyncEngine) -> AsyncIterator[_AuditCase]:
             user_email="admin@example.com",
             user_id=sub,
             action="member_add",
-            resource=f"user:{email}|{sub}",
+            resource=f"note:{email}|{sub}",
         ),
         # another account with no user row (never erased by a request here)
         AuditLog(
@@ -1311,7 +1311,7 @@ async def test_audit_rows_left_by_a_failed_audit_step_are_pseudonymized(
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
         ]
         assert await _audit(session, case.others + case.untouched) == others
         (audit,) = await _reprocess_audit_rows(session, case.p)
@@ -1364,7 +1364,7 @@ async def test_a_request_the_sweep_found_interrupted_is_processed_like_one_that_
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
         ]
         assert await _audit(session, case.others + case.untouched) == others
         row = await _snapshot(session, "erasure_requests", "t.id = :id", id=request.id)
@@ -1592,7 +1592,7 @@ async def test_a_flagged_note_rows_audit_residue_is_pseudonymized(
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
         ]
         assert await _audit(session, case.others + case.untouched) == others
         assert (
@@ -1674,7 +1674,7 @@ async def test_a_legacy_note_row_is_pseudonymized_with_its_audit_residue(
         assert (row["status"], row["completed_at"]) == (old["status"], old["completed_at"])
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
         ]
         assert await _audit(session, case.others + case.untouched) == others
         for key in ("memories", "memory_revisions", "erasure_requests"):
@@ -1880,7 +1880,7 @@ async def test_the_email_is_left_when_it_cannot_be_recovered(
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email, f"user:{case.email}"),
-            (case.p, "admin@example.com", f"user:{case.email}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email}|{case.p}"),
         ]
 
 
@@ -1948,7 +1948,7 @@ async def test_two_requests_of_one_account_pseudonymize_its_rows_once(
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
             (case.p, second_p, f"user:{second_p}"),
         ]
 
@@ -1990,7 +1990,7 @@ async def test_request_recovers_every_email_of_the_account(
     async with _maker(async_engine)() as session:
         assert await _own_rows(session, case) == [
             (case.p, case.email_p, f"user:{case.email_p}"),
-            (case.p, "admin@example.com", f"user:{case.email_p}|{case.p}"),
+            (case.p, "admin@example.com", f"note:{case.email_p}|{case.p}"),
             (case.p, second_p, f"user:{second_p}"),
         ]
 
@@ -2033,7 +2033,7 @@ async def test_a_resource_the_pseudonyms_lengthen_is_cut_to_the_column(
             user_email=case.email,
             user_id=case.sub,
             action="config_update",
-            resource=(f"user:{case.email}|" + "x" * 255)[:255],
+            resource=(f"note:{case.email}|" + "x" * 255)[:255],
         )
         session.add(long_row)
         await session.commit()
@@ -2044,7 +2044,7 @@ async def test_a_resource_the_pseudonyms_lengthen_is_cut_to_the_column(
             await session.execute(select(AuditLog.resource).where(AuditLog.id == long_row.id))
         ).scalar_one()
     assert len(resource) == 255
-    assert resource.startswith(f"user:{case.email_p}|") and case.email not in resource
+    assert resource.startswith(f"note:{case.email_p}|") and case.email not in resource
 
 
 async def test_a_finalized_erasure_gets_its_mentions_from_the_resources(

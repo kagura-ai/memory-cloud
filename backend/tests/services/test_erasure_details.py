@@ -658,8 +658,8 @@ async def test_own_resource_patterns_escape_the_value() -> None:
 
     values = _flat(params)
     assert r"a\.b@x\.io" in values
-    assert r"(?<=^user:|\|)a\.b@x\.io(?=\||$)" in values
-    assert r"(?<=^user:|\|)raw\-sub(?=\||$)" in values
+    assert r"(?<=^user:)a\.b@x\.io$" in values
+    assert r"(?<=^user:)raw\-sub$" in values
 
 
 async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:
