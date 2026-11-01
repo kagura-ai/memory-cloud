@@ -257,7 +257,7 @@ For the migration history (PR #726 / Issue #722) and operator runbook, see [`doc
 
 ### Activation Spreading
 
-The `explore()` tool uses graph traversal to discover related memories:
+The `explore()` tool uses graph traversal to discover related memories (opt-in over MCP: `?add_tools=explore` or `?profile=full` on the URL):
 
 ```
   Seed Memory ──(0.15)──→ Related Memory A
@@ -384,7 +384,7 @@ reference(memory_id)      → Get full details
   ↓
 remember(summary, content) → Store new knowledge
   ↓
-explore(memory_id)        → Find related memories
+explore(memory_id)        → Find related memories (opt-in: ?add_tools=explore)
 ```
 
 ## Data Isolation

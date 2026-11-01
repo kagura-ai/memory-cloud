@@ -37,7 +37,9 @@ from mcp_server.tools._helpers import (
     _viewer_read_only_response,
     execute_with_timeout,
     get_mcp_key_workspace_scope,
+    get_mcp_tool_view_query,
 )
+from mcp_server.tools._profiles import not_listed_reason
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
@@ -1135,7 +1137,12 @@ async def handle_load_guardrails(
     return _error_response("internal_error", "Database session unavailable")
 
 
-def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict[str, Any]:
+def _recall_envelope(
+    result: Any,
+    context: Any,
+    verbosity: str = "full",
+    explore_hints_omitted: str | None = None,
+) -> dict[str, Any]:
     """Build the recall MCP envelope from a ``RecallResponse``.
 
     Kept out of the handler so the response-size guard
@@ -1146,6 +1153,7 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
         result: The ``RecallResponse`` from ``MemoryService.recall``.
         context: The resolved primary context.
         verbosity: ``"full"`` or ``"compact"`` (#2002).
+        explore_hints_omitted: Why hints were not generated, when asked for (#2470).
 
     Returns:
         The envelope ``handle_recall`` serializes.
@@ -1185,6 +1193,8 @@ def _recall_envelope(result: Any, context: Any, verbosity: str = "full") -> dict
         response_data["explore_hints"] = [
             {"memory_id": str(h.memory_id), "reason": h.reason} for h in result.explore_hints
         ]
+    if explore_hints_omitted is not None:
+        response_data["explore_hints_omitted"] = explore_hints_omitted
 
     # #1503: only present on an empty tag-filtered recall — it tells the
     # agent whether the topic is absent or just spelled differently.
@@ -1308,6 +1318,13 @@ async def handle_recall(
             received=full,
         )
 
+    # #2470: a hint is a seed for explore(), so a URL that does not list explore
+    # gets a reason instead of seeds its model cannot follow up.
+    include_explore_hints = args.get("include_explore_hints", False)
+    explore_hints_omitted = (
+        not_listed_reason("explore", get_mcp_tool_view_query()) if include_explore_hints else None
+    )
+
     request = RecallRequest(
         query=args["query"],
         k=args.get("k", 5),
@@ -1319,7 +1336,7 @@ async def handle_recall(
         # query router can act on contexts with routing_mode='active';
         # MemoryService resolves None to "hybrid" everywhere else.
         search_mode=args.get("search_mode"),
-        include_explore_hints=args.get("include_explore_hints", False),
+        include_explore_hints=False if explore_hints_omitted else include_explore_hints,
         include_superseded=args.get("include_superseded", False),  # #1208
     )
 
@@ -1444,7 +1461,8 @@ async def handle_recall(
             # was: a result that cannot be rendered fails the call as a whole.
             response_data = _bound_recall_envelope(
                 _fit_recall_content(
-                    _recall_envelope(result, current_context, verbosity), max_chars
+                    _recall_envelope(result, current_context, verbosity, explore_hints_omitted),
+                    max_chars,
                 ),
                 max_chars,
             )

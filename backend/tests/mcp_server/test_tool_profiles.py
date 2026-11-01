@@ -22,6 +22,7 @@ from mcp_server.tools._profiles import (
     MAX_TOOL_NAMES,
     PROFILES,
     ToolProfileError,
+    not_listed_reason,
     select_tool_definitions,
 )
 
@@ -40,7 +41,8 @@ from mcp_server.tools._profiles import (
 # #2353 added create_edge (1,486 after its trim; reference, remember and bootstrap
 # moved Returns detail into their guide topics): 43,037 under the same budget.
 # #2313 added ownership guidance and trimmed create_edge: 43,087 (13 chars spare).
-CORE_CHAR_BUDGET = 43_100  # (#1973, #2353) 22 core tools
+# #2470 took explore out of core: 41,396, and the budget came down with it.
+CORE_CHAR_BUDGET = 41_500  # (#2470) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
@@ -80,7 +82,6 @@ def test_core_tools_are_the_documented_set():
         "reference",
         "update_memory",
         "forget",
-        "explore",
         "create_edge",
         "load_pinned",
         "recall_upcoming",
@@ -118,6 +119,56 @@ def test_create_edge_is_in_core_but_the_other_edge_tools_are_not():
     assert "create_edge" in CORE_TOOLS
     for name in ("update_edge", "delete_edge", "list_edges"):
         assert name in REGISTRY and name not in CORE_TOOLS
+
+
+def test_explore_is_opt_in():
+    """#2470: not on the default path; one URL parameter away, and still registered."""
+    assert "explore" in REGISTRY
+    assert "explore" not in CORE_TOOLS
+    assert "explore" not in _names(None)
+    assert "explore" not in _names("profile=core")
+    assert "explore" in _names("profile=full")
+    assert "explore" in _names("add_tools=explore")
+    assert "explore" in _names("profile=core&add_tools=explore")
+    assert "explore" in _names("tools=recall,explore")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        None,  # no request: a direct call, no URL to hold against it
+        b"profile=full",
+        b"add_tools=explore",
+        "tools=explore",
+    ],
+)
+def test_a_url_that_lists_the_tool_has_no_reason(query):
+    assert not_listed_reason("explore", query) is None
+
+
+@pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall"])
+def test_the_reason_names_every_opt_in(query):
+    """``tools=`` wins over both others, and a repeated parameter keeps its first
+    value, so an existing list has to grow. No ``?``: pasted behind
+    ``?context=<uuid>`` it would corrupt that value."""
+    reason = not_listed_reason("explore", query)
+    assert reason is not None
+    assert "add_tools=explore" in reason
+    assert "set profile=full" in reason
+    assert "the tools= or add_tools= list" in reason
+    assert "?" not in reason
+
+
+@pytest.mark.parametrize(
+    ("query", "named"), [(b"profile=typo", "'typo'"), (b"tools=bogus", "'bogus'")]
+)
+def test_a_broken_url_gets_the_error_tools_list_fails_with(query, named):
+    """The opt-in cannot work until the selection is fixed, so the reason is that."""
+    with pytest.raises(ToolProfileError) as listing:
+        select_tool_definitions(query)
+    reason = not_listed_reason("explore", query)
+    assert reason == listing.value.message
+    assert reason is not None and named in reason
 
 
 def test_load_guardrails_stays_out_of_core():

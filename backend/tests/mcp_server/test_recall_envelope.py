@@ -259,7 +259,7 @@ class TestEnvelope:
     def test_the_handler_serializes_this_envelope(self):
         # Pins the wiring: these tests would otherwise exercise an unused function.
         src = inspect.getsource(mcp_memory.handle_recall)
-        assert "_recall_envelope(result, current_context, verbosity)" in src
+        assert "_recall_envelope(result, current_context, verbosity, explore_hints_omitted)" in src
         assert "_dumps(" in src
 
 

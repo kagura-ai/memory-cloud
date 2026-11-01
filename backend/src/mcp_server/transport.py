@@ -1751,7 +1751,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
         set_mcp_guardrails_selection(select_guardrail_context(scope.get("query_string", b"")))
         # #1849: the same URL picks what ``tools/list`` shows; ``describe_tools``
-        # derives the view from these bytes when (and only when) it is called.
+        # and ``recall`` with explore hints derive the view from these bytes when
+        # (and only when) they need it.
         set_mcp_tool_view_query(scope.get("query_string", b""))
         # #2125: ``?context=<uuid>`` names the connection's default context;
         # the tool dispatcher fills a missing ``context_id`` from it. Pure parse

@@ -116,7 +116,6 @@ get_context_info(context_id) returns the context block alone (after switching co
 1. recall() - Search when the task needs past decisions
 2. remember() - Store what the user asks to keep
 3. update_memory() - Modify existing memories (in-place or upsert)
-4. explore() - Find related memories via graph traversal
 
 ## remember() Tips
 - summary: Write reusable conclusions (not process)
@@ -136,7 +135,7 @@ Most tools take a context_id argument (list_contexts and create_context do not).
 With ?context=<context_id> on the MCP URL it may be omitted: calls run in that default context.
 Otherwise use list_contexts() first to discover available context IDs.
 Use create_context() to create a new context (requires owner/admin role).
-Then pass context_id to other tools: remember(), recall(), forget(), reference(), explore(), get_context_info().
+Then pass context_id to other tools: remember(), recall(), forget(), reference(), get_context_info().
 
 Response includes context_id, context_name, context_display_name to confirm which context was used.
 

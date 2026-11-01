@@ -18,7 +18,7 @@ A default context can come from three places, so a client that cannot edit its U
 
 An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Gemini, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
-The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.6 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
+The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out `explore`, Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.7 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
 
 ## Claude Code (Recommended)
 
@@ -373,14 +373,14 @@ Which revision a client negotiates is the client's choice; a quick check is the 
 
 ## List fewer tools
 
-By default `tools/list` returns the 22 core tools (≈ 41k characters of JSON); the whole registry is 72 tools (≈ 107k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns the 21 core tools (≈ 40k characters of JSON); the whole registry is 72 tools (≈ 108k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|
-| *(none)* or `?profile=core` | The 22 core memory and context tools (incl. `create_edge`, `create_context`, `update_context`, `delete_context`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap`) — the default, ≈ 41k characters |
-| `?profile=full` | Everything — 72 tools, ≈ 107k characters |
+| *(none)* or `?profile=core` | The 21 core memory and context tools (incl. `create_edge`, `create_context`, `update_context`, `delete_context`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap`; `explore` is opt-in) — the default, ≈ 40k characters |
+| `?profile=full` | Everything — 72 tools, ≈ 108k characters |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
-| `?add_tools=list_edges,merge_contexts` | The default core tools plus the named ones (`?profile=core&add_tools=…` is the same); ignored next to `?tools=` |
+| `?add_tools=list_edges,merge_contexts` | The default core tools plus the named ones (`?profile=core&add_tools=…` is the same; `?add_tools=explore` turns on the graph walk); ignored next to `?tools=` |
 
 Only the URL changes; the `Authorization` header stays as it is. The client sections above show the default URL in full; this is where the URL lives in each client's configuration:
 

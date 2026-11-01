@@ -16,9 +16,11 @@ exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
 the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
-A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
-and nothing else: ``tools/call`` never reads it, so a tool left out of the list
-stays callable, subject to the same role checks as before. Do not use a profile
+A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``:
+``tools/call`` never gates on it, so a tool left out of the list stays callable,
+subject to the same role checks as before. Two tools read the URL's view for
+their reply: ``describe_tools``, and ``recall``, which leaves out ``explore``
+hints where the URL does not list that tool (#2470). Do not use a profile
 to restrict what a key can do — that is what workspace and context roles are
 for.
 """
@@ -36,7 +38,8 @@ logger = get_logger(__name__)
 # ``tools/list`` answers in), pinned by ``tests/mcp_server/test_tool_profiles.py``
 # together with a character budget — adding a tool here costs every ``core`` client.
 # ``merge_contexts`` and ``update_search_config`` stay out: rare, and the former
-# is destructive to the source context.
+# is destructive to the source context. ``explore`` left in #2470: an opt-in for
+# questions that follow a chain of decisions, not part of the default path.
 CORE_TOOLS: tuple[str, ...] = (
     "remember",
     "remember_batch",
@@ -46,7 +49,6 @@ CORE_TOOLS: tuple[str, ...] = (
     "recall_upcoming",
     "load_pinned",
     "forget",
-    "explore",
     "create_edge",
     "get_context_info",
     "list_contexts",
@@ -199,3 +201,27 @@ def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:
         ToolProfileError: the selection is broken — the same error ``tools/list`` fails with.
     """
     return frozenset(tool["name"] for tool in select_tool_definitions(query_string))
+
+
+def not_listed_reason(name: str, query_string: bytes | str | None) -> str | None:
+    """Why this URL's ``tools/list`` does not name ``name``, for the caller to act on.
+
+    ``None`` when it does, and for a ``query_string`` of ``None``: no request (a
+    direct call) has no URL to hold against the tool. A broken selection answers
+    with the error ``tools/list`` fails with, since the opt-in cannot work until
+    that is fixed. The parameters are named without their ``?``: the URL may
+    already have a query, and an existing list has to grow because the first
+    value of a repeated parameter is the one read.
+    """
+    if query_string is None:
+        return None
+    try:
+        if name in tool_view_names(query_string):
+            return None
+    except ToolProfileError as e:
+        return e.message
+    return (
+        f"{name} is not listed on this connection: add it to the tools= or add_tools= "
+        f"list in the MCP URL's query if it has one, otherwise add add_tools={name} or "
+        "set profile=full."
+    )
