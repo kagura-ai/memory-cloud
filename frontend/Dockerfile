@@ -53,11 +53,15 @@ WORKDIR /app
 
 # This stage only runs `node server.js`. npm, corepack and yarn come with the
 # base image and nothing here calls them; `apk upgrade` picks up Alpine fixes
-# the base image has not been rebuilt with yet.
+# the base image has not been rebuilt with yet. `rm -rf` succeeds on a path that
+# has moved, so the build checks the result.
 RUN apk upgrade --no-cache \
     && rm -rf /usr/local/lib/node_modules /opt/yarn-* \
        /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
-       /usr/local/bin/yarn /usr/local/bin/yarnpkg
+       /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+    && ! command -v npm \
+    && ! command -v corepack \
+    && ! command -v yarn
 
 ENV NODE_ENV=production
 # Uncomment the following line in case you want to disable telemetry during runtime.
