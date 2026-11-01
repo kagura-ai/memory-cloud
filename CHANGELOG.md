@@ -4,6 +4,42 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.135.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.135.0) — 2026-11-01
+
+Resource indexing and recall correctness: the indexer cleans up after old versions and keeps edits on re-index, recall reads hits from the contexts it searched, and points indexed before v0.122.0 can be backfilled. `explore` moves out of the default MCP tool list, and the api and web images ship less.
+
+### Added
+- **Resource point metadata backfill** ([#2463](https://github.com/kagura-ai/memory-cloud/pull/2463)): `python -m src.cli.resource_point_metadata_backfill` sets `type`, `tags` and `context_summary` on resource points indexed before v0.122.0, so `filters.type="resource_data"` finds them. Set-payload only: no re-embedding, no vector deletes, idempotent.
+- **Indexer records the events it skipped** ([#2254](https://github.com/kagura-ai/memory-cloud/issues/2254)): a failed resource event is still skipped once a later one succeeds, and the run now records it. `GET /api/v1/resources/{id}/indexer-status` gains `state.metrics.failed_events` (count), and `docs/ops/resource-indexer-backfill.md` has the rewind recipe. A later clean batch empties the record, so rewind soon after the count shows up.
+
+### Changed
+- **`forget` deletes its points after the commit** ([#2201](https://github.com/kagura-ai/memory-cloud/issues/2201)): a failed or cancelled commit no longer leaves a live row without its vector. A batch takes one drain with bulk deletes, capped at 2 s. A 50-id batch took about 1.8 s in the new timing test, so the 15 s default stays. While a point writer holds the lock or the vector store stalls, the points wait for the orphan sweep and `forget_point_delete_deferred` is logged. A running indexer batch counts as a writer ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)).
+- **`explore` is opt-in on the MCP URL** ([#2470](https://github.com/kagura-ai/memory-cloud/issues/2470)): the core profile lists 21 tools and `recall`'s description no longer points to `explore`. See Migration.
+- **api and web images ship less** ([#2457](https://github.com/kagura-ai/memory-cloud/issues/2457)): web moves to `node:24-alpine` and drops npm, corepack and yarn from the runner. api drops the base image's `pip`, `setuptools` and `wheel`, and the `uv` binary. CI, the dev compose file and the docs move to Node 24.
+- **Memory skills keep personal facts** ([#2468](https://github.com/kagura-ai/memory-cloud/pull/2468)): `/kagura-memory:remember` and `/kagura-memory:session-summary` keep one fact per memory with its specifics, and stamp `details.observed_at`. Development sessions keep their candidate counts.
+- **Dependencies** ([#2460](https://github.com/kagura-ai/memory-cloud/pull/2460)): pyasn1 → 0.6.5, glob removed from the frontend tree, minimatch → 11.0.3 under `@typescript-eslint/typescript-estree`. minimatch 3.1.5 stays with ESLint 9 and is development-only ([#2458](https://github.com/kagura-ai/memory-cloud/issues/2458)).
+
+### Fixed
+- **Indexer drops every point of an old version** ([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)): replacing a document version also removes a `remember(external_id=...)` row's own point and content chunks. Deletes now wait for the batch commit, so a rolled-back batch keeps its rows' points, and a point another live row names is kept. `delete` events with a `version` follow the same rule.
+- **Same-version re-index keeps edits** ([#2254](https://github.com/kagura-ai/memory-cloud/issues/2254)): `external_blob`, `trigger`, `location`, `tool_trigger` and `importance` are no longer overwritten when a document is indexed again at the same version.
+- **Recall hydrates hits from the searched contexts only** ([#2473](https://github.com/kagura-ai/memory-cloud/pull/2473)): a hit resolves to the row of the context its point carries, so a point two contexts can name no longer depends on row order.
+- **Audit mention counts no longer depend on erasure order** ([#2475](https://github.com/kagura-ai/memory-cloud/pull/2475)): under `user:` an own-row `resource` is rewritten only as the whole value, the rule the mention sweep uses, so a row naming another member still matches that member's erasure. Rows rewritten by earlier versions are not changed.
+
+### Migration
+
+The default MCP URL no longer lists `explore`.
+
+- **Before:** `/mcp` (`?profile=core`) listed `explore`, and `recall`'s description pointed to it.
+- **After:** `explore` is unlisted by default, and a direct `tools/call` keeps working. `recall(include_explore_hints=True)` on a plain URL generates no hints, succeeds, and returns `explore_hints_omitted` instead of `explore_hints`.
+- **Opt in:** a client that follows `tools/list` adds `?add_tools=explore` or `?profile=full` to the MCP URL (`&` when the URL already has a query). A URL with `tools=` or `add_tools=` adds the name to that list. The `kagura-mcp` stdio bridge uses `--tool-profile full`. Then reconnect.
+- **Python SDK:** `explore()` is unaffected. `explore_hints` needs the opt-in on the SDK's URL ([#2482](https://github.com/kagura-ai/memory-cloud/issues/2482)).
+
+### Notes
+- No database migration, no new environment variables.
+- **After deploy:** a deployment that indexed resource documents before v0.122.0 runs `python -m src.cli.resource_point_metadata_backfill` (plan), then `--workspace <workspace-id> --apply --yes` as a canary, then `--apply --yes`. See `docs/ops/resource-indexer-backfill.md`.
+- **Orphan sweep:** `forget` and the indexer now rely on it for deferred point deletes. With `ORPHAN_VECTOR_SWEEP_ENABLED=false`, those points stay until you run the sweep yourself ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)). Do not run it on a Qdrant shared with another deployment: see "Orphaned vectors" in `docs/deployment.md`.
+- **Images:** `docker exec kagura-api uv ...` no longer works; `python -m pytest` and `alembic` are unaffected. The web image grows from 193 MB to 239 MB and the api image from 1.62 GB to 1.69 GB.
+
 ## [v0.134.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.2) — 2026-10-31
 
 Account erasure hands workspaces on in the same transaction as its Postgres deletes.
