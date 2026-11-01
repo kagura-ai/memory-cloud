@@ -25,6 +25,8 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
+from db.base import isolated_session
+from db.point_writer_lock import wait_for_point_writers
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
@@ -342,20 +344,25 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     Sleep archive and merge (#2065) and the indexer's old-version cleanup
     (#2248) delete a memory's point by.
 
-    One live context per resource (#2248, #2254): no current path writes the
-    same document version into two live contexts. ``contexts.resource_id`` is
-    unique among live contexts (``ux_contexts_resource_id_active``), only the
-    indexer writes a ``resource_point_id`` into ``summary_embedding_id``, a
-    deleted context's rows are tombstoned, a restore is refused while another
-    live context serves the slug, and a merge copies rows under their own id.
-    So a "shared" answer today means a same-context duplicate, and the lookup
-    stays a guard. It is deliberately not scoped by collection: with no
-    cross-collection sharing there is no false "shared" to fix, while a scope
-    that misreads a context mid embedding migration (its rows in two
-    collections under the same ids) would delete a point a row still needs.
-    A change that lets several live contexts serve one resource must give each
-    context its own point id: the point carries one ``context_id``, which
-    recall filters by, so a shared point is searchable from one context only.
+    One context indexes a resource at a time (#2248, #2254).
+    ``contexts.resource_id`` is unique among live contexts
+    (``ux_contexts_resource_id_active``), only the indexer writes a
+    ``resource_point_id`` into ``summary_embedding_id``, a deleted context's
+    rows are tombstoned, a restore is refused while another live context
+    serves the slug, and a merge copies rows under their own id. One path
+    still lets two live rows name one point: a context that is unpublished or
+    changes its ``resource_id`` (``ContextService.update_context``) releases
+    the slug and keeps its rows, which keep naming their points. Once another
+    context takes the slug and indexes the same version, the point is
+    rewritten with that context's payload, and the first context's row is no
+    longer found by recall (the point carries one ``context_id``, which
+    recall filters by). This lookup is what keeps such a point from being
+    deleted while either row lives. It is deliberately not scoped by
+    collection: a scope that misreads a context mid embedding migration (its
+    rows in two collections under the same ids) would delete a point a row
+    still needs, and a false "shared" only keeps a point for the sweep.
+    Serving one resource from several contexts at once would need per-context
+    point ids.
     """
     if point_id == memory_id:
         return point_id
@@ -585,6 +592,12 @@ def _fit_memory_room(
 
 class ResourceRebuildError(Exception):
     """A resource-ingested row's point cannot be rebuilt from the row (#1870)."""
+
+
+# How long the old-version drain waits for open point writers (#2248) before
+# leaving the points to the orphan sweep. Short: the indexer job runs its
+# batches one after another.
+RETIRED_POINT_WRITER_WAIT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -1498,8 +1511,17 @@ class ResourceIndexer:
         of the old version) goes unless another live row names it, the
         ``unshared_point_id`` rule in one lookup for the batch: the deleted
         rows no longer count once committed, so a row found is a real second
-        row and its point is kept. The lookup's read transaction is ended
-        here, so the session is left as the batch commit left it.
+        row (see ``unshared_point_id`` for how one can exist) and its point
+        is kept.
+
+        In a session of its own, holding the point writers out exclusively
+        (``wait_for_point_writers``, as the orphan sweep does) from the lookup
+        to the deletes: a writer that upserts a point before its row commits
+        (another context's indexer that took over the slug, a restore) is
+        either finished and seen by the lookup, or waits. When one is still
+        open after ``RETIRED_POINT_WRITER_WAIT_SECONDS`` the points are left
+        to the sweep. The batch's session is not touched, so a failure here
+        never leaves it needing a rollback.
 
         Best effort: a failure is logged and the rest goes on; a crash before
         the drain leaves strays the sweep removes (``no_row``).
@@ -1508,23 +1530,33 @@ class ResourceIndexer:
         if not retired:
             return
         try:
-            async with self.db.begin_nested():
-                named = await self.db.execute(
+            async with isolated_session(self.db) as session:
+                if not await wait_for_point_writers(
+                    session, timeout_seconds=RETIRED_POINT_WRITER_WAIT_SECONDS
+                ):
+                    logger.info("old_version_points_deferred", rows=len(retired))
+                    return
+                named = await session.execute(
                     select(Memory.summary_embedding_id).where(
                         Memory.summary_embedding_id.in_({row.version_point for row in retired}),
                         Memory.deleted_at.is_(None),
                     )
                 )
-            shared = set(named.scalars().all())
+                shared = set(named.scalars().all())
+                await self._delete_unshared_version_points(retired, shared)
+                await session.commit()
         except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
             logger.warning(
                 "old_version_point_lookup_failed",
                 rows=len(retired),
                 error_class=type(e).__name__,
             )
-            return
-        finally:
-            await self._end_read_transaction()
+
+    @staticmethod
+    async def _delete_unshared_version_points(
+        retired: list[RetiredVersionRow], shared: set[UUID]
+    ) -> None:
+        """Delete ``retired``'s version points that no live row names, one call per collection."""
         by_collection: dict[str, list[str]] = {}
         for row in retired:
             if row.version_point in shared:
@@ -1547,13 +1579,6 @@ class ResourceIndexer:
                 )
                 continue
             logger.info("old_version_points_dropped", points=len(point_ids), collection=collection)
-
-    async def _end_read_transaction(self) -> None:
-        """Commit the read-only transaction a post-commit lookup began; log a failure."""
-        try:
-            await self.db.commit()
-        except Exception as e:  # noqa: BLE001 — nothing was written since the batch commit
-            logger.warning("indexer_read_transaction_end_failed", error_class=type(e).__name__)
 
     async def rebuild_point(
         self,

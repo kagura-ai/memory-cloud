@@ -1736,12 +1736,15 @@ the rows come back and keep their points. A crash between the commit and these
 deletes leaves points without a row, and the sweep removes them
 ([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)).
 
-These cleanups rely on each resource having at most one live context.
-`contexts.resource_id` is unique among live contexts, and a deleted context's
-rows are tombstoned, so two live rows never share a resource point. A resource
-point carries one `context_id` and recall filters on it. If a resource could
-ever be served by more than one live context, each context would need its own
-point ids.
+These deletes skip a point that another live row still names. Only one live
+context can serve a resource (`contexts.resource_id` is unique among live
+contexts), and a resource point carries one `context_id`, which recall filters
+on. A context that is unpublished or changes its `resource_id` keeps its rows,
+and they keep naming their points. If another context then takes the resource
+and indexes the same version, the point is rewritten for that context, and the
+first context's copy of the document can no longer be recalled. The point
+stays as long as either row is live. Serving one resource from several contexts
+at once would need per-context point ids.
 
 The scheduled run refuses to delete more than half of the points it scanned
 and logs `orphan_vector_sweep_refused` instead: that is what a sweep pointed
