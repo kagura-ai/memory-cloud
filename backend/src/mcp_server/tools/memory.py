@@ -1626,8 +1626,9 @@ _FORGET_NOT_ATTEMPTED_BUDGET = (
     "Not attempted: the call's time budget was spent on earlier ids. Retry it in a new call."
 )
 # The least of the budget an id must still have to be tried: an id started
-# with a sliver left would be cancelled mid-forget, after its search point is
-# removed but before its commit. A tenth of the budget, at most 1 s.
+# with a sliver left would only be cancelled mid-forget — rolled back and
+# reported ``error`` / ``timeout`` for the caller to verify. A tenth of the
+# budget, at most 1 s.
 _FORGET_MIN_SLICE_FRACTION = 0.1
 _FORGET_MIN_SLICE_MAX = 1.0
 # The batch deadline's clock. Tests patch this alias, never ``time.monotonic``
@@ -1736,9 +1737,8 @@ async def _handle_forget_many(
     """``forget(memory_ids=[...])``: each id is forgotten exactly as
     ``forget(memory_id=...)`` would forget it, and reported on its own row.
 
-    ``MemoryService.forget`` commits each id itself (its search point is
-    removed before that commit), so every id is its own transaction, as a
-    sequence of single forgets would be: an id that raises is rolled back
+    ``MemoryService.forget`` commits each id itself, so every id is its own
+    transaction, as a sequence of single forgets would be: an id that raises is rolled back
     alone and the others stay deleted. ``deleted`` / ``skipped`` (not found,
     not yours, already gone — one word, so the row is no existence oracle) /
     ``error``. One usage row and one context touch for the whole call.
@@ -1756,6 +1756,11 @@ async def _handle_forget_many(
     for the same event, and that row's help says to verify before retrying.
     A rollback that fails after such a cancel still flips ``session_ok`` and
     ends the loop — keep that bail-out if the rollback path changes.
+
+    #2201: the search points of the committed ids go once, after the loop
+    (``delete_forgotten_points``), not per id: that step takes the global
+    point-writer lock. It has its own short bound, which comes after the
+    budget like the usage row, and it fails soft to the orphan sweep.
     """
     from types import SimpleNamespace
 
@@ -1792,6 +1797,7 @@ async def _handle_forget_many(
 
             service = MemoryService(db)
             results: list[dict[str, Any]] = []
+            forgotten_points: list[tuple[UUID, UUID, str]] = []
             session_ok = True
             budget_left = True
             budget = get_tool_timeout("forget")
@@ -1817,6 +1823,7 @@ async def _handle_forget_many(
                             current_context_id=current_context_id,
                             key_workspace_id=get_mcp_key_workspace_scope(),
                             current_workspace_id=workspace_id,
+                            point_queue=forgotten_points,
                         ),
                         timeout=remaining,
                         operation_name="forget",
@@ -1844,6 +1851,9 @@ async def _handle_forget_many(
                         "status": "deleted" if result.deleted_count else "skipped",
                     }
                 )
+
+            if forgotten_points:
+                await service.delete_forgotten_points(forgotten_points)
 
             deleted = [r["memory_id"] for r in results if r["status"] == "deleted"]
             skipped = sum(1 for r in results if r["status"] == "skipped")

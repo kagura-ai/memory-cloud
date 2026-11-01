@@ -415,3 +415,38 @@ async def test_single_form_response_is_unchanged():
     assert body["memory_ids"] == [str(mid)]
     assert "results" not in body
     service.forget.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_batch_deletes_its_points_once_after_the_loop():
+    """#2201: that step takes the global point-writer lock, so a batch queues
+    its ids' points and takes it once, whatever the ids' outcomes."""
+    a, b, c = uuid4(), uuid4(), uuid4()
+    calls: list[str] = []
+
+    async def forget(request, **kwargs):
+        calls.append("forget")
+        if request.memory_id == b:
+            raise RuntimeError("boom")
+        kwargs["point_queue"].append((request.memory_id, request.memory_id, "c"))
+        return SimpleNamespace(deleted_count=1, memory_ids=[request.memory_id])
+
+    async def drain(queued):
+        calls.append("drain")
+        assert [entry[0] for entry in queued] == [a, c]
+
+    service = MagicMock()
+    service.forget = AsyncMock(side_effect=forget)
+    service.delete_forgotten_points = AsyncMock(side_effect=drain)
+    body, _, _ = await _call({"memory_ids": [str(a), str(b), str(c)]}, service)
+    assert calls == ["forget", "forget", "forget", "drain"]
+    assert body["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_nothing_queued_takes_no_lock():
+    a = uuid4()
+    service = _forgetter({a: 0})
+    service.delete_forgotten_points = AsyncMock()
+    await _call({"memory_ids": [str(a)]}, service)
+    service.delete_forgotten_points.assert_not_awaited()

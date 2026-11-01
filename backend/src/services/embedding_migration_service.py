@@ -395,7 +395,7 @@ async def _points_live_rows_name(
     collection is ONE point for TWO rows, and a tombstone and a live row of
     one document name the same point. A point is only the migration's to
     delete when no live row names it — the rule ``forget`` follows
-    (``MemoryService._delete_memory_point``), and like it not scoped by
+    (``MemoryService._point_to_delete``), and like it not scoped by
     context: the row to find may be in another one. ``other_than`` leaves one
     row out (the row whose point is being removed).
     """

@@ -17,9 +17,10 @@ other session. Each of those writers therefore holds this advisory lock
 before the look that precedes a delete. The embedding-model switch also takes
 it exclusively while changing routing, so a restore either finishes under
 the old route first or resolves the new route after the switch. The resource
-indexer's post-commit point cleanup takes it exclusively only when it is free
-(:func:`try_exclude_point_writers`): it can leave its points to the sweep, so
-it never queues.
+indexer's post-commit point cleanup and ``forget``'s post-commit point delete
+(#2201, once per call, at most 2 s held) take it exclusively only when it is
+free (:func:`try_exclude_point_writers`): they can leave their points to the
+sweep, so they never queue.
 
 A new writer that upserts before it commits must call
 :func:`hold_point_writer_lock` first.

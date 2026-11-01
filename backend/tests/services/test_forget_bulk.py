@@ -336,7 +336,7 @@ class TestBoundedReads:
 
     @pytest.mark.asyncio
     async def test_a_failure_in_chunk_two_keeps_chunk_one(self) -> None:
-        """Points-then-commit per chunk, as single forget: chunk 1 stays
+        """Points-then-commit per chunk: chunk 1 stays
         committed and audited once; chunk 2 is rolled back and the error raised."""
         service, perm = _service([_row() for _ in range(4)])
         AUDIT.reset_mock()
@@ -398,7 +398,8 @@ class TestForgetByQueryUsesTheSessionWorkspace:
             )
         )
         service.memory_repo = MagicMock(get=AsyncMock(return_value=memory))
-        service._soft_delete_memory = AsyncMock()  # type: ignore[method-assign]
+        # No point to delete (#2201: the helper returns it for after the commit).
+        service._soft_delete_memory = AsyncMock(return_value=None)  # type: ignore[method-assign]
         with patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()):
             resp = await service.forget(ForgetRequest(query="old", k=5), "u1", CTX)
         assert resp.deleted_count == 1

@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -550,6 +550,12 @@ def _without_dropped_rows(
         for sr in search_results
         if (memory := memories.get(sr["id"])) is None or memory.id not in dropped
     ]
+
+
+#: #2201: the bound on forget's whole post-commit point delete, so the global
+#: lock is never held past it and a stalled vector store cannot turn a
+#: committed delete into a tool timeout.
+FORGET_POINT_DELETE_TIMEOUT_SECONDS = 2.0
 
 
 class MemoryService:
@@ -7089,6 +7095,87 @@ class MemoryService:
         del_collection = await resolve_collection_name(self.db, memory.context_id)
         await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
 
+    async def delete_forgotten_points(self, point_deletes: list[tuple[UUID, UUID, str]]) -> None:
+        """Delete forgotten rows' search points and content chunks after their commit.
+
+        ``point_deletes``: ``(memory id, point id, collection)``. Never raises
+        an ``Exception``: the rows are committed tombstones, a tombstone's
+        leftover point is no hit, and the orphan vector sweep removes it after
+        its grace period (``REASON_TOMBSTONED``), so a caller's reply for a
+        committed delete does not depend on this step.
+
+        Between the commit and here a point can get a live owner again: a
+        ``rollback_session`` / Sleep undo restoring the row, or a resource
+        re-sync of the same document version (#1829) — writers that upsert the
+        point before their row commits. So the delete runs as the sweep's does
+        (:meth:`_points_free_to_delete`). That lock is global, so the step is
+        short: one lock per call (a batch queues its ids, see ``forget``), the
+        bulk deletes, and ``FORGET_POINT_DELETE_TIMEOUT_SECONDS`` over all of
+        it, which also keeps a stalled vector store out of the tool timeout.
+        """
+        if not point_deletes:
+            return
+        try:
+            async with asyncio.timeout(FORGET_POINT_DELETE_TIMEOUT_SECONDS):
+                async with self._points_free_to_delete(point_deletes) as free:
+                    await self._delete_points_by_collection(free)
+        except Exception as exc:
+            logger.warning(
+                "forget_point_delete_deferred",
+                points=len(point_deletes),
+                error_class=type(exc.__cause__ or exc).__name__,
+            )
+
+    @staticmethod
+    async def _delete_points_by_collection(point_deletes: list[tuple[UUID, UUID, str]]) -> None:
+        """One point delete and one chunk delete per collection."""
+        from db.qdrant import delete_chunk_points, delete_points_from_qdrant
+
+        collections: dict[str, list[tuple[UUID, UUID, str]]] = {}
+        for entry in point_deletes:
+            collections.setdefault(entry[2], []).append(entry)
+        for collection, entries in collections.items():
+            await delete_points_from_qdrant([str(entry[1]) for entry in entries], collection)
+            await delete_chunk_points([entry[0] for entry in entries], collection)
+
+    @contextlib.asynccontextmanager
+    async def _points_free_to_delete(
+        self, point_deletes: list[tuple[UUID, UUID, str]]
+    ) -> AsyncIterator[list[tuple[UUID, UUID, str]]]:
+        """The entries whose point no live row names, while no point writer is mid-transaction.
+
+        Holds the point-writer lock exclusively (``db.point_writer_lock``) on
+        an isolated session for the block, so the forget's own session is not
+        touched after its commit; closing that session releases the lock.
+        Yields nothing when the lock is taken: the points are left to the
+        sweep, which applies the same rule, rather than queueing every writer
+        behind this delete (``try_exclude_point_writers``).
+        """
+        from db.base import isolated_session
+        from db.point_writer_lock import try_exclude_point_writers
+
+        async with isolated_session(self.db) as session:
+            if not await try_exclude_point_writers(session):
+                logger.warning(
+                    "forget_point_delete_deferred", points=len(point_deletes), reason="writers"
+                )
+                yield []
+                return
+            points = list({point_id for _, point_id, _ in point_deletes})
+            owned = set(
+                (
+                    await session.execute(
+                        select(func.coalesce(Memory.summary_embedding_id, Memory.id)).where(
+                            Memory.deleted_at.is_(None),
+                            or_(Memory.id.in_(points), Memory.summary_embedding_id.in_(points)),
+                        )
+                    )
+                ).scalars()
+            )
+            if owned:
+                logger.info("forget_point_kept_live_owner", points=len(owned))
+            yield [entry for entry in point_deletes if entry[1] not in owned]
+
     async def _point_to_delete(self, memory: Memory) -> UUID | None:
         """``memory``'s vector point id, or ``None`` when another live row owns it too."""
         from services.resource_indexer import unshared_point_id
@@ -7101,18 +7188,16 @@ class MemoryService:
         memory: Memory,
         workspace_id: str,
         context_id: str,
-        *,
-        delete_point: bool = True,
     ) -> UUID | None:
-        """Delete one memory the caller may delete: ``forget``'s by-id side effects.
+        """Delete one memory the caller may delete: ``forget``'s per-row side effects.
 
-        Soft-deletes the row, removes its search point and its neural edges
-        (3-level isolation). Shared by ``forget(memory_id=...)`` and
-        ``forget_bulk`` so the two can never drift. The caller commits.
+        Soft-deletes the row, records its ``forgotten`` revision and removes
+        its neural edges (3-level isolation). Shared by ``forget``'s by-id and
+        by-query branches so the two can never drift. The caller commits.
 
-        With ``delete_point=False`` the point is not deleted here: its id is
-        returned (``None`` when another live row still owns it) so a batch
-        caller can remove a whole chunk's points in one request.
+        The search point is not deleted here (#2201): its id is returned
+        (``None`` when another live row still owns it) for the caller to
+        delete after its commit.
         """
         # Soft delete in PostgreSQL (set deleted_at, deleted_by)
         memory.deleted_at = utcnow()
@@ -7138,13 +7223,8 @@ class MemoryService:
             provenance=provenance,
         )
 
-        # Hard delete from Qdrant (remove from search index) — by the
-        # row's point id, not its row id (#1829).
-        point_to_delete: UUID | None = None
-        if delete_point:
-            await self._delete_memory_point(user_id, memory)
-        else:
-            point_to_delete = await self._point_to_delete(memory)
+        # The row's point id, not its row id (#1829).
+        point_to_delete = await self._point_to_delete(memory)
 
         # Clean up neural memory edges with 3-level isolation
         from repositories.neural_edge import NeuralEdgeRepository
@@ -7431,10 +7511,11 @@ class MemoryService:
             deleted, points = await self._soft_delete_chunk(
                 user_id, chunk, workspace_id_str, context_id_str
             )
-            # Points first, then the commit — single forget's order: a failed
-            # point delete raises before this chunk's rows are committed, so
-            # no committed row is left with a live search point. Earlier
-            # chunks stay committed and audited.
+            # Points first, then the commit: a failed point delete raises
+            # before this chunk's rows are committed, so no committed row is
+            # left with a live search point. Earlier chunks stay committed and
+            # audited. (Single forget deletes its points after its commit
+            # instead, #2201.)
             try:
                 await delete_points_from_qdrant(points, collection)
                 await self.db.commit()
@@ -7487,6 +7568,7 @@ class MemoryService:
         *,
         current_workspace_id: UUID | None = None,
         _skip_binding_row_filter: bool = False,
+        point_queue: list[tuple[UUID, UUID, str]] | None = None,
     ) -> ForgetResponse:
         """Delete memory (single or multiple via query).
 
@@ -7505,6 +7587,9 @@ class MemoryService:
                 context-level write gate, so replacing a denied-type row
                 cannot silently no-op and leave a live duplicate per
                 external_id. Never expose through transport layers.
+            point_queue: A batch caller's list: the committed rows' points are
+                added to it instead of being deleted here, and the caller
+                passes it to ``delete_forgotten_points`` once (#2201).
 
         Returns:
             ForgetResponse with deleted count and IDs
@@ -7528,6 +7613,9 @@ class MemoryService:
         )
 
         deleted_ids = []
+        # #2201: (memory id, point id, context id) of each forgotten row, deleted
+        # from the vector store only after the commit below.
+        point_deletes: list[tuple[UUID, UUID, UUID]] = []
         # #1286 item 2 (P0-5): the deleted rows' own (hard-validated)
         # workspace/context — the audit fallback when no context is declared.
         deleted_workspace_ids: set[UUID] = set()
@@ -7586,9 +7674,11 @@ class MemoryService:
                 deleted_workspace_ids.add(memory.workspace_id)
                 deleted_context_ids.add(memory.context_id)
 
-                await self._soft_delete_memory(
+                point_id = await self._soft_delete_memory(
                     user_id, memory, memory_workspace_id, memory_context_id
                 )
+                if point_id is not None:
+                    point_deletes.append((memory.id, point_id, memory.context_id))
 
                 deleted_ids.append(request.memory_id)
 
@@ -7633,7 +7723,7 @@ class MemoryService:
             # #1515: the pin above says the router must never choose the
             # candidate set of a destructive operation — and degradation would
             # do exactly that, underneath the pin. A keyword-only candidate set
-            # is a materially DIFFERENT set of memories, and this loop hard-
+            # is a materially DIFFERENT set of memories, and this call hard-
             # deletes Qdrant points and neural edges, neither of which has a
             # recovery path. Read paths trade precision for availability; a
             # delete must not. Restore the pre-#1515 failure instead.
@@ -7650,8 +7740,8 @@ class MemoryService:
             # Resolve and validate every match BEFORE any side effect, so a
             # request either deletes all of its matches or touches nothing: a
             # legacy row with NULL workspace/context (the by-id path refuses
-            # it too) must not abort the sweep after earlier rows lost their
-            # search points but before the commit.
+            # it too) must not abort the sweep after earlier rows were
+            # already stamped and their edges deleted.
             victims: list[Memory] = []
             for memory_response in search_response.results:
                 memory = await self.memory_repo.get(memory_response.memory_id)
@@ -7672,9 +7762,14 @@ class MemoryService:
             for memory in victims:
                 # The by-id path's helper: same #1924 stamp, same shared
                 # point rule, same 3-level edge isolation.
-                await self._soft_delete_memory(
-                    user_id, memory, str(memory.workspace_id), str(memory.context_id)
+                point_id = await self._soft_delete_memory(
+                    user_id,
+                    memory,
+                    str(memory.workspace_id),
+                    str(memory.context_id),
                 )
+                if point_id is not None:
+                    point_deletes.append((memory.id, point_id, memory.context_id))
                 deleted_ids.append(memory.id)
                 deleted_workspace_ids.add(memory.workspace_id)
                 deleted_context_ids.add(memory.context_id)
@@ -7686,6 +7781,11 @@ class MemoryService:
                 user_id=user_id,
             )
 
+        # Before the commit: the row's route, once per context.
+        collections = {
+            ctx: await resolve_collection_name(self.db, ctx)
+            for ctx in {context for _, _, context in point_deletes}
+        }
         await self.db.commit()
 
         # #1286 item 2 (P0-5): audit the destructive write (no-op unless a
@@ -7720,6 +7820,18 @@ class MemoryService:
                 else None
             ),
         )
+
+        # #2201: the vector store follows Postgres — the points go after the
+        # commit (and after the audit row of what it committed). Deleting them
+        # before the commit let a cancellation (the forget batch deadline) or a
+        # failed commit leave a live row without its vector, which nothing
+        # recovers; a tombstone's leftover point is no hit, and the orphan
+        # sweep removes it.
+        forgotten = [(mid, point, collections[ctx]) for mid, point, ctx in point_deletes]
+        if point_queue is not None:
+            point_queue.extend(forgotten)
+        else:
+            await self.delete_forgotten_points(forgotten)
 
         return ForgetResponse(deleted_count=len(deleted_ids), memory_ids=deleted_ids)
 

@@ -107,13 +107,13 @@ async def test_forget_by_query_log_has_no_raw_query():
     service.memory_repo.update = AsyncMock()
     service._may_delete_guardrail = AsyncMock(return_value=True)
     service.db.commit = AsyncMock()
+    service.delete_forgotten_points = AsyncMock()
 
     with (
         patch(
             "services.permission_service.PermissionService.ensure_memory_write_role", AsyncMock()
         ),
         patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
-        patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
         patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
         patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
         structlog.testing.capture_logs() as logs,
