@@ -1727,6 +1727,22 @@ Two things keep the two stores in step:
   ([#2101](https://github.com/kagura-ai/memory-cloud/issues/2101)). Set
   `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off.
 
+The resource indexer cleans up after itself as well. When a new version of a
+document replaces the old one, the indexer deletes the old row. Once the
+batch commits, it also deletes that row's points: the old version's resource
+point, and, for a row first written by `remember(external_id=...)`, the
+point under the row's own id and its content chunks. If the batch rolls back,
+the rows come back and keep their points. A crash between the commit and these
+deletes leaves points without a row, and the sweep removes them
+([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)).
+
+These cleanups rely on each resource having at most one live context.
+`contexts.resource_id` is unique among live contexts, and a deleted context's
+rows are tombstoned, so two live rows never share a resource point. A resource
+point carries one `context_id` and recall filters on it. If a resource could
+ever be served by more than one live context, each context would need its own
+point ids.
+
 The scheduled run refuses to delete more than half of the points it scanned
 and logs `orphan_vector_sweep_refused` instead: that is what a sweep pointed
 at the wrong database looks like. A deployment that deleted large contexts

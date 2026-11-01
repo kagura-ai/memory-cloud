@@ -1464,6 +1464,167 @@ class TestRepointedRowDropsItsStrayPoints:
         assert indexer._repointed == []
 
 
+class TestOldVersionCleanupDrainsStrays:
+    """#2248: a new version's upsert hard-deletes the old-version row; its
+    points go after the batch commits and never on rollback. The version's
+    point goes unless another live row names it; a row that did not own it
+    (a ``remember(external_id)`` row, #2164) also loses its own-id point and
+    its chunks."""
+
+    COLLECTION = "kagura_memories"
+
+    def _run(self, named, *, commit_error=None, shared=False):
+        """process_incremental over one v1 upsert whose doc has a v0 row
+        naming ``named`` (``"own"`` = the row id, ``"uuid5"`` = the v0 point)."""
+        from services.resource_indexer import resource_point_id
+
+        event = _make_event()
+        event.event_metadata = None
+        event.created_at = utcnow()
+        old = MagicMock()
+        old.id = uuid4()
+        old.resource_version = 0
+        self.version_point = resource_point_id(event.resource_id, event.doc_id, 0)
+        old.summary_embedding_id = {"own": old.id, "uuid5": self.version_point}.get(named, named)
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        indexer._get_or_create_state = AsyncMock(return_value=state)
+        indexer._fetch_events = AsyncMock(return_value=[event])
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=db.upsert_context)
+        indexer._existing_resource_doc_ids = AsyncMock(return_value={event.doc_id})
+        indexer._plan_suspended = AsyncMock(return_value=False)
+
+        self.order: list[str] = []
+        db.commit = AsyncMock(side_effect=commit_error or (lambda: self.order.append("commit")))
+        db.rollback = AsyncMock()
+
+        async def _unshared(_db, memory_id, point_id):
+            self.order.append("lookup")
+            assert memory_id == old.id
+            return None if shared else point_id
+
+        self.unshared = AsyncMock(side_effect=_unshared)
+        self.chunks = AsyncMock(side_effect=lambda ids, _c: self.order.append(f"chunks:{ids[0]}"))
+        self.points = AsyncMock(side_effect=lambda ids, _c: self.order.append(f"points:{ids[0]}"))
+        return indexer, old
+
+    async def _process(self, indexer):
+        routing = AsyncMock(return_value=(self.COLLECTION, indexer.embedding_service))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_lookup.resolve_resource_pk", AsyncMock(return_value=1)),
+            patch("services.resource_indexer.delete_chunk_points", self.chunks),
+            patch("services.resource_indexer.delete_points_from_qdrant", self.points),
+            patch("services.resource_indexer.unshared_point_id", self.unshared),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            metrics = await indexer.process_incremental("res_test", uuid4())
+        return metrics, log
+
+    @pytest.mark.asyncio
+    async def test_an_unowned_old_row_drops_its_own_point_chunks_and_version_point(self):
+        indexer, old = self._run("own")
+
+        metrics, log = await self._process(indexer)
+
+        assert metrics.errors == 0
+        assert self.order == [
+            "commit",
+            f"chunks:{old.id}",
+            f"points:{old.id}",
+            "lookup",
+            f"points:{self.version_point}",
+        ]
+        self.chunks.assert_awaited_once_with([old.id], self.COLLECTION)
+        indexer.qdrant_client.delete.assert_not_awaited()
+        assert indexer._retired == []
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert "old_versions_cleaned" in events
+        assert "old_version_points_dropped" in events
+
+    @pytest.mark.asyncio
+    async def test_an_owned_old_row_drops_only_its_version_point(self):
+        indexer, _ = self._run("uuid5")
+
+        await self._process(indexer)
+
+        assert self.order == ["commit", "lookup", f"points:{self.version_point}"]
+        self.chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_a_point_drops_chunks_and_own_id(self):
+        indexer, old = self._run(None)
+
+        await self._process(indexer)
+
+        assert self.order == [
+            "commit",
+            f"chunks:{old.id}",
+            f"points:{old.id}",
+            "lookup",
+            f"points:{self.version_point}",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_another_named_point_is_kept(self):
+        other = uuid4()
+        indexer, old = self._run(other)
+
+        _, log = await self._process(indexer)
+
+        assert f"points:{other}" not in self.order
+        assert self.order[1:3] == [f"chunks:{old.id}", f"points:{old.id}"]
+        kept = [c for c in log.info.call_args_list if c.args[0] == "old_version_named_point_kept"]
+        assert kept and kept[0].kwargs["point_id"] == str(other)
+
+    @pytest.mark.asyncio
+    async def test_a_shared_version_point_is_kept(self):
+        indexer, _ = self._run("uuid5", shared=True)
+
+        metrics, _ = await self._process(indexer)
+
+        assert metrics.errors == 0
+        assert self.order == ["commit", "lookup"]
+        self.points.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_rolled_back_batch_deletes_nothing(self):
+        indexer, _ = self._run("own", commit_error=RuntimeError("commit failed"))
+
+        metrics, _ = await self._process(indexer)
+
+        assert metrics.errors == 1
+        indexer.db.rollback.assert_awaited_once()
+        self.chunks.assert_not_awaited()
+        self.points.assert_not_awaited()
+        self.unshared.assert_not_awaited()
+        assert indexer._retired == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_delete_is_logged_and_the_run_completes(self):
+        indexer, old = self._run("own")
+        self.chunks.side_effect = RuntimeError("qdrant down")
+
+        metrics, log = await self._process(indexer)
+
+        assert metrics.errors == 0
+        self.points.assert_not_awaited()
+        warned = [
+            c for c in log.warning.call_args_list if c.args[0] == "old_version_point_cleanup_failed"
+        ]
+        assert warned[0].kwargs == {
+            "memory_id": str(old.id),
+            "collection": self.COLLECTION,
+            "error_class": "RuntimeError",
+        }
+        assert indexer._retired == []
+
+
 class TestProcessIncrementalSavepoints:
     """#2218: every event runs in its own SAVEPOINT, so a failed event rolls
     back only itself and the session stays usable for the rest of the batch."""
@@ -1618,35 +1779,83 @@ class TestProcessIncrementalSavepoints:
         assert "old_version_cleanup_failed" in warned
         # The old row was rolled back, so it keeps its point.
         indexer.qdrant_client.delete.assert_not_awaited()
+        assert indexer._retired == []
 
     @pytest.mark.asyncio
-    async def test_old_points_are_deleted_only_after_the_rows_flush(self):
-        from services.resource_indexer import resource_point_id
+    async def test_old_points_are_queued_not_deleted_inside_the_event(self):
+        """#2248: the event only queues the old row's points; the batch drains
+        them after its commit (``TestOldVersionCleanupDrainsStrays``)."""
+        from services.resource_indexer import RetiredVersionRow, resource_point_id
 
         old = MagicMock()
+        old.id = uuid4()
         old.resource_version = 0
-        order: list[str] = []
+        old.summary_embedding_id = old.id
         db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
-        db.flush = AsyncMock(side_effect=lambda: order.append("flush"))
         db.begin_nested = MagicMock(side_effect=lambda: _savepoint())
-        qdrant = AsyncMock()
-        qdrant.delete = AsyncMock(side_effect=lambda **_k: order.append("qdrant_delete"))
-        with patch("services.resource_indexer.get_qdrant_client", return_value=qdrant):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(db)
         indexer.embedding_service = MagicMock()
         indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
         event = _make_event()
         event.event_metadata = None
 
-        await indexer._apply_upsert(
-            event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
-        )
+        with (
+            patch("services.resource_indexer.delete_chunk_points") as chunks,
+            patch("services.resource_indexer.delete_points_from_qdrant") as points,
+        ):
+            await indexer._apply_upsert(
+                event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
+            )
 
-        # Row flush, cleanup flush, then the old point.
-        assert order == ["flush", "flush", "qdrant_delete"]
-        assert qdrant.delete.await_args.kwargs["points_selector"] == [
-            str(resource_point_id(event.resource_id, event.doc_id, 0))
+        db.delete.assert_awaited_once_with(old)
+        indexer.qdrant_client.delete.assert_not_awaited()
+        chunks.assert_not_called()
+        points.assert_not_called()
+        assert indexer._retired == [
+            RetiredVersionRow(
+                memory_id=old.id,
+                named_point=old.id,
+                version_point=resource_point_id(event.resource_id, event.doc_id, 0),
+                collection=self.COLLECTION,
+            )
         ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_events_retired_rows_are_dropped(self):
+        from services.resource_indexer import RetiredVersionRow
+
+        events = _numbered(_upsert("doc_1"), _upsert("doc_2"))
+        indexer = self._indexer(events)
+        kept, dropped = uuid4(), uuid4()
+
+        def _retired(memory_id):
+            return RetiredVersionRow(
+                memory_id=memory_id,
+                named_point=memory_id,
+                version_point=uuid4(),
+                collection=self.COLLECTION,
+            )
+
+        async def _apply(event, *_a):
+            if event.doc_id == "doc_1":
+                indexer._retired.append(_retired(kept))
+                return
+            indexer._retired.append(_retired(dropped))
+            raise RuntimeError("release failed after the cleanup")
+
+        indexer._apply_upsert.side_effect = _apply
+        chunks, points = AsyncMock(), AsyncMock()
+        unshared = AsyncMock(side_effect=lambda _db, _memory_id, point_id: point_id)
+
+        with patch("services.resource_indexer.unshared_point_id", unshared):
+            metrics = await self._process(indexer, chunks, points)
+
+        assert metrics.errors == 1
+        chunks.assert_awaited_once_with([kept], self.COLLECTION)
+        assert [c.args[0] for c in points.await_args_list][0] == [str(kept)]
+        assert all(str(dropped) not in c.args[0] for c in points.await_args_list)
+        assert indexer._retired == []
 
 
 async def _seed_indexed_resource(db_session, events: list[dict]):
@@ -1792,13 +2001,21 @@ class TestSameVersionReindexKeepsEdits:
     and the point follows the row."""
 
     LOCATION = {"lat": 35.5, "lon": 139.25}
+    # #2254: the details keys the indexer never takes from worker lineage.
+    ROW_AUTHORED = {
+        "external_blob": {"backend": "r2", "ref": "r2://bucket/report.pdf"},
+        "trigger": {"from": "2027-01-01T00:00:00", "until": "2027-01-02T00:00:00"},
+        "location": {"lat": 35.5, "lon": 139.25},
+        "tool_trigger": {"tool": "Bash", "on": "pre", "action": "warn"},
+    }
 
-    async def _index_then_replay(self, db_session, *, edit: bool):
+    async def _index_then_replay(self, db_session, *, edit: bool, edit_row=None, event=None):
         from models.resource import IndexerState
         from services.memory_versions import record_edit, versioned_snapshot
 
         ws_id, ctx_id, resource_pk, slug, owner = await _seed_indexed_resource(
-            db_session, [{"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}]
+            db_session,
+            [event or {"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}],
         )
         self.cleanup = (ws_id, ctx_id, resource_pk)
         indexer, embedder = _db_indexer(db_session)
@@ -1813,14 +2030,18 @@ class TestSameVersionReindexKeepsEdits:
         if edit:
             # The edit the API makes (update_memory): versioned, logged.
             before = versioned_snapshot(row)
-            row.context_summary = "what the user wrote"
-            row.details = {**row.details, "location": dict(self.LOCATION)}
+            if edit_row is None:
+                row.context_summary = "what the user wrote"
+                row.details = {**row.details, "location": dict(self.LOCATION)}
+            else:
+                edit_row(row)
             row.updated_at = utcnow()
             assert record_edit(db_session, row, before, actor_user_id=owner)
             await db_session.commit()
             await db_session.refresh(row)
             assert row.version == 2
-            assert row.location_lat == 35.5
+            if edit_row is None:
+                assert row.location_lat == 35.5
 
         # Replay: an offset reset re-applies the same version's event.
         state = (
@@ -1869,3 +2090,88 @@ class TestSameVersionReindexKeepsEdits:
         finally:
             if self.cleanup:
                 await _drop_indexed_resource(db_session, *self.cleanup)
+
+    @pytest.mark.asyncio
+    async def test_reserved_details_keys_and_importance_survive_a_replay(self, db_session):
+        """#2254: the four row-authored details keys and ``importance`` stay;
+        any other key comes from the event (worker lineage stays authoritative)."""
+        self.cleanup = None
+
+        def _edit(row):
+            row.details = {
+                **row.details,
+                **self.ROW_AUTHORED,
+                "channel_id": "C-edited",
+                "note": "a key the event does not carry",
+            }
+            row.importance = 0.95
+
+        try:
+            row, payload, _ = await self._index_then_replay(
+                db_session,
+                edit=True,
+                edit_row=_edit,
+                event={
+                    "doc_id": "doc_1",
+                    "version": 1,
+                    "payload": {"title": "Report"},
+                    "event_metadata": {"memory_details": {"channel_id": "C-worker"}},
+                },
+            )
+
+            for key, value in self.ROW_AUTHORED.items():
+                assert row.details[key] == value, key
+            assert row.details["channel_id"] == "C-worker"
+            assert "note" not in row.details
+            assert row.importance == 0.95
+            assert row.trigger_from == "2027-01-01T00:00:00"
+            assert row.external_blob_ref == "r2://bucket/report.pdf"
+            assert payload["location"] == self.LOCATION
+        finally:
+            if self.cleanup:
+                await _drop_indexed_resource(db_session, *self.cleanup)
+
+    @pytest.mark.asyncio
+    async def test_a_remembered_rows_first_match_keeps_its_importance_and_keys(self, db_session):
+        """#2254: a ``remember(external_id)`` row matched by natural key keeps
+        the importance and the row-authored keys it was written with."""
+        ws_id, ctx_id, resource_pk, slug, owner = await _seed_indexed_resource(
+            db_session,
+            [{"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}],
+        )
+        try:
+            row = Memory(
+                id=uuid4(),
+                user_id=owner,
+                workspace_id=ws_id,
+                context_id=ctx_id,
+                summary="a remembered external document",
+                content='{"title": "Report"}',
+                details={
+                    "resource_id": slug,
+                    "doc_id": "doc_1",
+                    "version": 1,
+                    "external_blob": self.ROW_AUTHORED["external_blob"],
+                },
+                type="fact",
+                importance=0.9,
+                client="pytest",
+                embedding_status="success",
+            )
+            row.summary_embedding_id = row.id
+            db_session.add(row)
+            await db_session.commit()
+            row_id = row.id
+            indexer, embedder = _db_indexer(db_session)
+
+            metrics = await _db_process(indexer, embedder, slug, ctx_id)
+
+            assert metrics.errors == 0, metrics.reason
+            assert metrics.applied_upserts == 1
+            db_session.expire_all()
+            row = await db_session.get(Memory, row_id)
+            assert row.importance == 0.9
+            assert row.details["external_blob"] == self.ROW_AUTHORED["external_blob"]
+            assert row.source_type == "connector"
+        finally:
+            await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
