@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
 from db.base import isolated_session
-from db.point_writer_lock import wait_for_point_writers
+from db.point_writer_lock import try_exclude_point_writers
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
@@ -356,8 +356,10 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     context takes the slug and indexes the same version, the point is
     rewritten with that context's payload, and the first context's row is no
     longer found by recall (the point carries one ``context_id``, which
-    recall filters by). This lookup is what keeps such a point from being
-    deleted while either row lives. It is deliberately not scoped by
+    recall filters by). This lookup only stops the caller's delete: the
+    orphan sweep judges a resource point by the context in its payload, so it
+    still removes that point once that context has no row for it, whatever
+    other context's row names it. It is deliberately not scoped by
     collection: a scope that misreads a context mid embedding migration (its
     rows in two collections under the same ids) would delete a point a row
     still needs, and a false "shared" only keeps a point for the sweep.
@@ -594,15 +596,9 @@ class ResourceRebuildError(Exception):
     """A resource-ingested row's point cannot be rebuilt from the row (#1870)."""
 
 
-# How long the old-version drain waits for open point writers (#2248) before
-# leaving the points to the orphan sweep. Short: the indexer job runs its
-# batches one after another.
-RETIRED_POINT_WRITER_WAIT_SECONDS = 5
-
-
 @dataclass(frozen=True)
 class RetiredVersionRow:
-    """An old-version row ``_apply_upsert`` hard-deleted, whose point goes after commit (#2248).
+    """A row the batch hard-deleted, whose version point goes after commit (#2248).
 
     Attributes:
         memory_id: The deleted row's id.
@@ -634,8 +630,9 @@ class ResourceIndexer:
         # point, as (memory_id, previous point id, collection). Drained after
         # the batch commits, cleared when it rolls back.
         self._repointed: list[tuple[UUID, UUID | None, str]] = []
-        # #2248: old-version rows the running batch hard-deleted, whose points
-        # are dropped after the batch commits, cleared when it rolls back.
+        # #2248: rows the running batch hard-deleted (an old version replaced,
+        # a version delete event), whose points are dropped after the batch
+        # commits, cleared when it rolls back.
         self._retired: list[RetiredVersionRow] = []
 
     async def process_incremental(
@@ -1503,25 +1500,25 @@ class ResourceIndexer:
             )
 
     async def _drop_retired_points(self) -> None:
-        """Delete the version points of the old-version rows this batch removed (#2248).
+        """Delete the version points of the rows this batch removed (#2248).
 
-        Runs after the batch commit, never on rollback, like
+        The rows of an old version a new one replaced, and of a ``version=N``
+        delete event. Runs after the batch commit, never on rollback, like
         ``_drop_repointed_points``: a rolled-back delete leaves the row live,
-        and it must keep its point. A version's point (``resource_point_id``
-        of the old version) goes unless another live row names it, the
-        ``unshared_point_id`` rule in one lookup for the batch: the deleted
-        rows no longer count once committed, so a row found is a real second
-        row (see ``unshared_point_id`` for how one can exist) and its point
-        is kept.
+        and it must keep its point. A version's point (``resource_point_id``)
+        goes unless another live row names it, the ``unshared_point_id`` rule
+        in one lookup for the batch: the deleted rows no longer count once
+        committed, so a row found is a real second row (see
+        ``unshared_point_id`` for how one can exist) and its point is kept.
 
         In a session of its own, holding the point writers out exclusively
-        (``wait_for_point_writers``, as the orphan sweep does) from the lookup
-        to the deletes: a writer that upserts a point before its row commits
-        (another context's indexer that took over the slug, a restore) is
-        either finished and seen by the lookup, or waits. When one is still
-        open after ``RETIRED_POINT_WRITER_WAIT_SECONDS`` the points are left
-        to the sweep. The batch's session is not touched, so a failure here
-        never leaves it needing a rollback.
+        from the lookup to the deletes: a writer that upserts a point before
+        its row commits (another context's indexer that took over the slug, a
+        restore) is either finished and seen by the lookup, or waits for this
+        short section. When one is mid-transaction the points are left to the
+        sweep rather than queueing every writer behind this drain
+        (``try_exclude_point_writers``). The batch's session is not touched,
+        so a failure here never leaves it needing a rollback.
 
         Best effort: a failure is logged and the rest goes on; a crash before
         the drain leaves strays the sweep removes.
@@ -1531,9 +1528,7 @@ class ResourceIndexer:
             return
         try:
             async with isolated_session(self.db) as session:
-                if not await wait_for_point_writers(
-                    session, timeout_seconds=RETIRED_POINT_WRITER_WAIT_SECONDS
-                ):
+                if not await try_exclude_point_writers(session):
                     logger.info("old_version_points_deferred", rows=len(retired))
                     return
                 named = await session.execute(
@@ -1813,9 +1808,8 @@ class ResourceIndexer:
                 # Delete specific version (new behavior)
                 # ================================================================
 
-                # Bugfix: Use UUID format like in upsert
-                point_id_str = f"{event.resource_id}:{event.doc_id}:v{event.version}"
-                point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
+                point_id_str = resource_point_source(event.resource_id, event.doc_id, event.version)
+                point_id_uuid = resource_point_id(event.resource_id, event.doc_id, event.version)
 
                 # Delete from Memory table with 3-level isolation
                 # Performance: Use generated columns (Migration 061) instead of JSONB search
@@ -1828,46 +1822,42 @@ class ResourceIndexer:
                         Memory.resource_version == event.version,  # Generated column (fast!)
                     )
                 )
-                memory = result.scalar_one_or_none()
+                # Several rows: a forgotten document synced again has a live
+                # row beside its tombstone, at one version.
+                memories = result.scalars().all()
 
-                # The rule ``forget`` and the Sleep archive and merge delete a
-                # point by (``unshared_point_id``), which needs this context's
-                # row. A point kept here is left to the orphan sweep.
-                unshared_point = (
-                    await unshared_point_id(self.db, memory.id, point_id_uuid) if memory else None
-                )
-                if unshared_point is None:
+                if not memories:
+                    # Not this context's point to delete: the sweep judges it.
                     logger.info(
                         "qdrant_delete_version_point_kept",
                         point_id=str(point_id_uuid),
                         point_id_source=point_id_str,
                         collection=collection_name,
-                        has_row=memory is not None,
                     )
-                else:
-                    await self.qdrant_client.delete(
-                        collection_name=collection_name,
-                        points_selector=[str(unshared_point)],
-                    )
+                    return
 
-                    # Code quality: Use info for important business events
-                    logger.info(
-                        "qdrant_delete_version",
-                        point_id=str(point_id_uuid),
-                        point_id_source=point_id_str,
+                for memory in memories:
+                    await self.db.delete(memory)
+                await self.db.flush()
+
+                # The rule of the other delete paths (``unshared_point_id``),
+                # applied once the deletes are durable: a rolled-back row must
+                # keep its point.
+                self._retired.append(
+                    RetiredVersionRow(
+                        memory_id=memories[0].id,
+                        version_point=point_id_uuid,
                         collection=collection_name,
                     )
+                )
 
-                if memory:
-                    await self.db.delete(memory)
-                    await self.db.flush()
-
-                    logger.info(
-                        "resource_memory_deleted_version",
-                        memory_id=str(memory.id),
-                        doc_id=event.doc_id,
-                        version=event.version,
-                    )
+                logger.info(
+                    "resource_memory_deleted_version",
+                    memory_id=str(memories[0].id),
+                    doc_id=event.doc_id,
+                    version=event.version,
+                    deleted_count=len(memories),
+                )
 
         except Exception as e:
             logger.error("qdrant_delete_failed", doc_id=event.doc_id, error=str(e))

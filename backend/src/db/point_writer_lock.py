@@ -16,7 +16,10 @@ other session. Each of those writers therefore holds this advisory lock
 *shared* until its transaction ends, and the sweep takes it *exclusively*
 before the look that precedes a delete. The embedding-model switch also takes
 it exclusively while changing routing, so a restore either finishes under
-the old route first or resolves the new route after the switch.
+the old route first or resolves the new route after the switch. The resource
+indexer's post-commit point cleanup takes it exclusively only when it is free
+(:func:`try_exclude_point_writers`): it can leave its points to the sweep, so
+it never queues.
 
 A new writer that upserts before it commits must call
 :func:`hold_point_writer_lock` first.
@@ -37,6 +40,9 @@ _SHARED_SQL = text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0
 _EXCLUSIVE_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
     key=_LOCK_KEY
 )
+_TRY_EXCLUSIVE_SQL = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+    key=_LOCK_KEY
+)
 _SET_LOCK_TIMEOUT_SQL = text("SELECT set_config('lock_timeout', :timeout, true)")
 
 
@@ -44,9 +50,23 @@ async def hold_point_writer_lock(db: AsyncSession) -> None:
     """Keep the sweep's delete pass out until this transaction ends.
 
     Call it before the first point is written. Shared: writers do not block
-    each other, only the sweep's delete pass (seconds, once a day).
+    each other, only the sweep's delete pass (seconds, once a day) and the
+    short deletes of a ``try_exclude_point_writers`` holder.
     """
     await db.execute(_SHARED_SQL)
+
+
+async def try_exclude_point_writers(db: AsyncSession) -> bool:
+    """Take the lock exclusively if no writer holds it, without waiting.
+
+    For a delete that has a backstop. An exclusive request that waits queues
+    every new shared request behind it, so a caller that can skip its delete
+    must not wait. The lock is held until the session's transaction ends.
+
+    Returns:
+        False when a writer is mid-transaction; the session stays usable.
+    """
+    return bool((await db.execute(_TRY_EXCLUSIVE_SQL)).scalar())
 
 
 async def wait_for_point_writers(db: AsyncSession, *, timeout_seconds: float) -> bool:
