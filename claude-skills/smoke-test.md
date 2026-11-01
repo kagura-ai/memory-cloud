@@ -245,8 +245,8 @@ reference(memory_id=..., context_id=...)
 
 explore(memory_id=..., context_id=..., depth=2, min_weight=0.0)
 -> Verify: returns response (total_activated >= 0, no error)
--> Note: explore is opt-in (`?profile=full` or `?add_tools=explore`): step 0 confirmed the first.
-   On a URL that does not list it the call fails with tool_not_listed, naming that change
+-> Note: explore is not listed by default (`?profile=full` or `?add_tools=explore` lists it):
+   step 0 confirmed the first
 
 recall_upcoming(context_id=..., from="now")
 -> Verify: status=success

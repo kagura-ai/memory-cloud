@@ -30,7 +30,7 @@ Use the available Kagura Memory MCP namespace, typically exposed as tools such a
 - `update_memory`
 - `forget`
 - context, edge, sleep, and usage tools when exposed
-- `explore`, which is opt-in: `?add_tools=explore` or `?profile=full` on the MCP URL lists it, and without that a call fails with `tool_not_listed`
+- `explore`, which is not listed by default: `?add_tools=explore` or `?profile=full` on the MCP URL lists it
 
 If the MCP tools are not available:
 

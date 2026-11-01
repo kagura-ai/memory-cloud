@@ -23,11 +23,11 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 - `explore` is opt-in: `?add_tools=explore` or `?profile=full` lists it (or name it in `tools`). It walks the Neural Memory graph, for questions that follow a chain of decisions or changes. See [`explore`](#explore).
 - Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
 
-> **A profile is a view, not an authorization boundary.** It filters `tools/list`: a tool left out of the list stays callable by anyone whose role allows it — on the server; most clients call listed tools only, so [`describe_tools`](#guide-2) tells the model what the URL left out and which URL lists it. The one exception is `explore`: a `tools/call` on a URL that does not list it fails with `tool_not_listed`, naming the URL change, so a client still holding an older list finds out what to do. Anyone can make that change, so this is a pointer and not a restriction. To restrict what a key can do, use workspace and context roles.
+> **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it — on the server; most clients call listed tools only, so [`describe_tools`](#guide-2) tells the model what the URL left out and which URL lists it. To restrict what a key can do, use workspace and context roles.
 
-> **Upgrading to v0.135.0.** `explore` is no longer in the core profile, so the default URL does not list it and a call to it there fails with `tool_not_listed`. A client that uses it adds `?add_tools=explore` or `?profile=full` to its URL (`&` when the URL already has a query; next to `tools`, add the name to that list). `include_explore_hints=true` on such a URL returns `explore_hints_omitted` instead of `explore_hints`.
+> **Upgrading to v0.135.0.** `explore` is no longer in the core profile, so the default URL does not list it. A client that follows `tools/list` adds `?add_tools=explore` or `?profile=full` to its URL (`&` when the URL already has a query; next to `tools`, add the name to that list). A direct `tools/call` keeps working. `include_explore_hints=true` on a URL that does not list it returns `explore_hints_omitted` instead of `explore_hints`.
 
-> **Upgrading from v0.92.0 or earlier.** The bare `/mcp` URL used to list every tool; it now lists the core profile. A client that needs the other tools adds `?profile=full` to its URL (`&profile=full` when the URL already has a query) — most clients let the model call listed tools only, so this is the step that makes them usable; `describe_tools` tells the model which ones exist. Nothing changes on the server side; connectors that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) show the new list at their next read.
+> **Upgrading from v0.92.0 or earlier.** The bare `/mcp` URL used to list every tool; it now lists the core profile. A client that needs the other tools adds `?profile=full` to its URL (`&profile=full` when the URL already has a query) — most clients let the model call listed tools only, so this is the step that makes them usable; `describe_tools` tells the model which ones exist. Nothing changes on the server side (`tools/call` accepts every registered tool); connectors that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) show the new list at their next read.
 
 ## Tool annotations
 
@@ -539,7 +539,6 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 | `no_writes_in_window` | `rollback_session(since, until)` found no write of yours (same user, same credential) in the context in that window (`retryable: false`); says nothing about other principals | `changes_since(context_id, since, by_me=true)` to see what you wrote and when |
 | `already_rolled_back` | The session's (or window's) rollback in this context is complete and nothing new was written since (`retryable: false`); also when every event in the window was already handled by another rollback (then without `rollback_id`) | None; `changes_since` shows what happened |
 | `unknown_tool` | No tool has that name | `tools/list` |
-| `tool_not_listed` | The tool is opt-in (`explore`) and this URL does not list it; `message` names the URL change. A URL with `tools` ignores `add_tools`, so the name goes in that list | Change the MCP URL and reconnect |
 
 A call that relied on the URL's [default context](#default-context--context) and was refused for it carries `context_source` (`"url"`, `"credential"` or `"binding"`): `context_not_found` keeps the explicit-path `message` and adds `context_source` with a `help` that points at the default, `feature_not_available` adds `context_source`, and a `?context=` that is not a UUID is `invalid_context_id_format` with `context_source: "url"`.
 
@@ -822,7 +821,7 @@ Always verify before deleting: show the memory's summary, warn when `importance 
 
 ### `explore`
 
-Opt-in: not in the core profile. `?add_tools=explore` or `?profile=full` on the MCP URL lists it, and a call on a URL that does not list it fails with `tool_not_listed`.
+Opt-in: not in the core profile. `?add_tools=explore` or `?profile=full` on the MCP URL lists it.
 
 | Parameter | Guidance |
 |-----------|----------|
