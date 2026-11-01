@@ -25,6 +25,8 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
+from db.base import isolated_session
+from db.point_writer_lock import try_exclude_point_writers
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
@@ -338,8 +340,31 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     unsearchable. A row whose point is its own id (``point_id == memory_id``)
     skips the lookup. Not scoped by context on purpose: the row to find is one
     in ANOTHER context that shares the collection. Served by the partial index
-    idx_memories_summary_embedding_live (#1869). The rule ``forget`` and the
-    Sleep archive and merge (#2065) delete a memory's point by.
+    idx_memories_summary_embedding_live (#1869). The rule ``forget``, the
+    Sleep archive and merge (#2065), and the indexer's old-version cleanup and
+    ``version=N`` delete (#2248) delete a memory's point by.
+
+    One context indexes a resource at a time (#2248, #2254).
+    ``contexts.resource_id`` is unique among live contexts
+    (``ux_contexts_resource_id_active``), only the indexer writes a
+    ``resource_point_id`` into ``summary_embedding_id``, a deleted context's
+    rows are tombstoned, a restore is refused while another live context
+    serves the slug, and a merge copies rows under their own id. One path
+    still lets two live rows name one point: a context that is unpublished or
+    changes its ``resource_id`` (``ContextService.update_context``) releases
+    the slug and keeps its rows, which keep naming their points. Once another
+    context takes the slug and indexes the same version, the point is
+    rewritten with that context's payload, and the first context's row is no
+    longer found by recall (the point carries one ``context_id``, which
+    recall filters by). This lookup only stops the caller's delete: the
+    orphan sweep judges a resource point by the context in its payload, so it
+    still removes that point once that context has no row for it, whatever
+    other context's row names it. It is deliberately not scoped by
+    collection: a scope that misreads a context mid embedding migration (its
+    rows in two collections under the same ids) would delete a point a row
+    still needs, and a false "shared" only keeps a point for the sweep.
+    Serving one resource from several contexts at once would need per-context
+    point ids.
     """
     if point_id == memory_id:
         return point_id
@@ -366,24 +391,44 @@ INDEXER_SOURCE = "resource_ingest"
 RESOURCE_MEMORY_TYPE = "resource_data"
 
 
+# ``details`` keys the indexer never takes from worker lineage
+# (``ResourceIndexer._extract_worker_lineage``): on a row they are user- or
+# agent-authored by construction, so a same-version re-index keeps them
+# (``_keeps_user_edits``, #2254).
+ROW_AUTHORED_DETAILS_KEYS = frozenset({"external_blob", "trigger", "location", "tool_trigger"})
+
+
 def _keeps_user_edits(
     memory: Memory, new_details: dict[str, Any], context_summary: str
 ) -> tuple[dict[str, Any], str]:
     """Carry a row's user-authored values over a same-version re-index (#2218).
 
     Returns the details and the ``context_summary`` the row and its point
-    keep: a copy of ``new_details`` with the row's ``details.location``, and
-    the row's or the indexer's ``context_summary``.
+    keep: a copy of ``new_details`` with the row's ``ROW_AUTHORED_DETAILS_KEYS``,
+    and the row's or the indexer's ``context_summary``.
 
-    - ``details.location`` is always kept. Its only writer is a user or agent
-      edit (``_apply_location``): the indexer strips ``location`` from worker
-      lineage (#1331), so a location on the row is user-authored by
-      construction. Copied as stored; it was validated when written.
+    - ``details.external_blob`` / ``trigger`` / ``location`` / ``tool_trigger``
+      are always kept (#2254). The indexer strips them from worker lineage
+      (``external_blob`` and ``trigger`` since #896, ``location`` since
+      #1331, ``tool_trigger`` since #1619), so on a row indexed since then
+      each is user- or agent-authored (``location``'s only writer is
+      ``_apply_location``). Copied as stored; they were validated when
+      written. Accepted edge: a row indexed before a key's strip may still
+      carry a worker-supplied value, which a replay now keeps instead of
+      clearing. A kept
+      ``tool_trigger`` is never served as a guardrail while the row is a
+      connector row: ``list_tool_triggered`` refuses
+      ``source_type='connector'``, which the update branch stamps. Any
+      other key comes from the event: worker lineage stays authoritative
+      there, so a worker can still clear a key it set.
     - ``context_summary`` is kept when the row was edited since the indexer
       wrote it (``version > 1``: only an API edit or a rollback bumps it,
       #2043) or was not written by the indexer (a ``remember(external_id)``
       row matched by natural key, #2164), unless it is empty. Otherwise the
       indexer's ``context_summary`` (the new truncation) is returned.
+
+    ``importance``, ``tags`` and ``type`` are not touched by a re-index at
+    all (the update branch of ``_apply_upsert``).
 
     Accepted edges: an edit of another versioned field (importance, tags)
     also keeps the old truncation, which on the same version differs from
@@ -391,9 +436,10 @@ def _keeps_user_edits(
     row's ``content`` and the point's text are refreshed either way.
     """
     details = dict(new_details)
-    location = (memory.details or {}).get("location")
-    if location is not None:
-        details["location"] = location
+    row_details = memory.details or {}
+    for key in ROW_AUTHORED_DETAILS_KEYS:
+        if row_details.get(key) is not None:
+            details[key] = row_details[key]
     user_authored = memory.version > 1 or memory.source != INDEXER_SOURCE
     if user_authored and memory.context_summary:
         return details, memory.context_summary
@@ -550,6 +596,21 @@ class ResourceRebuildError(Exception):
     """A resource-ingested row's point cannot be rebuilt from the row (#1870)."""
 
 
+@dataclass(frozen=True)
+class RetiredVersionRow:
+    """A row the batch hard-deleted, whose version point goes after commit (#2248).
+
+    Attributes:
+        memory_id: The deleted row's id.
+        version_point: ``resource_point_id`` of the row's version.
+        collection: The context's collection.
+    """
+
+    memory_id: UUID
+    version_point: UUID
+    collection: str
+
+
 class ResourceIndexer:
     """Incremental indexer for public contexts.
 
@@ -569,6 +630,10 @@ class ResourceIndexer:
         # point, as (memory_id, previous point id, collection). Drained after
         # the batch commits, cleared when it rolls back.
         self._repointed: list[tuple[UUID, UUID | None, str]] = []
+        # #2248: rows the running batch hard-deleted (an old version replaced,
+        # a version delete event), whose points are dropped after the batch
+        # commits, cleared when it rolls back.
+        self._retired: list[RetiredVersionRow] = []
 
     async def process_incremental(
         self,
@@ -589,6 +654,7 @@ class ResourceIndexer:
         start_time = utcnow()
         metrics = IndexerMetrics()
         self._repointed = []
+        self._retired = []
 
         try:
             # 1. Resolve context first so workspace_id is available for
@@ -741,6 +807,7 @@ class ResourceIndexer:
             # 5. Process each event
             for event in events:
                 repointed_mark = len(self._repointed)
+                retired_mark = len(self._retired)
                 try:
                     # #2218: one SAVEPOINT per event. A failed event's flush is
                     # rolled back on its own and the session stays usable for
@@ -767,6 +834,7 @@ class ResourceIndexer:
                     # The event's re-points went with its savepoint: the rows
                     # still name their old points, which must stay (#2164).
                     del self._repointed[repointed_mark:]
+                    del self._retired[retired_mark:]
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -788,8 +856,10 @@ class ResourceIndexer:
             state.last_run_at = utcnow()
             state.metrics = metrics.to_dict()
             await self.db.commit()
-            # #2164: only now that the re-points are durable.
+            # #2164 / #2248: only now that the re-points and the old-version
+            # deletes are durable.
             await self._drop_repointed_points()
+            await self._drop_retired_points()
 
             # 8. Calculate duration
             metrics.duration_ms = int((utcnow() - start_time).total_seconds() * 1000)
@@ -806,7 +876,9 @@ class ResourceIndexer:
         except Exception as e:
             # #2164: a rolled-back re-point leaves the row naming its old
             # point, so that point and its chunks must stay.
+            # #2248: so do the old-version rows the rollback brings back.
             self._repointed = []
+            self._retired = []
             await self.db.rollback()
             logger.error(
                 "indexer_run_failed",
@@ -925,7 +997,7 @@ class ResourceIndexer:
     # 'tool_trigger' marks a tool guardrail that client hooks inject into the
     # model's context: connector-ingested content must never become one, even
     # if the trusted-tier read gate were ever bypassed.
-    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger", "location", "tool_trigger"})
+    _LINEAGE_RESERVED_KEYS = ROW_AUTHORED_DETAILS_KEYS
 
     def _extract_worker_lineage(self, event: ResourceEvent) -> tuple[dict[str, Any], str | None]:
         """Extract ai-worker lineage (#896) from event_metadata.
@@ -1224,10 +1296,11 @@ class ResourceIndexer:
                 existing_memory.source_type = SOURCE_TYPE_CONNECTOR
                 existing_memory.context_summary = context_summary
                 existing_memory.content = json.dumps(event.payload, ensure_ascii=False)
-                # P0-2: Fix - use 'is not None' to allow importance=0.0
-                existing_memory.importance = (
-                    event.importance if event.importance is not None else 0.6
-                )
+                # #2254: ``importance`` is left as the row has it. A same-version
+                # event cannot carry a new value (one upsert per natural key,
+                # RESOURCE_EVENTS_UPSERT_UNIQUE), so this branch only sees a
+                # replay or a ``remember(external_id)`` row's first match;
+                # overwriting would undo a user edit or Sleep's re-evaluation.
                 existing_memory.details = new_details
                 # Always assign (mirrors the create branch) — re-indexing a doc
                 # whose event carries no lineage must clear a stale source_uri,
@@ -1307,11 +1380,17 @@ class ResourceIndexer:
             # failed flush deactivates the savepoint it ran in: swallowing the
             # error inside the event's savepoint would fail the event's release
             # (and lose the row written above) instead of being non-blocking.
-            # The old points are deleted only once the row deletes are
-            # flushed: a failed flush rolls the rows back, and they must keep
-            # their points.
+            # #2248: the old rows' points are queued once the row deletes are
+            # flushed and dropped only after the batch commits: a failed
+            # flush, a failed event or a rolled-back batch brings the rows
+            # back, and they must keep their points. The version's point goes
+            # to ``_drop_retired_points``. A row that did not own it (a
+            # ``remember(external_id)`` row, #2164) also leaves its own-id
+            # point and its chunks, which ``_drop_repointed_points`` drops by
+            # the same rule as for a re-pointed row.
             try:
-                old_points: list[str] = []
+                retired: list[RetiredVersionRow] = []
+                unowned: list[tuple[UUID, UUID | None, str]] = []
                 async with self.db.begin_nested():
                     old_memories_result = await self.db.execute(
                         select(Memory).where(
@@ -1327,28 +1406,32 @@ class ResourceIndexer:
 
                     if old_memories:
                         for old_mem in old_memories:
-                            old_point_str = (
-                                f"{event.resource_id}:{event.doc_id}:v{old_mem.resource_version}"
+                            version_point = resource_point_id(
+                                event.resource_id, event.doc_id, old_mem.resource_version
                             )
-                            old_points.append(str(uuid5(NAMESPACE_DNS, old_point_str)))
+                            retired.append(
+                                RetiredVersionRow(
+                                    memory_id=old_mem.id,
+                                    version_point=version_point,
+                                    collection=collection_name,
+                                )
+                            )
+                            if old_mem.summary_embedding_id != version_point:
+                                unowned.append(
+                                    (old_mem.id, old_mem.summary_embedding_id, collection_name)
+                                )
                             await self.db.delete(old_mem)
 
                         await self.db.flush()
-                for old_point in old_points:
-                    try:
-                        await self.qdrant_client.delete(
-                            collection_name=collection_name,
-                            points_selector=[old_point],
-                        )
-                    except Exception:
-                        pass  # Qdrant point may already be gone
-                if old_points:
+                self._retired.extend(retired)
+                self._repointed.extend(unowned)
+                if retired:
                     logger.info(
                         "old_versions_cleaned",
                         resource_id=event.resource_id,
                         doc_id=event.doc_id,
                         current_version=event.version,
-                        cleaned_count=len(old_points),
+                        cleaned_count=len(retired),
                     )
             except Exception as cleanup_err:
                 # Non-blocking: cleanup failure should not block upsert
@@ -1375,11 +1458,15 @@ class ResourceIndexer:
     async def _drop_repointed_points(self) -> None:
         """Delete the stray points of the rows this batch re-pointed (#2164).
 
+        Also of the old-version rows it deleted that did not own their
+        version's point (#2248): the same points are strays for the same
+        reason.
+
         Runs after the batch commit, never on rollback: deleting first and then
         rolling back would leave a live row naming its own id with no point and
         no chunks, which only the event retry restores. A row now owns its
-        document's point, so its content chunks (``chunk_of`` = row id) and a
-        previous point under its own id are strays. Any other previous id (the
+        document's point (or is gone), so its content chunks (``chunk_of`` =
+        row id) and a previous point under its own id are strays. Any other previous id (the
         point of another natural key) may be another row's, so it is kept for
         the orphan sweep. Best effort: a failure is logged and the next entry
         goes on; a crash before the drain leaves strays the sweep removes.
@@ -1411,6 +1498,82 @@ class ResourceIndexer:
                 memory_id=str(memory_id),
                 collection=collection,
             )
+
+    async def _drop_retired_points(self) -> None:
+        """Delete the version points of the rows this batch removed (#2248).
+
+        The rows of an old version a new one replaced, and of a ``version=N``
+        delete event. Runs after the batch commit, never on rollback, like
+        ``_drop_repointed_points``: a rolled-back delete leaves the row live,
+        and it must keep its point. A version's point (``resource_point_id``)
+        goes unless another live row names it, the ``unshared_point_id`` rule
+        in one lookup for the batch: the deleted rows no longer count once
+        committed, so a row found is a real second row (see
+        ``unshared_point_id`` for how one can exist) and its point is kept.
+
+        In a session of its own, holding the point writers out exclusively
+        from the lookup to the deletes: a writer that upserts a point before
+        its row commits (another context's indexer that took over the slug, a
+        restore) is either finished and seen by the lookup, or waits for this
+        short section. When one is mid-transaction the points are left to the
+        sweep rather than queueing every writer behind this drain
+        (``try_exclude_point_writers``). The batch's session is not touched,
+        so a failure here never leaves it needing a rollback.
+
+        Best effort: a failure is logged and the rest goes on; a crash before
+        the drain leaves strays the sweep removes.
+        """
+        retired, self._retired = self._retired, []
+        if not retired:
+            return
+        try:
+            async with isolated_session(self.db) as session:
+                if not await try_exclude_point_writers(session):
+                    logger.info("old_version_points_deferred", rows=len(retired))
+                    return
+                named = await session.execute(
+                    select(Memory.summary_embedding_id).where(
+                        Memory.summary_embedding_id.in_({row.version_point for row in retired}),
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                shared = set(named.scalars().all())
+                await self._delete_unshared_version_points(retired, shared)
+                await session.commit()
+        except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+            logger.warning(
+                "old_version_point_lookup_failed",
+                rows=len(retired),
+                error_class=type(e).__name__,
+            )
+
+    @staticmethod
+    async def _delete_unshared_version_points(
+        retired: list[RetiredVersionRow], shared: set[UUID]
+    ) -> None:
+        """Delete ``retired``'s version points that no live row names, one call per collection."""
+        by_collection: dict[str, list[str]] = {}
+        for row in retired:
+            if row.version_point in shared:
+                logger.info(
+                    "memory_point_shared_kept",
+                    memory_id=str(row.memory_id),
+                    point_id=str(row.version_point),
+                )
+                continue
+            by_collection.setdefault(row.collection, []).append(str(row.version_point))
+        for collection, point_ids in by_collection.items():
+            try:
+                await delete_points_from_qdrant(point_ids, collection)
+            except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+                logger.warning(
+                    "old_version_point_cleanup_failed",
+                    points=len(point_ids),
+                    collection=collection,
+                    error_class=type(e).__name__,
+                )
+                continue
+            logger.info("old_version_points_dropped", points=len(point_ids), collection=collection)
 
     async def rebuild_point(
         self,
@@ -1645,23 +1808,8 @@ class ResourceIndexer:
                 # Delete specific version (new behavior)
                 # ================================================================
 
-                # Delete from Qdrant
-                # Bugfix: Use UUID format like in upsert
-                point_id_str = f"{event.resource_id}:{event.doc_id}:v{event.version}"
-                point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
-
-                await self.qdrant_client.delete(
-                    collection_name=collection_name,
-                    points_selector=[str(point_id_uuid)],
-                )
-
-                # Code quality: Use info for important business events
-                logger.info(
-                    "qdrant_delete_version",
-                    point_id=str(point_id_uuid),
-                    point_id_source=point_id_str,
-                    collection=collection_name,
-                )
+                point_id_str = resource_point_source(event.resource_id, event.doc_id, event.version)
+                point_id_uuid = resource_point_id(event.resource_id, event.doc_id, event.version)
 
                 # Delete from Memory table with 3-level isolation
                 # Performance: Use generated columns (Migration 061) instead of JSONB search
@@ -1674,18 +1822,42 @@ class ResourceIndexer:
                         Memory.resource_version == event.version,  # Generated column (fast!)
                     )
                 )
-                memory = result.scalar_one_or_none()
+                # Several rows: a forgotten document synced again has a live
+                # row beside its tombstone, at one version.
+                memories = result.scalars().all()
 
-                if memory:
-                    await self.db.delete(memory)
-                    await self.db.flush()
-
+                if not memories:
+                    # Not this context's point to delete: the sweep judges it.
                     logger.info(
-                        "resource_memory_deleted_version",
-                        memory_id=str(memory.id),
-                        doc_id=event.doc_id,
-                        version=event.version,
+                        "qdrant_delete_version_point_kept",
+                        point_id=str(point_id_uuid),
+                        point_id_source=point_id_str,
+                        collection=collection_name,
                     )
+                    return
+
+                for memory in memories:
+                    await self.db.delete(memory)
+                await self.db.flush()
+
+                # The rule of the other delete paths (``unshared_point_id``),
+                # applied once the deletes are durable: a rolled-back row must
+                # keep its point.
+                self._retired.append(
+                    RetiredVersionRow(
+                        memory_id=memories[0].id,
+                        version_point=point_id_uuid,
+                        collection=collection_name,
+                    )
+                )
+
+                logger.info(
+                    "resource_memory_deleted_version",
+                    memory_id=str(memories[0].id),
+                    doc_id=event.doc_id,
+                    version=event.version,
+                    deleted_count=len(memories),
+                )
 
         except Exception as e:
             logger.error("qdrant_delete_failed", doc_id=event.doc_id, error=str(e))

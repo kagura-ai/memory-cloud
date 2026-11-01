@@ -2956,14 +2956,13 @@ class TestPointsFreeToDelete:
         with (
             patch("db.base.isolated_session", return_value=session),
             patch(
-                "db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=False)
-            ) as wait,
+                "db.point_writer_lock.try_exclude_point_writers", AsyncMock(return_value=False)
+            ) as lock,
             patch("db.qdrant.delete_points_from_qdrant", delete_point),
             patch("db.qdrant.delete_chunk_points", AsyncMock()),
         ):
             await service.delete_forgotten_points([(uuid4(), uuid4(), "c")])
-        assert wait.await_args.args[0] is session
-        assert wait.await_args.kwargs["timeout_seconds"] == 0.05
+        lock.assert_awaited_once_with(session)
         session.execute.assert_not_awaited()
         delete_point.assert_not_awaited()
         session.__aexit__.assert_awaited_once()  # the session closes: lock released
@@ -2982,7 +2981,7 @@ class TestPointsFreeToDelete:
         chunks = AsyncMock()
         with (
             patch("db.base.isolated_session", return_value=session),
-            patch("db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=True)),
+            patch("db.point_writer_lock.try_exclude_point_writers", AsyncMock(return_value=True)),
             patch(
                 "db.qdrant.delete_points_from_qdrant", AsyncMock(side_effect=delete_point)
             ) as deleted,
@@ -3004,7 +3003,7 @@ class TestPointsFreeToDelete:
         delete_point = AsyncMock()
         with (
             patch("db.base.isolated_session", return_value=session),
-            patch("db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=True)),
+            patch("db.point_writer_lock.try_exclude_point_writers", AsyncMock(return_value=True)),
             patch("db.qdrant.delete_points_from_qdrant", delete_point),
         ):
             await service.delete_forgotten_points([(uuid4(), uuid4(), "c")])

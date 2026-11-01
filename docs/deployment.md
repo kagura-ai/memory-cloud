@@ -1699,6 +1699,23 @@ python -m src.cli.observed_at_backfill --apply --yes  # write them
 
 It is idempotent; `--workspace <id>` limits it to one workspace.
 
+## Resource point metadata (`type` / `tags` / `context_summary`) — Issue #2254
+
+Resource points indexed before v0.122.0 carry no `type`, `tags` or
+`context_summary` payload, so recall's `filters.type="resource_data"` does not
+match them until they are reindexed. A deployment that indexed resource
+documents before v0.122.0 runs the one-shot backfill once (inside the API
+container, from `backend/`):
+
+```bash
+python -m src.cli.resource_point_metadata_backfill                # plan: how many points
+python -m src.cli.resource_point_metadata_backfill --apply --yes  # write them
+```
+
+Set-payload only, idempotent, no migration; `--workspace <id>` limits it to
+one workspace. The full procedure and the report lines are in
+[ops/resource-indexer-backfill.md](ops/resource-indexer-backfill.md#metadata-backfill-for-points-indexed-before-v01220-2254).
+
 ## Orphaned vectors — Issue #1798
 
 Postgres is the system of record; the vector store follows it. Every write
@@ -1732,6 +1749,29 @@ Two things keep the two stores in step:
   ([#2201](https://github.com/kagura-ai/memory-cloud/issues/2201)). With the
   scheduled run off, those points stay until you run the sweep yourself; they
   are not recall hits, but they do take candidate slots.
+
+The resource indexer cleans up after itself as well. When a new version of a
+document replaces the old one, the indexer deletes the old row. Once the
+batch commits, it also deletes that row's points: the old version's resource
+point, and, for a row first written by `remember(external_id=...)`, the
+point under the row's own id and its content chunks. A delete event for one
+version removes that version's resource point the same way. If the batch rolls
+back, the rows come back and keep their points. A crash between the commit and
+these deletes, or a point writer that is still open at that moment, leaves
+points without a row, and the sweep removes them
+([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)).
+
+These deletes skip a point that another live row still names. Only one live
+context can serve a resource (`contexts.resource_id` is unique among live
+contexts), and a resource point carries one `context_id`, which recall filters
+on. A context that is unpublished or changes its `resource_id` keeps its rows,
+and they keep naming their points. If another context then takes the resource
+and indexes the same version, the point is rewritten for that context, and the
+first context's copy of the document can no longer be recalled. The sweep judges
+a resource point by the context in its payload, so it removes that point once
+that context has no row for it, even if the first context's row still names it.
+Serving one resource from several contexts at once would need per-context point
+ids.
 
 The scheduled run refuses to delete more than half of the points it scanned
 and logs `orphan_vector_sweep_refused` instead: that is what a sweep pointed

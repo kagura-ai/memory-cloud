@@ -552,11 +552,6 @@ def _without_dropped_rows(
     ]
 
 
-#: #2201: how long forget waits, after its commit, for point writers that
-#: upsert before they commit (``db.point_writer_lock``) before it leaves its
-#: points to the orphan sweep. Short: a queued exclusive request holds up new
-#: writers behind it.
-FORGET_POINT_WRITER_WAIT_SECONDS = 0.05
 #: #2201: the bound on forget's whole post-commit point delete, so the global
 #: lock is never held past it and a stalled vector store cannot turn a
 #: committed delete into a tool timeout.
@@ -7152,17 +7147,15 @@ class MemoryService:
         Holds the point-writer lock exclusively (``db.point_writer_lock``) on
         an isolated session for the block, so the forget's own session is not
         touched after its commit; closing that session releases the lock.
-        Yields nothing — the points are left to the sweep, which applies the
-        same rule — when writers still hold the lock after
-        ``FORGET_POINT_WRITER_WAIT_SECONDS``.
+        Yields nothing when the lock is taken: the points are left to the
+        sweep, which applies the same rule, rather than queueing every writer
+        behind this delete (``try_exclude_point_writers``).
         """
         from db.base import isolated_session
-        from db.point_writer_lock import wait_for_point_writers
+        from db.point_writer_lock import try_exclude_point_writers
 
         async with isolated_session(self.db) as session:
-            if not await wait_for_point_writers(
-                session, timeout_seconds=FORGET_POINT_WRITER_WAIT_SECONDS
-            ):
+            if not await try_exclude_point_writers(session):
                 logger.warning(
                     "forget_point_delete_deferred", points=len(point_deletes), reason="writers"
                 )

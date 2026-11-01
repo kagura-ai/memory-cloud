@@ -116,3 +116,75 @@ If `applied_upserts > 0` but neither check above succeeds, the indexer
 reported success at the Postgres layer but the upsert did not land in
 Qdrant — re-check the collection shape (`GET /collections/kagura_memories`
 should report `dense` as a named vector) and the indexer logs.
+
+## Metadata backfill for points indexed before v0.122.0 (#2254)
+
+When to use: once, after upgrading a deployment that indexed resource
+documents before v0.122.0. Since v0.122.0 the indexer writes the owning
+memory's `type`, `tags` and `context_summary` into each resource point, so
+recall's payload filters see them. Points indexed earlier carry none of the
+three and gain them only when Sleep reindexes them, an embedding migration
+re-embeds them, or someone edits the memory. Until then
+`filters.type="resource_data"` does not return them (tags are empty on
+unedited rows, so tag filters are not affected).
+
+`resource_point_metadata_backfill` walks every live, embedded memory that owns
+a resource point (its `summary_embedding_id` is the `uuid5` of its
+`resource_id:doc_id:vN`) and sets the three keys on that point from the row.
+It is set-payload only: no vector is deleted or re-embedded, no other payload
+key changes, and there is no migration. Running it again writes the same
+values again.
+
+Run it where the API runs (same environment), e.g. inside the API container,
+from `backend/`:
+
+```bash
+# 1. Plan (the default, read-only): how many memories and contexts it covers
+python -m src.cli.resource_point_metadata_backfill
+
+# 2. Optional canary: one workspace first
+python -m src.cli.resource_point_metadata_backfill --workspace <workspace-id> --apply --yes
+
+# 3. Apply to the whole deployment
+python -m src.cli.resource_point_metadata_backfill --apply --yes
+```
+
+`--apply` without `--yes` asks before writing; `--yes` without `--apply` is a
+usage error (exit 2). The apply exits 0 when every point was written or
+skipped, 1 on an error or when any memory is listed `failed`. `--log-level DEBUG` prints one vector-store line per
+point.
+
+The apply report prints `updated <n> resource point(s)` and
+`points written: <n>` (the points actually written), then, when they occur:
+
+- `skipped <n> point(s) shared with another live memory` — the point is named
+  by a second live memory as well; it is left as it is, as a metadata edit
+  would leave it.
+- `skipped <n> memory(ies) deleted or changed during the run` — each row is
+  read again right before its point is written; one deleted, erased or
+  pointed at another point since the plan is left alone.
+- `failed <memory-id>` — one line per memory whose point could not be
+  written; the walk carries on with the rest, and the command exits 1. The
+  log line `resource_point_metadata_backfill_row_failed` holds the error. A
+  transient vector-store error clears on a second run. A point that no longer
+  exists ("No point with id ...") has no vector at all; queue the memory for
+  the embedding sweep, which rebuilds a resource point from its row (with
+  `type`, `tags` and `context_summary`) under the same point id:
+
+  ```sql
+  UPDATE memories
+  SET embedding_status = 'pending', embedding_error = NULL, embedding_retry_count = 0
+  WHERE id = '<memory-id>' AND deleted_at IS NULL;
+  ```
+
+Post-check: retrieve a point the plan covered and confirm the keys are there.
+
+```bash
+curl -s "$QDRANT_URL/collections/<collection>/points/<point-id>" \
+  | jq '.result.payload | {type, tags, context_summary}'
+```
+
+`type` is the memory's type (`resource_data` for documents the indexer
+wrote) and `tags` is a list (empty for unedited memories). A recall in the
+resource's context with `filters.type="resource_data"` now returns its
+documents.

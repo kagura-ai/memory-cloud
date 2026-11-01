@@ -30,6 +30,7 @@ from cli import (  # noqa: E402
     cleanup_erased_vectors,
     observed_at_backfill,
     reprocess_erasures,
+    resource_point_metadata_backfill,
     restore_context,
     sweep_orphan_objects,
     sweep_orphan_vectors,
@@ -133,6 +134,7 @@ _CLI_ARGV = [
     (restore_context, ["00000000-0000-0000-0000-000000000002"]),
     (backfill_deleted_context_files, []),
     (observed_at_backfill, []),
+    (resource_point_metadata_backfill, []),
     (reprocess_erasures, ["--all"]),
 ]
 

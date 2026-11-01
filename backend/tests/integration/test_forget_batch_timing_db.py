@@ -7,7 +7,7 @@ call shares one budget, the ``forget`` timeout (``MCP_TIMEOUT_FORGET``, default
 15 s); an id that does not fit comes back ``not_attempted``. Each of the 50
 memories has a summary point, two content chunk points and two edges.
 
-Measured locally (5 runs): median ~1.8 s, max ~2.0 s for the 50 ids, so the
+Measured locally (5 runs): median ~1.8 s, max ~2.1 s for the 50 ids, so the
 15 s default stays. The default run checks the behaviour under a generous
 budget and logs the wall time; the timing bound — the real default budget,
 and the batch under 10 s, the threshold #2201 set for raising it — is
@@ -308,3 +308,22 @@ async def test_a_row_restored_after_the_commit_keeps_its_point(world: World, asy
         str(p.id) for p in await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
     }
     assert left == {str(restored)}
+
+
+async def test_a_writer_mid_transaction_defers_the_points_without_waiting(
+    world: World, async_engine
+):
+    """A point writer holds the lock shared: forget neither waits for it nor
+    queues other writers behind it, and leaves its points to the sweep."""
+    from db.point_writer_lock import hold_point_writer_lock
+
+    ids = await _seed(world, 2)
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as writer:
+        await hold_point_writer_lock(writer)
+        body, _ = await _forget(world, ids)
+        await writer.rollback()
+
+    assert [r["status"] for r in body["results"]] == ["deleted", "deleted"]
+    left = await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
+    assert {str(p.id) for p in left} == {str(i) for i in ids}
