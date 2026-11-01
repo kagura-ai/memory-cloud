@@ -1467,13 +1467,13 @@ class TestRepointedRowDropsItsStrayPoints:
 class TestOldVersionCleanupDrainsStrays:
     """#2248: a new version's upsert hard-deletes the old-version row; its
     points go after the batch commits and never on rollback. The version's
-    point goes unless another live row names it; a row that did not own it
-    (a ``remember(external_id)`` row, #2164) also loses its own-id point and
-    its chunks."""
+    point goes unless another live row names it (one lookup per batch); a row
+    that did not own it (a ``remember(external_id)`` row, #2164) also loses
+    its own-id point and its chunks, through the re-point drain."""
 
     COLLECTION = "kagura_memories"
 
-    def _run(self, named, *, commit_error=None, shared=False):
+    def _run(self, named, *, commit_error=None, shared=False, lookup_error=None):
         """process_incremental over one v1 upsert whose doc has a v0 row
         naming ``named`` (``"own"`` = the row id, ``"uuid5"`` = the v0 point)."""
         from services.resource_indexer import resource_point_id
@@ -1487,6 +1487,25 @@ class TestOldVersionCleanupDrainsStrays:
         self.version_point = resource_point_id(event.resource_id, event.doc_id, 0)
         old.summary_embedding_id = {"own": old.id, "uuid5": self.version_point}.get(named, named)
         db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
+        rows_and_locks = db.execute.side_effect
+        self.order: list[str] = []
+        self.lookups: list[str] = []
+
+        def _execute(statement, *args, **kwargs):
+            sql = str(statement)
+            if "summary_embedding_id IN" in sql:
+                self.order.append("lookup")
+                self.lookups.append(sql)
+                if lookup_error:
+                    raise lookup_error
+                result = MagicMock()
+                result.scalars.return_value.all.return_value = (
+                    [self.version_point] if shared else []
+                )
+                return result
+            return rows_and_locks(statement, *args, **kwargs)
+
+        db.execute.side_effect = _execute
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(db)
         indexer.embedding_service = MagicMock()
@@ -1499,18 +1518,12 @@ class TestOldVersionCleanupDrainsStrays:
         indexer._existing_resource_doc_ids = AsyncMock(return_value={event.doc_id})
         indexer._plan_suspended = AsyncMock(return_value=False)
 
-        self.order: list[str] = []
         db.commit = AsyncMock(side_effect=commit_error or (lambda: self.order.append("commit")))
         db.rollback = AsyncMock()
-
-        async def _unshared(_db, memory_id, point_id):
-            self.order.append("lookup")
-            assert memory_id == old.id
-            return None if shared else point_id
-
-        self.unshared = AsyncMock(side_effect=_unshared)
         self.chunks = AsyncMock(side_effect=lambda ids, _c: self.order.append(f"chunks:{ids[0]}"))
-        self.points = AsyncMock(side_effect=lambda ids, _c: self.order.append(f"points:{ids[0]}"))
+        self.points = AsyncMock(
+            side_effect=lambda ids, _c: self.order.append(f"points:{','.join(ids)}")
+        )
         return indexer, old
 
     async def _process(self, indexer):
@@ -1520,7 +1533,6 @@ class TestOldVersionCleanupDrainsStrays:
             patch("services.resource_lookup.resolve_resource_pk", AsyncMock(return_value=1)),
             patch("services.resource_indexer.delete_chunk_points", self.chunks),
             patch("services.resource_indexer.delete_points_from_qdrant", self.points),
-            patch("services.resource_indexer.unshared_point_id", self.unshared),
             patch("services.resource_indexer.logger") as log,
         ):
             metrics = await indexer.process_incremental("res_test", uuid4())
@@ -1533,16 +1545,21 @@ class TestOldVersionCleanupDrainsStrays:
         metrics, log = await self._process(indexer)
 
         assert metrics.errors == 0
+        # Batch commit, the re-point drain, then one lookup, the read
+        # transaction's end and one delete for the version points.
         assert self.order == [
             "commit",
             f"chunks:{old.id}",
             f"points:{old.id}",
             "lookup",
+            "commit",
             f"points:{self.version_point}",
         ]
         self.chunks.assert_awaited_once_with([old.id], self.COLLECTION)
+        self.points.assert_awaited_with([str(self.version_point)], self.COLLECTION)
+        assert "deleted_at IS NULL" in self.lookups[0]
         indexer.qdrant_client.delete.assert_not_awaited()
-        assert indexer._retired == []
+        assert indexer._retired == [] and indexer._repointed == []
         events = [c.args[0] for c in log.info.call_args_list]
         assert "old_versions_cleaned" in events
         assert "old_version_points_dropped" in events
@@ -1553,7 +1570,7 @@ class TestOldVersionCleanupDrainsStrays:
 
         await self._process(indexer)
 
-        assert self.order == ["commit", "lookup", f"points:{self.version_point}"]
+        assert self.order == ["commit", "lookup", "commit", f"points:{self.version_point}"]
         self.chunks.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1562,13 +1579,8 @@ class TestOldVersionCleanupDrainsStrays:
 
         await self._process(indexer)
 
-        assert self.order == [
-            "commit",
-            f"chunks:{old.id}",
-            f"points:{old.id}",
-            "lookup",
-            f"points:{self.version_point}",
-        ]
+        assert self.order[:3] == ["commit", f"chunks:{old.id}", f"points:{old.id}"]
+        assert self.order[-1] == f"points:{self.version_point}"
 
     @pytest.mark.asyncio
     async def test_another_named_point_is_kept(self):
@@ -1577,20 +1589,26 @@ class TestOldVersionCleanupDrainsStrays:
 
         _, log = await self._process(indexer)
 
-        assert f"points:{other}" not in self.order
-        assert self.order[1:3] == [f"chunks:{old.id}", f"points:{old.id}"]
-        kept = [c for c in log.info.call_args_list if c.args[0] == "old_version_named_point_kept"]
+        assert all(str(other) not in step for step in self.order)
+        assert self.order[1] == f"chunks:{old.id}"
+        kept = [
+            c
+            for c in log.info.call_args_list
+            if c.args[0] == "resource_repoint_previous_point_kept"
+        ]
         assert kept and kept[0].kwargs["point_id"] == str(other)
 
     @pytest.mark.asyncio
     async def test_a_shared_version_point_is_kept(self):
-        indexer, _ = self._run("uuid5", shared=True)
+        indexer, old = self._run("uuid5", shared=True)
 
-        metrics, _ = await self._process(indexer)
+        metrics, log = await self._process(indexer)
 
         assert metrics.errors == 0
-        assert self.order == ["commit", "lookup"]
+        assert self.order == ["commit", "lookup", "commit"]
         self.points.assert_not_awaited()
+        kept = [c for c in log.info.call_args_list if c.args[0] == "memory_point_shared_kept"]
+        assert kept[0].kwargs == {"memory_id": str(old.id), "point_id": str(self.version_point)}
 
     @pytest.mark.asyncio
     async def test_a_rolled_back_batch_deletes_nothing(self):
@@ -1602,23 +1620,46 @@ class TestOldVersionCleanupDrainsStrays:
         indexer.db.rollback.assert_awaited_once()
         self.chunks.assert_not_awaited()
         self.points.assert_not_awaited()
-        self.unshared.assert_not_awaited()
-        assert indexer._retired == []
+        assert self.lookups == []
+        assert indexer._retired == [] and indexer._repointed == []
 
     @pytest.mark.asyncio
-    async def test_a_failed_delete_is_logged_and_the_run_completes(self):
-        indexer, old = self._run("own")
+    async def test_a_failed_lookup_keeps_the_points_and_ends_the_transaction(self):
+        indexer, _ = self._run("uuid5", lookup_error=RuntimeError("db gone"))
+
+        metrics, log = await self._process(indexer)
+
+        assert metrics.errors == 0
+        assert self.order == ["commit", "lookup", "commit"]
+        self.points.assert_not_awaited()
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert "old_version_point_lookup_failed" in warned
+
+    @pytest.mark.asyncio
+    async def test_a_failed_chunk_delete_still_drops_the_version_point(self):
+        indexer, _ = self._run("own")
         self.chunks.side_effect = RuntimeError("qdrant down")
 
         metrics, log = await self._process(indexer)
 
         assert metrics.errors == 0
-        self.points.assert_not_awaited()
+        self.points.assert_awaited_once_with([str(self.version_point)], self.COLLECTION)
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert "resource_repoint_cleanup_failed" in warned
+
+    @pytest.mark.asyncio
+    async def test_a_failed_version_point_delete_is_logged_and_the_run_completes(self):
+        indexer, _ = self._run("uuid5")
+        self.points.side_effect = RuntimeError("qdrant down")
+
+        metrics, log = await self._process(indexer)
+
+        assert metrics.errors == 0
         warned = [
             c for c in log.warning.call_args_list if c.args[0] == "old_version_point_cleanup_failed"
         ]
         assert warned[0].kwargs == {
-            "memory_id": str(old.id),
+            "points": 1,
             "collection": self.COLLECTION,
             "error_class": "RuntimeError",
         }
@@ -1815,11 +1856,13 @@ class TestProcessIncrementalSavepoints:
         assert indexer._retired == [
             RetiredVersionRow(
                 memory_id=old.id,
-                named_point=old.id,
                 version_point=resource_point_id(event.resource_id, event.doc_id, 0),
                 collection=self.COLLECTION,
             )
         ]
+        # It named its own id, not the version's point: the re-point drain
+        # drops that point and its chunks.
+        assert indexer._repointed == [(old.id, old.id, self.COLLECTION)]
 
     @pytest.mark.asyncio
     async def test_a_failed_events_retired_rows_are_dropped(self):
@@ -1829,32 +1872,24 @@ class TestProcessIncrementalSavepoints:
         indexer = self._indexer(events)
         kept, dropped = uuid4(), uuid4()
 
-        def _retired(memory_id):
-            return RetiredVersionRow(
-                memory_id=memory_id,
-                named_point=memory_id,
-                version_point=uuid4(),
-                collection=self.COLLECTION,
-            )
+        kept_point, dropped_point = uuid4(), uuid4()
 
         async def _apply(event, *_a):
             if event.doc_id == "doc_1":
-                indexer._retired.append(_retired(kept))
+                indexer._retired.append(RetiredVersionRow(kept, kept_point, self.COLLECTION))
                 return
-            indexer._retired.append(_retired(dropped))
+            indexer._retired.append(RetiredVersionRow(dropped, dropped_point, self.COLLECTION))
             raise RuntimeError("release failed after the cleanup")
 
         indexer._apply_upsert.side_effect = _apply
-        chunks, points = AsyncMock(), AsyncMock()
-        unshared = AsyncMock(side_effect=lambda _db, _memory_id, point_id: point_id)
+        # The drain's shared-point lookup finds no other row.
+        indexer.db.execute = AsyncMock(return_value=MagicMock())
+        points = AsyncMock()
 
-        with patch("services.resource_indexer.unshared_point_id", unshared):
-            metrics = await self._process(indexer, chunks, points)
+        metrics = await self._process(indexer, AsyncMock(), points)
 
         assert metrics.errors == 1
-        chunks.assert_awaited_once_with([kept], self.COLLECTION)
-        assert [c.args[0] for c in points.await_args_list][0] == [str(kept)]
-        assert all(str(dropped) not in c.args[0] for c in points.await_args_list)
+        points.assert_awaited_once_with([str(kept_point)], self.COLLECTION)
         assert indexer._retired == []
 
 
@@ -2164,7 +2199,12 @@ class TestSameVersionReindexKeepsEdits:
             row_id = row.id
             indexer, embedder = _db_indexer(db_session)
 
-            metrics = await _db_process(indexer, embedder, slug, ctx_id)
+            # The re-point drain's deletes (#2164) are not under test here.
+            with (
+                patch("services.resource_indexer.delete_chunk_points", AsyncMock()),
+                patch("services.resource_indexer.delete_points_from_qdrant", AsyncMock()),
+            ):
+                metrics = await _db_process(indexer, embedder, slug, ctx_id)
 
             assert metrics.errors == 0, metrics.reason
             assert metrics.applied_upserts == 1

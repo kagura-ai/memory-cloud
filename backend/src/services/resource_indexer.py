@@ -399,10 +399,14 @@ def _keeps_user_edits(
     and the row's or the indexer's ``context_summary``.
 
     - ``details.external_blob`` / ``trigger`` / ``location`` / ``tool_trigger``
-      are always kept (#2254). The indexer strips all four from worker
-      lineage (#1331), so on the row each is user- or agent-authored by
-      construction (``location``'s only writer is ``_apply_location``).
-      Copied as stored; they were validated when written. A kept
+      are always kept (#2254). The indexer strips them from worker lineage
+      (``external_blob`` and ``trigger`` since #896, ``location`` since
+      #1331, ``tool_trigger`` since #1619), so on a row indexed since then
+      each is user- or agent-authored (``location``'s only writer is
+      ``_apply_location``). Copied as stored; they were validated when
+      written. Accepted edge: a row indexed before a key's strip may still
+      carry a worker-supplied value, which a replay now keeps instead of
+      clearing. A kept
       ``tool_trigger`` is never served as a guardrail while the row is a
       connector row: ``list_tool_triggered`` refuses
       ``source_type='connector'``, which the update branch stamps. Any
@@ -585,18 +589,15 @@ class ResourceRebuildError(Exception):
 
 @dataclass(frozen=True)
 class RetiredVersionRow:
-    """An old-version row ``_apply_upsert`` hard-deleted, whose points go after commit (#2248).
+    """An old-version row ``_apply_upsert`` hard-deleted, whose point goes after commit (#2248).
 
     Attributes:
-        memory_id: The deleted row's id: its own-id point and its chunks'
-            ``chunk_of``.
-        named_point: The row's ``summary_embedding_id`` when it was deleted.
+        memory_id: The deleted row's id.
         version_point: ``resource_point_id`` of the row's version.
         collection: The context's collection.
     """
 
     memory_id: UUID
-    named_point: UUID | None
     version_point: UUID
     collection: str
 
@@ -1370,12 +1371,16 @@ class ResourceIndexer:
             # error inside the event's savepoint would fail the event's release
             # (and lose the row written above) instead of being non-blocking.
             # #2248: the old rows' points are queued once the row deletes are
-            # flushed and dropped only after the batch commits
-            # (``_drop_retired_points``): a failed flush, a failed event or a
-            # rolled-back batch brings the rows back, and they must keep
-            # their points.
+            # flushed and dropped only after the batch commits: a failed
+            # flush, a failed event or a rolled-back batch brings the rows
+            # back, and they must keep their points. The version's point goes
+            # to ``_drop_retired_points``. A row that did not own it (a
+            # ``remember(external_id)`` row, #2164) also leaves its own-id
+            # point and its chunks, which ``_drop_repointed_points`` drops by
+            # the same rule as for a re-pointed row.
             try:
                 retired: list[RetiredVersionRow] = []
+                unowned: list[tuple[UUID, UUID | None, str]] = []
                 async with self.db.begin_nested():
                     old_memories_result = await self.db.execute(
                         select(Memory).where(
@@ -1391,20 +1396,25 @@ class ResourceIndexer:
 
                     if old_memories:
                         for old_mem in old_memories:
+                            version_point = resource_point_id(
+                                event.resource_id, event.doc_id, old_mem.resource_version
+                            )
                             retired.append(
                                 RetiredVersionRow(
                                     memory_id=old_mem.id,
-                                    named_point=old_mem.summary_embedding_id,
-                                    version_point=resource_point_id(
-                                        event.resource_id, event.doc_id, old_mem.resource_version
-                                    ),
+                                    version_point=version_point,
                                     collection=collection_name,
                                 )
                             )
+                            if old_mem.summary_embedding_id != version_point:
+                                unowned.append(
+                                    (old_mem.id, old_mem.summary_embedding_id, collection_name)
+                                )
                             await self.db.delete(old_mem)
 
                         await self.db.flush()
                 self._retired.extend(retired)
+                self._repointed.extend(unowned)
                 if retired:
                     logger.info(
                         "old_versions_cleaned",
@@ -1438,11 +1448,15 @@ class ResourceIndexer:
     async def _drop_repointed_points(self) -> None:
         """Delete the stray points of the rows this batch re-pointed (#2164).
 
+        Also of the old-version rows it deleted that did not own their
+        version's point (#2248): the same points are strays for the same
+        reason.
+
         Runs after the batch commit, never on rollback: deleting first and then
         rolling back would leave a live row naming its own id with no point and
         no chunks, which only the event retry restores. A row now owns its
-        document's point, so its content chunks (``chunk_of`` = row id) and a
-        previous point under its own id are strays. Any other previous id (the
+        document's point (or is gone), so its content chunks (``chunk_of`` =
+        row id) and a previous point under its own id are strays. Any other previous id (the
         point of another natural key) may be another row's, so it is kept for
         the orphan sweep. Best effort: a failure is logged and the next entry
         goes on; a crash before the drain leaves strays the sweep removes.
@@ -1476,55 +1490,70 @@ class ResourceIndexer:
             )
 
     async def _drop_retired_points(self) -> None:
-        """Delete the points of the old-version rows this batch removed (#2248).
+        """Delete the version points of the old-version rows this batch removed (#2248).
 
         Runs after the batch commit, never on rollback, like
         ``_drop_repointed_points``: a rolled-back delete leaves the row live,
-        and it must keep its points. Per row:
+        and it must keep its point. A version's point (``resource_point_id``
+        of the old version) goes unless another live row names it, the
+        ``unshared_point_id`` rule in one lookup for the batch: the deleted
+        rows no longer count once committed, so a row found is a real second
+        row and its point is kept. The lookup's read transaction is ended
+        here, so the session is left as the batch commit left it.
 
-        - the version's point (``resource_point_id`` of the old version) goes
-          unless ``unshared_point_id`` finds another live row naming it. The
-          deleted row no longer counts once committed, so a "shared" answer is
-          a real second row (a later event of the batch re-created that
-          version) and the point is kept;
-        - a row that did not own that point (a ``remember(external_id)`` row,
-          #2164) also loses its own-id point and its content chunks
-          (``chunk_of`` = row id): both belonged to that row alone. Any other
-          point it named may be another row's, so it is left to the orphan
-          sweep.
-
-        Best effort: a failure is logged and the next row goes on; a crash
-        before the drain leaves strays the sweep removes (``no_row``).
+        Best effort: a failure is logged and the rest goes on; a crash before
+        the drain leaves strays the sweep removes (``no_row``).
         """
         retired, self._retired = self._retired, []
+        if not retired:
+            return
+        try:
+            async with self.db.begin_nested():
+                named = await self.db.execute(
+                    select(Memory.summary_embedding_id).where(
+                        Memory.summary_embedding_id.in_({row.version_point for row in retired}),
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+            shared = set(named.scalars().all())
+        except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+            logger.warning(
+                "old_version_point_lookup_failed",
+                rows=len(retired),
+                error_class=type(e).__name__,
+            )
+            return
+        finally:
+            await self._end_read_transaction()
+        by_collection: dict[str, list[str]] = {}
         for row in retired:
+            if row.version_point in shared:
+                logger.info(
+                    "memory_point_shared_kept",
+                    memory_id=str(row.memory_id),
+                    point_id=str(row.version_point),
+                )
+                continue
+            by_collection.setdefault(row.collection, []).append(str(row.version_point))
+        for collection, point_ids in by_collection.items():
             try:
-                if row.named_point != row.version_point:
-                    await delete_chunk_points([row.memory_id], row.collection)
-                    await delete_points_from_qdrant([str(row.memory_id)], row.collection)
-                    if row.named_point is not None and row.named_point != row.memory_id:
-                        logger.info(
-                            "old_version_named_point_kept",
-                            memory_id=str(row.memory_id),
-                            point_id=str(row.named_point),
-                            collection=row.collection,
-                        )
-                version_point = await unshared_point_id(self.db, row.memory_id, row.version_point)
-                if version_point is not None:
-                    await delete_points_from_qdrant([str(version_point)], row.collection)
+                await delete_points_from_qdrant(point_ids, collection)
             except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
                 logger.warning(
                     "old_version_point_cleanup_failed",
-                    memory_id=str(row.memory_id),
-                    collection=row.collection,
+                    points=len(point_ids),
+                    collection=collection,
                     error_class=type(e).__name__,
                 )
                 continue
-            logger.info(
-                "old_version_points_dropped",
-                memory_id=str(row.memory_id),
-                collection=row.collection,
-            )
+            logger.info("old_version_points_dropped", points=len(point_ids), collection=collection)
+
+    async def _end_read_transaction(self) -> None:
+        """Commit the read-only transaction a post-commit lookup began; log a failure."""
+        try:
+            await self.db.commit()
+        except Exception as e:  # noqa: BLE001 — nothing was written since the batch commit
+            logger.warning("indexer_read_transaction_end_failed", error_class=type(e).__name__)
 
     async def rebuild_point(
         self,
