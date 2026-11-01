@@ -69,13 +69,32 @@ def test_apply_writes_and_reports(capsys):
             ),
         ]
     )
-    assert _run(["--apply", "--yes", "--workspace", str(workspace)], backfill) == 0
+    # A row that failed makes the run exit 1: a partial apply is not clean.
+    assert _run(["--apply", "--yes", "--workspace", str(workspace)], backfill) == 1
     assert [c.kwargs["dry_run"] for c in backfill.await_args_list] == [True, False]
     assert {c.kwargs["workspace_id"] for c in backfill.await_args_list} == {workspace}
     out = capsys.readouterr().out
+    # The headline counts what was written, not the plan's candidates.
+    assert "updated 1 resource point(s)" in out
+    assert "updated 3" not in out
     assert "points written: 1" in out
     assert "skipped    1 point(s) shared with another live memory" in out
     assert str(failed) in out
+
+
+def test_a_clean_apply_exits_0_and_reports_rows_gone_meanwhile(capsys):
+    backfill = AsyncMock(
+        side_effect=[
+            ResourcePointMetadataBackfill(dry_run=True, rows=2, contexts=1),
+            ResourcePointMetadataBackfill(
+                dry_run=False, rows=2, contexts=1, written=1, gone_skipped=1
+            ),
+        ]
+    )
+    assert _run(["--apply", "--yes"], backfill) == 0
+    out = capsys.readouterr().out
+    assert "updated 1 resource point(s)" in out
+    assert "skipped    1 memory(ies) deleted or changed during the run" in out
 
 
 def test_apply_with_nothing_to_do_does_not_write(capsys):

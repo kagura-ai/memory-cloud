@@ -45,7 +45,17 @@ class ResourcePointMetadataBackfill:
     contexts: int = 0
     written: int = 0
     shared_skipped: int = 0
+    gone_skipped: int = 0
     failed: list[UUID] = field(default_factory=list)
+
+
+def _live_embedded() -> tuple[Any, ...]:
+    """A live row with a written point; one an erasure suppressed has none."""
+    return (
+        Memory.deleted_at.is_(None),
+        Memory.embedding_status == "success",
+        Memory.embedding_suppressed_at.is_(None),
+    )
 
 
 def _rows_query(workspace_id: UUID | None):  # noqa: ANN202 - a SQLAlchemy Select
@@ -61,14 +71,9 @@ def _rows_query(workspace_id: UUID | None):  # noqa: ANN202 - a SQLAlchemy Selec
             Memory.resource_id,
             Memory.resource_doc_id,
             Memory.resource_version,
-            Memory.type,
-            Memory.tags,
-            Memory.context_summary,
         )
         .where(
-            Memory.deleted_at.is_(None),
-            Memory.embedding_status == "success",
-            Memory.embedding_suppressed_at.is_(None),
+            *_live_embedded(),
             Memory.resource_id.is_not(None),
             Memory.resource_doc_id.is_not(None),
             Memory.resource_version.is_not(None),
@@ -80,6 +85,27 @@ def _rows_query(workspace_id: UUID | None):  # noqa: ANN202 - a SQLAlchemy Selec
     if workspace_id is not None:
         query = query.where(Memory.workspace_id == workspace_id)
     return query
+
+
+async def _current_values(db: AsyncSession, memory_id: UUID, point_id: UUID) -> Any | None:
+    """The row's ``type`` / ``tags`` / ``context_summary`` now, or ``None``.
+
+    Read right before the write, not from the walk's opening snapshot: a row
+    edited during the run (its metadata patch already wrote the new values to
+    the point) must not get its old values written back, and a row deleted,
+    erased or re-pointed meanwhile must get nothing. In a SAVEPOINT, like
+    ``unshared_point_id``, so a failed read fails only its row.
+    """
+    async with db.begin_nested():
+        return (
+            await db.execute(
+                select(Memory.type, Memory.tags, Memory.context_summary).where(
+                    Memory.id == memory_id,
+                    Memory.summary_embedding_id == point_id,
+                    *_live_embedded(),
+                )
+            )
+        ).one_or_none()
 
 
 def _payload(row: Any) -> dict[str, Any]:
@@ -104,7 +130,11 @@ async def backfill_resource_point_metadata(
         The counts. A row whose point fails (a point that is gone, a
         vector-store error) is logged by id and counted in ``failed``; the
         walk goes on. A point another live row names too is left as it is
-        and counted in ``shared_skipped``.
+        and counted in ``shared_skipped``; a row deleted, erased or
+        re-pointed since the walk started is counted in ``gone_skipped``.
+        Accepted edge: an edit that commits between a row's read and its
+        write and writes its own payload first is overwritten with the
+        values just read; the next run (or the row's next edit) corrects it.
     """
     from db.qdrant import update_memory_payload_in_qdrant
     from services.context_routing import resolve_collection_name
@@ -132,13 +162,18 @@ async def backfill_resource_point_metadata(
                 # live row naming the same point, like the metadata patch.
                 result.shared_skipped += 1
                 continue
+            current = await _current_values(db, row.id, point_id)
+            if current is None:
+                # Deleted, erased or re-pointed since the walk started.
+                result.gone_skipped += 1
+                continue
             collection = collections.get(row.context_id)
             if collection is None:
                 collection = await resolve_collection_name(db, row.context_id)
                 collections[row.context_id] = collection
             await update_memory_payload_in_qdrant(
                 memory_id=point_id,
-                payload_updates=_payload(row),
+                payload_updates=_payload(current),
                 collection_name=collection,
                 # An indexer point is not the row's id: chunk points (keyed by
                 # the row id) never hang off it.

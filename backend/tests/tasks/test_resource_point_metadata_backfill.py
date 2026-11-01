@@ -49,13 +49,23 @@ async def _unshared(db, memory_id, point_id):
     return point_id
 
 
-def _apply(rows, *, update=None, unshared=_unshared, resolve=None):
+def _apply(rows, *, update=None, unshared=_unshared, resolve=None, current=None):
     update = update or AsyncMock()
     resolve = resolve or AsyncMock(return_value="kagura_memories")
+    by_id = {row.id: row for row in rows}
+
+    async def _current(db, memory_id, point_id):
+        # The fresh per-row read; by default the row as the snapshot saw it.
+        return by_id[memory_id]
+
     with (
         patch("db.qdrant.update_memory_payload_in_qdrant", update),
         patch("services.resource_indexer.unshared_point_id", side_effect=unshared),
         patch("services.context_routing.resolve_collection_name", resolve),
+        patch(
+            "tasks.resource_point_metadata_backfill._current_values",
+            side_effect=current or _current,
+        ),
     ):
         result = asyncio.run(backfill_resource_point_metadata(_db(rows), dry_run=False))
     return result, update, resolve
@@ -112,6 +122,29 @@ class TestApply:
         result, update, _ = _apply([shared, _row()], unshared=unshared)
         assert (result.written, result.shared_skipped, result.failed) == (1, 1, [])
         assert update.await_args.kwargs["memory_id"] != shared.summary_embedding_id
+
+    def test_the_values_are_read_again_right_before_the_write(self):
+        # Edited during the run: its own metadata patch already wrote the new
+        # tags to the point; the snapshot's old ones must not overwrite them.
+        edited = _row(tags=["old"])
+
+        async def current(db, memory_id, point_id):
+            assert point_id == edited.summary_embedding_id
+            return SimpleNamespace(type="resource_data", tags=["new"], context_summary=None)
+
+        result, update, _ = _apply([edited], current=current)
+        assert result.written == 1
+        assert update.await_args.kwargs["payload_updates"]["tags"] == ["new"]
+
+    def test_a_row_gone_since_the_snapshot_is_skipped(self):
+        gone, kept = _row(), _row()
+
+        async def current(db, memory_id, point_id):
+            return None if memory_id == gone.id else kept
+
+        result, update, _ = _apply([gone, kept], current=current)
+        assert (result.written, result.gone_skipped, result.failed) == (1, 1, [])
+        assert update.await_args.kwargs["memory_id"] == kept.summary_embedding_id
 
     def test_each_context_collection_is_resolved_once(self):
         a, b = uuid4(), uuid4()

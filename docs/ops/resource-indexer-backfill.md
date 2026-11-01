@@ -150,20 +150,32 @@ python -m src.cli.resource_point_metadata_backfill --apply --yes
 ```
 
 `--apply` without `--yes` asks before writing; `--yes` without `--apply` is a
-usage error (exit 2). `--log-level DEBUG` prints one vector-store line per
+usage error (exit 2). The apply exits 0 when every point was written or
+skipped, 1 on an error or when any memory is listed `failed`. `--log-level DEBUG` prints one vector-store line per
 point.
 
-The apply report prints `points written: <n>` and then, when they occur:
+The apply report prints `updated <n> resource point(s)` and
+`points written: <n>` (the points actually written), then, when they occur:
 
 - `skipped <n> point(s) shared with another live memory` — the point is named
   by a second live memory as well; it is left as it is, as a metadata edit
   would leave it.
+- `skipped <n> memory(ies) deleted or changed during the run` — each row is
+  read again right before its point is written; one deleted, erased or
+  pointed at another point since the plan is left alone.
 - `failed <memory-id>` — one line per memory whose point could not be
-  written; the walk carries on with the rest. The log line
-  `resource_point_metadata_backfill_row_failed` holds the error. A transient
-  vector-store error clears on a second run. A point that no longer exists
-  ("No point with id ...") has no vector at all; ingest the document again as
-  a newer version (the same version is refused as a duplicate) to write it.
+  written; the walk carries on with the rest, and the command exits 1. The
+  log line `resource_point_metadata_backfill_row_failed` holds the error. A
+  transient vector-store error clears on a second run. A point that no longer
+  exists ("No point with id ...") has no vector at all; queue the memory for
+  the embedding sweep, which rebuilds a resource point from its row (with
+  `type`, `tags` and `context_summary`) under the same point id:
+
+  ```sql
+  UPDATE memories
+  SET embedding_status = 'pending', embedding_error = NULL, embedding_retry_count = 0
+  WHERE id = '<memory-id>' AND deleted_at IS NULL;
+  ```
 
 Post-check: retrieve a point the plan covered and confirm the keys are there.
 

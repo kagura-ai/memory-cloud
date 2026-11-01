@@ -13,7 +13,7 @@ Set-payload only — no vector is deleted or re-embedded. Idempotent: a second
 run writes the same values again. ``--workspace <id>`` limits the run to one
 workspace (a canary).
 
-Exit codes: 0 ok · 1 error.
+Exit codes: 0 ok · 1 error (including a point that could not be written).
 """
 
 from __future__ import annotations
@@ -44,28 +44,42 @@ def _print_applied(result: ResourcePointMetadataBackfill) -> None:
     print(f"points written: {result.written}")
     if result.shared_skipped:
         print(f"skipped    {result.shared_skipped} point(s) shared with another live memory")
+    if result.gone_skipped:
+        print(f"skipped    {result.gone_skipped} memory(ies) deleted or changed during the run")
     for memory_id in result.failed:
-        print(f"failed     {memory_id}  (see the log; run again)")
+        print(f"failed     {memory_id}  (see the log)")
 
 
 async def _main(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
 
+    applied: list[ResourcePointMetadataBackfill] = []
+
     async def run(db: AsyncSession, dry_run: bool) -> ResourcePointMetadataBackfill:
-        return await backfill_resource_point_metadata(
+        result = await backfill_resource_point_metadata(
             db, dry_run=dry_run, workspace_id=args.workspace
         )
+        if not dry_run:
+            applied.append(result)
+        return result
 
-    return await run_plan_apply(
+    code = await run_plan_apply(
         run=run,
         print_plan=_print_plan,
-        changes=lambda result: result.rows,
+        # The plan's candidates; after the write, the points actually written
+        # (the headline must not count skipped or failed rows as updated).
+        changes=lambda result: result.rows if result.dry_run else result.written,
         noun="resource point",
         verb="update",
         print_applied=_print_applied,
         apply=args.apply,
         assume_yes=args.yes,
     )
+    # A partial apply is not a clean one: a wrapper checking the exit code
+    # must see the rows that still need a run.
+    if code == 0 and any(result.failed for result in applied):
+        return 1
+    return code
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
