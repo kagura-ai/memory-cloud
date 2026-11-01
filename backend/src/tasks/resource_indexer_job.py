@@ -17,7 +17,11 @@ from sqlalchemy import select
 from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.resource import IndexerState
-from services.resource_indexer import ResourceIndexer, recorded_failed_events
+from services.resource_indexer import (
+    ResourceIndexer,
+    merge_failed_events,
+    recorded_failed_events,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -153,6 +157,11 @@ async def run_queued_indexers() -> None:
             logger.info("indexer_processing_queued_jobs", count=len(states))
 
             for state in states:
+                # The row was read at the pick: an operator rewind may have
+                # landed since (a stale last_offset would write over it), and a
+                # rollback in the previous row's run expired it.
+                await db.refresh(state)
+
                 # Check rate limit
                 can_run, reason = await can_run_indexer(state.resource_id, state.context_id)
 
@@ -173,7 +182,7 @@ async def run_queued_indexers() -> None:
                 await db.commit()
 
                 # #2254: state.metrics is replaced below on every path, and the
-                # skipped events it names are the only rewind target left.
+                # skipped events it names are the rewind target.
                 failed_events = recorded_failed_events(state.metrics)
 
                 # Run indexer
@@ -184,11 +193,6 @@ async def run_queued_indexers() -> None:
                         state.context_id,
                         batch_size=100,
                     )
-
-                    # A run that left no batch behind (nothing pending, held
-                    # back, rolled back) says nothing about the skipped events.
-                    if not metrics.batch_committed:
-                        metrics.failed_events = failed_events
 
                     # Update state. Only an ingest event re-queues an idle row,
                     # so a batch the #1549 daily memory quota refused (nothing
@@ -206,8 +210,17 @@ async def run_queued_indexers() -> None:
                     else:
                         state.job_status = "idle"
                     new_metrics = metrics.to_dict()
+                    # A run that left no batch behind (nothing pending, held
+                    # back, rolled back) says nothing about the skipped events;
+                    # a batch with no failures clears them.
+                    if not metrics.batch_committed:
+                        new_metrics["failed_events"] = failed_events
+                    elif new_metrics.get("failed_events"):
+                        new_metrics["failed_events"] = merge_failed_events(
+                            failed_events, new_metrics["failed_events"]
+                        )
                     state.metrics = new_metrics
-                    failed_events = recorded_failed_events(new_metrics)
+                    failed_events = new_metrics.get("failed_events", failed_events)
                     await db.commit()
 
                     # Record run for rate limiting

@@ -77,8 +77,8 @@ export interface IndexerStateMetrics {
   applied_deletes: number;
   errors: number;
   /**
-   * Events the last run that committed a batch skipped (capped at 20). They
-   * are not retried; absent on a backend older than this field.
+   * Events that failed since the last batch with no failures (capped at 20).
+   * Absent on a backend older than this field.
    */
   failed_events?: number;
   /**

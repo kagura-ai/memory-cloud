@@ -59,8 +59,8 @@ class IndexerStateMetrics(BaseModel):
     failed_events: int = Field(
         0,
         description=(
-            "Events recorded as skipped by the last run that committed a "
-            "batch, capped at 20. They are not retried: the IDs are in "
+            "Events that failed since the last batch with no failures, capped "
+            "at 20. One below ``last_offset`` is not retried: the IDs are in "
             "``indexer_state.metrics.failed_events`` for an operator rewind."
         ),
     )

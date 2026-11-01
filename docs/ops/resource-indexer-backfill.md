@@ -79,18 +79,19 @@ that's the steady state, not a failure.
 
 ## Re-run the events a run skipped (#2254)
 
-The indexer does not retry a failed event. It logs `indexer_event_failed`,
+The indexer does not retry a failed event. It logs `indexer_event_failed` and
 carries on with the batch, and as soon as a later event succeeds `last_offset`
-has moved past the failure, so nothing will pick it up again.
-`indexer-status` reports how many events were skipped as
-`state.metrics.failed_events`; `metrics.failed_events` on the row lists them
-(`event_id`, `doc_id`, `error_class`), the oldest 20 of the run.
+has moved past the failure, so nothing will pick it up again. A failed event
+at the end of a batch stays above `last_offset` and runs again with the next
+run, once one is queued. `indexer-status` reports the count as
+`state.metrics.failed_events`; `metrics.failed_events` on the row lists the
+events (`event_id`, `doc_id`, `error_class`), the oldest 20.
 
-The list belongs to the last run that committed a batch: a run with nothing
-pending, a held-back run and a run that fails outright keep it, but the next
-batch replaces it, and a batch with no failures empties it even though the
-skipped events were not re-applied. Rewind soon after the count shows up. For
-older runs, the `indexer_event_failed` log lines are the record.
+The list grows until a batch finishes with no failures. That batch empties it
+even though the skipped events were not re-applied, so rewind soon after the
+count shows up. A run with nothing pending, a held-back run and a run that
+fails outright keep the list. For anything older, the `indexer_event_failed`
+log lines are the record.
 
 ```sql
 SELECT resource_id, context_id, last_offset, job_status, metrics->'failed_events'
@@ -100,10 +101,38 @@ WHERE jsonb_array_length(coalesce(metrics->'failed_events', '[]'::jsonb)) > 0;
 
 Fix the cause first (`error_class`, and the log line's `error`), then rewind
 to just before the lowest `event_id`: the indexer reads `id > last_offset`, so
-`last_offset = min(event_id)` would skip that event again. Every event after it
-is applied again, which is safe (see [Safety](#safety)). Do this while
+`last_offset = min(event_id)` would skip that event again. Do this while
 `job_status` is not `running`, or the run in progress overwrites the rewind.
 `LEAST` keeps a row whose offset never passed the failure where it is.
+
+A rewind replays every event after that point, in order, for every document in
+the resource, not only the failed ones. The point ids stay stable (see
+[Safety](#safety)), but the rows do not:
+
+- Replaying an older version of a document retires its newer version's row, and
+  replaying the newer version writes a new row with a new id. Edits made on the
+  row since (tags, importance, details) are lost, and so is anything keyed to
+  its id.
+- A document that was forgotten comes back as a visible row, unless a later
+  `delete` event in the replay removes it again.
+- Until the replay reaches the latest version or the `delete`, the older state
+  is what recall serves.
+
+So rewind as little as you can, check the events between the target and
+`last_offset` first, and weigh this against sending the failed documents again
+through ingest, which touches only those documents: an upsert at a new version
+(the same version is refused as a duplicate), a delete as it was.
+
+```sql
+SELECT id, op, doc_id, version, created_at
+FROM resource_events
+WHERE resource_pk = (
+    SELECT resource_pk FROM indexer_state
+    WHERE resource_id = '<resource_id>' AND context_id = '<context_id>'
+  )
+  AND id >= <min_event_id> AND id <= <last_offset>
+ORDER BY id;
+```
 
 ```sql
 UPDATE indexer_state

@@ -18,6 +18,7 @@ from models.memory import Memory
 from services.context_routing import resolve_context_routing
 from services.resource_indexer import MAX_RECORDED_FAILED_EVENTS, ResourceIndexer
 from utils.datetime import utcnow
+from utils.exceptions import QdrantError
 from utils.text import normalize_for_search
 
 
@@ -1887,6 +1888,23 @@ class TestProcessIncrementalSavepoints:
         assert self.state.metrics["failed_events"] == expected
         assert "secret payload" not in str(self.state.metrics)
         assert metrics.batch_committed is True
+
+    @pytest.mark.asyncio
+    async def test_a_wrapped_failure_is_recorded_under_its_cause(self):
+        """``_apply_delete`` turns a Postgres failure into a QdrantError too."""
+        indexer = self._indexer(_numbered(_upsert("doc_1")))
+
+        async def _apply(*_a):
+            try:
+                raise ValueError("flush failed")
+            except ValueError as e:
+                raise QdrantError("Failed to delete document") from e
+
+        indexer._apply_upsert.side_effect = _apply
+
+        metrics = await self._process(indexer)
+
+        assert metrics.failed_events[0]["error_class"] == "ValueError"
 
     @pytest.mark.asyncio
     async def test_the_record_keeps_the_oldest_events_up_to_the_cap(self):

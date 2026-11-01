@@ -64,10 +64,27 @@ _SOURCE_URI_MAX_LEN = 2048
 MAX_RECORDED_FAILED_EVENTS = 20
 
 
-def recorded_failed_events(metrics: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The skipped events held in an ``indexer_state.metrics`` value (#2254)."""
-    failed_events = (metrics or {}).get("failed_events")
+def recorded_failed_events(metrics: Any) -> list[dict[str, Any]]:
+    """The skipped events held in an ``indexer_state.metrics`` value (#2254).
+
+    The column is plain JSONB that the runbook edits by hand, so anything else
+    reads as no record.
+    """
+    failed_events = metrics.get("failed_events") if isinstance(metrics, dict) else None
     return failed_events if isinstance(failed_events, list) else []
+
+
+def merge_failed_events(
+    recorded: list[dict[str, Any]], new: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The row's record plus a batch's failures, oldest first, capped (#2254).
+
+    A batch that fails on later events must not hide an older skipped event:
+    the rewind target is the lowest id. An event that failed again keeps one
+    entry, the new one.
+    """
+    by_event_id = {entry["event_id"]: entry for entry in [*recorded, *new]}
+    return [by_event_id[event_id] for event_id in sorted(by_event_id)][:MAX_RECORDED_FAILED_EVENTS]
 
 
 @dataclass
@@ -76,13 +93,14 @@ class IndexerMetrics:
 
     ``failed_events`` lists the events this run gave up on (``event_id``,
     ``doc_id``, ``error_class``; no message, the row must not keep event
-    content). Nothing retries them: the offset moves past a failed event as soon
-    as a later one succeeds, so the list is the operator's rewind target
-    (docs/ops/resource-indexer-backfill.md).
+    content). Nothing retries them once the offset has moved past them, which
+    happens as soon as a later event succeeds, so the list is the operator's
+    rewind target (docs/ops/resource-indexer-backfill.md).
 
-    ``batch_committed`` says the batch's outcome is durable, which makes
-    ``failed_events`` the row's new record. On any other run (held back, nothing
-    pending, rolled back) the job keeps the record it had. Not stored.
+    ``batch_committed`` says the batch's outcome is durable, so the job folds
+    ``failed_events`` into the row's record (a batch with no failures clears
+    it). On any other run (held back, nothing pending, rolled back) the job
+    keeps the record it had. Not stored.
     """
 
     applied_upserts: int = 0
@@ -868,12 +886,14 @@ class ResourceIndexer:
                         error=str(e),
                     )
                     metrics.errors += 1
-                    # Class only: the row keeps no event content (#2254).
+                    # Class only: the row keeps no event content (#2254). The
+                    # cause, since a wrapper like QdrantError also carries
+                    # Postgres failures.
                     metrics.failed_events.append(
                         {
                             "event_id": event.id,
                             "doc_id": event.doc_id,
-                            "error_class": type(e).__name__,
+                            "error_class": type(e.__cause__ or e).__name__,
                         }
                     )
                     # Continue processing (don't block on single event failure)
