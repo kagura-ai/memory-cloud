@@ -2,7 +2,7 @@
 
 ``tools/list`` defaults to the ``core`` profile: a model sees the memory and
 context tools and nothing else. The server itself accepts ``tools/call`` for
-every registered tool, but mainstream clients (Claude Code, Codex, ChatGPT,
+every registered tool except ``OPT_IN_TOOLS`` (#2470), but mainstream clients (Claude Code, Codex, ChatGPT,
 Cursor) let the model invoke only what their ``tools/list`` returned — so a
 hidden tool is, in practice, out of reach until the client's URL lists it.
 This tool is the discovery lane for that gap: without arguments it names every

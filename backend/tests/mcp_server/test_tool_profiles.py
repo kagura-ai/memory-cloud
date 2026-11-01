@@ -20,9 +20,12 @@ from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._profiles import (
     CORE_TOOLS,
     MAX_TOOL_NAMES,
+    OPT_IN_TOOLS,
     PROFILES,
     ToolProfileError,
+    not_listed_message,
     select_tool_definitions,
+    url_lists_tool,
 )
 
 # Measured after #1602 trimmed the descriptions: the ``core`` list serializes to
@@ -40,7 +43,8 @@ from mcp_server.tools._profiles import (
 # #2353 added create_edge (1,486 after its trim; reference, remember and bootstrap
 # moved Returns detail into their guide topics): 43,037 under the same budget.
 # #2313 added ownership guidance and trimmed create_edge: 43,087 (13 chars spare).
-CORE_CHAR_BUDGET = 43_100  # (#1973, #2353) 22 core tools
+# #2470 took explore out of core: 41,396, and the budget came down with it.
+CORE_CHAR_BUDGET = 41_500  # (#2470) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
@@ -80,7 +84,6 @@ def test_core_tools_are_the_documented_set():
         "reference",
         "update_memory",
         "forget",
-        "explore",
         "create_edge",
         "load_pinned",
         "recall_upcoming",
@@ -118,6 +121,50 @@ def test_create_edge_is_in_core_but_the_other_edge_tools_are_not():
     assert "create_edge" in CORE_TOOLS
     for name in ("update_edge", "delete_edge", "list_edges"):
         assert name in REGISTRY and name not in CORE_TOOLS
+
+
+def test_explore_is_opt_in():
+    """#2470: not on the default path; one URL parameter away, and still registered."""
+    assert "explore" in REGISTRY
+    assert "explore" not in CORE_TOOLS
+    assert "explore" not in _names(None)
+    assert "explore" not in _names("profile=core")
+    assert "explore" in _names("profile=full")
+    assert "explore" in _names("add_tools=explore")
+    assert "explore" in _names("profile=core&add_tools=explore")
+    assert "explore" in _names("tools=recall,explore")
+
+
+def test_opt_in_tools_are_registered_and_outside_core():
+    """The dispatcher refuses these unlisted (#2470), so a core tool here would
+    refuse every default client, and a name that is not registered guards nothing."""
+    assert OPT_IN_TOOLS == {"explore"}
+    assert OPT_IN_TOOLS <= set(REGISTRY)
+    assert not OPT_IN_TOOLS & set(CORE_TOOLS)
+
+
+@pytest.mark.parametrize(
+    ("query", "listed"),
+    [
+        (None, True),  # no request: a direct call, no URL to hold against it
+        (b"", False),
+        (b"profile=core", False),
+        (b"tools=recall", False),
+        (b"profile=typo", False),  # a broken selection lists nothing
+        (b"tools=bogus", False),
+        (b"profile=full", True),
+        (b"add_tools=explore", True),
+        ("tools=explore", True),
+    ],
+)
+def test_url_lists_tool(query, listed):
+    assert url_lists_tool("explore", query) is listed
+
+
+def test_not_listed_message_names_both_opt_ins():
+    message = not_listed_message("explore")
+    assert "?add_tools=explore" in message
+    assert "?profile=full" in message
 
 
 def test_load_guardrails_stays_out_of_core():

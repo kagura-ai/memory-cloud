@@ -28,9 +28,11 @@ from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
     _resolve_context_id,
+    get_mcp_tool_view_query,
     reset_mcp_capacity_policy,
     set_mcp_capacity_policy,
 )
+from mcp_server.tools._profiles import OPT_IN_TOOLS, not_listed_message, url_lists_tool
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +591,17 @@ async def execute_tool_call(
                 "Call tools/list to see the tools this URL lists; describe_tools() names the "
                 "rest. ?add_tools=<name> on the URL adds one to the list, and ?profile=full "
                 "lists every tool."
+            ),
+        )
+
+    # #2470: before the rate limit, like an unknown tool: this call did no work.
+    if tool_name in OPT_IN_TOOLS and not url_lists_tool(tool_name, get_mcp_tool_view_query()):
+        return _error_response(
+            "tool_not_listed",
+            not_listed_message(tool_name),
+            help=(
+                "Change the MCP URL, then reconnect. A URL with ?tools= ignores add_tools: "
+                "add the name to that list instead."
             ),
         )
 

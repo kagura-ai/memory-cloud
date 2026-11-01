@@ -89,7 +89,9 @@ FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session j
 # #2353 added create_edge (1,398) and moved Returns detail of reference, remember
 # and bootstrap into the guide: core list 41,331 under an unchanged ceiling.
 # #2313 owner guidance plus create_edge trim: core list 41,381 (119 chars spare).
-CORE_LIST_BUDGET = 41_500  # (#1973, #2353) 22 core tools
+# #2470 took explore out of core: core list 39,751, and the ceiling came down with it
+# so that the room it freed does not pay for the next tool.
+CORE_LIST_BUDGET = 40_000  # (#2470) 21 core tools
 RECALL_BUDGET = 4_000  # (#1850) was 6,900
 REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
 PER_TOOL_BUDGET = 4_800  # (#1853) the largest definition
@@ -267,8 +269,10 @@ def test_recall_keeps_the_signals_an_agent_acts_on():
 
 def test_tool_selection_guidance_names_the_neighbours():
     recall = _tool("recall")["description"]
-    for neighbour in ("reference(", "explore(", "load_pinned(", "recall_upcoming("):
+    for neighbour in ("reference(", "load_pinned(", "recall_upcoming("):
         assert neighbour in recall
+    # #2470: explore is opt-in, so recall no longer sends a core client to it.
+    assert "explore(" not in recall
     assert "update_memory" in _tool("remember")["description"]
     assert "remember" in _tool("update_memory")["description"]
 

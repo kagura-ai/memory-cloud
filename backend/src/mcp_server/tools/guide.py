@@ -113,7 +113,7 @@ GUIDE_TOPICS: dict[str, str] = {
     "remember.supersedes": (
         "Updating a fact: pass supersedes=<old_memory_id>. The old memory is shadowed "
         "out of default recall (not deleted; still reachable via "
-        "recall(include_superseded=true) and explore()). Prefer this to a "
+        "recall(include_superseded=true)). Prefer this to a "
         "near-duplicate, which leaves stale and fresh facts competing. If you forget, "
         "the server detects the near-duplicate and surfaces a supersede_candidate on "
         "a later recall()/reference(): accept it with "
@@ -163,12 +163,17 @@ GUIDE_TOPICS: dict[str, str] = {
         "summary head, type, importance, score, dates), Layers 1-2 (summary + "
         "context_summary, tags) with verbosity='full'; the top 3 results also carry "
         "their content (full=N); reference(memory_id) reads one memory in full; "
-        "explore(memory_id) walks the graph to its neighbours; load_pinned() returns "
+        "load_pinned() returns "
         "the pinned set, unranked; recall_upcoming() is the deterministic time query "
         '(recall_nearby(), outside the core profile — describe_tools(["recall_nearby"]) '
         "has its schema — the place query). Typical flow: recall (answer from the "
-        "top results' content) → reference for a cut or lower-ranked hit → explore. Searches may also strengthen associations (not keyword-only or "
-        "degraded recalls) and promote returned memories."
+        "top results' content) → reference for a cut or lower-ranked hit. "
+        "explore(memory_id), outside the core profile — "
+        'describe_tools(["explore"]) has its schema, ?add_tools=explore or '
+        "?profile=full on the URL lists it — walks the graph from a memory, for "
+        "questions that follow a chain of decisions or changes. Searches may also "
+        "strengthen associations (not keyword-only or degraded recalls) and promote "
+        "returned memories."
     ),
     "recall.query-tips": (
         "A question often matches better as a hypothetical answer — search 'JWT "
@@ -263,8 +268,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "search's candidates. Ids are newest first; reference(memory_id) reads one. "
         "Nothing folds without a judge verdict.\n"
         "• explore_hints (include_explore_hints=true) — up to 3 seed memories for a "
-        "follow-up explore(), reason top_result | high_centrality | "
-        "unexplored_neighbor. include_superseded=true also returns memories shadowed "
+        'follow-up explore(), outside the core profile (describe_tools(["explore"]) '
+        "has its schema), reason top_result | high_centrality | unexplored_neighbor. "
+        "A URL that does not list that tool gets explore_hints_omitted instead, "
+        "naming the URL change. include_superseded=true also returns memories shadowed "
         "by a supersedes edge, annotated with superseded_by, and folds nothing: every "
         "version is its own row (audit / history)."
     ),
@@ -291,7 +298,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "[{tag, count}], "
         "context_id, context_name, context_display_name, context_is_private, "
         "context_is_locked, explore_hints?: [{memory_id, "
-        "reason}], tag_suggestions?: {requested_tag: ['stored-tag (count)']}, "
+        "reason}], explore_hints_omitted?, tag_suggestions?: {requested_tag: ['stored-tag (count)']}, "
         "degraded?, degraded_reason?, context_summary_omitted?, truncated?}. Keys "
         "marked ? are omitted when empty (absent, never null): context_summary when "
         "none was written; superseded_by unless the memory is shadowed (needs "
@@ -302,7 +309,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "ran or was refused (see recall.selector); "
         "full_applied unless max_chars took content off a result; folded unless older "
         "versions were folded under the row; explore_hints unless "
-        "requested; tag_suggestions unless a tag filter returned nothing and similar "
+        "requested; explore_hints_omitted unless requested on a URL that does not "
+        "list that tool; tag_suggestions unless a tag filter returned nothing and similar "
         "stored tags exist (advisory — the filter was not widened); degraded / "
         "degraded_reason unless the search was degraded. score is rounded to 4 "
         "decimals. related_tags (absent when none): the up-to-10 most frequent tags among these results "
@@ -534,7 +542,9 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     # ----------------------------------------------------------------- explore
     "explore.usage": (
-        "recall ranks by query relevance; explore by graph activation from the seed "
+        "Opt-in: not in the core profile, so ?add_tools=explore or ?profile=full on "
+        "the MCP URL lists it; a call on a URL that does not list it fails with "
+        "tool_not_listed. recall ranks by query relevance; explore by graph activation from the seed "
         "(spreading activation over the Neural Memory graph). Use it after recall() "
         "to widen context, or for 'what else is related to X?'. depth: max hops "
         "(default 2, max 5): 1 = direct connections; 3+ reaches further but is slower "

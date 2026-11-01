@@ -1467,10 +1467,9 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
         # #1601 / #1849 / #2354: the endpoint URL (``?profile=`` / ``?tools=`` /
         # ``?add_tools=``) picks what is listed; without either this is the core profile. It is a
-        # view, not an authorization boundary — ``tools/call`` below never
-        # reads it, so an unlisted tool stays callable under the usual role
-        # checks (clients, however, call listed tools only; ``describe_tools``
-        # names the rest).
+        # view, not an authorization boundary — an unlisted tool stays callable
+        # under the usual role checks, ``OPT_IN_TOOLS`` aside (clients, however,
+        # call listed tools only; ``describe_tools`` names the rest).
         try:
             tools = select_tool_definitions(scope.get("query_string"))
         except ToolProfileError as e:

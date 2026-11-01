@@ -16,11 +16,13 @@ exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
 the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
-A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
-and nothing else: ``tools/call`` never reads it, so a tool left out of the list
-stays callable, subject to the same role checks as before. Do not use a profile
-to restrict what a key can do — that is what workspace and context roles are
-for.
+A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``,
+so a tool left out of the list stays callable, subject to the same role checks
+as before. The one exception is ``OPT_IN_TOOLS`` (#2470): ``execute_tool_call``
+answers ``tool_not_listed`` for those on a URL that does not list them, so a
+client holding an old tool list learns what to change. That is a pointer, not a
+restriction: anyone can change their URL. Do not use a profile to restrict what
+a key can do — that is what workspace and context roles are for.
 """
 
 from urllib.parse import parse_qsl
@@ -36,7 +38,8 @@ logger = get_logger(__name__)
 # ``tools/list`` answers in), pinned by ``tests/mcp_server/test_tool_profiles.py``
 # together with a character budget — adding a tool here costs every ``core`` client.
 # ``merge_contexts`` and ``update_search_config`` stay out: rare, and the former
-# is destructive to the source context.
+# is destructive to the source context. ``explore`` left in #2470: an opt-in for
+# questions that follow a chain of decisions, not part of the default path.
 CORE_TOOLS: tuple[str, ...] = (
     "remember",
     "remember_batch",
@@ -46,7 +49,6 @@ CORE_TOOLS: tuple[str, ...] = (
     "recall_upcoming",
     "load_pinned",
     "forget",
-    "explore",
     "create_edge",
     "get_context_info",
     "list_contexts",
@@ -61,6 +63,12 @@ CORE_TOOLS: tuple[str, ...] = (
     "changes_since",
     "bootstrap",
 )
+
+# Tools a call must find listed by its own URL (#2470). A client on the default
+# URL may hold a list from when these were in ``core``, and a silent success would
+# hide that its next ``tools/list`` no longer has them. Keep this to tools that
+# left ``core``: client hooks call ``load_guardrails`` unlisted, on purpose.
+OPT_IN_TOOLS: frozenset[str] = frozenset({"explore"})
 
 # ``None`` = no filter. Insertion order is the order error messages list them in.
 PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
@@ -199,3 +207,25 @@ def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:
         ToolProfileError: the selection is broken — the same error ``tools/list`` fails with.
     """
     return frozenset(tool["name"] for tool in select_tool_definitions(query_string))
+
+
+def url_lists_tool(name: str, query_string: bytes | str | None) -> bool:
+    """Whether this URL's ``tools/list`` names ``name``.
+
+    ``None`` is no request at all (a direct call), which has no URL to hold
+    against the tool. A broken selection lists nothing, so it lists no tool.
+    """
+    if query_string is None:
+        return True
+    try:
+        return name in tool_view_names(query_string)
+    except ToolProfileError:
+        return False
+
+
+def not_listed_message(name: str) -> str:
+    """What a caller is told about a tool its URL does not list; names the opt-in."""
+    return (
+        f"{name} is not listed on this connection: ?add_tools={name} or ?profile=full "
+        "on the MCP URL lists it."
+    )

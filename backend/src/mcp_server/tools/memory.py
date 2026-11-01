@@ -37,7 +37,9 @@ from mcp_server.tools._helpers import (
     _viewer_read_only_response,
     execute_with_timeout,
     get_mcp_key_workspace_scope,
+    get_mcp_tool_view_query,
 )
+from mcp_server.tools._profiles import not_listed_message, url_lists_tool
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
@@ -1308,6 +1310,13 @@ async def handle_recall(
             received=full,
         )
 
+    # #2470: a hint is a seed for explore(), so a URL that does not list explore
+    # gets a reason instead of seeds it has no tool for.
+    include_explore_hints = args.get("include_explore_hints", False)
+    omit_explore_hints = bool(include_explore_hints) and not url_lists_tool(
+        "explore", get_mcp_tool_view_query()
+    )
+
     request = RecallRequest(
         query=args["query"],
         k=args.get("k", 5),
@@ -1319,7 +1328,7 @@ async def handle_recall(
         # query router can act on contexts with routing_mode='active';
         # MemoryService resolves None to "hybrid" everywhere else.
         search_mode=args.get("search_mode"),
-        include_explore_hints=args.get("include_explore_hints", False),
+        include_explore_hints=False if omit_explore_hints else include_explore_hints,
         include_superseded=args.get("include_superseded", False),  # #1208
     )
 
@@ -1442,11 +1451,11 @@ async def handle_recall(
 
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
+            envelope = _recall_envelope(result, current_context, verbosity)
+            if omit_explore_hints:
+                envelope["explore_hints_omitted"] = not_listed_message("explore")
             response_data = _bound_recall_envelope(
-                _fit_recall_content(
-                    _recall_envelope(result, current_context, verbosity), max_chars
-                ),
-                max_chars,
+                _fit_recall_content(envelope, max_chars), max_chars
             )
 
             await _log_tool_usage(
