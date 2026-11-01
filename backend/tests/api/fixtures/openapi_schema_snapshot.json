@@ -4944,6 +4944,10 @@
             "default": 0,
             "type": "integer"
           },
+          "failed_events": {
+            "default": 0,
+            "type": "integer"
+          },
           "skipped_reason": {
             "anyOf": [
               {

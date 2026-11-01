@@ -14,7 +14,7 @@ from __future__ import annotations
 # Standard library imports (PEP8)
 import json  # Issue #262: JSON serialization for Memory content
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
@@ -58,10 +58,32 @@ logger = get_logger(__name__)
 # find_by_channel and a flush DataError can't poison the event offset.
 _SOURCE_URI_MAX_LEN = 2048
 
+# #2254: how many skipped events ``indexer_state.metrics`` keeps. The oldest
+# ones, in event order: a rewind to the lowest id re-covers everything after it,
+# so a capped list still gives the operator the right target.
+MAX_RECORDED_FAILED_EVENTS = 20
+
+
+def recorded_failed_events(metrics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The skipped events held in an ``indexer_state.metrics`` value (#2254)."""
+    failed_events = (metrics or {}).get("failed_events")
+    return failed_events if isinstance(failed_events, list) else []
+
 
 @dataclass
 class IndexerMetrics:
-    """Metrics from indexer run."""
+    """Metrics from indexer run.
+
+    ``failed_events`` lists the events this run gave up on (``event_id``,
+    ``doc_id``, ``error_class``; no message, the row must not keep event
+    content). Nothing retries them: the offset moves past a failed event as soon
+    as a later one succeeds, so the list is the operator's rewind target
+    (docs/ops/resource-indexer-backfill.md).
+
+    ``batch_committed`` says the batch's outcome is durable, which makes
+    ``failed_events`` the row's new record. On any other run (held back, nothing
+    pending, rolled back) the job keeps the record it had. Not stored.
+    """
 
     applied_upserts: int = 0
     applied_deletes: int = 0
@@ -70,6 +92,8 @@ class IndexerMetrics:
     duration_ms: int = 0
     skipped: bool = False
     reason: str | None = None
+    failed_events: list[dict[str, Any]] = field(default_factory=list)
+    batch_committed: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSONB storage."""
@@ -81,6 +105,7 @@ class IndexerMetrics:
             "duration_ms": self.duration_ms,
             "skipped": self.skipped,
             "reason": self.reason,
+            "failed_events": self.failed_events[:MAX_RECORDED_FAILED_EVENTS],
         }
 
 
@@ -266,6 +291,7 @@ async def get_indexer_status_for_context(
                 "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
                 "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
                 "errors": int(metrics_raw.get("errors", 0) or 0),
+                "failed_events": len(recorded_failed_events(metrics_raw)),
                 "skipped_reason": skipped_reason,
             },
         }
@@ -842,6 +868,14 @@ class ResourceIndexer:
                         error=str(e),
                     )
                     metrics.errors += 1
+                    # Class only: the row keeps no event content (#2254).
+                    metrics.failed_events.append(
+                        {
+                            "event_id": event.id,
+                            "doc_id": event.doc_id,
+                            "error_class": type(e).__name__,
+                        }
+                    )
                     # Continue processing (don't block on single event failure)
 
             # 6. Calculate lag
@@ -856,6 +890,7 @@ class ResourceIndexer:
             state.last_run_at = utcnow()
             state.metrics = metrics.to_dict()
             await self.db.commit()
+            metrics.batch_committed = True
             # #2164 / #2248: only now that the re-points and the old-version
             # deletes are durable.
             await self._drop_repointed_points()

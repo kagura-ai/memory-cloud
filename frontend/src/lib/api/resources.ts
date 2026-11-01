@@ -77,6 +77,11 @@ export interface IndexerStateMetrics {
   applied_deletes: number;
   errors: number;
   /**
+   * Events the last run that committed a batch skipped (capped at 20). They
+   * are not retried; absent on a backend older than this field.
+   */
+  failed_events?: number;
+  /**
    * Non-null only when the last run was skipped. Stale reasons after a
    * successful run are suppressed server-side — the UI can show the Alert
    * unconditionally when this is set.

@@ -7,6 +7,7 @@ Runs every 5 minutes to process queued indexer jobs.
 
 import time
 from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -16,7 +17,7 @@ from sqlalchemy import select
 from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.resource import IndexerState
-from services.resource_indexer import ResourceIndexer
+from services.resource_indexer import ResourceIndexer, recorded_failed_events
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -171,6 +172,10 @@ async def run_queued_indexers() -> None:
                 state.last_run_at = utcnow()
                 await db.commit()
 
+                # #2254: state.metrics is replaced below on every path, and the
+                # skipped events it names are the only rewind target left.
+                failed_events = recorded_failed_events(state.metrics)
+
                 # Run indexer
                 try:
                     indexer = ResourceIndexer(db)
@@ -179,6 +184,11 @@ async def run_queued_indexers() -> None:
                         state.context_id,
                         batch_size=100,
                     )
+
+                    # A run that left no batch behind (nothing pending, held
+                    # back, rolled back) says nothing about the skipped events.
+                    if not metrics.batch_committed:
+                        metrics.failed_events = failed_events
 
                     # Update state. Only an ingest event re-queues an idle row,
                     # so a batch the #1549 daily memory quota refused (nothing
@@ -195,7 +205,9 @@ async def run_queued_indexers() -> None:
                         )
                     else:
                         state.job_status = "idle"
-                    state.metrics = metrics.to_dict()
+                    new_metrics = metrics.to_dict()
+                    state.metrics = new_metrics
+                    failed_events = recorded_failed_events(new_metrics)
                     await db.commit()
 
                     # Record run for rate limiting
@@ -216,7 +228,10 @@ async def run_queued_indexers() -> None:
                         error=str(e),
                     )
                     state.job_status = "failed"
-                    state.metrics = {"error": str(e)}
+                    error_metrics: dict[str, Any] = {"error": str(e)}
+                    if failed_events:
+                        error_metrics["failed_events"] = failed_events
+                    state.metrics = error_metrics
                     await db.commit()
 
             return  # Exit async for loop

@@ -16,7 +16,7 @@ from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_N
 from models.auth import Context, Workspace
 from models.memory import Memory
 from services.context_routing import resolve_context_routing
-from services.resource_indexer import ResourceIndexer
+from services.resource_indexer import MAX_RECORDED_FAILED_EVENTS, ResourceIndexer
 from utils.datetime import utcnow
 from utils.text import normalize_for_search
 
@@ -1872,6 +1872,64 @@ class TestProcessIncrementalSavepoints:
         assert self.state.last_offset == events[2].id
         indexer.db.commit.assert_awaited_once()
         indexer.db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_event_is_recorded_with_its_class_only(self):
+        """#2254: the offset moves past it, so this is the rewind target."""
+        events = _numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3"))
+        indexer = self._indexer(events)
+        indexer._apply_upsert.side_effect = [None, RuntimeError("secret payload"), None]
+
+        metrics = await self._process(indexer)
+
+        expected = [{"event_id": events[1].id, "doc_id": "doc_2", "error_class": "RuntimeError"}]
+        assert metrics.failed_events == expected
+        assert self.state.metrics["failed_events"] == expected
+        assert "secret payload" not in str(self.state.metrics)
+        assert metrics.batch_committed is True
+
+    @pytest.mark.asyncio
+    async def test_the_record_keeps_the_oldest_events_up_to_the_cap(self):
+        events = _numbered(*[_upsert(f"doc_{i}") for i in range(25)])
+        indexer = self._indexer(events)
+        indexer._apply_upsert.side_effect = RuntimeError("boom")
+
+        metrics = await self._process(indexer)
+
+        assert metrics.errors == 25
+        recorded = self.state.metrics["failed_events"]
+        assert len(recorded) == MAX_RECORDED_FAILED_EVENTS == 20
+        assert [e["event_id"] for e in recorded] == [e.id for e in events[:20]]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_batch_commits_an_empty_record(self):
+        indexer = self._indexer(_numbered(_upsert("doc_1")))
+
+        metrics = await self._process(indexer)
+
+        assert metrics.failed_events == []
+        assert self.state.metrics["failed_events"] == []
+        assert metrics.batch_committed is True
+
+    @pytest.mark.asyncio
+    async def test_a_rolled_back_batch_is_not_marked_committed(self):
+        """The job then keeps the row's record: see TestFailedEventsSurviveTheJob."""
+        indexer = self._indexer(_numbered(_upsert("doc_1")))
+        indexer.db.commit.side_effect = RuntimeError("commit failed")
+
+        metrics = await self._process(indexer)
+
+        indexer.db.rollback.assert_awaited_once()
+        assert metrics.batch_committed is False
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_nothing_pending_is_not_marked_committed(self):
+        indexer = self._indexer([])
+
+        metrics = await self._process(indexer)
+
+        assert metrics.reason == "no_pending_events"
+        assert metrics.batch_committed is False
 
     @pytest.mark.asyncio
     async def test_a_failed_events_repoints_are_dropped(self):
