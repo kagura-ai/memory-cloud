@@ -830,11 +830,15 @@ async def pseudonymize_audit_logs(
       someone else
       (``RoleManager.assign_role``, ``SystemAdminService.promote``/``demote``);
       a blind overwrite would misattribute it.
-    - ``resource`` (conventionally ``user:{email}``): every occurrence of
-      each address (first: longer, more specific) on a row written while the
-      subject held it (``held_at``, #2359: the subject acting on whoever held
-      one of their former addresses later names that member, not them), then
-      of the raw sub, is replaced by its pseudonym. The result is cut to the column's length:
+    - ``resource`` (conventionally ``user:{email}``): every standalone
+      occurrence (``_standalone``) of each address (first: longer, more
+      specific) on a row written while the subject held it (``held_at``,
+      #2359: the subject acting on whoever held one of their former addresses
+      later names that member, not them), then of the raw sub, is replaced by
+      its pseudonym. One embedded in a longer identifier (``ann@x.io`` in
+      ``joann@x.io``) stays whole: that value is the member it names, and the
+      exact match of ``pseudonymize_audit_mentions`` has to find it unchanged
+      whichever erasure runs first. The result is cut to the column's length:
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
@@ -864,10 +868,12 @@ async def pseudonymize_audit_logs(
     held = merged_addresses(addresses)
     pseudonyms = {address.email: erasure_pseudonym(address.email) for address in held}
     for address in held:
-        # ``replace(r, '', p)`` is ``r``: outside the holding nothing changes,
+        # ``\&`` is the match itself: outside the holding nothing changes,
         # and the expression grows by one call per address, not doubles
-        searched = case((held_at(AuditLog, address), address.email), else_=literal(""))
-        resource = func.replace(resource, searched, pseudonyms[address.email])
+        replacement = case(
+            (held_at(AuditLog, address), pseudonyms[address.email]), else_=literal(r"\&")
+        )
+        resource = func.regexp_replace(resource, _standalone(address.email), replacement, "g")
     values["user_email"] = case(
         *(
             (
@@ -880,7 +886,8 @@ async def pseudonymize_audit_logs(
         else_=AuditLog.user_email,
     )
     values["resource"] = func.left(
-        func.replace(resource, user_id, user_pseudonym), AuditLog.resource.type.length
+        func.regexp_replace(resource, _standalone(user_id), user_pseudonym, "g"),
+        AuditLog.resource.type.length,
     )
 
     def own_rows(row: Any) -> tuple[ColumnElement[bool], ...]:
@@ -900,6 +907,17 @@ def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnEle
     if orphaned_only:
         predicate = predicate & ~exists().where(User.user_id == row.user_id)
     return predicate
+
+
+# What continues an identifier: with one of these beside it, an occurrence is
+# part of a longer sub or address. ``|``, ``:`` and spaces separate values.
+_IDENTIFIER_CHARS = "[[:alnum:]_.+%@-]"
+
+
+def _standalone(value: str) -> str:
+    """A Postgres regular expression for ``value``, literally, not embedded in
+    a longer identifier."""
+    return rf"(?<!{_IDENTIFIER_CHARS}){re.escape(value)}(?!{_IDENTIFIER_CHARS})"
 
 
 def _by_length(values: Iterable[str]) -> list[str]:

@@ -645,8 +645,19 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     # admin who got a former address later and acted on them keeps it)
     case_sql = sql[sql.index("user_email=CASE") : sql.index("resource=left(")]
     assert "audit_logs.created_at >= " in case_sql
-    assert "replace(audit_logs.resource, CASE WHEN (audit_logs.created_at >=" in sql
+    resource_sql = sql[sql.index("resource=left(") :]
+    assert "regexp_replace(audit_logs.resource, " in resource_sql
+    assert "CASE WHEN (audit_logs.created_at >=" in resource_sql
     assert HELD_SINCE in params.values()
+
+
+def test_standalone_escapes_the_value() -> None:
+    from services.erasure_details import _IDENTIFIER_CHARS, _standalone
+
+    # what it matches runs on Postgres (test_audit_subject_erasure_db)
+    assert _standalone("google-oauth2|a.b") == (
+        rf"(?<!{_IDENTIFIER_CHARS})google\-oauth2\|a\.b(?!{_IDENTIFIER_CHARS})"
+    )
 
 
 async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:
