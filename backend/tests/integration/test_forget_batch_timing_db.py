@@ -283,3 +283,38 @@ async def test_a_cancel_at_the_point_delete_leaves_a_tombstone_not_a_blind_row(w
         str(p.id) for p in await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
     }
     assert left == {str(ids[0]), str(ids[1])}
+
+
+async def test_a_row_restored_after_the_commit_keeps_its_point(world: World, async_engine):
+    """A restore (``rollback_session`` / Sleep undo) committed between forget's
+    commit and its point delete makes the row live again: the post-commit
+    look under the point-writer lock keeps its point."""
+    from sqlalchemy import update
+
+    from models.memory import Memory
+
+    ids = await _seed(world, 2)
+    restored = ids[0]
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def restore_first(**kwargs: Any) -> None:
+        # Runs after forget's commit, before its point delete (the audit step).
+        if kwargs.get("memory_id") != restored:
+            return
+        async with maker() as other:
+            await other.execute(
+                update(Memory).where(Memory.id == restored).values(deleted_at=None, deleted_by=None)
+            )
+            await other.commit()
+
+    with patch(
+        "services.memory_access_event_writer.emit_memory_access_event",
+        AsyncMock(side_effect=restore_first),
+    ):
+        body, _ = await _forget(world, ids)
+
+    assert [r["status"] for r in body["results"]] == ["deleted", "deleted"]
+    left = {
+        str(p.id) for p in await world.qdrant.retrieve(world.collection, ids=[str(i) for i in ids])
+    }
+    assert left == {str(restored)}

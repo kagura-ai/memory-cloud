@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -550,6 +550,13 @@ def _without_dropped_rows(
         for sr in search_results
         if (memory := memories.get(sr["id"])) is None or memory.id not in dropped
     ]
+
+
+#: #2201: how long forget waits, after its commit, for point writers that
+#: upsert before they commit (``db.point_writer_lock``) before it leaves its
+#: points to the orphan sweep. Short: it is spent once per forgotten id, inside
+#: the forget batch's one budget.
+FORGET_POINT_WRITER_WAIT_SECONDS = 0.05
 
 
 class MemoryService:
@@ -7119,28 +7126,75 @@ class MemoryService:
         only), and the orphan vector sweep removes it after the grace period
         (``REASON_TOMBSTONED``).
 
-        A resource point (``uuid5(resource:doc:version)``, not the row id) is
-        checked again first: a re-sync of the same document version committed
-        since the tombstone (#1829: a new live row under the same point id)
-        keeps it. A re-check that fails leaves the point to the sweep, which
-        keeps any point a live row still names.
+        Between the commit and here a point can get a live owner again: a
+        ``rollback_session`` / Sleep undo restoring the row, or a resource
+        re-sync of the same document version (#1829) — writers that upsert the
+        point before their row commits. So the delete runs as the orphan
+        sweep's does (:meth:`_points_free_to_delete`): under the point-writer
+        lock taken exclusively, after a look for a live owner.
         """
-        from services.resource_indexer import unshared_point_id
+        if not point_deletes:
+            return
+        try:
+            async with self._points_free_to_delete(point_deletes) as free:
+                for _memory_id, point_id, collection in free:
+                    try:
+                        await delete_memory_from_qdrant(
+                            user_id, point_id, collection_name=collection
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "forget_point_delete_failed",
+                            collection=collection,
+                            point_id=str(point_id),
+                            error_class=type(exc.__cause__ or exc).__name__,
+                        )
+        except Exception as exc:
+            logger.warning(
+                "forget_point_delete_deferred",
+                points=len(point_deletes),
+                error_class=type(exc).__name__,
+            )
 
-        for memory_id, point_id, collection in point_deletes:
-            try:
-                if point_id != memory_id and (
-                    await unshared_point_id(self.db, memory_id, point_id) is None
-                ):
-                    continue
-                await delete_memory_from_qdrant(user_id, point_id, collection_name=collection)
-            except Exception as exc:
-                logger.warning(
-                    "forget_point_delete_failed",
-                    collection=collection,
-                    point_id=str(point_id),
-                    error_class=type(exc.__cause__ or exc).__name__,
+    @contextlib.asynccontextmanager
+    async def _points_free_to_delete(
+        self, point_deletes: list[tuple[UUID, UUID, str]]
+    ) -> AsyncIterator[list[tuple[UUID, UUID, str]]]:
+        """The entries whose point no live row names, while no point writer is mid-transaction.
+
+        Holds the point-writer lock exclusively (``db.point_writer_lock``) on
+        an isolated session for the block, so the forget's own session is not
+        touched after its commit; closing that session releases the lock.
+        Yields nothing — the points are left to the sweep, which applies the
+        same rule — when writers still hold the lock after
+        ``FORGET_POINT_WRITER_WAIT_SECONDS``.
+        """
+        from db.base import isolated_session
+        from db.point_writer_lock import wait_for_point_writers
+
+        async with isolated_session(self.db) as session:
+            if not await wait_for_point_writers(
+                session, timeout_seconds=FORGET_POINT_WRITER_WAIT_SECONDS
+            ):
+                logger.info(
+                    "forget_point_delete_deferred", points=len(point_deletes), reason="writers"
                 )
+                yield []
+                return
+            points = list({point_id for _, point_id, _ in point_deletes})
+            owned = set(
+                (
+                    await session.execute(
+                        select(func.coalesce(Memory.summary_embedding_id, Memory.id)).where(
+                            Memory.deleted_at.is_(None),
+                            or_(Memory.id.in_(points), Memory.summary_embedding_id.in_(points)),
+                        )
+                    )
+                ).scalars()
+            )
+            if owned:
+                logger.info("forget_point_kept_live_owner", points=len(owned))
+            yield [entry for entry in point_deletes if entry[1] not in owned]
 
     async def _point_to_delete(self, memory: Memory) -> UUID | None:
         """``memory``'s vector point id, or ``None`` when another live row owns it too."""

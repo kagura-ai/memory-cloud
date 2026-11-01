@@ -2415,6 +2415,19 @@ class TestAccessEventEmission:
     they pin the CALL contract, not the writer's own gating).
     """
 
+    @pytest.fixture(autouse=True)
+    def _point_writer_lock_free(self):
+        """#2201: the post-commit delete's lock and live-owner look need a real
+        session; here the lock is free and no live row owns the point."""
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def free(self, point_deletes):
+            yield list(point_deletes)
+
+        with patch.object(MemoryService, "_points_free_to_delete", free):
+            yield
+
     @staticmethod
     def _memory_row(ws, ctx, mid):
         from datetime import datetime
@@ -2735,6 +2748,19 @@ class TestForgetDeletesThePointAfterTheCommit:
     vector. After the commit a cancellation or a failed delete only leaves a
     tombstone's point, which is no hit and which the orphan sweep removes."""
 
+    @pytest.fixture(autouse=True)
+    def _point_writer_lock_free(self):
+        """#2201: the post-commit delete's lock and live-owner look need a real
+        session; here the lock is free and no live row owns the point."""
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def free(self, point_deletes):
+            yield list(point_deletes)
+
+        with patch.object(MemoryService, "_points_free_to_delete", free):
+            yield
+
     @staticmethod
     def _service(rows):
         service = MemoryService(MagicMock())
@@ -2884,31 +2910,6 @@ class TestForgetDeletesThePointAfterTheCommit:
         assert row.deleted_by == "caller"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("claimed_since", [False, True])
-    async def test_a_resource_point_is_checked_again_after_the_commit(self, claimed_since):
-        """#1829: a re-sync of the same document version committed after the
-        tombstone is a new live row under the same point id; the post-commit
-        delete must not blind it."""
-        ws, ctx, mid, point = uuid4(), uuid4(), uuid4(), uuid4()
-        row = TestAccessEventEmission._memory_row(ws, ctx, mid)
-        row.summary_embedding_id = point
-        row.point_id = point
-        service = self._service({mid: row})
-        delete_point = AsyncMock()
-        checks = AsyncMock(side_effect=[point, None if claimed_since else point])
-        stack, commit = self._patches([], delete_point=delete_point)
-        service.db.commit = AsyncMock(side_effect=commit)
-        with stack, patch("services.resource_indexer.unshared_point_id", checks):
-            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
-
-        assert res.deleted_count == 1
-        assert checks.await_count == 2
-        if claimed_since:
-            delete_point.assert_not_awaited()
-        else:
-            delete_point.assert_awaited_once_with("caller", point, collection_name="c")
-
-    @pytest.mark.asyncio
     async def test_a_failed_commit_deletes_no_point(self):
         """The case the old order lost the vector: the commit raises, so the
         row stays live — and so must its point."""
@@ -2921,6 +2922,92 @@ class TestForgetDeletesThePointAfterTheCommit:
             await service.forget(ForgetRequest(memory_id=mid), "caller")
 
         delete_point.assert_not_awaited()
+
+
+class TestPointsFreeToDelete:
+    """#2201: after forget's commit a point may have a live owner again — a
+    session rollback / Sleep undo restoring the row, or a re-sync of the same
+    document version (#1829). The delete runs under the point-writer lock taken
+    exclusively on an isolated session, and only for points no live row names."""
+
+    @staticmethod
+    def _session(execute=None):
+        session = MagicMock()
+        session.execute = execute or AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_writers_holding_the_lock_leave_the_points_to_the_sweep(self):
+        service = MemoryService(MagicMock())
+        session = self._session()
+        delete_point = AsyncMock()
+        with (
+            patch("db.base.isolated_session", return_value=session),
+            patch(
+                "db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=False)
+            ) as wait,
+            patch("services.memory_service.delete_memory_from_qdrant", delete_point),
+        ):
+            await service._delete_points_after_commit("u", [(uuid4(), uuid4(), "c")])
+        assert wait.await_args.args[0] is session
+        assert wait.await_args.kwargs["timeout_seconds"] == 0.05
+        session.execute.assert_not_awaited()
+        delete_point.assert_not_awaited()
+        session.__aexit__.assert_awaited_once()  # the session closes: lock released
+
+    @pytest.mark.asyncio
+    async def test_a_point_a_live_row_names_again_is_kept(self):
+        service = MemoryService(MagicMock())
+        restored, freed = (uuid4(), uuid4(), "c"), (uuid4(), uuid4(), "c")
+        session = self._session(
+            AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=[restored[1]])))
+        )
+        order: list[str] = []
+
+        async def delete_point(user_id, point_id, collection_name):
+            order.append("delete")
+            session.__aexit__.assert_not_awaited()  # still under the lock
+
+        with (
+            patch("db.base.isolated_session", return_value=session),
+            patch("db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=True)),
+            patch(
+                "services.memory_service.delete_memory_from_qdrant",
+                AsyncMock(side_effect=delete_point),
+            ) as deleted,
+        ):
+            await service._delete_points_after_commit("u", [restored, freed])
+        deleted.assert_awaited_once_with("u", freed[1], collection_name="c")
+        sql = str(session.execute.await_args.args[0])
+        assert "deleted_at IS NULL" in sql
+        assert "summary_embedding_id" in sql
+        session.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_look_defers_and_never_touches_the_forget_session(self):
+        db = MagicMock()
+        service = MemoryService(db)
+        session = self._session(AsyncMock(side_effect=RuntimeError("db")))
+        delete_point = AsyncMock()
+        with (
+            patch("db.base.isolated_session", return_value=session),
+            patch("db.point_writer_lock.wait_for_point_writers", AsyncMock(return_value=True)),
+            patch("services.memory_service.delete_memory_from_qdrant", delete_point),
+        ):
+            await service._delete_points_after_commit("u", [(uuid4(), uuid4(), "c")])
+        delete_point.assert_not_awaited()
+        session.__aexit__.assert_awaited_once()
+        db.rollback.assert_not_called()
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nothing_queued_opens_no_session(self):
+        service = MemoryService(MagicMock())
+        with patch("db.base.isolated_session") as opened:
+            await service._delete_points_after_commit("u", [])
+        opened.assert_not_called()
 
 
 class TestFlooredUnscoredRerankCandidates:
