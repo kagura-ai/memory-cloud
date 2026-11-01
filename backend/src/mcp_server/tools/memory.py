@@ -1737,7 +1737,7 @@ async def _handle_forget_many(
     ``forget(memory_id=...)`` would forget it, and reported on its own row.
 
     ``MemoryService.forget`` commits each id itself (its search point is
-    removed before that commit), so every id is its own transaction, as a
+    removed after that commit, #2201), so every id is its own transaction, as a
     sequence of single forgets would be: an id that raises is rolled back
     alone and the others stay deleted. ``deleted`` / ``skipped`` (not found,
     not yours, already gone — one word, so the row is no existence oracle) /
@@ -1754,6 +1754,8 @@ async def _handle_forget_many(
     back, then ``deleted`` if its commit had landed, else ``error`` /
     ``timeout`` with a correlation id — exactly what the single form reports
     for the same event, and that row's help says to verify before retrying.
+    A cancel between the commit and the point delete reports ``deleted``: the
+    row is a committed tombstone, and the orphan sweep removes its point.
     A rollback that fails after such a cancel still flips ``session_ok`` and
     ends the loop — keep that bail-out if the rollback path changes.
     """

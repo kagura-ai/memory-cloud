@@ -2728,6 +2728,176 @@ class TestAccessEventEmission:
         assert kw["extra_metadata"]["memory_ids"] == [str(m) for m in ids]
 
 
+class TestForgetDeletesThePointAfterTheCommit:
+    """#2201: the vector store follows Postgres. A point deleted before the
+    commit was lost for good when the commit never landed (a cancellation at
+    the forget batch deadline, a failed commit): a live row without its
+    vector. After the commit a cancellation or a failed delete only leaves a
+    tombstone's point, which is no hit and which the orphan sweep removes."""
+
+    @staticmethod
+    def _service(rows):
+        service = MemoryService(MagicMock())
+        service.memory_repo.get = AsyncMock(side_effect=lambda m: rows.get(m))
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+        return service
+
+    @staticmethod
+    def _patches(order, *, delete_point):
+        import contextlib
+
+        stack = contextlib.ExitStack()
+
+        async def commit():
+            order.append("commit")
+
+        async def emit(**kwargs):
+            order.append("audit")
+
+        stack.enter_context(
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "services.permission_service.PermissionService.ensure_memory_write_role",
+                AsyncMock(),
+            )
+        )
+        stack.enter_context(
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c"))
+        )
+        stack.enter_context(
+            patch("services.memory_service.delete_memory_from_qdrant", delete_point)
+        )
+        edge_cls = stack.enter_context(patch("repositories.neural_edge.NeuralEdgeRepository"))
+        edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+        stack.enter_context(
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event",
+                AsyncMock(side_effect=emit),
+            )
+        )
+        return stack, commit
+
+    @pytest.mark.asyncio
+    async def test_by_id_commits_then_audits_then_deletes_the_point(self):
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service = self._service({mid: TestAccessEventEmission._memory_row(ws, ctx, mid)})
+        order: list[str] = []
+
+        async def delete_point(user_id, point_id, collection_name):
+            order.append(f"point:{point_id}")
+
+        stack, commit = self._patches(order, delete_point=AsyncMock(side_effect=delete_point))
+        service.db.commit = AsyncMock(side_effect=commit)
+        with stack:
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1
+        assert order == ["commit", "audit", f"point:{mid}"]
+
+    @pytest.mark.asyncio
+    async def test_by_query_deletes_every_point_after_the_commit(self):
+        ws, ctx = uuid4(), uuid4()
+        ids = [uuid4(), uuid4()]
+        service = self._service({m: TestAccessEventEmission._memory_row(ws, ctx, m) for m in ids})
+        service.context_service.get_context = AsyncMock(
+            return_value=MagicMock(id=ctx, workspace_id=ws)
+        )
+        service.recall = AsyncMock(
+            return_value=SimpleNamespace(
+                results=[SimpleNamespace(memory_id=m) for m in ids],
+                degraded=None,
+                degraded_reason=None,
+            )
+        )
+        order: list[str] = []
+
+        async def delete_point(user_id, point_id, collection_name):
+            order.append(f"point:{point_id}")
+
+        stack, commit = self._patches(order, delete_point=AsyncMock(side_effect=delete_point))
+        service.db.commit = AsyncMock(side_effect=commit)
+        with stack:
+            res = await service.forget(
+                ForgetRequest(query="q", k=10), "caller", current_context_id=ctx
+            )
+
+        assert res.deleted_count == 2
+        assert order == ["commit", "audit", *(f"point:{m}" for m in ids)]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_point_delete_after_the_commit_fails_soft(self):
+        """The row is a committed tombstone: forget succeeds, the failure is
+        logged, and the orphan sweep removes the point later."""
+        from db.qdrant import QdrantError
+
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service = self._service({mid: TestAccessEventEmission._memory_row(ws, ctx, mid)})
+        order: list[str] = []
+        failing = AsyncMock(side_effect=QdrantError("qdrant down"))
+        stack, commit = self._patches(order, delete_point=failing)
+        service.db.commit = AsyncMock(side_effect=commit)
+        with stack, patch("services.memory_service.logger") as log:
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1
+        assert order == ["commit", "audit"]
+        failing.assert_awaited_once()
+        log.warning.assert_any_call(
+            "forget_point_delete_failed",
+            collection="c",
+            point_id=str(mid),
+            error_class="QdrantError",
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_between_commit_and_point_delete_leaves_a_tombstone(self):
+        """The batch deadline cancels the id while its point delete stalls:
+        the row is already committed as deleted, never a live row without
+        its vector."""
+        import asyncio
+
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        row = TestAccessEventEmission._memory_row(ws, ctx, mid)
+        service = self._service({mid: row})
+        order: list[str] = []
+        never = asyncio.Event()
+
+        async def stall(user_id, point_id, collection_name):
+            order.append("point-started")
+            await never.wait()
+
+        stack, commit = self._patches(order, delete_point=AsyncMock(side_effect=stall))
+        service.db.commit = AsyncMock(side_effect=commit)
+        with stack, pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                service.forget(ForgetRequest(memory_id=mid), "caller"), timeout=0.2
+            )
+
+        assert order == ["commit", "audit", "point-started"]
+        assert row.deleted_at is not None
+        assert row.deleted_by == "caller"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_commit_deletes_no_point(self):
+        """The case the old order lost the vector: the commit raises, so the
+        row stays live — and so must its point."""
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service = self._service({mid: TestAccessEventEmission._memory_row(ws, ctx, mid)})
+        delete_point = AsyncMock()
+        stack, _ = self._patches([], delete_point=delete_point)
+        service.db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        with stack, pytest.raises(RuntimeError, match="commit failed"):
+            await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        delete_point.assert_not_awaited()
+
+
 class TestFlooredUnscoredRerankCandidates:
     """#2084: a candidate the reranker could not score reaches the readers of
     ``hybrid_score`` — recall ``score`` and the co-activation activation — at
