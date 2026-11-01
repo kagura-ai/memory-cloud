@@ -22,6 +22,7 @@ from services.erasure_details import (
     HeldAddress,
     count_audit_mentions,
     erasure_pseudonym,
+    pseudonymize_audit_logs,
     pseudonymize_audit_trail,
 )
 from utils.datetime import utcnow
@@ -611,6 +612,22 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
         ),
         pytest.param(
             "actor-{t}",
+            "brien{t}@example.invalid",
+            "other-{t}",
+            "o'brien{t}@example.invalid",
+            "o'brien{t}@example.invalid",
+            id="address-ends-with-the-actors-after-an-apostrophe",
+        ),
+        pytest.param(
+            "alice{t}",
+            "actor{t}@example.invalid",
+            "local:alice{t}",
+            "other{t}@example.invalid",
+            "local:alice{t}",
+            id="sub-ends-with-the-actors-after-a-colon",
+        ),
+        pytest.param(
+            "actor-{t}",
             "a.b{t}@example.invalid",
             "other-{t}",
             "a-b{t}@example.invalid",
@@ -680,6 +697,67 @@ async def test_own_row_resource_rewrites_every_standalone_occurrence(
             await db.commit()
             resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id))
         assert resource == f"user:{pseudonym}|{erasure_pseudonym(email)}|{pseudonym}"
+
+
+async def test_own_row_resource_outside_a_user_value_rewrites_any_occurrence(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """Exact matching is the ``user:`` namespace's: nothing matches any other
+    resource exactly, so there every occurrence goes, embedded or not."""
+    sub, pseudonym = subject["sub"], subject["p"]
+    email = f"{sub}@example.invalid"
+    row = _audit(subject, sub, email=email)
+    row.resource = f"note:{email}-old,{sub}-old"
+    row.created_at = datetime(2026, 2, 1)
+    with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
+        async with _maker(async_engine)() as db:
+            db.add(row)
+            await db.commit()
+            held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
+            await pseudonymize_audit_trail(db, sub, held)
+            await db.commit()
+            resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id))
+        assert resource == f"note:{erasure_pseudonym(email)}-old,{pseudonym}-old"
+
+
+async def test_own_row_resource_outside_the_holding_keeps_the_address(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """Before the subject held the address it was another member's: the row
+    keeps it, in both resource forms, and is still the subject's own."""
+    sub, pseudonym = subject["sub"], subject["p"]
+    email = f"former-{uuid.uuid4().hex}@example.invalid"
+    rows = [_audit(subject, sub, email="other@example.invalid") for _ in range(2)]
+    rows[0].resource = f"user:{email}"
+    rows[1].resource = f"note:{email}"
+    for row in rows:
+        row.created_at = datetime(2025, 6, 1)
+    with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
+        async with _maker(async_engine)() as db:
+            db.add_all(rows)
+            await db.commit()
+            held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
+            await pseudonymize_audit_trail(db, sub, held)
+            await db.commit()
+            after = await _snapshot(db, subject)
+    assert [after[row.id]["resource"] for row in rows] == [f"user:{email}", f"note:{email}"]
+    assert {after[row.id]["user_id"] for row in rows} == {pseudonym}
+
+
+@pytest.mark.parametrize("resource", ["", "user:", "user:a|", "workspace:x"])
+async def test_own_row_resource_is_unchanged_by_an_empty_address(
+    async_engine: AsyncEngine, subject: dict[str, Any], resource: str
+) -> None:
+    row = _audit(subject, subject["sub"])
+    row.resource = resource
+    row.created_at = datetime(2026, 2, 1)
+    async with _maker(async_engine)() as db:
+        db.add(row)
+        await db.commit()
+        held = [HeldAddress("", ((datetime(2026, 1, 1), None),))]
+        assert await pseudonymize_audit_logs(db, subject["sub"], held) == 1
+        await db.commit()
+        assert await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id)) == resource
 
 
 @pytest.mark.parametrize("historical", [False, True])
