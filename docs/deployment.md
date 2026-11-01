@@ -1699,6 +1699,23 @@ python -m src.cli.observed_at_backfill --apply --yes  # write them
 
 It is idempotent; `--workspace <id>` limits it to one workspace.
 
+## Resource point metadata (`type` / `tags` / `context_summary`) — Issue #2254
+
+Resource points indexed before v0.122.0 carry no `type`, `tags` or
+`context_summary` payload, so recall's `filters.type="resource_data"` does not
+match them until they are reindexed. A deployment that indexed resource
+documents before v0.122.0 runs the one-shot backfill once (inside the API
+container, from `backend/`):
+
+```bash
+python -m src.cli.resource_point_metadata_backfill                # plan: how many points
+python -m src.cli.resource_point_metadata_backfill --apply --yes  # write them
+```
+
+Set-payload only, idempotent, no migration; `--workspace <id>` limits it to
+one workspace. The full procedure and the report lines are in
+[ops/resource-indexer-backfill.md](ops/resource-indexer-backfill.md#metadata-backfill-for-points-indexed-before-v01220-2254).
+
 ## Orphaned vectors — Issue #1798
 
 Postgres is the system of record; the vector store follows it. Every write
