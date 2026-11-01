@@ -6,7 +6,7 @@ This guide will help you get started with Kagura Memory Cloud.
 
 - Docker and Docker Compose
 - Python 3.11+ (for backend / CLI tools)
-- Node.js 20+ (for frontend development, optional if using Docker)
+- Node.js 24+ (for frontend development, optional if using Docker)
 
 ## Installation
 

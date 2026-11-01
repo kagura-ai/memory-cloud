@@ -145,7 +145,7 @@ services:
 
   # Frontend (Next.js dev server)
   web:
-    image: node:20-alpine
+    image: node:24-alpine
     container_name: kagura-web-dev
     working_dir: /app
     environment:

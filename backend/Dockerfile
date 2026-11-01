@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# The base image's pip, setuptools and wheel sit outside .venv and nothing uses them.
+RUN pip uninstall -y --root-user-action=ignore setuptools wheel pip
+
 # The non-root user owns /app from the start, so the environment below is
 # created with the right owner and no `chown -R` layer duplicates it later.
 RUN useradd -m -u 1000 kagura && mkdir -p /app && chown kagura:kagura /app
@@ -50,6 +53,12 @@ COPY --chown=kagura:kagura templates/ ./templates/
 
 # Now the project itself (editable, as `-e .` was), dependencies untouched.
 RUN uv sync --locked --extra dev --no-cache
+
+# uv only builds the image. It lives in root's /bin, hence the step back to root.
+# A plain rm: if uv moves, the build fails instead of quietly keeping it.
+USER root
+RUN rm /bin/uv /bin/uvx
+USER kagura
 
 # Expose port
 EXPOSE 8080

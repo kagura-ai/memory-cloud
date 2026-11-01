@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 - Docker & Docker Compose
 - Python 3.11+
-- Node.js 20+
+- Node.js 24+
 - Git
 
 ### Quick Start
