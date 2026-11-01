@@ -16,9 +16,11 @@ exactly ``get_tool_definitions()``. ``add_tools`` adds names to the profile
 the URL selects (#2354) and is ignored when ``tools`` is present. A tool left out of the list stays callable:
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
-A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
-and nothing else: ``tools/call`` never reads it, so a tool left out of the list
-stays callable, subject to the same role checks as before. Do not use a profile
+A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``:
+``tools/call`` never gates on it, so a tool left out of the list stays callable,
+subject to the same role checks as before. Two tools read the URL's view for
+their reply: ``describe_tools``, and ``recall``, which leaves out ``explore``
+hints where the URL does not list that tool (#2470). Do not use a profile
 to restrict what a key can do — that is what workspace and context roles are
 for.
 """
@@ -208,7 +210,8 @@ def not_listed_reason(name: str, query_string: bytes | str | None) -> str | None
     direct call) has no URL to hold against the tool. A broken selection answers
     with the error ``tools/list`` fails with, since the opt-in cannot work until
     that is fixed. The parameters are named without their ``?``: the URL may
-    already have a query.
+    already have a query, and an existing list has to grow because the first
+    value of a repeated parameter is the one read.
     """
     if query_string is None:
         return None
@@ -218,7 +221,7 @@ def not_listed_reason(name: str, query_string: bytes | str | None) -> str | None
     except ToolProfileError as e:
         return e.message
     return (
-        f"{name} is not listed on this connection: add_tools={name} or profile=full in "
-        f"the MCP URL's query lists it (a URL with tools= ignores both: add {name} to "
-        "that list)."
+        f"{name} is not listed on this connection: add it to the tools= or add_tools= "
+        f"list in the MCP URL's query if it has one, otherwise add add_tools={name} or "
+        "set profile=full."
     )

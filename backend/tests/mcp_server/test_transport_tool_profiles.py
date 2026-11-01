@@ -20,6 +20,7 @@ import pytest
 import mcp_server.transport as transport
 from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._annotations import TOOL_ANNOTATIONS
+from mcp_server.tools._helpers import get_mcp_tool_view_query
 from mcp_server.tools._profiles import CORE_TOOLS
 from mcp_server.transport import TOOLS_LIST_TTL_MS, handle_streamable_http_post, mcp_asgi_app
 from mcp_server.transport_stateless import handle_stateless_post
@@ -523,7 +524,7 @@ async def test_explore_is_listed_only_where_the_url_opts_in(asgi, era, query, li
 
 @pytest.mark.asyncio
 @ERAS
-@pytest.mark.parametrize("query", [b"", b"profile=core", b"profile=full"])
+@pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall"])
 async def test_explore_still_runs_on_a_url_that_does_not_list_it(asgi, explore_handler, era, query):
     """#2470 changes the list only: ``KaguraMemory.explore()`` in the Python SDK
     calls this tool over ``tools/call`` on the plain URL."""
@@ -539,3 +540,24 @@ async def test_explore_still_runs_on_a_url_that_does_not_list_it(asgi, explore_h
     assert send.status == 200
     assert not send.body["result"].get("isError")
     assert len(explore_handler) == 1
+
+
+@pytest.mark.asyncio
+@ERAS
+async def test_a_call_sees_the_urls_query(asgi, monkeypatch, era):
+    """``recall`` reads this to decide on explore hints (#2470)."""
+    import mcp_server.tools as tools_mod
+
+    seen: list[bytes | None] = []
+
+    async def fake_guide(args, user_id, workspace_id):
+        seen.append(get_mcp_tool_view_query())
+        return [SimpleNamespace(type="text", text='{"status":"success"}')]
+
+    registry = tools_mod._build_registry()
+    registry["guide"] = fake_guide
+    monkeypatch.setattr(tools_mod, "_TOOL_REGISTRY", registry)
+
+    await _through_the_app(asgi, era, b"tools=recall", "tools/call", name="guide", arguments={})
+
+    assert seen == [b"tools=recall"]

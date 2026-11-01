@@ -347,7 +347,7 @@ Manual: guide(["recall"]).""",
                     },
                     "include_explore_hints": {
                         "type": "boolean",
-                        "description": "true adds up to 3 explore_hints where the URL opts in. Default false.",
+                        "description": "true adds up to 3 explore_hints (graph seeds) where the URL opts in. Default false.",
                     },
                     "include_superseded": {
                         "type": "boolean",

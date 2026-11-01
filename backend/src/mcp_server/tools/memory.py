@@ -1153,6 +1153,7 @@ def _recall_envelope(
         result: The ``RecallResponse`` from ``MemoryService.recall``.
         context: The resolved primary context.
         verbosity: ``"full"`` or ``"compact"`` (#2002).
+        explore_hints_omitted: Why hints were not generated, when asked for (#2470).
 
     Returns:
         The envelope ``handle_recall`` serializes.
@@ -1318,7 +1319,7 @@ async def handle_recall(
         )
 
     # #2470: a hint is a seed for explore(), so a URL that does not list explore
-    # gets a reason instead of seeds it has no tool for.
+    # gets a reason instead of seeds its model cannot follow up.
     include_explore_hints = args.get("include_explore_hints", False)
     explore_hints_omitted = (
         not_listed_reason("explore", get_mcp_tool_view_query()) if include_explore_hints else None

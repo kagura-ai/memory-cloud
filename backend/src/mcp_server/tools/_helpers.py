@@ -93,14 +93,15 @@ def get_mcp_guardrails_selection() -> "GuardrailSelection | None":
 # other tools. ``describe_tools`` lists what the URL left out; to know that it
 # needs the URL's selection, which the transport parses once per request at
 # the same seam as the two contextvars above. ``None`` (never set — a direct
-# handler call in tests) makes the handler fall back to the core set.
+# handler call in tests) makes the handler fall back to the core set. ``recall``
+# reads it too (#2470), and there ``None`` means no URL to hold against the hints.
 _mcp_tool_view_query: ContextVar["bytes | None"] = ContextVar("mcp_tool_view_query", default=None)
 
 
 def set_mcp_tool_view_query(query_string: "bytes | None") -> None:
-    """Store the request URL's raw query so ``describe_tools`` can derive the view
-    it is asked about. Storing the bytes keeps the auth seam free of registry
-    work: the view is computed only by the one tool that needs it."""
+    """Store the request URL's raw query so ``describe_tools`` and ``recall`` can
+    derive the view. Storing the bytes keeps the auth seam free of registry work:
+    the view is computed only by a call that needs it."""
     _mcp_tool_view_query.set(query_string)
 
 

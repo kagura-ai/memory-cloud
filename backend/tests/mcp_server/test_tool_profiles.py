@@ -148,13 +148,14 @@ def test_a_url_that_lists_the_tool_has_no_reason(query):
 
 @pytest.mark.parametrize("query", [b"", b"profile=core", b"tools=recall"])
 def test_the_reason_names_every_opt_in(query):
-    """``tools=`` wins over both others, so a URL holding it needs its own line.
-    No ``?``: pasted behind ``?context=<uuid>`` it would corrupt that value."""
+    """``tools=`` wins over both others, and a repeated parameter keeps its first
+    value, so an existing list has to grow. No ``?``: pasted behind
+    ``?context=<uuid>`` it would corrupt that value."""
     reason = not_listed_reason("explore", query)
     assert reason is not None
     assert "add_tools=explore" in reason
-    assert "profile=full" in reason
-    assert "tools=" in reason
+    assert "set profile=full" in reason
+    assert "the tools= or add_tools= list" in reason
     assert "?" not in reason
 
 

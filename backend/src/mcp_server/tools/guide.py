@@ -113,7 +113,8 @@ GUIDE_TOPICS: dict[str, str] = {
     "remember.supersedes": (
         "Updating a fact: pass supersedes=<old_memory_id>. The old memory is shadowed "
         "out of default recall (not deleted; still reachable via "
-        "recall(include_superseded=true)). Prefer this to a "
+        "recall(include_superseded=true) and explore(), outside the core profile, "
+        'describe_tools(["explore"]) has its schema). Prefer this to a '
         "near-duplicate, which leaves stale and fresh facts competing. If you forget, "
         "the server detects the near-duplicate and surfaces a supersede_candidate on "
         "a later recall()/reference(): accept it with "
