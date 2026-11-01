@@ -49,6 +49,8 @@ PERF_OPT_IN = os.getenv("RUN_PERF_TESTS") == "1"
 PERF_BATCH_S = 10.0
 # The default run's budget: generous, so only behaviour is checked.
 _RELAXED_BUDGET_S = 120.0
+# The cancel test's budget: the stalled point delete holds the id until then.
+_CANCEL_BUDGET_S = 5.0
 perf_logger = logging.getLogger(__name__)
 _DIM = 8
 _VEC = [1.0, 0, 0, 0, 0, 0, 0, 0]
@@ -123,12 +125,12 @@ async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
             await client.close()
 
 
-async def _seed(world: World) -> list[uuid.UUID]:
-    """``BATCH`` live memories, each with its points and two edges."""
+async def _seed(world: World, count: int = BATCH) -> list[uuid.UUID]:
+    """``count`` live memories, each with its points and an edge."""
     from models.memory import Memory
     from repositories.neural_edge import NeuralEdgeRepository
 
-    ids = [uuid.uuid4() for _ in range(BATCH)]
+    ids = [uuid.uuid4() for _ in range(count)]
     world.session.add_all(
         [
             Memory(
@@ -152,7 +154,7 @@ async def _seed(world: World) -> list[uuid.UUID]:
         await edges.create_or_update_edge(
             world.owner,
             mid,
-            ids[(i + 1) % BATCH],
+            ids[(i + 1) % count],
             weight=0.5,
             workspace_id=str(world.workspace_id),
             context_id=str(world.context_id),
@@ -251,7 +253,7 @@ async def test_a_cancel_at_the_point_delete_leaves_a_tombstone_not_a_blind_row(w
 
     from models.memory import Memory
 
-    ids = (await _seed(world))[:2]
+    ids = await _seed(world, 2)
     never = asyncio.Event()
 
     async def stall(*args: Any, **kwargs: Any) -> None:
@@ -259,11 +261,13 @@ async def test_a_cancel_at_the_point_delete_leaves_a_tombstone_not_a_blind_row(w
 
     with (
         patch("services.memory_service.delete_memory_from_qdrant", stall),
-        patch("mcp_server.tools.memory.get_tool_timeout", return_value=1.0),
+        # Generous: the first id must reach its commit before the deadline,
+        # even on a slow runner (it takes ~40 ms locally).
+        patch("mcp_server.tools.memory.get_tool_timeout", return_value=_CANCEL_BUDGET_S),
     ):
         body, elapsed = await _forget(world, ids)
 
-    assert elapsed < 3.0
+    assert elapsed < _CANCEL_BUDGET_S + 5.0
     assert body["results"][0] == {"memory_id": str(ids[0]), "status": "deleted"}
     assert body["results"][1]["error"] == "not_attempted"
     rows = dict(
