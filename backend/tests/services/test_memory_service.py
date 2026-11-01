@@ -2884,6 +2884,31 @@ class TestForgetDeletesThePointAfterTheCommit:
         assert row.deleted_by == "caller"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("claimed_since", [False, True])
+    async def test_a_resource_point_is_checked_again_after_the_commit(self, claimed_since):
+        """#1829: a re-sync of the same document version committed after the
+        tombstone is a new live row under the same point id; the post-commit
+        delete must not blind it."""
+        ws, ctx, mid, point = uuid4(), uuid4(), uuid4(), uuid4()
+        row = TestAccessEventEmission._memory_row(ws, ctx, mid)
+        row.summary_embedding_id = point
+        row.point_id = point
+        service = self._service({mid: row})
+        delete_point = AsyncMock()
+        checks = AsyncMock(side_effect=[point, None if claimed_since else point])
+        stack, commit = self._patches([], delete_point=delete_point)
+        service.db.commit = AsyncMock(side_effect=commit)
+        with stack, patch("services.resource_indexer.unshared_point_id", checks):
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1
+        assert checks.await_count == 2
+        if claimed_since:
+            delete_point.assert_not_awaited()
+        else:
+            delete_point.assert_awaited_once_with("caller", point, collection_name="c")
+
+    @pytest.mark.asyncio
     async def test_a_failed_commit_deletes_no_point(self):
         """The case the old order lost the vector: the commit raises, so the
         row stays live — and so must its point."""

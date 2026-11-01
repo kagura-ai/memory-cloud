@@ -7089,18 +7089,50 @@ class MemoryService:
         del_collection = await resolve_collection_name(self.db, memory.context_id)
         await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
 
+    async def _queue_point_delete(
+        self,
+        memory: Memory,
+        point_id: UUID | None,
+        point_deletes: list[tuple[UUID, UUID, str]],
+        collections: dict[UUID, str],
+    ) -> None:
+        """Queue ``memory``'s point (``None``: shared, kept) for ``_delete_points_after_commit``.
+
+        The collection is resolved now, while the row is loaded, once per context.
+        """
+        if point_id is None or memory.context_id is None:
+            return
+        if memory.context_id not in collections:
+            collections[memory.context_id] = await resolve_collection_name(
+                self.db, memory.context_id
+            )
+        point_deletes.append((memory.id, point_id, collections[memory.context_id]))
+
     async def _delete_points_after_commit(
-        self, user_id: str, point_deletes: list[tuple[UUID, str]]
+        self, user_id: str, point_deletes: list[tuple[UUID, UUID, str]]
     ) -> None:
         """Delete forgotten rows' search points (and their content chunks) after the commit.
 
-        Fails soft, as ``session_rollback.finish`` does: the rows are committed
-        tombstones, a tombstone's leftover point is never a hit (recall
-        hydrates live rows only), and the orphan vector sweep removes it after
-        the grace period (``REASON_TOMBSTONED``).
+        ``point_deletes``: ``(memory id, point id, collection)``. Fails soft,
+        as ``session_rollback.finish`` does: the rows are committed tombstones,
+        a tombstone's leftover point is never a hit (recall hydrates live rows
+        only), and the orphan vector sweep removes it after the grace period
+        (``REASON_TOMBSTONED``).
+
+        A resource point (``uuid5(resource:doc:version)``, not the row id) is
+        checked again first: a re-sync of the same document version committed
+        since the tombstone (#1829: a new live row under the same point id)
+        keeps it. A re-check that fails leaves the point to the sweep, which
+        keeps any point a live row still names.
         """
-        for point_id, collection in point_deletes:
+        from services.resource_indexer import unshared_point_id
+
+        for memory_id, point_id, collection in point_deletes:
             try:
+                if point_id != memory_id and (
+                    await unshared_point_id(self.db, memory_id, point_id) is None
+                ):
+                    continue
                 await delete_memory_from_qdrant(user_id, point_id, collection_name=collection)
             except Exception as exc:
                 logger.warning(
@@ -7545,7 +7577,8 @@ class MemoryService:
         deleted_ids = []
         # #2201: (point id, collection) of each forgotten row, deleted from the
         # vector store only after the commit below.
-        point_deletes: list[tuple[UUID, str]] = []
+        point_deletes: list[tuple[UUID, UUID, str]] = []
+        collections: dict[UUID, str] = {}
         # #1286 item 2 (P0-5): the deleted rows' own (hard-validated)
         # workspace/context — the audit fallback when no context is declared.
         deleted_workspace_ids: set[UUID] = set()
@@ -7607,10 +7640,7 @@ class MemoryService:
                 point_id = await self._soft_delete_memory(
                     user_id, memory, memory_workspace_id, memory_context_id
                 )
-                if point_id is not None:
-                    point_deletes.append(
-                        (point_id, await resolve_collection_name(self.db, memory.context_id))
-                    )
+                await self._queue_point_delete(memory, point_id, point_deletes, collections)
 
                 deleted_ids.append(request.memory_id)
 
@@ -7672,8 +7702,8 @@ class MemoryService:
             # Resolve and validate every match BEFORE any side effect, so a
             # request either deletes all of its matches or touches nothing: a
             # legacy row with NULL workspace/context (the by-id path refuses
-            # it too) must not abort the sweep after earlier rows lost their
-            # search points but before the commit.
+            # it too) must not abort the sweep after earlier rows were
+            # already stamped and their edges deleted.
             victims: list[Memory] = []
             for memory_response in search_response.results:
                 memory = await self.memory_repo.get(memory_response.memory_id)
@@ -7700,10 +7730,7 @@ class MemoryService:
                     str(memory.workspace_id),
                     str(memory.context_id),
                 )
-                if point_id is not None:
-                    point_deletes.append(
-                        (point_id, await resolve_collection_name(self.db, memory.context_id))
-                    )
+                await self._queue_point_delete(memory, point_id, point_deletes, collections)
                 deleted_ids.append(memory.id)
                 deleted_workspace_ids.add(memory.workspace_id)
                 deleted_context_ids.add(memory.context_id)
