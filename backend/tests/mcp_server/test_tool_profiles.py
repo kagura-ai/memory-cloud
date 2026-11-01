@@ -161,10 +161,12 @@ def test_url_lists_tool(query, listed):
     assert url_lists_tool("explore", query) is listed
 
 
-def test_not_listed_message_names_both_opt_ins():
+def test_not_listed_message_names_every_opt_in():
+    """``?tools=`` wins over both others, so a URL holding it needs its own line."""
     message = not_listed_message("explore")
     assert "?add_tools=explore" in message
     assert "?profile=full" in message
+    assert "?tools=" in message
 
 
 def test_load_guardrails_stays_out_of_core():

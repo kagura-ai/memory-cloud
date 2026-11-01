@@ -599,10 +599,7 @@ async def execute_tool_call(
         return _error_response(
             "tool_not_listed",
             not_listed_message(tool_name),
-            help=(
-                "Change the MCP URL, then reconnect. A URL with ?tools= ignores add_tools: "
-                "add the name to that list instead."
-            ),
+            help="Change the MCP URL, then reconnect.",
         )
 
     # #1742: both transports check this too; a direct caller gets the same

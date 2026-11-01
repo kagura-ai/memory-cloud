@@ -227,5 +227,5 @@ def not_listed_message(name: str) -> str:
     """What a caller is told about a tool its URL does not list; names the opt-in."""
     return (
         f"{name} is not listed on this connection: ?add_tools={name} or ?profile=full "
-        "on the MCP URL lists it."
+        f"on the MCP URL lists it (a URL with ?tools= ignores both: add {name} to that list)."
     )
