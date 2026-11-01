@@ -141,3 +141,29 @@ async def test_candidate_fetch_selects_by_summary_embedding_id():
     assert "summary_embedding_id IN" in sql, (
         "recall candidate fetch must match resource points on summary_embedding_id"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi_context", [False, True])
+async def test_candidate_fetch_reads_the_contexts_the_search_filtered_on(multi_context):
+    """SQL pin: hydration reads the rows of exactly what ``hybrid_search`` was given."""
+    svc, db = _make_service([])
+    svc.search_service.hybrid_search = AsyncMock(return_value=[{"id": str(uuid4()), "score": 0.9}])
+    current = uuid4()
+    context_ids = [current, uuid4()] if multi_context else None
+
+    await svc.recall(
+        request=RecallRequest(query="q", k=5),
+        user_id="u",
+        current_context_id=current,
+        current_workspace_id=uuid4(),
+        context_ids=context_ids,
+    )
+
+    searched = svc.search_service.hybrid_search.await_args.kwargs["context_id"]
+    assert searched == ([str(cid) for cid in context_ids] if multi_context else str(current))
+    statement = db.execute.call_args_list[-1].args[0]
+    compiled = statement.compile()
+    assert "memories.context_id IN" in " ".join(str(compiled).split())
+    bound = next(value for name, value in compiled.params.items() if name.startswith("context_id_"))
+    assert bound == (searched if multi_context else [searched])

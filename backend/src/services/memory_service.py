@@ -5243,12 +5243,13 @@ class MemoryService:
         self,
         request: RecallRequest,
         *,
-        memory_ids: list[str],
+        search_results: list[dict],
+        searched_context_id: str | list[str],
         cluster_memory_ids: list[UUID] | None,
     ) -> dict[str, Memory]:
         """Hydrate the search hits from PostgreSQL, keyed by every id they may carry.
 
-        ``memory_ids`` are Qdrant point ids. For ``remember()``-written memories
+        The hits' ids are Qdrant point ids. For ``remember()``-written memories
         the point id equals ``Memory.id`` (see ``add_memory_to_qdrant`` /
         ``summary_embedding_id == id``). Resource-projected memories
         (``ResourceIndexer._apply_upsert``) instead store the point under
@@ -5260,16 +5261,22 @@ class MemoryService:
         So the SELECT resolves via either identifier, and the returned dict is
         keyed by BOTH the row id and the point id — keying by both (rather than
         only the point id) keeps the lookup robust when ``summary_embedding_id``
-        is unset or divergent. For normal memories the two coincide (one key);
-        across rows they never collide because both id spaces are globally unique
-        UUIDs.
+        is unset or divergent. For normal memories the two coincide (one key).
+
+        A resource point's id comes from the document, so rows of two contexts
+        can name one point (``unshared_point_id``), and the id alone does not
+        say which row a hit is. Only the contexts the search filtered on are
+        read, and when two of those hold a row of the point, the point's own
+        ``context_id`` picks the row.
 
         Also applies the #214 source post-filters, the #887 trust-tier read
         filter and the #496 cluster scope.
 
         Args:
             request: The recall request carrying ``filters``.
-            memory_ids: Qdrant point ids from the hybrid search.
+            search_results: The hybrid search's hits.
+            searched_context_id: ``_RecallPlan.search_context_id``, what the
+                hybrid search filtered on.
             cluster_memory_ids: #496 cluster scope, or None when not scoped.
                 Guaranteed non-empty here — the caller short-circuits an empty
                 cluster before reaching hydration.
@@ -5277,11 +5284,16 @@ class MemoryService:
         Returns:
             Point-id / row-id → Memory, excluding soft-deleted rows.
         """
+        memory_ids = [r["id"] for r in search_results]
+        searched_context_ids = (
+            searched_context_id if isinstance(searched_context_id, list) else [searched_context_id]
+        )
         pg_conditions = [
             or_(
                 Memory.id.in_(memory_ids),
                 Memory.summary_embedding_id.in_(memory_ids),
             ),
+            Memory.context_id.in_(searched_context_ids),
             Memory.deleted_at.is_(None),
         ]
         if request.filters:
@@ -5311,11 +5323,15 @@ class MemoryService:
             pg_conditions.append(Memory.id.in_(cluster_memory_ids))
 
         result = await self.db.execute(select(Memory).where(*pg_conditions))
+        hit_contexts = {r["id"]: (r.get("payload") or {}).get("context_id") for r in search_results}
         memories: dict[str, Memory] = {}
         for m in result.scalars().all():
             memories[str(m.id)] = m
-            if m.summary_embedding_id is not None:
-                memories[str(m.summary_embedding_id)] = m
+            if m.summary_embedding_id is None:
+                continue
+            point_id = str(m.summary_embedding_id)
+            if point_id not in memories or hit_contexts.get(point_id) == str(m.context_id):
+                memories[point_id] = m
         return memories
 
     async def _recall_filter_rows_by_binding(
@@ -6559,10 +6575,7 @@ class MemoryService:
             timings=timings,
         )
 
-        # Get full memory data from PostgreSQL
-        memory_ids = [r["id"] for r in search_results]
-
-        if not memory_ids:
+        if not search_results:
             return await self._empty_recall_response(
                 request=request,
                 selection_config=selection_config,
@@ -6574,13 +6587,15 @@ class MemoryService:
                 context_count=context_count,
             )
 
-        # Fetch memories from PostgreSQL (exclude soft-deleted), applying the
-        # #214 source post-filters, the #887 trust-tier filter and the #496
-        # cluster scope. Keyed by both the row id and the Qdrant point id (#972).
+        # Fetch memories from PostgreSQL (exclude soft-deleted) of the contexts
+        # just searched, applying the #214 source post-filters, the #887
+        # trust-tier filter and the #496 cluster scope. Keyed by both the row
+        # id and the Qdrant point id (#972).
         with timings.stage("hydrate"):
             memories = await self._recall_hydrate_memories(
                 request,
-                memory_ids=memory_ids,
+                search_results=search_results,
+                searched_context_id=plan.search_context_id,
                 cluster_memory_ids=cluster_memory_ids,
             )
 
