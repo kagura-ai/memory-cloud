@@ -36,8 +36,8 @@ The default MCP URL no longer lists `explore`.
 
 ### Notes
 - No database migration, no new environment variables.
-- **After deploy:** run `python -m src.cli.resource_point_metadata_backfill` (plan), then `--workspace <workspace-id> --apply --yes` as a canary, then `--apply --yes`. See `docs/ops/resource-indexer-backfill.md`.
-- **Orphan sweep:** `forget` and the indexer now rely on it for deferred point deletes. With `ORPHAN_VECTOR_SWEEP_ENABLED=false`, those points stay until you run the sweep yourself ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)).
+- **After deploy:** a deployment that indexed resource documents before v0.122.0 runs `python -m src.cli.resource_point_metadata_backfill` (plan), then `--workspace <workspace-id> --apply --yes` as a canary, then `--apply --yes`. See `docs/ops/resource-indexer-backfill.md`.
+- **Orphan sweep:** `forget` and the indexer now rely on it for deferred point deletes. With `ORPHAN_VECTOR_SWEEP_ENABLED=false`, those points stay until you run the sweep yourself ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)). Do not run it on a Qdrant shared with another deployment: see "Orphaned vectors" in `docs/deployment.md`.
 - **Images:** `docker exec kagura-api uv ...` no longer works; `python -m pytest` and `alembic` are unaffected. The web image grows from 193 MB to 239 MB and the api image from 1.62 GB to 1.69 GB.
 
 ## [v0.134.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.134.2) — 2026-10-31
