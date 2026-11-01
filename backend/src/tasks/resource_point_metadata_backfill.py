@@ -169,7 +169,11 @@ async def backfill_resource_point_metadata(
                 continue
             collection = collections.get(row.context_id)
             if collection is None:
-                collection = await resolve_collection_name(db, row.context_id)
+                # A SAVEPOINT like the other per-row reads: a failed lookup
+                # must not leave the session's transaction aborted for the
+                # rows after it.
+                async with db.begin_nested():
+                    collection = await resolve_collection_name(db, row.context_id)
                 collections[row.context_id] = collection
             await update_memory_payload_in_qdrant(
                 memory_id=point_id,

@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointStruct
+from sqlalchemy import text
 
 from db import qdrant as qdrant_module
 from db.qdrant import (
@@ -103,8 +104,9 @@ async def _seed_row(
     tags: list[str] | None = None,
     context_summary: str | None = "ｶﾀｶﾅ summary",
     memory_type: str = "resource_data",
+    memory_id: UUID | None = None,
 ) -> Memory:
-    memory_id = uuid4()
+    memory_id = memory_id or uuid4()
     memory = Memory(
         id=memory_id,
         user_id=_USER,
@@ -243,3 +245,53 @@ class TestResourcePointMetadataBackfill:
         assert applied.failed == [missing.id]
         assert applied.written == 1
         assert await _type_matches(qdrant, collection, context) == {str(present_point)}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_routing_lookup_fails_only_its_row(self, db_session, qdrant, routed):
+        # A real Postgres error in the routing SELECT aborts the transaction
+        # unless it runs in a SAVEPOINT; the rows after it must still be
+        # written (the walk goes in id order, so the broken row goes first).
+        from services import context_routing
+
+        context, collection = routed
+        broken = Context(
+            id=uuid4(),
+            workspace_id=context.workspace_id,
+            name=f"bf_{uuid4().hex[:8]}",
+            display_name="Broken Routing",
+            created_by=_USER,
+            is_private=False,
+        )
+        db_session.add(broken)
+        await db_session.flush()
+        first = await _seed_row(
+            db_session,
+            broken,
+            doc_id="doc-broken",
+            memory_id=UUID(f"00000000-0000-4000-8000-{uuid4().hex[:12]}"),
+        )
+        await _write_old_point(qdrant, collection, broken, first)
+        second = await _seed_row(
+            db_session,
+            context,
+            doc_id="doc-fine",
+            memory_id=UUID(f"ffffffff-ffff-4fff-8fff-{uuid4().hex[:12]}"),
+        )
+        second_point = await _write_old_point(qdrant, collection, context, second)
+        await db_session.commit()
+
+        fetch = context_routing._fetch_config
+
+        async def failing_fetch(db, context_id):
+            if context_id == broken.id:
+                await db.execute(text("SELECT 1/0"))
+            return await fetch(db, context_id)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(context_routing, "_fetch_config", failing_fetch)
+            applied = await backfill_resource_point_metadata(
+                db_session, dry_run=False, workspace_id=context.workspace_id
+            )
+        assert applied.failed == [first.id]
+        assert applied.written == 1
+        assert await _type_matches(qdrant, collection, context) == {str(second_point)}
