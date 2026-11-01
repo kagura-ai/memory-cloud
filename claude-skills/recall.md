@@ -49,7 +49,7 @@ recall(context_id=..., query="$ARGUMENTS", k=10, search_mode="keyword")
 recall(context_id=..., query="$ARGUMENTS", k=10, use_rerank=true)
 ```
 
-**Explore hints** — `explore` is not listed by default: a client that follows `tools/list` needs `?add_tools=explore` or `?profile=full` on the MCP URL. When it is in your tool list, get suggestions for follow-up `explore()` calls to discover related memories via the knowledge graph:
+**Explore hints** — `explore` is not listed by default: a client that follows `tools/list` needs `?add_tools=explore` or `?profile=full` on the MCP URL (`--tool-profile full` on the `kagura-mcp` bridge). When it is in your tool list, get suggestions for follow-up `explore()` calls to discover related memories via the knowledge graph:
 
 ```
 recall(context_id=..., query="auth token handling", k=10, include_explore_hints=true)

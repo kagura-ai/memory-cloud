@@ -1813,7 +1813,7 @@
       "title": "What are API Keys?",
       "overview": "API Keys authenticate MCP clients (Claude Code, Claude Desktop, Gemini CLI) to access your workspace memories. Each key is tied to your user account and workspace, and acts with its owner's workspace role: admin / owner keys can also call workspace-management APIs (public-bound keys excepted).",
       "useCases": "Use cases: connect Claude Code to your memory workspace, integrate with CI/CD pipelines, build custom MCP clients.",
-      "howItWorks": "Create an API key → Add it to your .mcp.json config → Your MCP client can now remember, recall, and explore memories in this workspace."
+      "howItWorks": "Create an API key → Add it to your .mcp.json config → Your MCP client can now remember and recall memories in this workspace."
     },
     "apiKeysTitle": "API Keys",
     "apiKeysDesc": "For Codex CLI, the Python SDK, CI and .mcp.json clients",

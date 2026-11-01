@@ -1813,7 +1813,7 @@
       "title": "APIキーとは？",
       "overview": "APIキーは、MCPクライアント（Claude Code、Claude Desktop、Gemini CLI）がワークスペースのメモリにアクセスするための認証キーです。各キーはユーザーアカウントとワークスペースに紐付けられ、所有者のワークスペースロールの権限で動作します。admin / owner のキーはワークスペース管理APIも呼び出せます(公開バインドキーを除く)。",
       "useCases": "ユースケース: Claude Codeをメモリワークスペースに接続、CI/CDパイプラインとの統合、カスタムMCPクライアントの構築。",
-      "howItWorks": "APIキーを作成 → .mcp.json設定に追加 → MCPクライアントがこのワークスペースのメモリをremember、recall、exploreできるようになります。"
+      "howItWorks": "APIキーを作成 → .mcp.json設定に追加 → MCPクライアントがこのワークスペースのメモリをremember、recallできるようになります。"
     },
     "apiKeysTitle": "APIキー",
     "apiKeysDesc": "Codex CLI、Python SDK、CI、.mcp.json クライアント用",
