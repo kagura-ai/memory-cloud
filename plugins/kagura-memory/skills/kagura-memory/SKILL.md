@@ -26,11 +26,11 @@ Use the available Kagura Memory MCP namespace, typically exposed as tools such a
 - `get_context_info`
 - `recall`
 - `reference`
-- `explore`
 - `remember`
 - `update_memory`
 - `forget`
 - context, edge, sleep, and usage tools when exposed
+- `explore`, which is opt-in: `?add_tools=explore` or `?profile=full` on the MCP URL lists it, and without that a call fails with `tool_not_listed`
 
 If the MCP tools are not available:
 
@@ -123,7 +123,7 @@ When the user asks what is remembered, asks for prior decisions, or needs simila
    - `semantic`: concepts where wording may differ.
 4. Use filters when the user asks for a type, date, tag, source URI, or known category. If tag spelling is uncertain, search broadly first rather than inventing tag filters.
 5. The top three results also carry their `content` (up to 1,500 characters each; `full=N` sets how many, `full=0` none) — answer from it. Call `reference(context_id=..., memory_id=...)` only for a lower-ranked hit, or for one marked `content_truncated: true` (`content_offset=<content_next_offset>` reads on).
-6. For broad context-building, call `explore(context_id=..., memory_id=..., depth=2, min_weight=0.0)` on the strongest seed memory.
+6. For questions that follow a chain of decisions or changes, call `explore(context_id=..., memory_id=..., depth=2, min_weight=0.0)` on the strongest seed memory, when `explore` is in your tool list (see Tool Availability).
 
 <!-- SYNC: keep the query technique + response-reading notes (including the get_context_info.guardrails bullet) in step with claude-skills/guide.md ("Using the memory tools well") and docs/mcp-tools.md ("Usage notes"). The MCP tool descriptions are deliberately short; this is where the depth lives. -->
 

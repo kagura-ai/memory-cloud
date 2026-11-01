@@ -49,13 +49,13 @@ recall(context_id=..., query="$ARGUMENTS", k=10, search_mode="keyword")
 recall(context_id=..., query="$ARGUMENTS", k=10, use_rerank=true)
 ```
 
-**Explore hints** — get suggestions for follow-up `explore()` calls to discover related memories via the knowledge graph:
+**Explore hints** — `explore` is opt-in: it is listed only with `?add_tools=explore` or `?profile=full` on the MCP URL. When it is in your tool list, get suggestions for follow-up `explore()` calls to discover related memories via the knowledge graph:
 
 ```
 recall(context_id=..., query="auth token handling", k=10, include_explore_hints=true)
 ```
 
-When enabled, the response includes up to 3 `explore_hints` — each with a `memory_id` and a `reason` (`top_result`, `high_centrality`, or `unexplored_neighbor`). Use the suggested memory_id as a seed for `explore()` to discover related knowledge beyond keyword/semantic matching.
+When enabled, the response includes up to 3 `explore_hints` — each with a `memory_id` and a `reason` (`top_result`, `high_centrality`, or `unexplored_neighbor`). Use the suggested memory_id as a seed for `explore()` to discover related knowledge beyond keyword/semantic matching. Without `explore` in the tool list, the reply has `explore_hints_omitted` instead, naming the URL change; a call to `explore` fails with `tool_not_listed`. The recall itself is unaffected.
 
 **Filters** — narrow results by type, tags, importance, date, or source:
 

@@ -109,7 +109,7 @@ explore() ──→ Graph Traversal (Neural Memory) ←────────�
 ```
 
 - **`recall()`** — Precision search. Hybrid (semantic 60% + BM25 40%) with optional AI reranking. Returns the most relevant memories.
-- **`explore()`** — Discovery. Traverses the Neural Memory graph to find related memories that keyword search would miss.
+- **`explore()`** — Discovery. Traverses the Neural Memory graph to find related memories that keyword search would miss. Opt-in over MCP: `?add_tools=explore` or `?profile=full` on the URL lists it.
 - **Hebbian learning** — Every `recall()` silently strengthens edges between co-retrieved memories. No explicit training needed — the graph grows organically as you use the system.
 
 This separation is intentional: mixing graph signals into recall degrades precision ([validated via benchmarks](docs/neural-memory-evaluation.md)). Instead, each path does what it's best at.
@@ -241,7 +241,7 @@ cp .mcp.json.example .mcp.json
 
 An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Gemini, Cursor, `claude mcp add`) uses the same `/mcp` URL and connects to the workspace selected in the web UI; `/mcp/w/{workspace_id}` pins such a connector to one workspace when you belong to several.
 
-The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.6 times larger). See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.7 times larger). See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 3. Restart Claude Code and verify:
 
@@ -265,7 +265,7 @@ Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-too
 
 An agent's writes can be listed and undone: `changes_since` + `rollback_session` per session (a stateless MCP client can name its own session with `_meta["ai.kagura/sessionId"]` or a `Kagura-Session-Id` header), or — for clients without a session id — over a time window of your own writes (`by_me=true`, `since` / `until`); see [Which clients get a session id](docs/mcp-clients.md#which-clients-get-a-session-id).
 
-A client does not have to list all 72: the default URL [above](#connect-an-mcp-client) lists the 22 core tools (`?profile=full` lists everything), `?tools=remember,recall` lists exactly the tools you name, and `?add_tools=list_edges` lists the core tools plus the ones you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+A client does not have to list all 72: the default URL [above](#connect-an-mcp-client) lists the 21 core tools (`?profile=full` lists everything), `?tools=remember,recall` lists exactly the tools you name, and `?add_tools=list_edges` lists the core tools plus the ones you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 ## REST API
 

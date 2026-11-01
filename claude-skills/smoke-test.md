@@ -32,7 +32,7 @@ Use this after deployments, tool description changes, or MCP server updates.
 **Prerequisites:**
 
 - The MCP server is running and connected.
-- **The connection lists every tool.** `tools/list` defaults to the 22-tool core profile, and most
+- **The connection lists every tool.** `tools/list` defaults to the 21-tool core profile, and most
   clients let the model call listed tools only — `merge_contexts` and the Sleep, file, resource and
   edge rows (all but `create_edge`) are outside it.
   Connect with the full list: put `?profile=full` on the endpoint URL
@@ -59,7 +59,7 @@ describe_tools()
 -> Verify: len(listed) + count == 72 on any connection — the registry total this runbook is built
    for. A different sum means a tool was added or removed: reconcile the Coverage cross-check
    (section 8) before trusting the run
--> ABORT when count > 0 (a default connection answers count=50 with the 22 core tools in
+-> ABORT when count > 0 (a default connection answers count=51 with the 21 core tools in
    `listed`): create nothing, report step 0 as FAIL and tell the user to reconnect with the full
    tool list — `?profile=full` on the MCP endpoint URL, or `--tool-profile full` for the
    `kagura-mcp` stdio bridge — then run the smoke test again. The reply's `url` block says the same
@@ -245,6 +245,8 @@ reference(memory_id=..., context_id=...)
 
 explore(memory_id=..., context_id=..., depth=2, min_weight=0.0)
 -> Verify: returns response (total_activated >= 0, no error)
+-> Note: explore is opt-in (`?profile=full` or `?add_tools=explore`): step 0 confirmed the first.
+   On a URL that does not list it the call fails with tool_not_listed, naming that change
 
 recall_upcoming(context_id=..., from="now")
 -> Verify: status=success

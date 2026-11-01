@@ -10,7 +10,7 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 
 | URL ends with | The client lists |
 |---|---|
-| `/mcp` (or `?profile=core`) | Core tools (default) — the 22 core memory and context tools (see Tool Profiles). Sleep, analyses, files, edge edits and listings (only `create_edge` is in core), secrets, resources and the agent control plane are left out; `describe_tools` lists them |
+| `/mcp` (or `?profile=core`) | Core tools (default) — the 21 core memory and context tools (see Tool Profiles). Sleep, analyses, files, edge edits and listings (only `create_edge` is in core), secrets, resources and the agent control plane are left out; `describe_tools` lists them |
 | `?profile=full` | All tools |
 | `?tools=…` | Exactly the names in the list |
 | `?add_tools=…` | The profile (core by default) plus the names in the list; ignored next to `?tools=` |
