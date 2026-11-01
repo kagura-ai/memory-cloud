@@ -656,3 +656,189 @@ class TestRepointedRememberRowAgainstRealStores:
             await db_session.commit()
             await client.delete_collection(collection)
             await client.close()
+
+
+class TestOldVersionStraysAgainstRealStores:
+    """#2248 end to end against a live Postgres and Qdrant.
+
+    A ``remember(external_id, details={doc_id, version: 1})`` row, chunked
+    under its own id, is replaced by version 2 of its document. After the
+    batch the row is gone and so are its own-id point, its chunks and the
+    version-1 point; only the version-2 point is left, and the orphan sweep
+    finds nothing to remove. ``[1, 2]`` re-points the row onto the v1 point
+    first (#2164), then retires it, in one batch.
+    """
+
+    @pytest.mark.parametrize("versions", [[2], [1, 2]], ids=["v2", "v1-then-v2"])
+    async def test_a_replaced_row_leaves_no_stray_points(
+        self, db_session, monkeypatch, versions
+    ) -> None:
+        from datetime import timedelta
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from qdrant_client import AsyncQdrantClient
+        from sqlalchemy import delete, select
+
+        from db import qdrant as qdrant_module
+        from db.qdrant import CHUNK_OF_FIELD, _point_ref, ensure_kagura_memories_collection
+        from models.auth import Context, Workspace, WorkspaceMember, WorkspaceRole
+        from models.memory import Memory
+        from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
+        from services.orphan_vector_sweep import _classify
+        from services.resource_indexer import ResourceIndexer, resource_point_id
+        from utils.datetime import utcnow
+
+        client = AsyncQdrantClient(url=_qdrant_url(), timeout=5)
+        try:
+            await client.get_collections()
+        except Exception as exc:  # noqa: BLE001 — intentional broad skip guard
+            await client.close()
+            pytest.skip(f"Qdrant unreachable at {_qdrant_url()}: {exc}")
+        monkeypatch.setattr(qdrant_module, "_qdrant_client", client)
+        collection = f"kagura_memories_it_{uuid.uuid4().hex[:12]}"
+        await ensure_kagura_memories_collection(_EMBEDDING_DIM, collection)
+
+        user = f"retire_{uuid.uuid4().hex[:8]}"
+        slug = f"res-{uuid.uuid4().hex[:8]}"
+        workspace = Workspace(id=uuid.uuid4(), name="Retire", owner_user_id=user)
+        context = Context(
+            id=uuid.uuid4(),
+            workspace_id=workspace.id,
+            name=f"retire_{uuid.uuid4().hex[:8]}",
+            display_name="Retire",
+            created_by=user,
+            is_private=False,
+            resource_id=slug,
+        )
+        resource = Resource(id=uuid.uuid4(), workspace_id=workspace.id, resource_id=slug)
+        workspace_id, context_id, resource_pk = workspace.id, context.id, resource.id
+        try:
+            db_session.add(workspace)
+            await db_session.flush()
+            db_session.add(
+                WorkspaceMember(workspace_id=workspace.id, user_id=user, role=WorkspaceRole.OWNER)
+            )
+            db_session.add_all([context, resource])
+            await db_session.flush()
+            db_session.add(
+                ResourceSchema(
+                    resource_pk=resource.id,
+                    resource_id=slug,
+                    schema_version=1,
+                    field_definitions=[
+                        {"name": "title", "classification": "public", "index_hint": "fulltext"}
+                    ],
+                )
+            )
+            row = Memory(
+                id=uuid.uuid4(),
+                user_id=user,
+                workspace_id=workspace.id,
+                context_id=context.id,
+                summary="a remembered external document",
+                content='{"title": "Quarterly report"}',
+                details={"resource_id": slug, "doc_id": "doc_1", "version": 1},
+                type="fact",
+                client="pytest",
+                embedding_status="success",
+            )
+            row.summary_embedding_id = row.id
+            db_session.add(row)
+            for version in versions:
+                db_session.add(
+                    ResourceEvent(
+                        resource_pk=resource.id,
+                        resource_id=slug,
+                        op="upsert",
+                        doc_id="doc_1",
+                        version=version,
+                        payload={"title": f"Quarterly report v{version}"},
+                        created_at=utcnow(),
+                    )
+                )
+            await db_session.commit()
+            row_id = row.id
+
+            # The row's own-id point and two content chunks, as the embedding
+            # path wrote them, and a v1 document point.
+            base = {"workspace_id": str(workspace.id), "context_id": str(context.id)}
+            v1_point = str(resource_point_id(slug, "doc_1", 1))
+            await client.upsert(
+                collection_name=collection,
+                points=[
+                    PointStruct(
+                        id=str(row_id),
+                        vector={KAGURA_MEMORIES_VECTOR_NAME: [0.1] * _EMBEDDING_DIM},
+                        payload={**base, "memory_id": str(row_id)},
+                    ),
+                    *(
+                        PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector={KAGURA_MEMORIES_VECTOR_NAME: [0.2] * _EMBEDDING_DIM},
+                            payload={**base, CHUNK_OF_FIELD: str(row_id), "chunk_index": i},
+                        )
+                        for i in range(2)
+                    ),
+                    PointStruct(
+                        id=v1_point,
+                        vector={KAGURA_MEMORIES_VECTOR_NAME: [0.4] * _EMBEDDING_DIM},
+                        payload={
+                            **base,
+                            "memory_id": str(row_id),
+                            "resource_id": slug,
+                            "doc_id": "doc_1",
+                            "version": 1,
+                        },
+                    ),
+                ],
+                wait=True,
+            )
+
+            with patch("services.resource_indexer.get_qdrant_client", return_value=client):
+                indexer = ResourceIndexer(db_session)
+            embedder = MagicMock()
+            embedder.embed = AsyncMock(return_value=[0.3] * _EMBEDDING_DIM)
+            indexer._plan_suspended = AsyncMock(return_value=False)
+            with patch(
+                "services.resource_indexer.resolve_context_routing",
+                AsyncMock(return_value=(collection, embedder)),
+            ):
+                metrics = await indexer.process_incremental(slug, context.id)
+
+            assert metrics.errors == 0, metrics.reason
+            assert metrics.applied_upserts == len(versions)
+            v2_point = str(resource_point_id(slug, "doc_1", 2))
+            points, _ = await client.scroll(
+                collection_name=collection, limit=100, with_payload=True
+            )
+            assert {str(p.id) for p in points} == {v2_point}
+
+            db_session.expire_all()
+            assert await db_session.get(Memory, row_id) is None
+            live = (
+                (await db_session.execute(select(Memory).where(Memory.context_id == context_id)))
+                .scalars()
+                .all()
+            )
+            assert [(m.resource_version, str(m.summary_embedding_id)) for m in live] == [
+                (2, v2_point)
+            ]
+            refs = [_point_ref(p) for p in points]
+            assert await _classify(db_session, refs, utcnow() + timedelta(hours=1)) == {}
+        finally:
+            await db_session.rollback()
+            await db_session.execute(delete(Memory).where(Memory.workspace_id == workspace_id))
+            await db_session.execute(
+                delete(IndexerState).where(IndexerState.context_id == context_id)
+            )
+            for model in (ResourceEvent, ResourceSchema):
+                await db_session.execute(delete(model).where(model.resource_pk == resource_pk))
+            await db_session.execute(delete(Resource).where(Resource.id == resource_pk))
+            await db_session.execute(delete(Context).where(Context.id == context_id))
+            await db_session.execute(
+                delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id)
+            )
+            await db_session.execute(delete(Workspace).where(Workspace.id == workspace_id))
+            await db_session.commit()
+            await client.delete_collection(collection)
+            await client.close()
