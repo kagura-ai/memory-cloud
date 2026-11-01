@@ -140,14 +140,19 @@ def _service_with_stubbed_search(db_session: AsyncSession, candidate_memories: l
     return svc
 
 
-async def _recall_ids(svc, *, query, owner_id, context_id, workspace_id, filters=None):
-    """Run a keyword-mode recall and return the set of returned memory IDs (str)."""
+async def _recall_ids(svc, *, query, owner_id, context_ids, workspace_id, filters=None):
+    """Run a keyword-mode recall and return the set of returned memory IDs (str).
+
+    Searches both contexts: hydration reads the searched contexts' rows, so the
+    trust filter is what must tell these rows apart.
+    """
     request = RecallRequest(query=query, k=10, search_mode="keyword", filters=filters)
     response = await svc.recall(
         request=request,
         user_id=owner_id,
-        current_context_id=context_id,
+        current_context_id=context_ids[0],
         current_workspace_id=workspace_id,
+        context_ids=context_ids,
     )
     return {str(r.memory_id) for r in response.results}
 
@@ -165,7 +170,7 @@ async def test_trusted_filter_excludes_all_external_context_rows(
         svc,
         query="trust tier recall probe",
         owner_id=s["owner_id"],
-        context_id=s["trusted_ctx_id"],
+        context_ids=[s["trusted_ctx_id"], s["external_ctx_id"]],
         workspace_id=s["workspace_id"],
         filters={"trust_tier": "trusted"},
     )
@@ -194,7 +199,7 @@ async def test_no_filter_returns_all_including_external(
         svc,
         query="trust tier recall probe",
         owner_id=s["owner_id"],
-        context_id=s["trusted_ctx_id"],
+        context_ids=[s["trusted_ctx_id"], s["external_ctx_id"]],
         workspace_id=s["workspace_id"],
         filters=None,
     )
