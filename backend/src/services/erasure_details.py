@@ -830,11 +830,16 @@ async def pseudonymize_audit_logs(
       someone else
       (``RoleManager.assign_role``, ``SystemAdminService.promote``/``demote``);
       a blind overwrite would misattribute it.
-    - ``resource`` (conventionally ``user:{email}``): every occurrence of
-      each address (first: longer, more specific) on a row written while the
-      subject held it (``held_at``, #2359: the subject acting on whoever held
-      one of their former addresses later names that member, not them), then
-      of the raw sub, is replaced by its pseudonym. The result is cut to the column's length:
+    - ``resource`` (conventionally ``user:{email}``): each address (first:
+      longer, more specific) on a row written while the subject held it
+      (``held_at``, #2359: the subject acting on whoever held one of their
+      former addresses later names that member, not them), then the raw sub,
+      is replaced by its pseudonym (``_rewrite_own_resource``). Under ``user:``
+      only the whole value is, the rule of ``audit_mention_predicate``:
+      ``user:joann@x.io`` names another member than ``ann@x.io``, and the
+      exact match of ``pseudonymize_audit_mentions`` has to find it unchanged
+      whichever erasure runs first. Any other resource has no exact match to
+      keep: every occurrence goes there. The result is cut to the column's length:
       a pseudonym is longer than most subs and emails, and a value that no
       longer fits would fail the statement — and with it the erasure's
       whole Postgres step, on every retry.
@@ -864,10 +869,12 @@ async def pseudonymize_audit_logs(
     held = merged_addresses(addresses)
     pseudonyms = {address.email: erasure_pseudonym(address.email) for address in held}
     for address in held:
-        # ``replace(r, '', p)`` is ``r``: outside the holding nothing changes,
+        # ``\&`` is the match itself: outside the holding nothing changes,
         # and the expression grows by one call per address, not doubles
-        searched = case((held_at(AuditLog, address), address.email), else_=literal(""))
-        resource = func.replace(resource, searched, pseudonyms[address.email])
+        replacement = case(
+            (held_at(AuditLog, address), pseudonyms[address.email]), else_=literal(r"\&")
+        )
+        resource = _rewrite_own_resource(resource, address.email, replacement)
     values["user_email"] = case(
         *(
             (
@@ -880,7 +887,8 @@ async def pseudonymize_audit_logs(
         else_=AuditLog.user_email,
     )
     values["resource"] = func.left(
-        func.replace(resource, user_id, user_pseudonym), AuditLog.resource.type.length
+        _rewrite_own_resource(resource, user_id, user_pseudonym),
+        AuditLog.resource.type.length,
     )
 
     def own_rows(row: Any) -> tuple[ColumnElement[bool], ...]:
@@ -900,6 +908,27 @@ def _own_audit_rows(row: Any, user_id: str, *, orphaned_only: bool) -> ColumnEle
     if orphaned_only:
         predicate = predicate & ~exists().where(User.user_id == row.user_id)
     return predicate
+
+
+def _rewrite_own_resource(
+    resource: ColumnElement[str], value: str, replacement: Any
+) -> ColumnElement[str]:
+    """``resource`` with ``value``, literally, replaced by ``replacement``:
+    after ``user:`` only as the whole value, elsewhere any occurrence
+    (``pseudonymize_audit_logs``). The pattern reads the stored column, which
+    an earlier call for another value leaves ``user:`` or not. An empty
+    ``value`` is ``resource``: its pattern would match everywhere."""
+    if not value:
+        return resource
+    escaped = re.escape(value)
+    pattern = case(
+        (
+            AuditLog.resource.startswith(USER_RESOURCE_PREFIX),
+            rf"(?<=^{USER_RESOURCE_PREFIX}){escaped}$",
+        ),
+        else_=escaped,
+    )
+    return func.regexp_replace(resource, pattern, replacement, "g")
 
 
 def _by_length(values: Iterable[str]) -> list[str]:

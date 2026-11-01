@@ -645,8 +645,21 @@ async def test_audit_rows_get_the_sub_and_email_pseudonyms_by_the_raw_sub() -> N
     # admin who got a former address later and acted on them keeps it)
     case_sql = sql[sql.index("user_email=CASE") : sql.index("resource=left(")]
     assert "audit_logs.created_at >= " in case_sql
-    assert "replace(audit_logs.resource, CASE WHEN (audit_logs.created_at >=" in sql
+    resource_sql = sql[sql.index("resource=left(") :]
+    assert "regexp_replace(audit_logs.resource, CASE WHEN (audit_logs.resource LIKE" in resource_sql
+    assert "CASE WHEN (audit_logs.created_at >=" in resource_sql
+    assert r"\&" in params.values()  # the replacement outside the holding: the match itself
     assert HELD_SINCE in params.values()
+
+
+async def test_own_resource_patterns_escape_the_value() -> None:
+    # what they match runs on Postgres (test_audit_subject_erasure_db)
+    _, params = await _audit_update(["a.b@x.io"])
+
+    values = _flat(params)
+    assert r"a\.b@x\.io" in values
+    assert r"(?<=^user:)a\.b@x\.io$" in values
+    assert r"(?<=^user:)raw\-sub$" in values
 
 
 async def test_without_an_email_the_sub_fallbacks_are_still_scrubbed() -> None:

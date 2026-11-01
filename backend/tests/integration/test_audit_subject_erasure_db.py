@@ -19,8 +19,10 @@ from models.auth import AuditLog, User
 from models.erasure import ErasureRequest
 from services.erasure_details import (
     AUDIT_SUBJECT_METADATA_KEYS,
+    HeldAddress,
     count_audit_mentions,
     erasure_pseudonym,
+    pseudonymize_audit_logs,
     pseudonymize_audit_trail,
 )
 from utils.datetime import utcnow
@@ -485,7 +487,6 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
     row is the other's mention by address — erased at once queue instead of
     deadlocking, and a row outside the holding window stays."""
     from services import erasure_details
-    from services.erasure_details import HeldAddress
 
     first, second = subject["sub"], f"{subject['sub']}-second"
     first_email, second_email = f"{first}@example.invalid", f"{second}@example.invalid"
@@ -534,9 +535,9 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
             return result
 
     with patch.object(erasure_details, "_audit_metadata_ids", scan_together):
-        assert await asyncio.wait_for(
+        counts = await asyncio.wait_for(
             asyncio.gather(erase(first, first_email), erase(second, second_email)), timeout=15
-        ) == [(1, 1), (1, 1)]
+        )
     async with _maker(async_engine)() as db:
         actual = (
             await db.execute(
@@ -558,9 +559,207 @@ async def test_mutual_windowed_address_mentions_share_one_ordered_lock_union(
         ),
         ("someone-else", "admin@example.invalid", f"user:{first_email}"),
     ]
+    # after the rows: either transaction can take the lock first, and the
+    # order must change neither the final state nor these counts
+    assert counts == [(1, 1), (1, 1)]
     async with _maker(async_engine)() as db:
         await db.execute(delete(AuditLog).where(AuditLog.id.in_(ids)))
         await db.commit()
+
+
+@pytest.mark.parametrize(
+    ("actor", "actor_email", "other", "other_email", "named"),
+    [
+        pytest.param(
+            "actor-{t}",
+            "ann{t}@example.invalid",
+            "other-{t}",
+            "joann{t}@example.invalid",
+            "joann{t}@example.invalid",
+            id="address-ends-with-the-actors",
+        ),
+        pytest.param(
+            "actor-{t}",
+            "smith{t}@example.invalid",
+            "other-{t}",
+            "mary.smith{t}@example.invalid",
+            "mary.smith{t}@example.invalid",
+            id="dotted-address-ends-with-the-actors",
+        ),
+        pytest.param(
+            "actor-{t}",
+            "ann{t}@example.invalid",
+            "other-{t}",
+            "ann{t}@example.invalid.test",
+            "ann{t}@example.invalid.test",
+            id="address-starts-with-the-actors",
+        ),
+        pytest.param(
+            "local:alice{t}",
+            "actor{t}@example.invalid",
+            "local:alice{t}2",
+            "other{t}@example.invalid",
+            "local:alice{t}2",
+            id="sub-starts-with-the-actors",
+        ),
+        pytest.param(
+            "1000{t}",
+            "actor{t}@example.invalid",
+            "other-{t}",
+            "name.1000{t}.tail@example.invalid",
+            "name.1000{t}.tail@example.invalid",
+            id="address-contains-the-actors-sub",
+        ),
+        pytest.param(
+            "actor-{t}",
+            "brien{t}@example.invalid",
+            "other-{t}",
+            "o'brien{t}@example.invalid",
+            "o'brien{t}@example.invalid",
+            id="address-ends-with-the-actors-after-an-apostrophe",
+        ),
+        pytest.param(
+            "alice{t}",
+            "actor{t}@example.invalid",
+            "local:alice{t}",
+            "other{t}@example.invalid",
+            "local:alice{t}",
+            id="sub-ends-with-the-actors-after-a-colon",
+        ),
+        pytest.param(
+            "actor-{t}",
+            "ann{t}@example.invalid",
+            "other-{t}",
+            "jo|ann{t}@example.invalid",
+            "jo|ann{t}@example.invalid",
+            id="address-ends-with-the-actors-after-a-pipe",
+        ),
+        pytest.param(
+            "1000{t}",
+            "actor{t}@example.invalid",
+            "auth0|1000{t}",
+            "other{t}@example.invalid",
+            "auth0|1000{t}",
+            id="sub-ends-with-the-actors-after-a-pipe",
+        ),
+        pytest.param(
+            "actor-{t}",
+            "a.b{t}@example.invalid",
+            "other-{t}",
+            "a-b{t}@example.invalid",
+            "a-b{t}@example.invalid",
+            id="dot-matches-only-a-dot",
+        ),
+    ],
+)
+@pytest.mark.parametrize("named_member_first", [False, True])
+async def test_own_row_resource_leaves_a_longer_value_for_its_own_subject(
+    async_engine: AsyncEngine,
+    subject: dict[str, Any],
+    actor: str,
+    actor_email: str,
+    other: str,
+    other_email: str,
+    named: str,
+    named_member_first: bool,
+) -> None:
+    """An identifier embedded in a longer one is not the subject's: the own-row
+    rewrite leaves it whole, so the exact mention match of the member the row
+    names still finds it. The order of the two changes nothing."""
+    tag = uuid.uuid4().hex
+    actor, actor_email = actor.format(t=tag), actor_email.format(t=tag)
+    other, other_email = other.format(t=tag), other_email.format(t=tag)
+    named = named.format(t=tag)
+    held_since = datetime(2026, 1, 1)
+    row = AuditLog(
+        user_id=actor,
+        user_email=actor_email,
+        action=subject["sub"],
+        resource=f"user:{named}",
+        created_at=datetime(2026, 2, 1),
+    )
+    async with _maker(async_engine)() as db:
+        db.add(row)
+        await db.commit()
+        row_id = row.id
+
+    async def erase(sub: str, email: str) -> tuple[tuple[int, int], str]:
+        async with _maker(async_engine)() as db:
+            held = [HeldAddress(email, ((held_since, None),))]
+            counts = await pseudonymize_audit_trail(db, sub, held)
+            await db.commit()
+            resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row_id))
+            return counts, resource
+
+    subjects = [(actor, actor_email), (other, other_email)]
+    counts: dict[str, tuple[int, int]] = {}
+    resource = ""
+    for sub, email in reversed(subjects) if named_member_first else subjects:
+        counts[sub], resource = await erase(sub, email)
+    assert resource == f"user:{erasure_pseudonym(named)}"
+    assert counts == {actor: (1, 0), other: (0, 1)}
+
+
+async def test_own_row_resource_outside_a_user_value_rewrites_any_occurrence(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """Exact matching is the ``user:`` namespace's: nothing matches any other
+    resource exactly, so there every occurrence goes, embedded or not."""
+    sub, pseudonym = subject["sub"], subject["p"]
+    email = f"{sub}@example.invalid"
+    row = _audit(subject, sub, email=email)
+    row.resource = f"note:{email}-old,{sub}-old|{email}"
+    row.created_at = datetime(2026, 2, 1)
+    with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
+        async with _maker(async_engine)() as db:
+            db.add(row)
+            await db.commit()
+            held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
+            assert await pseudonymize_audit_trail(db, sub, held) == (1, 0)
+            await db.commit()
+            resource = await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id))
+        email_p = erasure_pseudonym(email)
+        assert resource == f"note:{email_p}-old,{pseudonym}-old|{email_p}"
+
+
+async def test_own_row_resource_outside_the_holding_keeps_the_address(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """Before the subject held the address it was another member's: the row
+    keeps it, in both resource forms, and is still the subject's own."""
+    sub, pseudonym = subject["sub"], subject["p"]
+    email = f"former-{uuid.uuid4().hex}@example.invalid"
+    rows = [_audit(subject, sub, email="other@example.invalid") for _ in range(2)]
+    rows[0].resource = f"user:{email}"
+    rows[1].resource = f"note:{email}"
+    for row in rows:
+        row.created_at = datetime(2025, 6, 1)
+    with patch("services.account_erasure_service._audit_salt", return_value="2348-test-salt"):
+        async with _maker(async_engine)() as db:
+            db.add_all(rows)
+            await db.commit()
+            held = [HeldAddress(email, ((datetime(2026, 1, 1), None),))]
+            await pseudonymize_audit_trail(db, sub, held)
+            await db.commit()
+            after = await _snapshot(db, subject)
+    assert [after[row.id]["resource"] for row in rows] == [f"user:{email}", f"note:{email}"]
+    assert {after[row.id]["user_id"] for row in rows} == {pseudonym}
+
+
+@pytest.mark.parametrize("resource", ["", "user:", "user:a|", "workspace:x"])
+async def test_own_row_resource_is_unchanged_by_an_empty_address(
+    async_engine: AsyncEngine, subject: dict[str, Any], resource: str
+) -> None:
+    row = _audit(subject, subject["sub"])
+    row.resource = resource
+    row.created_at = datetime(2026, 2, 1)
+    async with _maker(async_engine)() as db:
+        db.add(row)
+        await db.commit()
+        held = [HeldAddress("", ((datetime(2026, 1, 1), None),))]
+        assert await pseudonymize_audit_logs(db, subject["sub"], held) == 1
+        await db.commit()
+        assert await db.scalar(select(AuditLog.resource).where(AuditLog.id == row.id)) == resource
 
 
 @pytest.mark.parametrize("historical", [False, True])
