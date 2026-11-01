@@ -5258,16 +5258,19 @@ class MemoryService:
         column). Matching on ``Memory.id`` alone silently drops every resource hit
         during hydration → recall returns 0 in all modes (Issue #972).
 
-        So the SELECT resolves via either identifier, and the returned dict is
-        keyed by BOTH the row id and the point id — keying by both (rather than
-        only the point id) keeps the lookup robust when ``summary_embedding_id``
-        is unset or divergent. For normal memories the two coincide (one key).
+        So the SELECT resolves via either identifier, and a row is keyed by
+        whichever of the two a hit carries — matching both (rather than only
+        the point id) keeps the lookup robust when ``summary_embedding_id`` is
+        unset or divergent, and a content chunk's hit carries the row id. For
+        normal memories the two coincide (one key).
 
         A resource point's id comes from the document, so rows of two contexts
         can name one point (``unshared_point_id``), and the id alone does not
         say which row a hit is. Only the contexts the search filtered on are
-        read, and when two of those hold a row of the point, the point's own
-        ``context_id`` picks the row.
+        read, and a hit resolves to the row of the ``context_id`` its point
+        carries, the context the search found it in. A point whose row in that
+        context is gone hydrates to nothing, as it does in a recall of that
+        context alone.
 
         Also applies the #214 source post-filters, the #887 trust-tier read
         filter and the #496 cluster scope.
@@ -5282,7 +5285,7 @@ class MemoryService:
                 cluster before reaching hydration.
 
         Returns:
-            Point-id / row-id → Memory, excluding soft-deleted rows.
+            Hit id → Memory, excluding soft-deleted rows.
         """
         memory_ids = [r["id"] for r in search_results]
         searched_context_ids = (
@@ -5326,12 +5329,12 @@ class MemoryService:
         hit_contexts = {r["id"]: (r.get("payload") or {}).get("context_id") for r in search_results}
         memories: dict[str, Memory] = {}
         for m in result.scalars().all():
-            memories[str(m.id)] = m
-            if m.summary_embedding_id is None:
-                continue
-            point_id = str(m.summary_embedding_id)
-            if point_id not in memories or hit_contexts.get(point_id) == str(m.context_id):
-                memories[point_id] = m
+            for hit_id in (str(m.id), str(m.summary_embedding_id)):
+                if hit_id not in hit_contexts:
+                    continue
+                carried = hit_contexts[hit_id]
+                if carried is None or carried == str(m.context_id):
+                    memories[hit_id] = m
         return memories
 
     async def _recall_filter_rows_by_binding(

@@ -162,8 +162,13 @@ async def test_candidate_fetch_reads_the_contexts_the_search_filtered_on(multi_c
 
     searched = svc.search_service.hybrid_search.await_args.kwargs["context_id"]
     assert searched == ([str(cid) for cid in context_ids] if multi_context else str(current))
-    statement = db.execute.call_args_list[-1].args[0]
-    compiled = statement.compile()
-    assert "memories.context_id IN" in " ".join(str(compiled).split())
-    bound = next(value for name, value in compiled.params.items() if name.startswith("context_id_"))
-    assert bound == (searched if multi_context else [searched])
+    compiled = [
+        call.args[0].compile()
+        for call in db.execute.call_args_list
+        if call.args and hasattr(call.args[0], "compile")
+    ]
+    hydration = [c for c in compiled if "summary_embedding_id IN" in " ".join(str(c).split())]
+    assert len(hydration) == 1
+    assert "memories.context_id IN" in " ".join(str(hydration[0]).split())
+    bound = [v for name, v in hydration[0].params.items() if name.startswith("context_id_")]
+    assert bound == [searched if multi_context else [searched]]

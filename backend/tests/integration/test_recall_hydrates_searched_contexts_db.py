@@ -2,9 +2,9 @@
 
 A resource point's id comes from the document, so two live rows of different
 contexts can name one point (``unshared_point_id`` says how). The point carries
-one ``context_id``; a point two rows name resolves to the searched context's
-row, and with several searched contexts to the row of the context the point
-carries.
+one ``context_id``; a point two rows name resolves to the row of the context it
+carries, which is the searched context's, and with several searched contexts
+still that one.
 
 Real rows, read back by ``MemoryService.recall()``. ``hybrid_search`` is stubbed
 with the point the vector store would return, so each test fixes which point
@@ -26,6 +26,7 @@ from models.schemas import RecallRequest, RememberRequest
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
 from services.resource_indexer import resource_point_id
+from utils.datetime import utcnow
 
 BOTH_ORDERS = pytest.mark.parametrize("first_row_inserted_first", [True, False])
 
@@ -185,7 +186,7 @@ async def test_hit_with_no_row_in_the_searched_context_returns_nothing(
         point,
         first_row_inserted_first=first_row_inserted_first,
     )
-    await db_session.delete(second_row)
+    second_row.deleted_at = utcnow()
     await db_session.commit()
 
     response, _ = await _recall(
@@ -265,6 +266,39 @@ async def test_multi_context_recall_takes_the_row_of_the_context_the_point_carri
     )
 
     assert [r.memory_id for r in response.results] == [expected.id]
+
+
+@pytest.mark.asyncio
+@BOTH_ORDERS
+async def test_multi_context_recall_does_not_move_a_hit_to_another_searched_context(
+    db_session, point, first_row_inserted_first
+):
+    """The carried context's row is gone: the hit reads as in a recall of that context alone."""
+    owner, ws = await _workspace(db_session)
+    first_context = await _context(db_session, owner, ws)
+    second_context = await _context(db_session, owner, ws)
+    third_context = await _context(db_session, owner, ws)
+    first_row, _ = await _rows_in_order(
+        db_session,
+        first_context,
+        second_context,
+        point,
+        first_row_inserted_first=first_row_inserted_first,
+    )
+    await _row_of_point(db_session, third_context, point, "row of the third context")
+    first_row.deleted_at = utcnow()
+    await db_session.commit()
+
+    response, _ = await _recall(
+        db_session,
+        [_point_hit(first_context, point)],
+        user_id=owner,
+        ws=ws,
+        ctx=first_context,
+        context_ids=[first_context.id, second_context.id, third_context.id],
+    )
+
+    assert response.results == []
 
 
 @pytest.fixture
