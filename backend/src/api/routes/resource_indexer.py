@@ -56,6 +56,14 @@ class IndexerStateMetrics(BaseModel):
     applied_upserts: int = Field(0, description="Upsert events applied in the last run")
     applied_deletes: int = Field(0, description="Delete events applied in the last run")
     errors: int = Field(0, description="Errors observed in the last run")
+    failed_events: int = Field(
+        0,
+        description=(
+            "Events that failed since the last batch with no failures, capped "
+            "at 20. One below ``last_offset`` is not retried: the IDs are in "
+            "``indexer_state.metrics.failed_events`` for an operator rewind."
+        ),
+    )
     skipped_reason: IndexerSkippedReason | None = Field(
         None,
         description=(

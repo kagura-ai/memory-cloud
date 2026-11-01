@@ -142,7 +142,8 @@ class TestResponseContract:
                     "metrics": {
                         "applied_upserts": 10,
                         "applied_deletes": 1,
-                        "errors": 0,
+                        "errors": 3,
+                        "failed_events": 3,
                         "skipped_reason": None,
                     },
                 },
@@ -173,6 +174,7 @@ class TestResponseContract:
         body = resp.json()
         assert body["state"]["job_status"] == "idle"
         assert body["state"]["metrics"]["applied_upserts"] == 10
+        assert body["state"]["metrics"]["failed_events"] == 3
         assert len(body["recent_events"]) == 1
         assert body["recent_events"][0]["op"] == "upsert"
 
@@ -300,6 +302,7 @@ class TestOpenAPISnapshot:
         "applied_upserts",
         "applied_deletes",
         "errors",
+        "failed_events",
         "skipped_reason",
     }
 

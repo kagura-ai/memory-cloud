@@ -1129,6 +1129,7 @@ Notes:
 - `applied_upserts: int` — optional (default `0`)
 - `applied_deletes: int` — optional (default `0`)
 - `errors: int` — optional (default `0`)
+- `failed_events: int` — optional (default `0`)
 - `skipped_reason: IndexerSkippedReason | None` — optional
 
 ### IndexerState (BaseModel, L65)
