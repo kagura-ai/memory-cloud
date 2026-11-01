@@ -17,9 +17,11 @@ import pytest
 
 from mcp_server.tools import get_tool_definitions
 from tests.plugin.conftest import REPO_ROOT
+from utils.time_trigger import normalize_trigger
 
 RECALL = "claude-skills/recall.md"
 REMEMBER = "claude-skills/remember.md"
+SESSION_SUMMARY = "claude-skills/session-summary.md"
 CODEX = "plugins/kagura-memory/skills/kagura-memory/SKILL.md"
 DEFAULT_CONTEXT = "Default context: <name>; omit context_id"
 
@@ -150,3 +152,56 @@ def test_skill_copies_point_at_the_short_copies(relative):
     text = _flat(relative)
     assert "STORE_AUTHORITY in plugins/kagura-memory/hooks/kagura_guardrails.py" in text
     assert "backend/src/mcp_server/tools/_definitions.py" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_keeps_each_personal_fact_with_its_specifics(relative):
+    """#2465: a conversation yields one memory per stated fact, values verbatim."""
+    text = _remember_rules(relative)
+    assert "One fact per memory, specifics verbatim." in text
+    assert "a per-item price and a total are two facts; keep both" in text
+    assert "Never merge several personal facts into one summary." in text
+    assert "not generic advice" in text
+    assert "Write many items with one `remember_batch` call" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_batch_guidance_splits_and_falls_back(relative):
+    """#2465: a call above the server's item cap stores nothing; old servers lack the tool."""
+    text = _remember_rules(relative) if relative == CODEX else _flat(relative)
+    assert "about 20 items" in text and "split a longer list" in text
+    assert "one `remember` per item" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_resolves_relative_dates_into_the_content(relative):
+    """#2465: ``observed_at`` stays the material's date, not the resolved one."""
+    text = _remember_rules(relative)
+    assert "Resolve relative dates." in text
+    assert "`observed_at` stays the material's date" in text
+    assert 'the one exception to "as it states it"' in text
+    assert "With no material date, leave the phrase as stated." in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+@pytest.mark.parametrize("memory_type", ["fact", "preference", "event", "time"])
+def test_remember_vocabulary_covers_general_knowledge(relative, memory_type):
+    assert f"- `{memory_type}`: " in _remember_rules(relative)
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX, SESSION_SUMMARY])
+def test_personal_facts_keep_identifiers_out_and_stay_out_of_shared_contexts(relative):
+    """#2465: the tool descriptions refuse PII; a stated name is the fact itself."""
+    text = _flat(relative)
+    assert "A name or value inside a stated fact is the fact itself" in text
+    assert "account, card or ID numbers stay out" in text
+    assert "or a private one (`is_private`), not a shared project context" in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX, SESSION_SUMMARY])
+def test_time_memories_spell_out_the_trigger_the_server_requires(relative):
+    """#2465: ``type="time"`` without an integer year is a rejected write."""
+    text = _flat(relative)
+    assert '`details={"trigger": {"year": 2026, "month": 11, "day": 3}}`' in text
+    assert "A plan with no date is a `fact`" in text
+    normalize_trigger({"year": 2026, "month": 11, "day": 3})
