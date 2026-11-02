@@ -31,6 +31,8 @@ _AUTH_TIME_CLAIMS = json.dumps(
 
 
 _CERT_FETCH_TIMEOUT_SECONDS = 10
+# The Google callback makes these requests on the event loop: a hung one stops the worker.
+_GOOGLE_HTTP_TIMEOUT_SECONDS = 10
 
 
 def _cert_request(*args: Any, **kwargs: Any) -> Any:
@@ -419,7 +421,7 @@ class OAuth2Manager:
                 redirect_uri=redirect_uri,
             )
 
-            flow.fetch_token(code=code)
+            flow.fetch_token(code=code, timeout=_GOOGLE_HTTP_TIMEOUT_SECONDS)
             logger.info("Code exchange successful")
             # Flow.credentials is typed as Credentials | OAuth2Token, but the
             # web flow always populates Credentials after a successful
@@ -483,6 +485,7 @@ class OAuth2Manager:
         response = requests.get(
             oauth_endpoints.google_userinfo_url(),
             headers=headers,
+            timeout=_GOOGLE_HTTP_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
 
