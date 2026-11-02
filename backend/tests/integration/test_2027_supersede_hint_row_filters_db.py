@@ -279,3 +279,96 @@ async def test_the_folds_reused_resolution_honours_the_filter(db_session, quiet_
     # One resolution, the fold's, reused by the page.
     resolver.assert_awaited_once()
     assert resolver.await_args.kwargs["filters"] == {"source_uri_prefix": "docs/"}
+
+
+@pytest.mark.asyncio
+async def test_a_pool_target_with_a_stale_payload_still_folds(db_session, quiet_write):
+    """#2257 item 6: v1's row lost the filtered tag but its vector payload has
+    not caught up (a pending re-embed, a failed payload patch), so the search
+    still matched it and both versions are in the pool. The resolver must not
+    hold a pool node to the row filters it already matched: the pair folds."""
+    owner, ws, ctx = await _scope(db_session)
+    v1 = await _write(db_session, owner, ws, ctx, "the launch date v1", age_days=3, tags=["other"])
+    v2 = await _write(db_session, owner, ws, ctx, "the launch date v2", age_days=0, tags=["infra"])
+    await _suggest(db_session, v2, v1, judged=True)
+
+    svc = MemoryService(db_session)
+    resolver = AsyncMock(wraps=svc._resolve_supersede_candidates)
+    svc._resolve_supersede_candidates = resolver
+    svc.search_service.hybrid_search = AsyncMock(
+        return_value=[{"id": str(v2), "score": 0.9}, {"id": str(v1), "score": 0.8}]
+    )
+    response = await svc.recall(
+        RecallRequest(query="the launch date", k=5, filters={"tags": ["infra"]}),
+        user_id=owner,
+        current_context_id=ctx.id,
+        current_workspace_id=ws.id,
+    )
+    page = {r.memory_id: r for r in response.results}
+
+    assert list(page) == [v2]
+    assert page[v2].folded is not None
+    assert page[v2].folded.memory_ids == [v1]
+    assert page[v2].supersede_candidate is not None
+    assert page[v2].supersede_candidate.memory_id == v1
+    assert page[v2].supersede_candidate.verified is True
+    resolver.assert_awaited_once()
+
+    # Outside the pool, the same off-filter target is held to the filter as
+    # before (#2027): the row ships, the hint does not.
+    alone = await _recall(db_session, owner, ws, ctx, [v2], {"tags": ["infra"]})
+    assert list(alone) == [v2]
+    assert alone[v2].supersede_candidate is None
+
+
+@pytest.mark.asyncio
+async def test_a_pool_target_is_still_held_to_liveness_and_context(db_session, quiet_write):
+    """The pool exemption relaxes the row filters only: a tombstoned target or
+    one in another context is dropped even when its id is in the pool."""
+    owner, ws, ctx = await _scope(db_session)
+    v1 = await _write(db_session, owner, ws, ctx, "the launch date v1", age_days=3, tags=["other"])
+    v2 = await _write(db_session, owner, ws, ctx, "the launch date v2", age_days=0, tags=["infra"])
+    await _suggest(db_session, v2, v1, judged=True)
+    await db_session.execute(update(Memory).where(Memory.id == v1).values(deleted_at=utcnow()))
+    await db_session.commit()
+
+    page = await _recall(db_session, owner, ws, ctx, [v2, v1], {"tags": ["infra"]})
+
+    assert list(page) == [v2]
+    assert page[v2].folded is None
+    assert page[v2].supersede_candidate is None
+
+    # Straight at the resolver, with the tombstoned id named in the pool.
+    source = await _load(db_session, v2)
+    resolved = await MemoryService(db_session)._resolve_supersede_candidates(
+        {source.id: source},
+        user_id=owner,
+        operation="recall",
+        filters={"tags": ["infra"]},
+        pool_ids={v1, v2},
+    )
+    assert resolved == {}
+
+    # A target in another context of the workspace, named in the pool.
+    other_ctx = Context(
+        id=uuid4(),
+        workspace_id=ws.id,
+        name=f"rf-ctx-{uuid4().hex[:8]}",
+        created_by=owner,
+        is_private=False,
+    )
+    db_session.add(other_ctx)
+    await db_session.commit()
+    elsewhere = await _write(
+        db_session, owner, ws, other_ctx, "the launch date v0", age_days=5, tags=["other"]
+    )
+    await _suggest(db_session, v2, elsewhere)
+    source = await _load(db_session, v2)
+    resolved = await MemoryService(db_session)._resolve_supersede_candidates(
+        {source.id: source},
+        user_id=owner,
+        operation="recall",
+        filters={"tags": ["infra"]},
+        pool_ids={elsewhere, v2},
+    )
+    assert resolved == {}

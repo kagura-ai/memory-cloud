@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -4229,7 +4229,10 @@ class MemoryService:
            the fold did not. An empty answer (nothing survived, or the
            resolver failed open) writes nothing. ``filters`` (#2027) are the
            recall's effective row filters, so a hint the page reuses honours
-           them exactly as one it resolves itself.
+           them exactly as one it resolves itself; the fold's nodes (pool
+           rows and bridges, all hydrated hits) are the resolver's pool
+           (#2257), so a pair a stale vector payload let into the pool still
+           links.
         2. A verified candidate is a directed link newer → older. A pool row
            reachable from another pool row along links is folded; links are
            followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
@@ -4272,6 +4275,7 @@ class MemoryService:
                 operation="recall",
                 trusted_only=trusted_only,
                 filters=filters,
+                pool_ids=nodes.nodes.keys(),
             )
             if resolved is not None and candidates:
                 # #2131: every judged id, None where no hint survives, so the
@@ -4296,6 +4300,7 @@ class MemoryService:
         operation: str,
         trusted_only: bool = False,
         filters: Mapping[str, Any] | None = None,
+        pool_ids: Collection[UUID] | None = None,
         fail_open: bool = True,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
@@ -4334,6 +4339,15 @@ class MemoryService:
         dropped like a deleted target's — the source row stays. Time windows
         are not applied: a target is older than its source by construction.
         ``None`` (reference, update_memory) applies no row filter.
+
+        ``pool_ids`` (#2257) are the memories this recall already hydrated
+        for the caller (the fold's nodes; the page's hydrated map). A target
+        that is itself a pool node matched the recall's filters in the
+        search, so the row predicates above do not hold it — a vector
+        payload that lags its row (a pending re-embed, a failed payload
+        patch) must not unlink a pair both in the pool. Only the trusted
+        filter, liveness, the binding filter and the (workspace, context)
+        match hold it, as they hold every target.
 
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
@@ -4376,6 +4390,17 @@ class MemoryService:
                 return {}
 
             target_ids = {p["target_id"] for p in pending.values()}
+            conditions: list[ColumnElement[bool]] = [
+                Memory.id.in_(target_ids),
+                Memory.deleted_at.is_(None),
+            ]
+            # #2027: the recall's row filters; an off-filter target is "gone"
+            # for this read — unless the search already put it in the pool
+            # (#2257: its payload matched; its row may be mid-sync).
+            if precision := recall_row_predicates(filters):
+                held = and_(*precision)
+                in_pool = target_ids & set(pool_ids or ())
+                conditions.append(or_(Memory.id.in_(in_pool), held) if in_pool else held)
             rows = await self.db.execute(
                 select(
                     Memory.id,
@@ -4387,13 +4412,7 @@ class MemoryService:
                     # #2016: the head of the text the judge saw, to tell a
                     # stale verdict apart without reading whole contents.
                     func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
-                ).where(
-                    Memory.id.in_(target_ids),
-                    Memory.deleted_at.is_(None),
-                    # #2027: the recall's row filters; an off-filter target
-                    # is "gone" for this read.
-                    *recall_row_predicates(filters),
-                )
+                ).where(*conditions)
             )
             # Same agent-binding row filter every other recall lane enforces
             # (#1299): a binding-restricted target must not leak its summary
@@ -5508,6 +5527,9 @@ class MemoryService:
                     operation="recall",
                     trusted_only=_is_trusted_recall(request),
                     filters=filters,
+                    # #2257: the hydrated, binding-filtered map — never the
+                    # raw search ids — so a denied row is never exempt.
+                    pool_ids={m.id for m in memories.values()},
                 )
             )
         fold_map = fold_map or {}
