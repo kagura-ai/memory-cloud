@@ -863,6 +863,19 @@ describe("APIKeysTabPanel — create refusals through ApiError (#2384)", () => {
     );
   });
 
+  it("clears the notice when another public context is picked", async () => {
+    mockCreateAPIKey.mockRejectedValue(planRefusal());
+    await submitBoundKey();
+    await screen.findByRole("alert");
+
+    fireEvent.change(screen.getByLabelText("publicBindContextLabel"), {
+      target: { value: "" },
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("plan.title")).not.toBeInTheDocument(),
+    );
+  });
+
   it("keeps the server's message for a role refusal (AUTH-101)", async () => {
     const message = "You do not own this context";
     mockCreateAPIKey.mockRejectedValue(

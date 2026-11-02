@@ -84,15 +84,22 @@ export class ApiClient {
         try {
           errorDetails = JSON.parse(errorBody);
         } catch {
-          errorDetails = { message: errorBody };
+          // #2384: a plain-text body is the message; a proxy's HTML error
+          // page is not, so it falls through to the HTTP status below.
+          errorDetails = {
+            message: /^\s*</.test(errorBody) ? "" : errorBody,
+          };
         }
 
         // Backend returns { error: "RES-001", message: "...", details: {...} }
-        // FastAPI may also return { detail: "..." }
+        // FastAPI may also return { detail: "..." }. Strings only (#2384): an
+        // array `detail` (FastAPI's default 422) is not a message.
         const errorMessage =
-          errorDetails.message ||
-          errorDetails.detail ||
-          `HTTP ${response.status}: ${response.statusText}`;
+          (typeof errorDetails.message === "string" && errorDetails.message) ||
+          (typeof errorDetails.detail === "string" && errorDetails.detail) ||
+          (response.statusText
+            ? `HTTP ${response.status}: ${response.statusText}`
+            : `HTTP ${response.status}`);
         const errorCode = errorDetails.error;
 
         // #992: the canonical 422 envelope is { error: "VAL-001", message,

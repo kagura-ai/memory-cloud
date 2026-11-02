@@ -1043,7 +1043,10 @@ export function APIKeysTabPanel() {
                         id="create-api-key-bound-context"
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                         value={boundContextId}
-                        onChange={(e) => setBoundContextId(e.target.value)}
+                        onChange={(e) => {
+                          setBoundContextId(e.target.value);
+                          setCreateRefusal(null);
+                        }}
                       >
                         <option value="">
                           {t("publicBindContextPlaceholder")}

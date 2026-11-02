@@ -324,3 +324,62 @@ describe("ApiClient gate normalization (#1644)", () => {
     });
   });
 });
+
+describe("ApiClient error message (#2384)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockFetchOnce(response: Response) {
+    vi.spyOn(global, "fetch").mockResolvedValueOnce(response);
+  }
+
+  async function messageOf(response: Response): Promise<string> {
+    mockFetchOnce(response);
+    const caught = await new ApiClient("http://test")
+      .get("/x")
+      .catch((e: unknown) => e);
+    expect(caught).toBeInstanceOf(ApiError);
+    return (caught as ApiError).message;
+  }
+
+  it("ignores a non-string detail (FastAPI's default 422 array)", async () => {
+    const message = await messageOf(
+      new Response(
+        JSON.stringify({ detail: [{ loc: ["body", "name"], msg: "required" }] }),
+        {
+          status: 422,
+          statusText: "Unprocessable Entity",
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    expect(message).toBe("HTTP 422: Unprocessable Entity");
+  });
+
+  it("does not show a proxy's HTML error page as the message", async () => {
+    const message = await messageOf(
+      new Response("<html><head><title>502 Bad Gateway</title></head></html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    expect(message).toBe("HTTP 502: Bad Gateway");
+  });
+
+  it("keeps a plain-text body as the message", async () => {
+    const message = await messageOf(
+      new Response("Service temporarily unavailable", {
+        status: 503,
+        statusText: "Service Unavailable",
+      }),
+    );
+    expect(message).toBe("Service temporarily unavailable");
+  });
+
+  it("drops the separator when the status text is empty (HTTP/2)", async () => {
+    const message = await messageOf(new Response(null, { status: 502 }));
+    expect(message).toBe("HTTP 502");
+  });
+});
