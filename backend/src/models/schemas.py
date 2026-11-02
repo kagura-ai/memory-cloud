@@ -383,6 +383,22 @@ class RecallRequest(BaseModel):
     )
 
 
+class SupersedeAcceptance(TZAwareBaseModel):
+    """#2427: whether the caller may accept a supersede suggestion.
+
+    The server's answer, from the rule the accept path enforces: write access
+    to the context, both memories the caller's own (#1803/#2313), and a
+    candidate not written after the memory carrying it (#2308). ``reason`` is
+    set only when ``allowed`` is false: ``not_writable`` (no write access to
+    the context), ``not_owner`` (either memory, or both, is not the caller's
+    own; which one is never said), ``newer_candidate`` (the candidate was
+    written after this memory). The accept call itself stays authoritative.
+    """
+
+    allowed: bool
+    reason: Literal["not_writable", "not_owner", "newer_candidate"] | None = None
+
+
 class SupersedeCandidate(TZAwareBaseModel):
     """#1403: a near-duplicate the memory likely supersedes (a suggestion — never
     an auto-created edge).
@@ -408,6 +424,10 @@ class SupersedeCandidate(TZAwareBaseModel):
     # Both hold only while the verdict is about both memories' current texts
     # (#2059): after an edit of either, the candidate surfaces unverified.
     verified: bool | None = None
+    # #2427: whether the caller may accept this suggestion. Set on reference()
+    # and the PATCH reply only; absent (None) on recall, where it is not
+    # evaluated.
+    acceptance: SupersedeAcceptance | None = None
 
 
 class FoldedVersions(TZAwareBaseModel):

@@ -9836,8 +9836,19 @@
         },
         "type": "object"
       },
+      "SupersedeAcceptance": {
+        "properties": {
+          "allowed": {},
+          "reason": {}
+        },
+        "required": [
+          "allowed"
+        ],
+        "type": "object"
+      },
       "SupersedeCandidate": {
         "properties": {
+          "acceptance": {},
           "detected_at": {},
           "memory_id": {},
           "similarity": {},

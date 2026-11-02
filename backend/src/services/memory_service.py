@@ -2069,6 +2069,7 @@ class MemoryService:
         """
         from models.memory import EDGE_TYPE_SUPERSEDES
         from services.edge_service import create_declared_edge
+        from services.supersede_acceptance import acceptance_reason, pair_ownership
         from utils.exceptions import SupersedeEdgeConflictError
 
         # Not fail-open here: a lookup failure is a server error, not "no
@@ -2084,37 +2085,34 @@ class MemoryService:
             )
         target_id = candidate.memory_id
 
-        # #1803, the rule remember(supersedes=) applies (_own_memory_predicate):
-        # both ends must be the caller's own — the superseding memory, as
-        # remember's new memory always is, and the superseded one, so a shared
-        # context's member cannot shadow another member's memory for the team.
-        # In a private context an account linked to the caller counts.
-        own = await self._own_memory_predicate(memory.context_id, user_id)
-        rows = {
-            row.id: row
-            for row in (
-                await self.db.execute(
-                    select(Memory.id, Memory.created_at, own.label("own")).where(
-                        Memory.id.in_([memory.id, target_id])
-                    )
-                )
-            ).all()
-        }
-        target = rows.get(target_id)
-        if target is None:
+        # #1803, the rule remember(supersedes=) applies: both ends must be the
+        # caller's own — the superseding memory, as remember's new memory always
+        # is, and the superseded one, so a shared context's member cannot shadow
+        # another member's memory for the team. In a private context an account
+        # linked to the caller counts. #2427: one helper with the capability
+        # reference() reports, so the two cannot drift; the write access half is
+        # the transport's here (update_memory's own gate).
+        pair = await pair_ownership(
+            self.db,
+            user_id=user_id,
+            context_id=memory.context_id,
+            carrier_id=memory.id,
+            target_id=target_id,
+        )
+        if not pair.target_exists:
             # Gone (hard-deleted or erased) since the resolver read it.
             raise ValueError(
                 "This memory has no supersede_candidate to accept; recall() or "
                 "reference() it to see its current suggestion."
             )
-        carrier = rows.get(memory.id)
-        if carrier is None or not carrier.own:
+        reason = acceptance_reason(pair, can_write=True)
+        if reason == "not_owner" and not pair.carrier_own:
             raise ValueError(
                 "This memory is another member's, and a supersede_candidate is accepted "
                 "only on your own memory (as remember(supersedes=) links only from one); "
                 "leave the suggestion to its author."
             )
-        if not target.own:
+        if reason == "not_owner":
             raise ValueError(
                 "This memory's supersede_candidate is another member's memory, and "
                 "supersedes takes only your own (as remember(supersedes=) does); "
@@ -2124,11 +2122,7 @@ class MemoryService:
         # written AFTER this memory can be stored as its candidate (its
         # embedding finished first; the judge skips that pair), and accepting
         # it would shadow the newer fact behind the older one.
-        if (
-            target.created_at is not None
-            and memory.created_at is not None
-            and target.created_at > memory.created_at
-        ):
+        if reason == "newer_candidate":
             raise ValueError(
                 "This memory's supersede_candidate was written after it, so accepting "
                 "would hide the newer memory; dismiss the suggestion instead "
@@ -2825,11 +2819,9 @@ class MemoryService:
         # client sees the current suggestion in the patch response. operation="update"
         # matches the PATCH surface's MAE vocabulary so a shadow-mode binding
         # would_deny is attributed to the right operation (not "reference").
-        supersede_candidate = (
-            await self._resolve_supersede_candidates(
-                {memory.id: memory}, user_id=user_id, operation="update"
-            )
-        ).get(memory.id)
+        supersede_candidate = await self._supersede_candidate_for(
+            memory, user_id, operation="update"
+        )
 
         return ReferenceResponse(
             memory_id=memory.id,
@@ -3401,11 +3393,9 @@ class MemoryService:
         # #1403: resolve the (liveness-guarded, enriched) supersede suggestion for
         # this single memory — the deliberate Layer-3 fetch is exactly where a
         # client decides whether to confirm the supersession.
-        supersede_candidate = (
-            await self._resolve_supersede_candidates(
-                {memory.id: memory}, user_id=user_id, operation="reference"
-            )
-        ).get(memory.id)
+        supersede_candidate = await self._supersede_candidate_for(
+            memory, user_id, operation="reference"
+        )
 
         return ReferenceResponse(
             memory_id=memory.id,
@@ -4287,6 +4277,39 @@ class MemoryService:
         except Exception as e:
             logger.warning("supersede_fold_failed", error=str(e))
             return {}
+
+    async def _supersede_candidate_for(
+        self, memory: Memory, user_id: str, *, operation: str
+    ) -> SupersedeCandidate | None:
+        """#2427: one memory's live suggestion with the caller's ``acceptance``.
+
+        The single-memory read surfaces (``reference`` and the PATCH reply the
+        dialog adopts) both report whether the caller may accept it, so the
+        client can disable an action the server would refuse. Recall does not
+        (one ownership query per row). Fail-open like the resolver: an error
+        here returns the suggestion without ``acceptance`` — the client then
+        behaves as before, and the accept call still enforces the rule.
+        """
+        from services.supersede_acceptance import evaluate
+
+        candidate = (
+            await self._resolve_supersede_candidates(
+                {memory.id: memory}, user_id=user_id, operation=operation
+            )
+        ).get(memory.id)
+        if candidate is None:
+            return None
+        try:
+            candidate.acceptance = await evaluate(
+                self.db, user_id=user_id, memory=memory, target_id=candidate.memory_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "supersede_acceptance_failed",
+                memory_id=str(memory.id),
+                error=str(exc),
+            )
+        return candidate
 
     async def _resolve_supersede_candidates(
         self,
