@@ -5,7 +5,7 @@ FastAPI + MCP Server for Universal AI Memory Platform
 ## Requirements
 
 - Python 3.11+
-- uv 0.11.19 — the exact version `[tool.uv] required-version` in `pyproject.toml` names (`curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh`, or `pip install "uv==0.11.19"` inside a venv); a different uv refuses to run here
+- uv 0.11.19 — the version CI and the image pin, and the lower bound of `[tool.uv] required-version` in `pyproject.toml` (`curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh`, or `pip install "uv==0.11.19"` inside a venv); a newer uv also runs here, but writes a higher lock `revision`
 
 ## Installation
 
@@ -35,8 +35,8 @@ uv lock                          # re-resolve after a pyproject.toml change
 uv lock --upgrade-package NAME   # move one package inside its range
 ```
 
-Renovate opens a weekly lock-maintenance PR that refreshes every package inside
-its range; it runs the full CI like any other change.
+Dependabot opens one weekly PR that moves `uv.lock` inside the ranges; it runs
+the full CI like any other change.
 
 ## Development
 

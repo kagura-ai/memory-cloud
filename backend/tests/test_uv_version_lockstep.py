@@ -2,10 +2,14 @@
 
 ``backend/uv.lock`` is what CI, ``backend/Dockerfile`` and ``setup.sh`` install
 (``uv sync --locked``). uv's own version is pinned in four places, and a
-mismatch is not cosmetic: a newer uv rewrites the lock in a format the pinned
-one may not read, and a different resolver makes ``uv lock --check`` disagree
-across machines. So every site must carry the one version that
-``[tool.uv] required-version`` in ``backend/pyproject.toml`` names:
+mismatch is not cosmetic: a different resolver makes ``uv lock --check``
+disagree across machines. So every site must carry the one version that
+``[tool.uv] required-version`` in ``backend/pyproject.toml`` names as its lower
+bound. That is a bound and not ``==`` because Dependabot re-locks with the uv in
+its own image and an exact pin fails every refresh (#2524). A newer uv writes a
+higher lock ``revision``, which the pinned uv still reads.
+
+The sites are:
 
 1. ``astral-sh/setup-uv`` ``version:`` in ``.github/workflows/ci.yml`` and
    ``.github/workflows/eval-nightly.yml`` (every occurrence),
@@ -55,9 +59,11 @@ def _pyproject() -> dict:
 
 
 def required_uv_version() -> str:
-    """The canonical uv version: ``[tool.uv] required-version`` without its ``==``."""
+    """The canonical uv version: the lower bound in ``[tool.uv] required-version``."""
     spec = _pyproject()["tool"]["uv"]["required-version"]
-    assert spec.startswith("=="), f"required-version must pin one exact version, got {spec!r}"
+    assert re.fullmatch(r">=[0-9][^,\s]*", spec), (
+        f"required-version must be one lower bound (Dependabot's uv is newer), got {spec!r}"
+    )
     return spec[2:]
 
 

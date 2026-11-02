@@ -1,8 +1,8 @@
 """Guard test for #1705: auth-critical dependencies carry an upper bound.
 
 CI and the Docker image install the tracked ``backend/uv.lock`` (#1706), so a
-new release reaches them only through a lock refresh — Renovate's weekly
-lock-maintenance PR or a manual ``uv lock``. The bound is what such a refresh
+new release reaches them only through a lock refresh — Dependabot's weekly
+lock PR or a manual ``uv lock``. The bound is what such a refresh
 may move within: without it, a refresh could pull the next major of a library
 that sits on an authentication, token, session or crypto path without anyone
 deciding to. The reason for each bound is next to it in ``pyproject.toml``.

@@ -59,7 +59,7 @@ dependencies = [
     # Authentication
     # Auth-critical dependencies carry an upper bound (#1705). CI and the image
     # install the tracked uv.lock (#1706), so the bound is what a lock refresh
-    # (Renovate's weekly lock-maintenance PR, or `uv lock`) may move within: a
+    # (Dependabot's weekly lock PR, or `uv lock`) may move within: a
     # release past it arrives only when someone raises the bound and re-runs
     # tests/auth and tests/api/test_*oauth*. The set is authlib, joserfc, google-auth,
     # google-auth-oauthlib, bcrypt and pyotp here, plus starlette above and mcp
@@ -204,13 +204,15 @@ lint = ["ruff>=0.7.0"]
 
 [tool.uv]
 # uv.lock is tracked (#1706); CI, backend/Dockerfile and setup.sh install from
-# it with `uv sync --locked`. The uv version is pinned in lockstep here, in
+# it with `uv sync --locked`. The uv version is pinned in lockstep in
 # .github/workflows/ci.yml + eval-nightly.yml (setup-uv `version:`), in
-# backend/Dockerfile (the ghcr.io/astral-sh/uv image tag) and in setup.sh;
-# tests/test_uv_version_lockstep.py enforces it. A different uv refuses to run
-# here, so the lock is only ever written by this version. Bump every site
+# backend/Dockerfile (the ghcr.io/astral-sh/uv image tag) and in setup.sh, and
+# named here as the lower bound; tests/test_uv_version_lockstep.py enforces it.
+# It is a bound and not `==` because Dependabot re-locks with the uv in its own
+# image, and an exact pin fails every refresh (#2524). A newer uv writes a
+# higher lock `revision`, which the pinned uv still reads. Bump every site
 # together and regenerate the lock with `uv lock`.
-required-version = "==0.11.19"
+required-version = ">=0.11.19"
 
 [build-system]
 requires = ["hatchling"]

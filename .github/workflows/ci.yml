@@ -371,9 +371,9 @@ jobs:
       github.event_name == 'push'
     services:
       postgres:
-        # Literal pin (not a YAML anchor) in all three service blocks: Renovate's
-        # github-actions manager detects plain `image:` values, and the postgres
-        # packageRule group (renovate.json, #1310) bumps every site in one PR.
+        # Literal pin (not a YAML anchor) in all three service blocks, and
+        # postgres_pin_consistency.bats keeps them equal to the compose files.
+        # Dependabot bumps only the compose files: update these on its PR (#2524).
         image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_USER: kagura
