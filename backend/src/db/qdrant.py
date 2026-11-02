@@ -2133,6 +2133,52 @@ async def copy_context_points(
         raise QdrantError(f"Failed to copy context points: {e}") from e
 
 
+async def retrieve_dense_vectors(
+    collection_name: str, point_ids: Sequence[str]
+) -> dict[str, list[float]]:
+    """The stored dense vector of each point, in one retrieve (#2256).
+
+    For a caller that needs a memory's vector without embedding it again (the
+    supersede catch-up pass). Batching is the caller's.
+
+    Args:
+        collection_name: Qdrant collection name.
+        point_ids: Point ids to read.
+
+    Returns:
+        ``{str(point_id): vector}``; a point that does not exist or carries
+        no dense vector is absent.
+
+    Raises:
+        NotImplementedError: on a non-Qdrant store (LanceDB preview).
+        QdrantError: the retrieve failed.
+    """
+    if _active_store() is not None:
+        raise NotImplementedError(
+            "retrieve_dense_vectors is not supported by the LanceDB backend (preview)."
+        )
+    if not point_ids:
+        return {}
+    client = get_qdrant_client()
+    try:
+        points = await client.retrieve(
+            collection_name=collection_name,
+            ids=list(point_ids),
+            with_vectors=[KAGURA_MEMORIES_VECTOR_NAME],
+            with_payload=False,
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to read vectors: {e}") from e
+    out: dict[str, list[float]] = {}
+    for point in points:
+        vectors = point.vector
+        if isinstance(vectors, dict):
+            dense = vectors.get(KAGURA_MEMORIES_VECTOR_NAME)
+            if isinstance(dense, list) and dense:
+                out[str(point.id)] = [float(x) for x in dense]
+    return out
+
+
 async def delete_context_points(
     workspace_id: str, context_id: str, collection_name: str = KAGURA_MEMORIES_COLLECTION
 ) -> int:

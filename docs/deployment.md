@@ -1724,6 +1724,45 @@ Set-payload only, idempotent, no migration; `--workspace <id>` limits it to
 one workspace. The full procedure and the report lines are in
 [ops/resource-indexer-backfill.md](ops/resource-indexer-backfill.md#metadata-backfill-for-points-indexed-before-v01220-2254).
 
+## Supersede catch-up pass — Issue #2256
+
+The post-embed supersede detection ([`supersede_candidate`](mcp-tools.md))
+runs only inside the embedding pipeline, and a re-embed of unchanged text runs
+none (#2092). Memories embedded before the detection existed, before
+`SUPERSEDE_VERIFY_MODE=llm` was on, or while the judge was over its daily cap
+carry no candidate until their text changes. The one-shot pass runs the same
+detection for one context, in process, from each memory's stored vector: no
+embedding call, no seed edge, no point write. Inside the API container, from
+`backend/`:
+
+```bash
+python -m src.cli.supersede_catch_up --context <uuid>                # plan: how many rows
+python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the detection
+```
+
+- Rows: embedded, live, not resource rows, no candidate, oldest first, at
+  most `--limit` (default 200). `--include-unverified` also re-checks rows
+  whose candidate has no judge verdict; `--before <ISO-8601>` (UTC when no
+  offset) takes only rows created before that instant.
+- Judge spend: with the judge on, each row may cost one call, counted on the
+  same per-workspace `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` as live ingest. The
+  run stops once that counter advanced by `--max-judge-calls` (default 50,
+  `stopped judge_budget` in the report), so run it early in the UTC day with
+  headroom under the cap. Past the cap a pair at 0.85 or above is stored
+  unverified and a pair below is skipped, as on ingest.
+- Report: `processed`, `detected` (a candidate appeared), `updated` (stored
+  again with a new target or verdict), `cleared`, `unchanged`, `no_vector`
+  (no stored vector for the row), `skipped` (the row changed after the plan),
+  `judge_calls` (how far the workspace's judge counter advanced during the
+  run, live ingest included; `unknown` when Redis could not be read, and the
+  budget is then not enforced while the judge itself skips its calls) and
+  `stopped`. The INFO event `supersede_catch_up_completed` carries the same
+  tally.
+- A row whose nearest neighbour is not near enough stays without a candidate
+  and is planned again on the next run; narrow repeated runs with `--before`
+  and `--limit`. An older memory never takes a newer one as its candidate, so
+  of a near-duplicate pair only the newer row ends up with one.
+
 ## Orphaned vectors — Issue #1798
 
 Postgres is the system of record; the vector store follows it. Every write
