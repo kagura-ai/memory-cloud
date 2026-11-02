@@ -396,3 +396,141 @@ class TestConsolidationTask:
 
         mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
         mock_memory_repo.delete.assert_not_called()
+
+
+class TestGraphPaging:
+    """#2385: both tasks cover every graph, one id-ordered page per transaction.
+
+    ``GraphRepository.list`` orders by id; the tasks used to read only its
+    first 1000 rows, so with the fixed order every later graph would never be
+    decayed or consolidated.
+    """
+
+    @staticmethod
+    def _recording_db():
+        """A session mock whose commits land in the same log as the locks."""
+        events: list[tuple[str, ...]] = []
+        mock_db = MagicMock()
+        mock_db.execute = AsyncMock()
+        mock_db.commit = AsyncMock(side_effect=lambda: events.append(("commit",)))
+
+        async def lock(_db, user_id):
+            events.append(("lock", user_id))
+
+        return mock_db, events, lock
+
+    @pytest.mark.asyncio
+    async def test_weight_decay_pages_through_every_graph(self, monkeypatch):
+        """Pages follow each other by skip, each page's users are locked in
+        user_id order and committed before the next page is read."""
+        monkeypatch.setenv("ENABLE_NEURAL_MEMORY", "true")
+        monkeypatch.setenv("ENABLE_DECAY", "true")
+        monkeypatch.setattr("tasks.neural_tasks.GRAPH_PAGE_SIZE", 2)
+        mock_db, events, lock = self._recording_db()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(
+            side_effect=[
+                [_make_graph("user-d"), _make_graph("user-c")],
+                [_make_graph("user-a")],
+            ]
+        )
+        mock_decay_manager = MagicMock()
+        mock_decay_manager.apply_decay = AsyncMock(return_value={"edges_decayed": 0})
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch(
+                "tasks.neural_tasks.NeuralMemoryConfig.from_db", AsyncMock(return_value=MagicMock())
+            ),
+            patch("tasks.neural_tasks.GraphService", return_value=MagicMock()),
+            patch("tasks.neural_tasks.DecayManager", return_value=mock_decay_manager),
+            patch("tasks.neural_tasks.lock_graph_learning", lock),
+        ):
+            await weight_decay_task()
+
+        assert [c.kwargs for c in mock_graph_repo.list.await_args_list] == [
+            {"skip": 0, "limit": 2},
+            {"skip": 2, "limit": 2},
+        ]
+        assert events == [
+            ("lock", "user-c"),
+            ("lock", "user-d"),
+            ("commit",),
+            ("lock", "user-a"),
+            ("commit",),
+        ]
+        assert [c.args[0] for c in mock_decay_manager.apply_decay.await_args_list] == [
+            "user-c",
+            "user-d",
+            "user-a",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_weight_decay_stops_on_an_empty_page(self, monkeypatch):
+        """A full last page is followed by one more read that comes back empty."""
+        monkeypatch.setenv("ENABLE_NEURAL_MEMORY", "true")
+        monkeypatch.setenv("ENABLE_DECAY", "true")
+        monkeypatch.setattr("tasks.neural_tasks.GRAPH_PAGE_SIZE", 2)
+        mock_db, events, lock = self._recording_db()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(
+            side_effect=[[_make_graph("user-a"), _make_graph("user-b")], []]
+        )
+        mock_decay_manager = MagicMock()
+        mock_decay_manager.apply_decay = AsyncMock(return_value={"edges_decayed": 0})
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch(
+                "tasks.neural_tasks.NeuralMemoryConfig.from_db", AsyncMock(return_value=MagicMock())
+            ),
+            patch("tasks.neural_tasks.GraphService", return_value=MagicMock()),
+            patch("tasks.neural_tasks.DecayManager", return_value=mock_decay_manager),
+            patch("tasks.neural_tasks.lock_graph_learning", lock),
+        ):
+            await weight_decay_task()
+
+        assert mock_graph_repo.list.await_count == 2
+        assert events == [("lock", "user-a"), ("lock", "user-b"), ("commit",)]
+
+    @pytest.mark.asyncio
+    async def test_consolidation_pages_through_every_graph(self, monkeypatch):
+        """Every user past the first page is consolidated too, one commit per page."""
+        monkeypatch.setattr("tasks.neural_tasks.GRAPH_PAGE_SIZE", 2)
+        mock_db, events, lock = self._recording_db()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(
+            side_effect=[
+                [_make_graph("user-d"), _make_graph("user-c")],
+                [_make_graph("user-a")],
+            ]
+        )
+        mock_memory_repo = MagicMock()
+        mock_memory_repo.list = AsyncMock(return_value=[])
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
+            patch("tasks.neural_tasks.lock_graph_learning", lock),
+        ):
+            await consolidation_task()
+
+        assert [c.kwargs for c in mock_graph_repo.list.await_args_list] == [
+            {"skip": 0, "limit": 2},
+            {"skip": 2, "limit": 2},
+        ]
+        assert events == [
+            ("lock", "user-c"),
+            ("lock", "user-d"),
+            ("commit",),
+            ("lock", "user-a"),
+            ("commit",),
+        ]
+        assert [c.kwargs["filters"]["user_id"] for c in mock_memory_repo.list.await_args_list] == [
+            "user-c",
+            "user-d",
+            "user-a",
+        ]

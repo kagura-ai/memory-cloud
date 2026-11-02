@@ -61,20 +61,24 @@ class GraphRepository(BaseRepository[GraphMemory]):
     async def list(
         self, skip: int = 0, limit: int = 100, filters: dict | None = None
     ) -> list[GraphMemory]:
-        """List graphs with pagination.
+        """List graphs with pagination, ordered by primary key.
+
+        The primary-key order makes ``skip``/``limit`` pages deterministic
+        (#2385): without it the rows came back in physical order, which an
+        update or a vacuum can change between two page reads. Offset pages
+        are still positions, not a cursor: a row deleted below the current
+        offset moves the later rows down one place.
 
         Args:
             skip: Offset
             limit: Max results
-            filters: Optional filters
+            filters: Not applied; accepted for the ``BaseRepository``
+                signature only. Every graph is returned.
 
         Returns:
-            List of graphs
+            List of graphs, lowest id first
         """
-        query = select(GraphMemory)
-
-        # Pagination
-        query = query.offset(skip).limit(limit)
+        query = select(GraphMemory).order_by(GraphMemory.id).offset(skip).limit(limit)
 
         result = await self.db.execute(query)
         return list(result.scalars().all())
