@@ -71,6 +71,7 @@ class World:
 @pytest_asyncio.fixture(loop_scope="session")
 async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
     from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
+    from models.deferred_point_delete import DeferredPointDelete
 
     client = AsyncQdrantClient(url=_qdrant_url(), timeout=10)
     try:
@@ -118,6 +119,10 @@ async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
         finally:
             await session.rollback()
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+            # #2476: no FK to memories, so the queue outlives the rows.
+            await session.execute(
+                delete(DeferredPointDelete).where(DeferredPointDelete.collection == collection)
+            )
             await session.commit()
             await client.delete_collection(collection)
             await client.close()

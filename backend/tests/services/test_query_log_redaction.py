@@ -107,6 +107,7 @@ async def test_forget_by_query_log_has_no_raw_query():
     service.memory_repo.update = AsyncMock()
     service._may_delete_guardrail = AsyncMock(return_value=True)
     service.db.commit = AsyncMock()
+    service.db.execute = AsyncMock()  # #2476: the point queue INSERT
     service.delete_forgotten_points = AsyncMock()
 
     with (
