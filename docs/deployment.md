@@ -1249,7 +1249,14 @@ A re-embed whose summary and content are unchanged since the row's last
 successful embed (a content-chunk backfill, an embedding-model switch, a repair
 re-queue) runs neither the detection nor the judge. `embedding_completed`
 carries `mechanical_reembed=true` for it, so judge spend during a backfill is
-counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
+counted with `supersede_verify_judged` / `llm_call_log` as before (#2092). Such
+a re-embed of a row that holds a live candidate still checks whether the pair
+is near: one neighbour query, and when no neighbour is within 0.02 of the
+threshold the candidate answers to (0.85, or `SUPERSEDE_SUGGEST_THRESHOLD_LLM`
+for a pair that carries a verdict), the candidate is cleared and
+`supersede_candidate_cleared_no_neighbour` is logged (#2256). An
+embedding-model switch therefore drops pairs the new embedder no longer
+scores as near-duplicates; it never re-judges or stores a pair.
 
 **Supersede suggestions** (`services/memory_service.py`, `services/edge_service.py`)
 
@@ -1263,21 +1270,22 @@ counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
 | `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had set the pair aside and its verdict still matches both memories' texts, so the pair was not shown; a verdict that no longer matches is dismissed like any shown candidate) |
 | `supersede_candidate_skipped_source_edited` | INFO | the memory was edited while this embedding run was searching, judging or clearing its candidate, so this run wrote nothing; the edit's own run writes the column |
 | `supersede_candidate_skipped_row_changed` | INFO | the row changed between the embedding run's last read and its write (a dismissal, an accept, an edit, a delete or another run's candidate landed in that gap), so this run stored nothing. The write only applies to the row as it was read |
-| `supersede_candidate_cleared_no_neighbour` | INFO | a re-embed found no neighbour within 0.02 of the suggestion threshold (usually an edit moved the memory away from the pair), so the stored candidate was cleared. The margin keeps a pair that hovers at the threshold from being cleared and re-judged on every re-embed. Dismissal tombstones are never cleared |
+| `supersede_candidate_cleared_no_neighbour` | INFO | a re-embed found no neighbour within 0.02 of the suggestion threshold (usually an edit moved the memory away from the pair; also a re-embed of unchanged text under an embedder that scores the pair lower, #2256), so the stored candidate was cleared. The margin keeps a pair that hovers at the threshold from being cleared and re-judged on every re-embed. Dismissal tombstones are never cleared |
 | `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
 | `supersede_shadowing_applied` | INFO | recall-side: a recall applied the shadowing of memories superseded by an accepted `supersedes` edge (`shadowed` of `candidates` results were hidden) |
 | `supersede_shadowing_failed` | WARNING | recall-side: the shadowing lookup failed, so the recall returned without hiding superseded memories |
 | `supersede_fold_applied` | INFO | recall-side (#2123): judge-verified older versions were folded under the newest one (`folded` rows removed, in `groups` groups) |
 | `supersede_fold_failed` | WARNING | recall-side: the fold could not be computed, so the recall returned without folding |
 | `supersede_candidate_skipped_unjudged_low_similarity` | INFO | with the judge on, a neighbour between `SUPERSEDE_SUGGEST_THRESHOLD_LLM` and 0.85 got no `supersedes` / `parallel` verdict (no provider, the daily cap, a failure, or `unclear`), so nothing was stored (#2123). Many of these during an ingest usually mean the daily cap |
-| `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge, store or clear ran; the stored candidate is left as it is |
+| `supersede_candidate_skipped_newer_target` | INFO | the nearest neighbour was written after this memory (read from its point payload), so it was not stored as this memory's candidate: an older memory never points at a newer one (#2256) |
+| `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge or store ran; a live candidate is still cleared when its pair is no longer near (#2256) |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
 
 | event | level | meaning |
 |---|---|---|
 | `supersede_verify_judged` | INFO | one judge answer, with `verdict`, `confidence`, `verified` and `tokens` |
-| `supersede_verify_skipped_newer_target` | INFO | the neighbour was written after the memory, so the pair was not judged and the candidate is stored unverified |
+| `supersede_verify_skipped_newer_target` | INFO | the neighbour was written after the memory, so the pair was not judged and the candidate is stored unverified. Only for a point without a `created_at` payload; otherwise `supersede_candidate_skipped_newer_target` skips the pair before any load (#2256) |
 | `supersede_verify_failed` | WARNING | the provider call failed. The candidate is stored unverified |
 | `supersede_verify_unparseable` | WARNING | the answer could not be parsed. The candidate is stored unverified |
 | `supersede_verify_no_provider` | WARNING | `SLEEP_LLM_PROVIDER` is unset. Logged once per process |

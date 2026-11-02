@@ -8866,7 +8866,7 @@ async def _detect_supersede_candidate(
     # memory to the candidate already exists, the user already actioned the
     # suggestion and _accept_supersede_candidate_if_matching cleared the
     # column. Since detection runs independent of the seed guard (F2), a
-    # re-embed (update_memory edit / sleep reindex / backfill) would otherwise
+    # re-embed after an edit (or the #2256 catch-up pass) would otherwise
     # re-populate the candidate and re-surface it on recall — breaking the
     # accept-and-clear self-heal contract (#1403 review F2 guard).
     existing_super = await edge_repo.get_edge(

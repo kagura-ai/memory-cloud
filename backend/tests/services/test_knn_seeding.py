@@ -1548,9 +1548,9 @@ class TestSupersedeVerification:
 
     @pytest.mark.asyncio
     async def test_unmoved_pair_reuses_the_stored_verdict(self):
-        """A mechanical re-embed (same target, same texts, similarity within
-        the resurface delta) does not spend a judge call: the stored verdict
-        is kept."""
+        """A detection that meets an already-judged, unmoved pair (same
+        target, same texts, similarity within the resurface delta) does not
+        spend a judge call: the stored verdict is kept."""
         from services.supersede_verify import pair_fingerprint
 
         memory = _make_memory()
