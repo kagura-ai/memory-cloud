@@ -89,15 +89,15 @@ async def pair_ownership(
     )
 
 
-def acceptance_reason(pair: PairOwnership, *, can_write: bool) -> AcceptanceReason | None:
+def acceptance_reason(pair: PairOwnership) -> AcceptanceReason | None:
     """Why the pair may not be accepted, or None when it may.
 
-    Precedence: ``not_writable`` > ``not_owner`` > ``newer_candidate``. A
+    Ownership before direction: ``not_owner`` > ``newer_candidate``. A
     missing target is ``not_owner``, as the edge writer's uniform refusal
-    treats it; the accept path tells it apart itself.
+    treats it; the accept path tells it apart itself. Write access is not a
+    property of the pair: :func:`evaluate` checks it first (``not_writable``
+    wins over both), the accept path's transport has already checked it.
     """
-    if not can_write:
-        return "not_writable"
     if not (pair.target_exists and pair.carrier_own and pair.target_own):
         return "not_owner"
     if (
@@ -154,5 +154,5 @@ async def evaluate(
         carrier_id=memory.id,
         target_id=target_id,
     )
-    reason = acceptance_reason(pair, can_write=True)
+    reason = acceptance_reason(pair)
     return SupersedeAcceptance(allowed=reason is None, reason=reason)

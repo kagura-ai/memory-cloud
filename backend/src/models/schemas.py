@@ -392,7 +392,7 @@ class SupersedeAcceptance(TZAwareBaseModel):
     set only when ``allowed`` is false: ``not_writable`` (no write access to
     the context), ``not_owner`` (either memory, or both, is not the caller's
     own; which one is never said), ``newer_candidate`` (the candidate was
-    written after this memory). The accept call itself stays authoritative.
+    written after this memory). The write path still checks on its own.
     """
 
     allowed: bool

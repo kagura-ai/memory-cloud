@@ -37,7 +37,7 @@ def _pair(
 
 class TestAcceptanceReason:
     def test_own_pair_with_an_older_candidate_is_allowed(self):
-        assert acceptance_reason(_pair(), can_write=True) is None
+        assert acceptance_reason(_pair()) is None
 
     @pytest.mark.parametrize(
         ("carrier_own", "target_own"),
@@ -47,30 +47,25 @@ class TestAcceptanceReason:
     def test_a_foreign_end_is_one_uniform_reason(self, carrier_own, target_own):
         """Never which end: the reason is the same for either or both."""
         pair = _pair(carrier_own=carrier_own, target_own=target_own)
-        assert acceptance_reason(pair, can_write=True) == "not_owner"
+        assert acceptance_reason(pair) == "not_owner"
 
     def test_a_missing_target_is_not_owner(self):
         """The edge writer refuses a missing endpoint with the same uniform denial."""
         pair = _pair(target_exists=False, target_own=False, target_created_at=None)
-        assert acceptance_reason(pair, can_write=True) == "not_owner"
+        assert acceptance_reason(pair) == "not_owner"
 
     def test_a_candidate_written_after_the_carrier_is_newer(self):
         pair = _pair(carrier_created_at=_OLD, target_created_at=_NEW)
-        assert acceptance_reason(pair, can_write=True) == "newer_candidate"
+        assert acceptance_reason(pair) == "newer_candidate"
 
     def test_unknown_timestamps_do_not_refuse(self):
         """The accept path skips the direction rule when a timestamp is missing."""
-        assert acceptance_reason(_pair(carrier_created_at=None), can_write=True) is None
-        assert acceptance_reason(_pair(target_created_at=None), can_write=True) is None
+        assert acceptance_reason(_pair(carrier_created_at=None)) is None
+        assert acceptance_reason(_pair(target_created_at=None)) is None
 
     def test_ownership_wins_over_direction(self):
         pair = _pair(target_own=False, carrier_created_at=_OLD, target_created_at=_NEW)
-        assert acceptance_reason(pair, can_write=True) == "not_owner"
-
-    def test_no_write_access_wins_over_everything(self):
-        pair = _pair(carrier_own=False, target_own=False, carrier_created_at=_OLD)
-        assert acceptance_reason(pair, can_write=False) == "not_writable"
-        assert acceptance_reason(_pair(), can_write=False) == "not_writable"
+        assert acceptance_reason(pair) == "not_owner"
 
 
 class TestWireShape:

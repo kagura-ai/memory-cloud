@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import Response
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from api.routes.graph import CreateEdgeRequest, create_graph_edge
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
@@ -280,15 +280,19 @@ async def test_patch_reply_and_mcp_reference_carry_it_recall_does_not(db_session
 
 @pytest.mark.asyncio
 async def test_a_failing_evaluation_keeps_the_suggestion_without_acceptance(db_session):
-    """Fail-open like the resolver: the client behaves as before."""
+    """Fail-open like the resolver: the client behaves as before, and a failed
+    query rolls back only its savepoint, so the session stays usable."""
     a, _, _, ctx, _ = await _seed(db_session, private=False, link=False)
     carrier, target = await _pair(db_session, ctx, a, a)
 
-    with patch(
-        "services.supersede_acceptance.evaluate", AsyncMock(side_effect=RuntimeError("boom"))
-    ):
+    async def failing_query(db, **_kwargs):
+        await db.execute(text("SELECT 1 / 0"))
+
+    with patch("services.supersede_acceptance.pair_ownership", failing_query):
         response = await MemoryService(db_session).reference(carrier, a.user_id)
 
     assert response.supersede_candidate is not None
     assert response.supersede_candidate.memory_id == target
     assert response.supersede_candidate.acceptance is None
+    assert (await db_session.execute(text("SELECT 1"))).scalar_one() == 1
+    await db_session.commit()

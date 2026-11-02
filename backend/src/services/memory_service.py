@@ -2105,7 +2105,7 @@ class MemoryService:
                 "This memory has no supersede_candidate to accept; recall() or "
                 "reference() it to see its current suggestion."
             )
-        reason = acceptance_reason(pair, can_write=True)
+        reason = acceptance_reason(pair)
         if reason == "not_owner" and not pair.carrier_own:
             raise ValueError(
                 "This memory is another member's, and a supersede_candidate is accepted "
@@ -4300,9 +4300,12 @@ class MemoryService:
         if candidate is None:
             return None
         try:
-            candidate.acceptance = await evaluate(
-                self.db, user_id=user_id, memory=memory, target_id=candidate.memory_id
-            )
+            # A savepoint, so a failed query here rolls back only itself and
+            # the request's later statements (audit, commit) still run.
+            async with self.db.begin_nested():
+                candidate.acceptance = await evaluate(
+                    self.db, user_id=user_id, memory=memory, target_id=candidate.memory_id
+                )
         except Exception as exc:
             logger.warning(
                 "supersede_acceptance_failed",
