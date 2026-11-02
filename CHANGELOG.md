@@ -4,6 +4,19 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.135.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.135.1) — 2026-11-02
+
+Muse can register with the server again, and a refused member-credential call keeps its error code.
+
+### Changed
+- **Member-credential calls go through `ApiClient`** ([#2384](https://github.com/kagura-ai/memory-cloud/issues/2384)): a refusal reaches the caller as an `ApiError` with its code and plan-gate facts, and the create-key dialog shows a plan gate as a `FeatureGateNotice`.
+
+### Fixed
+- **Muse's DCR callbacks** ([#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)): `POST /api/v1/oauth/register` accepts `https://muse.ai/api/hatch/oauth/callback` and `https://platform.muse.ai/oauth/credential-test/callback` alongside `https://agent.meta.ai/api/hatch/oauth/callback`, each compared as written. Muse's connector sign-in test sends the first two and was refused with `invalid_client_metadata`.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+
 ## [v0.135.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.135.0) — 2026-11-01
 
 Resource indexing and recall correctness: the indexer cleans up after old versions and keeps edits on re-index, recall reads hits from the contexts it searched, and points indexed before v0.122.0 can be backfilled. `explore` moves out of the default MCP tool list, and the api and web images ship less.
