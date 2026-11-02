@@ -5499,7 +5499,10 @@ class MemoryService:
                 surviving hint or ``None``); those rows are not resolved again.
             filters: #2027 the row filters the recall searched with (after the
                 ``tags_normalize`` widening); a suggestion's target is held to
-                them. ``None`` applies no row filter, as in the fold.
+                them, except a target among ``memories`` (#2257: hydrated for
+                this caller, so the search already matched it), which only
+                the trusted filter, liveness, binding and the context match
+                hold. ``None`` applies no row filter, as in the fold.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5510,7 +5513,8 @@ class MemoryService:
         # rerank so discarded candidates cost nothing (empty/fast when none
         # carry one).
         # #2131: rows the fold already resolved (same caller, same operation,
-        # same trust filter) reuse its answer; only the rest are queried.
+        # same filters, same pool exemption — the fold's nodes are hydrated
+        # rows too) reuse its answer; only the rest are queried.
         page = search_results[: request.k]
         page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
         resolved = resolved_candidates or {}
