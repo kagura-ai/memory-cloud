@@ -146,6 +146,28 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
     expect(mockReferenceMemory).toHaveBeenCalledTimes(2);
   });
 
+  it("reads a 404 with the suggestion still there as a refusal, not a stale one", async () => {
+    // A member downgraded to viewer: the edge route's deny is a uniform 404,
+    // the re-read still shows the suggestion, now not writable.
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(404, "RES-001"));
+    const notWritable = candidate({
+      acceptance: { allowed: false, reason: "not_writable" },
+    });
+    mockReferenceMemory.mockResolvedValueOnce(reference(notWritable));
+
+    act(() => result.current.acceptSupersede());
+
+    await waitFor(() =>
+      expect(result.current.supersedeError).toEqual({
+        title: "supersede.errors.denied",
+      }),
+    );
+    expect(result.current.supersedeCandidate?.acceptance).toEqual(
+      notWritable.acceptance,
+    );
+  });
+
   it("maps a 409 to the conflict message that blocks a retry", async () => {
     // `acceptance` does not model another declared edge on the pair, so the
     // re-read still allows it: the error itself keeps the action disabled.
@@ -211,6 +233,62 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
       edge_type: "supersedes",
     });
     expect(mockToast).toHaveBeenCalledWith({ title: "supersede.accepted" });
+  });
+
+  function deferredReference() {
+    let resolve: (ref: MemoryReference) => void = () => {};
+    mockReferenceMemory.mockReturnValueOnce(
+      new Promise<MemoryReference>((r) => {
+        resolve = r;
+      }),
+    );
+    return (ref: MemoryReference) => resolve(ref);
+  }
+
+  it("ignores a re-read that resolves after an edit was saved", async () => {
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(403, "AUTH-101"));
+    const resolveReread = deferredReference();
+
+    act(() => result.current.acceptSupersede());
+    await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalledTimes(2));
+    const edited = { ...reference(), summary: "Edited summary", version: 2 };
+    act(() => result.current.applyEditSuccess(edited));
+    await act(async () => {
+      resolveReread(
+        reference(
+          candidate({ acceptance: { allowed: false, reason: "not_owner" } }),
+        ),
+      );
+    });
+
+    expect(result.current.hydrated).toEqual(edited);
+    expect(result.current.supersedeError).toBeNull();
+    expect(result.current.supersedeAccepting).toBe(false);
+  });
+
+  it("ignores a re-read that resolves after the dialog was closed and reopened", async () => {
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(403, "AUTH-101"));
+    const resolveReread = deferredReference();
+
+    act(() => result.current.acceptSupersede());
+    await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalledTimes(2));
+    act(() => result.current.handleDetailOpenChange(false));
+    const reopened = { ...reference(), summary: "Reopened view" };
+    mockReferenceMemory.mockResolvedValueOnce(reopened);
+    act(() => result.current.openDetail(MEMORY_ID));
+    await waitFor(() => expect(result.current.hydrated).toEqual(reopened));
+    await act(async () => {
+      resolveReread(
+        reference(
+          candidate({ acceptance: { allowed: false, reason: "not_owner" } }),
+        ),
+      );
+    });
+
+    expect(result.current.hydrated).toEqual(reopened);
+    expect(result.current.supersedeError).toBeNull();
   });
 
   it("drops a failure that lands after the dialog was closed", async () => {
