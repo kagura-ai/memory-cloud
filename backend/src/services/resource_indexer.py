@@ -1298,8 +1298,12 @@ class ResourceIndexer:
         # never takes a point for an orphan until its payload ``indexed_at`` —
         # the write time, not ``updated_at``, which is the event time and can
         # be far in the past on a backlog (#1869) — is older than the grace
-        # period, so this window is safe without the #1798 writer lock — which
-        # would pin the sweep out for the whole batch.
+        # period. Since #2407 the batch also holds the #1798 point-writer lock
+        # shared (taken above, before the first upsert, held to the batch
+        # commit) to fence erasure; so ``forget``'s post-commit point delete
+        # and this indexer's own post-commit drains, which never wait for the
+        # lock, defer while a batch runs — forget's to the deferred point
+        # delete drain (#2476), the drains' to the sweep.
         try:
             await self.qdrant_client.upsert(
                 collection_name=collection_name,
