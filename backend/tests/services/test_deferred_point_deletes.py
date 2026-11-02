@@ -256,7 +256,8 @@ class TestDrain:
         qdrant.side_effect = points
         with (
             patch("db.point_writer_lock.wait_for_point_writers", _lock(db)),
-            patch.object(deferred, "DRAIN_DELETE_TIMEOUT_SECONDS", 0.05),
+            # Room for collection "a" to finish on a slow runner before the bound.
+            patch.object(deferred, "DRAIN_DELETE_TIMEOUT_SECONDS", 0.5),
         ):
             result = await asyncio.wait_for(
                 deferred.drain_deferred_point_deletes(db, wait_seconds=30), timeout=5

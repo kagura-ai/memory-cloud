@@ -1762,9 +1762,12 @@ with `ORPHAN_VECTOR_SWEEP_ENABLED=false` as well
 ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)). Its log
 lines are `deferred_point_deletes_drained`,
 `deferred_point_deletes_writers_busy` (the writers outlasted the wait; the next
-run retries) and `deferred_point_deletes_failed` (a vector-store error; the
-rows stay); `deferred_point_deletes_backlog_old` warns when a queued point is
-older than a day. While the drain waits, new writers queue behind it, so lower
+run retries), `deferred_point_deletes_failed` (a vector-store error; the
+rows stay) and `deferred_point_deletes_task_failed` (the run itself raised —
+for example the new code started before migration f21 was applied, when
+`forget` fails as well because it writes to the table);
+`deferred_point_deletes_backlog_old` warns when a queued point is older than a
+day. While the drain waits, new writers queue behind it, so lower
 the wait (e.g. to 5) where an indexer or merge stall of that length matters.
 Once it holds the lock, a run takes at most 1000 points (fewest failed
 attempts first, then oldest) and spends at most 15 seconds on the vector store;
