@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# No job writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -308,6 +312,10 @@ jobs:
   # backend-integration's own `if:` gate decides whether to run.
   detect-changes:
     runs-on: ubuntu-latest
+    # paths-filter lists the pull request's files through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       backend-integration: ${{ steps.filter.outputs.backend-integration }}
       frontend-a11y-authed: ${{ steps.filter.outputs.frontend-a11y-authed }}
