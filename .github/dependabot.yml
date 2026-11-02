@@ -1,0 +1,47 @@
+# Replaces renovate.json, which never ran: the Renovate app was never installed (#2524).
+version: 2
+updates:
+  # The weekly lock refresh (#1706): one PR that re-resolves backend/uv.lock inside the
+  # ranges of backend/pyproject.toml. The ranges stay hand-edited, with the reason next to
+  # each bound (#1705).
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    versioning-strategy: lockfile-only
+    # Wait two weeks after a release: hijacked packages are usually caught and pulled within days.
+    cooldown:
+      default-days: 14
+    groups:
+      uv-lock:
+        patterns:
+          - "*"
+  # Postgres only (#1310): minors and digests, every compose file in one PR. A major is a
+  # stateful dump/restore cutover (docs/ops/postgres-18-migration-runbook.md), never a compose
+  # bump. This does not reach the `services:` images in the workflows: CONTRIBUTING.md has the
+  # step, and postgres_pin_consistency.bats fails until they agree.
+  - package-ecosystem: docker-compose
+    directories:
+      - /
+      - /terraform/single-server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 14
+    allow:
+      - dependency-name: postgres
+    ignore:
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
+    groups:
+      postgres:
+        patterns:
+          - postgres
+        group-by: dependency-name

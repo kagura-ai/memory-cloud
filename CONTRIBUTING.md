@@ -49,14 +49,23 @@ which fails when the lock is out of date, and the `lint` job runs
 - After editing `pyproject.toml`: `cd backend && uv lock` (or `make lock`) and
   commit `uv.lock` with the change. `make lock-check` is the CI gate.
 - Move one package inside its range: `uv lock --upgrade-package NAME`.
-- Renovate opens a weekly lock-maintenance PR that re-resolves every package
-  inside its range; the ranges are edited by hand, with the reason next to the
-  bound (`#1705`).
-- uv itself is pinned in lockstep: `[tool.uv] required-version` in
-  `pyproject.toml`, `astral-sh/setup-uv` in `.github/workflows/*.yml`, the
-  `ghcr.io/astral-sh/uv` stage in `backend/Dockerfile` and `setup.sh`.
+- Dependabot opens one weekly PR that moves `uv.lock` inside the ranges; the
+  ranges are edited by hand, with the reason next to the bound (`#1705`).
+- uv itself is pinned in lockstep: `astral-sh/setup-uv` in
+  `.github/workflows/*.yml`, the `ghcr.io/astral-sh/uv` stage in
+  `backend/Dockerfile` and `setup.sh`, with the same version as the lower bound
+  in `[tool.uv] required-version` in `pyproject.toml`.
   `backend/tests/test_uv_version_lockstep.py` fails when they disagree; bump
-  all of them together and regenerate the lock with the new uv.
+  all of them together and regenerate the lock with the new uv. The bound is
+  not `==` because Dependabot re-locks with its own, newer uv (`#2524`). That
+  uv writes a higher lock `revision`, which the pinned uv still reads.
+- Dependabot also opens one weekly PR for postgres minors and digests, across
+  the compose files. It cannot update `services:` images in workflows, so push
+  the same `postgres:…@sha256:…` to `.github/workflows/ci.yml` (three sites) and
+  `.github/workflows/eval-nightly.yml` on that PR.
+  `postgres_pin_consistency.bats` fails until every site agrees. Majors are not
+  proposed: they are a dump/restore cutover
+  (`docs/ops/postgres-18-migration-runbook.md`).
 
 ## Code Style
 

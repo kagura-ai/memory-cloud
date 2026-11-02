@@ -1,12 +1,11 @@
 #!/usr/bin/env bats
 # =============================================================================
 # Regression guard for the #1310 pin-divergence hazard: the postgres image is
-# digest-pinned as a LITERAL in six sites across four files (the ci.yml YAML
-# anchor was inlined so Renovate's github-actions manager detects every site).
-# YAML no longer enforces that the literals agree — this test does. The
-# Renovate packageRule group keeps them moving together once the bot is
-# active; this guard catches a stray hand-edit of a single site in the
-# meantime and forever. Static conformance — no docker, no network.
+# digest-pinned as a LITERAL in six sites across four files. YAML does not
+# enforce that the literals agree — this test does. Dependabot bumps only the
+# compose files (#2524), so this also fails on its PR until the workflow sites
+# are updated by hand, which is the point. Static conformance — no docker, no
+# network.
 # =============================================================================
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../../../.."
