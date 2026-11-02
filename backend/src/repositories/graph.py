@@ -64,15 +64,16 @@ class GraphRepository(BaseRepository[GraphMemory]):
         """List graphs with pagination, ordered by primary key.
 
         The primary-key order makes ``skip``/``limit`` pages deterministic
-        (#2385): without it the rows came back in physical order, so which
-        graphs a capped caller (``tasks.neural_tasks``) processed depended on
-        the table's storage layout. New graphs get higher ids, so an offset
-        scan does not shift when rows are inserted during it.
+        (#2385): without it the rows came back in physical order, which an
+        update or a vacuum can change between two page reads. Offset pages
+        are still positions, not a cursor: a row deleted below the current
+        offset moves the later rows down one place.
 
         Args:
             skip: Offset
             limit: Max results
-            filters: Optional filters
+            filters: Not applied; accepted for the ``BaseRepository``
+                signature only. Every graph is returned.
 
         Returns:
             List of graphs, lowest id first

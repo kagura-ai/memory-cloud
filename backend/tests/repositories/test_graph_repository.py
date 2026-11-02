@@ -1,5 +1,6 @@
 """Tests for GraphRepository."""
 
+from collections.abc import Callable
 from datetime import datetime
 from uuid import uuid4
 
@@ -11,12 +12,29 @@ from repositories.graph import GraphRepository
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def _list_all(repository: GraphRepository, page_size: int) -> list[GraphMemory]:
-    """Read every graph through list(), one skip/limit page at a time."""
+async def _scan(
+    repository: GraphRepository,
+    page_size: int,
+    *,
+    start: int = 0,
+    until: Callable[[list[GraphMemory]], bool] = lambda _rows: False,
+) -> list[GraphMemory]:
+    """Read graphs through list() one skip/limit page at a time, from ``start``.
+
+    Stops at the first empty page, or as soon as ``until`` holds for what was
+    read, so a test does not read more of the shared table than it needs.
+    """
     rows: list[GraphMemory] = []
-    while page := await repository.list(skip=len(rows), limit=page_size):
+    while not until(rows) and (
+        page := await repository.list(skip=start + len(rows), limit=page_size)
+    ):
         rows.extend(page)
     return rows
+
+
+def _has_ids(wanted: set[int]) -> Callable[[list[GraphMemory]], bool]:
+    """``until`` predicate: every id in ``wanted`` has been read."""
+    return lambda rows: wanted <= {g.id for g in rows}
 
 
 class TestGraphRepository:
@@ -82,9 +100,8 @@ class TestGraphRepository:
         and list() returns the lowest ids first, so page until the new graph
         (the highest id) shows up instead of reading one default page.
         """
-        results = await _list_all(repository, page_size=100)
+        results = await _scan(repository, page_size=100, until=_has_ids({sample_graph.id}))
 
-        assert len(results) > 0
         assert any(g.id == sample_graph.id for g in results)
 
     @pytest.mark.asyncio
@@ -110,28 +127,38 @@ class TestGraphRepository:
         first.graph_data = {"nodes": [{"id": "moved"}], "links": []}
         await db_session.flush()
 
-        listed = await _list_all(repository, page_size=100)
+        mine_ids = {first.id, second.id, third.id}
+        listed = await _scan(repository, page_size=1000, until=_has_ids(mine_ids))
         ids = [g.id for g in listed]
         assert ids == sorted(ids)
-        mine = [g.id for g in listed if g.user_id.startswith(f"order_{uid}_")]
-        assert mine == [first.id, second.id, third.id]
+        assert [i for i in ids if i in mine_ids] == [first.id, second.id, third.id]
 
     @pytest.mark.asyncio
     async def test_list_pages_are_contiguous(self, repository, db_session):
-        """skip/limit pages follow each other in id order without gaps or overlap."""
+        """skip/limit pages follow each other in id order without gaps or overlap.
+
+        Only this test's rows are compared, so graphs other sessions commit
+        meanwhile (always with higher ids) cannot make it fail.
+        """
         uid = uuid4().hex
-        for i in range(5):
-            db_session.add(
-                GraphMemory(user_id=f"contig_{uid}_{i}", graph_data={"nodes": [], "links": []})
-            )
+        rows = [
+            GraphMemory(user_id=f"contig_{uid}_{i}", graph_data={"nodes": [], "links": []})
+            for i in range(5)
+        ]
+        db_session.add_all(rows)
         await db_session.flush()
+        mine = sorted(g.id for g in rows)
 
-        everything = await _list_all(repository, page_size=1000)
-        paged = await _list_all(repository, page_size=2)
-        assert [g.id for g in paged] == [g.id for g in everything]
+        before_mine = await _scan(repository, page_size=1000, until=_has_ids({mine[0]}))
+        start = [g.id for g in before_mine].index(mine[0])  # offset of this test's lowest id
 
-        page = await repository.list(skip=1, limit=2)
-        assert [g.id for g in page] == [g.id for g in everything[1:3]]
+        paged = await _scan(repository, page_size=2, start=start, until=_has_ids(set(mine)))
+        paged_ids = [g.id for g in paged]
+        assert paged_ids == sorted(set(paged_ids))  # ascending, nothing read twice
+        assert [i for i in paged_ids if i in set(mine)] == mine  # nothing skipped
+
+        page = await repository.list(skip=start + 1, limit=2)
+        assert [g.id for g in page] == paged_ids[1:3]
 
     @pytest.mark.asyncio
     async def test_list_with_pagination(self, repository, db_session):
