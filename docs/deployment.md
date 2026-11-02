@@ -1742,13 +1742,40 @@ Two things keep the two stores in step:
   points of such a memory are ones written before the resource indexer took
   the row over, holding text it no longer has
   ([#2101](https://github.com/kagura-ai/memory-cloud/issues/2101)). Set
-  `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off. `forget`
-  also relies on the sweep: it deletes its points after its commit, and when a
-  point writer holds the lock or the vector store stalls it logs
-  `forget_point_delete_deferred` and leaves them for this run
-  ([#2201](https://github.com/kagura-ai/memory-cloud/issues/2201)). With the
-  scheduled run off, those points stay until you run the sweep yourself; they
-  are not recall hits, but they do take candidate slots.
+  `ORPHAN_VECTOR_SWEEP_ENABLED=false` to turn the scheduled run off.
+
+`forget` deletes its points right after its commit only when no point writer
+is mid-transaction ([#2201](https://github.com/kagura-ai/memory-cloud/issues/2201)).
+The resource indexer is one: it holds the point-writer lock from the first
+upsert of a batch to that batch's commit (up to 100 events, embedded one by
+one), so on a deployment with resource ingest a `forget` that runs while a
+batch is running is deferred — that is the normal case there, not an
+exception. A merge, a Sleep or session rollback and an admin restore hold the
+lock the same way while they write. A deferred delete (also one that hits a
+stalled vector store) logs `forget_point_delete_deferred`; the point is
+queued in the `deferred_point_deletes` table by the same transaction that
+deleted the memory. A drain job retries the queue every
+`DEFERRED_POINT_DRAIN_INTERVAL_SECONDS` (default 300; 0 turns it off) and
+waits up to `DEFERRED_POINT_DRAIN_WAIT_SECONDS` (default 30; 0 does not wait)
+for the writers, so the point goes within minutes without the daily sweep,
+with `ORPHAN_VECTOR_SWEEP_ENABLED=false` as well
+([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)). Its log
+lines are `deferred_point_deletes_drained`,
+`deferred_point_deletes_writers_busy` (the writers outlasted the wait; the next
+run retries), `deferred_point_deletes_failed` (a vector-store error; the
+rows stay) and `deferred_point_deletes_task_failed` (the run itself raised —
+for example the new code started before migration f21 was applied, when
+`forget` fails as well because it writes to the table);
+`deferred_point_deletes_backlog_old` warns when a queued point is older than a
+day. While the drain waits, new writers queue behind it, so lower
+the wait (e.g. to 5) where an indexer or merge stall of that length matters.
+Once it holds the lock, a run takes at most 1000 points (fewest failed
+attempts first, then oldest) and spends at most 15 seconds on the vector store;
+what it does not finish stays queued for the next run.
+Until the point goes it is not a recall hit, but it takes a candidate slot and
+counts in `confidence`. The sweep stays the backstop for a point an embedding
+task wrote after the forget. Apply the `f21_2476_deferred_point_deletes`
+migration before starting this version: `forget` writes to the table.
 
 The resource indexer cleans up after itself as well. When a new version of a
 document replaces the old one, the indexer deletes the old row. Once the

@@ -7116,11 +7116,14 @@ class MemoryService:
     async def delete_forgotten_points(self, point_deletes: list[tuple[UUID, UUID, str]]) -> None:
         """Delete forgotten rows' search points and content chunks after their commit.
 
-        ``point_deletes``: ``(memory id, point id, collection)``. Never raises
-        an ``Exception``: the rows are committed tombstones, a tombstone's
-        leftover point is no hit, and the orphan vector sweep removes it after
-        its grace period (``REASON_TOMBSTONED``), so a caller's reply for a
-        committed delete does not depend on this step.
+        ``point_deletes``: ``(memory id, point id, collection)``, each queued
+        in ``deferred_point_deletes`` by ``forget``'s commit (#2476). Never
+        raises an ``Exception``: the rows are committed tombstones, a
+        tombstone's leftover point is no hit, and a point left here keeps its
+        queue row, which the drain job retries
+        (``services.deferred_point_deletes``), so a caller's reply for a
+        committed delete does not depend on this step. The handled entries
+        leave the queue in the same transaction, under the lock.
 
         Between the commit and here a point can get a live owner again: a
         ``rollback_session`` / Sleep undo restoring the row, or a resource
@@ -7133,28 +7136,18 @@ class MemoryService:
         """
         if not point_deletes:
             return
+        from services.deferred_point_deletes import delete_points_by_collection
+
         try:
             async with asyncio.timeout(FORGET_POINT_DELETE_TIMEOUT_SECONDS):
                 async with self._points_free_to_delete(point_deletes) as free:
-                    await self._delete_points_by_collection(free)
+                    await delete_points_by_collection(free)
         except Exception as exc:
             logger.warning(
                 "forget_point_delete_deferred",
                 points=len(point_deletes),
                 error_class=type(exc.__cause__ or exc).__name__,
             )
-
-    @staticmethod
-    async def _delete_points_by_collection(point_deletes: list[tuple[UUID, UUID, str]]) -> None:
-        """One point delete and one chunk delete per collection."""
-        from db.qdrant import delete_chunk_points, delete_points_from_qdrant
-
-        collections: dict[str, list[tuple[UUID, UUID, str]]] = {}
-        for entry in point_deletes:
-            collections.setdefault(entry[2], []).append(entry)
-        for collection, entries in collections.items():
-            await delete_points_from_qdrant([str(entry[1]) for entry in entries], collection)
-            await delete_chunk_points([entry[0] for entry in entries], collection)
 
     @contextlib.asynccontextmanager
     async def _points_free_to_delete(
@@ -7165,34 +7158,29 @@ class MemoryService:
         Holds the point-writer lock exclusively (``db.point_writer_lock``) on
         an isolated session for the block, so the forget's own session is not
         touched after its commit; closing that session releases the lock.
-        Yields nothing when the lock is taken: the points are left to the
-        sweep, which applies the same rule, rather than queueing every writer
-        behind this delete (``try_exclude_point_writers``).
+        Yields nothing when the lock is taken: the points stay queued for the
+        drain job (#2476), which applies the same rule, rather than queueing
+        every writer behind this delete (``try_exclude_point_writers``). When
+        the block completes, the handled entries leave the queue and the
+        session commits, still under the lock; a block that raises (a
+        vector-store failure, the timeout) leaves them queued.
         """
         from db.base import isolated_session
-        from db.point_writer_lock import try_exclude_point_writers
+        from services.deferred_point_deletes import dequeue, points_free_of_writers
 
         async with isolated_session(self.db) as session:
-            if not await try_exclude_point_writers(session):
+            held = await points_free_of_writers(session, point_deletes, wait_seconds=None)
+            if held is None:
                 logger.warning(
                     "forget_point_delete_deferred", points=len(point_deletes), reason="writers"
                 )
                 yield []
                 return
-            points = list({point_id for _, point_id, _ in point_deletes})
-            owned = set(
-                (
-                    await session.execute(
-                        select(func.coalesce(Memory.summary_embedding_id, Memory.id)).where(
-                            Memory.deleted_at.is_(None),
-                            or_(Memory.id.in_(points), Memory.summary_embedding_id.in_(points)),
-                        )
-                    )
-                ).scalars()
-            )
-            if owned:
-                logger.info("forget_point_kept_live_owner", points=len(owned))
-            yield [entry for entry in point_deletes if entry[1] not in owned]
+            free, queued = held
+            yield free
+            if queued:
+                await dequeue(session, queued)
+                await session.commit()
 
     async def _point_to_delete(self, memory: Memory) -> UUID | None:
         """``memory``'s vector point id, or ``None`` when another live row owns it too."""
@@ -7804,6 +7792,15 @@ class MemoryService:
             ctx: await resolve_collection_name(self.db, ctx)
             for ctx in {context for _, _, context in point_deletes}
         }
+        forgotten = [(mid, point, collections[ctx]) for mid, point, ctx in point_deletes]
+        # #2476: each point is queued in the transaction that tombstones its
+        # row, so a delete that cannot run after the commit (a point writer
+        # holds the lock, the vector store stalls, a cancel) is retried by the
+        # drain job instead of waiting for the orphan sweep.
+        if forgotten:
+            from services.deferred_point_deletes import queue_point_deletes
+
+            await queue_point_deletes(self.db, forgotten)
         await self.db.commit()
 
         # #1286 item 2 (P0-5): audit the destructive write (no-op unless a
@@ -7843,9 +7840,8 @@ class MemoryService:
         # commit (and after the audit row of what it committed). Deleting them
         # before the commit let a cancellation (the forget batch deadline) or a
         # failed commit leave a live row without its vector, which nothing
-        # recovers; a tombstone's leftover point is no hit, and the orphan
-        # sweep removes it.
-        forgotten = [(mid, point, collections[ctx]) for mid, point, ctx in point_deletes]
+        # recovers; a tombstone's leftover point is no hit, and its queue row
+        # gets it deleted (#2476).
         if point_queue is not None:
             point_queue.extend(forgotten)
         else:

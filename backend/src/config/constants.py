@@ -261,6 +261,23 @@ TOMBSTONE_PURGER_CLAUSE = (
     f"{CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT} days)"
 )
 
+# =============================================================================
+# Deferred point deletes (#2476)
+# =============================================================================
+# forget queues the points it could not delete after its commit (a point
+# writer held the lock); tasks/neural_tasks.drain_deferred_point_deletes_task
+# retries them every INTERVAL seconds (0 turns the job off) and waits up to
+# WAIT seconds for the point writers each time (0: does not wait). Independent
+# of ORPHAN_VECTOR_SWEEP_ENABLED.
+DEFERRED_POINT_DRAIN_INTERVAL_ENV = "DEFERRED_POINT_DRAIN_INTERVAL_SECONDS"
+DEFERRED_POINT_DRAIN_INTERVAL_DEFAULT = 300
+DEFERRED_POINT_DRAIN_WAIT_ENV = "DEFERRED_POINT_DRAIN_WAIT_SECONDS"
+DEFERRED_POINT_DRAIN_WAIT_DEFAULT = 30.0
+# Above this the wait is a typo (or milliseconds): it falls back to the default.
+DEFERRED_POINT_DRAIN_WAIT_MAX = 600.0
+# A queued point older than this is logged as a warning on every run.
+DEFERRED_POINT_BACKLOG_WARN_SECONDS = 24 * 3600
+
 # ============================================================================
 # Gate contract (#1644)
 # ============================================================================

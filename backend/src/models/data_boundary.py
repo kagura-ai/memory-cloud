@@ -130,6 +130,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "audit_logs",
         "erasure_requests",
         "vector_erasure_jobs",
+        # #2476: vector point deletes forget deferred behind a point writer;
+        # opaque memory/point UUIDs and a collection name, no content.
+        "deferred_point_deletes",
         "signup_allowlist",
         "signup_gate_config",
         # Closed-beta invite links (#1581) — signup-gate plumbing like the two

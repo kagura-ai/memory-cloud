@@ -19,8 +19,10 @@ it exclusively while changing routing, so a restore either finishes under
 the old route first or resolves the new route after the switch. The resource
 indexer's post-commit point cleanup and ``forget``'s post-commit point delete
 (#2201, once per call, at most 2 s held) take it exclusively only when it is
-free (:func:`try_exclude_point_writers`): they can leave their points to the
-sweep, so they never queue.
+free (:func:`try_exclude_point_writers`), so they never queue: the indexer
+leaves its points to the sweep, ``forget`` to the deferred point delete drain
+(#2476, ``services.deferred_point_deletes``), which waits a bounded time
+(``DEFERRED_POINT_DRAIN_WAIT_SECONDS``) once per interval.
 
 A new writer that upserts before it commits must call
 :func:`hold_point_writer_lock` first.
@@ -79,7 +81,9 @@ async def wait_for_point_writers(db: AsyncSession, *, timeout_seconds: float) ->
         False when a writer was still mid-transaction at the timeout. The
         session has been rolled back in that case.
     """
-    await db.execute(_SET_LOCK_TIMEOUT_SQL, {"timeout": f"{int(timeout_seconds * 1000)}ms"})
+    # At least 1 ms: lock_timeout 0 means no timeout, an unbounded wait.
+    timeout_ms = max(1, int(timeout_seconds * 1000))
+    await db.execute(_SET_LOCK_TIMEOUT_SQL, {"timeout": f"{timeout_ms}ms"})
     try:
         await db.execute(_EXCLUSIVE_SQL)
     except DBAPIError as exc:

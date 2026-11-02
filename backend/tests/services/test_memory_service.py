@@ -2409,7 +2409,8 @@ class TestExploreAccessStats:
 @pytest.fixture
 def point_writer_lock_free():
     """#2201: the post-commit delete's lock and live-owner look need a real
-    session; here the lock is free and no live row owns the point."""
+    session; here the lock is free and no live row owns the point. #2476: the
+    queue INSERT before the commit needs one too; here it is a mock."""
     import contextlib
 
     @contextlib.asynccontextmanager
@@ -2419,6 +2420,7 @@ def point_writer_lock_free():
     with (
         patch.object(MemoryService, "_points_free_to_delete", free),
         patch("db.qdrant.delete_chunk_points", AsyncMock()),
+        patch("services.deferred_point_deletes.queue_point_deletes", AsyncMock()),
     ):
         yield
 
@@ -2767,13 +2769,23 @@ class TestForgetDeletesThePointAfterTheCommit:
         return service
 
     @staticmethod
-    def _patches(order, delete_point):
+    def _patches(order, delete_point, *, real_queue=False):
         import contextlib
 
         async def emit(**kwargs):
             order.append("audit")
 
+        async def queue(db, entries):
+            order.append(("queue", *entries))
+
         stack = contextlib.ExitStack()
+        if not real_queue:
+            stack.enter_context(
+                patch(
+                    "services.deferred_point_deletes.queue_point_deletes",
+                    AsyncMock(side_effect=queue),
+                )
+            )
         for target, mock in (
             (
                 "services.permission_service.PermissionService.can_access_memory",
@@ -2809,7 +2821,8 @@ class TestForgetDeletesThePointAfterTheCommit:
             res = await service.forget(ForgetRequest(memory_id=row.id), "caller")
 
         assert res.deleted_count == 1
-        assert order == ["commit", "audit", f"point:{row.id}"]
+        # #2476: the point is queued in the tombstone's transaction.
+        assert order == [("queue", (row.id, row.id, "c")), "commit", "audit", f"point:{row.id}"]
 
     @pytest.mark.asyncio
     async def test_by_query_deletes_every_point_in_one_request_after_the_commit(self):
@@ -2838,7 +2851,12 @@ class TestForgetDeletesThePointAfterTheCommit:
             )
 
         assert res.deleted_count == 2
-        assert order == ["commit", "audit", tuple(str(m) for m in ids)]
+        assert order == [
+            ("queue", *((m, m, "c") for m in ids)),
+            "commit",
+            "audit",
+            tuple(str(m) for m in ids),
+        ]
 
     @pytest.mark.asyncio
     async def test_a_batch_caller_gets_the_points_queued_not_deleted(self):
@@ -2916,7 +2934,7 @@ class TestForgetDeletesThePointAfterTheCommit:
                 service.forget(ForgetRequest(memory_id=row.id), "caller"), timeout=0.2
             )
 
-        assert order == ["commit", "audit", "point-started"]
+        assert order == [("queue", (row.id, row.id, "c")), "commit", "audit", "point-started"]
         assert row.deleted_at is not None
         assert row.deleted_by == "caller"
 
@@ -3018,6 +3036,174 @@ class TestPointsFreeToDelete:
         with patch("db.base.isolated_session") as opened:
             await service.delete_forgotten_points([])
         opened.assert_not_called()
+
+
+class TestFastPathDequeue:
+    """#2476: forget queued each point in its tombstone's transaction; the
+    post-commit delete removes the queue rows of what it handled — deleted, or
+    kept for a live owner seen under the lock — and commits while it still
+    holds the lock. Whatever it did not handle stays for the drain job."""
+
+    @staticmethod
+    def _session(owned=(), queued=()):
+        rows = [SimpleNamespace(id=uuid4(), queued_at=MagicMock(name="queued_at")) for _ in queued]
+        calls: list[str] = []
+
+        async def execute(stmt, *args, **kwargs):
+            sql = str(stmt)
+            if sql.startswith("DELETE"):
+                calls.append("dequeue")
+                return MagicMock()
+            if "deferred_point_deletes" in sql:
+                calls.append("queued")
+                return MagicMock(all=MagicMock(return_value=rows))
+            calls.append("look")
+            return MagicMock(scalars=MagicMock(return_value=list(owned)))
+
+        session = MagicMock()
+        session.execute = AsyncMock(side_effect=execute)
+
+        async def commit():
+            calls.append("commit")
+
+        session.commit = AsyncMock(side_effect=commit)
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        return session, calls, rows
+
+    @staticmethod
+    def _patches(session, lock_free=True, delete_point=None):
+        import contextlib
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch("db.base.isolated_session", return_value=session))
+        stack.enter_context(
+            patch(
+                "db.point_writer_lock.try_exclude_point_writers",
+                AsyncMock(return_value=lock_free),
+            )
+        )
+        stack.enter_context(
+            patch("db.qdrant.delete_points_from_qdrant", delete_point or AsyncMock())
+        )
+        stack.enter_context(patch("db.qdrant.delete_chunk_points", AsyncMock()))
+        return stack
+
+    @pytest.mark.asyncio
+    async def test_deleted_and_kept_entries_leave_the_queue_under_the_lock(self):
+        kept, freed = (uuid4(), uuid4(), "c"), (uuid4(), uuid4(), "c")
+        session, calls, rows = self._session(owned=[kept[1]], queued=[kept, freed])
+        deleted = AsyncMock()
+        with self._patches(session, delete_point=deleted):
+            await MemoryService(MagicMock()).delete_forgotten_points([kept, freed])
+
+        deleted.assert_awaited_once_with([str(freed[1])], "c")
+        assert calls == ["queued", "look", "dequeue", "commit"]
+        dequeue_sql = session.execute.await_args_list[-1].args[0]
+        compiled = dequeue_sql.compile()
+        assert "deferred_point_deletes" in str(compiled)
+        assert {pair[0] for pair in compiled.params["param_1"]} == {row.id for row in rows}
+        session.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_busy_lock_leaves_the_rows_queued(self):
+        session, calls, _ = self._session(queued=[(uuid4(), uuid4(), "c")])
+        with self._patches(session, lock_free=False):
+            await MemoryService(MagicMock()).delete_forgotten_points([(uuid4(), uuid4(), "c")])
+
+        assert calls == []
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_vector_delete_leaves_the_rows_queued(self):
+        from utils.exceptions import QdrantError
+
+        entry = (uuid4(), uuid4(), "c")
+        session, calls, _ = self._session(queued=[entry])
+        failing = AsyncMock(side_effect=QdrantError("qdrant down"))
+        with self._patches(session, delete_point=failing):
+            await MemoryService(MagicMock()).delete_forgotten_points([entry])
+
+        assert calls == ["queued", "look"]
+        session.commit.assert_not_awaited()
+        session.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_after_the_delete_leaves_the_rows_queued(self):
+        """The bound fires after the vector delete: re-deleting is idempotent,
+        so the rows stay and the drain repeats it."""
+        import asyncio
+
+        entry = (uuid4(), uuid4(), "c")
+        session, calls, _ = self._session(queued=[entry])
+        never = asyncio.Event()
+
+        async def stall_chunks(*args):
+            await never.wait()
+
+        with (
+            self._patches(session),
+            patch("db.qdrant.delete_chunk_points", AsyncMock(side_effect=stall_chunks)),
+            patch("services.memory_service.FORGET_POINT_DELETE_TIMEOUT_SECONDS", 0.05),
+        ):
+            await MemoryService(MagicMock()).delete_forgotten_points([entry])
+
+        assert calls == ["queued", "look"]
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_queue_row_found_commits_nothing(self):
+        entry = (uuid4(), uuid4(), "c")
+        session, calls, _ = self._session(queued=[])
+        with self._patches(session):
+            await MemoryService(MagicMock()).delete_forgotten_points([entry])
+
+        assert calls == ["queued", "look"]
+        session.commit.assert_not_awaited()
+
+
+class TestForgetQueuesItsPoints:
+    """#2476: the queue rows are written by forget's own session, before its
+    commit — the tombstone and its retry land together or not at all."""
+
+    @pytest.mark.asyncio
+    async def test_the_insert_carries_the_rows_and_runs_before_the_commit(self):
+        row = TestForgetDeletesThePointAfterTheCommit._row()
+        order: list = []
+        service = TestForgetDeletesThePointAfterTheCommit._service({row.id: row}, order)
+
+        async def execute(stmt, *args, **kwargs):
+            order.append(stmt)
+            return MagicMock()
+
+        service.db.execute = AsyncMock(side_effect=execute)
+        with TestForgetDeletesThePointAfterTheCommit._patches([], AsyncMock(), real_queue=True):
+            await service.forget(ForgetRequest(memory_id=row.id), "caller", point_queue=[])
+
+        insert, commit = order
+        assert commit == "commit"
+        sql = str(insert)
+        assert sql.startswith("INSERT INTO deferred_point_deletes")
+        assert "ON CONFLICT ON CONSTRAINT uq_deferred_point_delete DO UPDATE" in sql
+        params = insert.compile().params
+        assert params["memory_id_m0"] == row.id
+        assert params["point_id_m0"] == row.id
+        assert params["collection_m0"] == "c"
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_delete_queues_nothing(self):
+        row = TestForgetDeletesThePointAfterTheCommit._row()
+        order: list = []
+        service = TestForgetDeletesThePointAfterTheCommit._service({row.id: row}, order)
+        service.db.execute = AsyncMock()
+        with (
+            TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock(), real_queue=True),
+            patch.object(MemoryService, "_point_to_delete", AsyncMock(return_value=None)),
+        ):
+            await service.forget(ForgetRequest(memory_id=row.id), "caller")
+
+        service.db.execute.assert_not_awaited()
+        assert order == ["commit", "audit"]
 
 
 class TestFlooredUnscoredRerankCandidates:
