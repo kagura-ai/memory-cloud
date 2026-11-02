@@ -7,6 +7,7 @@
  * the dialog when the URL pointed at an unreachable memory.
  */
 
+import { useId } from "react";
 import {
   Dialog,
   DialogContent,
@@ -108,6 +109,8 @@ export function MemoryDetailDialog({
   // an older backend → the action stays enabled and the server decides.
   const supersedeAcceptance = supersedeCandidate?.acceptance ?? null;
   const supersedeRefused = supersedeAcceptance?.allowed === false;
+  // Unique per dialog instance, for the button's aria-describedby.
+  const supersedeReasonId = useId();
   // #2427: a 409 the server's `acceptance` cannot express; the inline alert
   // explains it, so the button just stays disabled.
   const supersedeBlocked = supersedeError?.blocksRetry === true;
@@ -412,9 +415,7 @@ export function MemoryDetailDialog({
                           supersedeBlocked
                         }
                         aria-describedby={
-                          supersedeRefused
-                            ? "supersede-unavailable-reason"
-                            : undefined
+                          supersedeRefused ? supersedeReasonId : undefined
                         }
                       >
                         {supersedeAccepting ? (
@@ -426,7 +427,7 @@ export function MemoryDetailDialog({
                       </Button>
                       {supersedeRefused && (
                         <p
-                          id="supersede-unavailable-reason"
+                          id={supersedeReasonId}
                           className="text-right text-xs text-slate-600 dark:text-slate-400"
                         >
                           {unavailableText(supersedeAcceptance?.reason)}
