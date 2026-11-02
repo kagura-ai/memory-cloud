@@ -1249,7 +1249,16 @@ A re-embed whose summary and content are unchanged since the row's last
 successful embed (a content-chunk backfill, an embedding-model switch, a repair
 re-queue) runs neither the detection nor the judge. `embedding_completed`
 carries `mechanical_reembed=true` for it, so judge spend during a backfill is
-counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
+counted with `supersede_verify_judged` / `llm_call_log` as before (#2092). Such
+a re-embed of a row that holds a live candidate still checks whether the pair
+is near: the candidate's stored vector is read from the same collection, and
+when the pair scores more than 0.02 below the threshold the candidate answers
+to (0.85, or `SUPERSEDE_SUGGEST_THRESHOLD_LLM` for a pair that carries a
+verdict), the candidate is cleared and `supersede_candidate_cleared_no_neighbour`
+is logged (#2256). A candidate whose memory has no point in that collection
+yet (an embedding-model switch fills the new collection row by row) is left as
+it is. An embedding-model switch therefore drops pairs the new embedder no
+longer scores as near-duplicates; it never re-judges or stores a pair.
 
 **Supersede suggestions** (`services/memory_service.py`, `services/edge_service.py`)
 
@@ -1262,8 +1271,8 @@ counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
 | `supersede_suggestion_dismissed` | INFO | an edit dismissed the candidate and wrote a tombstone |
 | `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had set the pair aside and its verdict still matches both memories' texts, so the pair was not shown; a verdict that no longer matches is dismissed like any shown candidate) |
 | `supersede_candidate_skipped_source_edited` | INFO | the memory was edited while this embedding run was searching, judging or clearing its candidate, so this run wrote nothing; the edit's own run writes the column |
-| `supersede_candidate_skipped_row_changed` | INFO | the row changed between the embedding run's last read and its write (a dismissal, an accept, an edit, a delete or another run's candidate landed in that gap), so this run stored nothing. The write only applies to the row as it was read |
-| `supersede_candidate_cleared_no_neighbour` | INFO | a re-embed found no neighbour within 0.02 of the suggestion threshold (usually an edit moved the memory away from the pair), so the stored candidate was cleared. The margin keeps a pair that hovers at the threshold from being cleared and re-judged on every re-embed. Dismissal tombstones are never cleared |
+| `supersede_candidate_skipped_row_changed` | INFO | the row changed between the embedding run's last read and its write (a dismissal, an accept, an edit, a delete or another run's candidate landed in that gap), so this run stored nothing. The write only applies to the row as it was read. Also logged when a clear finds a different candidate value than the one it measured (#2256), which it leaves alone |
+| `supersede_candidate_cleared_no_neighbour` | INFO | a re-embed found no neighbour within 0.02 of the suggestion threshold (usually an edit moved the memory away from the pair; also a re-embed of unchanged text under an embedder that scores the pair lower, #2256), so the stored candidate was cleared. The margin keeps a pair that hovers at the threshold from being cleared and re-judged on every re-embed. Dismissal tombstones are never cleared |
 | `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
 | `supersede_acceptance_failed` | WARNING | `reference` or a `PATCH` reply could not work out whether the caller may accept the suggestion (#2427), so the candidate was returned without `acceptance`. The read still succeeds; the client keeps the accept action enabled and the write path still checks on click |
 | `supersede_shadowing_applied` | INFO | recall-side: a recall applied the shadowing of memories superseded by an accepted `supersedes` edge (`shadowed` of `candidates` results were hidden) |
@@ -1271,14 +1280,18 @@ counted with `supersede_verify_judged` / `llm_call_log` as before (#2092).
 | `supersede_fold_applied` | INFO | recall-side (#2123): judge-verified older versions were folded under the newest one (`folded` rows removed, in `groups` groups) |
 | `supersede_fold_failed` | WARNING | recall-side: the fold could not be computed, so the recall returned without folding |
 | `supersede_candidate_skipped_unjudged_low_similarity` | INFO | with the judge on, a neighbour between `SUPERSEDE_SUGGEST_THRESHOLD_LLM` and 0.85 got no `supersedes` / `parallel` verdict (no provider, the daily cap, a failure, or `unclear`), so nothing was stored (#2123). Many of these during an ingest usually mean the daily cap |
-| `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge, store or clear ran; the stored candidate is left as it is |
+| `supersede_candidate_skipped_newer_target` | INFO | the nearest neighbour was written after this memory (read from its point payload), so it was not stored as this memory's candidate: an older memory never points at a newer one (#2256) |
+| `supersede_clear_skipped_target_not_indexed` | DEBUG | a re-embed of unchanged text found no point for the candidate's memory in the collection it just wrote to (an embedding-model switch not finished yet), so the candidate was left as it is (#2256) |
+| `supersede_clear_unsupported_backend` | WARNING | the vector store cannot return stored vectors (the LanceDB preview), so a re-embed of unchanged text never clears a candidate there; logged once per process (#2256) |
+| `supersede_clear_check_failed` | WARNING | the candidate's vector could not be read during a re-embed of unchanged text, so the candidate was left as it is; the embed itself succeeded (#2256) |
+| `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge or store ran; a live candidate is still cleared when its pair is no longer near (#2256) |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
 
 | event | level | meaning |
 |---|---|---|
 | `supersede_verify_judged` | INFO | one judge answer, with `verdict`, `confidence`, `verified` and `tokens` |
-| `supersede_verify_skipped_newer_target` | INFO | the neighbour was written after the memory, so the pair was not judged and the candidate is stored unverified |
+| `supersede_verify_skipped_newer_target` | INFO | the neighbour was written after the memory, so the pair was not judged and the candidate is stored unverified. Only for a point without a `created_at` payload; otherwise `supersede_candidate_skipped_newer_target` skips the pair before any load (#2256) |
 | `supersede_verify_failed` | WARNING | the provider call failed. The candidate is stored unverified |
 | `supersede_verify_unparseable` | WARNING | the answer could not be parsed. The candidate is stored unverified |
 | `supersede_verify_no_provider` | WARNING | `SLEEP_LLM_PROVIDER` is unset. Logged once per process |
@@ -1716,6 +1729,52 @@ python -m src.cli.resource_point_metadata_backfill --apply --yes  # write them
 Set-payload only, idempotent, no migration; `--workspace <id>` limits it to
 one workspace. The full procedure and the report lines are in
 [ops/resource-indexer-backfill.md](ops/resource-indexer-backfill.md#metadata-backfill-for-points-indexed-before-v01220-2254).
+
+## Supersede catch-up pass — Issue #2256
+
+The post-embed supersede detection ([`supersede_candidate`](mcp-tools.md))
+runs only inside the embedding pipeline, and a re-embed of unchanged text runs
+none (#2092). Memories embedded before the detection existed, before
+`SUPERSEDE_VERIFY_MODE=llm` was on, or while the judge was over its daily cap
+carry no candidate until their text changes. The one-shot pass runs the same
+detection for one context, in process, from each memory's stored vector: no
+embedding call, no seed edge, no point write. Inside the API container, from
+`backend/`:
+
+```bash
+python -m src.cli.supersede_catch_up --context <uuid>                # plan: how many rows
+python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the detection
+```
+
+- Rows: embedded, live, not resource rows, no candidate, oldest first, at
+  most `--limit` (default 200). `--include-unverified` also re-checks rows
+  whose candidate has no judge verdict; `--before <ISO-8601>` (UTC when no
+  offset) takes only rows created before that instant, and `--after
+  <ISO-8601>,<memory id>` resumes past the `resume` line of an earlier run.
+- Judge spend: with the judge on, each row may cost one call, counted on the
+  same per-workspace `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` as live ingest. The
+  run stops once that counter advanced by `--max-judge-calls` (default 50,
+  `stopped judge_budget` in the report), so run it early in the UTC day with
+  headroom under the cap. Past the cap a pair at 0.85 or above is stored
+  unverified and a pair below is skipped, as on ingest.
+- Report: `processed`, `detected` (a candidate appeared), `updated` (stored
+  again with a new target or verdict), `cleared`, `unchanged`, `failed` (the
+  detection failed on the row; see `knn_seeding_failed` in the log),
+  `no_vector` (no stored vector for the row), `skipped` (the row changed after
+  the plan, or its text or embedding moved after its vector was read),
+  `judge_calls` (how far the workspace's judge counter advanced during the
+  run, live ingest included; `unknown` when Redis could not be read) and
+  `stopped`. With the judge on, a run that cannot read the counter stops
+  (`stopped counter_unreadable`) instead of going on without a budget; with
+  the judge off it goes on. The report ends with a
+  `resume --after <created_at>,<id>` line naming the last row reached (rows
+  created in the same instant are not skipped). The INFO event
+  `supersede_catch_up_completed` carries the same tally.
+- A row whose nearest neighbour is not near enough stays without a candidate
+  and is planned again by a run over the same range (nothing records
+  "checked"); pass the `resume` line's `--after` to walk on through the
+  context. An older memory never takes a newer one as its candidate, so of a
+  near-duplicate pair only the newer row ends up with one.
 
 ## Orphaned vectors — Issue #1798
 

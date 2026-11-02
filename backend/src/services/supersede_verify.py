@@ -18,8 +18,9 @@ verdict is stored on the candidate under ``verification``:
                       "confidence": 0.0-1.0, "reason": "...", "model": "...",
                       "at": "...", "verified": true | false}}
 
-* ``parallel`` — the suggestion is kept in the column (so a mechanical
-  re-embed does not re-judge the pair) but not surfaced while it is current.
+* ``parallel`` — the suggestion is kept in the column (so the next
+  detection of the same, unmoved pair reuses it instead of re-judging) but
+  not surfaced while it is current.
 * ``supersedes`` with ``confidence >= supersede_verify_min_confidence`` —
   surfaced with ``verified: true``, the signal a client may auto-accept on.
   The floor is applied when the candidate is READ, so raising it later
@@ -368,9 +369,12 @@ def reuse_verification(
 ) -> dict[str, Any] | None:
     """An earlier verdict for the same pair, when the pair has not moved.
 
-    ``process_pending_embedding`` also runs for Sleep reindexes and backfills,
-    which recompute the same vector; re-judging on each of those would spend
-    an LLM call to learn what the column already says. The pair is "the same"
+    A re-embed of unchanged text runs no detection at all (#2092) and Sleep
+    reindexes write their points without reaching it, so this applies when a
+    detection meets an already-judged pair whose judged texts did not move:
+    an edit past the judge's content head (``CONTENT_HEAD_CHARS``), or a row
+    whose digest is not stamped yet. Re-judging there would spend an LLM
+    call to learn what the column already says. The pair is "the same"
     when the stored candidate names the same target, the similarity is within
     :data:`RESURFACE_SIMILARITY_DELTA` of the stored one (the rule the
     dismissal tombstone uses) AND the texts the judge saw are unchanged

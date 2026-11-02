@@ -374,6 +374,28 @@ class TestRecoverIntoTheContextsWorkspace:
         }
 
     @pytest.mark.asyncio
+    async def test_a_rebuilt_row_starts_with_no_digest_and_no_candidate(self, db_session):
+        """#2256 D4: the rebuilt row's next pipeline run detects (not mechanical)."""
+        from sqlalchemy import select
+
+        from models.memory import Memory
+
+        ws_id, ctx_id = await self._workspace_and_context(db_session)
+        points = [_point(ws_id), _point(str(uuid4()))]
+
+        await self._recover(db_session, points, context_id=ctx_id, dry_run=False)
+
+        rows = (
+            await db_session.execute(
+                select(Memory.embedded_text_digest, Memory.supersede_candidate).where(
+                    Memory.id.in_([p.id for p in points])
+                )
+            )
+        ).all()
+        assert len(rows) == 2
+        assert all(r.embedded_text_digest is None and r.supersede_candidate is None for r in rows)
+
+    @pytest.mark.asyncio
     async def test_a_missing_context_is_created_in_the_requested_workspace(self, db_session):
         ws_id, _ctx_id = await self._workspace_and_context(db_session)
         new_ctx = str(uuid4())

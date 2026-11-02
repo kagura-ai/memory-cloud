@@ -45,3 +45,14 @@ def test_merged_copy_is_filed_under_the_target_context() -> None:
     kwargs = _memory_constructor_kwargs()
     ctx = kwargs["context_id"]
     assert isinstance(ctx, ast.Name) and ctx.id == "target_context_id"
+
+
+def test_merged_copy_starts_with_no_digest_and_no_candidate() -> None:
+    """#2256 D4: the copy's next pipeline run (right away when pending, on
+    the next re-queue when its vector was copied) detects in the target
+    context's neighbourhood. Inheriting the digest would make that run
+    mechanical (no detection ever); a source-context candidate would point
+    outside the target context (the read path drops it)."""
+    kwargs = _memory_constructor_kwargs()
+    assert "embedded_text_digest" not in kwargs
+    assert "supersede_candidate" not in kwargs

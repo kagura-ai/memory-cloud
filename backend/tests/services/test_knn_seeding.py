@@ -6,7 +6,9 @@ new memories.
 """
 
 import hashlib
+import math
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -1548,9 +1550,9 @@ class TestSupersedeVerification:
 
     @pytest.mark.asyncio
     async def test_unmoved_pair_reuses_the_stored_verdict(self):
-        """A mechanical re-embed (same target, same texts, similarity within
-        the resurface delta) does not spend a judge call: the stored verdict
-        is kept."""
+        """A detection that meets an already-judged, unmoved pair (same
+        target, same texts, similarity within the resurface delta) does not
+        spend a judge call: the stored verdict is kept."""
         from services.supersede_verify import pair_fingerprint
 
         memory = _make_memory()
@@ -1701,10 +1703,219 @@ class TestSupersedeVerification:
         db.commit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_neighbour_written_later_is_not_judged(self):
-        """The top-1 neighbour was created AFTER this memory (its embedding
-        finished first): asking whether the earlier text supersedes the later
-        one inverts the question, so the candidate stays unverified."""
+    @pytest.mark.parametrize("verify_mode", ["off", "llm"])
+    async def test_a_neighbour_written_later_is_not_stored(self, verify_mode):
+        """#2256 D3: the top-1 neighbour was created AFTER this memory (its
+        embedding finished first, or the catch-up pass checks the older row of
+        a pair): an older memory never carries a suggestion pointing at a
+        newer one, in any mode. Read from the point payload — no DB load, no
+        judge call, no write."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode=verify_mode)
+        judge = AsyncMock()
+        dup_id, candidates, _ = self._run(memory, db, config, judge)
+        candidates[1]["payload"] = {"created_at": "2026-10-03T00:00:00Z"}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+            patch("services.memory_service.logger") as log,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        judge.assert_not_called()
+        db.execute.assert_not_called()
+        assert memory.supersede_candidate is None
+        events = {c.args[0]: c.kwargs for c in log.info.call_args_list if c.args}
+        skipped = events["supersede_candidate_skipped_newer_target"]
+        assert skipped["candidate_memory_id"] == dup_id
+        assert skipped["similarity"] == 0.93
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("score", "cleared"), [(0.78, True), (0.84, False)])
+    async def test_a_newer_neighbour_below_085_still_clears_a_085_candidate(self, score, cleared):
+        """Skipping the newer hit does not skip #2059's clear: the stored
+        pair scores no higher than this top-1, so with the judge on a
+        candidate stored at 0.85 or above is cleared a clear margin below."""
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+        memory.supersede_candidate = stored
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        newer = {
+            "id": str(uuid4()),
+            "score": score,
+            "payload": {"created_at": "2026-10-03T00:00:00Z"},
+            "embedding": [],
+        }
+        own = {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=[own, newer])),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=AsyncMock()) as judge,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        judge.assert_not_called()
+        assert (memory.supersede_candidate is None) is cleared
+        if not cleared:
+            assert memory.supersede_candidate == stored
+            db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_inverted_candidate_naming_the_newer_target_is_cleared(self):
+        """A candidate stored before the rule (or in an embedding race) that
+        points at the newer neighbour is the pair the rule forbids: cleared,
+        not left to surface forever."""
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        newer_id = str(uuid4())
+        memory.supersede_candidate = {"memory_id": newer_id, "similarity": 0.93}
+        db = _make_db()
+        hits = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {
+                "id": newer_id,
+                "score": 0.93,
+                "payload": {"created_at": "2026-10-03T00:00:00Z"},
+                "embedding": [],
+            },
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(enabled=False)),
+            ),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=hits)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_an_inverted_candidate_replaced_meanwhile_is_not_cleared(self):
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        newer_id = str(uuid4())
+        memory.supersede_candidate = {"memory_id": newer_id, "similarity": 0.93}
+        replacement = {"memory_id": str(uuid4()), "similarity": 0.9}
+        db = _make_db()
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = replacement
+
+        db.refresh = AsyncMock(side_effect=refresh)
+        hits = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {
+                "id": newer_id,
+                "score": 0.93,
+                "payload": {"created_at": "2026-10-03T00:00:00Z"},
+                "embedding": [],
+            },
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(enabled=False)),
+            ),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=hits)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == replacement
+
+    @pytest.mark.asyncio
+    async def test_an_older_neighbour_in_the_payload_is_stored(self):
+        """The payload says the neighbour is older: detection goes on as before."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="off")
+        dup_id, candidates, _ = self._run(memory, db, config, AsyncMock())
+        candidates[1]["payload"] = {"created_at": "2026-10-01T00:00:00+00:00"}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        assert memory.supersede_candidate["memory_id"] == dup_id
+
+    @pytest.mark.asyncio
+    async def test_a_hit_without_created_at_payload_falls_back_to_the_row(self):
+        """No ``created_at`` in the payload (an old point): the llm-mode check
+        on the loaded target still keeps the judge out, and the candidate is
+        stored unverified as before #2256."""
         memory = _make_memory()
         db = _make_db()
         config = _make_config(enabled=False, verify_mode="llm")
@@ -1903,8 +2114,14 @@ class TestSupersedeVerdictAfterAnEdit:
         db.execute.assert_awaited_once()
         sql, statement = self._update_sql(db)
         assert sql.startswith("UPDATE memories SET supersede_candidate=")
-        assert "supersede_candidate ->>" in sql
-        assert target in statement.compile().params.values()
+        # #2256: a compare-and-set on the whole value the decision was about.
+        assert "CAST(memories.supersede_candidate AS JSONB) = CAST(" in sql
+        snapshot = {
+            "memory_id": target,
+            "similarity": 0.93,
+            "verification": {"verdict": "supersedes", "confidence": 0.95},
+        }
+        assert snapshot in statement.compile().params.values()
         db.commit.assert_awaited()
         events = [c.args[0] for c in log.info.call_args_list if c.args]
         assert "supersede_candidate_cleared_no_neighbour" in events
@@ -2697,8 +2914,9 @@ class TestKnnSeedEditFence:
 
 class TestMechanicalReembed:
     """#2092: a re-embed of unchanged text (chunk backfill, model switch, repair
-    re-queue) runs no supersede detection, no judge and no clear; seeding is
-    unaffected."""
+    re-queue) runs no supersede detection and no judge; seeding is unaffected.
+    #2256: a row holding a live candidate still gets #2059's clear when the
+    pair is no longer near."""
 
     @staticmethod
     def _hits(memory, *others):
@@ -2707,9 +2925,26 @@ class TestMechanicalReembed:
         ]
 
     @staticmethod
-    async def _seed(memory, db, candidates, *, config, repo=None, threshold=None):
+    async def _invoke(
+        memory,
+        db,
+        candidates,
+        *,
+        config,
+        repo=None,
+        threshold=None,
+        mechanical=True,
+        seed=True,
+        vector=None,
+        stored_vectors=None,
+    ):
         judge = AsyncMock()
         detect = AsyncMock()
+        retrieve = (
+            stored_vectors
+            if isinstance(stored_vectors, AsyncMock)
+            else AsyncMock(return_value=stored_vectors or {})
+        )
         with (
             patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
             patch(
@@ -2719,6 +2954,7 @@ class TestMechanicalReembed:
             patch(
                 "db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)
             ) as search,
+            patch("db.qdrant.retrieve_dense_vectors", new=retrieve),
             patch(
                 "repositories.neural_edge.NeuralEdgeRepository",
                 return_value=repo or _make_edge_repo(),
@@ -2731,15 +2967,23 @@ class TestMechanicalReembed:
             patch.object(memory_service, "_detect_supersede_candidate", new=detect),
             patch("services.memory_service.logger") as log,
         ):
-            await _create_knn_seed_edges(
+            ok = await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 512,
+                vector=vector or [0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
-                mechanical_reembed=True,
+                mechanical_reembed=mechanical,
+                seed=seed,
             )
-        return search, judge, detect, log
+        return SimpleNamespace(
+            ok=ok, search=search, retrieve=retrieve, judge=judge, detect=detect, log=log
+        )
+
+    @classmethod
+    async def _seed(cls, memory, db, candidates, **kwargs):
+        run = await cls._invoke(memory, db, candidates, **kwargs)
+        return run.search, run.judge, run.detect, run.log
 
     @pytest.mark.asyncio
     async def test_mechanical_reembed_runs_no_detection_and_no_judge(self):
@@ -2790,13 +3034,11 @@ class TestMechanicalReembed:
         detect.assert_not_called()
         repo.create_edge_if_absent.assert_called()
 
-    @pytest.mark.asyncio
-    async def test_mechanical_reembed_does_not_clear_a_stored_candidate(self):
-        """The accepted trade-off: a re-embed under an embedder that scores the
-        pair lower no longer clears the suggestion (#2059's branch)."""
+    @staticmethod
+    def _orm_memory(stored):
+        """A real (transient) Memory: the clear sets the committed value on it."""
         from models.memory import Memory
 
-        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
         memory = Memory(
             id=uuid4(),
             user_id="user1",
@@ -2807,17 +3049,266 @@ class TestMechanicalReembed:
             created_at=datetime(2026, 10, 2),
         )
         memory.supersede_candidate = stored
-        db = _make_db()
+        return memory
 
-        await self._seed(
+    # The re-embedded vector and a target vector at a chosen cosine to it.
+    _OWN = [1.0, 0.0]
+
+    @staticmethod
+    def _at(cosine):
+        return [cosine, math.sqrt(1.0 - cosine * cosine)]
+
+    async def _clear(self, stored, cosine, *, config=None, **kwargs):
+        memory = self._orm_memory(stored)
+        db = _make_db()
+        target = stored.get("memory_id") if isinstance(stored, dict) else None
+        vectors = {} if cosine is None or target is None else {target: self._at(cosine)}
+        vectors = kwargs.pop("stored_vectors", vectors)
+        run = await self._invoke(
             memory,
             db,
-            self._hits(memory, (uuid4(), 0.60)),
-            config=_make_config(enabled=False, verify_mode="llm"),
+            self._hits(memory, (uuid4(), 0.99)),
+            config=config or _make_config(enabled=False, verify_mode="llm"),
+            vector=self._OWN,
+            stored_vectors=vectors,
+            **kwargs,
+        )
+        return memory, db, run
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_clears_a_pair_no_longer_near(self):
+        """#2256: a re-embed under an embedder that scores the pair far lower
+        (a model switch, a backfill, a repair) clears the suggestion as #2059
+        does on an edit — measured on the pair itself, the clear only: no
+        neighbour query, no detection, no judge, no store."""
+        target = str(uuid4())
+        memory, db, run = await self._clear({"memory_id": target, "similarity": 0.90}, 0.60)
+
+        run.retrieve.assert_awaited_once_with("kagura_memories", [target])
+        run.search.assert_not_called()
+        run.judge.assert_not_called()
+        run.detect.assert_not_called()
+        assert run.ok is True
+        assert memory.supersede_candidate is None
+        db.execute.assert_awaited_once()
+        from sqlalchemy.dialects import postgresql
+
+        statement = db.execute.await_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        assert sql.startswith("UPDATE memories SET supersede_candidate=")
+        assert "CAST(memories.supersede_candidate AS JSONB) = CAST(" in sql
+        assert {"memory_id": target, "similarity": 0.90} in statement.compile().params.values()
+        events = [c.args[0] for c in run.log.info.call_args_list if c.args]
+        assert "supersede_candidate_cleared_no_neighbour" in events
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_keeps_a_candidate_still_near(self):
+        """Another, nearer memory does not matter: the pair itself is near."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+
+        memory, db, run = await self._clear(stored, 0.88)
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+        run.judge.assert_not_called()
+        run.detect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_far_pair_is_cleared_even_when_another_memory_is_near(self):
+        """The top-1 neighbour at 0.99 is someone else: the stored pair at 0.60
+        no longer holds, so it is cleared."""
+        memory, _, _ = await self._clear({"memory_id": str(uuid4()), "similarity": 0.9}, 0.60)
+
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_a_target_not_indexed_yet_keeps_the_candidate(self):
+        """A model switch re-embeds rows one by one into the new collection:
+        a target without a point there yet is no evidence."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+
+        memory, db, run = await self._clear(stored, None)
+
+        run.retrieve.assert_awaited_once()
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error", [NotImplementedError("lance"), RuntimeError("vector store down")]
+    )
+    async def test_a_failed_vector_read_keeps_the_candidate_and_seeds(self, error):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        repo = _make_edge_repo()
+
+        memory, _, run = await self._clear(
+            stored,
+            0.5,
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+        )
+        assert memory.supersede_candidate is None  # sanity: 0.5 clears when readable
+
+        memory, db, run = await self._clear(
+            stored,
+            None,
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+            stored_vectors=AsyncMock(side_effect=error),
+        )
+
+        assert run.ok is True
+        assert memory.supersede_candidate == stored
+        run.search.assert_awaited_once()
+        repo.create_edge_if_absent.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_replaced_after_the_measurement_is_not_cleared(self):
+        """The pair measured is A; a concurrent detection stored B before the
+        clear re-read the row. B was never measured, so nothing is written."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        replacement = {"memory_id": str(uuid4()), "similarity": 0.91}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = replacement
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        run = await self._invoke(
+            memory,
+            db,
+            self._hits(memory),
+            config=_make_config(enabled=False),
+            vector=self._OWN,
+            stored_vectors={stored["memory_id"]: self._at(0.5)},
+        )
+
+        run.retrieve.assert_awaited_once()
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == replacement
+        events = [c.args[0] for c in run.log.info.call_args_list if c.args]
+        assert "supersede_candidate_skipped_row_changed" in events
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+
+    @pytest.mark.asyncio
+    async def test_a_judged_pair_keeps_the_llm_floor_with_the_judge_off(self):
+        """Stored verdicts are honoured after SUPERSEDE_VERIFY_MODE is switched
+        off, so a judged pair still answers to supersede_suggest_threshold_llm."""
+        stored = {
+            "memory_id": str(uuid4()),
+            "similarity": 0.80,
+            "verification": {"verdict": "supersedes", "confidence": 0.9, "verified": True},
+        }
+
+        memory, db, _ = await self._clear(
+            stored, 0.78, config=_make_config(enabled=False, verify_mode="off", llm_threshold=0.75)
         )
 
         assert memory.supersede_candidate == stored
         db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_unsupported_backend_is_reported_once(self, monkeypatch):
+        monkeypatch.setattr(memory_service, "_SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED", False)
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        logs = []
+        for _ in range(2):
+            memory, db, run = await self._clear(
+                stored, None, stored_vectors=AsyncMock(side_effect=NotImplementedError("lance"))
+            )
+            assert memory.supersede_candidate == stored
+            db.execute.assert_not_awaited()
+            logs.append([c for c in run.log.warning.call_args_list if c.args])
+        first, second = ([c.args[0] for c in calls] for calls in logs)
+        assert first == ["supersede_clear_unsupported_backend"]
+        assert second == []
+        assert set(logs[0][0].kwargs) == {"hint"}  # no row data
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_keeps_a_candidate_hovering_at_the_floor(self):
+        """The margin (RESURFACE_SIMILARITY_DELTA) applies as on every clear."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+
+        memory, db, _ = await self._clear(stored, 0.835, config=_make_config(enabled=False))
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verification", "cleared"),
+        [
+            ({"verdict": "supersedes", "confidence": 0.9, "verified": True}, False),
+            (None, True),
+        ],
+    )
+    async def test_mechanical_reembed_keeps_a_judged_candidate_down_to_the_llm_floor(
+        self, verification, cleared
+    ):
+        """A stored verdict is about the texts, which did not change: the pair
+        answers to the judge-mode threshold (the read path shows it down to
+        there). Without a verdict it answers to 0.85 as stored."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        if verification is not None:
+            stored["verification"] = verification
+
+        memory, _, run = await self._clear(
+            stored, 0.78, config=_make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        )
+
+        assert (memory.supersede_candidate is None) is cleared
+        run.judge.assert_not_called()
+        run.detect.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            None,
+            {"dismissed": {"memory_id": "x", "similarity": 0.9, "dismissed_at": "x"}},
+        ],
+    )
+    async def test_mechanical_reembed_reads_nothing_without_a_live_candidate(self, stored):
+        memory, db, run = await self._clear(stored, 0.1)
+
+        run.search.assert_not_called()
+        run.retrieve.assert_not_called()
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_with_suggestions_off_keeps_the_candidate(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+
+        memory, _, run = await self._clear(
+            stored, 0.1, config=_make_config(enabled=False, suggest=False)
+        )
+
+        run.search.assert_not_called()
+        run.retrieve.assert_not_called()
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_clears_and_still_seeds(self):
+        repo = _make_edge_repo()
+
+        memory, _, run = await self._clear(
+            {"memory_id": str(uuid4()), "similarity": 0.90},
+            0.6,
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+        )
+
+        run.search.assert_awaited_once()
+        assert run.search.await_args.kwargs["limit"] == 6
+        run.detect.assert_not_called()
+        assert memory.supersede_candidate is None
+        repo.create_edge_if_absent.assert_called()
 
     @pytest.mark.asyncio
     async def test_mechanical_reembed_does_not_report_suggestions_off(self):
@@ -2836,3 +3327,29 @@ class TestMechanicalReembed:
         assert memory_service._KNN_SEED_NO_CONSUMER_REPORTED == set()
         debug = [c for c in log.debug.call_args_list if c.args[0] == "knn_seed_skip_no_consumer"]
         assert debug[0].kwargs["reason"] == "mechanical_reembed"
+
+    @pytest.mark.asyncio
+    async def test_seed_false_runs_detection_only(self):
+        """#2256 D5: the catch-up pass passes ``seed=False`` — the detection
+        runs, no seed edge is written and no calibration bootstrap fires."""
+        memory = _make_memory()
+        repo = _make_edge_repo()
+        dup = uuid4()
+
+        search, _, detect, _ = await self._seed(
+            memory,
+            _make_db(),
+            self._hits(memory, (dup, 0.93), (uuid4(), 0.7)),
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+            mechanical=False,
+            seed=False,
+        )
+
+        search.assert_awaited_once()
+        assert search.await_args.kwargs["limit"] == 2
+        detect.assert_awaited_once()
+        assert str(detect.await_args.kwargs["raw_top"]["id"]) == str(dup)
+        repo.create_edge_if_absent.assert_not_called()
+        repo.get_outgoing_edges.assert_not_called()

@@ -884,10 +884,10 @@ class LanceVectorStore:
                 if not count:
                     return []
                 rows = table.search().select(["id", "user_id", "created_at"]).limit(count).to_list()
-                from db.qdrant import _payload_datetime
+                from db.qdrant import payload_datetime
 
                 return [
-                    (row["id"], row["user_id"], None, _payload_datetime(row.get("created_at")))
+                    (row["id"], row["user_id"], None, payload_datetime(row.get("created_at")))
                     for row in rows
                 ]
 
