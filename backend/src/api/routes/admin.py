@@ -1930,6 +1930,9 @@ async def recover_context(
         # through the embedding sweep, which rewrites the point's payload.
         point_matches = _same_uuid(payload.get("workspace_id"), workspace_id)
         try:
+            # #2256: ``embedded_text_digest`` and ``supersede_candidate`` start
+            # NULL on purpose: the row detects once, at its first pipeline run,
+            # in this context's neighbourhood.
             new_memory = Memory(
                 id=mem_id,
                 summary_embedding_id=mem_id,  # Qdrant point ID

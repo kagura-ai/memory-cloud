@@ -1132,6 +1132,9 @@ class ContextService:
             # are Computed columns (auto-derived from details)
             # #1951: the copy lives in the target context, so it belongs to the
             # target's workspace — not to whatever the source row carried.
+            # #2256: ``embedded_text_digest`` and ``supersede_candidate`` start
+            # NULL on purpose: the copy detects once, at its first pipeline
+            # run, in this context's neighbourhood.
             new_mem = Memory(
                 id=new_id,
                 user_id=mem.user_id,
