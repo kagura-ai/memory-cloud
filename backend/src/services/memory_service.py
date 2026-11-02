@@ -8860,6 +8860,17 @@ async def _detect_supersede_candidate(
             candidate_memory_id=target_id_str,
             similarity=round(raw_top_score, 4),
         )
+        # The nearest neighbour is this newer one, so a stored candidate's
+        # pair scores no higher: the #2059 clear applies as when no
+        # neighbour reaches the threshold (only from 0.85-stored candidates
+        # with the judge on, since the hit itself reached the threshold).
+        if (
+            clear_allowed
+            and raw_top_score
+            < _supersede_clear_floor(memory, _supersede_detect_threshold(config))
+            - RESURFACE_SIMILARITY_DELTA
+        ):
+            await _clear_supersede_candidate_without_neighbour(db, memory=memory)
         return
 
     # Don't resurrect an ACCEPTED suggestion. If a 'supersedes' edge from this

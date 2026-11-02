@@ -1739,6 +1739,55 @@ class TestSupersedeVerification:
         assert skipped["similarity"] == 0.93
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("score", "cleared"), [(0.78, True), (0.84, False)])
+    async def test_a_newer_neighbour_below_085_still_clears_a_085_candidate(self, score, cleared):
+        """Skipping the newer hit does not skip #2059's clear: the stored
+        pair scores no higher than this top-1, so with the judge on a
+        candidate stored at 0.85 or above is cleared a clear margin below."""
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        stored = {"memory_id": str(uuid4()), "similarity": 0.9}
+        memory.supersede_candidate = stored
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm", llm_threshold=0.75)
+        newer = {
+            "id": str(uuid4()),
+            "score": score,
+            "payload": {"created_at": "2026-10-03T00:00:00Z"},
+            "embedding": [],
+        }
+        own = {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=[own, newer])),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=AsyncMock()) as judge,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        judge.assert_not_called()
+        assert (memory.supersede_candidate is None) is cleared
+        if not cleared:
+            assert memory.supersede_candidate == stored
+            db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_an_older_neighbour_in_the_payload_is_stored(self):
         """The payload says the neighbour is older: detection goes on as before."""
         memory = _make_memory()
