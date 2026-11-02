@@ -12,12 +12,14 @@ no seed edge, no point write.
 
 Bounded by ``limit`` rows and by ``max_judge_calls``: the workspace's judge
 counter (the Redis key the daily cap counts on) is read before each row and
-the run stops once it has advanced that much. The pass shares the daily cap
+the run stops once it has advanced that much — or, with the judge on, as
+soon as the counter cannot be read. The pass shares the daily cap
 with live ingest; past the cap a pair at 0.85 or above is stored unverified
 and a pair below is skipped, as on ingest. A row whose nearest neighbour is
 not near enough stays without a candidate and is planned again by a run over
-the same range (nothing records "checked"); a run reports the creation time
-of the last row it reached, and ``after`` resumes past it.
+the same range (nothing records "checked"); a run reports the
+``(created_at, id)`` of the last row it reached, and ``after`` / ``after_id``
+resume past it.
 
 Run by hand (``python -m src.cli.supersede_catch_up``).
 """
@@ -44,6 +46,7 @@ VECTOR_BATCH = 64
 
 STOPPED_JUDGE_BUDGET = "judge_budget"
 STOPPED_SUGGESTIONS_OFF = "suggestions_off"
+STOPPED_COUNTER_UNREADABLE = "counter_unreadable"
 
 
 @dataclass
@@ -337,6 +340,12 @@ async def run_supersede_catch_up(
     model, dims = await resolve_context_embedding(db, context_id)
     collection = get_collection_name(model, dims)
 
+    # With the judge on, the budget and the judge_calls report both rest on
+    # the counter: a run that cannot read it stops rather than store pairs
+    # unverified and lose the count. With the judge off nothing is spent.
+    from services.supersede_verify import VERIFY_MODE_LLM
+
+    judge_on = getattr(config, "supersede_verify_mode", None) == VERIFY_MODE_LLM
     counter = _JudgeCounter(str(workspace_id))
     enforce = await counter.start()
     if not enforce:
@@ -344,10 +353,14 @@ async def run_supersede_catch_up(
             "supersede_catch_up_counter_unreadable",
             workspace_id=str(workspace_id),
             hint=(
-                "the judge budget is not enforced for this run; the judge itself "
-                "skips its call while the counter is unreachable"
+                "the run stops: the judge budget cannot be enforced"
+                if judge_on
+                else "the judge is off; the run goes on without a judge count"
             ),
         )
+        if judge_on:
+            result.stopped = STOPPED_COUNTER_UNREADABLE
+            rows = []
 
     for start in range(0, len(rows), VECTOR_BATCH):
         batch = rows[start : start + VECTOR_BATCH]
@@ -364,8 +377,15 @@ async def run_supersede_catch_up(
                     logger.warning(
                         "supersede_catch_up_counter_unreadable",
                         workspace_id=str(workspace_id),
-                        hint="the judge budget is not enforced for the rest of this run",
+                        hint=(
+                            "the run stops: the judge budget cannot be enforced"
+                            if judge_on
+                            else "the judge is off; the run goes on without a judge count"
+                        ),
                     )
+                    if judge_on:
+                        result.stopped = STOPPED_COUNTER_UNREADABLE
+                        break
                 elif used >= max_judge_calls:
                     result.stopped = STOPPED_JUDGE_BUDGET
                     break

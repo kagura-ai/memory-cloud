@@ -18,6 +18,7 @@ from sqlalchemy.dialects import postgresql
 
 from tasks import supersede_catch_up as task
 from tasks.supersede_catch_up import (
+    STOPPED_COUNTER_UNREADABLE,
     STOPPED_JUDGE_BUDGET,
     STOPPED_SUGGESTIONS_OFF,
     catch_up_rows_query,
@@ -127,8 +128,8 @@ def _memory(candidate: Any = None) -> Any:
     )
 
 
-def _config(suggest: bool = True) -> Any:
-    return SimpleNamespace(supersede_suggest_enabled=suggest)
+def _config(suggest: bool = True, verify_mode: str = "off") -> Any:
+    return SimpleNamespace(supersede_suggest_enabled=suggest, supersede_verify_mode=verify_mode)
 
 
 async def _run(
@@ -337,7 +338,7 @@ class TestApply:
         assert result.judge_calls == 4
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_counter_runs_unenforced_and_reports_none(self) -> None:
+    async def test_an_unreadable_counter_with_the_judge_off_runs_on(self) -> None:
         rows = [_memory(), _memory()]
         db = _Db(rows, uuid4())
 
@@ -352,6 +353,36 @@ class TestApply:
         read.assert_awaited_once()
         events = [c.args[0] for c in log.warning.call_args_list]
         assert events == ["supersede_catch_up_counter_unreadable"]
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_counter_with_the_judge_on_stops_before_any_row(self) -> None:
+        db = _Db([_memory(), _memory()], uuid4())
+
+        result, detect, _, _ = await _run(
+            db, counter=AsyncMock(return_value=None), config=_config(verify_mode="llm")
+        )
+
+        detect.assert_not_called()
+        assert result.stopped == STOPPED_COUNTER_UNREADABLE
+        assert (result.processed, result.judge_calls) == (0, None)
+        assert result.last_id is None
+
+    @pytest.mark.asyncio
+    async def test_a_counter_lost_mid_run_with_the_judge_on_stops_there(self) -> None:
+        rows = [_memory(), _memory(), _memory()]
+        db = _Db(rows, uuid4())
+        # start, before row 1, then unreadable before row 2.
+        counter = AsyncMock(side_effect=[3, 3, None])
+
+        result, detect, _, _ = await _run(
+            db, counter=counter, config=_config(verify_mode="llm"), max_judge_calls=10
+        )
+
+        assert [c.args[1] for c in detect.await_args_list] == [rows[0]]
+        assert result.stopped == STOPPED_COUNTER_UNREADABLE
+        assert result.processed == 1
+        assert result.judge_calls is None
+        assert result.last_id == rows[0].id  # resume at row 2
 
     @pytest.mark.asyncio
     async def test_a_row_without_a_stored_vector_is_counted_not_run(self) -> None:

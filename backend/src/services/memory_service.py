@@ -8598,6 +8598,10 @@ _SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 # LOG_LEVEL=info; later ones stay at DEBUG to keep it off every ingest.
 _KNN_SEED_NO_CONSUMER_REPORTED: set[tuple[str, int]] = set()
 
+# #2256: whether ``supersede_clear_unsupported_backend`` was already logged in
+# this process (a vector store that cannot return stored vectors).
+_SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED = False
+
 
 async def _source_text_moved(db: AsyncSession, memory: Memory, embedded: str | None = None) -> bool:
     """Re-read ``memory``'s text and candidate column; True when the text moved.
@@ -8738,7 +8742,20 @@ async def _clear_candidate_if_pair_moved(
     try:
         stored = await retrieve_dense_vectors(collection_name, [target_id])
     except NotImplementedError:
-        return  # a store that cannot return vectors (LanceDB preview)
+        # A store that cannot return vectors (LanceDB preview): the clear
+        # cannot measure the pair, so it never runs there. Said once.
+        global _SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED
+        if not _SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED:
+            _SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED = True
+            logger.warning(
+                "supersede_clear_unsupported_backend",
+                hint=(
+                    "the vector store cannot return stored vectors, so a re-embed of "
+                    "unchanged text never clears a supersede_candidate; logged once "
+                    "per process"
+                ),
+            )
+        return
     except Exception as exc:
         logger.warning(
             "supersede_clear_check_failed",

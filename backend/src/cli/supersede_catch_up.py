@@ -25,8 +25,9 @@ advanced by ``--max-judge-calls`` (50); run it early in the UTC day. Past the
 daily cap a pair at 0.85 or above is stored unverified and a pair below is
 skipped, as on ingest. ``judge_calls`` in the report is how far the counter
 advanced during the run (live ingest in the same workspace included), or
-``unknown`` when Redis could not be read (the budget is then not enforced;
-the judge itself skips its call while the counter is unreachable).
+``unknown`` when Redis could not be read. With the judge on, a run that cannot
+read the counter stops (``stopped counter_unreadable``); with the judge off it
+goes on.
 
 A row whose nearest neighbour is not near enough stays without a candidate
 and is planned again by a run over the same range: the report ends with a

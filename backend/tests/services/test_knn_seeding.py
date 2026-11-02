@@ -3212,6 +3212,23 @@ class TestMechanicalReembed:
         db.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_an_unsupported_backend_is_reported_once(self, monkeypatch):
+        monkeypatch.setattr(memory_service, "_SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED", False)
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        logs = []
+        for _ in range(2):
+            memory, db, run = await self._clear(
+                stored, None, stored_vectors=AsyncMock(side_effect=NotImplementedError("lance"))
+            )
+            assert memory.supersede_candidate == stored
+            db.execute.assert_not_awaited()
+            logs.append([c for c in run.log.warning.call_args_list if c.args])
+        first, second = ([c.args[0] for c in calls] for calls in logs)
+        assert first == ["supersede_clear_unsupported_backend"]
+        assert second == []
+        assert set(logs[0][0].kwargs) == {"hint"}  # no row data
+
+    @pytest.mark.asyncio
     async def test_mechanical_reembed_keeps_a_candidate_hovering_at_the_floor(self):
         """The margin (RESURFACE_SIMILARITY_DELTA) applies as on every clear."""
         stored = {"memory_id": str(uuid4()), "similarity": 0.90}
