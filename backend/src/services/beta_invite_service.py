@@ -68,7 +68,7 @@ _TOKEN_BYTES = 32
 # source of truth for the OAuth login's ``invite=`` parameter and the public
 # preview route. Deliberately looser than "exactly 43" so a future change to
 # ``_TOKEN_BYTES`` does not strand links already in people's inboxes.
-BETA_INVITE_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{20,128}$"
+BETA_INVITE_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{20,128}$"  # noqa: S105 — not a credential
 
 # #1595: mirrors ``beta_invites.label`` (``VARCHAR(100)``). Python ``len`` and
 # Postgres ``varchar(n)`` both count characters, so the two bounds agree.

@@ -22,7 +22,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Resource token prefix for easy identification
-RESOURCE_TOKEN_PREFIX = "kagura_resource_"
+RESOURCE_TOKEN_PREFIX = "kagura_resource_"  # noqa: S105 — not a credential
 
 
 def _require_scope_for_slug(

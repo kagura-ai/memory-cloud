@@ -28,12 +28,12 @@ _REDIS_LOCATION_UNKNOWN = "the configured REDIS_URL"
 # ``{FRONTEND_URL}/invite/<token>``, and that URL percent-encoded inside the
 # OAuth login's ``return_to`` (and so in the callback's ``Location``).
 # Each (pattern, replacement) keeps the route shape and drops only the token.
-_INVITE_TOKEN_PLACEHOLDER = "{token}"
+_INVITE_TOKEN_PLACEHOLDER = "{token}"  # noqa: S105 — not a credential
 # Both token kinds are URL-safe base64 (43 chars for 32 bytes); the slot has
 # to look like one, so an unrelated short slug in the same route family —
 # ".../join/<slug>", "/invitations/accept", "/invitations/pending" — is left
 # alone. A pasted link with a trailing "%20" still loses its token.
-_TOKEN_SHAPE = r"[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])"
+_TOKEN_SHAPE = r"[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])"  # noqa: S105 — not a credential
 _INVITE_TOKEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # GET /api/v1/beta-invites/<token>/preview — any segment in that slot.
     (re.compile(r"(/beta-invites/)[^/?#\s\"']+(?=/preview)"), r"\1" + _INVITE_TOKEN_PLACEHOLDER),

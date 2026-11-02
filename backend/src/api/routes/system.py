@@ -334,7 +334,7 @@ async def get_system_telemetry(
                     "nodes": len(graph_data.get("nodes", [])),
                     "edges": len(graph_data.get("links", [])),
                 }
-            except Exception:
+            except Exception:  # noqa: S110 - the graph stats are optional
                 pass
 
         # Uptime (rough estimate - time since process start)
@@ -525,8 +525,8 @@ async def list_embedding_models(
             import os
 
             openai_available = bool(os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        pass  # Non-critical: OpenAI availability is best-effort
+    except Exception:  # noqa: S110 - OpenAI availability is best-effort
+        pass
 
     # Check self-hosted backend availability (only if explicitly configured),
     # via the shared /v1/models probe. Detect explicit config via

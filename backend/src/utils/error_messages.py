@@ -30,9 +30,9 @@ class ErrorMessages:
     )
 
     # Resource Tokens
-    RESOURCE_TOKEN_NOT_FOUND = "Resource token not found or not owned by you."
+    RESOURCE_TOKEN_NOT_FOUND = "Resource token not found or not owned by you."  # noqa: S105 — not a credential
     RESOURCE_NOT_IN_ORG = "Resource ID not found in your workspace or you don't have access to it."
-    TOKEN_DIFFERENT_ORG = "This resource token belongs to a different workspace."
+    TOKEN_DIFFERENT_ORG = "This resource token belongs to a different workspace."  # noqa: S105 — not a credential
 
     # Plan/Quota — feature refusals are built by
     # ``FeatureNotAvailableError.for_feature`` from the tier registry (#1561);

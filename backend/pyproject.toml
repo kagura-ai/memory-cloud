@@ -316,17 +316,20 @@ select = [
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
     "DTZ", # flake8-datetimez — block naive datetime patterns in src/
+    "S",   # flake8-bandit — security lint, src/ only
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
     "B008",  # do not perform function calls in argument defaults
+    "S101",  # assert: pyright narrowing and import-time checks; nothing runs with -O
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures use bare datetime(YYYY, M, D, ...) literals widely.
 # Sweeping them is out of scope for the #490 scope-B PR — tracked as a
 # follow-up. The src/ side enforces the policy via DTZ.
-"tests/**" = ["DTZ"]
+# S: tests assert by design and use fake credentials as fixtures (#2500).
+"tests/**" = ["DTZ", "S"]
 
 [tool.ruff.format]
 quote-style = "double"

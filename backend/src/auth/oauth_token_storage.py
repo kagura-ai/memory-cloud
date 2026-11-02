@@ -101,12 +101,12 @@ def finalize_oauth_token_storage(
         if mode not in ("bridge", "hashed"):
             raise RuntimeError("Invalid OAuth token storage mode")
         converted = session.execute(
-            text("SELECT count(*) FROM oauth_tokens WHERE " + NON_HASH_SQL),
+            text("SELECT count(*) FROM oauth_tokens WHERE " + NON_HASH_SQL),  # noqa: S608 — NON_HASH_SQL is a constant
             {"pattern": HASH_PATTERN},
         ).scalar_one()
         session.execute(
             text(
-                "UPDATE oauth_tokens SET "
+                "UPDATE oauth_tokens SET "  # noqa: S608 — NON_HASH_SQL is a constant
                 "access_token = CASE WHEN access_token ~ :pattern THEN access_token "
                 "ELSE 'sha256$' || encode(sha256(convert_to(access_token, 'UTF8')), 'hex') END, "
                 "refresh_token = CASE WHEN refresh_token IS NULL OR refresh_token ~ :pattern "
@@ -130,7 +130,7 @@ def finalize_oauth_token_storage(
         )
         session.execute(text("UPDATE oauth_token_storage SET mode = 'hashed' WHERE id = 1"))
         remaining = session.execute(
-            text("SELECT count(*) FROM oauth_tokens WHERE " + NON_HASH_SQL),
+            text("SELECT count(*) FROM oauth_tokens WHERE " + NON_HASH_SQL),  # noqa: S608 — NON_HASH_SQL is a constant
             {"pattern": HASH_PATTERN},
         ).scalar_one()
         if remaining:

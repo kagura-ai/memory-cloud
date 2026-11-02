@@ -348,7 +348,7 @@ class ActivationSpreader:
                 )
             except ValueError:
                 raise
-            except Exception:
+            except Exception:  # noqa: S112 - visualize_activation_graph has no callers
                 continue
 
             for edge in outgoing_edges:

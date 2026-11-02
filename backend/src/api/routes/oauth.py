@@ -1134,7 +1134,7 @@ async def dynamic_client_registration(
                 grant_types=data.grant_types,
                 response_types=data.response_types,
                 scope=scope,
-                token_endpoint_auth_method="none",  # Force public client for DCR
+                token_endpoint_auth_method="none",  # Force public client for DCR  # noqa: S106 — not a credential
                 owner_id=None,  # DCR clients have no owner
                 workspace_id=None,  # Global clients
                 provider=detected_provider,
@@ -1678,7 +1678,7 @@ async def list_oauth2_providers(
                 display_name="Google",
                 client_id=google_client_id,
                 authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
-                token_url="https://oauth2.googleapis.com/token",
+                token_url="https://oauth2.googleapis.com/token",  # noqa: S106 — not a credential
                 scopes=["openid", "email", "profile"],
                 enabled=True,
                 configured=True,
@@ -1694,7 +1694,7 @@ async def list_oauth2_providers(
                 display_name="GitHub",
                 client_id=github_client_id,
                 authorization_url="https://github.com/login/oauth/authorize",
-                token_url="https://github.com/login/oauth/access_token",
+                token_url="https://github.com/login/oauth/access_token",  # noqa: S106 — not a credential
                 scopes=["read:user", "user:email"],
                 enabled=True,
                 configured=True,
@@ -3634,7 +3634,7 @@ def _authenticate_endpoint_client(
     client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
     if client is None:
         return _invalid_client_response("Client authentication failed.")
-    if client.token_endpoint_auth_method == "none":
+    if client.token_endpoint_auth_method == "none":  # noqa: S105 — not a credential
         if not allow_public:
             return _invalid_client_response(
                 "This endpoint requires a confidential client's credentials."
@@ -3840,7 +3840,7 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
                 scope=oauth_token.scope,
                 exp=int(oauth_token.get_expires_at()),
                 iat=int(oauth_token.issued_at.timestamp()),
-                token_type="Bearer",
+                token_type="Bearer",  # noqa: S106 — not a credential
                 aud=oauth_token.resource,  # RFC 8707 (None if not set)
             )
 

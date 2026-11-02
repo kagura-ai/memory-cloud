@@ -2152,7 +2152,7 @@ class ContextService:
             FROM tag_counts
             {sort_clause}
             LIMIT :limit
-            """
+            """  # noqa: S608 — sort_clause is allow-listed
         )
         result = await self.db.execute(
             sql,
