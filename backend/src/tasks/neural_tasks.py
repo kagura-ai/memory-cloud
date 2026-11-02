@@ -6,6 +6,7 @@ Implements:
 """
 
 import os
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,6 +19,7 @@ from config.constants import (
 )
 from db.base import get_db
 from db.graph_learning_lock import lock_graph_learning
+from models.memory import GraphMemory
 from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
 from repositories.graph import GraphRepository
@@ -37,6 +39,37 @@ logger = get_logger(__name__)
 # sleep one only when SLEEP_ENABLED and ENABLE_NEURAL_MEMORY are both on — so
 # SLEEP_ENABLED=true with neural memory off leaves NEITHER running.
 LEGACY_ARCHIVE_MIN_AGE_DAYS = 30
+
+# #2385: graphs are read and committed in pages of this size. Each page is one
+# transaction, so the graph learning locks a pass holds (#1985) stay bounded.
+GRAPH_PAGE_SIZE = 1000
+
+
+async def _graph_pages(graph_repo: GraphRepository) -> AsyncIterator[list[GraphMemory]]:
+    """Yield every graph_memory row in primary-key pages (#2385).
+
+    ``GraphRepository.list`` orders by id, so the pages cover the table in a
+    fixed order and no graph is left out once there are more than one page of
+    them. The caller commits after each page; committing does not move rows
+    between pages because an update keeps its id. A graph deleted by another
+    session during the pass moves the later rows down one place, so one of
+    them can be skipped in that pass and is picked up by the next one.
+
+    Args:
+        graph_repo: Repository bound to the task's session.
+
+    Yields:
+        Non-empty lists of at most ``GRAPH_PAGE_SIZE`` graphs, lowest ids first.
+    """
+    skip = 0
+    while True:
+        page = await graph_repo.list(skip=skip, limit=GRAPH_PAGE_SIZE)
+        if not page:
+            return
+        yield page
+        if len(page) < GRAPH_PAGE_SIZE:
+            return
+        skip += len(page)
 
 
 async def weight_decay_task():
@@ -62,58 +95,59 @@ async def weight_decay_task():
             # Issue #107: DB-driven config
             config = await NeuralMemoryConfig.from_db(db)
 
-            # Get all graphs
-            graphs = await graph_repo.list(skip=0, limit=1000)
+            # #2385: every graph, one id-ordered page per transaction.
+            total_graphs = 0
             total_updated = 0
+            async for graphs in _graph_pages(graph_repo):
+                total_graphs += len(graphs)
+                # #1985: users in a fixed order, each graph's edge writes under the
+                # graph learning lock so a live recall pass never interleaves.
+                for graph_model in sorted(graphs, key=lambda g: g.user_id):
+                    user_id = graph_model.user_id
+                    await lock_graph_learning(db, user_id)
 
-            # #1985: users in a fixed order, each graph's edge writes under the
-            # graph learning lock so a live recall pass never interleaves.
-            for graph_model in sorted(graphs, key=lambda g: g.user_id):
-                user_id = graph_model.user_id
-                await lock_graph_learning(db, user_id)
+                    graph_service = GraphService(user_id, db)
 
-                graph_service = GraphService(user_id, db)
-
-                # Apply decay (uses SQL backend directly). Issue #970: pass the
-                # persisted last_decay_at so Δt reflects REAL elapsed time — a
-                # fresh DecayManager is constructed per run and has no instance
-                # state across runs, so without this the decay always used the
-                # default interval (the "dead _last_decay_time" bug).
-                decay_manager = DecayManager(graph_service, config)
-                decay_result = await decay_manager.apply_decay(
-                    user_id, last_decay_at=graph_model.last_decay_at
-                )
-                edges_decayed = decay_result.get("edges_decayed", 0)
-
-                if edges_decayed > 0:
-                    # Issue #651: previously called graph_service.stats() here to
-                    # refresh graph_memory.total_*/avg/max cache columns. That call
-                    # violates the 3-level isolation invariant from #273 H-2 / #383
-                    # (workspace_id/context_id are unavailable in this global
-                    # cross-tenant task, and the validator on get_stats rejects
-                    # None pairs to prevent cross-tenant aggregation). The cache
-                    # columns are write-only — no consumer reads them — so
-                    # dropping the refresh has no functional impact. Removal of
-                    # the dead columns themselves is tracked as a follow-up
-                    # issue (TBD — to be filed when this PR lands).
-                    now = utcnow()
-                    graph_model.last_decay_at = now
-                    graph_model.updated_at = now
-
-                    total_updated += 1
-
-                    logger.info(
-                        "graph_decay_applied",
-                        user_id=user_id,
-                        edges_decayed=edges_decayed,
-                        edges_pruned=decay_result.get("edges_pruned", 0),
+                    # Apply decay (uses SQL backend directly). Issue #970: pass the
+                    # persisted last_decay_at so Δt reflects REAL elapsed time — a
+                    # fresh DecayManager is constructed per run and has no instance
+                    # state across runs, so without this the decay always used the
+                    # default interval (the "dead _last_decay_time" bug).
+                    decay_manager = DecayManager(graph_service, config)
+                    decay_result = await decay_manager.apply_decay(
+                        user_id, last_decay_at=graph_model.last_decay_at
                     )
+                    edges_decayed = decay_result.get("edges_decayed", 0)
 
-            await db.commit()
+                    if edges_decayed > 0:
+                        # Issue #651: previously called graph_service.stats() here to
+                        # refresh graph_memory.total_*/avg/max cache columns. That call
+                        # violates the 3-level isolation invariant from #273 H-2 / #383
+                        # (workspace_id/context_id are unavailable in this global
+                        # cross-tenant task, and the validator on get_stats rejects
+                        # None pairs to prevent cross-tenant aggregation). The cache
+                        # columns are write-only — no consumer reads them — so
+                        # dropping the refresh has no functional impact. Removal of
+                        # the dead columns themselves is tracked as a follow-up
+                        # issue (TBD — to be filed when this PR lands).
+                        now = utcnow()
+                        graph_model.last_decay_at = now
+                        graph_model.updated_at = now
+
+                        total_updated += 1
+
+                        logger.info(
+                            "graph_decay_applied",
+                            user_id=user_id,
+                            edges_decayed=edges_decayed,
+                            edges_pruned=decay_result.get("edges_pruned", 0),
+                        )
+
+                await db.commit()
 
             logger.info(
                 "weight_decay_task_completed",
-                total_graphs=len(graphs),
+                total_graphs=total_graphs,
                 updated_graphs=total_updated,
             )
             return
@@ -154,113 +188,118 @@ async def consolidation_task():
             memory_repo = MemoryRepository(db)
             graph_repo = GraphRepository(db)
 
-            # Get all users (from graph_memory table)
-            graphs = await graph_repo.list(skip=0, limit=1000)
-            user_ids = [g.user_id for g in graphs]
-
+            total_users = 0
             total_promoted = 0
             total_deleted = 0
 
-            for user_id in sorted(user_ids):
-                # #1985: deleting a memory cascades to its edge rows; take the
-                # graph learning lock first (users in a fixed order).
-                await lock_graph_learning(db, user_id)
-                # Get working memories
-                working_memories = await memory_repo.list(
-                    filters={"user_id": user_id, "scope": "working"}
-                )
+            # #2385: every user with a graph_memory row, one id-ordered page
+            # per transaction.
+            async for graphs in _graph_pages(graph_repo):
+                user_ids = [g.user_id for g in graphs]
+                total_users += len(user_ids)
 
-                # #1985: promotions are written in one id-ordered statement
-                # after the loop (no row locks taken against recall's order).
-                to_promote: dict[Any, tuple[Any, int]] = {}
-                for memory in working_memories:
-                    age_days = (utcnow() - memory.created_at).days
-
-                    # Promotion criteria (Issue #1)
-                    should_promote = (
-                        # Pattern 1: Frequently used + Important
-                        (memory.access_count >= 3 and memory.importance >= 0.5)
-                        # Pattern 2: Very frequently used
-                        or (memory.access_count >= 5)
-                        # Pattern 3: Important + aged
-                        or (memory.importance >= 0.8 and age_days >= 3)
-                        # Pattern 4: Old + used at least once
-                        or (age_days >= 30 and memory.access_count >= 1)
+                for user_id in sorted(user_ids):
+                    # #1985: deleting a memory cascades to its edge rows; take the
+                    # graph learning lock first (users in a fixed order).
+                    await lock_graph_learning(db, user_id)
+                    # Get working memories
+                    working_memories = await memory_repo.list(
+                        filters={"user_id": user_id, "scope": "working"}
                     )
 
-                    if should_promote:
-                        to_promote[memory.id] = (memory, age_days)
+                    # #1985: promotions are written in one id-ordered statement
+                    # after the loop (no row locks taken against recall's order).
+                    to_promote: dict[Any, tuple[Any, int]] = {}
+                    for memory in working_memories:
+                        age_days = (utcnow() - memory.created_at).days
 
-                    # #1523: a pinned row (delivery_mode='always') is never an
-                    # automated-delete candidate — same exemption as the Sleep
-                    # phases, and this branch is a physical delete with no
-                    # tombstone to restore from.
-                    elif memory.is_pinned:
-                        logger.info("legacy_consolidation_skipped_pinned", memory_id=str(memory.id))
-
-                    # Tool guardrails share the exemption: a physically deleted
-                    # guardrail would silently stop firing in every client hook.
-                    elif memory.is_tool_triggered:
-                        logger.info(
-                            "legacy_consolidation_skipped_tool_triggered",
-                            memory_id=str(memory.id),
+                        # Promotion criteria (Issue #1)
+                        should_promote = (
+                            # Pattern 1: Frequently used + Important
+                            (memory.access_count >= 3 and memory.importance >= 0.5)
+                            # Pattern 2: Very frequently used
+                            or (memory.access_count >= 5)
+                            # Pattern 3: Important + aged
+                            or (memory.importance >= 0.8 and age_days >= 3)
+                            # Pattern 4: Old + used at least once
+                            or (age_days >= 30 and memory.access_count >= 1)
                         )
 
-                    # Deletion criteria
-                    elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
-                        # ================================================================
-                        # BUG FIX #83-10: Delete from Qdrant to prevent orphan vectors
-                        # ================================================================
-                        # Problem: consolidation_task was deleting from PostgreSQL only,
-                        #          leaving orphan vectors in Qdrant. These orphans:
-                        #          - Waste storage
-                        #          - Pollute search results
-                        #          - Cannot be cleaned up easily
-                        #
-                        # Solution: Call delete_memory_from_qdrant() before PostgreSQL
-                        #           deletion to ensure complete cleanup.
-                        #
-                        # Note: This matches the pattern in MemoryService.forget() API.
-                        # ================================================================
+                        if should_promote:
+                            to_promote[memory.id] = (memory, age_days)
 
-                        # Delete from Qdrant first
-                        from db.qdrant import delete_memory_from_qdrant
+                        # #1523: a pinned row (delivery_mode='always') is never an
+                        # automated-delete candidate — same exemption as the Sleep
+                        # phases, and this branch is a physical delete with no
+                        # tombstone to restore from.
+                        elif memory.is_pinned:
+                            logger.info(
+                                "legacy_consolidation_skipped_pinned", memory_id=str(memory.id)
+                            )
 
-                        await delete_memory_from_qdrant(user_id, memory.point_id)
+                        # Tool guardrails share the exemption: a physically deleted
+                        # guardrail would silently stop firing in every client hook.
+                        elif memory.is_tool_triggered:
+                            logger.info(
+                                "legacy_consolidation_skipped_tool_triggered",
+                                memory_id=str(memory.id),
+                            )
 
-                        # Then delete from PostgreSQL
-                        await memory_repo.delete(memory.id)
-                        total_deleted += 1
+                        # Deletion criteria
+                        elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
+                            # ================================================================
+                            # BUG FIX #83-10: Delete from Qdrant to prevent orphan vectors
+                            # ================================================================
+                            # Problem: consolidation_task was deleting from PostgreSQL only,
+                            #          leaving orphan vectors in Qdrant. These orphans:
+                            #          - Waste storage
+                            #          - Pollute search results
+                            #          - Cannot be cleaned up easily
+                            #
+                            # Solution: Call delete_memory_from_qdrant() before PostgreSQL
+                            #           deletion to ensure complete cleanup.
+                            #
+                            # Note: This matches the pattern in MemoryService.forget() API.
+                            # ================================================================
 
+                            # Delete from Qdrant first
+                            from db.qdrant import delete_memory_from_qdrant
+
+                            await delete_memory_from_qdrant(user_id, memory.point_id)
+
+                            # Then delete from PostgreSQL
+                            await memory_repo.delete(memory.id)
+                            total_deleted += 1
+
+                            logger.info(
+                                "old_memory_deleted",
+                                memory_id=str(memory.id),
+                                user_id=user_id,
+                                age_days=age_days,
+                            )
+
+                    promoted = (
+                        await memory_repo.bulk_promote_to_persistent(list(to_promote))
+                        if to_promote
+                        else []
+                    )
+                    for memory_id in promoted:
+                        memory, age_days = to_promote[memory_id]
+                        total_promoted += 1
                         logger.info(
-                            "old_memory_deleted",
-                            memory_id=str(memory.id),
+                            "memory_promoted",
+                            memory_id=str(memory_id),
                             user_id=user_id,
+                            access_count=memory.access_count,
                             age_days=age_days,
+                            importance=memory.importance,
                         )
 
-                promoted = (
-                    await memory_repo.bulk_promote_to_persistent(list(to_promote))
-                    if to_promote
-                    else []
-                )
-                for memory_id in promoted:
-                    memory, age_days = to_promote[memory_id]
-                    total_promoted += 1
-                    logger.info(
-                        "memory_promoted",
-                        memory_id=str(memory_id),
-                        user_id=user_id,
-                        access_count=memory.access_count,
-                        age_days=age_days,
-                        importance=memory.importance,
-                    )
-
-            await db.commit()
+                await db.commit()
 
             logger.info(
                 "consolidation_task_completed",
-                users=len(user_ids),
+                users=total_users,
                 promoted=total_promoted,
                 deleted=total_deleted,
             )
