@@ -19,14 +19,17 @@ Security features:
 """
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import os
 import re
 import secrets
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Literal, NamedTuple, NoReturn
+from typing import Any, Literal, NamedTuple, NoReturn, TypeVar
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
@@ -114,6 +117,27 @@ google_router = APIRouter(prefix="/google", tags=["authentication", "google-oaut
 # Global instances (initialized on server startup)
 _oauth2_manager: OAuth2Manager | None = None
 _session_manager: SessionManager | None = None
+
+# #2501: the Google callback's blocking OAuth2Manager calls (code exchange,
+# userinfo, ID-token verification: HTTP to Google via ``requests``) run here.
+# On the event loop they would stall every request on the worker. They stay off
+# asyncio's default pool too: that pool is the head-room the OAuth token
+# endpoint draws on (#1885, see ``_OAUTH_SYNC_EXECUTOR`` in oauth.py), and a
+# burst of sign-ins while Google is slow must queue here instead of eating it.
+_T = TypeVar("_T")
+
+_GOOGLE_OAUTH_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="google-oauth")
+
+
+async def _run_google_sync(fn: Callable[..., _T], *args: Any) -> _T:
+    """Run a blocking Google call in ``_GOOGLE_OAUTH_EXECUTOR``.
+
+    Contextvars (structlog correlation fields) are copied like
+    ``asyncio.to_thread``, and the callable's exception is re-raised here.
+    """
+    call: Callable[[], _T] = functools.partial(fn, *args)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_GOOGLE_OAUTH_EXECUTOR, contextvars.copy_context().run, call)
 
 
 def initialize_auth_routes(oauth2_manager: OAuth2Manager, session_manager: SessionManager):
@@ -868,13 +892,12 @@ async def google_callback(
         if not redirect_uri:
             raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
 
-        # #2501: both are blocking HTTP calls (``requests``), so they run in a
-        # worker thread; on the loop they would stall every other request
-        # while Google answers. ``to_thread`` re-raises their exceptions.
-        credentials = await asyncio.to_thread(_oauth2_manager.exchange_code_web, code, redirect_uri)
+        # #2501: blocking HTTP to Google — off the event loop, in the bounded
+        # Google pool (see ``_GOOGLE_OAUTH_EXECUTOR``).
+        credentials = await _run_google_sync(_oauth2_manager.exchange_code_web, code, redirect_uri)
 
         # 3. Get user info from Google
-        user_info = await asyncio.to_thread(_oauth2_manager.get_user_info_web, credentials)
+        user_info = await _run_google_sync(_oauth2_manager.get_user_info_web, credentials)
 
         # 3.4. Account-linking short-circuit (Issue #517). MUST precede the
         # registration gate + ensure_user: when intent="link", the returned
@@ -1043,7 +1066,7 @@ async def google_callback(
         # one proves nothing (fail closed).
         auth_time = None
         if link_proof:
-            auth_time = await asyncio.to_thread(
+            auth_time = await _run_google_sync(
                 _oauth2_manager.verified_auth_time, credentials, user_info["sub"]
             )
             if auth_time is None:

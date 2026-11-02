@@ -31,8 +31,9 @@ _AUTH_TIME_CLAIMS = json.dumps(
 
 
 _CERT_FETCH_TIMEOUT_SECONDS = 10
-# Caps each socket operation of the web-flow requests (the callback runs them in
-# a worker thread, #2501): a hung Google call fails instead of holding the thread.
+# Per connect / per read of the web-flow requests, not a deadline for the whole
+# call: a response that trickles in can still hold the worker thread the
+# callback runs them in (#2501) for longer.
 _GOOGLE_HTTP_TIMEOUT_SECONDS = 10
 
 
