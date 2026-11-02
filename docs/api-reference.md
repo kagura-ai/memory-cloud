@@ -1126,8 +1126,11 @@ subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
 port, trailing dot or case variant, no subdomain — with the path
 `/r/user_bound_custom-mcp-<one segment>` (RFC 3986 unreserved characters,
 written as is or percent-encoded; no `..`, query, fragment or params), or (Muse) it is
-`https://agent.meta.ai/api/hatch/oauth/callback` exactly, as written
-([#2410](https://github.com/kagura-ai/memory-cloud/issues/2410)). Entries
+`https://agent.meta.ai/api/hatch/oauth/callback`,
+`https://muse.ai/api/hatch/oauth/callback` or
+`https://platform.muse.ai/oauth/credential-test/callback` exactly, as written
+([#2410](https://github.com/kagura-ai/memory-cloud/issues/2410),
+[#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)). Entries
 that do not qualify are left out of the registration (RFC 7591 §3.2.1): the
 response's `redirect_uris` lists what was registered, and only those are
 accepted at `/authorize` and `/token`, so compare it with what you sent. A

@@ -735,15 +735,24 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
     for host in hosts
 )
 
-# Providers whose client always sends one fixed callback (issue #2410): the
-# whole redirect URI is compared as written — scheme, host, path, nothing
-# after it — so there is no prefix, segment or wildcard to widen. Meta's Muse
-# registers through RFC 7591 as a public PKCE client with this single callback
-# on agent.meta.ai. muse.ai is deliberately absent: Muse never sends it, and it
-# also names an unrelated video service.
+# Providers whose client sends fixed callbacks (issues #2410, #2487): the whole
+# redirect URI is compared as written — scheme, host, path, nothing after it —
+# so there is no prefix, segment or wildcard to widen. Meta's Muse registers
+# through RFC 7591 as a public PKCE client. agent.meta.ai is the callback first
+# reported for it; the submission portal's sign-in test registers the other two
+# together and needs both. muse.ai is Meta's (whois, name servers, certificate).
 _PROVIDER_EXACT_URIS: dict[str, tuple[str, ...]] = {
-    "muse": ("https://agent.meta.ai/api/hatch/oauth/callback",),
+    "muse": (
+        "https://agent.meta.ai/api/hatch/oauth/callback",
+        "https://muse.ai/api/hatch/oauth/callback",
+        "https://platform.muse.ai/oauth/credential-test/callback",
+    ),
 }
+
+# The Muse callbacks as the registration rejection message names them.
+_MUSE_CALLBACKS_TEXT = (
+    f"{', '.join(_PROVIDER_EXACT_URIS['muse'][:-1])} or {_PROVIDER_EXACT_URIS['muse'][-1]}"
+)
 
 # The Gemini redirector hosts as the registration rejection message names them
 # ("https://a, https://b or https://c").
@@ -976,9 +985,11 @@ async def dynamic_client_registration(
       RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
       Cursor, Codex, Hermes Agent or OpenClaw (issue #1657); gemini by an
       exact https redirect on Google's OAuth redirector hosts under
-      ``/r/user_bound_custom-mcp-`` (issue #2222); muse by its one exact
-      callback URI ``https://agent.meta.ai/api/hatch/oauth/callback``
-      (issue #2410). Every entry of
+      ``/r/user_bound_custom-mcp-`` (issue #2222); muse by its exact callback
+      URIs ``https://agent.meta.ai/api/hatch/oauth/callback``,
+      ``https://muse.ai/api/hatch/oauth/callback`` and
+      ``https://platform.muse.ai/oauth/credential-test/callback``
+      (issues #2410, #2487). Every entry of
       ``redirect_uris`` is checked on its own (#1686); entries that fail are
       left out of the registration and only the rest are stored and echoed
       (RFC 7591 §3.2.1). Refused with ``invalid_client_metadata`` only when
@@ -1082,7 +1093,7 @@ async def dynamic_client_registration(
                 f"Gemini must use {_GEMINI_REDIRECT_HOSTS_TEXT} with the path "
                 f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
                 "query or fragment. "
-                f"Muse must use exactly {_PROVIDER_EXACT_URIS['muse'][0]}."
+                f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}."
             ),
         )
 
