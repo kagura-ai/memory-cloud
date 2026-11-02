@@ -237,7 +237,8 @@ async def drain_deferred_point_deletes(
     that — while the other collections' rows leave the queue. A collection that
     no longer exists holds no point, so its rows are handled. The vector-store
     calls share ``DRAIN_DELETE_TIMEOUT_SECONDS``, which bounds how long the lock
-    is held after it was taken; what the bound cuts off stays queued.
+    is held after it was taken; what the bound cuts off stays queued, with one
+    more attempt only for the collection whose delete was in flight.
     """
     pending, oldest = await _backlog(db)
     result = DrainResult(pending=pending, oldest_age_seconds=oldest)
@@ -274,6 +275,8 @@ async def drain_deferred_point_deletes(
 
     handled: list[Any] = []
     failed: list[Any] = []
+    # The group whose delete is in flight when the bound fires.
+    attempting: list[Any] = []
     try:
         async with asyncio.timeout(DRAIN_DELETE_TIMEOUT_SECONDS):
             # Listed after the rows were read: a collection a row names was
@@ -282,6 +285,7 @@ async def drain_deferred_point_deletes(
             for collection, group in by_collection.items():
                 free = [row for row in group if row.point_id not in owned]
                 if free and (existing is None or collection in existing):
+                    attempting = group
                     try:
                         await delete_points_by_collection(
                             [(row.memory_id, row.point_id, row.collection) for row in free]
@@ -296,15 +300,17 @@ async def drain_deferred_point_deletes(
                         )
                         continue
                     result.drained += len(free)
+                attempting = []
                 result.kept += len(group) - len(free)
                 handled.extend(group)
     except TimeoutError:
-        done = {row.id for row in handled} | {row.id for row in failed}
-        cut_off = [row for row in rows if row.id not in done]
-        failed.extend(cut_off)
+        # Only the collection that stalled counts an attempt. The ones the
+        # bound cut off before they started keep theirs, so they sort ahead
+        # of the stalled one next run instead of queueing behind it again.
+        failed.extend(attempting)
         result.failed = "TimeoutError"
         logger.warning(
-            "deferred_point_deletes_failed", points=len(cut_off), error_class=result.failed
+            "deferred_point_deletes_failed", points=len(attempting), error_class=result.failed
         )
 
     await dequeue(db, [QueuedRow(row.id, row.queued_at) for row in handled])

@@ -267,6 +267,32 @@ class TestDrain:
         assert (result.drained, result.failed) == (1, "TimeoutError")
 
     @pytest.mark.asyncio
+    async def test_collections_the_bound_cut_off_keep_their_attempts(self, qdrant):
+        """Only the stalled collection counts an attempt: the ones never tried
+        sort ahead of it next run, so one stall cannot block them forever."""
+        stalled, untried = (uuid4(), uuid4(), "a"), (uuid4(), uuid4(), "b")
+        db = FakeDb(rows=[stalled, untried], after=(2, 12.5))
+        never = asyncio.Event()
+
+        async def points(ids, collection):
+            if collection == "a":
+                await never.wait()
+
+        qdrant.side_effect = points
+        with (
+            patch("db.point_writer_lock.wait_for_point_writers", _lock(db)),
+            patch.object(deferred, "DRAIN_DELETE_TIMEOUT_SECONDS", 0.05),
+        ):
+            result = await asyncio.wait_for(
+                deferred.drain_deferred_point_deletes(db, wait_seconds=30), timeout=5
+            )
+
+        assert _bumped(db) == {db.rows[0].id}
+        assert ("points", "b", (str(untried[1]),)) not in qdrant.calls
+        assert "dequeue" not in db.steps
+        assert (result.drained, result.failed) == (0, "TimeoutError")
+
+    @pytest.mark.asyncio
     async def test_a_collection_that_is_gone_holds_no_point(self, qdrant):
         """A context migrated with --purge-source: nothing to delete, the row goes."""
         gone = (uuid4(), uuid4(), "kagura_memories_dropped")
