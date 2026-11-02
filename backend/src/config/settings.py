@@ -661,7 +661,7 @@ class Settings(BaseSettings):
         return self
 
     # API Settings
-    api_host: str = Field(default="0.0.0.0", description="API host")
+    api_host: str = Field(default="127.0.0.1", description="API host")
     api_port: int = Field(default=8080, description="API port")
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:8080",
