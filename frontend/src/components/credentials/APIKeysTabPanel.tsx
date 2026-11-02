@@ -17,6 +17,9 @@ import {
   TableLoadingState,
 } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
+import { useErrorGate } from "@/hooks/useErrorGate";
+import { ApiError } from "@/lib/api/base";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import {
@@ -164,6 +167,11 @@ export function APIKeysTabPanel() {
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createKeyError, setCreateKeyError] = useState<string | null>(null);
+  // #2384: a gate refusal on create (the plan's public_contexts feature when
+  // binding a key to a public context) renders as the gate notice with its
+  // upgrade prompt, lifted by useErrorGate like every other create error.
+  const [createRefusal, setCreateRefusal] = useState<ApiError | null>(null);
+  const createGate = useErrorGate(createRefusal, "public_contexts");
   // #2188: the dialog stays open while the create runs; a second click
   // must not mint a second key.
   const [creatingKey, setCreatingKey] = useState(false);
@@ -387,6 +395,7 @@ export function APIKeysTabPanel() {
     setShowCreateKeyDialog(false);
     setNewKeyName("");
     setCreateKeyError(null);
+    setCreateRefusal(null);
     setBindToPublicContext(false);
     setBoundContextId("");
     setPublicContextsError(null);
@@ -439,6 +448,7 @@ export function APIKeysTabPanel() {
     setCreatingKey(true);
     try {
       setCreateKeyError(null);
+      setCreateRefusal(null);
 
       if (!newKeyName.trim()) {
         setCreateKeyError(t("keyNameRequired"));
@@ -472,6 +482,13 @@ export function APIKeysTabPanel() {
         description: t("createSuccess"),
       });
     } catch (err: unknown) {
+      // #2384: a gate refusal renders as the gate notice. Not a role gate:
+      // this endpoint answers AUTH-101 for context-ownership and binding
+      // refusals too, whose own message says more than the generic role copy.
+      if (err instanceof ApiError && err.gate && err.gate.state !== "role") {
+        setCreateRefusal(err);
+        return;
+      }
       // Use err.message when available; fall back to the i18n'd error
       // string for non-Error rejections OR when err.message is empty.
       // The previous fallback `String(err) || "Failed to create API key"`
@@ -979,6 +996,7 @@ export function APIKeysTabPanel() {
                     setBindToPublicContext(checked);
                     setBoundContextId("");
                     setCreateKeyError(null);
+                    setCreateRefusal(null);
                     if (checked) {
                       void loadPublicContexts();
                     }
@@ -1025,7 +1043,10 @@ export function APIKeysTabPanel() {
                         id="create-api-key-bound-context"
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                         value={boundContextId}
-                        onChange={(e) => setBoundContextId(e.target.value)}
+                        onChange={(e) => {
+                          setBoundContextId(e.target.value);
+                          setCreateRefusal(null);
+                        }}
                       >
                         <option value="">
                           {t("publicBindContextPlaceholder")}
@@ -1075,6 +1096,9 @@ export function APIKeysTabPanel() {
               </div>
             )}
 
+            {createGate && (
+              <FeatureGateNotice gate={createGate} className="mb-0" />
+            )}
             {createKeyError && (
               <p className="text-sm text-red-600 dark:text-red-400">
                 {createKeyError}
