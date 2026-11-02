@@ -452,8 +452,12 @@ class TestWiring:
             and self._column_writes(fn)
             and all(self._stores_none(v) for v in self._column_writes(fn))
         ]
+        # #2256: the tombstone test lives in ``_live_candidate_target``, which
+        # must itself consult ``dismissed_entry``.
+        live_target = next(fn for fn in functions if fn.name == "_live_candidate_target")
+        assert self._calls(live_target, {"dismissed_entry"})
         for fn in clearers:
-            assert self._calls(fn, {"dismissed_entry"}), (
+            assert self._calls(fn, {"dismissed_entry", "_live_candidate_target"}), (
                 f"{fn.name} clears the supersede candidate without checking for a tombstone"
             )
         for fn in detectors:

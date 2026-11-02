@@ -2402,7 +2402,7 @@ class PointRef:
     chunk_of: str | None = None
 
 
-def _payload_datetime(raw: Any) -> datetime | None:
+def payload_datetime(raw: Any) -> datetime | None:
     """A payload ISO timestamp as naive UTC, or ``None`` if it is not one."""
     if not isinstance(raw, str):
         return None
@@ -2430,8 +2430,8 @@ def _point_ref(point: Any) -> PointRef:
         stamps = [
             stamp
             for stamp in (
-                _payload_datetime(payload.get("indexed_at")),
-                _payload_datetime(payload.get("updated_at")),
+                payload_datetime(payload.get("indexed_at")),
+                payload_datetime(payload.get("updated_at")),
             )
             if stamp is not None
         ]
@@ -2774,7 +2774,7 @@ async def erasure_point_identities(
                         str(point.id),
                         author,
                         payload.get(CHUNK_OF_FIELD) or payload.get("memory_id"),
-                        _payload_datetime(payload.get("created_at") or payload.get("indexed_at")),
+                        payload_datetime(payload.get("created_at") or payload.get("indexed_at")),
                     )
                 )
         yield batch

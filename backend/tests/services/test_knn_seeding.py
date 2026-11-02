@@ -1701,10 +1701,72 @@ class TestSupersedeVerification:
         db.commit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_neighbour_written_later_is_not_judged(self):
-        """The top-1 neighbour was created AFTER this memory (its embedding
-        finished first): asking whether the earlier text supersedes the later
-        one inverts the question, so the candidate stays unverified."""
+    @pytest.mark.parametrize("verify_mode", ["off", "llm"])
+    async def test_a_neighbour_written_later_is_not_stored(self, verify_mode):
+        """#2256 D3: the top-1 neighbour was created AFTER this memory (its
+        embedding finished first, or the catch-up pass checks the older row of
+        a pair): an older memory never carries a suggestion pointing at a
+        newer one, in any mode. Read from the point payload — no DB load, no
+        judge call, no write."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode=verify_mode)
+        judge = AsyncMock()
+        dup_id, candidates, _ = self._run(memory, db, config, judge)
+        candidates[1]["payload"] = {"created_at": "2026-10-03T00:00:00Z"}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+            patch("services.memory_service.logger") as log,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        judge.assert_not_called()
+        db.execute.assert_not_called()
+        assert memory.supersede_candidate is None
+        events = {c.args[0]: c.kwargs for c in log.info.call_args_list if c.args}
+        skipped = events["supersede_candidate_skipped_newer_target"]
+        assert skipped["candidate_memory_id"] == dup_id
+        assert skipped["similarity"] == 0.93
+
+    @pytest.mark.asyncio
+    async def test_an_older_neighbour_in_the_payload_is_stored(self):
+        """The payload says the neighbour is older: detection goes on as before."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="off")
+        dup_id, candidates, _ = self._run(memory, db, config, AsyncMock())
+        candidates[1]["payload"] = {"created_at": "2026-10-01T00:00:00+00:00"}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        assert memory.supersede_candidate["memory_id"] == dup_id
+
+    @pytest.mark.asyncio
+    async def test_a_hit_without_created_at_payload_falls_back_to_the_row(self):
+        """No ``created_at`` in the payload (an old point): the llm-mode check
+        on the loaded target still keeps the judge out, and the candidate is
+        stored unverified as before #2256."""
         memory = _make_memory()
         db = _make_db()
         config = _make_config(enabled=False, verify_mode="llm")
@@ -2697,8 +2759,9 @@ class TestKnnSeedEditFence:
 
 class TestMechanicalReembed:
     """#2092: a re-embed of unchanged text (chunk backfill, model switch, repair
-    re-queue) runs no supersede detection, no judge and no clear; seeding is
-    unaffected."""
+    re-queue) runs no supersede detection and no judge; seeding is unaffected.
+    #2256: a row holding a live candidate still gets #2059's clear when the
+    pair is no longer near."""
 
     @staticmethod
     def _hits(memory, *others):
@@ -2707,7 +2770,9 @@ class TestMechanicalReembed:
         ]
 
     @staticmethod
-    async def _seed(memory, db, candidates, *, config, repo=None, threshold=None):
+    async def _seed(
+        memory, db, candidates, *, config, repo=None, threshold=None, mechanical=True, seed=True
+    ):
         judge = AsyncMock()
         detect = AsyncMock()
         with (
@@ -2737,7 +2802,8 @@ class TestMechanicalReembed:
                 vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
-                mechanical_reembed=True,
+                mechanical_reembed=mechanical,
+                seed=seed,
             )
         return search, judge, detect, log
 
@@ -2790,13 +2856,11 @@ class TestMechanicalReembed:
         detect.assert_not_called()
         repo.create_edge_if_absent.assert_called()
 
-    @pytest.mark.asyncio
-    async def test_mechanical_reembed_does_not_clear_a_stored_candidate(self):
-        """The accepted trade-off: a re-embed under an embedder that scores the
-        pair lower no longer clears the suggestion (#2059's branch)."""
+    @staticmethod
+    def _orm_memory(stored):
+        """A real (transient) Memory: the clear sets the committed value on it."""
         from models.memory import Memory
 
-        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
         memory = Memory(
             id=uuid4(),
             user_id="user1",
@@ -2807,17 +2871,190 @@ class TestMechanicalReembed:
             created_at=datetime(2026, 10, 2),
         )
         memory.supersede_candidate = stored
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_clears_a_live_candidate_without_neighbour(self):
+        """#2256: a re-embed under an embedder that scores the pair far lower
+        (a model switch, a backfill, a repair) clears the suggestion as #2059
+        does on an edit — the clear only: no detection, no judge, no store."""
+        target = str(uuid4())
+        memory = self._orm_memory({"memory_id": target, "similarity": 0.90})
         db = _make_db()
 
-        await self._seed(
+        search, judge, detect, log = await self._seed(
             memory,
             db,
             self._hits(memory, (uuid4(), 0.60)),
             config=_make_config(enabled=False, verify_mode="llm"),
         )
 
+        search.assert_awaited_once()
+        assert search.await_args.kwargs["limit"] == 2
+        judge.assert_not_called()
+        detect.assert_not_called()
+        assert memory.supersede_candidate is None
+        db.execute.assert_awaited_once()
+        from sqlalchemy.dialects import postgresql
+
+        statement = db.execute.await_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        assert sql.startswith("UPDATE memories SET supersede_candidate=")
+        assert target in statement.compile().params.values()
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_candidate_cleared_no_neighbour" in events
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_with_only_itself_clears_too(self):
+        memory = self._orm_memory({"memory_id": str(uuid4()), "similarity": 0.90})
+        db = _make_db()
+
+        await self._seed(memory, db, self._hits(memory), config=_make_config(enabled=False))
+
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_keeps_a_candidate_still_near(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        _, judge, detect, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (stored["memory_id"], 0.88)),
+            config=_make_config(enabled=False, verify_mode="llm"),
+        )
+
         assert memory.supersede_candidate == stored
         db.execute.assert_not_awaited()
+        judge.assert_not_called()
+        detect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_keeps_a_candidate_hovering_at_the_floor(self):
+        """The margin (RESURFACE_SIMILARITY_DELTA) applies as on every clear."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.835)),
+            config=_make_config(enabled=False),
+        )
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verification", "cleared"),
+        [
+            ({"verdict": "supersedes", "confidence": 0.9, "verified": True}, False),
+            (None, True),
+        ],
+    )
+    async def test_mechanical_reembed_keeps_a_judged_candidate_down_to_the_llm_floor(
+        self, verification, cleared
+    ):
+        """A stored verdict is about the texts, which did not change: the pair
+        answers to the judge-mode threshold (the read path shows it down to
+        there). Without a verdict it answers to 0.85 as stored."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        if verification is not None:
+            stored["verification"] = verification
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        _, judge, detect, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.78)),
+            config=_make_config(enabled=False, verify_mode="llm", llm_threshold=0.75),
+        )
+
+        assert (memory.supersede_candidate is None) is cleared
+        judge.assert_not_called()
+        detect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_never_clears_without_its_own_point(self):
+        """A result without the memory's own point is no evidence (#2059)."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        await self._seed(
+            memory,
+            db,
+            [{"id": str(uuid4()), "score": 0.5, "payload": {}, "embedding": []}],
+            config=_make_config(enabled=False),
+        )
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            None,
+            {"dismissed": {"memory_id": "x", "similarity": 0.9, "dismissed_at": "x"}},
+        ],
+    )
+    async def test_mechanical_reembed_runs_no_query_without_a_live_candidate(self, stored):
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        search, judge, detect, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.5)),
+            config=_make_config(enabled=False, verify_mode="llm"),
+        )
+
+        search.assert_not_called()
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_with_suggestions_off_keeps_the_candidate(self):
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        search, _, _, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory),
+            config=_make_config(enabled=False, suggest=False),
+        )
+
+        search.assert_not_called()
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_mechanical_reembed_clear_and_seed_share_one_query(self):
+        memory = self._orm_memory({"memory_id": str(uuid4()), "similarity": 0.90})
+        repo = _make_edge_repo()
+        db = _make_db()
+
+        search, _, detect, _ = await self._seed(
+            memory,
+            db,
+            self._hits(memory, (uuid4(), 0.6)),
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+        )
+
+        search.assert_awaited_once()
+        assert search.await_args.kwargs["limit"] == 6
+        detect.assert_not_called()
+        assert memory.supersede_candidate is None
+        repo.create_edge_if_absent.assert_called()
 
     @pytest.mark.asyncio
     async def test_mechanical_reembed_does_not_report_suggestions_off(self):
@@ -2836,3 +3073,29 @@ class TestMechanicalReembed:
         assert memory_service._KNN_SEED_NO_CONSUMER_REPORTED == set()
         debug = [c for c in log.debug.call_args_list if c.args[0] == "knn_seed_skip_no_consumer"]
         assert debug[0].kwargs["reason"] == "mechanical_reembed"
+
+    @pytest.mark.asyncio
+    async def test_seed_false_runs_detection_only(self):
+        """#2256 D5: the catch-up pass passes ``seed=False`` — the detection
+        runs, no seed edge is written and no calibration bootstrap fires."""
+        memory = _make_memory()
+        repo = _make_edge_repo()
+        dup = uuid4()
+
+        search, _, detect, _ = await self._seed(
+            memory,
+            _make_db(),
+            self._hits(memory, (dup, 0.93), (uuid4(), 0.7)),
+            config=_make_config(enabled=True, k=5),
+            repo=repo,
+            threshold=0.5,
+            mechanical=False,
+            seed=False,
+        )
+
+        search.assert_awaited_once()
+        assert search.await_args.kwargs["limit"] == 2
+        detect.assert_awaited_once()
+        assert str(detect.await_args.kwargs["raw_top"]["id"]) == str(dup)
+        repo.create_edge_if_absent.assert_not_called()
+        repo.get_outgoing_edges.assert_not_called()
