@@ -13,8 +13,10 @@ runs the same detection for them, in process, from each row's stored vector
 
 Rows: embedded (``success``), live, not a resource row, no candidate (with
 ``--include-unverified`` also a candidate without a judge verdict), oldest
-first, at most ``--limit`` (200). ``--before`` / ``--after`` (ISO-8601, UTC
-when no offset) only take rows created before / after that instant.
+first, at most ``--limit`` (200). ``--before <ISO-8601>`` (UTC when no
+offset) only takes rows created before that instant. ``--after`` resumes past
+a cursor ``<ISO-8601>,<memory id>`` (the ``resume`` line of a run, in the
+rows' order); a bare instant includes rows created at that instant.
 
 Judge spend: with ``SUPERSEDE_VERIFY_MODE=llm`` each row may cost one judge
 call, counted on the same per-workspace daily cap as live ingest
@@ -28,7 +30,7 @@ the judge itself skips its call while the counter is unreachable).
 
 A row whose nearest neighbour is not near enough stays without a candidate
 and is planned again by a run over the same range: the report ends with a
-``resume`` line (``--after <created_at of the last row reached>``) to walk on
+``resume`` line (``--after <created_at>,<id>`` of the last row reached) to walk on
 past it.
 
 Exit codes: 0 ok · 1 error · 2 usage.
@@ -70,15 +72,27 @@ def _print_applied(result: SupersedeCatchUp) -> None:
     print(f"judge_calls  {judge_calls}")
     print(f"stopped      {result.stopped or '-'}")
     if result.last_created_at is not None:
-        print(f"resume       --after {to_utc_iso(result.last_created_at)}")
+        cursor = to_utc_iso(result.last_created_at)
+        if result.last_id is not None:
+            cursor = f"{cursor},{result.last_id}"
+        print(f"resume       --after {cursor}")
 
 
 def _changes(result: SupersedeCatchUp) -> int:
     return result.planned if result.dry_run else result.processed
 
 
+def _cursor(value: str) -> tuple[datetime, UUID | None]:
+    """``--after``: ``<ISO-8601>[,<memory id>]``, the resume line of a run."""
+    instant, _, memory_id = value.partition(",")
+    try:
+        return _utc_instant(instant), UUID(memory_id) if memory_id else None
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a memory id: {memory_id!r}") from exc
+
+
 def _utc_instant(value: str) -> datetime:
-    """``--before`` / ``--after``: ISO-8601; no offset means UTC. Returned as naive UTC."""
+    """ISO-8601; no offset means UTC. Returned as naive UTC."""
     try:
         return to_naive_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
     except ValueError as exc:
@@ -107,7 +121,8 @@ async def _main(args: argparse.Namespace) -> int:
             include_unverified=args.include_unverified,
             limit=args.limit,
             max_judge_calls=args.max_judge_calls,
-            after=args.after,
+            after=args.after[0] if args.after else None,
+            after_id=args.after[1] if args.after else None,
         )
 
     return await run_plan_apply(
@@ -139,9 +154,9 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--after",
-        type=_utc_instant,
+        type=_cursor,
         default=None,
-        help="only rows created after this ISO-8601 instant (the resume line of a run)",
+        help="resume past <ISO-8601>[,<memory id>] (the resume line of a run)",
     )
     parser.add_argument(
         "--include-unverified",

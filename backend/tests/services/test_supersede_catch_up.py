@@ -65,7 +65,10 @@ class TestRowsQuery:
         sql = str(
             query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
         )
-        assert "memories.created_at > '2026-02-01 00:00:00'" in sql
+        assert (
+            "(memories.created_at, memories.id) > "
+            "('2026-02-01 00:00:00', '00000000-0000-0000-0000-000000000000')"
+        ) in sql
 
 
 class _Db:
@@ -86,12 +89,23 @@ class _Db:
             result.scalar_one_or_none.return_value = self.workspace_id
         elif "count(" in sql:
             result.scalar_one.return_value = len(self.order) + 3
-        elif "memories.summary_embedding_id" in sql and "memories.content" not in sql:
+        elif "ORDER BY" in sql:
             result.all.return_value = [
                 SimpleNamespace(
                     id=i, summary_embedding_id=None, created_at=datetime(2026, 1, n + 1)
                 )
                 for n, i in enumerate(self.order)
+            ]
+        elif " IN (" in sql:
+            # The revisions read before the vectors.
+            result.all.return_value = [
+                SimpleNamespace(
+                    id=m.id,
+                    summary=m.summary,
+                    content=m.content,
+                    embedded_text_digest=m.embedded_text_digest,
+                )
+                for m in self.memories.values()
             ]
         else:
             memory_id = statement.whereclause.clauses[0].right.value
@@ -102,7 +116,15 @@ class _Db:
 
 
 def _memory(candidate: Any = None) -> Any:
-    return SimpleNamespace(id=uuid4(), supersede_candidate=candidate)
+    from services.supersede_verify import embedded_text_digest
+
+    return SimpleNamespace(
+        id=uuid4(),
+        supersede_candidate=candidate,
+        summary="s",
+        content="c",
+        embedded_text_digest=embedded_text_digest("s", "c"),
+    )
 
 
 def _config(suggest: bool = True) -> Any:
@@ -222,9 +244,54 @@ class TestApply:
     async def test_after_is_passed_to_the_row_filter(self) -> None:
         db = _Db([_memory()], uuid4())
 
-        await _run(db, after=datetime(2026, 3, 1))
+        await _run(db, after=datetime(2026, 3, 1), after_id=uuid4())
 
-        assert all("memories.created_at >" in sql for sql in db.statements[1:3])
+        assert all("(memories.created_at, memories.id) >" in sql for sql in db.statements[1:3])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("change", ["edited", "re_embedded"])
+    async def test_a_row_that_moved_after_its_vector_was_read_is_skipped(self, change) -> None:
+        """The vector was read for the text as it was; an edit (or an edit
+        and its re-embed) landing before the detection makes the pair
+        meaningless: skipped, no store, no clear."""
+        moved, kept = _memory({"memory_id": str(uuid4()), "similarity": 0.9}), _memory()
+        db = _Db([moved, kept], uuid4())
+        before = dict(moved.supersede_candidate)
+
+        async def retrieve(_collection, point_ids):
+            if change == "edited":
+                moved.summary = "edited"
+            else:
+                moved.embedded_text_digest = "another stamp"
+            return {pid: [0.1] for pid in point_ids}
+
+        detect = AsyncMock(return_value=True)
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", AsyncMock(return_value=_config())),
+            patch(
+                "services.context_routing.resolve_context_embedding",
+                AsyncMock(return_value=("text-embedding-3-small", 512)),
+            ),
+            patch("db.qdrant.retrieve_dense_vectors", AsyncMock(side_effect=retrieve)),
+            patch("services.memory_service._create_knn_seed_edges", detect),
+            patch.object(task, "_read_counter", AsyncMock(return_value=0)),
+        ):
+            result = await run_supersede_catch_up(
+                db, uuid4(), dry_run=False, include_unverified=True
+            )
+
+        assert [c.args[1] for c in detect.await_args_list] == [kept]
+        assert (result.processed, result.skipped) == (1, 1)
+        assert moved.supersede_candidate == before
+
+    @pytest.mark.asyncio
+    async def test_the_resume_cursor_is_the_last_row_reached(self) -> None:
+        rows = [_memory(), _memory()]
+        db = _Db(rows, uuid4())
+
+        result, *_ = await _run(db)
+
+        assert (result.last_created_at, result.last_id) == (datetime(2026, 1, 2), rows[1].id)
 
     @pytest.mark.asyncio
     async def test_stops_once_the_judge_counter_advanced_by_the_budget(self) -> None:

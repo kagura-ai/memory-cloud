@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -50,6 +50,7 @@ class TestCommand:
         assert call.kwargs["include_unverified"] is False
         assert call.kwargs["before"] is None
         assert call.kwargs["after"] is None
+        assert call.kwargs["after_id"] is None
         out = capsys.readouterr().out
         assert "rows without a supersede check: 9" in out
         assert "rows this run checks: 3" in out
@@ -69,7 +70,8 @@ class TestCommand:
                     no_vector=1,
                     judge_calls=4,
                     stopped="judge_budget",
-                    last_created_at=datetime(2026, 10, 1, 8, 30),
+                    last_created_at=datetime(2026, 10, 1, 8, 30, 0, 123456),
+                    last_id=UUID(int=7),
                 ),
             ]
         )
@@ -88,7 +90,7 @@ class TestCommand:
             "judge_calls  4",
             "stopped      judge_budget",
             "failed       0",
-            "resume       --after 2026-10-01T08:30:00Z",
+            "resume       --after 2026-10-01T08:30:00.123456Z,00000000-0000-0000-0000-000000000007",
         ):
             assert line in out
 
@@ -116,13 +118,18 @@ class TestCommand:
             "--before",
             "2026-10-01T09:00:00+09:00",
             "--after",
-            "2026-09-01T00:00:00Z",
+            "2026-09-01T00:00:00.5Z,00000000-0000-0000-0000-000000000009",
         ]
         assert _run(argv, task) == 0
         call = task.await_args_list[0]
         assert call.kwargs["include_unverified"] is True
         assert call.kwargs["before"] == datetime(2026, 10, 1, 0, 0)
-        assert call.kwargs["after"] == datetime(2026, 9, 1, 0, 0)
+        assert call.kwargs["after"] == datetime(2026, 9, 1, 0, 0, 0, 500000)
+        assert call.kwargs["after_id"] == UUID(int=9)
+
+    def test_a_bare_after_instant_is_accepted(self):
+        args = cli._parse(["--context", _CTX, "--after", "2026-09-01"])
+        assert args.after == (datetime(2026, 9, 1), None)
 
     def test_yes_without_apply_is_a_usage_error(self):
         task = AsyncMock()
@@ -157,7 +164,13 @@ class TestParse:
         assert cli._parse(["--context", _CTX, "--before", value]).before == expected
 
     @pytest.mark.parametrize(
-        "argv", [["--before", "yesterday"], ["--limit", "0"], ["--max-judge-calls", "-1"]]
+        "argv",
+        [
+            ["--before", "yesterday"],
+            ["--limit", "0"],
+            ["--max-judge-calls", "-1"],
+            ["--after", "2026-09-01,not-a-uuid"],
+        ],
     )
     def test_bad_values_are_usage_errors(self, argv):
         with pytest.raises(SystemExit) as exc:

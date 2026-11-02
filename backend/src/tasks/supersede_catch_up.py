@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, Text, and_, func, or_, select
+from sqlalchemy import Select, Text, and_, func, literal, or_, select, tuple_
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,11 +66,15 @@ class SupersedeCatchUp:
     unchanged: int = 0
     failed: int = 0  # the detection failed (logged as knn_seeding_failed)
     no_vector: int = 0  # no stored dense vector for the row's point
-    skipped: int = 0  # the row changed after the plan (gone, re-queued, got a candidate)
+    # the row changed after the plan (gone, re-queued, got a candidate, or its
+    # text / embedding moved after its vector was read)
+    skipped: int = 0
     judge_calls: int | None = None
     stopped: str | None = None  # STOPPED_* or None
-    # ``created_at`` of the last row reached; pass it as ``after`` to resume.
+    # ``(created_at, id)`` of the last row reached; pass them as
+    # ``after`` / ``after_id`` to resume (the rows' order).
     last_created_at: datetime | None = None
+    last_id: UUID | None = None
 
 
 def _candidate_predicate(include_unverified: bool) -> Any:
@@ -92,12 +96,16 @@ def _candidate_predicate(include_unverified: bool) -> Any:
     return or_(no_candidate, unverified)
 
 
+_NIL_UUID = UUID(int=0)
+
+
 def _row_filter(
     context_id: UUID,
     *,
     before: datetime | None,
     include_unverified: bool,
     after: datetime | None = None,
+    after_id: UUID | None = None,
 ) -> list[Any]:
     clauses: list[Any] = [
         Memory.context_id == context_id,
@@ -110,7 +118,16 @@ def _row_filter(
     if before is not None:
         clauses.append(Memory.created_at < before)
     if after is not None:
-        clauses.append(Memory.created_at > after)
+        # The resume cursor compares like the ORDER BY: rows created in the
+        # same instant as the last one reached are not skipped. Without an
+        # id the instant itself is included.
+        clauses.append(
+            tuple_(Memory.created_at, Memory.id)
+            > tuple_(
+                literal(after, Memory.created_at.type),
+                literal(after_id or _NIL_UUID, Memory.id.type),
+            )
+        )
     return clauses
 
 
@@ -121,6 +138,7 @@ def catch_up_rows_query(
     include_unverified: bool,
     limit: int,
     after: datetime | None = None,
+    after_id: UUID | None = None,
 ) -> Select[UUID, UUID | None, datetime]:
     """The rows a run checks, oldest first: ``(id, summary_embedding_id, created_at)``.
 
@@ -129,18 +147,49 @@ def catch_up_rows_query(
         before: Only rows created before this naive-UTC instant.
         include_unverified: Also rows whose live candidate has no verdict.
         limit: At most this many rows.
-        after: Only rows created after this naive-UTC instant (resume).
+        after: Resume past this ``(created_at, id)`` cursor (naive UTC).
+        after_id: The cursor's id; without it rows created at ``after``
+            itself are included.
     """
     return (
         select(Memory.id, Memory.summary_embedding_id, Memory.created_at)
         .where(
             *_row_filter(
-                context_id, before=before, include_unverified=include_unverified, after=after
+                context_id,
+                before=before,
+                include_unverified=include_unverified,
+                after=after,
+                after_id=after_id,
             )
         )
         .order_by(Memory.created_at, Memory.id)
         .limit(limit)
     )
+
+
+Revision = tuple[str | None, str]
+
+
+def _revision(memory: Any) -> Revision:
+    """The row's embedding stamp and the digest of its current text."""
+    from services.supersede_verify import embedded_text_digest
+
+    return (
+        memory.embedded_text_digest,
+        embedded_text_digest(memory.summary or "", memory.content or ""),
+    )
+
+
+async def _revisions(db: AsyncSession, ids: list[UUID]) -> dict[UUID, Revision]:
+    """:func:`_revision` of each row, read before its vector is."""
+    rows = (
+        await db.execute(
+            select(Memory.id, Memory.summary, Memory.content, Memory.embedded_text_digest).where(
+                Memory.id.in_(ids)
+            )
+        )
+    ).all()
+    return {row.id: _revision(row) for row in rows}
 
 
 def _verification(candidate: Any) -> Any:
@@ -209,6 +258,7 @@ async def run_supersede_catch_up(
     limit: int = 200,
     max_judge_calls: int = 50,
     after: datetime | None = None,
+    after_id: UUID | None = None,
 ) -> SupersedeCatchUp:
     """Run the post-embed supersede detection on rows that never had it.
 
@@ -223,9 +273,11 @@ async def run_supersede_catch_up(
         limit: At most this many rows.
         max_judge_calls: Stop once the workspace's judge counter advanced
             this much during the run.
-        after: Only rows created after this naive-UTC instant: the
-            ``last_created_at`` of an earlier run, to move past rows that
-            stay without a candidate.
+        after: Resume past ``(after, after_id)``: the ``last_created_at``
+            / ``last_id`` of an earlier run, to move past rows that stay
+            without a candidate. Without ``after_id`` rows created at
+            ``after`` itself are included.
+        after_id: See ``after``.
 
     Returns:
         The tally.
@@ -247,7 +299,11 @@ async def run_supersede_catch_up(
         raise ValueError(f"context {context_id} not found")
 
     filters = _row_filter(
-        context_id, before=before, include_unverified=include_unverified, after=after
+        context_id,
+        before=before,
+        include_unverified=include_unverified,
+        after=after,
+        after_id=after_id,
     )
     eligible = int(
         (await db.execute(select(func.count()).select_from(Memory).where(*filters))).scalar_one()
@@ -260,6 +316,7 @@ async def run_supersede_catch_up(
                 include_unverified=include_unverified,
                 limit=limit,
                 after=after,
+                after_id=after_id,
             )
         )
     ).all()
@@ -295,6 +352,9 @@ async def run_supersede_catch_up(
     for start in range(0, len(rows), VECTOR_BATCH):
         batch = rows[start : start + VECTOR_BATCH]
         point_ids = {row.id: str(row.summary_embedding_id or row.id) for row in batch}
+        # Read before the vectors: a row edited and re-embedded after this
+        # point has a vector that may not match the text loaded later.
+        revisions = await _revisions(db, list(point_ids))
         vectors = await retrieve_dense_vectors(collection, list(point_ids.values()))
         for row in batch:
             if enforce:
@@ -309,7 +369,7 @@ async def run_supersede_catch_up(
                 elif used >= max_judge_calls:
                     result.stopped = STOPPED_JUDGE_BUDGET
                     break
-            result.last_created_at = row.created_at
+            result.last_created_at, result.last_id = row.created_at, row.id
             memory = (
                 await db.execute(
                     select(Memory)
@@ -317,7 +377,7 @@ async def run_supersede_catch_up(
                     .execution_options(populate_existing=True)
                 )
             ).scalar_one_or_none()
-            if memory is None:
+            if memory is None or _revision(memory) != revisions.get(row.id):
                 result.skipped += 1
                 continue
             vector = vectors.get(point_ids[row.id])
@@ -377,5 +437,6 @@ async def run_supersede_catch_up(
         judge_calls=result.judge_calls,
         stopped=result.stopped,
         last_created_at=to_utc_iso(result.last_created_at),
+        last_id=str(result.last_id) if result.last_id else None,
     )
     return result

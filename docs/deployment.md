@@ -1746,8 +1746,9 @@ python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the d
 
 - Rows: embedded, live, not resource rows, no candidate, oldest first, at
   most `--limit` (default 200). `--include-unverified` also re-checks rows
-  whose candidate has no judge verdict; `--before` / `--after <ISO-8601>`
-  (UTC when no offset) take only rows created before / after that instant.
+  whose candidate has no judge verdict; `--before <ISO-8601>` (UTC when no
+  offset) takes only rows created before that instant, and `--after
+  <ISO-8601>,<memory id>` resumes past the `resume` line of an earlier run.
 - Judge spend: with the judge on, each row may cost one call, counted on the
   same per-workspace `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` as live ingest. The
   run stops once that counter advanced by `--max-judge-calls` (default 50,
@@ -1758,12 +1759,12 @@ python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the d
   again with a new target or verdict), `cleared`, `unchanged`, `failed` (the
   detection failed on the row; see `knn_seeding_failed` in the log),
   `no_vector` (no stored vector for the row), `skipped` (the row changed after
-  the plan),
+  the plan, or its text or embedding moved after its vector was read),
   `judge_calls` (how far the workspace's judge counter advanced during the
   run, live ingest included; `unknown` when Redis could not be read, and the
   budget is then not enforced while the judge itself skips its calls) and
-  `stopped`, then a `resume --after <instant>` line naming the creation time
-  of the last row reached. The INFO event `supersede_catch_up_completed`
+  `stopped`, then a `resume --after <created_at>,<id>` line naming the last
+  row reached (rows created in the same instant are not skipped). The INFO event `supersede_catch_up_completed`
   carries the same tally.
 - A row whose nearest neighbour is not near enough stays without a candidate
   and is planned again by a run over the same range (nothing records

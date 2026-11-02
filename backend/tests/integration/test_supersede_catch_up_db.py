@@ -199,12 +199,81 @@ async def test_the_pass_detects_on_the_newer_row_only(
         before=scope["b"].created_at,
     )
     assert bounded.planned == 1
-    # The resume point walks on past the rows that stay without a candidate.
-    assert applied.last_created_at == scope["c"].created_at
-    resumed = await _pass(async_engine, scope, dry_run=True, after=applied.last_created_at)
+    # The resume cursor walks on past the rows that stay without a candidate.
+    assert (applied.last_created_at, applied.last_id) == (scope["c"].created_at, scope["c"].id)
+    resumed = await _pass(
+        async_engine,
+        scope,
+        dry_run=True,
+        after=applied.last_created_at,
+        after_id=applied.last_id,
+    )
     assert resumed.eligible == 0
-    after_a = await _pass(async_engine, scope, dry_run=True, after=scope["a"].created_at)
+    after_a = await _pass(
+        async_engine, scope, dry_run=True, after=scope["a"].created_at, after_id=scope["a"].id
+    )
     assert after_a.planned == 1  # C (B has a candidate)
+    # A bare instant includes the rows created at it.
+    at_a = await _pass(async_engine, scope, dry_run=True, after=scope["a"].created_at)
+    assert at_a.planned == 2  # A and C
     # --limit caps the rows checked, not the eligible count.
     limited = await _pass(async_engine, scope, dry_run=True, include_unverified=True, limit=1)
     assert (limited.eligible, limited.planned) == (3, 1)
+
+
+async def test_the_resume_cursor_does_not_skip_rows_created_in_the_same_instant(
+    async_engine: AsyncEngine, scope: dict[str, Any], detection_env: None
+) -> None:
+    """Admin recovery inserts rows in one transaction with one ``now()``: a
+    run stopped inside such a group resumes at the next row of the group."""
+    from tasks import supersede_catch_up as task
+
+    a: Memory = scope["a"]
+    tied_at = scope["c"].created_at + timedelta(minutes=10)
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    tied = []
+    async with maker() as session:
+        for summary in ("tied one", "tied two"):
+            memory = Memory(
+                id=uuid4(),
+                workspace_id=a.workspace_id,
+                context_id=a.context_id,
+                user_id=a.user_id,
+                summary=summary,
+                content=summary,
+                type="note",
+                scope="working",
+                client="test",
+                created_at=tied_at,
+                embedding_status="success",
+                embedded_text_digest=embedded_text_digest(summary, summary),
+            )
+            session.add(memory)
+            tied.append(memory)
+        await session.commit()
+    tied.sort(key=lambda m: str(m.id))
+
+    async def retrieve(_collection: str, point_ids: list[str]) -> dict[str, list[float]]:
+        return {pid: [float(index)] for index, pid in enumerate(point_ids, start=10)}
+
+    async def search(**kwargs: Any) -> list[dict[str, Any]]:
+        return []  # nothing near: the rows stay without a candidate
+
+    async def run(**kwargs: Any) -> Any:
+        async with maker() as session:
+            with (
+                patch("db.qdrant.retrieve_dense_vectors", AsyncMock(side_effect=retrieve)),
+                patch("db.qdrant.search_memories_qdrant", AsyncMock(side_effect=search)),
+                patch.object(task, "_read_counter", AsyncMock(return_value=0)),
+            ):
+                return await task.run_supersede_catch_up(
+                    session, scope["ctx"].id, dry_run=False, limit=1, **kwargs
+                )
+
+    first = await run(after=scope["c"].created_at, after_id=scope["c"].id)
+    assert first.processed == 1
+    assert (first.last_created_at, first.last_id) == (tied_at, tied[0].id)
+
+    second = await run(after=first.last_created_at, after_id=first.last_id)
+    assert second.processed == 1
+    assert second.last_id == tied[1].id
