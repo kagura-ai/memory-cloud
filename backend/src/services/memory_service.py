@@ -7136,23 +7136,18 @@ class MemoryService:
         """
         if not point_deletes:
             return
+        from services.deferred_point_deletes import delete_points_by_collection
+
         try:
             async with asyncio.timeout(FORGET_POINT_DELETE_TIMEOUT_SECONDS):
                 async with self._points_free_to_delete(point_deletes) as free:
-                    await self._delete_points_by_collection(free)
+                    await delete_points_by_collection(free)
         except Exception as exc:
             logger.warning(
                 "forget_point_delete_deferred",
                 points=len(point_deletes),
                 error_class=type(exc.__cause__ or exc).__name__,
             )
-
-    @staticmethod
-    async def _delete_points_by_collection(point_deletes: list[tuple[UUID, UUID, str]]) -> None:
-        """One point delete and one chunk delete per collection."""
-        from services.deferred_point_deletes import delete_points_by_collection
-
-        await delete_points_by_collection(point_deletes)
 
     @contextlib.asynccontextmanager
     async def _points_free_to_delete(

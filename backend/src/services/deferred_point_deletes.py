@@ -24,6 +24,7 @@ repeat that answer.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -43,6 +44,8 @@ logger = get_logger(__name__)
 PointDelete = tuple[UUID, UUID, str]
 # Rows per drain run: one SELECT, one look, two vector-store calls per collection.
 DRAIN_BATCH = 1000
+# Bound on a drain run's vector-store calls, all made under the exclusive lock.
+DRAIN_DELETE_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -207,31 +210,39 @@ async def _backlog(db: AsyncSession) -> tuple[int, float | None]:
     return int(count or 0), (float(oldest) if oldest is not None else None)
 
 
+async def _existing_collections() -> set[str] | None:
+    """The ``kagura_memories*`` collections, or ``None`` when they cannot be listed."""
+    from db.qdrant import list_memory_collections
+
+    try:
+        return set(await list_memory_collections())
+    except Exception as exc:
+        logger.warning(
+            "deferred_point_deletes_collections_unlisted", error_class=type(exc).__name__
+        )
+        return None
+
+
 async def drain_deferred_point_deletes(
     db: AsyncSession, *, wait_seconds: float, limit: int = DRAIN_BATCH
 ) -> DrainResult:
-    """Delete up to ``limit`` queued points, oldest first, once no writer holds the lock.
+    """Delete up to ``limit`` queued points once no writer holds the lock.
 
     Takes no lock when the queue is empty. Waits up to ``wait_seconds`` for the
     point writers (``<= 0``: does not wait); past that it touches nothing and
-    reports ``busy``. Each collection is deleted on its own: a vector-store
-    failure keeps that collection's rows queued with one more attempt and
-    reports ``failed`` — it never raises for that — while the other
-    collections' rows leave the queue. A collection that no longer exists
-    holds no point, so its rows are handled.
+    reports ``busy``. Rows are taken fewest attempts first, then oldest, so a
+    collection that keeps failing cannot starve the others. Each collection is
+    deleted on its own: a vector-store failure keeps that collection's rows
+    queued with one more attempt and reports ``failed`` — it never raises for
+    that — while the other collections' rows leave the queue. A collection that
+    no longer exists holds no point, so its rows are handled. The vector-store
+    calls share ``DRAIN_DELETE_TIMEOUT_SECONDS``, which bounds how long the lock
+    is held after it was taken; what the bound cuts off stays queued.
     """
-    from db.qdrant import list_memory_collections
-
     pending, oldest = await _backlog(db)
     result = DrainResult(pending=pending, oldest_age_seconds=oldest)
     await db.rollback()
     if not pending:
-        return result
-    try:
-        existing = set(await list_memory_collections())
-    except Exception as exc:
-        result.failed = type(exc).__name__
-        logger.warning("deferred_point_deletes_failed", points=0, error_class=result.failed)
         return result
 
     if not await exclude_point_writers(db, wait_seconds=wait_seconds):
@@ -248,7 +259,11 @@ async def drain_deferred_point_deletes(
                 DeferredPointDelete.collection,
                 DeferredPointDelete.queued_at,
             )
-            .order_by(DeferredPointDelete.queued_at, DeferredPointDelete.id)
+            .order_by(
+                DeferredPointDelete.attempts,
+                DeferredPointDelete.queued_at,
+                DeferredPointDelete.id,
+            )
             .limit(limit)
         )
     ).all()
@@ -259,25 +274,38 @@ async def drain_deferred_point_deletes(
 
     handled: list[Any] = []
     failed: list[Any] = []
-    for collection, group in by_collection.items():
-        free = [row for row in group if row.point_id not in owned]
-        if collection in existing and free:
-            try:
-                await delete_points_by_collection(
-                    [(row.memory_id, row.point_id, row.collection) for row in free]
-                )
-            except Exception as exc:
-                failed.extend(group)
-                result.failed = type(exc).__name__
-                logger.warning(
-                    "deferred_point_deletes_failed",
-                    points=len(free),
-                    error_class=result.failed,
-                )
-                continue
-            result.drained += len(free)
-        result.kept += len(group) - len(free)
-        handled.extend(group)
+    try:
+        async with asyncio.timeout(DRAIN_DELETE_TIMEOUT_SECONDS):
+            # Listed after the rows were read: a collection a row names was
+            # created before that row committed, so absent now means deleted.
+            existing = await _existing_collections()
+            for collection, group in by_collection.items():
+                free = [row for row in group if row.point_id not in owned]
+                if free and (existing is None or collection in existing):
+                    try:
+                        await delete_points_by_collection(
+                            [(row.memory_id, row.point_id, row.collection) for row in free]
+                        )
+                    except Exception as exc:
+                        failed.extend(group)
+                        result.failed = type(exc).__name__
+                        logger.warning(
+                            "deferred_point_deletes_failed",
+                            points=len(free),
+                            error_class=result.failed,
+                        )
+                        continue
+                    result.drained += len(free)
+                result.kept += len(group) - len(free)
+                handled.extend(group)
+    except TimeoutError:
+        done = {row.id for row in handled} | {row.id for row in failed}
+        cut_off = [row for row in rows if row.id not in done]
+        failed.extend(cut_off)
+        result.failed = "TimeoutError"
+        logger.warning(
+            "deferred_point_deletes_failed", points=len(cut_off), error_class=result.failed
+        )
 
     await dequeue(db, [QueuedRow(row.id, row.queued_at) for row in handled])
     # Ends the transaction, which releases the lock before the bump.
@@ -290,5 +318,7 @@ async def drain_deferred_point_deletes(
             .execution_options(synchronize_session=False)
         )
         await db.commit()
-    result.pending = max(0, pending - len(handled))
+    # What is left now, for the log and the backlog warning.
+    result.pending, result.oldest_age_seconds = await _backlog(db)
+    await db.rollback()
     return result

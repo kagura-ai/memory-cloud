@@ -35,7 +35,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_deferred_point_deletes_queued",
         "deferred_point_deletes",
-        ["queued_at", "id"],
+        ["attempts", "queued_at", "id"],
         if_not_exists=True,
     )
 

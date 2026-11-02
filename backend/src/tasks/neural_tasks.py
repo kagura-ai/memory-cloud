@@ -21,6 +21,7 @@ from config.constants import (
     DEFERRED_POINT_DRAIN_INTERVAL_ENV,
     DEFERRED_POINT_DRAIN_WAIT_DEFAULT,
     DEFERRED_POINT_DRAIN_WAIT_ENV,
+    DEFERRED_POINT_DRAIN_WAIT_MAX,
 )
 from db.base import get_db
 from db.graph_learning_lock import lock_graph_learning
@@ -424,12 +425,12 @@ async def sweep_orphan_vectors_task() -> None:
         logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
 
 
-def _env_seconds(name: str, default: float) -> float:
+def _env_seconds(name: str, default: float, maximum: float | None = None) -> float:
     """A non-negative number of seconds from ``name``. Read at call time.
 
-    An unparsable or negative value falls back to ``default`` and is logged,
-    like the tombstone retention window, so a typo never turns into a wait
-    without bound or a job silently switched off.
+    An unparsable, negative or above-``maximum`` value falls back to
+    ``default`` and is logged, like the tombstone retention window, so a typo
+    never turns into a wait without bound or a job silently switched off.
     """
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -438,7 +439,7 @@ def _env_seconds(name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         value = -1.0
-    if not math.isfinite(value) or value < 0:
+    if not math.isfinite(value) or value < 0 or (maximum is not None and value > maximum):
         logger.warning("env_seconds_invalid", name=name, value=raw, fallback=default)
         return default
     return value
@@ -453,7 +454,11 @@ def _deferred_point_drain_interval() -> int:
 
 def _deferred_point_drain_wait() -> float:
     """Seconds a drain run waits for the point writers (#2476); 0 does not wait."""
-    return _env_seconds(DEFERRED_POINT_DRAIN_WAIT_ENV, DEFERRED_POINT_DRAIN_WAIT_DEFAULT)
+    return _env_seconds(
+        DEFERRED_POINT_DRAIN_WAIT_ENV,
+        DEFERRED_POINT_DRAIN_WAIT_DEFAULT,
+        maximum=DEFERRED_POINT_DRAIN_WAIT_MAX,
+    )
 
 
 async def drain_deferred_point_deletes_task() -> None:
@@ -485,7 +490,7 @@ async def drain_deferred_point_deletes_task() -> None:
             }
             if result.busy:
                 logger.info("deferred_point_deletes_writers_busy", **fields)
-            elif result.failed is None and (result.drained or result.kept):
+            elif result.drained or result.kept:
                 logger.info("deferred_point_deletes_drained", **fields)
             if (
                 result.oldest_age_seconds is not None

@@ -98,7 +98,7 @@ class TestDrainTask:
         drain.assert_awaited_once_with(db, wait_seconds=5.0)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", ["-1", "soon", "inf"])
+    @pytest.mark.parametrize("value", ["-1", "soon", "inf", "3000000"])
     async def test_a_bad_wait_falls_back_to_the_bound(self, drain, monkeypatch, value):
         """Never an unbounded wait from a typo."""
         monkeypatch.setenv(_WAIT, value)
@@ -127,6 +127,18 @@ class TestDrainTask:
 
         entry = next(e for e in logs if e["event"] == "deferred_point_deletes_drained")
         assert (entry["drained"], entry["kept"], entry["pending"]) == (2, 1, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_partly_failed_run_still_logs_what_it_drained(self, drain):
+        drain.return_value = DrainResult(drained=900, pending=100, failed="QdrantError")
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(MagicMock())),
+            structlog.testing.capture_logs() as logs,
+        ):
+            await drain_deferred_point_deletes_task()
+
+        entry = next(e for e in logs if e["event"] == "deferred_point_deletes_drained")
+        assert (entry["drained"], entry["pending"]) == (900, 100)
 
     @pytest.mark.asyncio
     async def test_logs_busy_writers(self, drain):

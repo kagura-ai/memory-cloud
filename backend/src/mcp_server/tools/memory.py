@@ -1778,7 +1778,9 @@ async def _handle_forget_many(
     #2201: the search points of the committed ids go once, after the loop
     (``delete_forgotten_points``), not per id: that step takes the global
     point-writer lock. It has its own short bound, which comes after the
-    budget like the usage row, and it fails soft to the orphan sweep.
+    budget like the usage row, and it fails soft: each forget queued its
+    points in its own commit, and the deferred point delete drain (#2476)
+    retries what this step did not delete.
     """
     from types import SimpleNamespace
 

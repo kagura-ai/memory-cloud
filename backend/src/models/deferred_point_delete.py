@@ -34,5 +34,6 @@ class DeferredPointDelete(Base):
 
     __table_args__ = (
         UniqueConstraint("memory_id", "point_id", "collection", name="uq_deferred_point_delete"),
-        Index("ix_deferred_point_deletes_queued", "queued_at", "id"),
+        # The drain reads fewest attempts first, then oldest.
+        Index("ix_deferred_point_deletes_queued", "attempts", "queued_at", "id"),
     )

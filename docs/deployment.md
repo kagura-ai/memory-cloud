@@ -1766,6 +1766,9 @@ run retries) and `deferred_point_deletes_failed` (a vector-store error; the
 rows stay); `deferred_point_deletes_backlog_old` warns when a queued point is
 older than a day. While the drain waits, new writers queue behind it, so lower
 the wait (e.g. to 5) where an indexer or merge stall of that length matters.
+Once it holds the lock, a run takes at most 1000 points (fewest failed
+attempts first, then oldest) and spends at most 15 seconds on the vector store;
+what it does not finish stays queued for the next run.
 Until the point goes it is not a recall hit, but it takes a candidate slot and
 counts in `confidence`. The sweep stays the backstop for a point an embedding
 task wrote after the forget. Apply the `f21_2476_deferred_point_deletes`
