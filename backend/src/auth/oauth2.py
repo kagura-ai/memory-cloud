@@ -31,7 +31,8 @@ _AUTH_TIME_CLAIMS = json.dumps(
 
 
 _CERT_FETCH_TIMEOUT_SECONDS = 10
-# The Google callback makes these requests on the event loop: a hung one stops the worker.
+# Caps each socket operation of the web-flow requests (the callback runs them in
+# a worker thread, #2501): a hung Google call fails instead of holding the thread.
 _GOOGLE_HTTP_TIMEOUT_SECONDS = 10
 
 
@@ -392,6 +393,8 @@ class OAuth2Manager:
 
         Raises:
             InvalidCredentialsError: If code exchange fails
+
+        Blocking (HTTP to Google's token endpoint): call it off the event loop.
         """
         client_id = os.getenv("GOOGLE_CLIENT_ID")
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -478,6 +481,8 @@ class OAuth2Manager:
 
         Returns:
             User info dict with sub, email, name, picture
+
+        Blocking (HTTP to Google's userinfo endpoint): call it off the event loop.
         """
         import requests
 

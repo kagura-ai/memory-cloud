@@ -868,10 +868,13 @@ async def google_callback(
         if not redirect_uri:
             raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
 
-        credentials = _oauth2_manager.exchange_code_web(code, redirect_uri)
+        # #2501: both are blocking HTTP calls (``requests``), so they run in a
+        # worker thread; on the loop they would stall every other request
+        # while Google answers. ``to_thread`` re-raises their exceptions.
+        credentials = await asyncio.to_thread(_oauth2_manager.exchange_code_web, code, redirect_uri)
 
         # 3. Get user info from Google
-        user_info = _oauth2_manager.get_user_info_web(credentials)
+        user_info = await asyncio.to_thread(_oauth2_manager.get_user_info_web, credentials)
 
         # 3.4. Account-linking short-circuit (Issue #517). MUST precede the
         # registration gate + ensure_user: when intent="link", the returned
