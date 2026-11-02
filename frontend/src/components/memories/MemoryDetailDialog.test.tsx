@@ -417,3 +417,121 @@ describe("MemoryDetailDialog — observed_at (#2330)", () => {
     );
   });
 });
+
+describe("MemoryDetailDialog — supersede acceptance (#2427)", () => {
+  const confirm = () =>
+    screen.getByRole("button", { name: /supersede\.confirm/ });
+
+  function renderWith(
+    candidate: SupersedeCandidate,
+    extra: Partial<Parameters<typeof MemoryDetailDialog>[0]> = {},
+  ) {
+    const onAccept = vi.fn();
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={candidate}
+        onAcceptSupersede={onAccept}
+        {...extra}
+      />,
+    );
+    return onAccept;
+  }
+
+  it("keeps the action enabled when the server allows it", () => {
+    renderWith(makeCandidate({ acceptance: { allowed: true } }));
+
+    expect(confirm()).toBeEnabled();
+    expect(screen.queryByText(/supersede\.unavailable\./)).toBeNull();
+  });
+
+  it("disables the action and explains a foreign memory", () => {
+    const onAccept = renderWith(
+      makeCandidate({ acceptance: { allowed: false, reason: "not_owner" } }),
+    );
+
+    expect(confirm()).toBeDisabled();
+    const reason = screen.getByText("supersede.unavailable.notOwner");
+    expect(confirm()).toHaveAttribute("aria-describedby", reason.id);
+    fireEvent.click(confirm());
+    expect(onAccept).not.toHaveBeenCalled();
+    // The suggestion itself stays informative.
+    expect(screen.getByText("Older duplicate memory")).toBeInTheDocument();
+  });
+
+  it("explains a context the caller cannot write to", () => {
+    renderWith(
+      makeCandidate({ acceptance: { allowed: false, reason: "not_writable" } }),
+    );
+
+    expect(confirm()).toBeDisabled();
+    expect(
+      screen.getByText("supersede.unavailable.notWritable"),
+    ).toBeInTheDocument();
+  });
+
+  it("explains a candidate newer than the memory", () => {
+    renderWith(
+      makeCandidate({
+        acceptance: { allowed: false, reason: "newer_candidate" },
+      }),
+    );
+
+    expect(confirm()).toBeDisabled();
+    expect(
+      screen.getByText("supersede.unavailable.newerCandidate"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps today's behaviour when the server sends no acceptance", () => {
+    const onAccept = renderWith(makeCandidate());
+
+    expect(confirm()).toBeEnabled();
+    expect(confirm()).not.toHaveAttribute("aria-describedby");
+    fireEvent.click(confirm());
+    expect(onAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an accept failure as an inline alert, even once the candidate is gone", () => {
+    const { rerender } = render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={makeCandidate()}
+        onAcceptSupersede={vi.fn()}
+        supersedeError={{ title: "supersede.errors.denied" }}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "supersede.errors.denied",
+    );
+
+    rerender(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={null}
+        onAcceptSupersede={vi.fn()}
+        supersedeError={{
+          title: "supersede.acceptFailed",
+          description: "server text",
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("supersede.acceptFailed");
+    expect(alert).toHaveTextContent("server text");
+    expect(
+      screen.queryByRole("button", { name: /supersede\.confirm/ }),
+    ).toBeNull();
+  });
+});

@@ -22,6 +22,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useTranslations } from "next-intl";
 import { referenceMemory } from "@/lib/api/memory";
 import { graphApi } from "@/lib/api/graph";
+import { ApiError } from "@/lib/api/base";
 import type {
   LinkedMemoryRef,
   MemoryReference,
@@ -53,6 +54,14 @@ function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
   };
 }
 
+// #2427: a failed accept, shown inline in the suggestion block (a dialog-body
+// error) rather than as a toast. `description` carries the server's text only
+// for an unmapped failure.
+export interface SupersedeError {
+  title: string;
+  description?: string;
+}
+
 export interface UseMemoryDetailDialogOpts {
   memoryIdParam: string | null;
   setMemoryIdParam: (id: string | null) => void;
@@ -77,6 +86,8 @@ export interface UseMemoryDetailDialogResult {
   supersedeCandidate: SupersedeCandidate | null;
   supersedeAccepting: boolean;
   acceptSupersede: () => void;
+  // #2427: the last accept failure for the open memory (null when none).
+  supersedeError: SupersedeError | null;
 
   // Dialog onOpenChange handlers — wire directly to MemoryDetailDialog /
   // EditMemoryDialog / DeleteMemoryDialog props of the same name.
@@ -111,6 +122,9 @@ export function useMemoryDetailDialog(
   const [detailNotFound, setDetailNotFound] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [supersedeError, setSupersedeError] = useState<SupersedeError | null>(
+    null,
+  );
 
   // Race guard: if the user clicks A then B before A's referenceMemory()
   // resolves, B sets pendingHydrationRef.current=B.id; when A resolves we
@@ -141,6 +155,7 @@ export function useMemoryDetailDialog(
         setHydrated(ref);
         setLinkedRefs(linkedRefsFromMemoryReference(ref));
         setDetailNotFound(false);
+        setSupersedeError(null);
         if (target === "detail") setDetailOpen(true);
         else if (target === "edit") setEditOpen(true);
         else setDeleteOpen(true);
@@ -174,6 +189,7 @@ export function useMemoryDetailDialog(
       setLinkedRefs(EMPTY_LINKED_REFS);
       setEditOpen(false);
       setDeleteOpen(false);
+      setSupersedeError(null);
       pendingHydrationRef.current = null;
       return;
     }
@@ -192,6 +208,7 @@ export function useMemoryDetailDialog(
       if (!next) {
         if (memoryIdParam) setMemoryIdParam(null);
         setDetailNotFound(false);
+        setSupersedeError(null);
         // Cancel any in-flight referenceMemory: nulling the ref makes the
         // openWith resolution path's identity check fail, so a late-arriving
         // response can't re-open the dialog the user just closed.
@@ -285,11 +302,31 @@ export function useMemoryDetailDialog(
       ? rawSupersedeCandidate
       : null;
 
+  // #2427: re-read the open memory after a refused accept so the block shows
+  // the server's current answer (a candidate gone, or `acceptance` now
+  // refusing). Discarded when the dialog moved to another memory or closed
+  // meanwhile (the same identity check as openWith); a failed re-read leaves
+  // the dialog as it is — the inline error already says what happened.
+  const refreshHydrated = useCallback(async (id: string) => {
+    try {
+      const ref = await referenceMemory(id);
+      if (pendingHydrationRef.current !== id) return;
+      setHydrated(ref);
+      setLinkedRefs(linkedRefsFromMemoryReference(ref));
+    } catch {
+      // Keep the current view; see above.
+    }
+  }, []);
+
   const acceptSupersede = useCallback(() => {
     if (!hydrated || !rawSupersedeCandidate || !contextId) return;
+    // #2427: the server said this caller may not accept it; the button is
+    // disabled too, this guards any other caller of the action.
+    if (rawSupersedeCandidate.acceptance?.allowed === false) return;
     const sourceId = hydrated.memory_id;
     const targetId = rawSupersedeCandidate.memory_id;
     setSupersedeAccepting(true);
+    setSupersedeError(null);
     void (async () => {
       try {
         await graphApi.createEdge({
@@ -301,16 +338,41 @@ export function useMemoryDetailDialog(
         setAcceptedSupersedeKey(`${sourceId}->${targetId}`);
         toast({ title: tDetail("supersede.accepted") });
       } catch (err) {
-        toast({
-          variant: "destructive",
-          title: tDetail("supersede.acceptFailed"),
-          description: err instanceof Error ? err.message : undefined,
-        });
+        // A reply for a memory the dialog no longer shows is dropped.
+        if (pendingHydrationRef.current !== sourceId) return;
+        // Status, not server prose: 403 is a lost role, ownership or plan
+        // slot (the copy names none of them), 404 a candidate or context
+        // gone, 409 another declared edge on the pair. Each re-reads the
+        // memory so the block reflects the server's current answer.
+        const status = err instanceof ApiError ? err.status : undefined;
+        if (status === 403 || status === 404 || status === 409) {
+          setSupersedeError({
+            title:
+              status === 403
+                ? tDetail("supersede.errors.denied")
+                : status === 404
+                  ? tDetail("supersede.errors.stale")
+                  : tDetail("supersede.errors.conflict"),
+          });
+          void refreshHydrated(sourceId);
+        } else {
+          setSupersedeError({
+            title: tDetail("supersede.acceptFailed"),
+            description: err instanceof Error ? err.message : undefined,
+          });
+        }
       } finally {
         setSupersedeAccepting(false);
       }
     })();
-  }, [hydrated, rawSupersedeCandidate, contextId, toast, tDetail]);
+  }, [
+    hydrated,
+    rawSupersedeCandidate,
+    contextId,
+    toast,
+    tDetail,
+    refreshHydrated,
+  ]);
 
   return {
     hydrated,
@@ -331,5 +393,6 @@ export function useMemoryDetailDialog(
     supersedeCandidate,
     supersedeAccepting,
     acceptSupersede,
+    supersedeError,
   };
 }

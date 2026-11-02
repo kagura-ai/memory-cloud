@@ -63,6 +63,21 @@ export interface SupersedeCandidate {
   detected_at: string | null;
   // #2016: true when the deployment's judge confirmed the update; absent / null otherwise.
   verified?: boolean | null;
+  // #2427: whether the caller may accept the suggestion, computed by the
+  // server on reference and the PATCH reply. Absent on recall rows and on an
+  // older backend — the UI then keeps the action enabled and the server
+  // decides on click.
+  acceptance?: SupersedeAcceptance | null;
+}
+
+// #2427 mirror of backend `SupersedeAcceptance`. `reason` is set only when
+// `allowed` is false; `not_owner` never says which memory is someone else's.
+export type SupersedeAcceptanceReason =
+  "not_writable" | "not_owner" | "newer_candidate";
+
+export interface SupersedeAcceptance {
+  allowed: boolean;
+  reason?: SupersedeAcceptanceReason | null;
 }
 
 // Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by
