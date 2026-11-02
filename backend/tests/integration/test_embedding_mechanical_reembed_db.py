@@ -11,6 +11,7 @@ Postgres is unreachable.
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -203,8 +204,11 @@ async def candidate_scope(db_session: AsyncSession) -> AsyncIterator[dict[str, A
 
 
 async def _embed_with_detection(
-    async_engine: AsyncEngine, memory_id: UUID, hits: list[dict[str, Any]]
-) -> tuple[AsyncMock, AsyncMock]:
+    async_engine: AsyncEngine,
+    memory_id: UUID,
+    hits: list[dict[str, Any]],
+    stored: dict[str, list[float]] | None = None,
+) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
     """Run the pipeline with the real ``_create_knn_seed_edges``."""
     from services import memory_service
 
@@ -220,8 +224,9 @@ async def _embed_with_detection(
         return _gen()
 
     svc = MagicMock(model="m")
-    svc.embed = AsyncMock(return_value=[0.1])
+    svc.embed = AsyncMock(return_value=[1.0, 0.0])
     judge = AsyncMock()
+    retrieve = AsyncMock(return_value=stored or {})
     try:
         with (
             patch("db.base.get_db", side_effect=_get_db),
@@ -233,6 +238,7 @@ async def _embed_with_detection(
             patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
             patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
             patch("db.qdrant.search_memories_qdrant", AsyncMock(return_value=hits)) as search,
+            patch("db.qdrant.retrieve_dense_vectors", retrieve),
             patch("services.supersede_verify.judge_pair", judge),
             patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()),
         ):
@@ -240,7 +246,7 @@ async def _embed_with_detection(
     finally:
         for session in sessions:
             await session.close()
-    return search, judge
+    return search, judge, retrieve
 
 
 async def test_mechanical_reembed_clears_a_candidate_without_a_near_neighbour(
@@ -260,23 +266,36 @@ async def test_mechanical_reembed_clears_a_candidate_without_a_near_neighbour(
     assert digest == embedded_text_digest(row.summary, row.content)
     assert first.supersede_candidate["memory_id"] == str(target.id)
 
+    async def requeue() -> None:
+        async with _maker(async_engine)() as session:
+            assert await requeue_embedding(session, row.id, reason="test") is True
+            await session.commit()
+
     # 2. A repair re-queue (mechanical) while the pair is still near: kept.
-    async with _maker(async_engine)() as session:
-        assert await requeue_embedding(session, row.id, reason="test") is True
-        await session.commit()
-    search, judge = await _embed_with_detection(async_engine, row.id, [own, near])
-    search.assert_awaited_once()
+    # The pair is measured on the target's stored vector, not the search.
+    await requeue()
+    search, judge, retrieve = await _embed_with_detection(
+        async_engine, row.id, [own], {str(target.id): [0.9, math.sqrt(1 - 0.81)]}
+    )
+    search.assert_not_called()
+    retrieve.assert_awaited_once_with("kagura_memories", [str(target.id)])
     judge.assert_not_called()
     kept = await _final(async_engine, row.id)
     assert kept.supersede_candidate == first.supersede_candidate
     assert kept.embedded_text_digest == digest
 
-    # 3. The same re-queue under an embedder that no longer scores the pair
-    # as near (a model switch): the candidate is cleared, no judge, no store.
-    async with _maker(async_engine)() as session:
-        assert await requeue_embedding(session, row.id, reason="test") is True
-        await session.commit()
-    _, judge = await _embed_with_detection(async_engine, row.id, [own])
+    # 3. The target has no point in the collection yet (a model switch fills
+    # the new collection row by row): no evidence, kept.
+    await requeue()
+    await _embed_with_detection(async_engine, row.id, [own], {})
+    assert (await _final(async_engine, row.id)).supersede_candidate == first.supersede_candidate
+
+    # 4. The re-embedded pair scores far lower (a model switch): cleared, no
+    # judge, no store.
+    await requeue()
+    _, judge, _ = await _embed_with_detection(
+        async_engine, row.id, [own], {str(target.id): [0.5, math.sqrt(1 - 0.25)]}
+    )
     judge.assert_not_called()
     cleared = await _final(async_engine, row.id)
     assert cleared.supersede_candidate is None

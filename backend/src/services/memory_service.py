@@ -16,7 +16,7 @@ import os
 import statistics
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
@@ -119,7 +119,7 @@ from services.search_service import SearchService
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
 from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
-from utils.datetime import to_utc_iso, utcnow
+from utils.datetime import to_naive_utc, to_utc_iso, utcnow
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
@@ -8645,6 +8645,66 @@ async def _clear_supersede_candidate_without_neighbour(db: AsyncSession, *, memo
     )
 
 
+def _cosine(a: list[float], b: list[float]) -> float | None:
+    """Cosine similarity of two dense vectors; None when it is undefined."""
+    if len(a) != len(b) or not a:
+        return None
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    if norm == 0.0:
+        return None
+    return dot / norm
+
+
+async def _clear_candidate_if_pair_moved(
+    db: AsyncSession,
+    *,
+    memory: Memory,
+    vector: list[float],
+    collection_name: str,
+    config: Any,
+) -> None:
+    """#2059's clear on a re-embed of unchanged text (#2256).
+
+    The pair itself is measured: the stored target's vector is read from the
+    collection this run just wrote ``memory``'s point to and compared with
+    ``vector``. The candidate is cleared when the pair scores a clear margin
+    below its floor (:func:`_mechanical_clear_floor`). A target with no point
+    there yet — an embedding-model switch re-embeds rows one by one into the
+    new collection — is no evidence and leaves the candidate alone, as does
+    any failure. Never judges, never stores.
+    """
+    from db.qdrant import retrieve_dense_vectors
+
+    target_id = _live_candidate_target(memory.supersede_candidate)
+    if target_id is None:
+        return
+    try:
+        stored = await retrieve_dense_vectors(collection_name, [target_id])
+    except NotImplementedError:
+        return  # a store that cannot return vectors (LanceDB preview)
+    except Exception as exc:
+        logger.warning(
+            "supersede_clear_check_failed",
+            memory_id=str(memory.id),
+            candidate_memory_id=target_id,
+            error=str(exc),
+        )
+        return
+    target_vector = stored.get(target_id)
+    similarity = _cosine(vector, target_vector) if target_vector is not None else None
+    if similarity is None:
+        logger.debug(
+            "supersede_clear_skipped_target_not_indexed",
+            memory_id=str(memory.id),
+            candidate_memory_id=target_id,
+        )
+        return
+    floor = _mechanical_clear_floor(memory, _supersede_detect_threshold(config))
+    if similarity < floor - RESURFACE_SIMILARITY_DELTA:
+        await _clear_supersede_candidate_without_neighbour(db, memory=memory)
+
+
 async def _supersede_write_preempted(
     db: AsyncSession,
     *,
@@ -8845,10 +8905,8 @@ async def _detect_supersede_candidate(
     from db.qdrant import payload_datetime
 
     target_created_at = payload_datetime((raw_top.get("payload") or {}).get("created_at"))
-    own_created_at = memory.created_at
-    if own_created_at is not None and own_created_at.tzinfo is not None:
-        # The column is naive UTC; payload_datetime returns naive UTC too.
-        own_created_at = own_created_at.astimezone(UTC).replace(tzinfo=None)
+    # The column is naive UTC; payload_datetime returns naive UTC too.
+    own_created_at = to_naive_utc(memory.created_at) if memory.created_at else None
     if (
         target_created_at is not None
         and own_created_at is not None
@@ -8860,11 +8918,14 @@ async def _detect_supersede_candidate(
             candidate_memory_id=target_id_str,
             similarity=round(raw_top_score, 4),
         )
-        # The nearest neighbour is this newer one, so a stored candidate's
-        # pair scores no higher: the #2059 clear applies as when no
-        # neighbour reaches the threshold (only from 0.85-stored candidates
-        # with the judge on, since the hit itself reached the threshold).
-        if (
+        # A live candidate naming this very target is such an inverted
+        # pair stored before the rule (or in an embedding race): clear it.
+        # Otherwise the nearest neighbour is this newer one, so a stored
+        # candidate's pair scores no higher: the #2059 clear applies as when
+        # no neighbour reaches the threshold (only from 0.85-stored
+        # candidates with the judge on, since the hit reached the threshold).
+        inverted = _live_candidate_target(memory.supersede_candidate) == target_id_str
+        if inverted or (
             clear_allowed
             and raw_top_score
             < _supersede_clear_floor(memory, _supersede_detect_threshold(config))
@@ -9072,7 +9133,7 @@ async def _create_knn_seed_edges(
     *,
     mechanical_reembed: bool = False,
     seed: bool = True,
-) -> None:
+) -> bool:
     """Create k-NN cold-start seed edges for a newly embedded memory.
 
     Issue #221: After a memory is upserted to Qdrant, search for its k nearest
@@ -9103,12 +9164,10 @@ async def _create_knn_seed_edges(
     verdicts are keyed on text, not vectors. Seed edges are unaffected.
 
     Issue #2256: such a re-embed of a row that holds a LIVE candidate (not a
-    tombstone) still runs #2059's clear: the neighbour query, and when the
-    row's own point is among the hits and the top-1 neighbour is a clear
-    margin below the floor, the candidate is cleared (see
-    :func:`_mechanical_clear_floor`). It never judges and never stores, so an
-    embedding-model switch costs no judge call but drops pairs the new
-    embedder no longer scores as near-duplicates.
+    tombstone) still runs #2059's clear, on the pair itself: see
+    :func:`_clear_candidate_if_pair_moved`. It never judges and never
+    stores, so an embedding-model switch costs no judge call but drops pairs
+    the new embedder no longer scores as near-duplicates.
 
     ``seed=False`` (#2256, the supersede catch-up pass) runs the detection
     only: no seed edge, no calibration lookup or bootstrap trigger.
@@ -9130,6 +9189,10 @@ async def _create_knn_seed_edges(
             clear of a live candidate runs (#2256).
         seed: False to write no seed edges whatever ``knn_seed_enabled`` says
             (#2256: the catch-up pass).
+
+    Returns:
+        False when a failure was swallowed (logged as ``knn_seeding_failed``),
+        True otherwise (#2256: the catch-up pass counts failed rows).
     """
     from db.qdrant import search_memories_qdrant
     from neural.calibration import resolve_knn_threshold
@@ -9174,11 +9237,16 @@ async def _create_knn_seed_edges(
             detection_skipped and _live_candidate_target(memory.supersede_candidate) is not None
         )
         if not seed_enabled and not suggest_enabled and not clear_only:
-            return
+            return True
 
         if not memory.context_id:
             # Defensive: 3-level isolation requires both
-            return
+            return True
+
+        if clear_only:
+            await _clear_candidate_if_pair_moved(
+                db, memory=memory, vector=vector, collection_name=collection_name, config=config
+            )
 
         # Resolve the threshold via the D4 fallback chain (#406) — only when
         # seeding is on (#2010). None means "no seed edges for this call":
@@ -9247,7 +9315,7 @@ async def _create_knn_seed_edges(
         # #2010: seeding reads the query only with a threshold in hand; if the
         # detection is off as well, nothing consumes it, so skip the round trip.
         needs_seed = seed_enabled and threshold is not None
-        if not needs_seed and not suggest_enabled and not clear_only:
+        if not needs_seed and not suggest_enabled:
             skip_key = (model_name, len(vector))
             if detection_skipped:
                 # #2092: the flag is on; only this run skips the detection.
@@ -9279,7 +9347,7 @@ async def _create_knn_seed_edges(
                     model=model_name,
                     dimensions=len(vector),
                 )
-            return
+            return True
 
         workspace_id_str = str(memory.workspace_id)
         context_id_str = str(memory.context_id)
@@ -9308,22 +9376,11 @@ async def _create_knn_seed_edges(
         edge_repo = NeuralEdgeRepository(db)
 
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
-        if suggest_enabled or clear_only:
+        if suggest_enabled:
             # #2123: lower while the judge is on; 0.85 otherwise.
             detect_threshold = _supersede_detect_threshold(config)
             raw_top = max(non_self, key=lambda c: float(c["score"])) if non_self else None
-            # #2256: on the clear-only path (a mechanical re-embed) the floor
-            # follows a stored verdict; the detection path keeps #2123's.
-            clear_floor = (
-                _mechanical_clear_floor(memory, detect_threshold)
-                if clear_only
-                else _supersede_clear_floor(memory, detect_threshold)
-            )
-            if (
-                suggest_enabled
-                and raw_top is not None
-                and float(raw_top["score"]) >= detect_threshold
-            ):
+            if raw_top is not None and float(raw_top["score"]) >= detect_threshold:
                 await _detect_supersede_candidate(
                     db,
                     memory=memory,
@@ -9336,7 +9393,8 @@ async def _create_knn_seed_edges(
                 )
             elif len(non_self) < len(candidates) and (
                 raw_top is None
-                or float(raw_top["score"]) < clear_floor - RESURFACE_SIMILARITY_DELTA
+                or float(raw_top["score"])
+                < _supersede_clear_floor(memory, detect_threshold) - RESURFACE_SIMILARITY_DELTA
             ):
                 # #2059: no near-duplicate any more. Only when the search
                 # returned this memory's own point (just upserted): a result
@@ -9355,7 +9413,7 @@ async def _create_knn_seed_edges(
                 model=model_name,
                 dimensions=len(vector),
             )
-            return
+            return True
 
         # Idempotency guard (SEEDING ONLY — the supersede detection above
         # deliberately runs first): process_pending_embedding is called on both new
@@ -9377,7 +9435,7 @@ async def _create_knn_seed_edges(
                 "knn_seed_skip_already_seeded",
                 memory_id=memory_id_str,
             )
-            return
+            return True
 
         # Filter: exclude self, apply resolved (calibrated) similarity threshold, cap at k
         seed_neighbors = [
@@ -9391,7 +9449,7 @@ async def _create_knn_seed_edges(
                 candidates=len(candidates),
                 threshold=threshold,
             )
-            return
+            return True
 
         edges_created = 0
         similarities: list[float] = []
@@ -9453,7 +9511,7 @@ async def _create_knn_seed_edges(
                     raise _SeedEdgesDropped
         except _SeedEdgesDropped:
             logger.info("knn_seed_skipped_source_edited", memory_id=memory_id_str)
-            return
+            return True
 
         if edges_created > 0:
             await db.commit()
@@ -9487,6 +9545,8 @@ async def _create_knn_seed_edges(
             memory_id=_memory_log_id(memory),
             error=str(e),
         )
+        return False
+    return True
 
 
 async def _create_tag_cooccurrence_seed_edges(
