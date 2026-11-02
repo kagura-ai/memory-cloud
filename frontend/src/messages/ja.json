@@ -3503,6 +3503,27 @@
         "announceAdded": "フィルター {tag} を追加しました。共起するタグに絞り込みました。",
         "announceRemoved": "フィルター {tag} を解除しました。",
         "announceCleared": "すべてのタグフィルターを解除しました。"
+      },
+      "recall": {
+        "modeLabel": "検索モード",
+        "modeText": "テキスト一致",
+        "modeRecall": "リコール",
+        "hint": "リコールは意味で検索します。Enter キーか「検索」で実行します。",
+        "submit": "検索",
+        "includeSuperseded": "古いバージョンも表示",
+        "includeSupersededHelp": "事実の各バージョンを 1 行ずつ表示し、新しいメモリーに置き換えられたメモリーも含めます。",
+        "resultsLabel": "リコール結果",
+        "resultsCount": "{count, plural, other {# 件の結果}}",
+        "loading": "検索中…",
+        "loadFailed": "リコールに失敗しました",
+        "noResultsTitle": "該当なし",
+        "noResultsDesc": "「{query}」に該当するメモリーは見つかりませんでした。",
+        "score": "スコア {score}",
+        "folded": "{count, plural, other {古いバージョン # 件を折りたたみ:}}",
+        "openFolded": "古いバージョン {id} を開く",
+        "superseded": "置き換え済み",
+        "openNewer": "新しいバージョンを開く",
+        "view": "表示"
       }
     },
     "tagCloud": {
