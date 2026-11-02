@@ -195,6 +195,27 @@ class TestResolver:
         assert ors == []
         assert any("memories.source_uri LIKE" in term for term in plain)
 
+    async def test_the_pool_exemption_never_covers_the_trust_predicate(self):
+        target_id = uuid.uuid4()
+        source = _source(target_id)
+        service = _service([_target(target_id)])
+
+        await service._resolve_supersede_candidates(
+            {source.id: source},
+            user_id="u",
+            operation="recall",
+            filters={"trust_tier": "trusted", "type": "note"},
+            pool_ids={target_id},
+        )
+
+        ors, plain = _where_parts(service)
+        assert len(ors) == 1
+        assert "memories.type IN" in ors[0]
+        assert "trust_tier" not in ors[0]
+        assert "source_type" not in ors[0]
+        assert any("contexts.trust_tier" in term for term in plain)
+        assert any("memories.source_type !=" in term for term in plain)
+
     async def test_pool_ids_without_filters_add_nothing(self):
         target_id = uuid.uuid4()
         source = _source(target_id)
@@ -262,7 +283,6 @@ class TestThreading:
             {"n": newer, "o": older},
             include_superseded=False,
             user_id="u",
-            trusted_only=False,
             filters=filters,
         )
 
@@ -282,13 +302,13 @@ class TestThreading:
             {"n": newer, "o": older, "b": bridge},
             include_superseded=False,
             user_id="u",
-            trusted_only=False,
             shadow_map={bridge.id: newer.id},
             filters={"type": "note"},
         )
 
         kwargs = service._resolve_supersede_candidates.await_args.kwargs
         assert set(kwargs["pool_ids"]) == {newer.id, older.id, bridge.id}
+        assert "trusted_only" not in kwargs
 
     async def test_page_exempts_the_hydrated_map_only(self):
         # The page's pool is the hydrated, binding-filtered map recall hands
@@ -311,6 +331,7 @@ class TestThreading:
 
         kwargs = service._resolve_supersede_candidates.await_args.kwargs
         assert set(kwargs["pool_ids"]) == {source.id, folded.id}
+        assert "trusted_only" not in kwargs
 
     async def test_fold_and_page_resolve_with_the_same_filters(self):
         # A judged head whose target is off-filter (outside the pool) and a
@@ -334,7 +355,6 @@ class TestThreading:
             memories,
             include_superseded=False,
             user_id="u",
-            trusted_only=False,
             resolved=resolved,
             filters=filters,
         )

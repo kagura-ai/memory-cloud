@@ -249,9 +249,10 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
 def _is_trusted_recall(request: RecallRequest) -> bool:
     """Whether a recall runs under ``filters={"trust_tier": "trusted"}`` (#887).
 
-    The one reading of the trusted filter: the row filter, the supersede
-    resolver's connector exclusion and the selection-evidence guard all ask
-    here, so they cannot drift apart.
+    The one reading of the trusted filter: the row filter and the
+    selection-evidence guard ask here, and the supersede resolver's SQL twin
+    (``memory_listing.recall_trust_predicates``, #2257) reads the same key
+    of the same ``filters`` the same way, so they cannot drift apart.
     """
     return (request.filters or {}).get("trust_tier") == "trusted"
 
@@ -4204,7 +4205,6 @@ class MemoryService:
         *,
         include_superseded: bool,
         user_id: str,
-        trusted_only: bool,
         shadow_map: Mapping[UUID, UUID] | None = None,
         resolved: dict[UUID, SupersedeCandidate | None] | None = None,
         filters: Mapping[str, Any] | None = None,
@@ -4273,7 +4273,6 @@ class MemoryService:
                 nodes.judged,
                 user_id=user_id,
                 operation="recall",
-                trusted_only=trusted_only,
                 filters=filters,
                 pool_ids=nodes.nodes.keys(),
             )
@@ -4298,7 +4297,6 @@ class MemoryService:
         *,
         user_id: str,
         operation: str,
-        trusted_only: bool = False,
         filters: Mapping[str, Any] | None = None,
         pool_ids: Collection[UUID] | None = None,
         fail_open: bool = True,
@@ -4323,14 +4321,6 @@ class MemoryService:
         whose target is gone silently stops surfacing (the stored value is cleared
         on acceptance at edge-creation time).
 
-        ``trusted_only`` (a recall under ``filters={"trust_tier": "trusted"}``,
-        which every agent-bootstrap recall is) also drops a connector-sourced
-        target, as the recall filter drops a connector-sourced row (#887): the
-        suggestion carries the target's summary, so it must not bring back
-        what the filter kept out. The context half of that filter holds by
-        construction — the target shares the (already trusted) source's
-        context.
-
         ``filters`` (#2027) are the recall's effective row filters (after the
         ``tags_normalize`` widening): ``type``, ``scope``, ``source_type``,
         ``source_uri_prefix``, ``tags`` and ``importance`` join the one target
@@ -4340,13 +4330,21 @@ class MemoryService:
         are not applied: a target is older than its source by construction.
         ``None`` (reference, update_memory) applies no row filter.
 
+        Under ``trust_tier="trusted"`` (which every agent-bootstrap recall
+        is) the target is held to the trusted filter in SQL
+        (:func:`services.memory_listing.recall_trust_predicates`, #887 /
+        #2257): a trusted context and not connector-sourced, read from the
+        same ``filters`` as hydration's ``_is_trusted_recall``. The
+        suggestion carries the target's summary, so it must not bring back
+        what the filter kept out.
+
         ``pool_ids`` (#2257) are the memories this recall already hydrated
         for the caller (the fold's nodes; the page's hydrated map). A target
         that is itself a pool node matched the recall's filters in the
         search, so the row predicates above do not hold it — a vector
         payload that lags its row (a pending re-embed, a failed payload
-        patch) must not unlink a pair both in the pool. Only the trusted
-        filter, liveness, the binding filter and the (workspace, context)
+        patch) must not unlink a pair both in the pool. Only the trust
+        predicate, liveness, the binding filter and the (workspace, context)
         match hold it, as they hold every target.
 
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
@@ -4361,7 +4359,10 @@ class MemoryService:
         from services.agent_binding_service import filter_memory_rows_by_binding
 
         try:
-            from services.memory_listing import recall_row_predicates
+            from services.memory_listing import (
+                recall_row_predicates,
+                recall_trust_predicates,
+            )
             from services.supersede_verify import (
                 CONTENT_HEAD_CHARS,
                 is_parallel,
@@ -4393,6 +4394,8 @@ class MemoryService:
             conditions: list[ColumnElement[bool]] = [
                 Memory.id.in_(target_ids),
                 Memory.deleted_at.is_(None),
+                # #887 / #2257: the trusted filter, never relaxed for a pool node.
+                *recall_trust_predicates(filters),
             ]
             # #2027: the recall's row filters; an off-filter target is "gone"
             # for this read — unless the search already put it in the pool
@@ -4432,8 +4435,6 @@ class MemoryService:
                 target = live.get(p["target_id"])
                 if target is None:
                     continue  # self-healing: target gone → drop the suggestion
-                if trusted_only and target.source_type == SOURCE_TYPE_CONNECTOR:
-                    continue  # the trusted filter's connector exclusion (#887)
                 source = p["source"]
                 if (target.workspace_id, target.context_id) != (
                     source.workspace_id,
@@ -5525,7 +5526,6 @@ class MemoryService:
                     pending,
                     user_id=user_id,
                     operation="recall",
-                    trusted_only=_is_trusted_recall(request),
                     filters=filters,
                     # #2257: the hydrated, binding-filtered map — never the
                     # raw search ids — so a denied row is never exempt.
@@ -6656,7 +6656,6 @@ class MemoryService:
             memories,
             include_superseded=request.include_superseded,
             user_id=user_id,
-            trusted_only=_is_trusted_recall(request),
             shadow_map=shadow_map,
             resolved=resolved_candidates,
             # #2027: the filters the rows matched with, widened tags included.

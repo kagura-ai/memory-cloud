@@ -94,7 +94,6 @@ async def _fold(
         memories,
         include_superseded=include_superseded,
         user_id="u",
-        trusted_only=False,
         shadow_map=shadow_map,
         resolved=resolved,
     )

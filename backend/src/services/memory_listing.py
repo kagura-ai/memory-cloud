@@ -345,7 +345,8 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
       groups. ``tags_normalize`` is not applied again: the widening already
       happened.
 
-    Not applied: ``trust_tier`` (the resolver's ``trusted_only`` covers it),
+    Not applied: ``trust_tier`` (:func:`recall_trust_predicates` carries it,
+    apart, because the resolver's pool exemption must never relax it),
     ``analysis_cluster`` (a pool membership, not a row property), ``near`` /
     ``within`` / ``score_threshold`` / ``client`` (query shape), and the time
     windows (``created_*``, ``updated_*``, ``observed_*``) — a target is older
@@ -403,6 +404,29 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
             projected["tags"] = valid
             projected["tags_match"] = tags_match
     return compile_memory_filters(projected) + group_predicates
+
+
+def recall_trust_predicates(filters: Mapping[str, Any] | None) -> list[ColumnElement[bool]]:
+    """SQL predicate for a recall's trusted filter, for a row read outside the search.
+
+    #2257: the supersede resolver's trust rule — the SQL twin of the trusted
+    post-filter recall's hydration applies (a trusted context, not a
+    connector-ingested row; #887, #908), and the same predicate
+    :func:`compile_memory_filters` builds for ``trust_tier``. Read exactly as
+    ``memory_service._is_trusted_recall`` reads it, so the two cannot
+    disagree. Kept apart from :func:`recall_row_predicates` (the precision
+    filters) because the resolver exempts a target already in the recall's
+    pool from those, and never from this.
+
+    Args:
+        filters: The filter dict recall searched with, or None.
+
+    Returns:
+        ``[trusted predicate]`` under ``trust_tier="trusted"``, else ``[]``.
+    """
+    if (filters or {}).get("trust_tier") == "trusted":
+        return [_trusted_predicate()]
+    return []
 
 
 @dataclass(frozen=True)

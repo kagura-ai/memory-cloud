@@ -6,7 +6,10 @@ older memory under ``notes/`` in the same context. ``recall(filters=
 the ``notes/`` memory and carry its summary anyway. The resolver now holds the
 target to the same row filters in its one target query: the row ships, the
 suggestion does not. Same for ``type``, ``tags`` (any / all), ``importance``,
-``source_type`` and ``scope``; time windows are deliberately not applied.
+``source_type``, ``scope`` and ``trust_tier`` (#2257: one SQL trust predicate);
+time windows are deliberately not applied. A target the search already put in
+the pool is exempt from the row filters, never from liveness, trust or the
+context match (#2257).
 
 Stubbed at the module boundary only: ``search_service.hybrid_search`` (the
 candidate pool the Qdrant filter would have produced). The memory writes, the
@@ -24,8 +27,15 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select, update
 
-from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
-from models.memory import Memory
+from models.auth import (
+    CONTEXT_TRUST_TIER_TRUSTED,
+    Context,
+    User,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+)
+from models.memory import SOURCE_TYPE_CONNECTOR, Memory
 from models.schemas import RecallRequest, RememberRequest
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
@@ -86,6 +96,8 @@ async def _scope(db) -> tuple[str, Workspace, Context]:
         name=f"rf-ctx-{uuid4().hex[:8]}",
         created_by=owner,
         is_private=False,
+        # Explicit, so the source row hydrates under the trusted filter.
+        trust_tier=CONTEXT_TRUST_TIER_TRUSTED,
     )
     db.add(ctx)
     await db.flush()
@@ -163,6 +175,9 @@ CASES = [
     pytest.param({"importance": {"gte": 0.7}}, {"importance": 0.3}, id="importance"),
     pytest.param({"source_type": "manual"}, {"source_type": "url"}, id="source_type"),
     pytest.param({"scope": "persistent"}, {"scope": "working"}, id="scope"),
+    pytest.param(
+        {"trust_tier": "trusted"}, {"source_type": SOURCE_TYPE_CONNECTOR}, id="trust_tier"
+    ),
 ]
 
 
