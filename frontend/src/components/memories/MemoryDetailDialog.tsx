@@ -108,6 +108,9 @@ export function MemoryDetailDialog({
   // an older backend → the action stays enabled and the server decides.
   const supersedeAcceptance = supersedeCandidate?.acceptance ?? null;
   const supersedeRefused = supersedeAcceptance?.allowed === false;
+  // #2427: a 409 the server's `acceptance` cannot express; the inline alert
+  // explains it, so the button just stays disabled.
+  const supersedeBlocked = supersedeError?.blocksRetry === true;
   // Literal keys, one per reason (the i18n parity scan and TS exhaustiveness).
   const unavailableText = (
     reason: SupersedeAcceptanceReason | null | undefined,
@@ -405,7 +408,8 @@ export function MemoryDetailDialog({
                         disabled={
                           supersedeAccepting ||
                           !onAcceptSupersede ||
-                          supersedeRefused
+                          supersedeRefused ||
+                          supersedeBlocked
                         }
                         aria-describedby={
                           supersedeRefused

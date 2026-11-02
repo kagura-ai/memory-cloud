@@ -132,23 +132,50 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
     expect(mockToast).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [404, "RES-001", "supersede.errors.stale"],
-    [409, "RES-002", "supersede.errors.conflict"],
-  ])(
-    "maps a %i to its message and re-reads the memory",
-    async (status, code, key) => {
-      const { result } = await openDialog(reference());
-      mockCreateEdge.mockRejectedValueOnce(apiError(status, code));
-      mockReferenceMemory.mockResolvedValueOnce(reference(null));
+  it("maps a 404 to the stale message and re-reads the memory", async () => {
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(404, "RES-001"));
+    mockReferenceMemory.mockResolvedValueOnce(reference(null));
 
-      act(() => result.current.acceptSupersede());
+    act(() => result.current.acceptSupersede());
 
-      await waitFor(() => expect(result.current.supersedeCandidate).toBeNull());
-      expect(result.current.supersedeError).toEqual({ title: key });
-      expect(mockReferenceMemory).toHaveBeenCalledTimes(2);
-    },
-  );
+    await waitFor(() => expect(result.current.supersedeCandidate).toBeNull());
+    expect(result.current.supersedeError).toEqual({
+      title: "supersede.errors.stale",
+    });
+    expect(mockReferenceMemory).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps a 409 to the conflict message that blocks a retry", async () => {
+    // `acceptance` does not model another declared edge on the pair, so the
+    // re-read still allows it: the error itself keeps the action disabled.
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(409, "RES-002"));
+    mockReferenceMemory.mockResolvedValueOnce(reference());
+
+    act(() => result.current.acceptSupersede());
+
+    await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(result.current.supersedeError).toEqual({
+        title: "supersede.errors.conflict",
+        blocksRetry: true,
+      }),
+    );
+    expect(result.current.supersedeCandidate?.acceptance?.allowed).toBe(true);
+  });
+
+  it("clears an accept failure when an edit's reply replaces the memory", async () => {
+    const { result } = await openDialog(reference());
+    mockCreateEdge.mockRejectedValueOnce(apiError(409, "RES-002"));
+    mockReferenceMemory.mockResolvedValueOnce(reference());
+    act(() => result.current.acceptSupersede());
+    await waitFor(() => expect(result.current.supersedeError).not.toBeNull());
+
+    act(() => result.current.applyEditSuccess(reference()));
+
+    expect(result.current.supersedeError).toBeNull();
+  });
 
   it("shows any other failure with the server's text and no re-read", async () => {
     const { result } = await openDialog(reference());

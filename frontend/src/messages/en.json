@@ -3589,7 +3589,7 @@
           "newerCandidate": "The suggested memory is newer than this one, so it can't be marked as superseded."
         },
         "errors": {
-          "denied": "You no longer have permission to do this. The suggestion has been refreshed.",
+          "denied": "You can't mark this memory as superseding right now.",
           "stale": "The suggested memory is no longer available.",
           "conflict": "These memories are already linked in another way."
         }

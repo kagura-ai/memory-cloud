@@ -495,6 +495,25 @@ describe("MemoryDetailDialog — supersede acceptance (#2427)", () => {
     expect(onAccept).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the action disabled after a conflict the server cannot express", () => {
+    const onAccept = renderWith(
+      makeCandidate({ acceptance: { allowed: true } }),
+      {
+        supersedeError: {
+          title: "supersede.errors.conflict",
+          blocksRetry: true,
+        },
+      },
+    );
+
+    expect(confirm()).toBeDisabled();
+    fireEvent.click(confirm());
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "supersede.errors.conflict",
+    );
+  });
+
   it("renders an accept failure as an inline alert, even once the candidate is gone", () => {
     const { rerender } = render(
       <MemoryDetailDialog

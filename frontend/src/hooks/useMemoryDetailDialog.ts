@@ -56,10 +56,13 @@ function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
 
 // #2427: a failed accept, shown inline in the suggestion block (a dialog-body
 // error) rather than as a toast. `description` carries the server's text only
-// for an unmapped failure.
+// for an unmapped failure. `blocksRetry` (a 409: another declared edge links
+// the pair, which `acceptance` does not model) keeps the action disabled until
+// the dialog shows another memory, so the click cannot repeat the conflict.
 export interface SupersedeError {
   title: string;
   description?: string;
+  blocksRetry?: boolean;
 }
 
 export interface UseMemoryDetailDialogOpts {
@@ -273,6 +276,8 @@ export function useMemoryDetailDialog(
     setHydrated(updated);
     setLinkedRefs(linkedRefsFromMemoryReference(updated));
     setEditOpen(false);
+    // The PATCH reply carries the suggestion's current state (#2427).
+    setSupersedeError(null);
   }, []);
 
   const applyDeleteSuccess = useCallback(() => {
@@ -353,6 +358,7 @@ export function useMemoryDetailDialog(
                 : status === 404
                   ? tDetail("supersede.errors.stale")
                   : tDetail("supersede.errors.conflict"),
+            ...(status === 409 ? { blocksRetry: true } : {}),
           });
           void refreshHydrated(sourceId);
         } else {
