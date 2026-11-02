@@ -133,7 +133,7 @@ def _debug(stage: str) -> None:
     """One stderr line naming a stage or a field (debug log only on exit 0)."""
     try:
         sys.stderr.write(SYSTEM_MESSAGE_PREFIX + stage + "\n")
-    except Exception:  # noqa: BLE001 - stderr may be closed
+    except Exception:  # noqa: BLE001, S110 - stderr may be closed
         pass  # a debug line that cannot be written is dropped; never fail the hook over it
 
 
@@ -1188,7 +1188,7 @@ def fetch_guardrails(
     finally:
         try:
             conn.close()
-        except Exception:  # noqa: BLE001 - closing a half-open socket may raise anything
+        except Exception:  # noqa: BLE001, S110 - closing a half-open socket may raise anything
             pass  # the outcome was decided above; a close failure changes nothing
     return parse_tools_call_envelope(raw)
 
@@ -1688,6 +1688,6 @@ if __name__ == "__main__":
         main(sys.argv, sys.stdin, sys.stdout, os.environ)
     except KeyboardInterrupt:
         pass  # interrupted mid-hook: still exit 0 and print no traceback
-    except Exception:  # noqa: BLE001 - never a non-zero exit
+    except Exception:  # noqa: BLE001, S110 - never a non-zero exit
         pass  # main() already named the stage on stderr where it could
     sys.exit(0)

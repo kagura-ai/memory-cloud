@@ -227,7 +227,7 @@ CONFIRM_TOKEN_TTL_SECONDS = 3600
 
 # Redis key prefix for the raw confirmation token. The `confirm_token_hash`
 # column stores SHA256(token); the raw token only ever lives here.
-_CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
+_CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"  # noqa: S105 — not a credential
 
 # #1678: appended to the Redis value (``<request_id><suffix>``) when the token
 # was delivered by email. The emailed link is then the second factor by
@@ -698,7 +698,7 @@ class AccountErasureService:
                 # primary error is the email dispatch, not Redis).
                 try:
                     await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
-                except Exception:
+                except Exception:  # noqa: S110 - the key's 1h TTL cleans it up
                     pass
                 # ``from None`` suppresses the original __context__ — SDK
                 # exception messages can leak the token via repr/str.
@@ -717,7 +717,7 @@ class AccountErasureService:
                 await self.db.rollback()
                 try:
                     await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
-                except Exception:
+                except Exception:  # noqa: S110 - the key's 1h TTL cleans it up
                     pass
                 raise EmailDispatchError()
 
@@ -736,11 +736,11 @@ class AccountErasureService:
             # ``error_type`` only, never ``str(exc)``.
             try:
                 await self.db.rollback()
-            except Exception:
+            except Exception:  # noqa: S110 - the commit failure is logged below
                 pass
             try:
                 await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
-            except Exception:
+            except Exception:  # noqa: S110 - the key's 1h TTL cleans it up
                 pass
             logger.error(
                 "erasure_request_commit_failed_after_side_effects",

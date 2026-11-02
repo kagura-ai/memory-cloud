@@ -459,7 +459,7 @@ class FileStorageService:
                     # context they cannot access.
                     if row is not None and row.context_id == context_id:
                         same_context_row = row
-                except Exception:  # noqa: BLE001 — best-effort enrichment
+                except Exception:  # noqa: BLE001, S110 — best-effort enrichment
                     pass
                 msg = f"file with sha256={sha256} already exists in workspace"
                 existing_row: FileObject | None = None

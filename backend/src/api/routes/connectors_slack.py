@@ -40,7 +40,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/connectors/slack", tags=["connectors"])
 
 _SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
-_SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+_SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"  # noqa: S105 — not a credential
 _STATE_TTL_SECONDS = 600
 _INSTALL_TTL_SECONDS = 600
 # Bot scopes that user-facing features depend on beyond ingestion (#1758):

@@ -620,7 +620,7 @@ class CostAggregationService:
             cost
         FROM emb_per_source
         ORDER BY period_start, workspace_id, user_id, kind, model, source, paid_by
-        """
+        """  # noqa: S608 — fragments are constants, values are bound
 
         result = await self.db.execute(text(sql), params)
         rows = result.mappings().all()

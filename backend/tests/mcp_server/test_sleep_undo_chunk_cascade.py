@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
 from mcp_server.tools import sleep as sleep_tools
 
@@ -30,6 +31,33 @@ async def test_importance_restore_cascades_by_the_context_flag(flag):
         await sleep_tools._undo_update_importance(db, action, _ctx(str(uuid4())), summary)
     assert update.await_args.kwargs["cascade_chunks"] is flag
     assert summary["importance_restored"] == 1
+
+
+@pytest.mark.asyncio
+async def test_importance_restore_logs_a_failed_qdrant_sync():
+    """The restore still counts: Postgres has the old value. The stale payload is logged."""
+    action = MagicMock(memory_id=uuid4(), details={"old_importance": 0.4})
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+    summary = {"importance_restored": 0, "importance_kept": 0}
+    with (
+        patch(
+            "db.qdrant.update_memory_payload_in_qdrant",
+            new=AsyncMock(side_effect=RuntimeError("qdrant down")),
+        ),
+        patch(
+            "services.content_chunk_writer.chunk_cascade_needed",
+            new=AsyncMock(return_value=False),
+        ),
+        capture_logs() as logs,
+    ):
+        await sleep_tools._undo_update_importance(db, action, _ctx(str(uuid4())), summary)
+    assert summary["importance_restored"] == 1
+    assert [
+        (entry["event"], entry["memory_id"], entry["error_type"])
+        for entry in logs
+        if entry["log_level"] == "warning"
+    ] == [("importance_rollback_qdrant_sync_failed", str(action.memory_id), "RuntimeError")]
 
 
 @pytest.mark.asyncio

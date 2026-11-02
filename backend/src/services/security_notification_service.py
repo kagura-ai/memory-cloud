@@ -191,13 +191,13 @@ _IP_MAX_CHARS = 64
 class SecurityEvent(StrEnum):
     """The security-sensitive changes that email the account owner."""
 
-    PASSWORD_SET = "password_set"
-    PASSWORD_CHANGED = "password_changed"
-    PASSWORD_RESET = "password_reset"
+    PASSWORD_SET = "password_set"  # noqa: S105 — not a credential
+    PASSWORD_CHANGED = "password_changed"  # noqa: S105 — not a credential
+    PASSWORD_RESET = "password_reset"  # noqa: S105 — not a credential
     OAUTH_CLIENT_AUTHORIZED = "oauth_client_authorized"
     API_KEY_CREATED = "api_key_created"
     API_KEY_REGENERATED = "api_key_regenerated"
-    OAUTH_SECRET_REGENERATED = "oauth_secret_regenerated"
+    OAUTH_SECRET_REGENERATED = "oauth_secret_regenerated"  # noqa: S105 — not a credential
     SIGN_IN_METHOD_REMOVED = "sign_in_method_removed"
     SIGN_IN_METHOD_ADDED = "sign_in_method_added"
     OAUTH_CLIENT_CREATED = "oauth_client_created"

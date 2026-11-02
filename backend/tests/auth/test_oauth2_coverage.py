@@ -31,7 +31,7 @@ from auth.exceptions import (
     NotAuthenticatedError,
     TokenRefreshError,
 )
-from auth.oauth2 import OAuth2Manager
+from auth.oauth2 import _GOOGLE_HTTP_TIMEOUT_SECONDS, OAuth2Manager
 from config.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -586,8 +586,9 @@ class TestExchangeCodeWeb:
         class _FakeFlow:
             credentials = sentinel_creds
 
-            def fetch_token(self, code: str) -> None:
+            def fetch_token(self, code: str, timeout: float) -> None:
                 captured["code"] = code
+                captured["timeout"] = timeout
 
         def _from_client_config(
             client_config: dict[str, Any], scopes: Any, redirect_uri: str
@@ -601,6 +602,7 @@ class TestExchangeCodeWeb:
         result = manager.exchange_code_web(code="the-code", redirect_uri="https://x/cb")
         assert result is sentinel_creds
         assert captured["code"] == "the-code"
+        assert captured["timeout"] == _GOOGLE_HTTP_TIMEOUT_SECONDS
         assert captured["redirect_uri"] == "https://x/cb"
         # client_config has the web section with id/secret wired from env.
         web = captured["client_config"]["web"]
@@ -616,7 +618,7 @@ class TestExchangeCodeWeb:
         monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csecret")
 
         class _FakeFlow:
-            def fetch_token(self, code: str) -> None:
+            def fetch_token(self, code: str, timeout: float) -> None:
                 raise RuntimeError("bad code")
 
         monkeypatch.setattr(
@@ -642,7 +644,7 @@ class TestExchangeCodeWeb:
         class _FakeFlow:
             credentials = Credentials(token="t")
 
-            def fetch_token(self, code: str) -> None:
+            def fetch_token(self, code: str, timeout: float) -> None:
                 pass
 
         def _from_client_config(
@@ -677,9 +679,10 @@ class TestGetUserInfoWeb:
             def json(self) -> dict[str, Any]:
                 return {"sub": "123", "email": "u@example.com", "name": "U"}
 
-        def _fake_get(url: str, headers: dict[str, str]) -> _FakeResponse:
+        def _fake_get(url: str, headers: dict[str, str], timeout: float) -> _FakeResponse:
             captured["url"] = url
             captured["headers"] = headers
+            captured["timeout"] = timeout
             return _FakeResponse()
 
         monkeypatch.setattr("requests.get", _fake_get)
@@ -689,6 +692,7 @@ class TestGetUserInfoWeb:
         assert info == {"sub": "123", "email": "u@example.com", "name": "U"}
         assert captured["headers"]["Authorization"] == "Bearer bearer-tok"
         assert captured["url"] == "https://www.googleapis.com/oauth2/v3/userinfo"
+        assert captured["timeout"] == _GOOGLE_HTTP_TIMEOUT_SECONDS
 
     def test_propagates_http_error(
         self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
@@ -702,7 +706,7 @@ class TestGetUserInfoWeb:
             def json(self) -> dict[str, Any]:  # pragma: no cover - not reached
                 return {}
 
-        monkeypatch.setattr("requests.get", lambda url, headers: _FakeResponse())
+        monkeypatch.setattr("requests.get", lambda url, headers, timeout: _FakeResponse())
 
         with pytest.raises(RuntimeError, match="401 Unauthorized"):
             manager.get_user_info_web(Credentials(token="t"))
@@ -723,7 +727,7 @@ class TestGetUserInfoWeb:
             def json(self) -> dict[str, Any]:
                 return {}
 
-        def _fake_get(url: str, headers: dict[str, str]) -> _FakeResponse:
+        def _fake_get(url: str, headers: dict[str, str], timeout: float) -> _FakeResponse:
             captured["url"] = url
             return _FakeResponse()
 

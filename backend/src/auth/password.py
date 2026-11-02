@@ -20,7 +20,7 @@ PASSWORD_TOO_LONG_MESSAGE = (
 )
 
 PASSWORD_NOT_ENCODABLE_MESSAGE = (
-    "Password must be valid Unicode text: it contains a character that cannot be UTF-8 encoded."
+    "Password must be valid Unicode text: it contains a character that cannot be UTF-8 encoded."  # noqa: S105 — not a credential
 )
 
 

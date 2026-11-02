@@ -55,8 +55,8 @@ def get_env_from_api_container(key: str) -> str | None:
     found: dict[str, str] = {}
     for name in API_CONTAINERS:
         try:
-            result = subprocess.run(
-                ["docker", "exec", name, "printenv", key],
+            result = subprocess.run(  # noqa: S603 — argv list, no shell, operator CLI
+                ["docker", "exec", name, "printenv", key],  # noqa: S607 — docker is resolved from the operator's PATH
                 capture_output=True,
                 text=True,
                 timeout=10,

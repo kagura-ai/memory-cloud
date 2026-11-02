@@ -686,8 +686,13 @@ async def _undo_update_importance(
                 await chunk_cascade_needed(db, UUID(ctx.ctx_id_str)) if ctx.ctx_id_str else True
             ),
         )
-    except Exception:
-        pass  # Non-fatal: Qdrant payload sync
+    except Exception as exc:
+        # Non-fatal: Postgres holds the restored value.
+        logger.warning(
+            "importance_rollback_qdrant_sync_failed",
+            memory_id=str(action.memory_id),
+            error_type=type(exc).__name__,
+        )
     summary["importance_restored"] += 1
 
 

@@ -77,7 +77,7 @@ def plan_recall_selection(
         effective_floor = min(config.exploration_floor, maximum_feasible_floor)
         if effective_floor > 0.0 and selected_count < n:
             mixture_probability = min(1.0, effective_floor * n / selected_count)
-            rng = random.Random(config.seed)
+            rng = random.Random(config.seed)  # noqa: S311 — seeded on purpose, so replay is stable
             if rng.random() < mixture_probability:
                 chosen = set(rng.sample(range(n), selected_count))
                 # Uniformly choose the subset, then retain production rank order

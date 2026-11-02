@@ -37,10 +37,10 @@ logger = get_logger(__name__)
 
 # --- Real provider defaults (the only URLs used unless overrides are active) ---
 GOOGLE_AUTH_URL_DEFAULT = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL_DEFAULT = "https://oauth2.googleapis.com/token"
+GOOGLE_TOKEN_URL_DEFAULT = "https://oauth2.googleapis.com/token"  # noqa: S105 — not a credential
 GOOGLE_USERINFO_URL_DEFAULT = "https://www.googleapis.com/oauth2/v3/userinfo"
 GITHUB_AUTH_URL_DEFAULT = "https://github.com/login/oauth/authorize"
-GITHUB_TOKEN_URL_DEFAULT = "https://github.com/login/oauth/access_token"
+GITHUB_TOKEN_URL_DEFAULT = "https://github.com/login/oauth/access_token"  # noqa: S105 — not a credential
 GITHUB_USER_URL_DEFAULT = "https://api.github.com/user"
 GITHUB_EMAILS_URL_DEFAULT = "https://api.github.com/user/emails"
 

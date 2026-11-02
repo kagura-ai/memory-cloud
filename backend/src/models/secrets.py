@@ -65,8 +65,8 @@ _ALL_PUBKEY_STATUSES: tuple[str, ...] = (
 )
 
 # --- Secret lifecycle ----------------------------------------------------------
-SECRET_STATUS_ACTIVE = "active"
-SECRET_STATUS_DISABLED = "disabled"
+SECRET_STATUS_ACTIVE = "active"  # noqa: S105 — not a credential
+SECRET_STATUS_DISABLED = "disabled"  # noqa: S105 — not a credential
 _ALL_SECRET_STATUSES: tuple[str, ...] = (
     SECRET_STATUS_ACTIVE,
     SECRET_STATUS_DISABLED,
@@ -75,7 +75,7 @@ _ALL_SECRET_STATUSES: tuple[str, ...] = (
 # --- Ciphertext algorithm ------------------------------------------------------
 # Only ``age`` is supported. The column exists so a future alg can be added
 # without a schema change, but the server never interprets the ciphertext.
-SECRET_ALG_AGE = "age"
+SECRET_ALG_AGE = "age"  # noqa: S105 — not a credential
 _ALL_SECRET_ALGS: tuple[str, ...] = (SECRET_ALG_AGE,)
 
 # --- Audit log enums -----------------------------------------------------------

@@ -53,7 +53,7 @@ logger = get_logger(__name__)
 # signer can never be downgraded to a weaker alg by a permissive default.
 _ALG = "Ed25519"
 _ALGORITHMS = (_ALG,)
-_TOKEN_TYP = "JWT"
+_TOKEN_TYP = "JWT"  # noqa: S105 — not a credential
 # The handoff token always asserts the owner role — the route only mints after a
 # successful owner gate, so the claim is a constant, not caller-supplied.
 _ROLE_OWNER = "owner"

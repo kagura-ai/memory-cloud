@@ -229,7 +229,7 @@ def check_code_challenge(payload: Any, client: OAuth2Client, required: bool) -> 
     challenge = payload.data.get("code_challenge")
     method = payload.data.get("code_challenge_method")
     if not challenge and not method:
-        if required and client.token_endpoint_auth_method == "none":
+        if required and client.token_endpoint_auth_method == "none":  # noqa: S105 — not a credential
             raise InvalidRequestError(
                 "Missing 'code_challenge'. Public clients must use PKCE with S256."
             )

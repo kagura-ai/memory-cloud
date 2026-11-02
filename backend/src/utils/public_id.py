@@ -38,7 +38,7 @@ class PublicIdPrefix(StrEnum):
 
     API_KEY = "akey"
     SHARE_KEY = "skey"
-    RESOURCE_TOKEN = "rtok"
+    RESOURCE_TOKEN = "rtok"  # noqa: S105 — not a credential
     INVITATION = "winv"
 
 
