@@ -6,7 +6,7 @@ If you discover a security vulnerability, please report it responsibly:
 
 1. **Do NOT open a public GitHub issue**
 2. Use [GitHub Security Advisories](https://github.com/kagura-ai/memory-cloud/security/advisories/new) to report privately
-3. Or contact: https://github.com/JFK
+3. Or email security@kagura-ai.com
 
 We aim to acknowledge reports within 48 hours and provide a fix within 7 days for critical issues.
 
