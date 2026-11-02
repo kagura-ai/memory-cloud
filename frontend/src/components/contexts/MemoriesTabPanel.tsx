@@ -15,12 +15,26 @@
  * shareable links, page reset to 1 on every debounced change, two
  * distinct empty states (zero memories vs. zero matches).
  *
+ * Issue #2132: a "Recall" search mode next to the text match. It runs
+ * `POST /api/v1/memory/recall` on submit (never per keystroke — each recall
+ * is an embedding call), shows the older versions recall folded under a row
+ * and offers the `include_superseded` switch (every version as its own row,
+ * shadowed memories with `superseded_by`). Mode and switch are local state:
+ * a shared link never runs a recall by itself.
+ *
  * Create is still deferred — needs an MCP-shape form rewrite.
  */
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { FileText, Search, SearchX } from "lucide-react";
@@ -37,11 +51,18 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { useMemoryDetailDialog } from "@/hooks/useMemoryDetailDialog";
 import { useMemoryIdParam } from "@/hooks/useMemoryIdParam";
-import { getMemories } from "@/lib/api/memory";
+import { getMemories, recallMemories } from "@/lib/api/memory";
 import { TagCloud } from "@/components/contexts/TagCloud";
+import { RecallResultsList } from "@/components/memories/RecallResultsList";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { X } from "lucide-react";
-import type { MemoryListItem, MemoryReference } from "@/lib/types/memory";
+import type {
+  MemoryListItem,
+  MemoryReference,
+  RecallResultItem,
+} from "@/lib/types/memory";
 
 interface MemoriesTabPanelProps {
   contextId: string;
@@ -53,9 +74,14 @@ const SEARCH_PARAM = "q";
 // Supersedes #618's single `?tag=`.
 const TAGS_PARAM = "tags";
 const DEBOUNCE_MS = 300;
+// #2132: recall has no pagination; one page of the best matches.
+const RECALL_K = 20;
+
+type SearchMode = "text" | "recall";
 
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
+  const tRecall = useTranslations("contextDetail.memoriesPanel.recall");
   const { toast } = useToast();
   const router = useRouter();
   const pathname = usePathname();
@@ -80,6 +106,22 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // Each call increments the ref; only the latest call's response is
   // committed to state.
   const requestIdRef = useRef(0);
+
+  // #2132: recall mode. `recallRequest` is the submitted query (a fresh
+  // object per submit or refresh, so re-submitting the same text re-runs);
+  // null until the first submit. The switch and the tag filter re-run the
+  // submitted query through the effect below. `recallOutcome` records which
+  // effective request its rows answer, so loading is derived, not stored.
+  const [searchMode, setSearchMode] = useState<SearchMode>("text");
+  const [includeSuperseded, setIncludeSuperseded] = useState(false);
+  const [recallRequest, setRecallRequest] = useState<{ query: string } | null>(
+    null,
+  );
+  const [recallOutcome, setRecallOutcome] = useState<{
+    request: object;
+    results: RecallResultItem[];
+    error: string | null;
+  } | null>(null);
 
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
@@ -176,13 +218,15 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // separate effect would cause a double fetch (first with the stale
   // page, then with page=1).
   useEffect(() => {
+    // #2132: recall mode runs on submit; the text match stays where it was.
+    if (searchMode !== "text") return;
     if (searchInput === debouncedQuery) return;
     const timer = window.setTimeout(() => {
       setDebouncedQuery(searchInput);
       setPage(1);
     }, DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [searchInput, debouncedQuery]);
+  }, [searchInput, debouncedQuery, searchMode]);
 
   // Sync the URL whenever the *debounced* query changes — per-keystroke
   // navigation would spam history and trigger refetches for every
@@ -209,6 +253,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   }, [debouncedQuery]);
 
   const fetchMemories = useCallback(async () => {
+    // #2132: recall mode never renders the list; switching back to text
+    // mode changes this callback's identity, so the effect below refetches.
+    if (searchMode !== "text") return;
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
@@ -235,11 +282,113 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [contextId, page, debouncedQuery, selectedTags, t]);
+  }, [contextId, page, debouncedQuery, selectedTags, t, searchMode]);
 
   useEffect(() => {
     fetchMemories();
   }, [fetchMemories]);
+
+  // The submitted recall's full request. Its identity changes only when the
+  // query is (re)submitted or refreshed, or the switch, context or tags
+  // change — never on a mode switch, so flipping Text → Recall shows the
+  // last rows without spending another recall.
+  const recallParams = useMemo(
+    () =>
+      recallRequest
+        ? {
+            query: recallRequest.query,
+            k: RECALL_K,
+            include_superseded: includeSuperseded,
+            filters: {
+              context_id: contextId,
+              // ALL-match, as the list's tag drill-down.
+              ...(selectedTags.length
+                ? { tags: selectedTags, tags_match: "all" as const }
+                : {}),
+            },
+          }
+        : null,
+    [recallRequest, includeSuperseded, contextId, selectedTags],
+  );
+  const outcomeRequest = recallOutcome?.request;
+
+  // A recall's response is kept only if its request is still the current
+  // one when it lands, and the component is still mounted. The checks read
+  // refs instead of an effect cleanup, so a mode switch never drops an
+  // in-flight recall: switching Text -> Recall while one is pending waits
+  // for it instead of sending it again.
+  const latestRecallParamsRef = useRef(recallParams);
+  const inFlightRecallRef = useRef<object | null>(null);
+  const searchModeRef = useRef(searchMode);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    latestRecallParamsRef.current = recallParams;
+    searchModeRef.current = searchMode;
+  }, [recallParams, searchMode]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Runs only in recall mode and only when the rows shown do not answer
+  // the current request: a tag change or a refresh in text mode is picked
+  // up on return, and nothing runs before the first submit.
+  useEffect(() => {
+    if (!recallParams || searchMode !== "recall") return;
+    if (outcomeRequest === recallParams) return;
+    if (inFlightRecallRef.current === recallParams) return;
+    const request = recallParams;
+    inFlightRecallRef.current = request;
+    // An obsolete response (a later request superseded it) or one landing
+    // after unmount is dropped.
+    const current = () => {
+      if (inFlightRecallRef.current === request) {
+        inFlightRecallRef.current = null;
+      }
+      return mountedRef.current && latestRecallParamsRef.current === request;
+    };
+    recallMemories(request).then(
+      (response) => {
+        if (!current()) return;
+        setRecallOutcome({ request, results: response.results, error: null });
+        if (searchModeRef.current === "recall") {
+          setAnnouncement(
+            tRecall("resultsCount", { count: response.results.length }),
+          );
+        }
+      },
+      (err: unknown) => {
+        if (!current()) return;
+        setRecallOutcome({
+          request,
+          results: [],
+          error: err instanceof Error ? err.message : tRecall("loadFailed"),
+        });
+      },
+    );
+  }, [recallParams, searchMode, outcomeRequest, tRecall]);
+
+  const recallLoading =
+    recallParams !== null && outcomeRequest !== recallParams;
+  const recallError = recallLoading ? null : (recallOutcome?.error ?? null);
+  // Rows of an earlier request are never shown under a new one: while a
+  // re-run is in flight the list shows its loading state instead.
+  const recallResults = recallLoading ? [] : (recallOutcome?.results ?? []);
+  const includeSupersededId = useId();
+  const includeSupersededHelpId = useId();
+
+  const submitRecall = useCallback(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) return;
+    setRecallRequest({ query: trimmed });
+  }, [searchInput]);
+
+  // Re-run the submitted recall after an edit / delete (no-op before one).
+  const refreshRecall = useCallback(() => {
+    setRecallRequest((r) => (r ? { ...r } : r));
+  }, []);
 
   const handleView = useCallback(
     (memory: MemoryListItem) => dialog.openDetail(memory.id),
@@ -256,8 +405,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
       dialog.applyEditSuccess(updated);
       toast({ title: t("editSuccess") });
       void fetchMemories();
+      refreshRecall();
     },
-    [dialog, fetchMemories, toast, t],
+    [dialog, fetchMemories, refreshRecall, toast, t],
   );
 
   // #1941: delete by filter (date range / type / tags).
@@ -268,25 +418,28 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
       setBulkOpen(false);
       toast({ title: tBulk("deleted", { count: deleted }) });
       requestCapacityRefresh();
+      refreshRecall();
       if (page > 1) {
         setPage(1);
       } else {
         void fetchMemories();
       }
     },
-    [fetchMemories, toast, tBulk, page],
+    [fetchMemories, refreshRecall, toast, tBulk, page],
   );
 
   // A later batch failed: the dialog keeps the error; refresh quietly.
   const handleBulkPartial = useCallback(() => {
     requestCapacityRefresh();
+    refreshRecall();
     void fetchMemories();
-  }, [fetchMemories]);
+  }, [fetchMemories, refreshRecall]);
 
   const handleDeleteSuccess = useCallback(() => {
     dialog.applyDeleteSuccess();
     toast({ title: t("deleteSuccess") });
     requestCapacityRefresh();
+    refreshRecall();
 
     // Avoid stranding the user on an empty page when the deleted row was the
     // last one on this page. Dropping `page` back triggers the fetch effect;
@@ -296,7 +449,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } else {
       void fetchMemories();
     }
-  }, [dialog, fetchMemories, toast, t, items.length, page]);
+  }, [dialog, fetchMemories, refreshRecall, toast, t, items.length, page]);
 
   // Search input → active-tag chip → tag cloud, rendered above any state branch
   // (error / empty) so the user can always search, see/clear the active filter,
@@ -304,26 +457,85 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // which can be tall — sits below so it never pushes search off-screen.
   const filterControls = (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* #2132: text match (list) vs recall (semantic). */}
+        <div
+          role="group"
+          aria-label={tRecall("modeLabel")}
+          className="inline-flex gap-1"
+        >
+          {(["text", "recall"] as const).map((mode) => (
+            <Button
+              key={mode}
+              type="button"
+              size="sm"
+              variant={searchMode === mode ? "default" : "outline"}
+              aria-pressed={searchMode === mode}
+              onClick={() => setSearchMode(mode)}
+            >
+              {mode === "text" ? tRecall("modeText") : tRecall("modeRecall")}
+            </Button>
+          ))}
+        </div>
         <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
           {tBulk("open")}
         </Button>
       </div>
-      <div className="relative">
-        <Search
-          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
-          aria-hidden="true"
-        />
-        <Input
-          ref={searchInputRef}
-          type="search"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          placeholder={t("search.placeholder")}
-          aria-label={t("search.label")}
-          className="pl-9"
-        />
-      </div>
+      <form
+        role="search"
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (searchMode === "recall") submitRecall();
+        }}
+      >
+        <div className="relative flex-1">
+          <Search
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+            aria-hidden="true"
+          />
+          <Input
+            ref={searchInputRef}
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder={t("search.placeholder")}
+            aria-label={t("search.label")}
+            className="pl-9"
+          />
+        </div>
+        {searchMode === "recall" && (
+          <Button type="submit" disabled={!searchInput.trim() || recallLoading}>
+            {tRecall("submit")}
+          </Button>
+        )}
+      </form>
+      {searchMode === "recall" && (
+        <div className="space-y-2">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {tRecall("hint")}
+          </p>
+          <div className="flex items-start gap-3">
+            <Switch
+              id={includeSupersededId}
+              checked={includeSuperseded}
+              onCheckedChange={setIncludeSuperseded}
+              aria-describedby={includeSupersededHelpId}
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor={includeSupersededId}>
+                {tRecall("includeSuperseded")}
+              </Label>
+              <p
+                id={includeSupersededHelpId}
+                className="text-xs text-gray-500 dark:text-gray-400"
+              >
+                {tRecall("includeSupersededHelp")}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       {/*
         #830: selected-tags chip row (generalized from #618's single chip).
         Each chip removes one tag from the AND drill-down; "clear all" resets
@@ -358,7 +570,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           {/* Hide the count while a fetch is in flight so the chip row never
               shows a stale total (0 on first paint of a shared link, or the
               previous page's total during a refetch). */}
-          {!loading && (
+          {!loading && searchMode === "text" && (
             <span className="text-xs text-gray-400 dark:text-gray-500">
               {t("filter.filteringCount", { count: total })}
             </span>
@@ -369,7 +581,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         contextId={contextId}
         selectedTags={selectedTags}
         onTagClick={handleTagClick}
-        q={debouncedQuery}
+        // #2132: the text query narrows the cloud only in text mode; recall
+        // rows are not a substring match, so the cloud covers the context.
+        q={searchMode === "text" ? debouncedQuery : ""}
       />
       {/* a11y: announce facet changes — the cloud re-rendering is silent to AT. */}
       <div aria-live="polite" className="sr-only" role="status">
@@ -377,6 +591,75 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
       </div>
     </div>
   );
+
+  const dialogs = (
+    <>
+      <MemoryDetailDialog
+        memory={dialog.hydrated}
+        open={dialog.detailOpen}
+        onOpenChange={dialog.handleDetailOpenChange}
+        onEdit={dialog.hydrated ? dialog.handleDetailEdit : undefined}
+        onDelete={dialog.handleDetailDelete}
+        notFound={dialog.detailNotFound}
+        outgoingLinks={dialog.linkedRefs.outgoing}
+        outgoingHasMore={dialog.linkedRefs.outgoingHasMore}
+        incomingLinks={dialog.linkedRefs.incoming}
+        incomingHasMore={dialog.linkedRefs.incomingHasMore}
+        onOpenLinkedMemory={dialog.openDetail}
+        supersedeCandidate={dialog.supersedeCandidate}
+        onAcceptSupersede={dialog.acceptSupersede}
+        supersedeAccepting={dialog.supersedeAccepting}
+        supersedeError={dialog.supersedeError}
+      />
+      <BulkDeleteMemoriesDialog
+        contextId={contextId}
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        onDeleted={handleBulkDeleted}
+        onPartial={handleBulkPartial}
+      />
+      {dialog.hydrated && (
+        <DeleteMemoryDialog
+          memory={dialog.hydrated}
+          open={dialog.deleteOpen}
+          onOpenChange={dialog.handleDeleteOpenChange}
+          onSuccess={handleDeleteSuccess}
+        />
+      )}
+      {dialog.hydrated && (
+        <EditMemoryDialog
+          memory={dialog.hydrated}
+          open={dialog.editOpen}
+          onOpenChange={dialog.handleEditOpenChange}
+          onSuccess={handleEditSuccess}
+          contextId={contextId}
+        />
+      )}
+    </>
+  );
+
+  // #2132: recall mode owns its own result / empty / error states; the
+  // list's branches below stay the text match's.
+  if (searchMode === "recall") {
+    return (
+      <>
+        <div className="space-y-4">
+          {filterControls}
+          {recallError ? (
+            <ErrorBanner error={recallError} />
+          ) : recallRequest ? (
+            <RecallResultsList
+              results={recallResults}
+              loading={recallLoading}
+              query={recallRequest.query}
+              onOpen={dialog.openDetail}
+            />
+          ) : null}
+        </div>
+        {dialogs}
+      </>
+    );
+  }
 
   if (error) {
     return (
@@ -442,47 +725,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           onPageChange={setPage}
         />
       </div>
-      <MemoryDetailDialog
-        memory={dialog.hydrated}
-        open={dialog.detailOpen}
-        onOpenChange={dialog.handleDetailOpenChange}
-        onEdit={dialog.hydrated ? dialog.handleDetailEdit : undefined}
-        onDelete={dialog.handleDetailDelete}
-        notFound={dialog.detailNotFound}
-        outgoingLinks={dialog.linkedRefs.outgoing}
-        outgoingHasMore={dialog.linkedRefs.outgoingHasMore}
-        incomingLinks={dialog.linkedRefs.incoming}
-        incomingHasMore={dialog.linkedRefs.incomingHasMore}
-        onOpenLinkedMemory={dialog.openDetail}
-        supersedeCandidate={dialog.supersedeCandidate}
-        onAcceptSupersede={dialog.acceptSupersede}
-        supersedeAccepting={dialog.supersedeAccepting}
-        supersedeError={dialog.supersedeError}
-      />
-      <BulkDeleteMemoriesDialog
-        contextId={contextId}
-        open={bulkOpen}
-        onOpenChange={setBulkOpen}
-        onDeleted={handleBulkDeleted}
-        onPartial={handleBulkPartial}
-      />
-      {dialog.hydrated && (
-        <DeleteMemoryDialog
-          memory={dialog.hydrated}
-          open={dialog.deleteOpen}
-          onOpenChange={dialog.handleDeleteOpenChange}
-          onSuccess={handleDeleteSuccess}
-        />
-      )}
-      {dialog.hydrated && (
-        <EditMemoryDialog
-          memory={dialog.hydrated}
-          open={dialog.editOpen}
-          onOpenChange={dialog.handleEditOpenChange}
-          onSuccess={handleEditSuccess}
-          contextId={contextId}
-        />
-      )}
+      {dialogs}
     </>
   );
 }

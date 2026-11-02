@@ -172,14 +172,19 @@ class TestExpiredState:
 class TestExchangeFailure:
     """Token-exchange / downstream failures → oauth_failed redirect, no reflection."""
 
-    async def test_google_exchange_failure_redirects_failed(self):
+    @pytest.mark.parametrize("failing", ["exchange_code_web", "get_user_info_web"])
+    async def test_google_exchange_failure_redirects_failed(self, failing):
+        # #2501: both calls run in a worker thread now; the exception still
+        # comes back to the handler, so the lane and its log line are unchanged.
         session_mgr = MagicMock()
         session_mgr._redis.get.return_value = "pending"
         oauth_mgr = MagicMock()
-        oauth_mgr.exchange_code_web.side_effect = RuntimeError("boom-internal-detail")
+        getattr(oauth_mgr, failing).side_effect = RuntimeError("boom-internal-detail")
+        fake_logger = MagicMock()
         with (
             patch.object(auth_module, "_session_manager", session_mgr),
             patch.object(auth_module, "_oauth2_manager", oauth_mgr),
+            patch.object(auth_module, "logger", fake_logger),
             patch.dict(os.environ, {"GOOGLE_REDIRECT_URI": "http://localhost:8080/cb"}),
         ):
             resp = await google_callback(
@@ -190,6 +195,7 @@ class TestExchangeFailure:
         assert "error=oauth_failed" in loc
         # Internal exception text never reaches the URL.
         assert "boom-internal-detail" not in loc
+        fake_logger.error.assert_called_once_with("OAuth2 callback failed: boom-internal-detail")
         # State is still consumed (one-time use) before the exchange.
         session_mgr._redis.delete.assert_any_call("oauth2_state:s")
 

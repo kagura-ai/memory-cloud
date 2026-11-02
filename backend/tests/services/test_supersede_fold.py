@@ -94,7 +94,6 @@ async def _fold(
         memories,
         include_superseded=include_superseded,
         user_id="u",
-        trusted_only=False,
         shadow_map=shadow_map,
         resolved=resolved,
     )
@@ -139,6 +138,10 @@ class TestFold:
         # Only the memories with a supersedes verdict are resolved.
         resolved_over = svc._resolve_supersede_candidates.await_args.args[0]
         assert set(resolved_over) == {v2.id, v3.id}
+        # #2257: every fold node is the resolver's pool (exempt from the
+        # precision filters a stale payload could fail).
+        pool_ids = svc._resolve_supersede_candidates.await_args.kwargs["pool_ids"]
+        assert set(pool_ids) == {v1.id, v2.id, v3.id, other.id}
 
     async def test_chain_ranked_newest_first_gives_the_same_page(self):
         """The reranker-off shape: the hybrid order already has v3 first."""
@@ -273,6 +276,9 @@ class TestFold:
         # v2 is a link, not a row this recall folded.
         assert fold_map == {v3.id: [v1.id]}
         assert set(svc._resolve_supersede_candidates.await_args.args[0]) == {v2.id}
+        # #2257: the shadowed bridge was a hydrated hit, so it is a pool node.
+        pool_ids = svc._resolve_supersede_candidates.await_args.kwargs["pool_ids"]
+        assert set(pool_ids) == {v1.id, v2.id, v3.id}
 
     async def test_a_chain_of_accepted_edges_still_links(self):
         """v4→v3 and v3→v2 accepted (both shadowed), v2 verified→v1: v1 stays
@@ -422,6 +428,9 @@ class TestResolveOnce:
         assert svc._resolve_supersede_candidates.await_count == 2
         page_lookup = svc._resolve_supersede_candidates.await_args_list[-1].args[0]
         assert set(page_lookup) == {str(other.id)}
+        # #2257: the page's pool is the hydrated map, folded rows included.
+        page_pool = svc._resolve_supersede_candidates.await_args_list[-1].kwargs["pool_ids"]
+        assert page_pool == {m.id for m in memories.values()}
         hints = {r.memory_id: r.supersede_candidate for r in responses}
         assert hints == {v3.id: candidates[v3.id], other.id: other_hint}
 

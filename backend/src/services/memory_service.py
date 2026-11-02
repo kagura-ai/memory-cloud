@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -249,9 +249,10 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
 def _is_trusted_recall(request: RecallRequest) -> bool:
     """Whether a recall runs under ``filters={"trust_tier": "trusted"}`` (#887).
 
-    The one reading of the trusted filter: the row filter, the supersede
-    resolver's connector exclusion and the selection-evidence guard all ask
-    here, so they cannot drift apart.
+    The one reading of the trusted filter: the row filter and the
+    selection-evidence guard ask here, and the supersede resolver's SQL twin
+    (``memory_listing.recall_trust_predicates``, #2257) reads the same key
+    of the same ``filters`` the same way, so they cannot drift apart.
     """
     return (request.filters or {}).get("trust_tier") == "trusted"
 
@@ -4194,7 +4195,6 @@ class MemoryService:
         *,
         include_superseded: bool,
         user_id: str,
-        trusted_only: bool,
         shadow_map: Mapping[UUID, UUID] | None = None,
         resolved: dict[UUID, SupersedeCandidate | None] | None = None,
         filters: Mapping[str, Any] | None = None,
@@ -4219,7 +4219,10 @@ class MemoryService:
            the fold did not. An empty answer (nothing survived, or the
            resolver failed open) writes nothing. ``filters`` (#2027) are the
            recall's effective row filters, so a hint the page reuses honours
-           them exactly as one it resolves itself.
+           them exactly as one it resolves itself; the fold's nodes (pool
+           rows and bridges, all hydrated hits) are the resolver's pool
+           (#2257), so a pair a stale vector payload let into the pool still
+           links.
         2. A verified candidate is a directed link newer → older. A pool row
            reachable from another pool row along links is folded; links are
            followed transitively (v3→v2→v1 folds v2 and v1 under v3), but
@@ -4260,8 +4263,8 @@ class MemoryService:
                 nodes.judged,
                 user_id=user_id,
                 operation="recall",
-                trusted_only=trusted_only,
                 filters=filters,
+                pool_ids=nodes.nodes.keys(),
             )
             if resolved is not None and candidates:
                 # #2131: every judged id, None where no hint survives, so the
@@ -4320,8 +4323,8 @@ class MemoryService:
         *,
         user_id: str,
         operation: str,
-        trusted_only: bool = False,
         filters: Mapping[str, Any] | None = None,
+        pool_ids: Collection[UUID] | None = None,
         fail_open: bool = True,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
@@ -4344,14 +4347,6 @@ class MemoryService:
         whose target is gone silently stops surfacing (the stored value is cleared
         on acceptance at edge-creation time).
 
-        ``trusted_only`` (a recall under ``filters={"trust_tier": "trusted"}``,
-        which every agent-bootstrap recall is) also drops a connector-sourced
-        target, as the recall filter drops a connector-sourced row (#887): the
-        suggestion carries the target's summary, so it must not bring back
-        what the filter kept out. The context half of that filter holds by
-        construction — the target shares the (already trusted) source's
-        context.
-
         ``filters`` (#2027) are the recall's effective row filters (after the
         ``tags_normalize`` widening): ``type``, ``scope``, ``source_type``,
         ``source_uri_prefix``, ``tags`` and ``importance`` join the one target
@@ -4360,6 +4355,23 @@ class MemoryService:
         dropped like a deleted target's — the source row stays. Time windows
         are not applied: a target is older than its source by construction.
         ``None`` (reference, update_memory) applies no row filter.
+
+        Under ``trust_tier="trusted"`` (which every agent-bootstrap recall
+        is) the target is held to the trusted filter in SQL
+        (:func:`services.memory_listing.recall_trust_predicates`, #887 /
+        #2257): a trusted context and not connector-sourced, read from the
+        same ``filters`` as hydration's ``_is_trusted_recall``. The
+        suggestion carries the target's summary, so it must not bring back
+        what the filter kept out.
+
+        ``pool_ids`` (#2257) are the memories this recall already hydrated
+        for the caller (the fold's nodes; the page's hydrated map). A target
+        that is itself a pool node matched the recall's filters in the
+        search, so the row predicates above do not hold it — a vector
+        payload that lags its row (a pending re-embed, a failed payload
+        patch) must not unlink a pair both in the pool. Only the trust
+        predicate, liveness, the binding filter and the (workspace, context)
+        match hold it, as they hold every target.
 
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
@@ -4373,7 +4385,10 @@ class MemoryService:
         from services.agent_binding_service import filter_memory_rows_by_binding
 
         try:
-            from services.memory_listing import recall_row_predicates
+            from services.memory_listing import (
+                recall_row_predicates,
+                recall_trust_predicates,
+            )
             from services.supersede_verify import (
                 CONTENT_HEAD_CHARS,
                 is_parallel,
@@ -4402,6 +4417,19 @@ class MemoryService:
                 return {}
 
             target_ids = {p["target_id"] for p in pending.values()}
+            conditions: list[ColumnElement[bool]] = [
+                Memory.id.in_(target_ids),
+                Memory.deleted_at.is_(None),
+                # #887 / #2257: the trusted filter, never relaxed for a pool node.
+                *recall_trust_predicates(filters),
+            ]
+            # #2027: the recall's row filters; an off-filter target is "gone"
+            # for this read — unless the search already put it in the pool
+            # (#2257: its payload matched; its row may be mid-sync).
+            if precision := recall_row_predicates(filters):
+                held = and_(*precision)
+                in_pool = target_ids & set(pool_ids or ())
+                conditions.append(or_(Memory.id.in_(in_pool), held) if in_pool else held)
             rows = await self.db.execute(
                 select(
                     Memory.id,
@@ -4413,13 +4441,7 @@ class MemoryService:
                     # #2016: the head of the text the judge saw, to tell a
                     # stale verdict apart without reading whole contents.
                     func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
-                ).where(
-                    Memory.id.in_(target_ids),
-                    Memory.deleted_at.is_(None),
-                    # #2027: the recall's row filters; an off-filter target
-                    # is "gone" for this read.
-                    *recall_row_predicates(filters),
-                )
+                ).where(*conditions)
             )
             # Same agent-binding row filter every other recall lane enforces
             # (#1299): a binding-restricted target must not leak its summary
@@ -4439,8 +4461,6 @@ class MemoryService:
                 target = live.get(p["target_id"])
                 if target is None:
                     continue  # self-healing: target gone → drop the suggestion
-                if trusted_only and target.source_type == SOURCE_TYPE_CONNECTOR:
-                    continue  # the trusted filter's connector exclusion (#887)
                 source = p["source"]
                 if (target.workspace_id, target.context_id) != (
                     source.workspace_id,
@@ -5505,7 +5525,10 @@ class MemoryService:
                 surviving hint or ``None``); those rows are not resolved again.
             filters: #2027 the row filters the recall searched with (after the
                 ``tags_normalize`` widening); a suggestion's target is held to
-                them. ``None`` applies no row filter, as in the fold.
+                them, except a target among ``memories`` (#2257: hydrated for
+                this caller, so the search already matched it), which only
+                the trusted filter, liveness, binding and the context match
+                hold. ``None`` applies no row filter, as in the fold.
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5516,7 +5539,8 @@ class MemoryService:
         # rerank so discarded candidates cost nothing (empty/fast when none
         # carry one).
         # #2131: rows the fold already resolved (same caller, same operation,
-        # same trust filter) reuse its answer; only the rest are queried.
+        # same filters, same pool exemption — the fold's nodes are hydrated
+        # rows too) reuse its answer; only the rest are queried.
         page = search_results[: request.k]
         page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
         resolved = resolved_candidates or {}
@@ -5532,8 +5556,10 @@ class MemoryService:
                     pending,
                     user_id=user_id,
                     operation="recall",
-                    trusted_only=_is_trusted_recall(request),
                     filters=filters,
+                    # #2257: the hydrated, binding-filtered map — never the
+                    # raw search ids — so a denied row is never exempt.
+                    pool_ids={m.id for m in memories.values()},
                 )
             )
         fold_map = fold_map or {}
@@ -6346,6 +6372,10 @@ class MemoryService:
         Skipped entirely for a cross-context recall: the vocabulary read covers
         ONE context, so suggesting from the primary alone would describe a
         different search than the one the caller ran.
+
+        Reads ``request.filters``, not the widened filters, on purpose:
+        suggestions describe the tags the caller typed; the widened spellings
+        were already searched (#2257).
         """
         if responses or cross_context:
             return None
@@ -6660,7 +6690,6 @@ class MemoryService:
             memories,
             include_superseded=request.include_superseded,
             user_id=user_id,
-            trusted_only=_is_trusted_recall(request),
             shadow_map=shadow_map,
             resolved=resolved_candidates,
             # #2027: the filters the rows matched with, widened tags included.
@@ -6761,6 +6790,8 @@ class MemoryService:
         # it waits for another one, and a failure there cannot undo or fail
         # the page it already has. They do delay the response (#1989
         # post_commit_ms).
+        # ``client`` is not a row filter; the tag widening never touches it,
+        # so the raw request.filters reading is the effective one (#2257).
         client = request.filters.get("client", "api") if request.filters else "api"
         with timings.stage("post_commit"):
             await self._recall_record_access(responses, memories, client=client)
