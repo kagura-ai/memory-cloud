@@ -131,11 +131,26 @@ export interface RecallParams {
   k?: number;
   use_rerank?: boolean;
   search_mode?: "hybrid" | "semantic" | "keyword";
+  /**
+   * #2132: true returns memories shadowed by a `supersedes` edge (annotated
+   * with `superseded_by`) and turns folding off, so every version is its own
+   * row. Backend default false.
+   */
+  include_superseded?: boolean;
   filters?: {
     context_id?: string;
     scope?: MemoryScope;
     type?: string;
+    tags?: string[];
+    tags_match?: "any" | "all";
   };
+}
+
+// Mirror of backend `FoldedVersions` (schemas.py, #2123): judge-verified older
+// versions of a fact folded under the newest one. Ids are newest first.
+export interface FoldedVersions {
+  count: number;
+  memory_ids: string[];
 }
 
 // Mirror of backend `MemoryResponse` (schemas.py:186) — one recall result row.
@@ -154,6 +169,10 @@ export interface RecallResultItem {
   score?: number | null;
   source_uri?: string | null;
   source_type?: string | null;
+  /** #1208: set only when include_superseded=true opted a shadowed row back in. */
+  superseded_by?: string | null;
+  /** #2123: older versions folded under this row; absent when none. */
+  folded?: FoldedVersions | null;
 }
 
 // Mirror of backend `RecallResponse` (schemas.py:288).

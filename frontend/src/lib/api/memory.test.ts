@@ -107,4 +107,39 @@ describe("recallMemories", () => {
     await recallMemories({ query: "anything" });
     expect(mockPost).toHaveBeenCalledWith(RECALL, { query: "anything" });
   });
+
+  // #2132: the top-level include_superseded flag (RecallRequest) and the tag
+  // filter reach the endpoint as given; `folded` comes back on the row.
+  it("sends include_superseded and the tag filter, and returns folded", async () => {
+    mockPost.mockResolvedValue({
+      results: [
+        {
+          memory_id: "m-new",
+          summary: "current value",
+          context_summary: null,
+          type: "fact",
+          importance: 0.5,
+          scope: "persistent",
+          created_at: "2026-10-01T00:00:00Z",
+          client: "api",
+          tags: [],
+          context: null,
+          folded: { count: 1, memory_ids: ["m-old"] },
+        },
+      ],
+    });
+    const res = await recallMemories({
+      query: "value",
+      k: 20,
+      include_superseded: true,
+      filters: { context_id: "ctx-1", tags: ["a"], tags_match: "all" },
+    });
+    expect(mockPost).toHaveBeenCalledWith(RECALL, {
+      query: "value",
+      k: 20,
+      include_superseded: true,
+      filters: { context_id: "ctx-1", tags: ["a"], tags_match: "all" },
+    });
+    expect(res.results[0].folded).toEqual({ count: 1, memory_ids: ["m-old"] });
+  });
 });
