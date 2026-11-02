@@ -3503,6 +3503,27 @@
         "announceAdded": "Added filter {tag}. Cloud refined to co-occurring tags.",
         "announceRemoved": "Removed filter {tag}.",
         "announceCleared": "Cleared all tag filters."
+      },
+      "recall": {
+        "modeLabel": "Search mode",
+        "modeText": "Text match",
+        "modeRecall": "Recall",
+        "hint": "Recall searches by meaning. Press Enter or Search to run it.",
+        "submit": "Search",
+        "includeSuperseded": "Include older versions",
+        "includeSupersededHelp": "Show every version of a fact as its own row, including memories replaced by a newer one.",
+        "resultsLabel": "Recall results",
+        "resultsCount": "{count, plural, one {# result} other {# results}}",
+        "loading": "Searching…",
+        "loadFailed": "Recall failed",
+        "noResultsTitle": "No results",
+        "noResultsDesc": "Recall found no memories for \"{query}\".",
+        "score": "Score {score}",
+        "folded": "{count, plural, one {# older version folded:} other {# older versions folded:}}",
+        "openFolded": "Open older version {id}",
+        "superseded": "Superseded",
+        "openNewer": "Open newer version",
+        "view": "View"
       }
     },
     "tagCloud": {
