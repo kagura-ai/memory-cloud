@@ -61,7 +61,13 @@ class GraphRepository(BaseRepository[GraphMemory]):
     async def list(
         self, skip: int = 0, limit: int = 100, filters: dict | None = None
     ) -> list[GraphMemory]:
-        """List graphs with pagination.
+        """List graphs with pagination, ordered by primary key.
+
+        The primary-key order makes ``skip``/``limit`` pages deterministic
+        (#2385): without it the rows came back in physical order, so which
+        graphs a capped caller (``tasks.neural_tasks``) processed depended on
+        the table's storage layout. New graphs get higher ids, so an offset
+        scan does not shift when rows are inserted during it.
 
         Args:
             skip: Offset
@@ -69,12 +75,9 @@ class GraphRepository(BaseRepository[GraphMemory]):
             filters: Optional filters
 
         Returns:
-            List of graphs
+            List of graphs, lowest id first
         """
-        query = select(GraphMemory)
-
-        # Pagination
-        query = query.offset(skip).limit(limit)
+        query = select(GraphMemory).order_by(GraphMemory.id).offset(skip).limit(limit)
 
         result = await self.db.execute(query)
         return list(result.scalars().all())

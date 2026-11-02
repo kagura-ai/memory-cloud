@@ -11,6 +11,14 @@ from repositories.graph import GraphRepository
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+async def _list_all(repository: GraphRepository, page_size: int) -> list[GraphMemory]:
+    """Read every graph through list(), one skip/limit page at a time."""
+    rows: list[GraphMemory] = []
+    while page := await repository.list(skip=len(rows), limit=page_size):
+        rows.extend(page)
+    return rows
+
+
 class TestGraphRepository:
     """Test GraphRepository for PostgreSQL graph storage."""
 
@@ -68,11 +76,62 @@ class TestGraphRepository:
 
     @pytest.mark.asyncio
     async def test_list(self, repository, sample_graph):
-        """Test listing graphs."""
-        results = await repository.list()
+        """Test listing graphs.
+
+        The shared test database accumulates graphs committed by other tests,
+        and list() returns the lowest ids first, so page until the new graph
+        (the highest id) shows up instead of reading one default page.
+        """
+        results = await _list_all(repository, page_size=100)
 
         assert len(results) > 0
         assert any(g.id == sample_graph.id for g in results)
+
+    @pytest.mark.asyncio
+    async def test_list_orders_by_id_not_physical_or_user_id_order(self, repository, db_session):
+        """list() returns graphs in primary-key order (#2385).
+
+        The user_ids sort opposite to the ids, and the first row is updated so
+        Postgres writes its new version after the others: physical order is
+        then (second, third, first), user_id order is (third, second, first),
+        and only an ORDER BY id gives (first, second, third).
+        """
+        uid = uuid4().hex
+        rows = [
+            GraphMemory(user_id=f"order_{uid}_{label}", graph_data={"nodes": [], "links": []})
+            for label in ("c", "b", "a")
+        ]
+        for row in rows:
+            db_session.add(row)
+            await db_session.flush()  # one INSERT per row: ids ascend in list order
+        first, second, third = rows
+        assert first.id < second.id < third.id
+
+        first.graph_data = {"nodes": [{"id": "moved"}], "links": []}
+        await db_session.flush()
+
+        listed = await _list_all(repository, page_size=100)
+        ids = [g.id for g in listed]
+        assert ids == sorted(ids)
+        mine = [g.id for g in listed if g.user_id.startswith(f"order_{uid}_")]
+        assert mine == [first.id, second.id, third.id]
+
+    @pytest.mark.asyncio
+    async def test_list_pages_are_contiguous(self, repository, db_session):
+        """skip/limit pages follow each other in id order without gaps or overlap."""
+        uid = uuid4().hex
+        for i in range(5):
+            db_session.add(
+                GraphMemory(user_id=f"contig_{uid}_{i}", graph_data={"nodes": [], "links": []})
+            )
+        await db_session.flush()
+
+        everything = await _list_all(repository, page_size=1000)
+        paged = await _list_all(repository, page_size=2)
+        assert [g.id for g in paged] == [g.id for g in everything]
+
+        page = await repository.list(skip=1, limit=2)
+        assert [g.id for g in page] == [g.id for g in everything[1:3]]
 
     @pytest.mark.asyncio
     async def test_list_with_pagination(self, repository, db_session):
