@@ -5,6 +5,7 @@ Implements:
 - Memory consolidation (daily)
 """
 
+import math
 import os
 from typing import Any, cast
 
@@ -15,6 +16,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from config.constants import (
     CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT,
     CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV,
+    DEFERRED_POINT_BACKLOG_WARN_SECONDS,
+    DEFERRED_POINT_DRAIN_INTERVAL_DEFAULT,
+    DEFERRED_POINT_DRAIN_INTERVAL_ENV,
+    DEFERRED_POINT_DRAIN_WAIT_DEFAULT,
+    DEFERRED_POINT_DRAIN_WAIT_ENV,
 )
 from db.base import get_db
 from db.graph_learning_lock import lock_graph_learning
@@ -418,6 +424,81 @@ async def sweep_orphan_vectors_task() -> None:
         logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
 
 
+def _env_seconds(name: str, default: float) -> float:
+    """A non-negative number of seconds from ``name``. Read at call time.
+
+    An unparsable or negative value falls back to ``default`` and is logged,
+    like the tombstone retention window, so a typo never turns into a wait
+    without bound or a job silently switched off.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not math.isfinite(value) or value < 0:
+        logger.warning("env_seconds_invalid", name=name, value=raw, fallback=default)
+        return default
+    return value
+
+
+def _deferred_point_drain_interval() -> int:
+    """Seconds between drain runs (#2476); 0 turns the job off."""
+    seconds = _env_seconds(DEFERRED_POINT_DRAIN_INTERVAL_ENV, DEFERRED_POINT_DRAIN_INTERVAL_DEFAULT)
+    # A fraction of a second still means "on": never round it down to off.
+    return max(1, int(seconds)) if seconds > 0 else 0
+
+
+def _deferred_point_drain_wait() -> float:
+    """Seconds a drain run waits for the point writers (#2476); 0 does not wait."""
+    return _env_seconds(DEFERRED_POINT_DRAIN_WAIT_ENV, DEFERRED_POINT_DRAIN_WAIT_DEFAULT)
+
+
+async def drain_deferred_point_deletes_task() -> None:
+    """Delete the points ``forget`` queued because a point writer held the lock (#2476).
+
+    Runs every ``DEFERRED_POINT_DRAIN_INTERVAL_SECONDS`` (default 300) and
+    waits up to ``DEFERRED_POINT_DRAIN_WAIT_SECONDS`` (default 30) for the
+    point writers — the resource indexer holds the lock for a whole batch —
+    while it queues every new writer behind it, so the wait is the knob to
+    lower on a deployment where writer stalls matter. No lock is taken when
+    nothing is queued. Independent of ``ORPHAN_VECTOR_SWEEP_ENABLED``: with the
+    sweep off this job is what removes those points.
+
+    No single_flight: the scheduler leader runs one copy, and a second run in
+    another process only waits on the same lock and finds the rows gone.
+    """
+    try:
+        from services.deferred_point_deletes import drain_deferred_point_deletes
+
+        async for db in get_db():
+            result = await drain_deferred_point_deletes(
+                db, wait_seconds=_deferred_point_drain_wait()
+            )
+            fields = {
+                "drained": result.drained,
+                "kept": result.kept,
+                "pending": result.pending,
+                "oldest_age_seconds": result.oldest_age_seconds,
+            }
+            if result.busy:
+                logger.info("deferred_point_deletes_writers_busy", **fields)
+            elif result.failed is None and (result.drained or result.kept):
+                logger.info("deferred_point_deletes_drained", **fields)
+            if (
+                result.oldest_age_seconds is not None
+                and result.oldest_age_seconds > DEFERRED_POINT_BACKLOG_WARN_SECONDS
+            ):
+                logger.warning("deferred_point_deletes_backlog_old", **fields)
+            break
+    except Exception as e:
+        logger.error(
+            "deferred_point_deletes_task_failed", error_class=type(e).__name__, exc_info=True
+        )
+
+
 def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
     """Schedule Neural Memory background tasks.
 
@@ -469,3 +550,18 @@ def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("scheduled_orphan_vector_sweep_task")
+
+    # Deferred point deletes (#2476): forget's points a point writer kept it
+    # from deleting. Not tied to the orphan sweep switch.
+    drain_interval = _deferred_point_drain_interval()
+    if drain_interval > 0:
+        scheduler.add_job(
+            drain_deferred_point_deletes_task,
+            trigger=IntervalTrigger(seconds=drain_interval),
+            id="drain_deferred_point_deletes",
+            name="Drain Deferred Point Deletes",
+            replace_existing=True,
+        )
+        logger.info("scheduled_deferred_point_drain_task", interval_seconds=drain_interval)
+    else:
+        logger.info("deferred_point_drain_disabled", reason="interval_zero")
