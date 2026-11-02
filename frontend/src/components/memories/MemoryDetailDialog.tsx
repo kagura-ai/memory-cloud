@@ -7,6 +7,7 @@
  * the dialog when the URL pointed at an unreachable memory.
  */
 
+import { useId } from "react";
 import {
   Dialog,
   DialogContent,
@@ -16,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Separator } from "@/components/ui/separator";
@@ -34,8 +36,10 @@ import { InlineSpinner } from "@/components/common/LoadingState";
 import type {
   LinkedMemoryRef,
   MemoryReference,
+  SupersedeAcceptanceReason,
   SupersedeCandidate,
 } from "@/lib/types/memory";
+import type { SupersedeError } from "@/hooks/useMemoryDetailDialog";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { formatObservedAt } from "./observedAt";
 import { useAuth } from "@/contexts/AuthContext";
@@ -72,6 +76,9 @@ interface MemoryDetailDialogProps {
   supersedeCandidate?: SupersedeCandidate | null;
   onAcceptSupersede?: () => void;
   supersedeAccepting?: boolean;
+  // #2427: a failed accept, rendered as an inline Alert in the suggestion
+  // block (it stays visible when the re-read dropped the candidate).
+  supersedeError?: SupersedeError | null;
 }
 
 export function MemoryDetailDialog({
@@ -89,6 +96,7 @@ export function MemoryDetailDialog({
   supersedeCandidate,
   onAcceptSupersede,
   supersedeAccepting = false,
+  supersedeError = null,
 }: MemoryDetailDialogProps) {
   const { user } = useAuth();
   const locale = useLocale();
@@ -96,6 +104,31 @@ export function MemoryDetailDialog({
   const tCommon = useTranslations("common");
   const { toast } = useToast();
   const { isCopied, copyToTarget } = useCopyFeedback();
+
+  // #2427: the server's answer to "may I accept this suggestion?". Absent on
+  // an older backend → the action stays enabled and the server decides.
+  const supersedeAcceptance = supersedeCandidate?.acceptance ?? null;
+  const supersedeRefused = supersedeAcceptance?.allowed === false;
+  // Unique per dialog instance, for the button's aria-describedby.
+  const supersedeReasonId = useId();
+  // #2427: a 409 the server's `acceptance` cannot express; the inline alert
+  // explains it, so the button just stays disabled.
+  const supersedeBlocked = supersedeError?.blocksRetry === true;
+  // Literal keys, one per reason (the i18n parity scan and TS exhaustiveness).
+  const unavailableText = (
+    reason: SupersedeAcceptanceReason | null | undefined,
+  ) => {
+    switch (reason) {
+      case "not_writable":
+        return t("supersede.unavailable.notWritable");
+      case "newer_candidate":
+        return t("supersede.unavailable.newerCandidate");
+      case "not_owner":
+      default:
+        // An unknown reason from a newer backend reads as the coarsest one.
+        return t("supersede.unavailable.notOwner");
+    }
+  };
 
   const copy = async (text: string, key: string) => {
     try {
@@ -326,49 +359,83 @@ export function MemoryDetailDialog({
               POSTs a `supersedes` edge (self-healing the suggestion). This is an
               informational suggestion, not an error, so it uses a subtle
               highlighted block rather than ErrorBanner. */}
-          {supersedeCandidate && (
+          {(supersedeCandidate || supersedeError) && (
             <>
               <Separator />
               <div>
                 <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
                   {t("supersede.title")}
                 </label>
-                <div className="mt-2 space-y-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/30">
-                  <p className="text-sm text-slate-700 dark:text-slate-300">
-                    {t("supersede.description")}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onOpenLinkedMemory?.(supersedeCandidate.memory_id)
-                    }
-                    disabled={!onOpenLinkedMemory}
-                    className="flex w-full items-center gap-2 rounded bg-white/70 px-2 py-1.5 text-left text-sm transition hover:bg-white disabled:cursor-default disabled:hover:bg-white/70 dark:bg-slate-900/40 dark:hover:bg-slate-900 dark:disabled:hover:bg-slate-900/40"
-                  >
-                    <span className="flex-1 truncate">
-                      {supersedeCandidate.summary}
-                    </span>
-                    <code className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800">
-                      {t("supersede.similarity", {
-                        value: Math.round(supersedeCandidate.similarity * 100),
-                      })}
-                    </code>
-                  </button>
-                  <div className="flex justify-end">
-                    <Button
-                      size="sm"
-                      onClick={onAcceptSupersede}
-                      disabled={supersedeAccepting || !onAcceptSupersede}
+                {/* #2427: dialog-body error → inline Alert (frontend rule). */}
+                {supersedeError && (
+                  <Alert variant="destructive" className="mt-2">
+                    <AlertTitle>{supersedeError.title}</AlertTitle>
+                    {supersedeError.description && (
+                      <AlertDescription>
+                        {supersedeError.description}
+                      </AlertDescription>
+                    )}
+                  </Alert>
+                )}
+                {supersedeCandidate && (
+                  <div className="mt-2 space-y-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/30">
+                    <p className="text-sm text-slate-700 dark:text-slate-300">
+                      {t("supersede.description")}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenLinkedMemory?.(supersedeCandidate.memory_id)
+                      }
+                      disabled={!onOpenLinkedMemory}
+                      className="flex w-full items-center gap-2 rounded bg-white/70 px-2 py-1.5 text-left text-sm transition hover:bg-white disabled:cursor-default disabled:hover:bg-white/70 dark:bg-slate-900/40 dark:hover:bg-slate-900 dark:disabled:hover:bg-slate-900/40"
                     >
-                      {supersedeAccepting ? (
-                        <InlineSpinner size="sm" className="mr-2" />
-                      ) : (
-                        <GitMerge className="mr-2 h-4 w-4" />
+                      <span className="flex-1 truncate">
+                        {supersedeCandidate.summary}
+                      </span>
+                      <code className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800">
+                        {t("supersede.similarity", {
+                          value: Math.round(
+                            supersedeCandidate.similarity * 100,
+                          ),
+                        })}
+                      </code>
+                    </button>
+                    <div className="flex flex-col items-end gap-1">
+                      {/* #2427: disabled, not hidden, when the server says the
+                        caller may not accept it; the reason is inline text
+                        (a tooltip never fires on a disabled button). */}
+                      <Button
+                        size="sm"
+                        onClick={onAcceptSupersede}
+                        disabled={
+                          supersedeAccepting ||
+                          !onAcceptSupersede ||
+                          supersedeRefused ||
+                          supersedeBlocked
+                        }
+                        aria-describedby={
+                          supersedeRefused ? supersedeReasonId : undefined
+                        }
+                      >
+                        {supersedeAccepting ? (
+                          <InlineSpinner size="sm" className="mr-2" />
+                        ) : (
+                          <GitMerge className="mr-2 h-4 w-4" />
+                        )}
+                        {t("supersede.confirm")}
+                      </Button>
+                      {supersedeRefused && (
+                        <p
+                          id={supersedeReasonId}
+                          className="text-right text-xs text-slate-600 dark:text-slate-400"
+                        >
+                          {unavailableText(supersedeAcceptance?.reason)}
+                        </p>
                       )}
-                      {t("supersede.confirm")}
-                    </Button>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             </>
           )}

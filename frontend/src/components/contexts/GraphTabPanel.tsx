@@ -306,6 +306,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         supersedeCandidate={dialog.supersedeCandidate}
         onAcceptSupersede={dialog.acceptSupersede}
         supersedeAccepting={dialog.supersedeAccepting}
+        supersedeError={dialog.supersedeError}
       />
       {dialog.hydrated && (
         <DeleteMemoryDialog

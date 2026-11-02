@@ -609,6 +609,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         supersedeCandidate={dialog.supersedeCandidate}
         onAcceptSupersede={dialog.acceptSupersede}
         supersedeAccepting={dialog.supersedeAccepting}
+        supersedeError={dialog.supersedeError}
       />
       <BulkDeleteMemoriesDialog
         contextId={contextId}

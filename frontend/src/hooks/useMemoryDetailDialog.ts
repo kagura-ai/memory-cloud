@@ -22,6 +22,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useTranslations } from "next-intl";
 import { referenceMemory } from "@/lib/api/memory";
 import { graphApi } from "@/lib/api/graph";
+import { ApiError } from "@/lib/api/base";
 import type {
   LinkedMemoryRef,
   MemoryReference,
@@ -53,6 +54,17 @@ function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
   };
 }
 
+// #2427: a failed accept, shown inline in the suggestion block (a dialog-body
+// error) rather than as a toast. `description` carries the server's text only
+// for an unmapped failure. `blocksRetry` (a 409: another declared edge links
+// the pair, which `acceptance` does not model) keeps the action disabled until
+// the dialog shows another memory, so the click cannot repeat the conflict.
+export interface SupersedeError {
+  title: string;
+  description?: string;
+  blocksRetry?: boolean;
+}
+
 export interface UseMemoryDetailDialogOpts {
   memoryIdParam: string | null;
   setMemoryIdParam: (id: string | null) => void;
@@ -77,6 +89,8 @@ export interface UseMemoryDetailDialogResult {
   supersedeCandidate: SupersedeCandidate | null;
   supersedeAccepting: boolean;
   acceptSupersede: () => void;
+  // #2427: the last accept failure for the open memory (null when none).
+  supersedeError: SupersedeError | null;
 
   // Dialog onOpenChange handlers — wire directly to MemoryDetailDialog /
   // EditMemoryDialog / DeleteMemoryDialog props of the same name.
@@ -111,12 +125,21 @@ export function useMemoryDetailDialog(
   const [detailNotFound, setDetailNotFound] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [supersedeError, setSupersedeError] = useState<SupersedeError | null>(
+    null,
+  );
 
   // Race guard: if the user clicks A then B before A's referenceMemory()
   // resolves, B sets pendingHydrationRef.current=B.id; when A resolves we
   // compare and discard. Cleared on dialog close so a stale in-flight
   // reference can't re-open the dialog after the user dismissed it.
   const pendingHydrationRef = useRef<string | null>(null);
+
+  // #2427: generation of the dialog's view of the memory. Bumped by every new
+  // hydration (openWith), an edit's PATCH reply and closing the dialog, so a
+  // late accept failure or re-read for an older view is dropped even when the
+  // memory id is the same (close + reopen, or an edit saved meanwhile).
+  const viewGenerationRef = useRef(0);
 
   // Bypass token for the deep-link effect: openDetail mutates the URL AND
   // calls openWith() with viaUrl=false (so a failure surfaces as a toast).
@@ -135,12 +158,14 @@ export function useMemoryDetailDialog(
   const openWith = useCallback(
     async (id: string, target: DialogTarget, viaUrl = false) => {
       pendingHydrationRef.current = id;
+      viewGenerationRef.current += 1;
       try {
         const ref = await referenceMemory(id);
         if (pendingHydrationRef.current !== id) return;
         setHydrated(ref);
         setLinkedRefs(linkedRefsFromMemoryReference(ref));
         setDetailNotFound(false);
+        setSupersedeError(null);
         if (target === "detail") setDetailOpen(true);
         else if (target === "edit") setEditOpen(true);
         else setDeleteOpen(true);
@@ -174,7 +199,9 @@ export function useMemoryDetailDialog(
       setLinkedRefs(EMPTY_LINKED_REFS);
       setEditOpen(false);
       setDeleteOpen(false);
+      setSupersedeError(null);
       pendingHydrationRef.current = null;
+      viewGenerationRef.current += 1;
       return;
     }
     if (skipNextDeepLinkEffectRef.current === memoryIdParam) {
@@ -192,10 +219,12 @@ export function useMemoryDetailDialog(
       if (!next) {
         if (memoryIdParam) setMemoryIdParam(null);
         setDetailNotFound(false);
+        setSupersedeError(null);
         // Cancel any in-flight referenceMemory: nulling the ref makes the
         // openWith resolution path's identity check fail, so a late-arriving
         // response can't re-open the dialog the user just closed.
         pendingHydrationRef.current = null;
+        viewGenerationRef.current += 1;
       }
     },
     [memoryIdParam, setMemoryIdParam],
@@ -253,12 +282,16 @@ export function useMemoryDetailDialog(
   );
 
   const applyEditSuccess = useCallback((updated: MemoryReference) => {
+    viewGenerationRef.current += 1;
     setHydrated(updated);
     setLinkedRefs(linkedRefsFromMemoryReference(updated));
     setEditOpen(false);
+    // The PATCH reply carries the suggestion's current state (#2427).
+    setSupersedeError(null);
   }, []);
 
   const applyDeleteSuccess = useCallback(() => {
+    viewGenerationRef.current += 1;
     setDeleteOpen(false);
     setDetailOpen(false);
     setHydrated(null);
@@ -285,11 +318,53 @@ export function useMemoryDetailDialog(
       ? rawSupersedeCandidate
       : null;
 
+  // #2427: re-read the open memory after a refused accept so the block shows
+  // the server's current answer (a candidate gone, or `acceptance` now
+  // refusing). `stale` when the view changed meanwhile (another memory, an
+  // edit's reply, a close): nothing is applied then. `ref: null` when the
+  // re-read failed: the dialog keeps its view and the caller still reports
+  // the refusal.
+  const refreshHydrated = useCallback(
+    async (
+      id: string,
+      generation: number,
+    ): Promise<
+      { stale: true } | { stale: false; ref: MemoryReference | null }
+    > => {
+      let ref: MemoryReference | null = null;
+      try {
+        ref = await referenceMemory(id);
+      } catch {
+        ref = null;
+      }
+      if (
+        viewGenerationRef.current !== generation ||
+        pendingHydrationRef.current !== id
+      ) {
+        return { stale: true };
+      }
+      if (ref) {
+        setHydrated(ref);
+        setLinkedRefs(linkedRefsFromMemoryReference(ref));
+      }
+      return { stale: false, ref };
+    },
+    [],
+  );
+
   const acceptSupersede = useCallback(() => {
     if (!hydrated || !rawSupersedeCandidate || !contextId) return;
+    // #2427: the server said this caller may not accept it; the button is
+    // disabled too, this guards any other caller of the action.
+    if (rawSupersedeCandidate.acceptance?.allowed === false) return;
     const sourceId = hydrated.memory_id;
     const targetId = rawSupersedeCandidate.memory_id;
+    const generation = viewGenerationRef.current;
+    const viewIsCurrent = () =>
+      viewGenerationRef.current === generation &&
+      pendingHydrationRef.current === sourceId;
     setSupersedeAccepting(true);
+    setSupersedeError(null);
     void (async () => {
       try {
         await graphApi.createEdge({
@@ -301,16 +376,54 @@ export function useMemoryDetailDialog(
         setAcceptedSupersedeKey(`${sourceId}->${targetId}`);
         toast({ title: tDetail("supersede.accepted") });
       } catch (err) {
-        toast({
-          variant: "destructive",
-          title: tDetail("supersede.acceptFailed"),
-          description: err instanceof Error ? err.message : undefined,
-        });
+        // A reply for a view the dialog no longer shows is dropped.
+        if (!viewIsCurrent()) return;
+        // Status, not server prose: 403 is a lost role, ownership or plan
+        // slot (the copy names none of them), 404 a candidate, context or
+        // write access gone (the route's deny is a uniform 404), 409 another
+        // declared edge on the pair. Each re-reads the memory first, so the
+        // message and the block follow the server's current answer.
+        const status = err instanceof ApiError ? err.status : undefined;
+        if (status === 403 || status === 404 || status === 409) {
+          const refreshed = await refreshHydrated(sourceId, generation);
+          if (refreshed.stale) return;
+          let title: string;
+          if (status === 409) {
+            title = tDetail("supersede.errors.conflict");
+          } else if (
+            status === 404 &&
+            refreshed.ref?.supersede_candidate?.memory_id !== targetId
+          ) {
+            // The suggestion is gone (or the memory could not be re-read).
+            title = tDetail("supersede.errors.stale");
+          } else {
+            // A 403, or a 404 while the suggestion still surfaces — e.g. a
+            // member downgraded to viewer, whose refusal the route keeps a
+            // uniform 404; the refreshed `acceptance` disables the button.
+            title = tDetail("supersede.errors.denied");
+          }
+          setSupersedeError({
+            title,
+            ...(status === 409 ? { blocksRetry: true } : {}),
+          });
+        } else {
+          setSupersedeError({
+            title: tDetail("supersede.acceptFailed"),
+            description: err instanceof Error ? err.message : undefined,
+          });
+        }
       } finally {
         setSupersedeAccepting(false);
       }
     })();
-  }, [hydrated, rawSupersedeCandidate, contextId, toast, tDetail]);
+  }, [
+    hydrated,
+    rawSupersedeCandidate,
+    contextId,
+    toast,
+    tDetail,
+    refreshHydrated,
+  ]);
 
   return {
     hydrated,
@@ -331,5 +444,6 @@ export function useMemoryDetailDialog(
     supersedeCandidate,
     supersedeAccepting,
     acceptSupersede,
+    supersedeError,
   };
 }

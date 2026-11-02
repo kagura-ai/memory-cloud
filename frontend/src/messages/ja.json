@@ -3603,7 +3603,17 @@
         "similarity": "類似度 {value}%",
         "confirm": "更新元にする",
         "accepted": "更新元に設定しました",
-        "acceptFailed": "更新元に設定できませんでした"
+        "acceptFailed": "更新元に設定できませんでした",
+        "unavailable": {
+          "notWritable": "このコンテキストへの書き込み権限がありません。",
+          "notOwner": "両方のメモリの作成者だけが更新元に設定できます。",
+          "newerCandidate": "候補のメモリの方が新しいため、更新元には設定できません。"
+        },
+        "errors": {
+          "denied": "現在、このメモリを更新元に設定することはできません。",
+          "stale": "候補のメモリは利用できなくなりました。",
+          "conflict": "これらのメモリは既に別の関係でリンクされています。"
+        }
       }
     },
     "deleteDialog": {
