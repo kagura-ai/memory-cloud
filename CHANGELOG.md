@@ -4,6 +4,26 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.136.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.136.0) — 2026-11-02
+
+A forgotten memory's vector now goes within minutes even while the resource indexer is busy or the orphan sweep is off, and the neural maintenance tasks reach every graph.
+
+### Added
+- **Deferred point deletes** ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)): `forget` queues each point it has to delete in a new `deferred_point_deletes` table, inside the transaction that tombstones the row, and still deletes it right after the commit when no point writer holds the lock. A delete deferred behind a running indexer batch is retried by a scheduler job every `DEFERRED_POINT_DRAIN_INTERVAL_SECONDS` (default 300; `0` turns it off), which waits up to `DEFERRED_POINT_DRAIN_WAIT_SECONDS` (default 30; `0` = try only) for the writers, so the point goes within minutes — with `ORPHAN_VECTOR_SWEEP_ENABLED=false` as well. Log events: `deferred_point_deletes_drained`, `deferred_point_deletes_writers_busy`, `deferred_point_deletes_failed`, `deferred_point_deletes_backlog_old` (a queued point older than a day) and `deferred_point_deletes_task_failed`. `docs/deployment.md` states when the delete is deferred.
+
+### Changed
+- **Neural tasks process every graph** ([#2385](https://github.com/kagura-ai/memory-cloud/issues/2385)): `GraphRepository.list()` is ordered by id, and `weight_decay_task` and `consolidation_task` read the graphs in id-ordered pages of 1000 with one transaction per page. Before, only the first 1000 graphs in physical row order were processed, in one transaction.
+- **Report addresses** ([#2497](https://github.com/kagura-ai/memory-cloud/issues/2497)): the security and code-of-conduct reporting addresses are company addresses.
+
+### Fixed
+- **Sub-millisecond lock waits** ([#2476](https://github.com/kagura-ai/memory-cloud/issues/2476)): `wait_for_point_writers` no longer turns a wait shorter than a millisecond into `lock_timeout = 0`, which Postgres reads as no timeout.
+
+### Notes
+- **Migration** `f21_2476_deferred_point_deletes` adds the `deferred_point_deletes` table (memory and point ids plus a collection name, no foreign key). **Apply it before starting v0.136.0**: `forget` writes to the table in the tombstone's transaction, so the new code without the table fails every `forget` (rolled back, nothing lost) and the drain logs `deferred_point_deletes_task_failed` every interval. Downgrade drops the table and the pending retries; the orphan sweep remains the backstop.
+- **New environment variables** `DEFERRED_POINT_DRAIN_INTERVAL_SECONDS` and `DEFERRED_POINT_DRAIN_WAIT_SECONDS`, both optional (defaults above). While the drain waits for the lock, new point writers — an indexer batch, a merge, a Sleep or session rollback, an admin restore — queue behind it for at most the wait, and only while rows are pending; lower the wait if that stall matters. The drain runs on the scheduler leader and holds the lock for about 15 s at most per run.
+- **Orphan sweep:** replaces the v0.135.0 note — `forget` no longer relies on the sweep for a deferred delete. The sweep still covers a point an embedding task wrote after its row was forgotten, and the other pre-commit delete paths ([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)).
+- The development-only Dependabot alert on minimatch 3.1.5 was dismissed as tolerable risk: no upgrade clears it while ESLint 9's plugins pin minimatch 3 ([#2458](https://github.com/kagura-ai/memory-cloud/issues/2458)).
+
 ## [v0.135.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.135.1) — 2026-11-02
 
 Muse can register with the server again, and a refused member-credential call keeps its error code.
