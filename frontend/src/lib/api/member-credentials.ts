@@ -2,9 +2,21 @@
  * Member Credentials API Client
  *
  * Migration 034: Member-scoped API Keys and OAuth Apps
+ *
+ * Every wrapper goes through `apiClient` (#2384), so a refusal reaches the
+ * caller as an `ApiError` carrying the error code, the details and the
+ * normalised plan-gate facts (`err.gate`) — the UI renders a plan limit on
+ * key creation like every other gate refusal. The message keeps the app's
+ * precedence: the envelope's `message`, then a plain `detail` string, then
+ * the HTTP status.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+import { apiClient } from "./base";
+
+/** The member's credentials collection; every wrapper below sits under it. */
+function credentialsPath(workspaceId: string, userId: string): string {
+  return `/api/v1/workspaces/${workspaceId}/members/${userId}/credentials`;
+}
 
 export interface MemberAPIKey {
   id: string; // Public id: "akey_" + 22 base62 chars (#1008)
@@ -50,48 +62,15 @@ export interface MemberCredentials {
 }
 
 /**
- * Throw an Error carrying the API's message for a non-OK response.
- *
- * Same precedence as `ApiClient` in `./base`: `message` from the app's
- * `{error, message, details}` envelope (every error the API raises, 422
- * included), then a plain `detail` string. A body with neither (or one that
- * is not JSON) falls back to `fallback` plus the HTTP status (#2202).
- */
-async function throwResponseError(
-  response: Response,
-  fallback: string,
-): Promise<never> {
-  const error: unknown = await response.json().catch(() => null);
-  const body =
-    error && typeof error === "object"
-      ? (error as { detail?: unknown; message?: unknown })
-      : {};
-  const text =
-    (typeof body.message === "string" && body.message) ||
-    (typeof body.detail === "string" && body.detail) ||
-    `${fallback}: HTTP ${response.status} ${response.statusText}`.trimEnd();
-  throw new Error(text);
-}
-
-/**
  * Get or create member credentials (Lazy initialization)
  */
 export async function getMemberCredentials(
   workspaceId: string,
   userId: string,
 ): Promise<MemberCredentials> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials`,
-    {
-      credentials: "include",
-    },
+  return apiClient.get<MemberCredentials>(
+    credentialsPath(workspaceId, userId),
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to get credentials");
-  }
-
-  return response.json();
 }
 
 /**
@@ -101,17 +80,9 @@ export async function hideAPIKey(
   workspaceId: string,
   userId: string,
 ): Promise<void> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key/hide`,
-    {
-      method: "POST",
-      credentials: "include",
-    },
+  await apiClient.post<void>(
+    `${credentialsPath(workspaceId, userId)}/api-key/hide`,
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to hide API key");
-  }
 }
 
 /**
@@ -122,19 +93,9 @@ export async function regenerateAPIKey(
   userId: string,
   keyId: string,
 ): Promise<{ key: string; key_prefix: string; key_id: string }> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key/regenerate?key_id=${encodeURIComponent(keyId)}`,
-    {
-      method: "POST",
-      credentials: "include",
-    },
+  return apiClient.post<{ key: string; key_prefix: string; key_id: string }>(
+    `${credentialsPath(workspaceId, userId)}/api-key/regenerate?key_id=${encodeURIComponent(keyId)}`,
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to regenerate API key");
-  }
-
-  return response.json();
 }
 
 /**
@@ -159,23 +120,10 @@ export async function createAPIKey(
     default_context_id?: string;
   },
 ): Promise<MemberAPIKey> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-keys`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      credentials: "include",
-      body: JSON.stringify(data),
-    },
+  return apiClient.post<MemberAPIKey>(
+    `${credentialsPath(workspaceId, userId)}/api-keys`,
+    data,
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to create API key");
-  }
-
-  return response.json();
 }
 
 /**
@@ -192,17 +140,9 @@ export async function deleteWorkspaceMemberAPIKeyById(
   userId: string,
   keyId: string,
 ): Promise<void> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-keys/${keyId}`,
-    {
-      method: "DELETE",
-      credentials: "include",
-    },
+  await apiClient.delete<void>(
+    `${credentialsPath(workspaceId, userId)}/api-keys/${keyId}`,
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to delete API key");
-  }
 }
 
 /**
@@ -230,17 +170,7 @@ export async function deleteWorkspaceMemberAPIKey(
  * Note: Use OAuth clients API directly
  */
 export async function hideOAuthClientSecret(clientId: string): Promise<void> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/oauth/clients/${clientId}/hide`,
-    {
-      method: "POST",
-      credentials: "include",
-    },
-  );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to hide OAuth app");
-  }
+  await apiClient.post<void>(`/api/v1/oauth/clients/${clientId}/hide`);
 }
 
 /**
@@ -250,19 +180,9 @@ export async function regenerateOAuthSecret(
   workspaceId: string,
   userId: string,
 ): Promise<{ client_secret: string; client_id: string }> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/oauth/regenerate`,
-    {
-      method: "POST",
-      credentials: "include",
-    },
+  return apiClient.post<{ client_secret: string; client_id: string }>(
+    `${credentialsPath(workspaceId, userId)}/oauth/regenerate`,
   );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to regenerate OAuth secret");
-  }
-
-  return response.json();
 }
 
 /**
@@ -272,15 +192,5 @@ export async function deleteOAuthApp(
   workspaceId: string,
   userId: string,
 ): Promise<void> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/oauth`,
-    {
-      method: "DELETE",
-      credentials: "include",
-    },
-  );
-
-  if (!response.ok) {
-    await throwResponseError(response, "Failed to delete OAuth app");
-  }
+  await apiClient.delete<void>(`${credentialsPath(workspaceId, userId)}/oauth`);
 }

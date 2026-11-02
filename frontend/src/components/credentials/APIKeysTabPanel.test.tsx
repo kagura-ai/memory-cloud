@@ -28,6 +28,8 @@ import {
   RECENT_USE_WARNING_WINDOW_MS,
 } from "./APIKeysTabPanel";
 import type { MemberAPIKey } from "@/lib/api/member-credentials";
+import { ApiError } from "@/lib/api/base";
+import { normalizeGate } from "@/lib/gates/featureGates";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -88,6 +90,21 @@ vi.mock("@/hooks/useAutoOpenOnFreshWindow", () => ({
 // MCPConfigBlock is unrelated to the table behavior under test.
 vi.mock("@/components/credentials/MCPConfigBlock", () => ({
   MCPConfigBlock: () => null,
+}));
+
+// #2384: a create refusal's gate renders through useErrorGate +
+// FeatureGateNotice, which read /system/info (the Plan page flag), the tier
+// matrix and the router. Without these the real hooks fetch in the DOM env.
+const mockPush = vi.hoisted(() => vi.fn());
+vi.mock("next/navigation", () => {
+  const router = { push: mockPush };
+  return { useRouter: () => router };
+});
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => ({ plan_page: true }),
+}));
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => null,
 }));
 
 // ---------- Helpers ----------------------------------------------------------
@@ -758,6 +775,103 @@ describe("APIKeysTabPanel — default context (#2129)", () => {
         screen.queryByLabelText("defaultContextLabel"),
       ).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("APIKeysTabPanel — create refusals through ApiError (#2384)", () => {
+  const CTX_PUB = "33333333-3333-4333-8333-333333333333";
+  const PLAN_MESSAGE = "Feature 'public_contexts' is not available on your plan";
+
+  /** An ApiError exactly as lib/api/base.ts builds it from this body. */
+  function refusal(
+    status: number,
+    error: string,
+    message: string,
+    details: Record<string, unknown>,
+  ): ApiError {
+    return new ApiError({
+      error,
+      message,
+      status,
+      details,
+      gate: normalizeGate(status, error, details),
+    });
+  }
+
+  const planRefusal = () =>
+    refusal(403, "FEAT-001", PLAN_MESSAGE, {
+      gate: "plan",
+      feature: "public_contexts",
+      required_plan: "pro",
+      required_plan_display: "L",
+      current_plan: "free",
+    });
+
+  /** Open the create dialog, bind to a public context and submit. */
+  async function submitBoundKey() {
+    seed(makeKey());
+    mockGetContexts.mockResolvedValue({
+      contexts: [
+        {
+          id: CTX_PUB,
+          name: "pub",
+          display_name: "Public",
+          is_public: true,
+          created_by: "user-1",
+        },
+      ],
+      total: 1,
+    });
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByText("createApiKey"));
+    await screen.findByText("createApiKeyTitle");
+    fireEvent.change(screen.getByLabelText("keyName"), {
+      target: { value: "pub" },
+    });
+    fireEvent.click(screen.getByLabelText("publicBindToggleLabel"));
+    const select = await screen.findByLabelText("publicBindContextLabel");
+    fireEvent.change(select, { target: { value: CTX_PUB } });
+    fireEvent.click(screen.getByText("createKey"));
+  }
+
+  it("renders a plan refusal as the gate notice with the upgrade prompt", async () => {
+    mockCreateAPIKey.mockRejectedValue(planRefusal());
+    await submitBoundKey();
+
+    const notice = await screen.findByRole("alert");
+    expect(within(notice).getByText("plan.title")).toBeInTheDocument();
+    const cta = within(notice).getByRole("button", { name: "plan.action" });
+    fireEvent.click(cta);
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+
+    // One channel: the server's prose is not shown beside the notice.
+    expect(screen.queryByText(PLAN_MESSAGE)).not.toBeInTheDocument();
+    // The dialog stays open and no key was listed.
+    expect(screen.getByText("createApiKeyTitle")).toBeInTheDocument();
+    expect(mockGetMemberCredentials).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the notice when the bind option is toggled off", async () => {
+    mockCreateAPIKey.mockRejectedValue(planRefusal());
+    await submitBoundKey();
+    await screen.findByRole("alert");
+
+    fireEvent.click(screen.getByLabelText("publicBindToggleLabel"));
+    await waitFor(() =>
+      expect(screen.queryByText("plan.title")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps the server's message for a role refusal (AUTH-101)", async () => {
+    const message = "You do not own this context";
+    mockCreateAPIKey.mockRejectedValue(
+      refusal(403, "AUTH-101", message, {}),
+    );
+    await submitBoundKey();
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText(/^role\./)).not.toBeInTheDocument();
   });
 });
 
