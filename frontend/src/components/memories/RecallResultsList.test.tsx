@@ -62,7 +62,7 @@ describe("RecallResultsList", () => {
     expect(
       within(item).getByText("Deploy target is region B"),
     ).toBeInTheDocument();
-    expect(within(item).getByText("score:0.81")).toBeInTheDocument();
+    expect(within(item).getByText("score:81")).toBeInTheDocument();
     expect(within(item).queryByText(/^folded:/)).not.toBeInTheDocument();
     expect(
       within(item).queryByRole("button", { name: /^openFolded:/ }),
@@ -107,6 +107,19 @@ describe("RecallResultsList", () => {
     fireEvent.click(second);
     expect(onOpen).toHaveBeenNthCalledWith(1, OLDER_1);
     expect(onOpen).toHaveBeenNthCalledWith(2, OLDER_2);
+  });
+
+  it("keeps the folded count when the id list is capped", () => {
+    render(
+      <RecallResultsList
+        results={[row({ folded: { count: 4, memory_ids: [] } })]}
+        loading={false}
+        query="deploy"
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("folded:4")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^openFolded:/ })).toBeNull();
   });
 
   it("marks a superseded row and opens the newer memory", () => {

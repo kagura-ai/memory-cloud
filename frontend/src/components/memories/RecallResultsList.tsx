@@ -64,8 +64,9 @@ export function RecallResultsList({
       aria-label={t("resultsLabel")}
     >
       {results.map((r) => {
-        const folded =
-          r.folded && r.folded.memory_ids.length > 0 ? r.folded : null;
+        // Gate on the count, not the ids: the backend may cap the id list
+        // later, and the count alone still leaves a trace.
+        const folded = r.folded && r.folded.count > 0 ? r.folded : null;
         const newer = r.superseded_by;
         return (
           <li
@@ -82,7 +83,9 @@ export function RecallResultsList({
                     </code>
                   )}
                   {typeof r.score === "number" && (
-                    <span>{t("score", { score: r.score.toFixed(2) })}</span>
+                    <span>
+                      {t("score", { score: Math.round(r.score * 100) })}
+                    </span>
                   )}
                   {newer && (
                     <>

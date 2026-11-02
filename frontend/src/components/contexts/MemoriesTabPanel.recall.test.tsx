@@ -214,6 +214,36 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the last rows again on Text -> Recall without a new recall", async () => {
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    fireEvent.click(screen.getByRole("button", { name: "modeText" }));
+    await screen.findByText("Listed row");
+    fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
+    expect(screen.getByText("Deploy target is region B")).toBeInTheDocument();
+    expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show the previous query's rows while a re-run is in flight", async () => {
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    mockRecallMemories.mockReturnValueOnce(new Promise(() => {}));
+    submitQuery("billing");
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Deploy target is region B")).toBeNull();
+    expect(screen.getByText("loading")).toBeInTheDocument();
+  });
+
+  it("does not refetch the list while recall mode is shown", async () => {
+    await enterRecallMode();
+    const listCalls = mockGetMemories.mock.calls.length;
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    expect(mockGetMemories.mock.calls.length).toBe(listCalls);
+  });
+
   it("shows an error banner when recall fails", async () => {
     mockRecallMemories.mockRejectedValueOnce(new Error("boom"));
     await enterRecallMode();

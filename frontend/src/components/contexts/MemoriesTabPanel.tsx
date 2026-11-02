@@ -27,7 +27,14 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { FileText, Search, SearchX } from "lucide-react";
@@ -246,6 +253,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   }, [debouncedQuery]);
 
   const fetchMemories = useCallback(async () => {
+    // #2132: recall mode never renders the list; switching back to text
+    // mode changes this callback's identity, so the effect below refetches.
+    if (searchMode !== "text") return;
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
@@ -272,18 +282,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [contextId, page, debouncedQuery, selectedTags, t]);
+  }, [contextId, page, debouncedQuery, selectedTags, t, searchMode]);
 
   useEffect(() => {
     fetchMemories();
   }, [fetchMemories]);
 
-  // The recall to show: null outside recall mode, so a tag change or a
-  // refresh in text mode never spends a recall; returning to recall mode
-  // re-runs the submitted query so its rows are current.
-  const effectiveRecall = useMemo(
+  // The submitted recall's full request. Its identity changes only when the
+  // query is (re)submitted or refreshed, or the switch, context or tags
+  // change — never on a mode switch, so flipping Text → Recall shows the
+  // last rows without spending another recall.
+  const recallParams = useMemo(
     () =>
-      recallRequest && searchMode === "recall"
+      recallRequest
         ? {
             query: recallRequest.query,
             k: RECALL_K,
@@ -297,11 +308,17 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
             },
           }
         : null,
-    [recallRequest, searchMode, includeSuperseded, contextId, selectedTags],
+    [recallRequest, includeSuperseded, contextId, selectedTags],
   );
+  const outcomeRequest = recallOutcome?.request;
 
+  // Runs only in recall mode and only when the rows shown do not answer
+  // the current request: a tag change or a refresh in text mode is picked
+  // up on return, and nothing runs before the first submit.
   useEffect(() => {
-    if (!effectiveRecall) return;
+    if (!recallParams || searchMode !== "recall") return;
+    if (outcomeRequest === recallParams) return;
+    const effectiveRecall = recallParams;
     // Cleanup flips this, so a slower earlier recall never overwrites the
     // rows of a later one.
     let alive = true;
@@ -329,13 +346,16 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     return () => {
       alive = false;
     };
-  }, [effectiveRecall, tRecall]);
+  }, [recallParams, searchMode, outcomeRequest, tRecall]);
 
   const recallLoading =
-    effectiveRecall !== null && recallOutcome?.request !== effectiveRecall;
+    recallParams !== null && outcomeRequest !== recallParams;
   const recallError = recallLoading ? null : (recallOutcome?.error ?? null);
-  // While a re-run is in flight the previous rows stay (aria-busy).
-  const recallResults = recallOutcome?.results ?? [];
+  // Rows of an earlier request are never shown under a new one: while a
+  // re-run is in flight the list shows its loading state instead.
+  const recallResults = recallLoading ? [] : (recallOutcome?.results ?? []);
+  const includeSupersededId = useId();
+  const includeSupersededHelpId = useId();
 
   const submitRecall = useCallback(() => {
     const trimmed = searchInput.trim();
@@ -475,17 +495,17 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           </p>
           <div className="flex items-start gap-3">
             <Switch
-              id="recall-include-superseded"
+              id={includeSupersededId}
               checked={includeSuperseded}
               onCheckedChange={setIncludeSuperseded}
-              aria-describedby="recall-include-superseded-help"
+              aria-describedby={includeSupersededHelpId}
             />
             <div className="space-y-0.5">
-              <Label htmlFor="recall-include-superseded">
+              <Label htmlFor={includeSupersededId}>
                 {tRecall("includeSuperseded")}
               </Label>
               <p
-                id="recall-include-superseded-help"
+                id={includeSupersededHelpId}
                 className="text-xs text-gray-500 dark:text-gray-400"
               >
                 {tRecall("includeSupersededHelp")}
@@ -528,7 +548,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           {/* Hide the count while a fetch is in flight so the chip row never
               shows a stale total (0 on first paint of a shared link, or the
               previous page's total during a refetch). */}
-          {!loading && (
+          {!loading && searchMode === "text" && (
             <span className="text-xs text-gray-400 dark:text-gray-500">
               {t("filter.filteringCount", { count: total })}
             </span>
@@ -539,7 +559,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         contextId={contextId}
         selectedTags={selectedTags}
         onTagClick={handleTagClick}
-        q={debouncedQuery}
+        // #2132: the text query narrows the cloud only in text mode; recall
+        // rows are not a substring match, so the cloud covers the context.
+        q={searchMode === "text" ? debouncedQuery : ""}
       />
       {/* a11y: announce facet changes — the cloud re-rendering is silent to AT. */}
       <div aria-live="polite" className="sr-only" role="status">
