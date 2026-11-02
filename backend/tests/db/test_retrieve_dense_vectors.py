@@ -53,6 +53,6 @@ async def test_a_failed_retrieve_is_a_qdrant_error(client):
 
 @pytest.mark.asyncio
 async def test_a_non_qdrant_store_is_not_supported(monkeypatch):
-    monkeypatch.setattr(qmod, "_active_store", lambda: object())
+    monkeypatch.setattr(qmod, "_active_store", object)
     with pytest.raises(NotImplementedError):
         await retrieve_dense_vectors("col", ["a"])
