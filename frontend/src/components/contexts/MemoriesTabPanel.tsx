@@ -312,40 +312,62 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   );
   const outcomeRequest = recallOutcome?.request;
 
+  // A recall's response is kept only if its request is still the current
+  // one when it lands, and the component is still mounted. The checks read
+  // refs instead of an effect cleanup, so a mode switch never drops an
+  // in-flight recall: switching Text -> Recall while one is pending waits
+  // for it instead of sending it again.
+  const latestRecallParamsRef = useRef(recallParams);
+  const inFlightRecallRef = useRef<object | null>(null);
+  const searchModeRef = useRef(searchMode);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    latestRecallParamsRef.current = recallParams;
+    searchModeRef.current = searchMode;
+  }, [recallParams, searchMode]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // Runs only in recall mode and only when the rows shown do not answer
   // the current request: a tag change or a refresh in text mode is picked
   // up on return, and nothing runs before the first submit.
   useEffect(() => {
     if (!recallParams || searchMode !== "recall") return;
     if (outcomeRequest === recallParams) return;
-    const effectiveRecall = recallParams;
-    // Cleanup flips this, so a slower earlier recall never overwrites the
-    // rows of a later one.
-    let alive = true;
-    recallMemories(effectiveRecall).then(
+    if (inFlightRecallRef.current === recallParams) return;
+    const request = recallParams;
+    inFlightRecallRef.current = request;
+    // An obsolete response (a later request superseded it) or one landing
+    // after unmount is dropped.
+    const current = () => {
+      if (inFlightRecallRef.current === request) {
+        inFlightRecallRef.current = null;
+      }
+      return mountedRef.current && latestRecallParamsRef.current === request;
+    };
+    recallMemories(request).then(
       (response) => {
-        if (!alive) return;
-        setRecallOutcome({
-          request: effectiveRecall,
-          results: response.results,
-          error: null,
-        });
-        setAnnouncement(
-          tRecall("resultsCount", { count: response.results.length }),
-        );
+        if (!current()) return;
+        setRecallOutcome({ request, results: response.results, error: null });
+        if (searchModeRef.current === "recall") {
+          setAnnouncement(
+            tRecall("resultsCount", { count: response.results.length }),
+          );
+        }
       },
       (err: unknown) => {
-        if (!alive) return;
+        if (!current()) return;
         setRecallOutcome({
-          request: effectiveRecall,
+          request,
           results: [],
           error: err instanceof Error ? err.message : tRecall("loadFailed"),
         });
       },
     );
-    return () => {
-      alive = false;
-    };
   }, [recallParams, searchMode, outcomeRequest, tRecall]);
 
   const recallLoading =

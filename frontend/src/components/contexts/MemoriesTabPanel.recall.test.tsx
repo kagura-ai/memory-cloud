@@ -9,7 +9,13 @@
  * ?memoryId= deep link.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoriesTabPanel } from "./MemoriesTabPanel";
@@ -84,6 +90,8 @@ function recallRow(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Reset, not just clear: an unconsumed mock*Once must not leak across tests.
+  mockRecallMemories.mockReset();
   mockSearchParams.current = new URLSearchParams();
   mockGetMemories.mockResolvedValue({
     memories: [
@@ -223,6 +231,55 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
     expect(screen.getByText("Deploy target is region B")).toBeInTheDocument();
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an in-flight recall across Text -> Recall and shows its response", async () => {
+    let resolve: (v: unknown) => void = () => {};
+    mockRecallMemories.mockReturnValueOnce(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    await enterRecallMode();
+    submitQuery("deploy");
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "modeText" }));
+    await screen.findByText("Listed row");
+    fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
+    expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolve({ results: [recallRow()] });
+    });
+    expect(
+      await screen.findByText("Deploy target is region B"),
+    ).toBeInTheDocument();
+    expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an obsolete response when the switch changed the request", async () => {
+    let resolveFirst: (v: unknown) => void = () => {};
+    mockRecallMemories
+      .mockReturnValueOnce(
+        new Promise((r) => {
+          resolveFirst = r;
+        }),
+      )
+      .mockResolvedValueOnce({
+        results: [recallRow({ memory_id: OLDER, summary: "Billing row" })],
+      });
+    await enterRecallMode();
+    submitQuery("deploy");
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("switch", { name: "includeSuperseded" }));
+    await screen.findByText("Billing row");
+    expect(mockRecallMemories).toHaveBeenLastCalledWith(
+      expect.objectContaining({ include_superseded: true }),
+    );
+    await act(async () => {
+      resolveFirst({ results: [recallRow()] });
+    });
+    expect(screen.getByText("Billing row")).toBeInTheDocument();
+    expect(screen.queryByText("Deploy target is region B")).toBeNull();
   });
 
   it("does not show the previous query's rows while a re-run is in flight", async () => {
