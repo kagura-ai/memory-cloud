@@ -13,8 +13,8 @@ runs the same detection for them, in process, from each row's stored vector
 
 Rows: embedded (``success``), live, not a resource row, no candidate (with
 ``--include-unverified`` also a candidate without a judge verdict), oldest
-first, at most ``--limit`` (200). ``--before`` (ISO-8601, UTC when no offset)
-only takes rows created before that instant.
+first, at most ``--limit`` (200). ``--before`` / ``--after`` (ISO-8601, UTC
+when no offset) only take rows created before / after that instant.
 
 Judge spend: with ``SUPERSEDE_VERIFY_MODE=llm`` each row may cost one judge
 call, counted on the same per-workspace daily cap as live ingest
@@ -27,8 +27,9 @@ advanced during the run (live ingest in the same workspace included), or
 the judge itself skips its call while the counter is unreachable).
 
 A row whose nearest neighbour is not near enough stays without a candidate
-and is planned again on the next run; narrow a repeated run with
-``--before`` / ``--limit``.
+and is planned again by a run over the same range: the report ends with a
+``resume`` line (``--after <created_at of the last row reached>``) to walk on
+past it.
 
 Exit codes: 0 ok · 1 error · 2 usage.
 """
@@ -38,7 +39,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -48,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from tasks.supersede_catch_up import SupersedeCatchUp, run_supersede_catch_up  # noqa: E402
+from utils.datetime import to_naive_utc, to_utc_iso  # noqa: E402
 
 
 def _print_plan(result: SupersedeCatchUp) -> None:
@@ -62,10 +64,13 @@ def _print_applied(result: SupersedeCatchUp) -> None:
     print(f"updated      {result.updated}")
     print(f"cleared      {result.cleared}")
     print(f"unchanged    {result.unchanged}")
+    print(f"failed       {result.failed}")
     print(f"no_vector    {result.no_vector}")
     print(f"skipped      {result.skipped}")
     print(f"judge_calls  {judge_calls}")
     print(f"stopped      {result.stopped or '-'}")
+    if result.last_created_at is not None:
+        print(f"resume       --after {to_utc_iso(result.last_created_at)}")
 
 
 def _changes(result: SupersedeCatchUp) -> int:
@@ -73,14 +78,11 @@ def _changes(result: SupersedeCatchUp) -> int:
 
 
 def _utc_instant(value: str) -> datetime:
-    """``--before``: ISO-8601; no offset means UTC. Returned as naive UTC."""
+    """``--before`` / ``--after``: ISO-8601; no offset means UTC. Returned as naive UTC."""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return to_naive_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"not an ISO-8601 time: {value!r}") from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-    return parsed
 
 
 def _positive(value: str) -> int:
@@ -105,6 +107,7 @@ async def _main(args: argparse.Namespace) -> int:
             include_unverified=args.include_unverified,
             limit=args.limit,
             max_judge_calls=args.max_judge_calls,
+            after=args.after,
         )
 
     return await run_plan_apply(
@@ -133,6 +136,12 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         type=_utc_instant,
         default=None,
         help="only rows created before this ISO-8601 instant (UTC when no offset)",
+    )
+    parser.add_argument(
+        "--after",
+        type=_utc_instant,
+        default=None,
+        help="only rows created after this ISO-8601 instant (the resume line of a run)",
     )
     parser.add_argument(
         "--include-unverified",

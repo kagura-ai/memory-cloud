@@ -1251,12 +1251,14 @@ re-queue) runs neither the detection nor the judge. `embedding_completed`
 carries `mechanical_reembed=true` for it, so judge spend during a backfill is
 counted with `supersede_verify_judged` / `llm_call_log` as before (#2092). Such
 a re-embed of a row that holds a live candidate still checks whether the pair
-is near: one neighbour query, and when no neighbour is within 0.02 of the
-threshold the candidate answers to (0.85, or `SUPERSEDE_SUGGEST_THRESHOLD_LLM`
-for a pair that carries a verdict), the candidate is cleared and
-`supersede_candidate_cleared_no_neighbour` is logged (#2256). An
-embedding-model switch therefore drops pairs the new embedder no longer
-scores as near-duplicates; it never re-judges or stores a pair.
+is near: the candidate's stored vector is read from the same collection, and
+when the pair scores more than 0.02 below the threshold the candidate answers
+to (0.85, or `SUPERSEDE_SUGGEST_THRESHOLD_LLM` for a pair that carries a
+verdict), the candidate is cleared and `supersede_candidate_cleared_no_neighbour`
+is logged (#2256). A candidate whose memory has no point in that collection
+yet (an embedding-model switch fills the new collection row by row) is left as
+it is. An embedding-model switch therefore drops pairs the new embedder no
+longer scores as near-duplicates; it never re-judges or stores a pair.
 
 **Supersede suggestions** (`services/memory_service.py`, `services/edge_service.py`)
 
@@ -1278,6 +1280,8 @@ scores as near-duplicates; it never re-judges or stores a pair.
 | `supersede_fold_failed` | WARNING | recall-side: the fold could not be computed, so the recall returned without folding |
 | `supersede_candidate_skipped_unjudged_low_similarity` | INFO | with the judge on, a neighbour between `SUPERSEDE_SUGGEST_THRESHOLD_LLM` and 0.85 got no `supersedes` / `parallel` verdict (no provider, the daily cap, a failure, or `unclear`), so nothing was stored (#2123). Many of these during an ingest usually mean the daily cap |
 | `supersede_candidate_skipped_newer_target` | INFO | the nearest neighbour was written after this memory (read from its point payload), so it was not stored as this memory's candidate: an older memory never points at a newer one (#2256) |
+| `supersede_clear_skipped_target_not_indexed` | DEBUG | a re-embed of unchanged text found no point for the candidate's memory in the collection it just wrote to (an embedding-model switch not finished yet), so the candidate was left as it is (#2256) |
+| `supersede_clear_check_failed` | WARNING | the candidate's vector could not be read during a re-embed of unchanged text, so the candidate was left as it is; the embed itself succeeded (#2256) |
 | `supersede_detect_skipped_mechanical_reembed` | DEBUG | the re-embed's summary and content are unchanged since the row's last successful embed (#2092), so no detection, judge or store ran; a live candidate is still cleared when its pair is no longer near (#2256) |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
@@ -1742,8 +1746,8 @@ python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the d
 
 - Rows: embedded, live, not resource rows, no candidate, oldest first, at
   most `--limit` (default 200). `--include-unverified` also re-checks rows
-  whose candidate has no judge verdict; `--before <ISO-8601>` (UTC when no
-  offset) takes only rows created before that instant.
+  whose candidate has no judge verdict; `--before` / `--after <ISO-8601>`
+  (UTC when no offset) take only rows created before / after that instant.
 - Judge spend: with the judge on, each row may cost one call, counted on the
   same per-workspace `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` as live ingest. The
   run stops once that counter advanced by `--max-judge-calls` (default 50,
@@ -1751,17 +1755,21 @@ python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the d
   headroom under the cap. Past the cap a pair at 0.85 or above is stored
   unverified and a pair below is skipped, as on ingest.
 - Report: `processed`, `detected` (a candidate appeared), `updated` (stored
-  again with a new target or verdict), `cleared`, `unchanged`, `no_vector`
-  (no stored vector for the row), `skipped` (the row changed after the plan),
+  again with a new target or verdict), `cleared`, `unchanged`, `failed` (the
+  detection failed on the row; see `knn_seeding_failed` in the log),
+  `no_vector` (no stored vector for the row), `skipped` (the row changed after
+  the plan),
   `judge_calls` (how far the workspace's judge counter advanced during the
   run, live ingest included; `unknown` when Redis could not be read, and the
   budget is then not enforced while the judge itself skips its calls) and
-  `stopped`. The INFO event `supersede_catch_up_completed` carries the same
-  tally.
+  `stopped`, then a `resume --after <instant>` line naming the creation time
+  of the last row reached. The INFO event `supersede_catch_up_completed`
+  carries the same tally.
 - A row whose nearest neighbour is not near enough stays without a candidate
-  and is planned again on the next run; narrow repeated runs with `--before`
-  and `--limit`. An older memory never takes a newer one as its candidate, so
-  of a near-duplicate pair only the newer row ends up with one.
+  and is planned again by a run over the same range (nothing records
+  "checked"); pass the `resume` line's `--after` to walk on through the
+  context. An older memory never takes a newer one as its candidate, so of a
+  near-duplicate pair only the newer row ends up with one.
 
 ## Orphaned vectors — Issue #1798
 

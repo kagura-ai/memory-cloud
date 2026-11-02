@@ -15,8 +15,9 @@ counter (the Redis key the daily cap counts on) is read before each row and
 the run stops once it has advanced that much. The pass shares the daily cap
 with live ingest; past the cap a pair at 0.85 or above is stored unverified
 and a pair below is skipped, as on ingest. A row whose nearest neighbour is
-not near enough stays without a candidate and is planned again on the next
-run (nothing records "checked"); narrow a repeated run with ``before``.
+not near enough stays without a candidate and is planned again by a run over
+the same range (nothing records "checked"); a run reports the creation time
+of the last row it reached, and ``after`` resumes past it.
 
 Run by hand (``python -m src.cli.supersede_catch_up``).
 """
@@ -33,6 +34,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -62,10 +64,13 @@ class SupersedeCatchUp:
     updated: int = 0  # a live candidate was stored again (new target or verdict)
     cleared: int = 0  # a live candidate was removed
     unchanged: int = 0
+    failed: int = 0  # the detection failed (logged as knn_seeding_failed)
     no_vector: int = 0  # no stored dense vector for the row's point
     skipped: int = 0  # the row changed after the plan (gone, re-queued, got a candidate)
     judge_calls: int | None = None
     stopped: str | None = None  # STOPPED_* or None
+    # ``created_at`` of the last row reached; pass it as ``after`` to resume.
+    last_created_at: datetime | None = None
 
 
 def _candidate_predicate(include_unverified: bool) -> Any:
@@ -88,7 +93,11 @@ def _candidate_predicate(include_unverified: bool) -> Any:
 
 
 def _row_filter(
-    context_id: UUID, *, before: datetime | None, include_unverified: bool
+    context_id: UUID,
+    *,
+    before: datetime | None,
+    include_unverified: bool,
+    after: datetime | None = None,
 ) -> list[Any]:
     clauses: list[Any] = [
         Memory.context_id == context_id,
@@ -100,6 +109,8 @@ def _row_filter(
     ]
     if before is not None:
         clauses.append(Memory.created_at < before)
+    if after is not None:
+        clauses.append(Memory.created_at > after)
     return clauses
 
 
@@ -109,21 +120,32 @@ def catch_up_rows_query(
     before: datetime | None,
     include_unverified: bool,
     limit: int,
-) -> Select[UUID, UUID | None]:
-    """The rows a run checks, oldest first: ``(id, summary_embedding_id)``.
+    after: datetime | None = None,
+) -> Select[UUID, UUID | None, datetime]:
+    """The rows a run checks, oldest first: ``(id, summary_embedding_id, created_at)``.
 
     Args:
         context_id: The context to walk.
         before: Only rows created before this naive-UTC instant.
         include_unverified: Also rows whose live candidate has no verdict.
         limit: At most this many rows.
+        after: Only rows created after this naive-UTC instant (resume).
     """
     return (
-        select(Memory.id, Memory.summary_embedding_id)
-        .where(*_row_filter(context_id, before=before, include_unverified=include_unverified))
+        select(Memory.id, Memory.summary_embedding_id, Memory.created_at)
+        .where(
+            *_row_filter(
+                context_id, before=before, include_unverified=include_unverified, after=after
+            )
+        )
         .order_by(Memory.created_at, Memory.id)
         .limit(limit)
     )
+
+
+def _verification(candidate: Any) -> Any:
+    """The stored verdict of a candidate (``None`` when it has none)."""
+    return candidate.get("verification") if isinstance(candidate, dict) else None
 
 
 async def _read_counter(key: str) -> int | None:
@@ -186,6 +208,7 @@ async def run_supersede_catch_up(
     include_unverified: bool = False,
     limit: int = 200,
     max_judge_calls: int = 50,
+    after: datetime | None = None,
 ) -> SupersedeCatchUp:
     """Run the post-embed supersede detection on rows that never had it.
 
@@ -200,6 +223,9 @@ async def run_supersede_catch_up(
         limit: At most this many rows.
         max_judge_calls: Stop once the workspace's judge counter advanced
             this much during the run.
+        after: Only rows created after this naive-UTC instant: the
+            ``last_created_at`` of an earlier run, to move past rows that
+            stay without a candidate.
 
     Returns:
         The tally.
@@ -220,14 +246,20 @@ async def run_supersede_catch_up(
     if workspace_id is None:
         raise ValueError(f"context {context_id} not found")
 
-    filters = _row_filter(context_id, before=before, include_unverified=include_unverified)
+    filters = _row_filter(
+        context_id, before=before, include_unverified=include_unverified, after=after
+    )
     eligible = int(
         (await db.execute(select(func.count()).select_from(Memory).where(*filters))).scalar_one()
     )
     rows = (
         await db.execute(
             catch_up_rows_query(
-                context_id, before=before, include_unverified=include_unverified, limit=limit
+                context_id,
+                before=before,
+                include_unverified=include_unverified,
+                limit=limit,
+                after=after,
             )
         )
     ).all()
@@ -277,6 +309,7 @@ async def run_supersede_catch_up(
                 elif used >= max_judge_calls:
                     result.stopped = STOPPED_JUDGE_BUDGET
                     break
+            result.last_created_at = row.created_at
             memory = (
                 await db.execute(
                     select(Memory)
@@ -293,7 +326,7 @@ async def run_supersede_catch_up(
                 continue
             seen = memory.supersede_candidate
             seen_target = _live_candidate_target(seen)
-            await _create_knn_seed_edges(
+            ok = await _create_knn_seed_edges(
                 db,
                 memory,
                 vector,
@@ -303,13 +336,18 @@ async def run_supersede_catch_up(
                 seed=False,
             )
             result.processed += 1
+            if not ok:
+                result.failed += 1
+                continue
             now = memory.supersede_candidate
             now_target = _live_candidate_target(now)
             if now_target is not None and seen_target is None:
                 result.detected += 1
             elif now_target is None and seen_target is not None:
                 result.cleared += 1
-            elif now_target is not None and now != seen:
+            elif now_target is not None and (
+                now_target != seen_target or _verification(now) != _verification(seen)
+            ):
                 result.updated += 1
             else:
                 result.unchanged += 1
@@ -333,9 +371,11 @@ async def run_supersede_catch_up(
         updated=result.updated,
         cleared=result.cleared,
         unchanged=result.unchanged,
+        failed=result.failed,
         no_vector=result.no_vector,
         skipped=result.skipped,
         judge_calls=result.judge_calls,
         stopped=result.stopped,
+        last_created_at=to_utc_iso(result.last_created_at),
     )
     return result

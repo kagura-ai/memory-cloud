@@ -164,7 +164,7 @@ async def test_the_pass_detects_on_the_newer_row_only(
     applied = await _pass(async_engine, scope, dry_run=False)
 
     assert (applied.processed, applied.detected, applied.unchanged) == (3, 1, 2)
-    assert (applied.cleared, applied.no_vector, applied.skipped) == (0, 0, 0)
+    assert (applied.cleared, applied.no_vector, applied.skipped, applied.failed) == (0, 0, 0, 0)
     assert applied.judge_calls == 0
     candidates = await _candidates(async_engine, scope)
     # B (newer) names A; A never names the newer B (D3); C has no near neighbour.
@@ -199,6 +199,12 @@ async def test_the_pass_detects_on_the_newer_row_only(
         before=scope["b"].created_at,
     )
     assert bounded.planned == 1
+    # The resume point walks on past the rows that stay without a candidate.
+    assert applied.last_created_at == scope["c"].created_at
+    resumed = await _pass(async_engine, scope, dry_run=True, after=applied.last_created_at)
+    assert resumed.eligible == 0
+    after_a = await _pass(async_engine, scope, dry_run=True, after=scope["a"].created_at)
+    assert after_a.planned == 1  # C (B has a candidate)
     # --limit caps the rows checked, not the eligible count.
     limited = await _pass(async_engine, scope, dry_run=True, include_unverified=True, limit=1)
     assert (limited.eligible, limited.planned) == (3, 1)

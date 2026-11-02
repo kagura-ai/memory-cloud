@@ -49,6 +49,7 @@ class TestCommand:
         assert call.kwargs["max_judge_calls"] == 50
         assert call.kwargs["include_unverified"] is False
         assert call.kwargs["before"] is None
+        assert call.kwargs["after"] is None
         out = capsys.readouterr().out
         assert "rows without a supersede check: 9" in out
         assert "rows this run checks: 3" in out
@@ -68,6 +69,7 @@ class TestCommand:
                     no_vector=1,
                     judge_calls=4,
                     stopped="judge_budget",
+                    last_created_at=datetime(2026, 10, 1, 8, 30),
                 ),
             ]
         )
@@ -85,6 +87,8 @@ class TestCommand:
             "no_vector    1",
             "judge_calls  4",
             "stopped      judge_budget",
+            "failed       0",
+            "resume       --after 2026-10-01T08:30:00Z",
         ):
             assert line in out
 
@@ -103,13 +107,22 @@ class TestCommand:
         assert _run(["--context", _CTX, "--apply", "--yes"], task) == 0
         assert task.await_count == 1
 
-    def test_include_unverified_and_before_are_passed(self):
+    def test_include_unverified_before_and_after_are_passed(self):
         task = AsyncMock(return_value=SupersedeCatchUp(dry_run=True))
-        argv = ["--context", _CTX, "--include-unverified", "--before", "2026-10-01T09:00:00+09:00"]
+        argv = [
+            "--context",
+            _CTX,
+            "--include-unverified",
+            "--before",
+            "2026-10-01T09:00:00+09:00",
+            "--after",
+            "2026-09-01T00:00:00Z",
+        ]
         assert _run(argv, task) == 0
         call = task.await_args_list[0]
         assert call.kwargs["include_unverified"] is True
         assert call.kwargs["before"] == datetime(2026, 10, 1, 0, 0)
+        assert call.kwargs["after"] == datetime(2026, 9, 1, 0, 0)
 
     def test_yes_without_apply_is_a_usage_error(self):
         task = AsyncMock()

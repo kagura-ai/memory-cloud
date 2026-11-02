@@ -58,6 +58,15 @@ class TestRowsQuery:
     def test_before_bounds_created_at(self) -> None:
         assert "memories.created_at < '2026-01-01 00:00:00'" in _sql(False, datetime(2026, 1, 1))
 
+    def test_after_resumes_past_created_at(self) -> None:
+        query = catch_up_rows_query(
+            uuid4(), before=None, include_unverified=False, limit=7, after=datetime(2026, 2, 1)
+        )
+        sql = str(
+            query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+        assert "memories.created_at > '2026-02-01 00:00:00'" in sql
+
 
 class _Db:
     """An AsyncSession double that answers the pass's statements by shape."""
@@ -79,7 +88,10 @@ class _Db:
             result.scalar_one.return_value = len(self.order) + 3
         elif "memories.summary_embedding_id" in sql and "memories.content" not in sql:
             result.all.return_value = [
-                SimpleNamespace(id=i, summary_embedding_id=None) for i in self.order
+                SimpleNamespace(
+                    id=i, summary_embedding_id=None, created_at=datetime(2026, 1, n + 1)
+                )
+                for n, i in enumerate(self.order)
             ]
         else:
             memory_id = statement.whereclause.clauses[0].right.value
@@ -130,9 +142,10 @@ async def _run(
 def _setting(values: dict[UUID, Any]) -> AsyncMock:
     """A detection stub that leaves ``values[memory.id]`` in the column."""
 
-    async def _detect(_db: Any, memory: Any, *_args: Any, **_kwargs: Any) -> None:
+    async def _detect(_db: Any, memory: Any, *_args: Any, **_kwargs: Any) -> bool:
         if memory.id in values:
             memory.supersede_candidate = values[memory.id]
+        return True
 
     return AsyncMock(side_effect=_detect)
 
@@ -182,6 +195,36 @@ class TestApply:
         assert result.processed == 4
         assert result.judge_calls == 0
         assert result.stopped is None
+        assert result.last_created_at == datetime(2026, 1, 4)
+
+    @pytest.mark.asyncio
+    async def test_a_restamped_candidate_with_the_same_target_and_verdict_is_unchanged(self):
+        """Storing the same pair again moves ``detected_at`` only."""
+        target = str(uuid4())
+        row = _memory({"memory_id": target, "similarity": 0.9, "detected_at": "a"})
+        db = _Db([row], uuid4())
+        detect = _setting({row.id: {"memory_id": target, "similarity": 0.9, "detected_at": "b"}})
+
+        result, *_ = await _run(db, detect=detect, include_unverified=True)
+
+        assert (result.updated, result.unchanged) == (0, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_detection_failure_is_counted_as_failed(self) -> None:
+        rows = [_memory(), _memory()]
+        db = _Db(rows, uuid4())
+
+        result, *_ = await _run(db, detect=AsyncMock(side_effect=[False, True]))
+
+        assert (result.processed, result.failed, result.unchanged) == (2, 1, 1)
+
+    @pytest.mark.asyncio
+    async def test_after_is_passed_to_the_row_filter(self) -> None:
+        db = _Db([_memory()], uuid4())
+
+        await _run(db, after=datetime(2026, 3, 1))
+
+        assert all("memories.created_at >" in sql for sql in db.statements[1:3])
 
     @pytest.mark.asyncio
     async def test_stops_once_the_judge_counter_advanced_by_the_budget(self) -> None:
@@ -196,6 +239,8 @@ class TestApply:
         assert result.processed == 2
         assert result.stopped == STOPPED_JUDGE_BUDGET
         assert result.judge_calls == 2
+        # Resume past the last row the detection ran on.
+        assert result.last_created_at == datetime(2026, 1, 2)
 
     @pytest.mark.asyncio
     async def test_reads_the_workspace_counter_key(self) -> None:
