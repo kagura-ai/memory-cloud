@@ -6342,6 +6342,10 @@ class MemoryService:
         Skipped entirely for a cross-context recall: the vocabulary read covers
         ONE context, so suggesting from the primary alone would describe a
         different search than the one the caller ran.
+
+        Reads ``request.filters``, not the widened filters, on purpose:
+        suggestions describe the tags the caller typed; the widened spellings
+        were already searched (#2257).
         """
         if responses or cross_context:
             return None
@@ -6756,6 +6760,8 @@ class MemoryService:
         # it waits for another one, and a failure there cannot undo or fail
         # the page it already has. They do delay the response (#1989
         # post_commit_ms).
+        # ``client`` is not a row filter; the tag widening never touches it,
+        # so the raw request.filters reading is the effective one (#2257).
         client = request.filters.get("client", "api") if request.filters else "api"
         with timings.stage("post_commit"):
             await self._recall_record_access(responses, memories, client=client)
