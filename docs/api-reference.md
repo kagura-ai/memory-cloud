@@ -354,6 +354,8 @@ Retrieve complete details (Layer 3) of a specific memory by ID.
 
 `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) is 1 when the memory is created and moves by one with each edit that changes `summary`, `context_summary`, `content`, `details`, `type`, `importance` or `tags`; `remember` and `recall` results carry it too. Pass it as `expected_version` to `PATCH` below.
 
+`supersede_candidate` ([#1403](https://github.com/kagura-ai/memory-cloud/issues/1403)), when the memory carries a live suggestion, adds `acceptance: {allowed, reason?}` here and on the `PATCH` reply below ([#2427](https://github.com/kagura-ai/memory-cloud/issues/2427)): whether you may accept it (write the `supersedes` edge). `reason` is present only when `allowed` is false: `not_writable` (you have no write access to the context), `not_owner` (one or both memories are not your own; a linked account counts only in a private context), `newer_candidate` (the candidate was written after this memory). `recall` rows do not carry it. The accept call stays authoritative.
+
 With `version` below the current one, the response is that earlier version, rebuilt from the memory's revision log: `historical: true`, `current_version` is the live version, `updated_at` is when that version was written (`created_at` for version 1), and `outgoing_links` / `incoming_links` / `supersede_candidate` come back empty because they describe the memory now. `unavailable_fields` names fields whose old value account erasure removed (they read `null`). A `version` above the current one is `422`; a forgotten memory is `404`, as for every read. [MCP Tools › `list_revisions`](mcp-tools.md#list_revisions-and-earlier-versions) explains what a rebuilt version contains.
 
 **Example (Python):**
