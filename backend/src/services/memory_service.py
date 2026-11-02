@@ -8503,20 +8503,32 @@ def _supersede_clear_floor(memory: Memory, detect_threshold: float) -> float:
     return detect_threshold
 
 
-def _mechanical_clear_floor(memory: Memory, detect_threshold: float) -> float:
+def _llm_similarity_floor(config: Any) -> float:
+    """``supersede_suggest_threshold_llm``, never above the unverified threshold."""
+    value = getattr(config, "supersede_suggest_threshold_llm", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    return min(float(value), _SUPERSEDE_SUGGEST_THRESHOLD)
+
+
+def _mechanical_clear_floor(candidate: Any, config: Any) -> float:
     """The clear floor for a mechanical re-embed of a row with a live candidate (#2256).
 
     The texts did not change, so a stored verdict still holds: a judged pair
-    answers to ``detect_threshold`` (the judge-mode threshold; the read path
-    shows a judged pair down to there). An unjudged pair answers to the
-    threshold it was admitted under (:func:`_supersede_clear_floor`). With
-    the judge off both are 0.85.
+    answers to the judge-mode similarity floor
+    (``supersede_suggest_threshold_llm``) whether or not new judge calls are
+    on — the read path keeps honouring stored verdicts after the judge is
+    switched off. An unjudged pair answers to the threshold it was admitted
+    under, as :func:`_supersede_clear_floor` says.
     """
     from services.supersede_verify import stored_verification
 
-    if stored_verification(memory.supersede_candidate) is not None:
-        return detect_threshold
-    return _supersede_clear_floor(memory, detect_threshold)
+    if stored_verification(candidate) is not None:
+        return _llm_similarity_floor(config)
+    similarity = candidate.get("similarity") if isinstance(candidate, dict) else None
+    if isinstance(similarity, (int, float)) and similarity >= _SUPERSEDE_SUGGEST_THRESHOLD:
+        return _SUPERSEDE_SUGGEST_THRESHOLD
+    return _supersede_detect_threshold(config)
 
 
 def _supersede_detect_threshold(config: Any) -> float:
@@ -8534,10 +8546,7 @@ def _supersede_detect_threshold(config: Any) -> float:
 
     if getattr(config, "supersede_verify_mode", None) != VERIFY_MODE_LLM:
         return _SUPERSEDE_SUGGEST_THRESHOLD
-    value = getattr(config, "supersede_suggest_threshold_llm", None)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return _SUPERSEDE_SUGGEST_THRESHOLD
-    return min(float(value), _SUPERSEDE_SUGGEST_THRESHOLD)
+    return _llm_similarity_floor(config)
 
 
 # #2006: (model_name, dimensions) pairs already warned about having no
@@ -8598,7 +8607,9 @@ def _live_candidate_target(stored: Any) -> str | None:
     return str(target) if target else None
 
 
-async def _clear_supersede_candidate_without_neighbour(db: AsyncSession, *, memory: Memory) -> None:
+async def _clear_supersede_candidate_without_neighbour(
+    db: AsyncSession, *, memory: Memory, expected: Any = None
+) -> None:
     """Clear a live suggestion the re-embed no longer supports (#2059).
 
     The column holds "the nearest neighbour scored at or above
@@ -8609,27 +8620,40 @@ async def _clear_supersede_candidate_without_neighbour(db: AsyncSession, *, memo
     would otherwise keep surfacing. A tombstone is never cleared: it is the
     caller's rejection (#1504) or ``remember(dedupe="off")``'s permanent
     opt-out, and must hold the next time the pair is a neighbour.
+
+    ``expected`` (#2256) is the candidate value the caller's decision was
+    about; by default the value ``memory`` holds now. Only that exact value
+    is cleared: a dismissal, an accept or another candidate committed since
+    (by the re-read below, or by the time of the write) is left alone.
     """
+    from sqlalchemy import cast as sql_cast
     from sqlalchemy import update
+    from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm.attributes import set_committed_value
 
-    if _live_candidate_target(memory.supersede_candidate) is None:
+    snapshot = memory.supersede_candidate if expected is None else expected
+    target_id = _live_candidate_target(snapshot)
+    if target_id is None:
         return
     if await _source_text_moved(db, memory):
         logger.info("supersede_candidate_skipped_source_edited", memory_id=str(memory.id))
         return
-    target_id = _live_candidate_target(memory.supersede_candidate)
-    if target_id is None:
-        return  # a dismissal or an accept committed meanwhile
-    # Conditional on the row still naming that target: a dismissal committed
-    # after the re-read above (a tombstone has no top-level memory_id) or a
-    # newer candidate must not be wiped. Not a user edit: updated_at stays
-    # (#1317), as for the detection write.
+    if memory.supersede_candidate != snapshot:
+        # A dismissal, an accept or another candidate committed meanwhile.
+        logger.info(
+            "supersede_candidate_skipped_row_changed",
+            memory_id=str(memory.id),
+            candidate_memory_id=target_id,
+        )
+        return
+    # A compare-and-set on the whole value the decision was about, as the
+    # detection write does (#2069): anything committed after the re-read
+    # above must not be wiped. Not a user edit: updated_at stays (#1317).
     result = await db.execute(
         update(Memory)
         .where(
             Memory.id == memory.id,
-            Memory.supersede_candidate["memory_id"].as_string() == target_id,
+            sql_cast(Memory.supersede_candidate, JSONB) == sql_cast(snapshot, JSONB),
         )
         .values(supersede_candidate=None)
         .execution_options(synchronize_session=False)
@@ -8676,7 +8700,8 @@ async def _clear_candidate_if_pair_moved(
     """
     from db.qdrant import retrieve_dense_vectors
 
-    target_id = _live_candidate_target(memory.supersede_candidate)
+    snapshot = memory.supersede_candidate
+    target_id = _live_candidate_target(snapshot)
     if target_id is None:
         return
     try:
@@ -8700,9 +8725,8 @@ async def _clear_candidate_if_pair_moved(
             candidate_memory_id=target_id,
         )
         return
-    floor = _mechanical_clear_floor(memory, _supersede_detect_threshold(config))
-    if similarity < floor - RESURFACE_SIMILARITY_DELTA:
-        await _clear_supersede_candidate_without_neighbour(db, memory=memory)
+    if similarity < _mechanical_clear_floor(snapshot, config) - RESURFACE_SIMILARITY_DELTA:
+        await _clear_supersede_candidate_without_neighbour(db, memory=memory, expected=snapshot)
 
 
 async def _supersede_write_preempted(
@@ -8924,14 +8948,15 @@ async def _detect_supersede_candidate(
         # candidate's pair scores no higher: the #2059 clear applies as when
         # no neighbour reaches the threshold (only from 0.85-stored
         # candidates with the judge on, since the hit reached the threshold).
-        inverted = _live_candidate_target(memory.supersede_candidate) == target_id_str
+        seen = memory.supersede_candidate
+        inverted = _live_candidate_target(seen) == target_id_str
         if inverted or (
             clear_allowed
             and raw_top_score
             < _supersede_clear_floor(memory, _supersede_detect_threshold(config))
             - RESURFACE_SIMILARITY_DELTA
         ):
-            await _clear_supersede_candidate_without_neighbour(db, memory=memory)
+            await _clear_supersede_candidate_without_neighbour(db, memory=memory, expected=seen)
         return
 
     # Don't resurrect an ACCEPTED suggestion. If a 'supersedes' edge from this

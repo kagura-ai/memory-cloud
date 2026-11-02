@@ -1837,6 +1837,57 @@ class TestSupersedeVerification:
         assert memory.supersede_candidate is None
 
     @pytest.mark.asyncio
+    async def test_an_inverted_candidate_replaced_meanwhile_is_not_cleared(self):
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        newer_id = str(uuid4())
+        memory.supersede_candidate = {"memory_id": newer_id, "similarity": 0.93}
+        replacement = {"memory_id": str(uuid4()), "similarity": 0.9}
+        db = _make_db()
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = replacement
+
+        db.refresh = AsyncMock(side_effect=refresh)
+        hits = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {
+                "id": newer_id,
+                "score": 0.93,
+                "payload": {"created_at": "2026-10-03T00:00:00Z"},
+                "embedding": [],
+            },
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(enabled=False)),
+            ),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=hits)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == replacement
+
+    @pytest.mark.asyncio
     async def test_an_older_neighbour_in_the_payload_is_stored(self):
         """The payload says the neighbour is older: detection goes on as before."""
         memory = _make_memory()
@@ -2063,8 +2114,14 @@ class TestSupersedeVerdictAfterAnEdit:
         db.execute.assert_awaited_once()
         sql, statement = self._update_sql(db)
         assert sql.startswith("UPDATE memories SET supersede_candidate=")
-        assert "supersede_candidate ->>" in sql
-        assert target in statement.compile().params.values()
+        # #2256: a compare-and-set on the whole value the decision was about.
+        assert "CAST(memories.supersede_candidate AS JSONB) = CAST(" in sql
+        snapshot = {
+            "memory_id": target,
+            "similarity": 0.93,
+            "verification": {"verdict": "supersedes", "confidence": 0.95},
+        }
+        assert snapshot in statement.compile().params.values()
         db.commit.assert_awaited()
         events = [c.args[0] for c in log.info.call_args_list if c.args]
         assert "supersede_candidate_cleared_no_neighbour" in events
@@ -3039,7 +3096,8 @@ class TestMechanicalReembed:
         statement = db.execute.await_args.args[0]
         sql = str(statement.compile(dialect=postgresql.dialect()))
         assert sql.startswith("UPDATE memories SET supersede_candidate=")
-        assert target in statement.compile().params.values()
+        assert "CAST(memories.supersede_candidate AS JSONB) = CAST(" in sql
+        assert {"memory_id": target, "similarity": 0.90} in statement.compile().params.values()
         events = [c.args[0] for c in run.log.info.call_args_list if c.args]
         assert "supersede_candidate_cleared_no_neighbour" in events
 
@@ -3105,6 +3163,53 @@ class TestMechanicalReembed:
         assert memory.supersede_candidate == stored
         run.search.assert_awaited_once()
         repo.create_edge_if_absent.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_replaced_after_the_measurement_is_not_cleared(self):
+        """The pair measured is A; a concurrent detection stored B before the
+        clear re-read the row. B was never measured, so nothing is written."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.90}
+        replacement = {"memory_id": str(uuid4()), "similarity": 0.91}
+        memory = self._orm_memory(stored)
+        db = _make_db()
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = replacement
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        run = await self._invoke(
+            memory,
+            db,
+            self._hits(memory),
+            config=_make_config(enabled=False),
+            vector=self._OWN,
+            stored_vectors={stored["memory_id"]: self._at(0.5)},
+        )
+
+        run.retrieve.assert_awaited_once()
+        db.execute.assert_not_awaited()
+        assert memory.supersede_candidate == replacement
+        events = [c.args[0] for c in run.log.info.call_args_list if c.args]
+        assert "supersede_candidate_skipped_row_changed" in events
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+
+    @pytest.mark.asyncio
+    async def test_a_judged_pair_keeps_the_llm_floor_with_the_judge_off(self):
+        """Stored verdicts are honoured after SUPERSEDE_VERIFY_MODE is switched
+        off, so a judged pair still answers to supersede_suggest_threshold_llm."""
+        stored = {
+            "memory_id": str(uuid4()),
+            "similarity": 0.80,
+            "verification": {"verdict": "supersedes", "confidence": 0.9, "verified": True},
+        }
+
+        memory, db, _ = await self._clear(
+            stored, 0.78, config=_make_config(enabled=False, verify_mode="off", llm_threshold=0.75)
+        )
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_mechanical_reembed_keeps_a_candidate_hovering_at_the_floor(self):
