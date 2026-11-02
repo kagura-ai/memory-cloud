@@ -375,7 +375,7 @@ class TestRecoverIntoTheContextsWorkspace:
 
     @pytest.mark.asyncio
     async def test_a_rebuilt_row_starts_with_no_digest_and_no_candidate(self, db_session):
-        """#2256 D4: the rebuilt row detects once, at its first pipeline run."""
+        """#2256 D4: the rebuilt row's next pipeline run detects (not mechanical)."""
         from sqlalchemy import select
 
         from models.memory import Memory
