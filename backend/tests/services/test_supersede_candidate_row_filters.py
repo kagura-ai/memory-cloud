@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql import operators
 
 from models.memory import SOURCE_TYPE_MANUAL
 from models.schemas import RecallRequest, SupersedeCandidate
@@ -89,6 +90,20 @@ def _where(service: MemoryService) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
 
 
+def _where_parts(service: MemoryService) -> tuple[list[str], list[str]]:
+    """The target query's top-level AND terms, split into OR groups and the rest."""
+    statement = service.db.execute.await_args.args[0]
+    clause = statement.whereclause
+    terms = (
+        list(clause.clauses) if getattr(clause, "operator", None) is operators.and_ else [clause]
+    )
+    ors, plain = [], []
+    for term in terms:
+        compiled = str(term.compile(dialect=postgresql.dialect()))
+        (ors if getattr(term, "operator", None) is operators.or_ else plain).append(compiled)
+    return ors, plain
+
+
 @pytest.mark.asyncio
 class TestResolver:
     async def test_resolver_adds_the_row_predicates_to_the_target_query(self):
@@ -138,6 +153,80 @@ class TestResolver:
 
         assert resolved == {}
         service.db.execute.assert_awaited_once()
+
+    async def test_a_target_in_the_pool_is_exempt_from_the_row_predicates(self):
+        # #2257 item 6: a pool node matched the recall's filters in the search;
+        # a stale vector payload must not unlink it, so the precision
+        # predicates hold only the targets outside the pool.
+        target_id = uuid.uuid4()
+        source = _source(target_id)
+        service = _service([_target(target_id)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {source.id: source},
+            user_id="u",
+            operation="recall",
+            filters={"source_uri_prefix": "docs/"},
+            pool_ids={source.id, target_id},
+        )
+
+        ors, plain = _where_parts(service)
+        assert len(ors) == 1
+        assert "memories.id IN" in ors[0]
+        assert "memories.source_uri LIKE" in ors[0]
+        assert any("memories.deleted_at IS NULL" in term for term in plain)
+        assert not any("deleted_at" in group for group in ors)
+        assert resolved[source.id].memory_id == target_id
+
+    async def test_a_target_outside_the_pool_is_held_to_the_row_predicates(self):
+        target_id = uuid.uuid4()
+        source = _source(target_id)
+        service = _service([_target(target_id)])
+
+        await service._resolve_supersede_candidates(
+            {source.id: source},
+            user_id="u",
+            operation="recall",
+            filters={"source_uri_prefix": "docs/"},
+            pool_ids={source.id, uuid.uuid4()},
+        )
+
+        ors, plain = _where_parts(service)
+        assert ors == []
+        assert any("memories.source_uri LIKE" in term for term in plain)
+
+    async def test_the_pool_exemption_never_covers_the_trust_predicate(self):
+        target_id = uuid.uuid4()
+        source = _source(target_id)
+        service = _service([_target(target_id)])
+
+        await service._resolve_supersede_candidates(
+            {source.id: source},
+            user_id="u",
+            operation="recall",
+            filters={"trust_tier": "trusted", "type": "note"},
+            pool_ids={target_id},
+        )
+
+        ors, plain = _where_parts(service)
+        assert len(ors) == 1
+        assert "memories.type IN" in ors[0]
+        assert "trust_tier" not in ors[0]
+        assert "source_type" not in ors[0]
+        assert any("contexts.trust_tier" in term for term in plain)
+        assert any("memories.source_type !=" in term for term in plain)
+
+    async def test_pool_ids_without_filters_add_nothing(self):
+        target_id = uuid.uuid4()
+        source = _source(target_id)
+        service = _service([_target(target_id)])
+
+        await service._resolve_supersede_candidates(
+            {source.id: source}, user_id="u", operation="recall", pool_ids={target_id}
+        )
+
+        ors, _plain = _where_parts(service)
+        assert ors == []
 
 
 @pytest.mark.asyncio
@@ -194,11 +283,55 @@ class TestThreading:
             {"n": newer, "o": older},
             include_superseded=False,
             user_id="u",
-            trusted_only=False,
             filters=filters,
         )
 
         assert service._resolve_supersede_candidates.await_args.kwargs["filters"] == filters
+
+    async def test_fold_exempts_its_pool_rows_and_bridges(self):
+        # #2257: the fold's pool ids are its nodes — hydrated pool rows and the
+        # shadowed bridges (hydrated hits too) — never a raw search id.
+        older = _source(uuid.uuid4(), age_days=1)
+        newer = _source(older.id, judged=True)
+        bridge = _source(uuid.uuid4(), age_days=2)
+        service = MemoryService(MagicMock())
+        service._resolve_supersede_candidates = AsyncMock(return_value={})
+
+        await service._apply_supersede_fold(
+            [{"id": "n", "score": 0.9}, {"id": "o", "score": 0.8}, {"id": "gone", "score": 0.7}],
+            {"n": newer, "o": older, "b": bridge},
+            include_superseded=False,
+            user_id="u",
+            shadow_map={bridge.id: newer.id},
+            filters={"type": "note"},
+        )
+
+        kwargs = service._resolve_supersede_candidates.await_args.kwargs
+        assert set(kwargs["pool_ids"]) == {newer.id, older.id, bridge.id}
+        assert "trusted_only" not in kwargs
+
+    async def test_page_exempts_the_hydrated_map_only(self):
+        # The page's pool is the hydrated, binding-filtered map recall hands
+        # it: a search hit with no row there (denied, deleted) is not exempt.
+        source = _source(uuid.uuid4())
+        folded = _source(uuid.uuid4(), age_days=1)
+        service = MemoryService(MagicMock())
+        service._resolve_supersede_candidates = AsyncMock(return_value={})
+        memories = {"p1": source, str(source.id): source, "p2": folded}
+
+        await service._recall_build_responses(
+            RecallRequest(query="q", k=1, filters={"type": "note"}),
+            [{"id": "p1", "score": 0.9}, {"id": "denied", "score": 0.8}],
+            memories,
+            shadow_map={},
+            contradiction_map={},
+            user_id="u",
+            filters={"type": "note"},
+        )
+
+        kwargs = service._resolve_supersede_candidates.await_args.kwargs
+        assert set(kwargs["pool_ids"]) == {source.id, folded.id}
+        assert "trusted_only" not in kwargs
 
     async def test_fold_and_page_resolve_with_the_same_filters(self):
         # A judged head whose target is off-filter (outside the pool) and a
@@ -222,7 +355,6 @@ class TestThreading:
             memories,
             include_superseded=False,
             user_id="u",
-            trusted_only=False,
             resolved=resolved,
             filters=filters,
         )

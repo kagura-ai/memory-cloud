@@ -16,7 +16,11 @@ from sqlalchemy import cast
 from sqlalchemy.dialects import postgresql
 
 from models.memory import Memory
-from services.memory_listing import compile_memory_filters, recall_row_predicates
+from services.memory_listing import (
+    compile_memory_filters,
+    recall_row_predicates,
+    recall_trust_predicates,
+)
 from utils.tag_normalize import TAG_GROUPS_FILTER_KEY, tag_filter_groups, tag_filter_groups_any
 
 
@@ -155,6 +159,30 @@ class TestWidenedTags:
     def test_an_unknown_tags_match_is_ignored(self):
         # recall's builder refuses it, so the recall never reaches the page.
         assert recall_row_predicates({"tags": ["a"], "tags_match": "some"}) == []
+
+
+class TestTrust:
+    """#2257: the resolver's trust rule, kept apart from the precision projection."""
+
+    def test_trusted_is_the_listing_trusted_predicate(self):
+        _same(
+            recall_trust_predicates({"trust_tier": "trusted"}),
+            compile_memory_filters({"trust_tier": "trusted"}),
+        )
+
+    @pytest.mark.parametrize(
+        "filters",
+        [None, {}, {"trust_tier": "external"}, {"trust_tier": None}, {"type": "note"}],
+    )
+    def test_anything_but_trusted_is_no_predicate(self, filters):
+        assert recall_trust_predicates(filters) == []
+
+    def test_trust_reads_only_trust_tier(self):
+        # The precision filters are recall_row_predicates' job, never this one's.
+        _same(
+            recall_trust_predicates({"trust_tier": "trusted", "type": "note", "tags": ["a"]}),
+            compile_memory_filters({"trust_tier": "trusted"}),
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,12 +1,16 @@
-"""Supersede suggestions honour the trusted filter (#2013 review).
+"""Supersede suggestions honour the trusted filter (#2013 review, #2257).
 
 Under ``filters={"trust_tier": "trusted"}`` recall drops connector-sourced
 rows (#887), but ``supersede_candidate`` names another memory and carries its
 summary. A connector-sourced target in a trusted context would reach the reply
 through the suggestion. get_agent_bootstrap always recalls under the trusted
 filter and, since #2013, serves recall's full rows — so the suggestion is a
-way into the bootstrap reply too. The resolver drops such a target when the
-recall is trusted-only.
+way into the bootstrap reply too. Since #2257 the resolver holds the target to
+the trusted filter inside its one target query
+(``memory_listing.recall_trust_predicates``, read from the recall's
+``filters``), so these cases assert the compiled statement; the behaviour on
+real rows is pinned by
+``tests/integration/test_2027_supersede_hint_row_filters_db.py`` (trust_tier).
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from models.memory import SOURCE_TYPE_CONNECTOR, SOURCE_TYPE_MANUAL
 from models.schemas import RecallRequest, RecallResponse
@@ -26,10 +31,12 @@ from services.agent_bootstrap_service import (
     BootstrapPrincipal,
 )
 from services.memory_service import MemoryService
-from utils.recall_projection import recall_result_item
 
 WS = uuid.uuid4()
 CTX = uuid.uuid4()
+
+TRUST_CONTEXT = "contexts.trust_tier"
+NOT_CONNECTOR = "memories.source_type !="
 
 
 def _source(target_id: uuid.UUID) -> SimpleNamespace:
@@ -84,18 +91,30 @@ def _service(target: SimpleNamespace) -> MemoryService:
     return service
 
 
-async def _page(request: RecallRequest, source_type: str):
+def _where(service: MemoryService) -> str:
+    statement = service.db.execute.await_args.args[0]
+    return str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+
+
+async def _page_sql(request: RecallRequest) -> str:
+    """The resolver's target query for a one-row page, as ``recall()`` runs it."""
     target_id = uuid.uuid4()
     source = _source(target_id)
-    service = _service(_target(target_id, source_type))
-    return await service._recall_build_responses(
+    service = _service(_target(target_id, SOURCE_TYPE_CONNECTOR))
+    await service._recall_build_responses(
         request,
         [{"id": "p1", "score": 0.9}],
         {"p1": source},
         shadow_map={},
         contradiction_map={},
         user_id="u",
+        # recall() hands the page its (widened) filters; trust_tier is
+        # never widened, so request.filters carries the same reading.
+        filters=request.filters,
     )
+    return _where(service)
 
 
 TRUSTED = {"trust_tier": "trusted"}
@@ -103,59 +122,68 @@ TRUSTED = {"trust_tier": "trusted"}
 
 @pytest.mark.asyncio
 class TestResolver:
-    async def test_trusted_only_drops_a_connector_sourced_target(self):
+    async def test_a_trusted_read_holds_the_target_to_the_trusted_filter(self):
         target_id = uuid.uuid4()
         source = _source(target_id)
         service = _service(_target(target_id, SOURCE_TYPE_CONNECTOR))
 
-        resolved = await service._resolve_supersede_candidates(
-            {source.id: source}, user_id="u", operation="recall", trusted_only=True
+        await service._resolve_supersede_candidates(
+            {source.id: source}, user_id="u", operation="recall", filters=TRUSTED
         )
 
-        assert resolved == {}
+        sql = _where(service)
+        assert TRUST_CONTEXT in sql
+        assert f"{NOT_CONNECTOR} '{SOURCE_TYPE_CONNECTOR}'" in sql
 
-    async def test_trusted_only_keeps_a_manual_target(self):
+    async def test_a_manual_target_the_query_returns_is_kept(self):
+        # The trust rule lives in SQL only: a row the query returns is not
+        # dropped again in Python.
         target_id = uuid.uuid4()
         source = _source(target_id)
         service = _service(_target(target_id, SOURCE_TYPE_MANUAL))
 
         resolved = await service._resolve_supersede_candidates(
-            {source.id: source}, user_id="u", operation="recall", trusted_only=True
+            {source.id: source}, user_id="u", operation="recall", filters=TRUSTED
         )
 
         assert resolved[source.id].memory_id == target_id
 
-    async def test_an_unfiltered_read_keeps_a_connector_target(self):
+    @pytest.mark.parametrize("filters", [None, {}, {"trust_tier": "all"}, {"type": "note"}])
+    async def test_an_untrusted_read_adds_no_trust_predicate(self, filters):
         target_id = uuid.uuid4()
         source = _source(target_id)
         service = _service(_target(target_id, SOURCE_TYPE_CONNECTOR))
 
         resolved = await service._resolve_supersede_candidates(
-            {source.id: source}, user_id="u", operation="recall"
+            {source.id: source}, user_id="u", operation="recall", filters=filters
         )
 
+        sql = _where(service)
+        assert TRUST_CONTEXT not in sql
+        assert NOT_CONNECTOR not in sql
         assert resolved[source.id].memory_id == target_id
 
 
 @pytest.mark.asyncio
 class TestRecallPage:
-    async def test_a_trusted_recall_carries_no_connector_suggestion(self):
-        page = await _page(RecallRequest(query="q", k=5, filters=TRUSTED), SOURCE_TYPE_CONNECTOR)
+    async def test_a_trusted_recall_page_holds_its_targets_to_the_trusted_filter(self):
+        sql = await _page_sql(RecallRequest(query="q", k=5, filters=TRUSTED))
 
-        assert page[0].supersede_candidate is None
-        assert "supersede_candidate" not in recall_result_item(page[0], "full")
+        assert TRUST_CONTEXT in sql
+        assert f"{NOT_CONNECTOR} '{SOURCE_TYPE_CONNECTOR}'" in sql
 
-    async def test_an_unfiltered_recall_still_carries_it(self):
-        page = await _page(RecallRequest(query="q", k=5), SOURCE_TYPE_CONNECTOR)
+    async def test_an_unfiltered_recall_page_does_not(self):
+        sql = await _page_sql(RecallRequest(query="q", k=5))
 
-        assert page[0].supersede_candidate is not None
+        assert TRUST_CONTEXT not in sql
+        assert NOT_CONNECTOR not in sql
 
 
 @pytest.mark.asyncio
 class TestBootstrapRecall:
-    async def test_the_bootstrap_recall_request_drops_a_connector_suggestion(self):
+    async def test_the_bootstrap_recall_request_holds_targets_to_the_trusted_filter(self):
         # The request bootstrap hands MemoryService.recall, fed to the page
-        # builder that recall runs: no connector summary reaches the row.
+        # builder that recall runs: the target query excludes connector rows.
         recall = AsyncMock(return_value=RecallResponse(results=[]))
         with patch("services.memory_service.MemoryService") as ms_cls:
             ms_cls.return_value.recall = recall
@@ -166,15 +194,16 @@ class TestBootstrapRecall:
             )
         request = recall.await_args.args[0]
 
-        page = await _page(request, SOURCE_TYPE_CONNECTOR)
+        sql = await _page_sql(request)
 
-        assert page[0].supersede_candidate is None
-        assert "supersede_candidate" not in recall_result_item(page[0], "full")
+        assert TRUST_CONTEXT in sql
+        assert f"{NOT_CONNECTOR} '{SOURCE_TYPE_CONNECTOR}'" in sql
 
 
 class TestIsTrustedRecall:
-    """One predicate for the trusted filter — the row filter, the supersede
-    resolver and the selection-evidence guard read it the same way."""
+    """One reading of the trusted filter — the row filter and the
+    selection-evidence guard ask here; the supersede resolver's SQL twin reads
+    the same key the same way."""
 
     @pytest.mark.parametrize(
         ("filters", "expected"),
@@ -191,3 +220,21 @@ class TestIsTrustedRecall:
         from services.memory_service import _is_trusted_recall
 
         assert _is_trusted_recall(RecallRequest(query="q", filters=filters)) is expected
+
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            None,
+            {},
+            {"trust_tier": "all"},
+            {"trust_tier": "trusted"},
+            {"trust_tier": "trusted", "type": "note"},
+        ],
+    )
+    def test_the_resolvers_sql_twin_agrees(self, filters):
+        # #2257: the resolver reads trust from the same filters dict.
+        from services.memory_listing import recall_trust_predicates
+        from services.memory_service import _is_trusted_recall
+
+        trusted = _is_trusted_recall(RecallRequest(query="q", filters=filters))
+        assert bool(recall_trust_predicates(filters)) is trusted
