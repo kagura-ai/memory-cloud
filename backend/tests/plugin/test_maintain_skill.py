@@ -83,6 +83,17 @@ def _codex_step_5() -> str:
     return section.split("\n5. Keep touched memories current", 1)[1].split("\n6. ", 1)[0]
 
 
+def _codex_backlog() -> str:
+    """The Codex "Lightweight backlog" section: the memo pattern (#2586)."""
+    body = _codex().split("\n## Lightweight backlog\n", 1)[1]
+    return body.split("\n<!-- SYNC:", 1)[0].split("\n## ", 1)[0]
+
+
+def _guide_backlog() -> str:
+    text = (REPO_ROOT / "claude-skills" / "guide.md").read_text(encoding="utf-8")
+    return text.split("**Lightweight backlog", 1)[1].split("\n### ", 1)[0]
+
+
 def tools_max_upcoming() -> int:
     """The largest ``k`` the registry documents for ``recall_upcoming``."""
     description = _tools()["recall_upcoming"]["properties"]["k"]["description"]
@@ -347,8 +358,8 @@ def test_every_tool_of_the_sweep_is_spelled_out(text) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    [_maintain, _codex_section, _step_4c, _codex_step_5],
-    ids=["claude", "codex", "claude-4c", "codex-step-5"],
+    [_maintain, _codex_section, _step_4c, _codex_step_5, _codex_backlog, _guide_backlog],
+    ids=["claude", "codex", "claude-4c", "codex-step-5", "codex-backlog", "guide-backlog"],
 )
 def test_every_call_is_a_registered_tool_with_its_required_parameters(text) -> None:
     tools = _tools()
@@ -437,3 +448,64 @@ def test_session_summary_and_codex_start_point_to_the_skill() -> None:
     assert "/kagura-memory:maintain" in SESSION_SUMMARY.read_text(encoding="utf-8")
     start = _codex().split("\n## Start Session\n", 1)[1].split("\n## ", 1)[0]
     assert '"Maintain"' in start
+
+
+# ---------------------------------------------------------------------------
+# Open memos: the lightweight backlog (#2586)
+# ---------------------------------------------------------------------------
+
+OPEN_MEMOS_LIST = (
+    'list(context_id=..., filters={"type": ["tech-debt", "needs-decision"], '
+    '"tags": ["status:open"], "trust_tier": "trusted"}, order_by="created_at", '
+    'direction="asc", limit=20)'
+)
+CLOSE_MEMO = (
+    'update_memory(memory_id=..., context_id=..., remove_tags=["status:open"], '
+    'add_tags=["status:done"])'
+)
+
+
+@pytest.mark.parametrize("text", [_maintain, _codex_backlog], ids=["claude", "codex"])
+def test_open_memos_are_listed_oldest_first_with_age_and_files(text) -> None:
+    """The planning view: every open memo, oldest first, with its age and files."""
+    flat = _flat(text())
+    assert OPEN_MEMOS_LIST in flat
+    assert "`created_at`" in flat and "`file:` tags" in flat
+    # The memo stays out of archival while it is open, and a read counts as use.
+    assert re.search(r"never archives a memo[^.]*`status:open`", flat)
+    assert "counts as adoption" in flat
+
+
+@pytest.mark.parametrize("text", [_maintain, _codex_backlog], ids=["claude", "codex"])
+def test_a_memo_is_closed_or_promoted_by_one_tag_flip(text) -> None:
+    flat = _flat(text())
+    assert CLOSE_MEMO in flat
+    assert '"status:promoted", "issue:#<N>"' in flat
+
+
+def test_the_codex_maintain_section_points_to_the_backlog_section() -> None:
+    """The Maintain section is at its cap; the memo calls live in their own section."""
+    section = _codex_section()
+    assert section.count('"Lightweight backlog"') == 2  # the read and the close
+    text = _codex()
+    start = text.index("\n## Lightweight backlog\n")
+    assert text.index("\n## Maintain\n") < start < text.index("\n## Tool guardrails (hooks)\n")
+    sync = text[: start + 1].rstrip().splitlines()[-1]
+    assert sync.startswith("<!-- SYNC:") and "claude-skills/maintain.md" in sync
+    assert "claude-skills/session-summary.md" in sync and "claude-skills/guide.md" in sync
+
+
+def test_the_guide_describes_the_backlog() -> None:
+    flat = _flat(_guide_backlog())
+    for needle in (
+        '`type="tech-debt"` (importance 0.45)',
+        '`type="needs-decision"` (0.5)',
+        "`status:open`",
+        "`file:<repo path>`",
+        "/kagura-memory:session-summary",
+        "/kagura-memory:maintain",
+        CLOSE_MEMO,
+    ):
+        assert needle in flat, needle
+    # A server without the partial tag edits still closes a memo.
+    assert "`tags=[...]`" in flat
