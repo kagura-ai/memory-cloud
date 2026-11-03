@@ -471,6 +471,48 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
 
 
 @pytest.mark.asyncio
+async def test_unfinished_erasures_and_scopes_are_counted_and_left_alone(
+    db_session: AsyncSession, subject: dict[str, Any], stores: None
+) -> None:
+    """A request still in progress after its Postgres step (its row stores the
+    account id) and a vector-erasure scope not drained have to finish under
+    the salt they started with, before a rotation: the plan counts both, the
+    stamp's plan too, and the re-key leaves the request row as it is."""
+    sub = subject["sub"]
+    request_id = await _erase(db_session, subject, sub)
+    # a run that died after its Postgres commit, before the drain and the close
+    await db_session.execute(
+        update(ErasureRequest)
+        .where(ErasureRequest.id == request_id)
+        .values(status="in_progress", user_id=sub, initiated_by=sub, completed_at=None)
+    )
+    await db_session.execute(
+        update(VectorErasureJob)
+        .where(VectorErasureJob.request_id == request_id)
+        .values(completed_at=None)
+    )
+    await db_session.commit()
+    vectors = _Vectors({})
+
+    stamp = await _rekey(db_session, vectors, dry_run=True, stamp_current=True)
+    plan = await _rekey(db_session, vectors, dry_run=True)
+    applied = await _rekey(db_session, vectors, dry_run=False)
+
+    assert plan.in_progress >= 1 and plan.scopes_pending >= 1
+    for result in (stamp, applied):
+        assert (result.in_progress, result.scopes_pending) == (
+            plan.in_progress,
+            plan.scopes_pending,
+        )
+    row = await _request(db_session, request_id)
+    assert (row.status, row.user_id) == ("in_progress", sub)
+    # the fingerprint the erasure wrote under A: neither re-keyed nor re-stamped
+    assert row.deleted_data_summary[NOTE_PSEUDONYM_SALT_KEY] == pseudonym_salt_fingerprint(
+        _audit_salt()
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_failed_payload_patch_is_patched_again_by_the_next_apply(
     db_session: AsyncSession, subject: dict[str, Any], stores: None
 ) -> None:

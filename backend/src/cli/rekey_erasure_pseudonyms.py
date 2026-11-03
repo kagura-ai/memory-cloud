@@ -79,6 +79,13 @@ Limits (counts only, never a value):
 - Run it while no erasure, re-run (``reprocess_erasures``,
   ``cleanup_erased_vectors``) or sweep runs: they derive pseudonyms with the
   salt of their own process.
+- Two things have to finish under the salt they started with, before the
+  rotation, and are counted: a request still ``in_progress`` after its
+  Postgres step (the subject's rows carry the pseudonym, the request row the
+  account id: closed after the rotation, it gets the new salt's pseudonym and
+  the rows keep the old one), and a vector-erasure scope not drained yet
+  (after the rotation it no longer matches a point that still carries the
+  account id).
 
 After the re-key, a pseudonym derived from an account id under the new salt
 does not equal the stored one, by design: the code that derives one and
@@ -149,6 +156,7 @@ from models.config import ConfigOverride  # noqa: E402
 from models.erasure import (  # noqa: E402
     NOTE_PSEUDONYM_REKEY_PAYLOADS_KEY,
     NOTE_PSEUDONYM_SALT_KEY,
+    STATUS_IN_PROGRESS,
     ErasureRequest,
 )
 from models.file_objects import FileObject  # noqa: E402
@@ -187,6 +195,7 @@ from services.erasure_details import (  # noqa: E402
     legacy_note_row,
     merged_request_summary,
     pseudonym_salt_fingerprint,
+    ran_in_postgres,
     stores_pseudonym,
     unrepaired_erasure,
 )
@@ -273,6 +282,14 @@ PLACEHOLDER_SALT = (
     "AUDIT_PSEUDO_SALT is a shipped placeholder: a re-key under it protects nothing; "
     "set a private value, restart, and run again"
 )
+IN_PROGRESS_ROWS = (
+    "in progress after their Postgres step: let them finish (or the erasure sweep close "
+    "them) before the salt is rotated, or their rows keep the old salt"
+)
+SCOPES_PENDING = (
+    "not drained: let the erasure sweep (or cleanup_erased_vectors --apply) drain them "
+    "before the salt is rotated, or a point that still carries the account id keeps it"
+)
 KNOWN_LIMIT = (
     "known limit: an email pseudonym that only other actors' rows carry is not found "
     "and stays under its salt (it cannot be counted)"
@@ -303,6 +320,10 @@ class RekeyResult:
     unmarked: int = 0
     # request rows that store the account id (not re-keyable)
     account_id_rows: int = 0
+    # to finish under the salt they started with, before a rotation: requests
+    # in progress after their Postgres step, vector-erasure scopes not drained
+    in_progress: int = 0
+    scopes_pending: int = 0
     # request rows that get (got) the current fingerprint
     stamped: int = 0
     # ``table.column`` -> rows rewritten (would be)
@@ -382,6 +403,24 @@ async def _scope(db: AsyncSession) -> tuple[list[_Request], int]:
             )
         )
     return requests, account_ids
+
+
+async def _unfinished(db: AsyncSession) -> tuple[int, int]:
+    """Requests in progress after their Postgres step and vector-erasure
+    scopes not drained (counts; both must finish before a rotation)."""
+    running = (
+        await db.execute(
+            select(func.count(ErasureRequest.id)).where(
+                ErasureRequest.status == STATUS_IN_PROGRESS, ran_in_postgres()
+            )
+        )
+    ).scalar_one()
+    scopes = (
+        await db.execute(
+            select(func.count(VectorErasureJob.id)).where(VectorErasureJob.completed_at.is_(None))
+        )
+    ).scalar_one()
+    return running, scopes
 
 
 async def _email_pseudonyms(
@@ -723,6 +762,7 @@ async def _rekey(db: AsyncSession, *, dry_run: bool, stamp_current: bool) -> Rek
     if not dry_run:
         await db.execute(_REKEY_LOCK)
     requests, result.account_id_rows = await _scope(db)
+    result.in_progress, result.scopes_pending = await _unfinished(db)
     current = [r for r in requests if r.fingerprint == fingerprint]
     to_rekey = [r for r in requests if r.fingerprint != fingerprint]
     result.current = len(current)
@@ -917,6 +957,10 @@ def _print_plan(result: RekeyResult) -> None:
     print(f"  no salt fingerprint: {result.unmarked}")
     if result.account_id_rows:
         print(f"requests  {result.account_id_rows}  {ACCOUNT_ID_ROWS}")
+    if result.in_progress:
+        print(f"requests  {result.in_progress}  {IN_PROGRESS_ROWS}")
+    if result.scopes_pending:
+        print(f"vector erasure scopes  {result.scopes_pending}  {SCOPES_PENDING}")
     if result.stamp_current:
         verb = "would stamp" if result.dry_run else "stamped"
         print(

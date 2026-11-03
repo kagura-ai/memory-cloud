@@ -127,7 +127,7 @@ v0.141.0 から、request 行を pseudonymize するすべての書き手 (erasu
 手順 (この順で):
 
 1. v0.141.0 へ上げる。
-2. `reprocess_erasures --all` (plan) で `would repair` / `would pseudonymize note row` が出れば、salt を変える前に `--all --apply --yes` で直す (account id を保存した行は re-key できない。下記)。
+2. `reprocess_erasures --all` (plan) で `would repair` / `would pseudonymize note row` が出れば、salt を変える前に `--all --apply --yes` で直す (account id を保存した行は re-key できない。下記)。`rekey_erasure_pseudonyms` の plan に `requests  N  in progress after their Postgres step ...` (Postgres ステップの後で `in_progress` のまま止まった request) か `vector erasure scopes  N  not drained ...` (`vector_erasure_jobs.completed_at IS NULL`) が出れば、salt を変える前に sweep (または `cleanup_erased_vectors --apply`) に終わらせる。
 3. salt をまだ変えていない場合: `rekey_erasure_pseudonyms --stamp-current` (plan) → `--stamp-current --apply`。fingerprint のない行に現在の salt の fingerprint を書くだけで、他は何も変えない。
 4. erasure を止める (scheduler の sweep、admin 強制削除、`reprocess_erasures`、`cleanup_erased_vectors` を走らせない。どれも自分の process の salt で pseudonym を導出する)。`AUDIT_PSEUDO_SALT` を新しい値 (`openssl rand -hex 32`) にし、API・scheduler・CLI を実行するすべての process を再起動する。
 5. `rekey_erasure_pseudonyms` (plan) → `--apply --yes`。
@@ -174,6 +174,7 @@ commit 後に、re-key した本人の memory の vector payload (`user_id`、su
 制限 (件数だけを表示、値は出さない):
 
 - account id を保存した request 行 (v0.124.0 より前に Postgres ステップの後で失敗した行、v0.125.0 より前の note 行、v0.58.1 より前に完了した行) は re-key できない: 旧 salt なしにその pseudonym を導出できない (`requests  N  store the account id ...`)。salt を変える前に手順 2 で直す。
+- salt を変えた時点で Postgres ステップの後の `in_progress` だった request は、後で sweep が閉じると新しい salt の pseudonym を保存し、本人の行は旧い salt のまま残る (re-key できない)。drain されていない `vector_erasure_jobs` は、salt を変えた後は account id を持つ point と一致しなくなる。どちらも plan が件数を出す (手順 2)。
 - 他人の行にだけ残る email pseudonym (本人の行のどれもその address を名指さず、`account_erasure` 行の address でもないもの) は見つからず、旧 salt のまま残る。件数は数えられない (plan の `known limit` 行)。
 - 現在の salt の request が記録した email pseudonym とその request の pseudonym は、re-key する request の行にあっても書き換えない (`kept  N value(s) of a request already under the current salt`)。live なアカウントの ID と同じ値も書き換えない (`kept  N value(s) a live account uses as its id`)。
 - erasure が列長 (255) で切り詰めた `resource` の末尾に残る pseudonym の一部は、8 桁以上で 1 つの値にだけ一致すれば書き換え、それ以外は残る。

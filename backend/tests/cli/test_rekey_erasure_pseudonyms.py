@@ -167,6 +167,19 @@ class TestThePlan:
         assert "payload patch pending from an earlier apply: 1 request(s)" in out
         assert "vector payloads: 3 memory(ies)" in out
 
+    @pytest.mark.parametrize("stamp_current", [False, True])
+    def test_unfinished_erasures_and_scopes_are_reported(self, stamp_current, capsys):
+        """What has to finish before a rotation, in the plan of both modes."""
+        result = _result(dry_run=True, stamp_current=stamp_current)
+        result.in_progress, result.scopes_pending = 1, 2
+
+        cli._print_plan(result)
+
+        out = capsys.readouterr().out
+        assert re.search(r"[0-9a-f]{8,}", out) is None, out
+        assert f"requests  1  {cli.IN_PROGRESS_ROWS}" in out
+        assert f"vector erasure scopes  2  {cli.SCOPES_PENDING}" in out
+
     def test_a_placeholder_salt_re_keys_nothing(self, capsys):
         result = _result(dry_run=True)
         result.placeholder_salt = True
