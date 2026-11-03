@@ -866,10 +866,9 @@ async def update_workspace_slot_bonus(
     await db.execute(text("SET LOCAL lock_timeout = '0'"))
 
     # ---- Validation phase (read-only, outside db_transaction) ----
-    # db_transaction's bare `except Exception` wraps MemoryCloudException
-    # subclasses as HTTPException(500), which would convert our structured
-    # BONUS-001/002 4xx errors into generic 500s. Keeping the guard raises
-    # outside the transaction so they propagate to memory_cloud_exception_handler.
+    # The structured BONUS-001/002 4xx guard raises propagate to
+    # memory_cloud_exception_handler. (Until #2443 db_transaction turned
+    # MemoryCloudException subclasses into 500s; it now re-raises them.)
     target_result = await db.execute(select(User).where(User.user_id == user_id))
     target_user = target_result.scalar_one_or_none()
     if target_user is None:
@@ -909,9 +908,8 @@ async def update_workspace_slot_bonus(
     # as IntegrityError → generic 500, masking the structured 400). We
     # disambiguate 404 (user vanished) from raced-BONUS-002 (user exists,
     # would-go-negative) via a single follow-up SELECT in the rare error
-    # path. The raise paths sit OUTSIDE db_transaction so
-    # MemoryCloudException subclasses propagate to
-    # memory_cloud_exception_handler instead of being swallowed as 500.
+    # path. The raise paths sit OUTSIDE db_transaction and propagate to
+    # memory_cloud_exception_handler.
     update_stmt = (
         update(User)
         .where(

@@ -11,6 +11,9 @@ subject's ``users`` row from its first step, so at steps 2 and 3 it takes the
 workspace rows ``NOWAIT`` and reschedules the request when one is busy.
 Steps 2 and 3 are one transaction: step 2 reads the owned workspaces under the
 identity-link lock and nothing is committed before step 3's commit.
+A referral redemption holds the referrer's ``users`` row from its cap check,
+so it takes workspace rows ``NOWAIT`` too and answers 409 when one stays
+busy (#2443).
 Each test drives two real Postgres sessions and waits on
 ``pg_blocking_pids`` before releasing the paused one.
 """
@@ -21,15 +24,18 @@ import asyncio
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import event, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.admin import delete_user
+from config.settings import get_settings
 from models.auth import User, Workspace, WorkspaceMember
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
@@ -37,8 +43,11 @@ from models.erasure import (
     STATUS_FAILED,
     ErasureRequest,
 )
+from models.referral import ReferralGrant
 from services.account_erasure_service import AccountErasureService
 from services.file_storage_service import FileStorageService
+from services.referral_service import ReferralService
+from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS
 from services.workspace_service import WorkspaceService
 from utils.exceptions import ConflictError, ErasureRetryScheduledError, NotFoundException
 
@@ -1360,3 +1369,221 @@ async def test_an_admin_deletion_that_settles_agents_takes_the_global_order(
     _agents_before_keys(trace)
     assert response["reowned"]["agents"] == 1
     assert response["suspended"] == {"agents": 1}
+
+
+# ---------------------------------------------------------------------------
+# Referral bonus recompute (#2443)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def referral_world(db_session, connector_world):
+    """``connector_world``; the referral grants of its users are deleted
+    afterwards (their foreign keys only SET NULL)."""
+    yield connector_world
+    await db_session.rollback()
+    users = connector_world.targets
+    await db_session.execute(
+        delete(ReferralGrant).where(
+            ReferralGrant.referrer_user_id.in_(users) | ReferralGrant.referred_user_id.in_(users)
+        )
+    )
+    await db_session.commit()
+
+
+@dataclass(frozen=True)
+class _Referral:
+    referrer: str
+    referee: str
+    code: str
+    referrer_ws: UUID
+    referee_ws: UUID | None
+
+
+async def _referral(world, *, referee_owns_a_workspace: bool = True) -> _Referral:
+    """A referrer with a code and one workspace, and a new referee."""
+    referrer = await world.user("referrer")
+    referee = await world.user("referee")
+    referrer_ws = (await world.workspace(referrer)).id
+    referee_ws = (await world.workspace(referee)).id if referee_owns_a_workspace else None
+    code = f"code{uuid4().hex[:16]}"
+    await world.db.execute(update(User).where(User.user_id == referrer).values(referral_code=code))
+    await world.db.commit()
+    return _Referral(referrer, referee, code, referrer_ws, referee_ws)
+
+
+async def _bonus(db, workspace_id) -> int:
+    return await db.scalar(
+        select(Workspace.referral_memory_bonus).where(Workspace.id == workspace_id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_redeem_and_revoke_take_the_global_order(db_session, referral_world):
+    """``redeem`` holds the referrer's users row from its cap check on, so it
+    takes the workspace rows ``NOWAIT``: before its INSERT (whose foreign keys
+    take a KEY SHARE on them) and again for the recompute. ``revoke`` takes
+    them ``NOWAIT`` too."""
+    referral = await _referral(referral_world)
+    settings = get_settings()
+
+    with _LockTrace(db_session.bind) as trace:
+        grant = await ReferralService(db_session).redeem(
+            referred_user_id=referral.referee, code=referral.code
+        )
+    _assert_global_order(trace)
+    (redeem_tx,) = trace.kinds()
+    assert redeem_tx[0] == ("users", False), redeem_tx
+    assert len(redeem_tx) > 1 and set(redeem_tx[1:]) == {("ws_live", True)}, redeem_tx
+    assert await _bonus(db_session, referral.referrer_ws) == (
+        settings.referral_referrer_reward_memories
+    )
+    assert (
+        await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
+    )
+    await db_session.commit()
+
+    with _LockTrace(db_session.bind) as trace:
+        _, changed = await ReferralService(db_session).revoke(grant_id=grant.id, reason="test")
+        await db_session.commit()
+    assert changed
+    _assert_global_order(trace)
+    (revoke_tx,) = trace.kinds()
+    workspace_locks = [lock for lock in revoke_tx if lock[0] == "ws_live"]
+    assert workspace_locks and set(workspace_locks) == {("ws_live", True)}, revoke_tx
+    assert await _bonus(db_session, referral.referrer_ws) == 0
+    assert await _bonus(db_session, referral.referee_ws) == 0
+
+
+@pytest.mark.asyncio
+async def test_applying_pending_grants_takes_the_workspace_nowait(db_session, referral_world):
+    """A grant recorded while the referee owned no workspace is applied once
+    one exists; its recompute takes the workspace row ``NOWAIT`` as well."""
+    world = referral_world
+    referral = await _referral(world, referee_owns_a_workspace=False)
+    await ReferralService(db_session).redeem(referred_user_id=referral.referee, code=referral.code)
+    referee_ws = (await world.workspace(referral.referee)).id
+    await db_session.commit()
+
+    with _LockTrace(db_session.bind) as trace:
+        applied = await ReferralService(db_session).apply_pending_grants(referral.referee)
+    assert applied == 1
+    _assert_global_order(trace)
+    (apply_tx,) = trace.kinds()
+    assert ("ws_live", True) in apply_tx and ("ws_live", False) not in apply_tx, apply_tx
+    assert await _bonus(db_session, referee_ws) == get_settings().referral_referee_reward_memories
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", ["referrer_ws", "referee_ws"])
+async def test_a_redeem_does_not_wait_on_a_workspace_another_transaction_holds(
+    db_session, referral_world, held
+):
+    """Another transaction holds a workspace row the redeem credits, as
+    ``DELETE /workspaces/W`` does before it locks the users rows it clears.
+    The redeem, which holds the referrer's users row, does not wait on it
+    (neither in its INSERT's foreign-key check nor in the recompute): after
+    its tries it raises ``ConflictError`` (409) and nothing is paid. Once the
+    holder commits, the same redeem goes through."""
+    referral = await _referral(referral_world)
+    held_id = getattr(referral, held)
+    settings = get_settings()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict = {}
+
+    async def redeem() -> UUID:
+        async with maker() as db:
+            pids["redeem"] = await _pid(db)
+            grant = await ReferralService(db).redeem(
+                referred_user_id=referral.referee, code=referral.code
+            )
+            return grant.id
+
+    tasks: list[asyncio.Task] = []
+    try:
+        async with maker() as holder:
+            await holder.execute(
+                select(Workspace.id).where(Workspace.id == held_id).with_for_update()
+            )
+            redeeming = asyncio.create_task(redeem())
+            tasks.append(redeeming)
+            await _done_or_blocked(maker, redeeming, lambda: pids.get("redeem"))
+            assert redeeming.done(), "the redeem waits on the workspace row"
+            with pytest.raises(ConflictError):
+                await redeeming
+            await holder.commit()
+    finally:
+        await _cancel_all(tasks)
+
+    grants = await db_session.scalar(
+        select(func.count())
+        .select_from(ReferralGrant)
+        .where(ReferralGrant.referred_user_id == referral.referee)
+    )
+    assert grants == 0
+    assert await _bonus(db_session, referral.referrer_ws) == 0
+    assert await _bonus(db_session, referral.referee_ws) == 0
+
+    grant_id = await asyncio.wait_for(redeem(), 15)
+    paid = (
+        await db_session.execute(
+            select(ReferralGrant.referred_user_id, ReferralGrant.referrer_workspace_id).where(
+                ReferralGrant.id == grant_id
+            )
+        )
+    ).one()
+    assert tuple(paid) == (referral.referee, referral.referrer_ws)
+    assert await _bonus(db_session, referral.referrer_ws) == (
+        settings.referral_referrer_reward_memories
+    )
+    assert (
+        await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_redeem_that_loses_a_try_goes_on_in_its_transaction(db_session, referral_world):
+    """The workspace row the redeem locks second is held, and the holder
+    commits during the backoff after the lost try. That try rolls back only
+    its savepoint: the redeem goes on in the same transaction, still holding
+    the referrer's users row and the first workspace row, and pays both."""
+    referral = await _referral(referral_world)
+    assert referral.referee_ws is not None
+    second = max(referral.referrer_ws, referral.referee_ws)  # the UUID order
+    settings = get_settings()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async with maker() as holder:
+        await holder.execute(select(Workspace.id).where(Workspace.id == second).with_for_update())
+
+        async def release_then_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            await holder.commit()
+            await real_sleep(0)
+
+        with (
+            patch("services.workspace_locks.asyncio", SimpleNamespace(sleep=release_then_sleep)),
+            _LockTrace(db_session.bind) as trace,
+        ):
+            async with maker() as db:
+                await asyncio.wait_for(
+                    ReferralService(db).redeem(
+                        referred_user_id=referral.referee, code=referral.code
+                    ),
+                    15,
+                )
+
+    assert sleeps == [NOWAIT_LOCK_BACKOFF_SECONDS]
+    _assert_global_order(trace)
+    # one transaction: the lost try did not end it
+    (redeem_tx,) = trace.kinds()
+    assert redeem_tx[0] == ("users", False), redeem_tx
+    assert set(redeem_tx[1:]) == {("ws_live", True)}, redeem_tx
+    assert await _bonus(db_session, referral.referrer_ws) == (
+        settings.referral_referrer_reward_memories
+    )
+    assert (
+        await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
+    )

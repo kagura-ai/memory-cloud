@@ -11,10 +11,18 @@ e.g. two paths can no longer read the same ``ownership_epoch`` and both write
 ``epoch + 1``, losing an increment. (The lock serializes the *paths*; it does not
 itself reconcile the ``owner_user_id`` pointer with ``WorkspaceMember.role`` —
 see ``workspace_ownership_service`` for that representation contract.)
+
+``retry_nowait`` is for a path that must not wait on a workspace row: by the
+global lock order (``tests/integration/test_erasure_lock_order_db.py``), any
+transaction holding a ``users`` row. It takes the row ``NOWAIT`` and tries
+again for a moment before it gives up with a 409 (#2443).
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 from uuid import UUID
 
 from sqlalchemy import select
@@ -24,6 +32,58 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.auth import Workspace
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException
+
+_T = TypeVar("_T")
+
+# #2443: a NOWAIT lock that loses to a short holder (a memory create keeps its
+# workspace row locked from its quota check until it commits) is tried again,
+# each try under a savepoint: 0.05 + 0.1 + 0.2 + 0.4 s of sleep at most.
+# Sleeping is not waiting on a lock, so the caller is in no lock cycle while it
+# holds its users row. The same values as the erasure steps'
+# ``account_erasure_service.WORKSPACE_LOCK_TRIES`` and
+# ``account_erasure_service.WORKSPACE_LOCK_BACKOFF_SECONDS``.
+NOWAIT_LOCK_TRIES = 5
+NOWAIT_LOCK_BACKOFF_SECONDS = 0.05
+
+
+async def retry_nowait(
+    db: AsyncSession,
+    lock: Callable[[], Awaitable[_T]],
+    *,
+    tries: int = NOWAIT_LOCK_TRIES,
+    backoff: float = NOWAIT_LOCK_BACKOFF_SECONDS,
+) -> _T:
+    """Run ``lock``, a ``NOWAIT`` row lock, under a savepoint; while the row is
+    busy (``55P03``) roll back to the savepoint, sleep and try again, ``tries``
+    times in all, the sleep doubling from ``backoff`` (#2443).
+
+    The savepoint keeps the surrounding transaction usable after a lost try:
+    the failed statement aborts only the savepoint.
+
+    Args:
+        db: The session whose transaction takes the lock.
+        lock: Issues the ``NOWAIT`` locking statement.
+        tries: How many times to try.
+        backoff: Seconds of sleep after the first lost try.
+
+    Returns:
+        What ``lock`` returned.
+
+    Raises:
+        ConflictError: The row is still busy after the last try (409). The
+            caller's transaction is still open; the caller rolls it back.
+    """
+    for attempt in range(tries):
+        try:
+            async with db.begin_nested():
+                return await lock()
+        except DBAPIError as exc:
+            if not is_lock_not_available(exc):
+                raise
+            if attempt + 1 == tries:
+                raise ConflictError("Workspace is being modified; retry the operation") from exc
+        await asyncio.sleep(backoff * 2**attempt)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def lock_workspace_for_update(

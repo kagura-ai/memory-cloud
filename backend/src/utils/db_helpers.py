@@ -18,6 +18,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -111,6 +112,8 @@ async def db_transaction(
 
     Automatically handles:
     - HTTPException passthrough (no rollback needed)
+    - MemoryCloudException: rollback + re-raise unchanged, so the global
+      handler answers it with its own status and error code (#2443)
     - Generic exceptions: rollback + log + raise HTTPException 500
 
     Args:
@@ -131,6 +134,11 @@ async def db_transaction(
         yield
     except HTTPException:
         # Let HTTPException pass through without rollback
+        raise
+    except MemoryCloudException:
+        # A domain error (e.g. a 409 ``ConflictError``), not a failure of the
+        # transaction wrapper: undo the transaction, keep the status and code.
+        await db.rollback()
         raise
     except Exception as e:
         await db.rollback()

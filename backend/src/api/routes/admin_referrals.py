@@ -158,11 +158,16 @@ async def revoke_referral_grant(
 
     Raises:
         HTTPException: 404 if no such grant exists.
+        ConflictError: 409 ``RES-002`` if a workspace row the recompute locks
+            stays busy; nothing is revoked or audited (the admin retries).
     """
     service = ReferralService(db)
     actor_id = user.get("user_id", "unknown")
 
     async with db_transaction(db, "revoke_referral_grant", "Failed to revoke referral grant"):
+        # #2443: the recompute takes the workspace rows NOWAIT. A ConflictError
+        # for one still held after its tries propagates: ``db_transaction``
+        # rolls back and re-raises it, and the global handler answers 409.
         grant, changed = await service.revoke(grant_id=grant_id, reason=payload.reason)
         if grant is None:
             raise HTTPException(

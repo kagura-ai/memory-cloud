@@ -34,6 +34,7 @@ from db.base import get_db
 from models.auth import Workspace
 from services.referral_service import ReferralSummary
 from utils.exceptions import (
+    ConflictError,
     ReferralAlreadyRedeemedError,
     ReferralCapReachedError,
     ReferralCodeInvalidError,
@@ -615,6 +616,26 @@ class TestRedeem:
     def test_empty_code_is_rejected_before_the_service(self, client, referrals_enabled) -> None:
         assert client.post("/api/v1/referrals/redeem", json={"code": ""}).status_code == 422
 
+    def test_a_busy_workspace_is_a_409_the_client_retries(
+        self, client, referrals_enabled, monkeypatch
+    ) -> None:
+        """#2443: ``redeem`` takes the workspace rows it credits ``NOWAIT``; one
+        another transaction still holds after the tries is a 409 (nothing was
+        paid), not a ``REFERRAL-*`` refusal."""
+        monkeypatch.setattr(
+            "services.referral_service.ReferralService.redeem",
+            AsyncMock(
+                side_effect=ConflictError("Workspace is being modified; retry the operation")
+            ),
+        )
+        response = client.post("/api/v1/referrals/redeem", json={"code": "abc123"})
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": "RES-002",
+            "message": "Workspace is being modified; retry the operation",
+            "details": {},
+        }
+
 
 class TestAdminRevoke:
     def test_revoke_requires_a_reason(self, client) -> None:
@@ -697,6 +718,50 @@ class TestAdminRevoke:
             assert added == []
             # The row is still returned, so the retry looks successful to the admin.
             assert response.json()["revoked_reason"] == "farming"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_a_busy_workspace_is_a_409_with_the_revocation_rolled_back(self, monkeypatch) -> None:
+        """#2443: the recompute takes the workspace rows ``NOWAIT``; one still
+        held after the tries is a 409 the admin retries (the transaction
+        wrapper rolls back and re-raises it rather than making it a 500), and
+        nothing is audited."""
+
+        async def mock_admin():
+            return _admin_user()
+
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        async def mock_db():
+            yield db
+
+        audited = MagicMock()
+        monkeypatch.setattr(
+            "services.referral_service.ReferralService.revoke",
+            AsyncMock(
+                side_effect=ConflictError("Workspace is being modified; retry the operation")
+            ),
+        )
+        monkeypatch.setattr("api.routes.admin_referrals.AuditLog", audited)
+        app.dependency_overrides[require_admin] = mock_admin
+        app.dependency_overrides[get_db] = mock_db
+        try:
+            response = TestClient(app, raise_server_exceptions=False).post(
+                f"/api/v1/admin/referrals/{uuid4()}/revoke", json={"reason": "farming"}
+            )
+            assert response.status_code == 409
+            # the ConflictError itself, through ``db_transaction``, as the
+            # global handler renders it (the redeem's 409 is the same)
+            assert response.json() == {
+                "error": "RES-002",
+                "message": "Workspace is being modified; retry the operation",
+                "details": {},
+            }
+            db.rollback.assert_awaited()
+            db.commit.assert_not_awaited()
+            audited.assert_not_called()
         finally:
             app.dependency_overrides.clear()
 
