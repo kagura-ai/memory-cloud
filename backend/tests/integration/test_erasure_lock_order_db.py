@@ -24,6 +24,7 @@ import asyncio
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -46,6 +47,7 @@ from models.referral import ReferralGrant
 from services.account_erasure_service import AccountErasureService
 from services.file_storage_service import FileStorageService
 from services.referral_service import ReferralService
+from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS
 from services.workspace_service import WorkspaceService
 from utils.exceptions import ConflictError, ErasureRetryScheduledError, NotFoundException
 
@@ -1458,6 +1460,54 @@ async def test_a_redeem_does_not_wait_on_a_workspace_another_transaction_holds(
         )
     ).one()
     assert tuple(paid) == (referral.referee, referral.referrer_ws)
+    assert await _bonus(db_session, referral.referrer_ws) == (
+        settings.referral_referrer_reward_memories
+    )
+    assert (
+        await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_redeem_that_loses_a_try_goes_on_in_its_transaction(db_session, referral_world):
+    """The workspace row the redeem locks second is held, and the holder
+    commits during the backoff after the lost try. That try rolls back only
+    its savepoint: the redeem goes on in the same transaction, still holding
+    the referrer's users row and the first workspace row, and pays both."""
+    referral = await _referral(referral_world)
+    assert referral.referee_ws is not None
+    second = max(referral.referrer_ws, referral.referee_ws)  # the UUID order
+    settings = get_settings()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async with maker() as holder:
+        await holder.execute(select(Workspace.id).where(Workspace.id == second).with_for_update())
+
+        async def release_then_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            await holder.commit()
+            await real_sleep(0)
+
+        with (
+            patch("services.workspace_locks.asyncio", SimpleNamespace(sleep=release_then_sleep)),
+            _LockTrace(db_session.bind) as trace,
+        ):
+            async with maker() as db:
+                await asyncio.wait_for(
+                    ReferralService(db).redeem(
+                        referred_user_id=referral.referee, code=referral.code
+                    ),
+                    15,
+                )
+
+    assert sleeps == [NOWAIT_LOCK_BACKOFF_SECONDS]
+    _assert_global_order(trace)
+    # one transaction: the lost try did not end it
+    (redeem_tx,) = trace.kinds()
+    assert redeem_tx[0] == ("users", False), redeem_tx
+    assert set(redeem_tx[1:]) == {("ws_live", True)}, redeem_tx
     assert await _bonus(db_session, referral.referrer_ws) == (
         settings.referral_referrer_reward_memories
     )

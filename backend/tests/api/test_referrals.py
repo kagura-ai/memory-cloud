@@ -630,8 +630,11 @@ class TestRedeem:
         )
         response = client.post("/api/v1/referrals/redeem", json={"code": "abc123"})
         assert response.status_code == 409
-        assert "RES-002" in response.text
-        assert "REFERRAL-" not in response.text
+        assert response.json() == {
+            "error": "RES-002",
+            "message": "Workspace is being modified; retry the operation",
+            "details": {},
+        }
 
 
 class TestAdminRevoke:
@@ -748,7 +751,12 @@ class TestAdminRevoke:
                 f"/api/v1/admin/referrals/{uuid4()}/revoke", json={"reason": "farming"}
             )
             assert response.status_code == 409
-            assert "retry" in response.text
+            # an HTTPException, in the envelope ``http_exception_handler`` gives it
+            assert response.json() == {
+                "error": "HTTP-409",
+                "message": "Workspace is being modified; retry the operation",
+                "details": {},
+            }
             db.rollback.assert_awaited()
             db.commit.assert_not_awaited()
             audited.assert_not_called()
