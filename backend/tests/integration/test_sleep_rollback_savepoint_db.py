@@ -198,6 +198,77 @@ async def test_a_failed_undo_is_rolled_back_alone(session: AsyncSession) -> None
     assert status == "failed"
 
 
+@pytest.mark.parametrize("source", ["sleep", "analysis"])
+async def test_an_analysis_report_is_never_rolled_back(session: AsyncSession, source: str) -> None:
+    """#2547: the stored ``source`` decides, not the actions under the row.
+
+    An analysis row (#2088) has no Sleep actions; one is planted here so a
+    rollback that ignored ``source`` would visibly undo it. The Sleep row
+    with the same action is rolled back as before.
+    """
+    from mcp_server.tools.sleep import handle_rollback_sleep_run
+
+    memory = Memory(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        user_id=_USER,
+        summary="importance re-evaluated",
+        content="c",
+        type="note",
+        scope="working",
+        client="test",
+        importance=0.9,
+        embedding_status="success",
+    )
+    report = SleepReport(id=uuid4(), user_id=_USER, status="completed", source=source)
+    session.add_all([memory, report])
+    await session.flush()
+    session.add(
+        SleepAction(
+            report_id=report.id,
+            phase="importance_reeval",
+            action_type="update_importance",
+            memory_id=memory.id,
+            details={"old_importance": 0.4},
+        )
+    )
+    await session.commit()
+    memory_id, report_id = memory.id, report.id
+
+    async def _get_db():
+        yield session
+
+    with (
+        patch("db.base.get_db", new=_get_db),
+        patch(
+            "mcp_server.tools.sleep._authorize_report_rollback",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("services.embedding_service.EmbeddingService", return_value=AsyncMock()),
+        patch("db.qdrant.update_memory_payload_in_qdrant", new=AsyncMock()) as payload,
+    ):
+        response = await handle_rollback_sleep_run({"report_id": str(report_id)}, _USER, None)
+    data = json.loads(response[0].text)
+
+    session.expunge_all()
+    importance = (
+        await session.execute(select(Memory.importance).where(Memory.id == memory_id))
+    ).scalar_one()
+    status = (
+        await session.execute(select(SleepReport.status).where(SleepReport.id == report_id))
+    ).scalar_one()
+    if source == "analysis":
+        assert data["error"] == "analysis_report", data
+        assert importance == pytest.approx(0.9)
+        assert status == "completed"
+        payload.assert_not_awaited()
+    else:
+        assert data["status"] == "rolled_back", data
+        assert data["rollback_summary"]["importance_restored"] == 1
+        assert importance == pytest.approx(0.4)
+        assert status == "rolled_back"
+
+
 @pytest.mark.parametrize("embed_fails", [False, True])
 async def test_a_per_merge_undo_writes_the_restored_point(
     session: AsyncSession, embed_fails: bool
