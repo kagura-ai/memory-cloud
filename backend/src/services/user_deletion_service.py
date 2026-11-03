@@ -35,7 +35,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -77,13 +77,14 @@ PRIVATE_CONTEXT_HANDED_OVER = (
 )
 
 
-def _contextless_in(m: Any, workspaces: list[UUID] | Any) -> ColumnElement[bool]:
+def _contextless_in(m: Any, workspaces: list[UUID] | Select[Any] | Any) -> ColumnElement[bool]:
     """``m`` is a memory row with no context in one of ``workspaces`` (a list
-    of ids, or a workspace id column to correlate with): no foreign key takes
-    it with its workspace."""
+    of ids, a select of them, or a workspace id column to correlate with): no
+    foreign key takes it with its workspace. Account erasure deletes the same
+    rows of the workspaces it removes (#2445)."""
     in_workspace = (
         m.workspace_id.in_(workspaces)
-        if isinstance(workspaces, list)
+        if isinstance(workspaces, list | Select)
         else m.workspace_id == workspaces
     )
     return and_(in_workspace, m.context_id.is_(None))

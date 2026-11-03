@@ -326,6 +326,56 @@ async def test_erasure_takes_a_soft_deleted_workspace_with_members_and_no_admin(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("patched_external_stores")
+async def test_erasure_deletes_the_contextless_memories_of_the_workspaces_it_removes(
+    connector_world, db_session
+):
+    """``memories.workspace_id`` has no foreign key, so the workspace cascade
+    leaves a memory with no context behind: erasure deletes those of the
+    sole-owned and soft-deleted workspaces it removes, as user deletion does
+    (#2445). The subject's own keep their vector-erasure scope (captured
+    before the delete); a handed-on workspace keeps its rows, the subject's
+    own scrubbed rather than deleted."""
+    from models.vector_erasure import VectorErasureJob
+    from services.erasure_details import erasure_pseudonym
+
+    world = connector_world
+    target = await world.user("erased")
+    other = await world.user("other")
+    sole_id = (await world.workspace(target)).id
+    gone_id = (await world.workspace(target)).id
+    shared_id = (await world.workspace(target, **{other: WorkspaceRole.ADMIN})).id
+    removed = {
+        await _memory(db_session, ws_id, None, author): author
+        for ws_id in (sole_id, gone_id)
+        for author in (target, other)
+    }
+    kept = await _memory(db_session, shared_id, None, other)
+    scrubbed = await _memory(db_session, shared_id, None, target)
+    await _soft_delete(db_session, gone_id)
+    await db_session.commit()
+
+    try:
+        await world.erase(target)
+
+        assert await _count(db_session, Memory, Memory.id.in_(list(removed))) == 0
+        assert await _count(db_session, Workspace, Workspace.id.in_([sole_id, gone_id])) == 0
+        assert (await db_session.get(Workspace, shared_id)).owner_user_id == other
+        assert (await db_session.get(Memory, kept)).user_id == other
+        assert (await db_session.get(Memory, scrubbed)).user_id == erasure_pseudonym(target)
+        own = {memory_id for memory_id, author in removed.items() if author == target}
+        scoped = await db_session.scalars(
+            select(VectorErasureJob.memory_id).where(VectorErasureJob.memory_id.in_(own))
+        )
+        assert set(scoped) == own
+    finally:
+        # no foreign key takes them with the workspaces the fixture deletes
+        await db_session.rollback()
+        await db_session.execute(delete(Memory).where(Memory.id.in_([*removed, kept, scrubbed])))
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_create_admin_sees_a_workspace_left_under_its_user_id(db_session):
     """``create_admin`` refuses a login ID whose ``local:`` user_id a leftover
     workspace (here a soft-deleted one) still names as its owner."""

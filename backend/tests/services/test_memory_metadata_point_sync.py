@@ -370,6 +370,71 @@ class TestRollbackApplyChecksThePointAgain:
         write.assert_not_awaited()
         db.rollback.assert_awaited_once()
 
+    @staticmethod
+    async def _apply_after_a_failed_group_read(locked: bool) -> tuple[list, AsyncMock, MagicMock]:
+        """Two syncs whose group re-read fails; the second row stays
+        unreadable on its own when ``locked``."""
+        from types import SimpleNamespace
+
+        from services import session_rollback as sr
+
+        ids = [uuid4(), uuid4()]
+        syncs = [
+            sr.PayloadSync(memory_id, "coll", ("tags",), {"tags": ["stale"]}, (), False)
+            for memory_id in ids
+        ]
+
+        async def read(_db: object, group: list, **_: object) -> dict:
+            if len(group) > 1 or (locked and group == ids[1:]):
+                raise RuntimeError("lock timeout")
+            (memory_id,) = group
+            return {
+                memory_id: SimpleNamespace(
+                    id=memory_id,
+                    tags=["now"],
+                    importance=0.5,
+                    type="note",
+                    details=None,
+                    updated_at=None,
+                    summary_embedding_id=None,
+                )
+            }
+
+        db = MagicMock(commit=AsyncMock(), rollback=AsyncMock())
+        with (
+            patch("services.payload_sync.share_lock_rows", AsyncMock(side_effect=read)),
+            patch("db.qdrant.update_memory_payload_in_qdrant", new_callable=AsyncMock) as write,
+            patch.object(sr, "logger") as log,
+        ):
+            await sr._apply_payload_syncs(syncs, db)
+        return ids, write, log
+
+    async def test_one_unreadable_row_leaves_the_rest_of_its_group_patched(self):
+        """#2433: a lock timeout on one row fails the group's re-read; the
+        other row is patched from its own re-read (the row's values now, not
+        the queued ones), the locked one not at all, and the summary line
+        counts both."""
+        (free, _), write, log = await self._apply_after_a_failed_group_read(locked=True)
+
+        write.assert_awaited_once()
+        assert write.await_args.kwargs["memory_id"] == free
+        assert write.await_args.kwargs["payload_updates"]["tags"] == ["now"]
+        log.warning.assert_called_once_with(
+            "session_rollback_payload_syncs_failed", failed=0, unread=1, recovered=1, of=2
+        )
+
+    async def test_a_group_read_whose_rows_all_recover_is_reported_as_info(self):
+        """#2433: nothing is left unpatched, yet the group's read failed: no
+        ``..._syncs_failed`` warning, but an info line says how many rows the
+        row-by-row re-read recovered."""
+        ids, write, log = await self._apply_after_a_failed_group_read(locked=False)
+
+        assert [c.kwargs["memory_id"] for c in write.await_args_list] == ids
+        log.warning.assert_not_called()
+        log.info.assert_called_once_with(
+            "session_rollback_payload_syncs_recovered", recovered=2, of=2
+        )
+
 
 def test_scope_is_not_editable_by_update_or_patch():
     """``scope`` is not a metadata edit, so the sync never writes it."""

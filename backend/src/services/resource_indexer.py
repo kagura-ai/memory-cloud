@@ -12,6 +12,7 @@ Responsibilities:
 from __future__ import annotations
 
 # Standard library imports (PEP8)
+import asyncio
 import json  # Issue #262: JSON serialization for Memory content
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -62,6 +63,14 @@ _SOURCE_URI_MAX_LEN = 2048
 # ones, in event order: a rewind to the lowest id re-covers everything after it,
 # so a capped list still gives the operator the right target.
 MAX_RECORDED_FAILED_EVENTS = 20
+
+#: #2478: the bound on the post-commit drain of retired version points (the
+#: lookup and the deletes), the indexer's sibling of forget's
+#: ``FORGET_POINT_DELETE_TIMEOUT_SECONDS``. The drain holds the point writers
+#: out while it runs and every new writer queues behind it, so a stalled
+#: vector store must not hold them past this; what is left goes to the orphan
+#: sweep.
+RETIRED_POINT_DELETE_TIMEOUT_SECONDS = 2.0
 
 
 def recorded_failed_events(metrics: Any) -> list[dict[str, Any]]:
@@ -1576,8 +1585,12 @@ class ResourceIndexer:
         restore) is either finished and seen by the lookup, or waits for this
         short section. When one is mid-transaction the points are left to the
         sweep rather than queueing every writer behind this drain
-        (``try_exclude_point_writers``). The batch's session is not touched,
-        so a failure here never leaves it needing a rollback.
+        (``try_exclude_point_writers``). Once it holds the lock, every new
+        writer queues behind it, so ``RETIRED_POINT_DELETE_TIMEOUT_SECONDS``
+        bounds the whole section (#2478): past it the session closes, which
+        releases the lock, and the points not yet deleted are left to the
+        sweep. The batch's session is not touched, so a failure here never
+        leaves it needing a rollback.
 
         Best effort: a failure is logged and the rest goes on; a crash before
         the drain leaves strays the sweep removes.
@@ -1585,21 +1598,37 @@ class ResourceIndexer:
         retired, self._retired = self._retired, []
         if not retired:
             return
+        points = {row.version_point for row in retired}
+        shared: set[UUID | None] = set()
+        dropped: set[str] = set()
+        bound = asyncio.timeout(RETIRED_POINT_DELETE_TIMEOUT_SECONDS)
         try:
-            async with isolated_session(self.db) as session:
-                if not await try_exclude_point_writers(session):
-                    logger.info("old_version_points_deferred", rows=len(retired))
-                    return
-                named = await session.execute(
-                    select(Memory.summary_embedding_id).where(
-                        Memory.summary_embedding_id.in_({row.version_point for row in retired}),
-                        Memory.deleted_at.is_(None),
+            async with bound:
+                async with isolated_session(self.db) as session:
+                    if not await try_exclude_point_writers(session):
+                        logger.info("old_version_points_deferred", rows=len(retired))
+                        return
+                    named = await session.execute(
+                        select(Memory.summary_embedding_id).where(
+                            Memory.summary_embedding_id.in_(points),
+                            Memory.deleted_at.is_(None),
+                        )
                     )
-                )
-                shared = set(named.scalars().all())
-                await self._delete_unshared_version_points(retired, shared)
-                await session.commit()
+                    shared = set(named.scalars().all())
+                    await self._delete_unshared_version_points(retired, shared, dropped)
+                    await session.commit()
         except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+            # Only the bound's own expiry is a timeout here: a TimeoutError
+            # the driver raises (a connect timeout) is a failure like any other.
+            if bound.expired():
+                logger.warning(
+                    "old_version_point_drain_timed_out",
+                    timeout_seconds=RETIRED_POINT_DELETE_TIMEOUT_SECONDS,
+                    points_dropped=len(dropped),
+                    # Not deleted and not known to be shared: the sweep's to judge.
+                    points_left=len({str(point) for point in points - shared} - dropped),
+                )
+                return
             logger.warning(
                 "old_version_point_lookup_failed",
                 rows=len(retired),
@@ -1608,9 +1637,13 @@ class ResourceIndexer:
 
     @staticmethod
     async def _delete_unshared_version_points(
-        retired: list[RetiredVersionRow], shared: set[UUID]
+        retired: list[RetiredVersionRow], shared: set[UUID | None], dropped: set[str]
     ) -> None:
-        """Delete ``retired``'s version points that no live row names, one call per collection."""
+        """Delete ``retired``'s version points that no live row names, one call per collection.
+
+        Each collection's ids are added to ``dropped`` once its delete
+        returns, so a caller cut off mid-way still knows what went.
+        """
         by_collection: dict[str, list[str]] = {}
         for row in retired:
             if row.version_point in shared:
@@ -1632,6 +1665,7 @@ class ResourceIndexer:
                     error_class=type(e).__name__,
                 )
                 continue
+            dropped.update(point_ids)
             logger.info("old_version_points_dropped", points=len(point_ids), collection=collection)
 
     async def rebuild_point(
