@@ -245,3 +245,53 @@ def test_codex_session_summary_carries_the_personal_fact_rules():
     assert "`details.trigger` on a `time` item" in section
     assert "never today's date" not in section
     assert "into the content (`light`: the summary)" in section
+
+
+MEMO_TAGS = (
+    "`status:open`",
+    "`source:review`",
+    "`issue:#N`",
+    "`pr:#N`",
+    "`area:<area>`",
+    "`file:<repo path>` for every file concerned",
+)
+
+
+def _codex_backlog() -> str:
+    text = CODEX_SKILL.read_text(encoding="utf-8")
+    body = text.split("\n## Lightweight backlog\n", 1)[1]
+    return body.split("\n<!-- SYNC:", 1)[0].split("\n## ", 1)[0]
+
+
+def test_session_summary_offers_the_two_memo_buckets():
+    """#2586: the follow-up policy's memos, with every field the policy names."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    step = text.split("### 2. Identify what to remember", 1)[1].split("\n### ", 1)[0]
+    memos = step.split("**Memos", 1)[1]
+    assert "| `tech-debt` | 0.45 | `tech-debt (<area>): ` |" in memos
+    assert "| `needs-decision` | 0.5 | `needs-decision (<area>): ` |" in memos
+    assert "a question only the owner can answer" in memos
+    assert "`Problem:`, `Proposal:` and `Source:` lines" in memos
+    assert "then `Related issues: #…`" in memos
+    assert "- **context_summary**: when to pick it up" in memos
+    for tag in MEMO_TAGS:
+        assert tag in memos, tag
+    # The file tags are the lookup key, so the general tag cap gives way; and
+    # light mode, which drops context_summary, keeps a memo whole.
+    assert "the about-6 cap of step 4 does not apply" in memos
+    assert "a memo keeps these fields in every mode" in memos
+    assert "/kagura-memory:maintain" in memos
+
+
+def test_codex_session_summary_offers_the_memo_buckets():
+    section = _section(CODEX_SKILL.read_text(encoding="utf-8"), "## Session Summary")
+    assert 'can be offered as a memo ("Lightweight backlog" below)' in section
+    assert "a memo's is the one exception" in section
+    backlog = " ".join(_codex_backlog().split())
+    assert '`type="tech-debt"` (importance 0.45)' in backlog
+    assert '`type="needs-decision"` (0.5)' in backlog
+    assert "`tech-debt (<area>): `" in backlog and "`needs-decision (<area>): `" in backlog
+    assert "`Problem:`, `Proposal:` and `Source:` lines, then `Related issues: #…`" in backlog
+    assert "`context_summary`: when to pick it up" in backlog
+    for tag in MEMO_TAGS:
+        assert tag in backlog, tag

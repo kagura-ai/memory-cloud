@@ -8,7 +8,7 @@ Arguments: $ARGUMENTS — `[light|standard|deep|auto]`, the save mode. Nothing g
 
 ## When to use
 
-When the user asks for it — by running this command, or through a workflow the user started (for example `/gh-issue-driven:ship`, which runs it at the end) — typically at the end of a development session or before switching to a different task. Proposes decisions, patterns, bugs, and plans that would be useful in future sessions; the user decides what is kept.
+When the user asks for it — by running this command, or through a workflow the user started (for example `/gh-issue-driven:ship`, which runs it at the end) — typically at the end of a development session or before switching to a different task. Proposes decisions, patterns, bugs, plans and memos for later that would be useful in future sessions; the user decides what is kept.
 
 ## Save modes
 
@@ -52,6 +52,19 @@ Review the conversation and categorize knowledge into one of the canonical types
 | `time` | Forward-looking plans and dated follow-ups (a deadline, an appointment, "re-check on date X", a scheduled flag flip). Set `details={"trigger": {"year": 2026, "month": 11, "day": 3}}` (integers, `year` required) so `recall_upcoming` surfaces it at the right time instead of letting it decay into the backlog. A plan with no date is a `fact`. | 0.6-0.8 |
 
 **A conversation about the user's own life** (not a development session): propose every distinct fact the user stated about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own candidate, with every name, number, date and quantity exactly as stated (a per-item price and a total are two facts). The mode's candidate count limits development knowledge only, not these. Include the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure). A name or value inside a stated fact is the fact itself; contact details, home addresses, and account, card or ID numbers stay out, as do secrets and credentials.
+
+**Memos — what the session leaves for later.** An observation that is not a decision, pattern or trap — a refactor, a duplicated helper, dead code, a nit, a hardening idea — or a question only the owner can answer can be kept as a memo instead of an issue, to be picked up when a later change touches its files. Offer it in one of two buckets; a memo keeps these fields in every mode:
+
+| Bucket | `type` | `importance` | `summary` starts with |
+|--------|--------|--------------|-----------------------|
+| work to pick up later | `tech-debt` | 0.45 | `tech-debt (<area>): ` |
+| a question for the owner | `needs-decision` | 0.5 | `needs-decision (<area>): ` |
+
+- **content**: `Problem:`, `Proposal:` and `Source:` lines (the review, PR or file it came from), then `Related issues: #…` — the one place a related-issues line belongs in content.
+- **context_summary**: when to pick it up ("when a change touches the export path").
+- **tags**: the type, `status:open`, `source:review` when a review raised it, `issue:#N`, `pr:#N`, `area:<area>`, and `file:<repo path>` for every file concerned. The file tags are how a later change finds the memo, so the about-6 cap of step 4 does not apply.
+
+One memo per theme. `/kagura-memory:maintain` lists the open ones and closes them.
 
 ### 3. Get the target context
 

@@ -78,6 +78,14 @@ Use `source_uri` and `source_type` with `remember` to track where knowledge orig
 3. End session: `/kagura-memory:session-summary` to save learnings
 4. Every few weeks: `/kagura-memory:maintain` to update, supersede, unpin or delete memories that are out of date
 
+**Lightweight backlog — memos instead of issues:**
+A finding worth keeping but not worth an issue yet — a refactor, a duplicated helper, a hardening idea, a question only the owner can answer — can wait in the context as a memo until a change touches its files: `type="tech-debt"` (importance 0.45) or `type="needs-decision"` (0.5), tagged `status:open`, `area:<area>` and `file:<repo path>` for each file concerned.
+1. Save: `/kagura-memory:session-summary` offers the two buckets with their fields.
+2. Pick up: before changing a file, `list(context_id=..., filters={"type": ["tech-debt", "needs-decision"], "tags": ["status:open", "file:<repo path>"], "tags_match": "all", "trust_tier": "trusted"})` finds its open memos; with `"tags": ["status:open"]` alone and `order_by="created_at", direction="asc"`, the same call is the planning view.
+3. Close: `/kagura-memory:maintain` lists the open memos with their age and files and, on your pick, closes one with `update_memory(memory_id=..., context_id=..., remove_tags=["status:open"], add_tags=["status:done"])` (`status:promoted` plus `issue:#N` when it became an issue).
+
+Sleep maintenance never archives a memo while it is tagged `status:open`. `add_tags` / `remove_tags` and that exemption need a v0.140.0 or later server; on an older one, close a memo by sending its whole tag list as `tags=[...]`.
+
 ### 4. Using the memory tools well
 
 The tool descriptions your client lists are deliberately short. This is the depth behind them; the full version is `docs/mcp-tools.md` › "Usage notes" in the repository.
