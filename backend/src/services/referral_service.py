@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.auth import User, Workspace
 from models.referral import ReferralGrant
+from services.workspace_locks import retry_nowait
 from utils.datetime import utcnow
 from utils.exceptions import (
     NotFoundException,
@@ -101,6 +102,12 @@ def build_pending_grant_update(
         )
         .values({workspace_col.key: workspace_id})
     )
+
+
+def _in_lock_order(workspace_ids: tuple[uuid.UUID | None, ...]) -> list[uuid.UUID]:
+    """The workspaces to lock, de-duplicated and UUID-ordered (see
+    :meth:`ReferralService._recompute_workspace_bonuses`)."""
+    return sorted({w for w in workspace_ids if w is not None})
 
 
 @dataclass(frozen=True)
@@ -224,6 +231,8 @@ class ReferralService:
             ReferralWindowClosedError: The account is older than the redeem window.
             ReferralCapReachedError: The referrer has no slots left.
             ReferralAlreadyRedeemedError: This user was already referred.
+            ConflictError: A workspace row to credit is held by another
+                transaction past the ``NOWAIT`` tries (409); nothing is paid.
         """
         referee = await self.db.scalar(select(User).where(User.user_id == referred_user_id))
         if referee is None:
@@ -252,9 +261,12 @@ class ReferralService:
 
         # Lock the referrer row for the duration of the cap check + insert, so
         # two invitees redeeming the same code cannot both see the last free
-        # slot. Taken before any workspace lock, and the workspace locks
-        # themselves are UUID-ordered (``_recompute_workspace_bonuses``), so the
-        # global lock order is: referrer user row, then workspaces ascending.
+        # slot. It is taken before any workspace lock: the global lock order
+        # (tests/integration/test_erasure_lock_order_db.py) is users rows, then
+        # workspace rows, and a transaction holding a users row never waits on
+        # a workspace row. ``DELETE /workspaces/W`` locks W first and then the
+        # users rows it clears, so a wait on W here could close that cycle; the
+        # workspace rows below are taken NOWAIT, UUID-ordered (#2443).
         await self.db.execute(
             select(User.user_id).where(User.user_id == referrer_id).with_for_update()
         )
@@ -273,6 +285,13 @@ class ReferralService:
 
         referrer_workspace_id = await self._resolve_owned_workspace_id(referrer_id)
         referred_workspace_id = await self._resolve_owned_workspace_id(referred_user_id)
+
+        # Both workspace rows before the INSERT: its foreign keys take a KEY
+        # SHARE on them, which waits on a row another transaction holds FOR
+        # UPDATE. Held by this transaction, they make that check and the
+        # recompute's re-lock free. A row still busy after the tries is a
+        # ConflictError (409) with nothing written: the client retries.
+        await self._lock_workspaces_nowait(referrer_workspace_id, referred_workspace_id)
 
         stmt = (
             pg_insert(ReferralGrant)
@@ -361,17 +380,32 @@ class ReferralService:
             .limit(1)
         )
 
-    async def _recompute_workspace_bonuses(self, *workspace_ids: uuid.UUID | None) -> None:
-        """Recompute several workspaces in a deadlock-free, de-duplicated order.
+    async def _lock_workspaces_nowait(self, *workspace_ids: uuid.UUID | None) -> None:
+        """Lock workspace rows ``NOWAIT`` in the recompute's order (#2443).
 
-        Callers pass workspaces by ROLE (referrer, then referee). Locking in that
-        order deadlocks on mutual referrals: A-invites-B locks (Wa, Wb) while
-        B-invites-A locks (Wb, Wa). Sorting by UUID gives a total order shared by
-        every transaction in the system, and de-duplication avoids locking (and
-        recomputing) the same workspace twice when both sides resolve to one
-        workspace — reachable after an ownership transfer.
+        Raises:
+            ConflictError: One is still held by another transaction after the
+                tries (409).
         """
-        for workspace_id in sorted({w for w in workspace_ids if w is not None}):
+        for workspace_id in _in_lock_order(workspace_ids):
+            await self._lock_workspace_nowait(workspace_id)
+
+    async def _recompute_workspace_bonuses(self, *workspace_ids: uuid.UUID | None) -> None:
+        """Recompute several workspaces in one UUID-ordered, de-duplicated pass.
+
+        Callers pass workspaces by ROLE (referrer, then referee), so mutual
+        referrals pass them in opposite orders: A-invites-B (Wa, Wb) while
+        B-invites-A (Wb, Wa). Sorting by UUID gives a total order shared by
+        every transaction in the system: the one that gets the first row also
+        gets the second, instead of each holding one and losing its ``NOWAIT``
+        tries on the other. De-duplication avoids locking (and recomputing) the
+        same workspace twice when both sides resolve to one workspace —
+        reachable after an ownership transfer.
+
+        Raises:
+            ConflictError: See :meth:`_recompute_workspace_bonus`.
+        """
+        for workspace_id in _in_lock_order(workspace_ids):
             await self._recompute_workspace_bonus(workspace_id)
 
     async def _recompute_workspace_bonus(self, workspace_id: uuid.UUID | None) -> None:
@@ -385,16 +419,25 @@ class ReferralService:
         two concurrent recomputes would each stamp a value computed from their
         own pre-commit snapshot and the later commit would silently drop the
         other's ledger change. Locking the workspace row first makes the read and
-        the write one critical section. Prefer ``_recompute_workspace_bonuses``
-        over calling this directly with more than one workspace — that wrapper
-        supplies the ordering that keeps these locks deadlock-free.
+        the write one critical section.
+
+        The lock is ``NOWAIT``, tried again for a moment
+        (:meth:`_lock_workspace_nowait`): ``redeem`` holds the referrer's users
+        row here, and a transaction holding a users row never waits on a
+        workspace row (#2443). ``revoke`` and ``apply_pending_grants`` hold none
+        and get the same behaviour. Prefer ``_recompute_workspace_bonuses`` over
+        calling this directly with more than one workspace — that wrapper
+        supplies the order the locks are taken in.
+
+        Raises:
+            ConflictError: Another transaction still holds the workspace row
+                after the tries (409). The caller's transaction must be rolled
+                back; nothing of it is committed.
         """
         if workspace_id is None:
             return
 
-        await self.db.execute(
-            select(Workspace.id).where(Workspace.id == workspace_id).with_for_update()
-        )
+        await self._lock_workspace_nowait(workspace_id)
 
         referrer_total = func.coalesce(
             func.sum(ReferralGrant.referrer_bonus_memories).filter(
@@ -421,6 +464,22 @@ class ReferralService:
             .values(referral_memory_bonus=int(total or 0))
         )
 
+    async def _lock_workspace_nowait(self, workspace_id: uuid.UUID) -> None:
+        """``SELECT ... FOR UPDATE NOWAIT`` the workspace row, retried (#2443).
+
+        Raises:
+            ConflictError: Another transaction still holds the row after the
+                tries (409).
+        """
+        await retry_nowait(
+            self.db,
+            lambda: self.db.execute(
+                select(Workspace.id)
+                .where(Workspace.id == workspace_id)
+                .with_for_update(nowait=True)
+            ),
+        )
+
     async def apply_pending_grants(self, user_id: str) -> int:
         """Attach a workspace to this user's grants that were recorded without one.
 
@@ -440,6 +499,10 @@ class ReferralService:
 
         Returns:
             Number of grant rows updated.
+
+        Raises:
+            ConflictError: The workspace row stays busy past the ``NOWAIT``
+                tries (409); see :meth:`_recompute_workspace_bonus`.
         """
         workspace_id = await self._resolve_owned_workspace_id(user_id)
         if workspace_id is None:
@@ -559,6 +622,10 @@ class ReferralService:
         Returns:
             ``(grant, changed)``. ``grant`` is ``None`` if no such row exists;
             ``changed`` is True only when this call performed the revocation.
+
+        Raises:
+            ConflictError: A workspace row stays busy past the ``NOWAIT`` tries
+                (409); the caller rolls back the revocation and retries.
         """
         grant = await self.db.get(ReferralGrant, grant_id)
         if grant is None:
