@@ -77,8 +77,8 @@ export interface IndexerStateMetrics {
   applied_deletes: number;
   errors: number;
   /**
-   * Events that failed since the last batch with no failures (capped at 20).
-   * Absent on a backend older than this field.
+   * Events that failed and were not run again or cleared by an operator
+   * since (capped at 20). Absent on a backend older than this field.
    */
   failed_events?: number;
   /**

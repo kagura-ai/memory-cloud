@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
 import pydantic.root_model  # noqa: F401  isort: skip
 import pytest
 import pytest_asyncio
-from sqlalchemy import update
+from sqlalchemy import text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
 # ``mcp_tasks`` → ``mcp.types``, whose ``RootModel[...]`` generic submodel
@@ -39,7 +41,11 @@ from sqlalchemy import update
 # first so the import chain is stable with and without ``--cov``.
 from models.auth import Context, Workspace
 from models.resource import IndexerState, Resource
-from services.resource_indexer import IndexerMetrics, get_indexer_status_for_context
+from services.resource_indexer import (
+    IndexerMetrics,
+    get_indexer_status_for_context,
+    recorded_failed_events,
+)
 from tasks.resource_indexer_job import (
     MAX_RUNS_PER_HOUR,
     MIN_INTERVAL_SECONDS,
@@ -446,9 +452,67 @@ class TestRunQueuedIndexers:
 FAILED_EVENT = {"event_id": 7, "doc_id": "doc_7", "error_class": "RuntimeError"}
 
 
+def _returns_the_record(reason=None, *, batch_committed=False, rollback=None):
+    """A ``process_incremental`` that returns the record it is given, as the
+    indexer does on every run that leaves it unchanged (#2477)."""
+
+    async def _run(*_a, failed_events=(), **_k):
+        if rollback is not None:
+            await rollback()
+        return IndexerMetrics(
+            skipped=reason is not None,
+            reason=reason,
+            failed_events=list(failed_events),
+            batch_committed=batch_committed,
+        )
+
+    return _run
+
+
+async def _run_job(db_session, process_incremental, record=None):
+    """One job cycle with the given ``process_incremental`` side effect.
+
+    Returns the ``process_incremental`` mock.
+    """
+    client = _fake_redis()
+    indexer_instance = MagicMock()
+    indexer_instance.process_incremental = AsyncMock(side_effect=process_incremental)
+    with (
+        patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+        patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+        patch("tasks.resource_indexer_job.increment_counter", AsyncMock()),
+        patch(
+            "tasks.resource_indexer_job.ResourceIndexer",
+            MagicMock(return_value=indexer_instance),
+        ),
+        patch("tasks.resource_indexer_job.record_indexer_run", record or AsyncMock()),
+    ):
+        await run_queued_indexers()
+    return indexer_instance.process_incremental
+
+
+def _operator_writes_then_allows(db_session, statement, params):
+    """A ``can_run_indexer`` that first commits ``statement`` from a session of
+    its own, as an operator's psql would.
+
+    The job calls it after the top-of-loop refresh and before the ``running``
+    commit, the window a runbook write still passes the
+    ``job_status <> 'running'`` guard in (#2477).
+    """
+
+    async def _can_run(*_a):
+        async with AsyncSession(bind=db_session.bind, expire_on_commit=False) as operator:
+            await operator.execute(text(statement), params)
+            await operator.commit()
+        return True, "ok"
+
+    return _can_run
+
+
 class TestFailedEventsSurviveTheJob:
-    """#2254: ``state.metrics`` is replaced on every path, and the skipped
-    events it names are the operator's only rewind target."""
+    """#2254 / #2477: the skipped events in ``state.metrics`` are the
+    operator's only rewind target. The job hands the row's record to the run,
+    whose batch commit writes it, and stores what the run returns."""
 
     @pytest_asyncio.fixture
     async def state_with_failed_events(self, db_session, seeded_state):
@@ -456,106 +520,49 @@ class TestFailedEventsSurviveTheJob:
         await db_session.commit()
         return seeded_state
 
-    async def _run(self, db_session, process_incremental, record=None):
-        """One job cycle with the given ``process_incremental`` side effect."""
-        client = _fake_redis()
-        indexer_instance = MagicMock()
-        indexer_instance.process_incremental = AsyncMock(side_effect=process_incremental)
-        with (
-            patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
-            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
-            patch("tasks.resource_indexer_job.increment_counter", AsyncMock()),
-            patch(
-                "tasks.resource_indexer_job.ResourceIndexer",
-                MagicMock(return_value=indexer_instance),
-            ),
-            patch("tasks.resource_indexer_job.record_indexer_run", record or AsyncMock()),
-        ):
-            await run_queued_indexers()
+    async def test_the_run_is_given_the_rows_record(self, db_session, state_with_failed_events):
+        """So the batch commit already holds the merge (#2477)."""
+        process = await _run_job(db_session, _returns_the_record())
+
+        assert process.await_args.kwargs["failed_events"] == [FAILED_EVENT]
 
     @pytest.mark.parametrize(
         "reason",
-        ["no_pending_events", "schema_not_found", "memory_limit_exceeded", "plan_suspended"],
+        [None, "no_pending_events", "schema_not_found", "memory_limit_exceeded", "plan_suspended"],
     )
-    async def test_a_run_without_a_batch_keeps_the_record(
+    async def test_the_row_keeps_the_record_the_run_returns(
         self, db_session, state_with_failed_events, reason
     ):
-        metrics = IndexerMetrics(skipped=True, reason=reason)
-
-        await self._run(db_session, [metrics])
+        """A batch with no failures (``None``) included: only an operator acts
+        on the record (#2477)."""
+        await _run_job(db_session, _returns_the_record(reason, batch_committed=reason is None))
 
         await db_session.refresh(state_with_failed_events)
         assert state_with_failed_events.metrics["failed_events"] == [FAILED_EVENT]
         assert state_with_failed_events.metrics["reason"] == reason
 
-    async def test_a_rolled_back_run_keeps_the_record_not_its_own_failures(
+    async def test_the_job_does_not_add_the_old_record_back(
         self, db_session, state_with_failed_events
     ):
-        """The rollback put the offset back, so the run's failures were not
-        skipped: the next run picks them up."""
-        rolled_back = IndexerMetrics(
-            errors=2,
-            reason="commit failed",
-            failed_events=[{"event_id": 9, "doc_id": "doc_9", "error_class": "ValueError"}],
-        )
-
-        async def _roll_back(*_a, **_k):
-            await db_session.rollback()
-            return rolled_back
-
-        await self._run(db_session, _roll_back)
-
-        await db_session.refresh(state_with_failed_events)
-        assert state_with_failed_events.metrics["failed_events"] == [FAILED_EVENT]
-
-    async def test_the_next_clean_batch_clears_the_record(
-        self, db_session, state_with_failed_events
-    ):
-        metrics = IndexerMetrics(applied_upserts=3, batch_committed=True)
-
-        await self._run(db_session, [metrics])
-
-        await db_session.refresh(state_with_failed_events)
-        assert state_with_failed_events.metrics["failed_events"] == []
-        assert state_with_failed_events.job_status == "idle"
-
-    async def test_a_batch_with_failures_adds_to_the_record(
-        self, db_session, state_with_failed_events
-    ):
-        """The rewind target stays the older event."""
+        """A replay ran the recorded event again and the run dropped it: the
+        job's second commit must not merge it back."""
         newer = {"event_id": 12, "doc_id": "doc_12", "error_class": "QdrantError"}
         metrics = IndexerMetrics(errors=1, failed_events=[newer], batch_committed=True)
 
-        await self._run(db_session, [metrics])
+        await _run_job(db_session, [metrics])
 
         await db_session.refresh(state_with_failed_events)
-        assert state_with_failed_events.metrics["failed_events"] == [FAILED_EVENT, newer]
+        assert state_with_failed_events.metrics["failed_events"] == [newer]
 
-    async def test_an_event_that_fails_again_keeps_one_entry(
-        self, db_session, state_with_failed_events
-    ):
-        again = {**FAILED_EVENT, "error_class": "QdrantError"}
-        metrics = IndexerMetrics(errors=1, failed_events=[again], batch_committed=True)
-
-        await self._run(db_session, [metrics])
+    async def test_a_rolled_back_run_keeps_the_record(self, db_session, state_with_failed_events):
+        """The rollback expired the row; the job's write after it still lands."""
+        await _run_job(
+            db_session, _returns_the_record("commit failed", rollback=db_session.rollback)
+        )
 
         await db_session.refresh(state_with_failed_events)
-        assert state_with_failed_events.metrics["failed_events"] == [again]
-
-    async def test_the_merged_record_keeps_the_oldest_events_up_to_the_cap(
-        self, db_session, seeded_state
-    ):
-        recorded = [{**FAILED_EVENT, "event_id": i} for i in range(10, 30)]
-        seeded_state.metrics = {"failed_events": recorded}
-        await db_session.commit()
-        older = {**FAILED_EVENT, "event_id": 5}
-        metrics = IndexerMetrics(errors=1, failed_events=[older], batch_committed=True)
-
-        await self._run(db_session, [metrics])
-
-        await db_session.refresh(seeded_state)
-        kept = seeded_state.metrics["failed_events"]
-        assert [e["event_id"] for e in kept] == [5, *range(10, 29)]
+        assert state_with_failed_events.metrics["failed_events"] == [FAILED_EVENT]
+        assert state_with_failed_events.job_status == "idle"
 
     async def test_a_metrics_value_that_is_no_object_does_not_strand_the_row(
         self, db_session, seeded_state
@@ -564,7 +571,7 @@ class TestFailedEventsSurviveTheJob:
         seeded_state.metrics = ["hand", "edited"]
         await db_session.commit()
 
-        await self._run(db_session, [IndexerMetrics(skipped=True, reason="no_pending_events")])
+        await _run_job(db_session, [IndexerMetrics(skipped=True, reason="no_pending_events")])
 
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "idle"
@@ -588,7 +595,31 @@ class TestFailedEventsSurviveTheJob:
             offsets.append(seeded_state.last_offset)
             return IndexerMetrics(skipped=True, reason="no_pending_events")
 
-        await self._run(db_session, _see_the_offset)
+        await _run_job(db_session, _see_the_offset)
+
+        assert offsets == [6]
+
+    async def test_a_rewind_before_the_running_commit_is_the_offset_the_run_starts_from(
+        self, db_session, seeded_state
+    ):
+        """#2477: the rewind lands after the top-of-loop refresh, while the row
+        is not ``running`` yet, so the runbook's guard lets it through."""
+        seeded_state.last_offset = 100
+        await db_session.commit()
+        rewind = (
+            "UPDATE indexer_state SET last_offset = 6 WHERE id = :id AND job_status <> 'running'"
+        )
+        offsets = []
+
+        async def _see_the_offset(*_a, **_k):
+            offsets.append(seeded_state.last_offset)
+            return IndexerMetrics(skipped=True, reason="no_pending_events")
+
+        with patch(
+            "tasks.resource_indexer_job.can_run_indexer",
+            _operator_writes_then_allows(db_session, rewind, {"id": seeded_state.id}),
+        ):
+            await _run_job(db_session, _see_the_offset)
 
         assert offsets == [6]
 
@@ -623,14 +654,14 @@ class TestFailedEventsSurviveTheJob:
                 db_session.expire_all()
             return IndexerMetrics(errors=1, reason="commit failed")
 
-        await self._run(db_session, _roll_back_once)
+        await _run_job(db_session, _roll_back_once)
 
         assert len(ran) == 2
 
     async def test_a_raising_run_keeps_the_record_beside_the_error(
         self, db_session, state_with_failed_events
     ):
-        await self._run(db_session, RuntimeError("boom indexing"))
+        await _run_job(db_session, RuntimeError("boom indexing"))
 
         await db_session.refresh(state_with_failed_events)
         assert state_with_failed_events.job_status == "failed"
@@ -643,9 +674,11 @@ class TestFailedEventsSurviveTheJob:
         self, db_session, state_with_failed_events
     ):
         newer = {"event_id": 12, "doc_id": "doc_12", "error_class": "QdrantError"}
-        metrics = IndexerMetrics(errors=1, failed_events=[newer], batch_committed=True)
+        metrics = IndexerMetrics(
+            errors=1, failed_events=[FAILED_EVENT, newer], batch_committed=True
+        )
 
-        await self._run(
+        await _run_job(
             db_session, [metrics], record=AsyncMock(side_effect=RuntimeError("after the run"))
         )
 
@@ -683,6 +716,91 @@ class TestFailedEventsSurviveTheJob:
         status = await get_indexer_status_for_context(db_session, context)
 
         assert status["state"]["metrics"]["failed_events"] == 0
+
+
+_RUNBOOK = Path(__file__).resolve().parents[3] / "docs" / "ops" / "resource-indexer-backfill.md"
+
+
+def _runbook_clear() -> str:
+    """The runbook's clear of ``metrics.failed_events`` (#2477), its
+    placeholders turned into bind parameters."""
+    docs = _RUNBOOK.read_text()
+    section = docs[docs.index("### Clear the list") :]
+    block = section[section.index("```sql\n") + len("```sql\n") :]
+    statement = block[: block.index("```")]
+    assert "'<resource_id>'" in statement and "'<context_id>'" in statement, statement
+    return statement.replace("'<resource_id>'", ":resource_id").replace(
+        "'<context_id>'", ":context_id"
+    )
+
+
+class TestTheOperatorClearsTheRecord:
+    """#2477: the record stays until an operator acts on it. The runbook's
+    clear, run as written, is how they drop it without a rewind."""
+
+    async def _clear(self, db_session, state) -> None:
+        await db_session.execute(
+            text(_runbook_clear()),
+            {"resource_id": state.resource_id, "context_id": state.context_id},
+        )
+        await db_session.commit()
+
+    async def test_the_clear_empties_the_record_and_keeps_the_rest(self, db_session, seeded_state):
+        seeded_state.metrics = {"errors": 1, "failed_events": [FAILED_EVENT]}
+        seeded_state.job_status = "idle"
+        await db_session.commit()
+
+        await self._clear(db_session, seeded_state)
+
+        await db_session.refresh(seeded_state)
+        assert recorded_failed_events(seeded_state.metrics) == []
+        assert seeded_state.metrics["errors"] == 1
+        context = await db_session.get(Context, seeded_state.context_id)
+        context.resource_id = seeded_state.resource_id
+        status = await get_indexer_status_for_context(db_session, context)
+        assert status["state"]["metrics"]["failed_events"] == 0
+
+    async def test_the_next_run_is_given_an_empty_record(self, db_session, seeded_state):
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        await db_session.commit()
+        await self._clear(db_session, seeded_state)
+
+        process = await _run_job(db_session, _returns_the_record())
+
+        assert process.await_args.kwargs["failed_events"] == []
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == []
+
+    async def test_a_clear_before_the_running_commit_is_not_written_over(
+        self, db_session, seeded_state
+    ):
+        """The clear lands after the top-of-loop refresh, while the row is not
+        ``running`` yet, so the runbook's guard lets it through: the run must
+        start from it, not from the copy the refresh read."""
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        await db_session.commit()
+        params = {"resource_id": seeded_state.resource_id, "context_id": seeded_state.context_id}
+
+        with patch(
+            "tasks.resource_indexer_job.can_run_indexer",
+            _operator_writes_then_allows(db_session, _runbook_clear(), params),
+        ):
+            process = await _run_job(db_session, _returns_the_record())
+
+        assert process.await_args.kwargs["failed_events"] == []
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == []
+
+    async def test_the_clear_leaves_a_running_row_alone(self, db_session, seeded_state):
+        """The run in progress would write its record back over the clear."""
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        seeded_state.job_status = "running"
+        await db_session.commit()
+
+        await self._clear(db_session, seeded_state)
+
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == [FAILED_EVENT]
 
 
 class TestScheduleResourceIndexerJobs:

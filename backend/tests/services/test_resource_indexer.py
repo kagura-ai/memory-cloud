@@ -18,7 +18,11 @@ from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_N
 from models.auth import Context, Workspace
 from models.memory import Memory
 from services.context_routing import resolve_context_routing
-from services.resource_indexer import MAX_RECORDED_FAILED_EVENTS, ResourceIndexer
+from services.resource_indexer import (
+    MAX_RECORDED_FAILED_EVENTS,
+    ResourceIndexer,
+    recorded_failed_events,
+)
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
 from utils.text import normalize_for_search
@@ -877,6 +881,37 @@ def _numbered(*events: MagicMock) -> list[MagicMock]:
         # Naive, like the TIMESTAMP WITHOUT TIME ZONE column the lag is read from.
         event.created_at = datetime(2026, 4, 15)
     return list(events)
+
+
+def _after(offset: int, *events: MagicMock) -> list[MagicMock]:
+    """``_numbered``, continuing after ``offset`` (the row's ``last_offset``)."""
+    numbered = _numbered(*events)
+    for event in numbered:
+        event.id += offset
+    return numbered
+
+
+def _entry(event_id: int, error_class: str = "RuntimeError") -> dict:
+    """A ``failed_events`` entry for event ``event_id`` of ``doc_<event_id>``."""
+    return {"event_id": event_id, "doc_id": f"doc_{event_id}", "error_class": error_class}
+
+
+def test_the_record_reads_only_entries_with_an_integer_event_id():
+    """#2477: the batch commit sorts the record by ``event_id``, and the column
+    is edited by hand. An entry without an integer id would roll back every
+    batch from then on."""
+    stored = {
+        "failed_events": [
+            _entry(7),
+            "doc_8",
+            None,
+            {"event_id": "9", "doc_id": "doc_9"},
+            {"doc_id": "doc_10"},
+            {"event_id": True, "doc_id": "doc_11"},
+        ]
+    }
+
+    assert recorded_failed_events(stored) == [_entry(7)]
 
 
 class TestProcessIncrementalSuspendedOrFull:
@@ -1988,8 +2023,9 @@ class TestProcessIncrementalSavepoints:
         indexer._workspace_memory_room = AsyncMock(return_value=10_000)
         return indexer
 
-    async def _process(self, indexer, chunks=None, points=None):
+    async def _process(self, indexer, chunks=None, points=None, failed_events=None):
         routing = AsyncMock(return_value=(self.COLLECTION, MagicMock()))
+        kwargs = {} if failed_events is None else {"failed_events": failed_events}
         with (
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
@@ -1997,7 +2033,7 @@ class TestProcessIncrementalSavepoints:
             patch("services.resource_indexer.delete_points_from_qdrant", points or AsyncMock()),
         ):
             quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
-            return await indexer.process_incremental("res_test", uuid4())
+            return await indexer.process_incremental("res_test", uuid4(), **kwargs)
 
     @pytest.mark.asyncio
     async def test_each_event_runs_in_its_own_savepoint(self):
@@ -2105,6 +2141,134 @@ class TestProcessIncrementalSavepoints:
 
         assert metrics.reason == "no_pending_events"
         assert metrics.batch_committed is False
+
+    @pytest.mark.asyncio
+    async def test_a_clean_batch_keeps_the_record_it_was_given(self):
+        """#2477: the skipped event was not re-applied, so only an operator
+        rewind or clear takes it off the record."""
+        indexer = self._indexer(_after(10, _upsert("doc_11"), _upsert("doc_12")))
+        self.state.last_offset = 10
+
+        metrics = await self._process(indexer, failed_events=[_entry(7)])
+
+        assert metrics.errors == 0
+        assert metrics.failed_events == [_entry(7)]
+        assert self.state.metrics["failed_events"] == [_entry(7)]
+
+    @pytest.mark.asyncio
+    async def test_the_batch_commit_writes_the_merged_record(self):
+        """#2477: the record goes into the batch's own commit, not into a later
+        one in the job that a process can die before."""
+        indexer = self._indexer(_after(10, _upsert("doc_11"), _upsert("doc_12")))
+        self.state.last_offset = 10
+        indexer._apply_upsert.side_effect = [None, RuntimeError("boom")]
+        committed = []
+        indexer.db.commit.side_effect = lambda: committed.append(
+            self.state.metrics["failed_events"]
+        )
+
+        metrics = await self._process(indexer, failed_events=[_entry(7)])
+
+        assert committed == [[_entry(7), _entry(12)]]
+        assert metrics.failed_events == [_entry(7), _entry(12)]
+
+    @pytest.mark.asyncio
+    async def test_a_replay_drops_the_entries_it_ran_again_and_keeps_the_rest(self):
+        """#2477: after a rewind to 4 the batch runs 5 to 8 again. 3 is at or
+        below the target and 20 past this batch, so both stay; 5 succeeded and
+        leaves; 8 failed again and is listed once, with its new class."""
+        events = _after(4, *[_upsert(f"doc_{i}") for i in range(5, 9)])
+        indexer = self._indexer(events)
+        self.state.last_offset = 4
+        indexer._apply_upsert.side_effect = [None, None, None, ValueError("again")]
+
+        metrics = await self._process(
+            indexer, failed_events=[_entry(3), _entry(5), _entry(8), _entry(20)]
+        )
+
+        expected = [_entry(3), _entry(8, "ValueError"), _entry(20)]
+        assert metrics.failed_events == expected
+        assert self.state.metrics["failed_events"] == expected
+
+    @pytest.mark.asyncio
+    async def test_the_merged_record_keeps_the_oldest_events_up_to_the_cap(self):
+        indexer = self._indexer(_after(100, _upsert("doc_101")))
+        self.state.last_offset = 100
+        indexer._apply_upsert.side_effect = RuntimeError("boom")
+        recorded = [_entry(i) for i in range(1, MAX_RECORDED_FAILED_EVENTS + 1)]
+
+        metrics = await self._process(indexer, failed_events=recorded)
+
+        assert metrics.errors == 1
+        assert self.state.metrics["failed_events"] == recorded
+
+    @pytest.mark.asyncio
+    async def test_a_full_record_lists_an_event_that_failed_again_once(self):
+        """#2477: the entry the batch ran again gives way to its new outcome
+        before the cap is applied, so it is neither counted twice nor cut."""
+        indexer = self._indexer(_after(100, _upsert("doc_101"), _upsert("doc_102")))
+        self.state.last_offset = 100
+        indexer._apply_upsert.side_effect = [ValueError("again"), RuntimeError("new")]
+        recorded = [_entry(i) for i in range(1, MAX_RECORDED_FAILED_EVENTS)] + [_entry(101)]
+
+        metrics = await self._process(indexer, failed_events=recorded)
+
+        assert metrics.failed_events == [*recorded[:-1], _entry(101, "ValueError")]
+        assert self.state.metrics["failed_events"] == metrics.failed_events
+
+    @pytest.mark.asyncio
+    async def test_a_failure_at_the_end_of_a_batch_leaves_once_the_next_run_applies_it(self):
+        """#2477: the offset stays below a trailing failure, so the next run
+        runs it again; once it succeeds it is off the record."""
+        first = self._indexer(_after(10, _upsert("doc_11"), _upsert("doc_12")))
+        self.state.last_offset = 10
+        first._apply_upsert.side_effect = [None, RuntimeError("boom")]
+
+        after_first = await self._process(first, failed_events=[_entry(7)])
+
+        assert self.state.last_offset == 11
+        assert after_first.failed_events == [_entry(7), _entry(12)]
+
+        second = self._indexer(_after(11, _upsert("doc_12"), _upsert("doc_13")))
+        self.state.last_offset = 11
+
+        after_second = await self._process(second, failed_events=after_first.failed_events)
+
+        assert self.state.last_offset == 13
+        assert after_second.failed_events == [_entry(7)]
+        assert self.state.metrics["failed_events"] == [_entry(7)]
+
+    @pytest.mark.asyncio
+    async def test_a_rolled_back_batch_returns_the_record_it_was_given(self):
+        """The offset went back with the batch, so the batch runs again: its
+        own failures are not skipped, and 11, which it ran, stays listed."""
+        indexer = self._indexer(_after(10, _upsert("doc_11"), _upsert("doc_12")))
+        self.state.last_offset = 10
+        indexer._apply_upsert.side_effect = [None, RuntimeError("boom")]
+        indexer.db.commit.side_effect = RuntimeError("commit failed")
+
+        metrics = await self._process(indexer, failed_events=[_entry(7), _entry(11)])
+
+        assert metrics.batch_committed is False
+        assert metrics.failed_events == [_entry(7), _entry(11)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason", ["no_pending_events", "plan_suspended", "resource_entity_missing"]
+    )
+    async def test_a_run_without_a_batch_returns_the_record_it_was_given(self, reason):
+        """The job stores what the run returns on every path (#2477)."""
+        events = [] if reason == "no_pending_events" else _after(10, _upsert("doc_11"))
+        indexer = self._indexer(events)
+        indexer._plan_suspended.return_value = reason == "plan_suspended"
+        pk = None if reason == "resource_entity_missing" else uuid4()
+
+        with patch("services.resource_lookup.resolve_resource_pk", AsyncMock(return_value=pk)):
+            metrics = await self._process(indexer, failed_events=[_entry(7)])
+
+        assert metrics.reason == reason
+        assert metrics.failed_events == [_entry(7)]
+        indexer._apply_upsert.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_failed_events_repoints_are_dropped(self):
@@ -2342,7 +2506,7 @@ def _db_indexer(db_session):
     return indexer, embedder
 
 
-async def _db_process(indexer, embedder, slug, ctx_id):
+async def _db_process(indexer, embedder, slug, ctx_id, **kwargs):
     with (
         patch(
             "services.resource_indexer.resolve_context_routing",
@@ -2351,7 +2515,7 @@ async def _db_process(indexer, embedder, slug, ctx_id):
         patch("services.resource_indexer.QuotaService") as quota_cls,
     ):
         quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
-        return await indexer.process_incremental(slug, ctx_id)
+        return await indexer.process_incremental(slug, ctx_id, **kwargs)
 
 
 class TestFailedEventDoesNotPoisonTheBatch:
@@ -2399,6 +2563,63 @@ class TestFailedEventDoesNotPoisonTheBatch:
                 )
             ).scalar_one()
             assert state.last_offset == doc_2_event
+        finally:
+            await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
+
+
+class TestTheBatchCommitHoldsTheRecord:
+    """#2477, against the real DB: the batch commit itself writes the row's
+    record of skipped events merged with the batch's own, so a process that
+    dies before the job's later commit keeps both."""
+
+    @pytest.mark.asyncio
+    async def test_the_row_holds_the_merged_record_once_the_batch_commits(self, db_session):
+        from sqlalchemy import func
+
+        from models.resource import IndexerState, ResourceEvent
+
+        ws_id, ctx_id, resource_pk, slug, _ = await _seed_indexed_resource(
+            db_session,
+            [
+                # importance outside [0, 1] violates memories.valid_importance.
+                {"doc_id": "doc_1", "version": 1, "payload": {"title": "a"}, "importance": 5.0},
+                {"doc_id": "doc_2", "version": 1, "payload": {"title": "b"}},
+            ],
+        )
+        try:
+            first = (
+                await db_session.execute(
+                    select(func.min(ResourceEvent.id)).where(
+                        ResourceEvent.resource_pk == resource_pk
+                    )
+                )
+            ).scalar_one()
+            earlier = {"event_id": first - 1, "doc_id": "doc_0", "error_class": "QdrantError"}
+            db_session.add(
+                IndexerState(
+                    resource_pk=resource_pk,
+                    resource_id=slug,
+                    context_id=ctx_id,
+                    last_offset=first - 1,
+                    job_status="running",
+                    metrics={"failed_events": [earlier]},
+                )
+            )
+            await db_session.commit()
+            indexer, embedder = _db_indexer(db_session)
+
+            metrics = await _db_process(indexer, embedder, slug, ctx_id, failed_events=[earlier])
+
+            assert metrics.batch_committed is True
+            stored = (
+                await db_session.execute(
+                    select(IndexerState.metrics).where(IndexerState.context_id == ctx_id)
+                )
+            ).scalar_one()
+            assert [(e["event_id"], e["doc_id"]) for e in stored["failed_events"]] == [
+                (first - 1, "doc_0"),
+                (first, "doc_1"),
+            ]
         finally:
             await _drop_indexed_resource(db_session, ws_id, ctx_id, resource_pk)
 
