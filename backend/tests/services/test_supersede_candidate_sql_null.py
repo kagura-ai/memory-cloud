@@ -9,6 +9,7 @@ nothing. Reading through the ORM cannot tell the two apart (both load as
 
 from __future__ import annotations
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -83,15 +84,22 @@ async def _stored(db, memory_id: UUID) -> tuple[bool, str | None]:
     return row.sql_null, row.json_type
 
 
-def _req(summary: str) -> RememberRequest:
-    return RememberRequest(summary=summary, content="content", type="note", importance=0.5)
+def _req(summary: str, content: str = "content") -> RememberRequest:
+    return RememberRequest(summary=summary, content=content, type="note", importance=0.5)
 
 
 async def _remember(
-    db, owner: str, ws: Workspace, ctx: Context, *, summary: str = "a remembered fact", **kw
+    db,
+    owner: str,
+    ws: Workspace,
+    ctx: Context,
+    *,
+    summary: str = "a remembered fact",
+    content: str = "content",
+    **kw,
 ) -> UUID:
     result = await MemoryService(db).remember(
-        _req(summary),
+        _req(summary, content),
         user_id=owner,
         client="pytest",
         current_context_id=ctx.id,
@@ -285,3 +293,61 @@ async def test_detection_write_skips_an_edit_accept_or_delete_after_the_re_read(
 
     assert written is False
     assert await _stored(db_session, memory_id) == (True, None)
+
+
+@pytest.mark.asyncio
+async def test_detection_write_fences_the_text_with_sha256_not_md5():
+    """#2511: SQL ``md5()`` raises on a FIPS-mode server (PG 14+ on OpenSSL),
+    which would turn every detection write into the best-effort failure. The
+    text fence hashes the UTF-8 bytes with ``sha256`` and binds the raw
+    digests, so no ``md5(`` reaches the compiled UPDATE."""
+    from sqlalchemy.dialects import postgresql
+
+    from services.memory_service import _store_supersede_candidate
+
+    summary, content = "日本語の要約", "本文:記憶の詳細です。"
+    memory = Memory(id=uuid4(), summary=summary, content=content, supersede_candidate=None)
+    db = MagicMock(execute=AsyncMock(return_value=MagicMock(rowcount=0)), commit=AsyncMock())
+
+    await _store_supersede_candidate(
+        db, memory=memory, candidate={"memory_id": str(uuid4()), "similarity": 0.93}
+    )
+
+    compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "sha256(convert_to(memories.summary," in sql
+    assert "sha256(convert_to(memories.content," in sql
+    assert "md5(" not in sql.lower()
+    bound = [value for value in compiled.params.values() if isinstance(value, bytes)]
+    assert sorted(bound) == sorted(
+        hashlib.sha256(text_.encode("utf-8")).digest() for text_ in (summary, content)
+    )
+
+
+@pytest.mark.asyncio
+async def test_detection_write_fence_matches_non_ascii_text(db_session, quiet_write):
+    """The SQL ``sha256(convert_to(col, 'UTF8'))`` equals the Python digest of
+    the same text byte for byte, Japanese included, or no candidate would
+    ever be stored for such a memory."""
+    from services.memory_service import _store_supersede_candidate
+
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    await db_session.commit()
+    memory_id = await _remember(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        summary="日本語の要約、記憶の詳細",
+        content="本文:記憶の詳細です。",
+    )
+    memory = (await db_session.execute(select(Memory).where(Memory.id == memory_id))).scalar_one()
+    target = str(uuid4())
+
+    written = await _store_supersede_candidate(
+        db_session, memory=memory, candidate={"memory_id": target, "similarity": 0.93}
+    )
+
+    assert written is True
+    assert await _target_of(db_session, memory_id) == target

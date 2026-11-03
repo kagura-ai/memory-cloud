@@ -9218,7 +9218,8 @@ async def _store_supersede_candidate(
       "No candidate" also matches the JSON ``null`` rows the #2022 walk
       skipped (the ORM reads both as None);
     - the text is the one this run embedded (an edit's own run owns the
-      column, #2059);
+      column, #2059), compared by ``sha256`` of the UTF-8 bytes: SQL
+      ``md5()`` raises on a FIPS-mode server (#2511);
     - no ``supersedes`` edge to the target exists (an accept that did not
       touch the column), and the memory is not deleted.
 
@@ -9231,15 +9232,17 @@ async def _store_supersede_candidate(
         as committed, so the seed-edge commits that follow do not flush it
         again.
     """
-    from sqlalchemy import Text, update
+    from sqlalchemy import LargeBinary, Text, literal, update
     from sqlalchemy import cast as sql_cast
     from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm.attributes import set_committed_value
 
     from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
 
-    def md5(value: str) -> str:
-        return hashlib.md5(value.encode("utf-8"), usedforsecurity=False).hexdigest()
+    def text_unchanged(column: Any, value: str) -> Any:
+        digest = hashlib.sha256(value.encode("utf-8")).digest()
+        stored = func.sha256(func.convert_to(column, "UTF8"), type_=LargeBinary)
+        return stored == literal(digest, LargeBinary)
 
     seen = memory.supersede_candidate
     if seen is None:
@@ -9260,8 +9263,8 @@ async def _store_supersede_candidate(
             Memory.id == memory.id,
             Memory.deleted_at.is_(None),
             column_unchanged,
-            func.md5(Memory.summary) == md5(memory.summary),
-            func.md5(Memory.content) == md5(memory.content),
+            text_unchanged(Memory.summary, memory.summary),
+            text_unchanged(Memory.content, memory.content),
             ~accepted,
         )
         .values(supersede_candidate=candidate)
