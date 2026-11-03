@@ -2369,8 +2369,9 @@ class AccountErasureService:
                 ),
             )
         )
-        # The memories the workspace delete below removes, its context-less
-        # ones included (#2445), are in this one id-ordered memory phase.
+        # One id-ordered memory phase: the rows the workspace cascade below
+        # removes, and the context-less ones of those workspaces, which no
+        # cascade reaches and a DELETE just before it removes (#2445).
         await self.db.execute(
             locked_ids(
                 Memory,
