@@ -29,6 +29,7 @@ from mcp_server.tools.guide import GUIDE_INDEX, GUIDE_TOPICS
 from services.session_bootstrap_service import (
     COMPONENTS,
     FORMATS,
+    INDEX_GUARDRAIL_ROWS,
     _fit,
     index_change_row,
     index_components,
@@ -134,6 +135,7 @@ def test_the_guide_topic_names_every_input_property():
     assert "under 10,000" in topic and "2,000" in topic
     assert "instructions is left out" in topic
     assert "guardrails.truncated: true" in topic
+    assert f"up to {INDEX_GUARDRAIL_ROWS} guardrail rows" in topic  # #2485
     assert "every lane comes back empty" in topic
 
 
@@ -377,46 +379,80 @@ def test_index_fit_never_exceeds_max_chars_with_a_guardrails_lane():
         assert "context_summary_omitted" not in out
 
 
-def test_index_fit_cuts_guardrails_last():
-    """#2485: guardrails take what pinned, upcoming and changes leave."""
+def _rows_chars(items):
+    """What ``fit_lanes`` charges for ``items``: each row's JSON plus a separator."""
+    return sum(json_chars(item) + 1 for item in items)
+
+
+def _index_shell_chars(env):
+    """The fitted reply with every lane empty. ``_fit``'s own shell reserves the
+    widest cursor and is a few characters larger, so the budgets below give
+    each lane's last row half a row of slack."""
+    return json_chars(_fit(env, 1, change_cursors=[], since=SINCE, index=True))
+
+
+CURSORS = [f"cur-{i}" for i in range(6)]
+
+
+def test_index_fit_fits_guardrails_after_upcoming_and_before_changes():
+    """#2485: what pinned and upcoming leave goes to the guardrails, then to changes."""
     env = _index_envelope()
     comps = env["components"]
-    lanes_chars = sum(
-        json_chars(comps[name][key])
-        for name, key in (("pinned", "memories"), ("upcoming", "results"), ("changes", "changes"))
+    # Room for every pinned and upcoming row and one and a half guardrail rows.
+    budget = (
+        _index_shell_chars(env)
+        + _rows_chars(comps["pinned"]["memories"])
+        + _rows_chars(comps["upcoming"]["results"])
+        + _rows_chars(env["guardrails"]["items"][:1]) * 3 // 2
     )
-    shell = _fit(env, 1, change_cursors=[], since=SINCE, index=True)
-    # Room for every pinned, upcoming and change row and about two guardrail rows.
-    budget = json_chars(shell) + lanes_chars + 2 * 120
-    out = _fit(env, budget, change_cursors=[f"cur-{i}" for i in range(6)], since=SINCE, index=True)
+    out = _fit(env, budget, change_cursors=CURSORS, since=SINCE, index=True)
     comps = out["components"]
     assert len(comps["pinned"]["memories"]) == 6 and comps["pinned"]["truncated"] is False
     assert len(comps["upcoming"]["results"]) == 6 and "truncated" not in comps["upcoming"]
-    assert len(comps["changes"]["changes"]) == 6 and "truncated" not in comps["changes"]
-    assert comps["changes"]["has_more"] is False and comps["changes"]["next_cursor"] is None
-    assert 0 < len(out["guardrails"]["items"]) < 6
+    assert out["guardrails"]["items"] == env["guardrails"]["items"][:1]
     assert out["guardrails"]["truncated"] is True  # the block's own flag
     assert out["guardrails"]["total_available"] == 6  # says how many exist
+    assert comps["changes"]["changes"] == [] and comps["changes"]["has_more"] is True
+    assert comps["changes"]["next_cursor"] == window_start_cursor(SINCE)
+    assert json_chars(out) <= budget
 
 
-def test_index_fit_gives_guardrails_nothing_when_changes_fill_the_budget():
-    """#2485: a cut changes page leaves the guardrails lane empty, not the reverse."""
+def test_index_fit_keeps_at_most_three_guardrails_before_changes():
+    """#2485: over budget the guardrails lane stops at INDEX_GUARDRAIL_ROWS, so a
+    context with many guardrails still leaves the rest to changes."""
     env = _index_envelope()
     comps = env["components"]
-    lanes_chars = json_chars(comps["pinned"]["memories"]) + json_chars(comps["upcoming"]["results"])
-    shell = _fit(env, 1, change_cursors=[], since=SINCE, index=True)
-    # Room for every pinned and upcoming row and about two change rows.
-    budget = json_chars(shell) + lanes_chars + 2 * 130
-    cursors = [f"cur-{i}" for i in range(6)]
-    out = _fit(env, budget, change_cursors=cursors, since=SINCE, index=True)
+    # Room for every pinned and upcoming row, three guardrail rows and two and a
+    # half change rows: without the cap the guardrails would take more.
+    budget = (
+        _index_shell_chars(env)
+        + _rows_chars(comps["pinned"]["memories"])
+        + _rows_chars(comps["upcoming"]["results"])
+        + _rows_chars(env["guardrails"]["items"][:INDEX_GUARDRAIL_ROWS])
+        + _rows_chars(comps["changes"]["changes"][:1]) * 5 // 2
+    )
+    out = _fit(env, budget, change_cursors=CURSORS, since=SINCE, index=True)
     comps = out["components"]
     assert len(comps["pinned"]["memories"]) == 6 and len(comps["upcoming"]["results"]) == 6
-    kept = len(comps["changes"]["changes"])
-    assert 0 < kept < 6
+    assert out["guardrails"]["items"] == env["guardrails"]["items"][:INDEX_GUARDRAIL_ROWS]
+    assert out["guardrails"]["truncated"] is True
+    assert out["guardrails"]["total_available"] == 6
+    assert len(comps["changes"]["changes"]) == 2
     assert comps["changes"]["truncated"] is True and comps["changes"]["has_more"] is True
-    assert comps["changes"]["next_cursor"] == f"cur-{kept - 1}"
-    assert out["guardrails"]["items"] == [] and out["guardrails"]["truncated"] is True
+    assert comps["changes"]["next_cursor"] == "cur-1"
     assert json_chars(out) <= budget
+
+
+def test_index_fit_caps_guardrails_only_when_the_reply_is_cut():
+    """A reply that fits keeps every guardrail row; one over budget by the
+    guardrails alone loses the rows past the cap and says so."""
+    env = _index_envelope()
+    assert len(env["guardrails"]["items"]) > INDEX_GUARDRAIL_ROWS
+    assert _fit(env, json_chars(env), change_cursors=CURSORS, since=SINCE, index=True) is env
+    out = _fit(env, json_chars(env) - 1, change_cursors=CURSORS, since=SINCE, index=True)
+    assert out["guardrails"]["items"] == env["guardrails"]["items"][:INDEX_GUARDRAIL_ROWS]
+    assert out["guardrails"]["truncated"] is True
+    assert out["components"] == env["components"]  # every other lane whole
 
 
 def test_full_fit_never_cuts_guardrails():

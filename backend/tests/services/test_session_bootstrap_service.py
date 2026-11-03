@@ -16,6 +16,7 @@ from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from services.memory_listing import changes_since, decode_change_cursor
 from services.session_bootstrap_service import (
     COMPONENTS,
+    INDEX_GUARDRAIL_ROWS,
     SessionBootstrapService,
     window_start_cursor,
 )
@@ -548,21 +549,26 @@ async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
     changes = comps["changes"]
     assert changes["truncated"] is True and changes["has_more"] is True
     assert len(changes["changes"]) < len(full_index["components"]["changes"]["changes"])
-    # A later lane keeps rows only when every earlier lane kept all of its rows;
-    # guardrails come last (#2485).
+    # #2485: pinned, upcoming, at most INDEX_GUARDRAIL_ROWS guardrails, changes.
+    # A later lane keeps rows only when every earlier lane kept all it may.
+    whole = full_index["components"]
     lanes = [
-        (comps["pinned"], "memories", full_index["components"]["pinned"]),
-        (comps["upcoming"], "results", full_index["components"]["upcoming"]),
-        (changes, "changes", full_index["components"]["changes"]),
-        (env["guardrails"], "items", full_index["guardrails"]),
+        (comps["pinned"], "memories", len(whole["pinned"]["memories"])),
+        (comps["upcoming"], "results", len(whole["upcoming"]["results"])),
+        (env["guardrails"], "items", INDEX_GUARDRAIL_ROWS),
+        (changes, "changes", len(whole["changes"]["changes"])),
     ]
     earlier_cut = False
-    for block, key, whole in lanes:
+    for block, key, room in lanes:
         if earlier_cut:
             assert block[key] == []
-        if len(block[key]) < len(whole[key]):
+        assert len(block[key]) <= room
+        if len(block[key]) < room:
             assert block["truncated"] is True
             earlier_cut = True
+    # Six guardrails, at most three kept: cut by the cap, and it says so.
+    assert len(full_index["guardrails"]["items"]) == 6
+    assert env["guardrails"]["truncated"] is True
 
 
 _TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": "inform"}
@@ -572,7 +578,7 @@ _TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": 
 async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
     """#2485: on a context whose guardrail rows alone fill the session-start
     budget, the upcoming rows and a changes page still come back; the
-    guardrails lane takes what the other lanes leave and says it was cut."""
+    guardrails lane keeps a few rows before changes and says it was cut."""
     owner = f"o-{uuid4().hex[:6]}"
     ws, ctx = await _scope(db_session, owner)
     now = utcnow()
@@ -654,7 +660,10 @@ async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
     assert changes["changes"], "the changes page must not be empty"
     assert changes["truncated"] is True and changes["has_more"] is True
     guard = env["guardrails"]
-    assert len(guard["items"]) < len(full_index["guardrails"]["items"])
+    assert 1 <= len(guard["items"]) <= INDEX_GUARDRAIL_ROWS < len(full_index["guardrails"]["items"])
+    # The first rows of the provider's order (importance first), not any rows.
+    whole_ids = [g["memory_id"] for g in full_index["guardrails"]["items"]]
+    assert [g["memory_id"] for g in guard["items"]] == whole_ids[: len(guard["items"])]
     assert guard["truncated"] is True and guard["total_available"] == 50
 
 

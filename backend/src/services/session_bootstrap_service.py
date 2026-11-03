@@ -13,7 +13,8 @@ change list does not answer its question.
 ``format="index"`` (#2126) turns the same reads into pointer rows: pinned
 keeps its text, guardrails / upcoming / changes rows carry an 80-character
 summary head (``summary_cut``), ``instructions`` is left out, and the
-guardrails items become a lane the budget may cut — the last one (#2485).
+guardrails items become a lane the budget may cut — at most
+``INDEX_GUARDRAIL_ROWS`` rows, before changes (#2485).
 
 Components are fail-soft: a failing one reports ``{status: error}`` while the
 rest return, with top-level ``degraded: true`` — the same contract as the
@@ -52,15 +53,18 @@ UPCOMING_K = 20
 CHANGES_LIMIT = 50
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
-# Lane priority when the envelope has to be cut: standing guardrails first,
-# then what is due, then what changed.
+# Lane priority when the envelope has to be cut: pinned first, then what is
+# due, then what changed.
 _LANES = (("pinned", "memories"), ("upcoming", "results"), ("changes", "changes"))
-# #2126: in index mode the guardrails items are a lane too. #2485: the last one,
-# so a context with many tool guardrails cannot starve upcoming and changes —
-# the hook and the guardrail digest deliver them at the matching call anyway.
-# Full mode keeps them uncut (the get_context_info contract).
+# #2126: in index mode the guardrails items are a lane too. #2485: between
+# upcoming and changes, and a cut envelope keeps at most INDEX_GUARDRAIL_ROWS
+# of them (the provider's order, importance first): a context with many tool
+# guardrails cannot starve upcoming and changes, and a busy changes window
+# cannot empty the guardrails lane. Full mode keeps them uncut (the
+# get_context_info contract).
 _GUARDRAILS = "guardrails"
-_INDEX_LANES = (*_LANES, (_GUARDRAILS, "items"))
+_INDEX_LANES = (*_LANES[:2], (_GUARDRAILS, "items"), _LANES[2])
+INDEX_GUARDRAIL_ROWS = 3
 
 
 async def _component(db: AsyncSession, name: str, fn: Any) -> dict[str, Any]:
@@ -307,7 +311,8 @@ def _fit(
     or at the start of the window when nothing was kept, so paging on from the
     reply reproduces the cut items instead of skipping them.
 
-    ``index`` (#2126) adds ``guardrails.items`` as the last lane (#2485; its
+    ``index`` (#2126) adds ``guardrails.items`` as a lane between upcoming and
+    changes that keeps at most ``INDEX_GUARDRAIL_ROWS`` rows (#2485; its
     block's own ``truncated`` turns true when cut); index rows carry no
     ``context_summary``, so nothing is dropped first. When the uncuttable
     shell alone exceeds ``max_chars``, every lane comes back empty with
@@ -346,14 +351,20 @@ def _fit(
     budget = max_chars - json_chars(shell)
     if droppable is not None:
         budget -= len('"context_summary_omitted":true,')
-    bounded, cut, dropped = fit_lanes(
-        [container(name)[key] for name, key in present], budget, droppable=droppable
+
+    def offered(name: str, key: str) -> list[Any]:
+        """The rows a lane may keep; guardrails (index mode only) stop at the cap."""
+        items = container(name)[key]
+        return items[:INDEX_GUARDRAIL_ROWS] if name == _GUARDRAILS else items
+
+    bounded, _, dropped = fit_lanes(
+        [offered(name, key) for name, key in present], budget, droppable=droppable
     )
     out = dict(envelope)
     new_components = dict(components)
-    for (name, key), items, was_cut in zip(present, bounded, cut, strict=True):
+    for (name, key), items in zip(present, bounded, strict=True):
         block = {**container(name), key: items}
-        if was_cut:
+        if len(items) < len(container(name)[key]):  # cut by the budget or the cap
             block["truncated"] = True
             if name == "changes":
                 block["has_more"] = True
