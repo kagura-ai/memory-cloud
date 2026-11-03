@@ -725,6 +725,7 @@ class WorkspaceService:
         user_id: str,
         raise_if_not_found: bool = True,
         with_lock: bool = False,
+        populate_existing: bool = False,
     ) -> WorkspaceMember | None:
         """Get workspace member.
 
@@ -733,6 +734,9 @@ class WorkspaceService:
             user_id: User ID
             raise_if_not_found: Raise exception if not found
             with_lock: Use SELECT FOR UPDATE to prevent race conditions
+            populate_existing: Overwrite a row this session already loaded
+                with what is committed now (a read under a lock taken after
+                that earlier load).
 
         Returns:
             Membership or None
@@ -748,6 +752,8 @@ class WorkspaceService:
         # Issue #275 High: Row-level locking for concurrent member operations
         if with_lock:
             stmt = stmt.with_for_update()
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
 
         result = await self.db.execute(stmt)
         member = result.scalar_one_or_none()
@@ -816,7 +822,10 @@ class WorkspaceService:
         # tests/integration/test_erasure_lock_order_db.py).
         locked_workspace = await lock_workspace_for_update(self.db, workspace_id)
 
-        member = await self.get_member(workspace_id, user_id)
+        # populate_existing: the route loaded this row before the lock (its
+        # owner check); a plain re-read returns that instance with the role it
+        # had before the wait, and a change committed meanwhile is lost.
+        member = await self.get_member(workspace_id, user_id, populate_existing=True)
         if member is None:
             # get_member raises by default; narrow for pyright + any future
             # call site that passes raise_if_not_found=False.

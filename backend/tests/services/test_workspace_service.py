@@ -553,6 +553,62 @@ class TestUpdateMemberRole:
         assert updated.role == "admin"
         assert order == ["lock", "member"]
 
+    @pytest.mark.asyncio
+    async def test_role_change_reads_the_member_as_committed_under_the_lock(
+        self, db_session
+    ) -> None:
+        # #2571: the route reads the target member before update_member_role
+        # takes the workspace lock. A change another admin commits in between
+        # is what the service must see, not the instance the route loaded:
+        # viewer -> member committed elsewhere, then -> viewer here is a
+        # member -> viewer change and stores [] (a viewer with no list would
+        # reach every shared context).
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        owner, target = f"o-{uuid4().hex[:8]}", f"v-{uuid4().hex[:8]}"
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="WFresh", owner_user_id=owner, plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id=target, role=WorkspaceRole.VIEWER)
+        )
+        await db_session.commit()
+        loaded = await service.get_member(ws.id, target)  # the route's read
+        assert loaded is not None and loaded.allowed_context_ids is None
+
+        maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+        async with maker() as other:
+            await WorkspaceService(other).update_member_role(ws.id, target, "member")
+
+        updated = await service.update_member_role(ws.id, target, "viewer")
+        assert updated.role == "viewer"
+        assert updated.allowed_context_ids == []
+
+    @pytest.mark.asyncio
+    async def test_a_desynced_owner_holder_is_not_lowered_but_can_be_restored(
+        self, db_session
+    ) -> None:
+        # #2571: with the lock taken for every role change, the #1108 guard also
+        # covers the owner_user_id holder whose own row is not OWNER (a desync):
+        # lowering it further is refused like any demotion of the owner. The
+        # repair, promoting it back to OWNER, still goes through.
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W10d", owner_user_id="holder", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="holder", role=WorkspaceRole.ADMIN)
+        )
+        await db_session.flush()
+
+        with pytest.raises(ValidationError, match="transfer ownership"):
+            await service.update_member_role(ws.id, "holder", "member")
+
+        restored = await service.update_member_role(ws.id, "holder", "owner")
+        assert restored.role == "owner"
+
 
 # ---------------------------------------------------------------------------
 # lock_workspace_for_update (#1102 shared owner-mutation lock)
