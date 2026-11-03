@@ -195,8 +195,8 @@ Manual: guide(["remember_batch"]).""",
         },
         {
             "name": "update_memory",
-            "description": """Update a memory in place (memory_id) or upsert by external_id (not found → created; found → replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
-SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context. details is replaced wholesale (resend details.location or it is dropped).
+            "description": """Update a memory in place (memory_id) or upsert by external_id (new if not found, else replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
+SECURITY: never store secrets, credentials or PII: refuse and ask the user to redact; coordinates go only in details.location, never in context.
 Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict, edge_exists.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
@@ -205,7 +205,7 @@ Manual: guide(["update_memory"]).""",
                 "properties": {
                     "verbose": {
                         "type": "boolean",
-                        "description": "true keeps persistence.detail (the lifecycle prose); default false — see guide(['persistence']).",
+                        "description": "true keeps persistence.detail (lifecycle prose); default false. See guide(['persistence']).",
                     },
                     "memory_id": {
                         "type": "string",
@@ -215,19 +215,19 @@ Manual: guide(["update_memory"]).""",
                     "expected_version": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Edit only if the memory is still at this version (the version reference() returned); else version_conflict. Omit for last-writer-wins.",
+                        "description": "Edit only while the memory is at this version (from reference()); else version_conflict. Omit: last writer wins.",
                     },
                     "external_id": {
                         "type": "string",
-                        "description": "External resource ID for the upsert lookup (stored in details.resource_id).",
+                        "description": "Upsert lookup key (stored in details.resource_id).",
                     },
                     "dismiss_supersede_candidate": {
                         "type": "boolean",
-                        "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed.",
+                        "description": "true rejects the current supersede_candidate (needs memory_id); nothing is deleted or shadowed.",
                     },
                     "accept_supersede_candidate": {
                         "type": "boolean",
-                        "description": "true accepts this memory's current supersede_candidate (requires memory_id, no field edits; both memories yours): the candidate is shadowed out of default recall.",
+                        "description": "true accepts the current supersede_candidate (needs memory_id, no field edits; both memories yours): the candidate leaves default recall.",
                     },
                     "summary": {
                         "type": "string",
@@ -247,11 +247,15 @@ Manual: guide(["update_memory"]).""",
                     },
                     "details": {
                         "type": "object",
-                        "description": "New structured details (JSON object); replaces the stored details wholesale.",
+                        "description": "Replaces the stored details (resend details.location or it is dropped).",
+                    },
+                    "details_patch": {
+                        "type": "object",
+                        "description": "Merged into the stored details; null deletes a key.",
                     },
                     "observed_at": {
                         "type": "string",
-                        "description": "When the fact held, ISO 8601 date or UTC datetime (details.observed_at). With no details: edits only the event time of the stored details.",
+                        "description": "When the fact held: ISO 8601 date or UTC datetime (details.observed_at). Without details, edits only that key.",
                     },
                     "importance": {
                         "type": "number",
@@ -260,7 +264,17 @@ Manual: guide(["update_memory"]).""",
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "New tags (replaces the list); at most 50, 100 characters each.",
+                        "description": "Replaces the tag list; at most 50, 100 characters each.",
+                    },
+                    "add_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Appended to the stored tags, each once.",
+                    },
+                    "remove_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Removed from the stored tags.",
                     },
                     "context": {
                         "type": "object",
@@ -269,7 +283,7 @@ Manual: guide(["update_memory"]).""",
                     "delivery_mode": {
                         "type": "string",
                         "enum": ["always", "on_recall", "on_trigger"],
-                        "description": "'always' pins the memory (persistent); 'on_recall' unpins it. Omit to leave unchanged.",
+                        "description": "'always' pins the memory (persistent); 'on_recall' unpins it.",
                     },
                     "context_id": {
                         "type": "string",
@@ -494,7 +508,7 @@ Manual: guide(["time-memories"]).""",
         {
             "name": "recall_nearby",
             "readOnly": True,
-            "description": """List memories near a geographic point, nearest first with distance_m. Use for 'what happened around here?' questions. A deterministic spatial query over stored coordinates (details.location), NOT semantic search — for topics use recall(). Store a location on any memory type with remember(details={'location': {'lat': 35.68, 'lon': 139.76, 'label': 'optional'}}); lat/lon must be JSON numbers. update_memory replaces details wholesale — resend location or it is dropped.
+            "description": """List memories near a geographic point, nearest first with distance_m. Use for 'what happened around here?' questions. A deterministic spatial query over stored coordinates (details.location), NOT semantic search — for topics use recall(). Store a location on any memory type with remember(details={'location': {'lat': 35.68, 'lon': 139.76, 'label': 'optional'}}); lat/lon must be JSON numbers. update_memory(details=) replaces details wholesale — resend location or it is dropped; details_patch merges instead.
 
 Returns: {status, results: [{memory_id, summary, type, location, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. location is the memory's details.location. With include_details=true each item carries the full details object instead (later items get details_omitted + details_total_chars past 20000 characters); reference(memory_id) reads one memory in full.""",
             "inputSchema": {

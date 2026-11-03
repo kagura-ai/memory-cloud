@@ -312,3 +312,59 @@ async def test_member_can_still_edit_a_plain_row(guard_env, db_session):
             current_context_id=guard_env["ctx"],
         )
     assert response.memory_id == guard_env["plain"]
+
+
+# --------------------------------------------------------------------------- #
+# #2585: details_patch / add_tags go through the same gate and validator
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_cannot_mark_a_row_through_details_patch(guard_env, db_session):
+    svc = MemoryService(db_session)
+    with pytest.raises(AuthorizationError):
+        await svc.update_memory(
+            UpdateMemoryRequest(
+                memory_id=guard_env["plain"], details_patch={"tool_trigger": dict(TT)}
+            ),
+            user_id=guard_env["member"],
+            current_context_id=guard_env["ctx"],
+        )
+    refreshed = await db_session.get(Memory, guard_env["plain"])
+    assert refreshed.details == {"note": "plain"}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_tag_edit_of_a_guardrail_is_denied(guard_env, db_session):
+    svc = MemoryService(db_session)
+    with pytest.raises(AuthorizationError):
+        await svc.patch_memory(
+            guard_env["marked"], PatchMemoryRequest(add_tags=["status:done"]), guard_env["member"]
+        )
+    refreshed = await db_session.get(Memory, guard_env["marked"])
+    assert refreshed.tags == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_owner_details_patch_keeps_then_unmarks_the_guardrail(guard_env, db_session):
+    svc = MemoryService(db_session)
+    p1, p2, p3 = _patched_side_effects()
+    with p1, p2, p3:
+        await svc.update_memory(
+            UpdateMemoryRequest(memory_id=guard_env["marked"], details_patch={"note": "changed"}),
+            user_id=guard_env["owner"],
+            current_context_id=guard_env["ctx"],
+        )
+        refreshed = await db_session.get(Memory, guard_env["marked"])
+        await db_session.refresh(refreshed)
+        assert refreshed.details == {"tool_trigger": TT_NORMALIZED, "note": "changed"}
+        assert refreshed.is_tool_triggered is True
+
+        await svc.patch_memory(
+            guard_env["marked"],
+            PatchMemoryRequest(details_patch={"tool_trigger": None}),
+            guard_env["owner"],
+        )
+    stored = await _stored_details(db_session, guard_env["marked"])
+    assert "tool_trigger" not in stored  # the key is gone, not a JSON null
+    assert '"note": "changed"' in stored

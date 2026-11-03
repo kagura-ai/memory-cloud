@@ -99,7 +99,7 @@ Ask for an action per item number. Anything not named stays as it is.
 | Action | Call |
 |--------|------|
 | keep | none |
-| update in place | `update_memory(memory_id=..., context_id=..., summary=..., content=...)` — only the fields that change; `details` is replaced wholesale |
+| update in place | `update_memory(memory_id=..., context_id=..., summary=..., content=...)` — only the fields that change; `details` is replaced wholesale, `details_patch` merges |
 | supersede a candidate | `update_memory(memory_id=<memory_id of the result that carries the candidate>, accept_supersede_candidate=true, context_id=...)` — `supersede_candidate.memory_id` leaves default recall, not deleted |
 | supersede another pair | `create_edge(source_id=<newer>, target_id=<older>, edge_type="supersedes", context_id=...)` |
 | dismiss a candidate | `update_memory(memory_id=<memory_id of the result that carries the candidate>, dismiss_supersede_candidate=true, context_id=...)` |

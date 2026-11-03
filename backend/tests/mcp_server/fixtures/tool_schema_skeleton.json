@@ -208,6 +208,9 @@
         "details": {
           "type": "object"
         },
+        "details_patch": {
+          "type": "object"
+        },
         "observed_at": {
           "type": "string"
         },
@@ -215,6 +218,18 @@
           "type": "number"
         },
         "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "add_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remove_tags": {
           "type": "array",
           "items": {
             "type": "string"

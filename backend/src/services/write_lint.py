@@ -105,8 +105,14 @@ def _summary_hints(summary: str) -> list[WriteLintHint]:
     return hints
 
 
-def _tag_hints(tags: list[str], vocabulary: dict[str, int]) -> list[WriteLintHint]:
-    """Vocabulary checks — only ever comparing against tags that exist."""
+def _tag_hints(
+    tags: list[str], vocabulary: dict[str, int], checked: list[str] | None = None
+) -> list[WriteLintHint]:
+    """Vocabulary checks — only ever comparing against tags that exist.
+
+    ``checked`` (default: ``tags``) are the tags compared; ``tags`` decides
+    ``no_tags``.
+    """
     hints: list[WriteLintHint] = []
 
     if not tags:
@@ -121,7 +127,7 @@ def _tag_hints(tags: list[str], vocabulary: dict[str, int]) -> list[WriteLintHin
         )
         return hints
 
-    for tag in tags[:MAX_TAGS_CHECKED]:
+    for tag in (tags if checked is None else checked)[:MAX_TAGS_CHECKED]:
         folded = normalize_tag(tag)
         if not folded or tag in vocabulary:
             continue  # already an established spelling — nothing to say
@@ -166,6 +172,7 @@ async def lint_write(
     summary: str,
     tags: list[str] | None,
     memory_id: UUID | None = None,
+    checked_tags: list[str] | None = None,
 ) -> list[WriteLintHint]:
     """Advisory recall-ability hints for a just-written memory.
 
@@ -178,6 +185,10 @@ async def lint_write(
         summary: The summary as written.
         tags: The tags as written.
         memory_id: The written row, for the log line only.
+        checked_tags: The tags to compare with the vocabulary, when not all of
+            ``tags`` (#2585: the ones an ``add_tags`` call added; the stored
+            ones were judged when they were written). ``tags`` still decides
+            ``no_tags``.
 
     Returns:
         Up to ``MAX_HINTS`` hints, or an empty list when the write looks fine —
@@ -188,8 +199,13 @@ async def lint_write(
         hints = _summary_hints(summary)
 
         tag_list = [t for t in (tags or []) if isinstance(t, str) and t]
+        checked = (
+            tag_list
+            if checked_tags is None
+            else [t for t in checked_tags if isinstance(t, str) and t]
+        )
         vocabulary: dict[str, int] = {}
-        if tag_list:
+        if checked:
             # Only pay for the vocabulary read when there is something to compare
             # against it; the no-tags hint needs no vocabulary at all. #1512: the
             # read is the cached snapshot from BEFORE this write (the row is
@@ -201,9 +217,9 @@ async def lint_write(
                 workspace_id=workspace_id,
                 context_id=context_id,
                 user_id=user_id,
-                written_tags=tag_list,
+                written_tags=checked,
             )
-        hints.extend(_tag_hints(tag_list, vocabulary))
+        hints.extend(_tag_hints(tag_list, vocabulary, checked))
         hints = hints[:MAX_HINTS]
 
         if hints:

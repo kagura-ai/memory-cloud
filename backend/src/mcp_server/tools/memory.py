@@ -508,6 +508,10 @@ async def handle_update_memory(
             type=args.get("type"),
             importance=args.get("importance"),
             tags=args.get("tags"),
+            # #2585: edit the stored tags / details instead of replacing them.
+            add_tags=args.get("add_tags"),
+            remove_tags=args.get("remove_tags"),
+            details_patch=args.get("details_patch"),
             context=args.get("context"),
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
             observed_at=args.get("observed_at"),  # #2330 D7

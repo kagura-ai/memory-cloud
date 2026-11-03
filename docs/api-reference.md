@@ -398,7 +398,13 @@ A memory's revision log, newest first ([#2043](https://github.com/kagura-ai/memo
 
 ### PATCH /api/v1/memory/{memory_id}
 
-Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, `details`, `observed_at`; omitted fields keep their value, `tags` replaces the list and `"details": null` clears it. `observed_at` ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)) sets `details.observed_at`: alone, it keeps the rest of the stored details (a new version); with `details` it must match `details.observed_at` if that is given; `null` means unchanged. The response is the updated memory in the `reference` shape, `version` included.
+Partial update: send any of `summary`, `content`, `type`, `importance`, `tags`, `details`, `observed_at`, `add_tags`, `remove_tags`, `details_patch`; omitted fields keep their value, `tags` replaces the list and `"details": null` clears it. `observed_at` ([#2330](https://github.com/kagura-ai/memory-cloud/issues/2330)) sets `details.observed_at`: alone, it keeps the rest of the stored details (a new version); with `details` or `details_patch` it must match their `observed_at` if that is given; `null` means unchanged. The response is the updated memory in the `reference` shape, `version` included.
+
+`add_tags` / `remove_tags` and `details_patch` ([#2585](https://github.com/kagura-ai/memory-cloud/issues/2585)) edit the stored values instead of replacing them, as on `update_memory`: removals first, then each added tag not already present is appended once; `details_patch` merges into the stored details (a `NULL` column starts from `{}`) and a key set to `null` is deleted. The resulting list may hold at most 100 tags and each added tag at most 64 characters; a longer stored tag (one written through MCP, which allows 100) is kept. The reserved `details` keys are validated as in `details`. `tags` with `add_tags` / `remove_tags`, `details` (`null` included) with `details_patch`, or an explicit `null` for any of the three is `422`.
+
+```json
+{"remove_tags": ["status:open"], "add_tags": ["status:done"]}
+```
 
 `expected_version` (optional, integer ≥ 1) makes the patch conditional: it applies only while the memory is still at that version. Otherwise nothing is written and the call answers `409`:
 
