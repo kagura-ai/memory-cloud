@@ -11,7 +11,8 @@
  *   - Edge click renders the metadata overlay
  *   - Outside click on overlay dismisses it
  *   - URL gets ?memoryId= updated when a node is clicked
- *   - An accepted supersede re-reads the graph so the new edge is drawn (#2543)
+ *   - An accepted supersede re-reads the graph so the new edge is drawn, and
+ *     an older read that lands late never replaces it (#2543)
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -500,16 +501,52 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
       .mockReturnValueOnce(reread.promise);
     mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
     mockCreateEdge.mockResolvedValueOnce({ operation: "created", edge: null });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await renderGraph();
 
-    clickNode(NODE_A_ID);
+    try {
+      clickNode(NODE_A_ID);
+      await accept();
+      await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
+      const failure = new Error("graph down");
+      await act(async () => reread.reject(failure));
+
+      expect(screen.queryByText("graph down")).not.toBeInTheDocument();
+      expect(screen.getByText("graphVizNodeCount")).toBeInTheDocument();
+      expect(simCallbacks.edges.map((e) => e.type)).toEqual(["co_recall"]);
+      // Silent for the user, but not lost for whoever debugs it.
+      expect(warn).toHaveBeenCalledWith(expect.any(String), failure);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the re-read when the first load lands after it (deep link)", async () => {
+    const firstLoad = deferred<GraphData>();
+    const reread = deferred<GraphData>();
+    mockGetGraphData
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(reread.promise);
+    mockSearchParams.current = new URLSearchParams(`memoryId=${NODE_A_ID}`);
+    mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
+    mockCreateEdge.mockResolvedValueOnce({ operation: "updated", edge: null });
+    render(<GraphTabPanel contextId="ctx-1" />);
+
+    // The dialog opens from the URL while the first load is still running.
     await accept();
     await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
-    await act(async () => reread.reject(new Error("graph down")));
+    await act(async () => reread.resolve(GRAPH_AFTER_FIRST));
+    // The first load was read before the accept; it lands last.
+    await act(async () => firstLoad.resolve(SAMPLE_GRAPH));
 
-    expect(screen.queryByText("graph down")).not.toBeInTheDocument();
-    expect(screen.getByText("graphVizNodeCount")).toBeInTheDocument();
-    expect(simCallbacks.edges.map((e) => e.type)).toEqual(["co_recall"]);
+    await screen.findByText("graphVizNodeCount");
+    expect(simCallbacks.edges).toEqual([
+      expect.objectContaining({
+        source: NODE_A_ID,
+        target: NODE_B_ID,
+        type: "supersedes",
+      }),
+    ]);
   });
 
   it("drops an older re-read that lands after a newer one", async () => {

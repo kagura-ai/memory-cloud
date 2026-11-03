@@ -110,9 +110,18 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // (and detach if we ever fall back to loading mid-life).
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
 
-  // #2543: bumped by every graph read, so a re-read that a later read
-  // overtook (two accepts in a row, or a reload) is dropped when it lands.
+  // #2543: graph reads are numbered as they start, and a reply is drawn only
+  // when it is newer than the graph on screen. An older reply that lands late
+  // (the first load after an accept made from a deep link, or the first of
+  // two accepts) never replaces a newer graph; a newer read that fails still
+  // lets an older reply through.
   const graphReadRef = useRef(0);
+  const graphShownRef = useRef(0);
+  const showGraph = useCallback((read: number, result: GraphData) => {
+    if (read <= graphShownRef.current) return;
+    graphShownRef.current = read;
+    setGraphData(result);
+  }, []);
 
   // #2543: an accepted supersede re-reads the graph so the new `supersedes`
   // edge is drawn. A re-read rather than a local patch: an endpoint may not be
@@ -130,12 +139,13 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         const result = await graphApi.getGraphData(contextId, {
           limit_nodes: GRAPH_LIMIT_NODES,
         });
-        if (read === graphReadRef.current) setGraphData(result);
-      } catch {
+        showGraph(read, result);
+      } catch (err) {
         // Nothing to undo: the accept itself succeeded and was reported.
+        console.warn("Graph re-read after an accepted supersede failed", err);
       }
     })();
-  }, [contextId]);
+  }, [contextId, showGraph]);
 
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
@@ -147,20 +157,20 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // --- Data fetch ---
   const fetchData = useCallback(async () => {
     if (!contextId) return;
-    graphReadRef.current += 1;
+    const read = ++graphReadRef.current;
     setLoading(true);
     setError(null);
     try {
       const result = await graphApi.getGraphData(contextId, {
         limit_nodes: GRAPH_LIMIT_NODES,
       });
-      setGraphData(result);
+      showGraph(read, result);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("graphVizLoadError"));
     } finally {
       setLoading(false);
     }
-  }, [contextId, t]);
+  }, [contextId, t, showGraph]);
 
   useEffect(() => {
     fetchData();
