@@ -278,6 +278,17 @@ DEFERRED_POINT_DRAIN_WAIT_MAX = 600.0
 # A queued point older than this is logged as a warning on every run.
 DEFERRED_POINT_BACKLOG_WARN_SECONDS = 24 * 3600
 
+# =============================================================================
+# Pending referral grants (#2563)
+# =============================================================================
+# A referral grant whose workspace row stayed busy past the NOWAIT tries
+# (#2443) stays pending; tasks/referral_tasks.apply_pending_referral_grants_task
+# applies the pending grants of up to BATCH users (oldest grant first) every
+# INTERVAL seconds (0 turns the job off).
+REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_ENV = "REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_SECONDS"
+REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_DEFAULT = 300
+REFERRAL_PENDING_GRANT_SWEEP_BATCH = 100
+
 # ============================================================================
 # Gate contract (#1644)
 # ============================================================================

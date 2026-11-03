@@ -206,33 +206,42 @@ class WorkspaceService:
         # ``create_personal_workspace`` both route through this method.
         #
         # Non-blocking on purpose: workspace creation must never fail because a
-        # bonus could not be applied. The grant row survives either way, so a
-        # later workspace creation (or an admin) can still resolve it.
+        # bonus could not be applied. The grant row survives either way and
+        # stays pending: the scheduler sweep (``tasks.referral_tasks``) and the
+        # next ``GET /referrals/me`` apply it (#2563) — e.g. when the oldest
+        # owned workspace was busy past the ``NOWAIT`` tries (#2443). The
+        # commit above already released the owner's users row, so this call
+        # holds no row lock when it takes that workspace row.
         #
         # The rollback in the handler is NOT optional. A failure here (e.g. a
         # constraint violation) leaves the session in an aborted transaction, and
         # swallowing the exception without rolling back would hand the caller a
         # session where every subsequent statement fails with
         # InFailedSQLTransactionError — turning a cosmetic bonus problem into a
-        # broken request. The workspace itself is already committed above.
+        # broken request. The workspace itself is already committed above. The
+        # rollback expires every loaded object, ``workspace`` included: its id
+        # is read before, and it is reloaded after, because an expired
+        # attribute read on an async session raises MissingGreenlet (#2563).
         # Deliberately NOT gated on ``settings.enable_referrals``. This call
         # mints nothing — it only re-homes ledger rows that were already earned
         # and recomputes a cache from them. Gating it would strand grants earned
         # while the program was on if the kill switch is flipped off before the
         # beneficiary creates a workspace, contradicting the documented
         # "already-granted bonuses are unaffected by the kill switch".
+        workspace_id = workspace.id
         try:
             from services.referral_service import ReferralService
 
             await ReferralService(self.db).apply_pending_grants(owner_user_id)
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             await self.db.rollback()
             logger.warning(
                 "referral_pending_grants_apply_failed",
-                workspace_id=str(workspace.id),
+                workspace_id=str(workspace_id),
                 owner_user_id=owner_user_id,
                 error=str(exc),
             )
+            await self.db.refresh(workspace)
 
         return workspace
 

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy import CursorResult, func, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,7 @@ from models.referral import ReferralGrant
 from services.workspace_locks import retry_nowait
 from utils.datetime import utcnow
 from utils.exceptions import (
+    ConflictError,
     NotFoundException,
     ReferralAlreadyRedeemedError,
     ReferralCapReachedError,
@@ -55,6 +56,20 @@ logger = get_logger(__name__)
 # attacker and knowing that some account exists.
 _REFERRAL_CODE_BYTES = 12
 _MAX_CODE_MINT_ATTEMPTS = 5
+
+# The two sides of a grant: a user and the workspace credited on their side.
+_GRANT_SIDES = (
+    (ReferralGrant.referrer_user_id, ReferralGrant.referrer_workspace_id),
+    (ReferralGrant.referred_user_id, ReferralGrant.referred_workspace_id),
+)
+
+
+def _uncredited(workspace_col: Any) -> Any:
+    """The side ``workspace_col`` credits no live workspace: unset, or soft-deleted."""
+    # Workspaces a grant may currently point at that no longer count. A subquery
+    # keeps this a single statement.
+    dead_workspaces = select(Workspace.id).where(Workspace.deleted_at.is_not(None))
+    return workspace_col.is_(None) | workspace_col.in_(dead_workspaces)
 
 
 def build_pending_grant_update(
@@ -84,14 +99,11 @@ def build_pending_grant_update(
     Returns:
         A SQLAlchemy ``Update`` statement.
     """
-    # Workspaces a grant may currently point at that no longer count. A subquery
-    # keeps this a single statement.
-    dead_workspaces = select(Workspace.id).where(Workspace.deleted_at.is_not(None))
     return (
         update(ReferralGrant)
         .where(
             user_col == user_id,
-            workspace_col.is_(None) | workspace_col.in_(dead_workspaces),
+            _uncredited(workspace_col),
             # NULL-safe inequality, and it has to be. ``!=`` evaluates to NULL
             # (not TRUE) for exactly the NULL rows this UPDATE exists to fix, so
             # it would silently match nothing. ``is_not`` emits SQL
@@ -483,7 +495,10 @@ class ReferralService:
     async def apply_pending_grants(self, user_id: str) -> int:
         """Attach a workspace to this user's grants that were recorded without one.
 
-        Called after workspace creation. Two states are re-homed here:
+        Called after workspace creation, when the user reads the referral
+        summary, and by the scheduler sweep
+        (``tasks.referral_tasks``, #2563) — the retry point for grants whose
+        workspace row was busy the first time. Two states are re-homed here:
 
         - grants earned while the user owned NO workspace (pending team
           invitations suppress personal-workspace bootstrap), and
@@ -494,51 +509,136 @@ class ReferralService:
         forever while ``get_summary`` keeps reporting it as earned — the user
         sees a bonus they no longer have anywhere.
 
+        The caller holds no row lock (in particular no ``users`` row). When a
+        grant is pending this takes the workspace row ``NOWAIT``, then the
+        grant rows it re-homes — the global order's workspace rows before
+        child rows — and never waits on the workspace row (#2443, #2563).
+
         Args:
             user_id: The user whose grants should be re-resolved.
 
         Returns:
-            Number of grant rows updated.
+            Number of grant rows updated; committed when not 0.
 
         Raises:
             ConflictError: The workspace row stays busy past the ``NOWAIT``
-                tries (409); see :meth:`_recompute_workspace_bonus`.
+                tries (409). Everything since the pending check is rolled back
+                to a savepoint: the grants stay pending, and the caller's
+                transaction holds nothing of it and stays usable.
         """
         workspace_id = await self._resolve_owned_workspace_id(user_id)
-        if workspace_id is None:
+        if workspace_id is None or not await self._has_pending_grants(user_id):
             return 0
 
-        updated = 0
-        for user_col, workspace_col in (
-            (ReferralGrant.referrer_user_id, ReferralGrant.referrer_workspace_id),
-            (ReferralGrant.referred_user_id, ReferralGrant.referred_workspace_id),
-        ):
-            result = await self.db.execute(
-                build_pending_grant_update(user_col, workspace_col, user_id, workspace_id)
-            )
-            # ``AsyncSession.execute`` is typed as returning ``Result``, which has
-            # no ``rowcount``; a DML statement always yields a ``CursorResult`` at
-            # runtime. Narrow explicitly rather than suppressing the diagnostic.
-            updated += cast(CursorResult[Any], result).rowcount or 0
-
-        if updated:
+        async with self.db.begin_nested() as savepoint:
+            # The workspace row first: the re-homing UPDATEs' foreign-key
+            # checks take a KEY SHARE on it, which waits on a transaction
+            # holding it FOR UPDATE. Held here, those checks and the
+            # recompute's re-lock are free.
+            await self._lock_workspace_nowait(workspace_id)
+            updated = 0
+            for user_col, workspace_col in _GRANT_SIDES:
+                result = await self.db.execute(
+                    build_pending_grant_update(user_col, workspace_col, user_id, workspace_id)
+                )
+                # ``AsyncSession.execute`` is typed as returning ``Result``, which
+                # has no ``rowcount``; a DML statement always yields a
+                # ``CursorResult`` at runtime. Narrow explicitly rather than
+                # suppressing the diagnostic.
+                updated += cast(CursorResult[Any], result).rowcount or 0
+            if not updated:
+                # Another transaction applied them since the check: let go of
+                # the workspace row rather than hold it for the caller.
+                await savepoint.rollback()
+                return 0
             await self._recompute_workspace_bonus(workspace_id)
-            await self.db.commit()
-            logger.info(
-                "referral_pending_grants_applied",
-                user_id=user_id,
-                workspace_id=str(workspace_id),
-                grants_applied=updated,
-            )
+
+        await self.db.commit()
+        logger.info(
+            "referral_pending_grants_applied",
+            user_id=user_id,
+            workspace_id=str(workspace_id),
+            grants_applied=updated,
+        )
         return updated
+
+    async def _has_pending_grants(self, user_id: str) -> bool:
+        """Whether a live grant credits no live workspace on ``user_id``'s side.
+
+        A plain read, no lock: it only spares :meth:`apply_pending_grants`
+        the workspace lock when there is nothing to re-home.
+        """
+        return bool(
+            await self.db.scalar(
+                select(
+                    select(ReferralGrant.id)
+                    .where(
+                        ReferralGrant.revoked_at.is_(None),
+                        or_(
+                            *(
+                                (user_col == user_id) & _uncredited(workspace_col)
+                                for user_col, workspace_col in _GRANT_SIDES
+                            )
+                        ),
+                    )
+                    .exists()
+                )
+            )
+        )
+
+    async def users_with_pending_grants(self, *, limit: int) -> list[str]:
+        """Users with a pending grant who own a live workspace, oldest grant first.
+
+        Pending is what :meth:`apply_pending_grants` re-homes: a grant that is
+        not revoked and credits no live workspace on the user's side. A user
+        who owns no live workspace has nothing to credit yet and is left out,
+        so every user returned is one an apply would change (#2563).
+
+        Args:
+            limit: The most users to return.
+
+        Returns:
+            User ids, the one with the oldest pending grant first.
+        """
+        sides = [
+            select(user_col.label("user_id"), ReferralGrant.granted_at.label("granted_at")).where(
+                ReferralGrant.revoked_at.is_(None),
+                _uncredited(workspace_col),
+                select(Workspace.id)
+                .where(Workspace.owner_user_id == user_col, Workspace.deleted_at.is_(None))
+                .exists(),
+            )
+            for user_col, workspace_col in _GRANT_SIDES
+        ]
+        pending = union_all(*sides).subquery()
+        return list(
+            await self.db.scalars(
+                select(pending.c.user_id)
+                .group_by(pending.c.user_id)
+                .order_by(func.min(pending.c.granted_at), pending.c.user_id)
+                .limit(limit)
+            )
+        )
 
     # ------------------------------------------------------------------
     # Read models
     # ------------------------------------------------------------------
 
     async def get_summary(self, user_id: str) -> ReferralSummary:
-        """Build the user-facing referral summary, minting a code if needed."""
+        """Build the user-facing referral summary, minting a code if needed.
+
+        Also applies the user's pending grants (#2563), so a bonus whose
+        workspace row was busy when it was earned is credited by the time the
+        user looks. It runs after the code is minted — the mint commits on its
+        own — so it starts with no row lock held. A workspace row still busy
+        after the tries leaves the grants to the scheduler sweep; the summary
+        renders either way and does not depend on them.
+        """
         code = await self.get_or_create_referral_code(user_id)
+        try:
+            await self.apply_pending_grants(user_id)
+        except ConflictError:
+            logger.info("referral_pending_grants_busy", user_id=user_id)
         used = await self._count_active_grants(user_id)
         earned = (
             await self.db.scalar(
