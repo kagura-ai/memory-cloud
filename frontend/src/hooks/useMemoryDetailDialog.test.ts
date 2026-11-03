@@ -34,7 +34,10 @@ vi.mock("next-intl", () => ({
   useTranslations: () => stableT,
 }));
 
-import { useMemoryDetailDialog } from "./useMemoryDetailDialog";
+import {
+  useMemoryDetailDialog,
+  type UseMemoryDetailDialogOpts,
+} from "./useMemoryDetailDialog";
 
 const MEMORY_ID = "11111111-1111-1111-1111-111111111111";
 const TARGET_ID = "99999999-9999-9999-9999-999999999999";
@@ -78,13 +81,17 @@ function apiError(status: number, error: string) {
   return new ApiError({ status, error, message: "server prose" });
 }
 
-async function openDialog(first: MemoryReference) {
+async function openDialog(
+  first: MemoryReference,
+  onSupersedeAccepted?: UseMemoryDetailDialogOpts["onSupersedeAccepted"],
+) {
   mockReferenceMemory.mockResolvedValueOnce(first);
   const hook = renderHook(() =>
     useMemoryDetailDialog({
       memoryIdParam: null,
       setMemoryIdParam: vi.fn(),
       contextId: "ctx-1",
+      onSupersedeAccepted,
     }),
   );
   act(() => hook.result.current.openDetail(MEMORY_ID));
@@ -234,6 +241,50 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
     });
     expect(mockToast).toHaveBeenCalledWith({ title: "supersede.accepted" });
   });
+
+  // #2515: the caller's hook to refresh what it shows (the Memories tab
+  // re-runs its cached recall), fired once the hook has applied the accept.
+  it("tells the caller which pair was accepted, after its own state", async () => {
+    const onAccepted = vi.fn();
+    const { result } = await openDialog(reference(), onAccepted);
+    mockCreateEdge.mockResolvedValueOnce({ operation: "created" });
+
+    act(() => result.current.acceptSupersede());
+
+    await waitFor(() => expect(onAccepted).toHaveBeenCalledTimes(1));
+    expect(onAccepted).toHaveBeenCalledWith({
+      sourceId: MEMORY_ID,
+      targetId: TARGET_ID,
+    });
+    expect(result.current.supersedeCandidate).toBeNull();
+    expect(mockToast.mock.invocationCallOrder[0]).toBeLessThan(
+      onAccepted.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    // A refused accept re-reads the memory; any other failure does not.
+    ["a refused accept (409)", () => apiError(409, "RES-002"), true],
+    ["any other failure", () => new Error("network down"), false],
+  ])(
+    "does not tell the caller about %s",
+    async (_label, makeError, rereads) => {
+      const onAccepted = vi.fn();
+      const { result } = await openDialog(reference(), onAccepted);
+      mockCreateEdge.mockRejectedValueOnce(makeError());
+      if (rereads) mockReferenceMemory.mockResolvedValueOnce(reference());
+
+      act(() => result.current.acceptSupersede());
+
+      await waitFor(() =>
+        expect(result.current.supersedeError).not.toBeNull(),
+      );
+      await waitFor(() =>
+        expect(result.current.supersedeAccepting).toBe(false),
+      );
+      expect(onAccepted).not.toHaveBeenCalled();
+    },
+  );
 
   function deferredReference() {
     let resolve: (ref: MemoryReference) => void = () => {};

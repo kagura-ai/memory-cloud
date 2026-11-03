@@ -45,6 +45,11 @@ vi.mock("@/lib/api/memory", () => ({
   forgetMemory: vi.fn(),
 }));
 
+const mockCreateEdge = vi.fn();
+vi.mock("@/lib/api/graph", () => ({
+  graphApi: { createEdge: (...a: unknown[]) => mockCreateEdge(...a) },
+}));
+
 vi.mock("@/components/contexts/TagCloud", () => ({
   TagCloud: () => null,
 }));
@@ -298,6 +303,57 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     const listCalls = mockGetMemories.mock.calls.length;
     submitQuery("deploy");
     await screen.findByText("Deploy target is region B");
+    expect(mockGetMemories.mock.calls.length).toBe(listCalls);
+  });
+
+  it("re-runs the submitted recall after a supersede is accepted (#2515)", async () => {
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    const listCalls = mockGetMemories.mock.calls.length;
+    mockReferenceMemory.mockResolvedValueOnce({
+      memory_id: NEWEST,
+      summary: "Deploy target is region B",
+      context_summary: null,
+      content: "body",
+      details: null,
+      type: "fact",
+      scope: "persistent",
+      importance: 0.6,
+      tags: [],
+      context: null,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z",
+      client: "api",
+      supersede_candidate: {
+        memory_id: OLDER,
+        summary: "Deploy target is region A",
+        similarity: 0.93,
+        detected_at: "2026-10-01T00:00:00Z",
+        acceptance: { allowed: true },
+      },
+    });
+    mockCreateEdge.mockResolvedValueOnce({ operation: "created" });
+    fireEvent.click(screen.getByRole("button", { name: "view" }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "supersede.confirm" }),
+    );
+
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(2));
+    expect(mockCreateEdge).toHaveBeenCalledWith({
+      context_id: "ctx-1",
+      source_id: NEWEST,
+      target_id: OLDER,
+      edge_type: "supersedes",
+    });
+    expect(mockRecallMemories).toHaveBeenLastCalledWith({
+      query: "deploy",
+      k: 20,
+      include_superseded: false,
+      filters: { context_id: "ctx-1" },
+    });
+    // List mode stays as it was: the accept adds no list fetch.
     expect(mockGetMemories.mock.calls.length).toBe(listCalls);
   });
 
