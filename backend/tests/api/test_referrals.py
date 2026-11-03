@@ -315,6 +315,53 @@ class TestPendingGrantSQL:
         """The NULL branch is the whole point — assert it survives compilation."""
         assert "IS NULL" in self._sql()
 
+    @staticmethod
+    def _flat(stmt) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        return " ".join(str(stmt.compile(dialect=postgresql.dialect())).split())
+
+    def _locked_rows_update_sql(self) -> str:
+        from models.referral import ReferralGrant
+        from services.referral_service import build_pending_grant_update
+
+        return self._flat(
+            build_pending_grant_update(
+                ReferralGrant.referred_user_id,
+                ReferralGrant.referred_workspace_id,
+                "user_1",
+                uuid4(),
+                ids=[uuid4(), uuid4()],
+            )
+        )
+
+    def _pending_rows_lock_sql(self) -> str:
+        from services.referral_service import build_pending_grant_lock
+
+        return self._flat(build_pending_grant_lock("user_1", uuid4()))
+
+    def test_the_update_touches_only_the_rows_the_apply_locked(self) -> None:
+        """#2602: restricted to the ids the ``SKIP LOCKED`` select returned (by
+        default none), and still carrying the whole pending predicate."""
+        for sql in (" ".join(self._sql().split()), self._locked_rows_update_sql()):
+            assert "referral_grants.id IN (" in sql
+            assert "IS DISTINCT FROM" in sql
+            assert "workspace_id IS NULL" in sql
+            assert "workspaces.deleted_at IS NOT NULL" in sql
+            assert "referral_grants.revoked_at IS NULL" in sql
+
+    def test_the_pending_rows_are_locked_skip_locked_in_id_order(self) -> None:
+        """#2602: one select over both sides' pending rows, ``FOR UPDATE SKIP
+        LOCKED`` in id order, so the apply never waits on a grant row."""
+        sql = self._pending_rows_lock_sql()
+        assert sql.startswith("SELECT referral_grants.id FROM referral_grants WHERE ")
+        assert sql.endswith("ORDER BY referral_grants.id FOR UPDATE SKIP LOCKED")
+        assert "referral_grants.referrer_user_id = " in sql
+        assert "referral_grants.referred_user_id = " in sql
+        assert sql.count("IS DISTINCT FROM") == 2
+        assert "referral_grants.revoked_at IS NULL" in sql
+        assert re.search(r"IS NOT (?!NULL|DISTINCT|TRUE|FALSE|UNKNOWN)", sql) is None
+
 
 class TestEntitlementConsistency:
     """Every consumer of the memory limit must agree with the ORM property (#1470).
