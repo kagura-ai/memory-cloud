@@ -35,7 +35,8 @@ open http://localhost:3000          # Frontend
 ### Manual Setup (without Docker)
 
 See the [README](README.md) for platform-specific instructions (WSL, macOS, Linux).
-Backend dependencies come from the tracked lock: `cd backend && uv sync --locked --extra dev`
+Backend dependencies come from the tracked lock: `make install`, which runs
+`cd backend && uv sync --locked --extra dev --extra llm_providers --extra lite`
 (see [Dependencies and the lockfile](#dependencies-and-the-lockfile)).
 
 ### Dependencies and the lockfile
@@ -46,6 +47,19 @@ Backend dependencies come from the tracked lock: `cd backend && uv sync --locked
 which fails when the lock is out of date, and the `lint` job runs
 `uv lock --check` so a `pyproject.toml` edit without a lock update fails CI.
 
+- `make install` installs the extras CI's `type-check` job installs, except
+  `neural`. pyright stops analysing a module whose imports it cannot resolve,
+  so the optional provider packages (`llm_providers`: anthropic, google-genai,
+  ollama; `lite`: lancedb, pyarrow) are installed rather than marked optional
+  in the pyright config: an ignored import would hide every finding in the
+  module that makes it. `neural` is about 2.3 GB of torch/CUDA wheels and
+  nothing pyright checks imports it. `backend/tests/ci/test_type_check_env.py`
+  fails when either stops being true or the two sets drift apart.
+  `make type-check` runs the pyright in `backend/.venv` against that venv's
+  interpreter, whichever venv is active in your shell
+  (`make type-check BACKEND_VENV=/abs/path/.venv` picks another one).
+- `uv sync` is exact: a later sync with fewer extras (`--extra dev` alone, as
+  `setup.sh` runs) removes the provider packages again. Re-run `make install`.
 - After editing `pyproject.toml`: `cd backend && uv lock` (or `make lock`) and
   commit `uv.lock` with the change. `make lock-check` is the CI gate.
 - Move one package inside its range: `uv lock --upgrade-package NAME`.
@@ -85,8 +99,8 @@ cd backend && ruff check src/ tests/
 # Format
 cd backend && ruff format src/ tests/
 
-# Type check
-cd backend && pyright src/
+# Type check (backend/.venv from `make install`)
+make type-check
 ```
 
 ### Frontend (TypeScript)

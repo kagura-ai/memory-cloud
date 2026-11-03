@@ -34,7 +34,7 @@ For local backend tests: `cd backend && pytest tests/api/ -v`
 - Backend source: `backend/src/`
 - `PYTHONPATH=src` is required when running scripts outside pytest (pytest configures this via `pyproject.toml`)
 - Virtual env: `backend/.venv/` (not committed)
-- Dependencies: `backend/pyproject.toml` holds the ranges; `backend/uv.lock` (tracked, #1706) is what CI and the image install. Install with `cd backend && uv sync --locked --extra dev`; after editing `pyproject.toml` run `uv lock` and commit the lock (CI's `uv lock --check` fails otherwise). uv is pinned in lockstep with the lower bound in `[tool.uv] required-version` (`CONTRIBUTING.md`).
+- Dependencies: `backend/pyproject.toml` holds the ranges; `backend/uv.lock` (tracked, #1706) is what CI and the image install. Install with `make install` (`cd backend && uv sync --locked --extra dev --extra llm_providers --extra lite`: CI's type-check extras minus `neural`, ~2.3 GB of torch/CUDA nothing pyright checks imports; see `CONTRIBUTING.md`). `uv sync` is exact, so a bare `--extra dev` sync removes the provider packages and `make type-check` then fails on their imports; after editing `pyproject.toml` run `uv lock` and commit the lock (CI's `uv lock --check` fails otherwise). uv is pinned in lockstep with the lower bound in `[tool.uv] required-version` (`CONTRIBUTING.md`).
 
 ## Key Makefile Targets
 
@@ -46,7 +46,8 @@ For local backend tests: `cd backend && pytest tests/api/ -v`
 | `make logs` | Follow API logs |
 | `make lint` | ruff check (backend) |
 | `make format` | ruff format (backend) |
-| `make type-check` | pyright (backend) |
+| `make install` | Backend venv from `uv.lock` (dev + llm_providers + lite) |
+| `make type-check` | pyright (backend), with `backend/.venv`'s pyright and interpreter (`BACKEND_VENV=<abs path>` for another venv, e.g. from a worktree) |
 | `make migrate` | Run pending Alembic migrations |
 | `make migrate-create name='...'` | Create new migration |
 | `make health` | Curl API health endpoint |

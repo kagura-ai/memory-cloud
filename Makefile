@@ -19,6 +19,7 @@ help:
 	@echo "  make ps          - Show running containers"
 	@echo ""
 	@echo "Dependencies:"
+	@echo "  make install     - Install backend/.venv from uv.lock with the extras type-check needs"
 	@echo "  make lock        - Regenerate backend/uv.lock after editing pyproject.toml"
 	@echo "  make lock-check  - Fail if uv.lock is out of date (the CI gate)"
 	@echo ""
@@ -242,7 +243,7 @@ test-unit:
 
 # Coverage upload (release flow). Tools come from fixed places, never from
 # whatever `pytest` / `codecovcli` happens to be first on PATH (#1809):
-#   - pytest: the backend virtualenv (`uv sync --locked --extra dev`), which
+#   - pytest: the backend virtualenv (`make install`), which
 #     has the app's dependencies and pytest-cov;
 #   - codecovcli: an isolated, pinned `uvx` environment. codecov-cli pins
 #     click<8.3, so adding it to the backend lock would downgrade click and
@@ -253,7 +254,7 @@ CODECOV_CLI = uvx --from codecov-cli==$(CODECOV_CLI_VERSION) codecovcli
 
 .PHONY: coverage-upload
 coverage-upload:
-	@test -x $(BACKEND_PYTEST) || { echo "Error: $(BACKEND_PYTEST) not found — run: cd $(BACKEND_DIR) && uv sync --locked --extra dev"; exit 1; }
+	@test -x $(BACKEND_PYTEST) || { echo "Error: $(BACKEND_PYTEST) not found — run: make install"; exit 1; }
 	@command -v uvx >/dev/null || { echo "Error: uvx not found (install uv)"; exit 1; }
 	@echo "pytest:     $(BACKEND_PYTEST)"
 	@v=$$($(CODECOV_CLI) --version) || { echo "Error: could not run codecov-cli $(CODECOV_CLI_VERSION) via uvx"; exit 1; }; \
@@ -301,6 +302,17 @@ lock:
 lock-check:
 	cd $(BACKEND_DIR) && uv lock --check
 
+# Local backend environment (#2523): backend/.venv from the lock, with the
+# extras CI's type-check job installs. pyright stops analysing a module whose
+# imports it cannot resolve, so a venv without llm_providers / lite fails the
+# local type check on a clean main. `neural` is left out: about 2.3 GB of
+# torch/CUDA wheels, and nothing pyright checks imports it
+# (backend/tests/ci/test_type_check_env.py keeps both true). `uv sync` is
+# exact: a later sync with fewer extras removes these again.
+.PHONY: install
+install:
+	cd $(BACKEND_DIR) && uv sync --locked --extra dev --extra llm_providers --extra lite
+
 .PHONY: lint
 lint: lint-models-no-column lock-check
 	@echo "Running linter..."
@@ -345,10 +357,18 @@ format:
 	cd $(BACKEND_DIR) && ruff format src/ tests/
 	@echo "Format complete."
 
+# pyright resolves imports against the interpreter it is given; without
+# --pythonpath that is the first `python` on PATH, not the venv pyright was
+# installed into. Both come from one venv: backend/.venv, the one `make
+# install` builds, unless BACKEND_VENV names another (e.g. from a worktree
+# without its own) (#2523).
+BACKEND_VENV = $(abspath $(BACKEND_DIR)/.venv)
+
 .PHONY: type-check
 type-check:
+	@test -x $(BACKEND_VENV)/bin/pyright || { echo "Error: $(BACKEND_VENV)/bin/pyright not found — run: make install (or pass BACKEND_VENV=<venv>)"; exit 1; }
 	@echo "Type checking..."
-	cd $(BACKEND_DIR) && pyright src/ ../plugins/kagura-memory/hooks/ ../plugins/kagura-memory/scripts/
+	cd $(BACKEND_DIR) && $(BACKEND_VENV)/bin/pyright --pythonpath $(BACKEND_VENV)/bin/python src/ ../plugins/kagura-memory/hooks/ ../plugins/kagura-memory/scripts/
 	@echo "Type check complete."
 
 # ============================================================================
