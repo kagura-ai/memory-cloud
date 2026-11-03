@@ -305,6 +305,77 @@ async def test_private_context_passes_to_a_linked_contributor_not_a_successor(
 
 
 @pytest.mark.asyncio
+async def test_a_linked_contributor_does_not_take_a_connector_write_target(
+    connector_world, db_session
+):
+    """#2422: the hand-over leaves a connector's write target to the
+    workspace even where a linked admin wrote in it, so the deletion asks for
+    a successor for it; the one picked gets it, as the connector's key goes
+    to the workspace's owner."""
+    from sqlalchemy import update
+
+    from models.auth import IdentityLink
+    from models.resource import WorkspaceConnector
+
+    from ._connector_world import _live_connector_key
+
+    world = connector_world
+    target = await world.user("departing")
+    linked = await world.user("linked")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin", linked: "admin"})
+    ws_id = workspace.id
+    ctx_id = await _context(db_session, workspace, target, private=True)
+    connector_id = (await world.connector(workspace, by=target)).connector.id
+    key_id = (await _live_connector_key(db_session, connector_id)).id
+    await db_session.execute(
+        update(WorkspaceConnector)
+        .where(WorkspaceConnector.id == connector_id)
+        .values(context_id=ctx_id)
+    )
+    group = uuid4()
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=target, linked_by=target),
+            IdentityLink(group_id=group, user_id=linked, linked_by=target),
+        ]
+    )
+    theirs = Memory(
+        id=uuid4(),
+        user_id=linked,
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        content="theirs",
+        summary="theirs",
+        type="note",
+        client="test",
+    )
+    db_session.add(theirs)
+    theirs_id = theirs.id
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(target, {"user_id": "operator"}, db_session)
+    assert error.value.status_code == 409
+    assert error.value.detail["context_ids"] == [str(ctx_id)]
+    await db_session.rollback()
+
+    response = await delete_user(
+        target,
+        {"user_id": "operator"},
+        db_session,
+        UserDeleteRequest(context_transfers={ctx_id: owner}),
+    )
+    assert response["deleted"]["contexts"] == 0
+    assert response["reowned"] == {"connector_api_keys": 1, "agents": 0}
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
+    assert await db_session.get(Memory, theirs_id) is not None
+    assert (await _live_connector_key(db_session, connector_id)).id == key_id
+    assert (await _live_connector_key(db_session, connector_id)).user_id == owner
+
+
+@pytest.mark.asyncio
 async def test_private_context_nobody_linked_wrote_in_is_deleted_with_the_user(
     connector_world, db_session
 ):

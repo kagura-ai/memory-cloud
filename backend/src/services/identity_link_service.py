@@ -507,14 +507,18 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     A private context is readable through its creator. When the creator goes,
     a linked account that wrote memories in it would lose them along with the
     context. So a live private context ``user_id`` created passes to a linked
-    account when both hold:
+    account when all three hold:
 
     * a linked account wrote memories in it — otherwise there is nothing of
       the survivor's to keep, and the context is left for the caller to
-      handle as before; and
+      handle as before;
     * that account could own it today as a linked account: a workspace owner
       or admin, or a member whose ``allowed_context_ids`` names the context.
-      The hand-over never gives an account more than the link already did.
+      The hand-over never gives an account more than the link already did;
+      and
+    * the context is not a connector's write target: that one belongs to the
+      workspace, whatever its privacy flag, and follows the workspace's
+      successor or owner (``services.connector_contexts``, #2422).
 
     The leaving account's own memories in a context that is handed over are
     deleted here. They are its private data, and the new owner could
@@ -588,18 +592,22 @@ async def private_context_takeovers(
     """Which of ``contexts`` (the ones the leaving account created) a linked
     account in ``others`` takes over under the rule of
     ``hand_over_private_contexts``, and who: ``{context_id: new_creator}``.
-    Only live private contexts qualify.
+    Only live private contexts that are no connector's write target qualify
+    (#2422; one query for the whole list).
     Read-only: ``hand_over_private_contexts`` applies it, and administrative
     deletion reads it to tell what still needs a successor (#2417)."""
     from auth.workspace_roles import WorkspaceRole, reaches_context
     from models.auth import WorkspaceMember
     from models.memory import Memory
+    from services.connector_contexts import connector_write_targets_among
 
     takeovers: dict[uuid.UUID, str] = {}
     if not others:
         return takeovers
-    for context in contexts:
-        if not context.is_private or context.deleted_at is not None:
+    candidates = [c for c in contexts if c.is_private and c.deleted_at is None]
+    connector_targets = await connector_write_targets_among(db, [c.id for c in candidates])
+    for context in candidates:
+        if context.id in connector_targets:
             continue
         authors = set(
             (

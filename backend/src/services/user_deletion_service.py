@@ -12,9 +12,10 @@ linked account that wrote in a private context takes it over
 (``hand_over_private_contexts``, #1784). A private context someone else wrote
 in that the hand-over did not take (no eligible linked author, or the context
 is soft-deleted), and a connector's write target (connectors create theirs
-private; it is the workspace's), keep another account's data, so they take a
-successor like a shared context: the API requires one, the CLI hands them to
-the surviving workspace owner (#2417).
+private; it is the workspace's, and the hand-over never takes one, #2422),
+keep another account's data, so they take a successor like a shared context:
+the API requires one, the CLI hands them to the surviving workspace owner
+(#2417).
 
 A soft-deleted workspace the user owns goes with the user on both paths
 (#2406): its owner already deleted it, so it is never handed to a successor.
@@ -51,8 +52,8 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.memory import Memory
-from models.resource import WorkspaceConnector
 from services.billing_contract import ensure_no_billing_contract, workspaces_under_contract
+from services.connector_contexts import connector_write_target_ids
 from services.connector_key_ownership import settle_departing_credentials
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
@@ -75,12 +76,6 @@ PRIVATE_CONTEXT_HANDED_OVER = (
     "A private context a linked account wrote in cannot be transferred: that account takes it over"
 )
 
-# The write targets of the workspace connectors: a context here belongs to the
-# workspace whatever its privacy flag says.
-_CONNECTOR_CONTEXT_IDS = select(WorkspaceConnector.context_id).where(
-    WorkspaceConnector.context_id.is_not(None)
-)
-
 
 def _contextless_in(m: Any, workspaces: list[UUID] | Select[Any] | Any) -> ColumnElement[bool]:
     """``m`` is a memory row with no context in one of ``workspaces`` (a list
@@ -97,8 +92,10 @@ def _contextless_in(m: Any, workspaces: list[UUID] | Select[Any] | Any) -> Colum
 
 def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
     """``c`` is a private context of ``user_id``'s own: created by it, written
-    in by nobody else, and no connector's write target. Such a context goes
-    with the user; every other one it created takes a successor.
+    in by nobody else, and no connector's write target (that one is the
+    workspace's whatever its privacy flag, ``services.connector_contexts``).
+    Such a context goes with the user; every other one it created takes a
+    successor.
 
     "Written in by nobody else" counts another account's rows live or
     soft-deleted: deleting the context would cascade over a row its author
@@ -114,7 +111,7 @@ def _personal(c: Any, user_id: str) -> ColumnElement[bool]:
     return and_(
         c.created_by == user_id,
         c.is_private.is_(True),
-        c.id.not_in(_CONNECTOR_CONTEXT_IDS),
+        c.id.not_in(connector_write_target_ids()),
         ~others_wrote,
     )
 

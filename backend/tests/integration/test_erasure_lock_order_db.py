@@ -1218,6 +1218,82 @@ async def test_step_two_locks_every_live_owned_workspace_before_the_members(
 
 
 @pytest.mark.asyncio
+async def test_the_hand_over_and_the_connector_target_re_own_take_the_global_order(
+    db_session, connector_world
+):
+    """#2422: an erasure whose identity-link hand-over passes one private
+    context on and leaves a connector's write target, which then goes to the
+    workspace's owner: the write-target lookups only read, and the re-own
+    re-takes contexts the erasure holds."""
+    from models.auth import Context, IdentityLink
+    from models.memory import Memory
+    from models.resource import WorkspaceConnector
+
+    world = connector_world
+    subject = await world.user("subject")
+    linked = await world.user("linked")
+    owner = await world.user("owner")
+    ws = await world.workspace(owner, **{subject: "admin", linked: "admin"})
+    connector_id = (await world.connector(ws, by=subject)).connector.id
+    contexts = [
+        Context(
+            id=uuid4(),
+            workspace_id=ws.id,
+            name=f"priv_{uuid4().hex[:8]}",
+            created_by=subject,
+            is_private=True,
+        )
+        for _ in range(2)
+    ]
+    db_session.add_all(contexts)
+    await db_session.flush()
+    target_id, sibling_id = contexts[0].id, contexts[1].id
+    await db_session.execute(
+        update(WorkspaceConnector)
+        .where(WorkspaceConnector.id == connector_id)
+        .values(context_id=target_id)
+    )
+    group = uuid4()
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=subject, linked_by=subject),
+            IdentityLink(group_id=group, user_id=linked, linked_by=subject),
+            *(
+                Memory(
+                    id=uuid4(),
+                    user_id=linked,
+                    workspace_id=ws.id,
+                    context_id=context_id,
+                    summary="a summary long enough",
+                    content="content",
+                    type="note",
+                    client="pytest",
+                )
+                for context_id in (target_id, sibling_id)
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    with _external_stores_stubbed(), _LockTrace(db_session.bind) as trace:
+        counts = await world.erase(subject)
+
+    _assert_global_order(trace)
+    assert counts["contexts_handed_over"] == 1
+    assert counts["connector_contexts_reowned"] == 1
+    owners = dict(
+        (
+            await db_session.execute(
+                select(Context.id, Context.created_by).where(
+                    Context.id.in_([target_id, sibling_id])
+                )
+            )
+        ).all()
+    )
+    assert owners == {target_id: owner, sibling_id: linked}
+
+
+@pytest.mark.asyncio
 async def test_admin_user_deletion_takes_the_global_order(db_session, connector_world):
     from api.routes.admin import UserDeleteRequest
 
