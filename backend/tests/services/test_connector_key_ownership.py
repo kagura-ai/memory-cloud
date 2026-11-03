@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -135,7 +135,7 @@ class TestAgentStatements:
             "AND agents.workspace_id = workspaces.id "
             "AND workspaces.owner_user_id != %(owner_user_id_2)s::VARCHAR"
         )
-        assert sql.endswith("RETURNING agents.workspace_id, workspaces.owner_user_id")
+        assert sql.endswith("RETURNING agents.workspace_id, workspaces.owner_user_id, agents.id")
         assert "status" not in sql
         assert stmt.compile().params == {
             "owner_user_id_1": "raw-sub",
@@ -168,6 +168,7 @@ class TestAgentStatements:
         ) in sql
         assert "workspaces.owner_user_id != %(owner_user_id_1)s::VARCHAR" in sql
         assert "owner_user_id=" not in sql  # the owner stays
+        assert sql.endswith("RETURNING agents.workspace_id, workspaces.owner_user_id, agents.id")
         params = stmt.compile().params
         assert params["status"] == "suspended"
         assert params["status_1"] == "active"
@@ -223,10 +224,12 @@ class TestSettleDepartingCredentials:
         from utils.hashing import hmac_sha256_hex
 
         ws_1, ws_2 = uuid4(), uuid4()
+        low, mid, high = (UUID(int=n) for n in (1, 2, 3))
         db, captured = _results(
             [],  # the agent lock
-            [(ws_1, "owner-1")],  # agents re-owned
-            [(ws_1, "owner-1"), (ws_2, "owner-2")],  # agents suspended
+            [(ws_1, "owner-1", mid)],  # agents re-owned
+            # agents suspended, out of id order (RETURNING has none)
+            [(ws_1, "owner-1", high), (ws_2, "owner-2", mid), (ws_1, "owner-1", low)],
             [(ws_1, "owner-1")],  # connector keys re-owned
             [(ws_1, "owner-1", 2), (ws_2, "owner-2", 1)],  # agent keys to delete
             [("owner-1", "one@example.com")],  # the owners' emails
@@ -237,7 +240,7 @@ class TestSettleDepartingCredentials:
         assert settled == SettledCredentials(
             connector_api_keys_reowned=1,
             agent_api_keys_deleted=3,
-            agents_suspended=2,
+            agents_suspended=3,
             agents_reowned=1,
         )
         kinds = [_sql(stmt).split(" ", 2)[:2] for stmt in captured]
@@ -268,8 +271,11 @@ class TestSettleDepartingCredentials:
                     "path": "user_deletion",
                     "connector_api_keys_reowned": 1,
                     "agent_api_keys_deleted": 2,
-                    "agents_suspended": 1,
+                    "agents_suspended": 2,
                     "agents_reowned": 1,
+                    # the agents to re-provision, in id order
+                    "suspended_agent_ids": [str(low), str(high)],
+                    "reowned_agent_ids": [str(mid)],
                 },
             ),
             (
@@ -285,6 +291,8 @@ class TestSettleDepartingCredentials:
                     "agent_api_keys_deleted": 1,
                     "agents_suspended": 1,
                     "agents_reowned": 0,
+                    "suspended_agent_ids": [str(mid)],
+                    "reowned_agent_ids": [],
                 },
             ),
         ]

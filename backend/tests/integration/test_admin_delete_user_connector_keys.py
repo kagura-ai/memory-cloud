@@ -204,6 +204,8 @@ class TestAgentCredentialsOfADeletedUser:
             "agent_api_keys_deleted": 1,
             "agents_suspended": 1,
             "agents_reowned": 0,
+            "suspended_agent_ids": [str(agent_id)],
+            "reowned_agent_ids": [],
         }
 
     @pytest.mark.asyncio
@@ -240,4 +242,6 @@ class TestAgentCredentialsOfADeletedUser:
             "agent_api_keys_deleted": 0,
             "agents_suspended": 0,
             "agents_reowned": 1,
+            "suspended_agent_ids": [],
+            "reowned_agent_ids": [str(agent_id)],
         }

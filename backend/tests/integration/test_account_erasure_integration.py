@@ -2862,6 +2862,8 @@ class TestAgentCredentialsOfAnErasedMember:
             "agent_api_keys_deleted": 1,
             "agents_suspended": 1,
             "agents_reowned": 0,
+            "suspended_agent_ids": [str(agent_id)],
+            "reowned_agent_ids": [],
         }
         assert target not in json.dumps(row.user_metadata)
 
@@ -2903,6 +2905,8 @@ class TestAgentCredentialsOfAnErasedMember:
             "agent_api_keys_deleted": 0,
             "agents_suspended": 0,
             "agents_reowned": 1,
+            "suspended_agent_ids": [],
+            "reowned_agent_ids": [str(agent_id)],
         }
         rows = await _key_rows(db_session, [connector_key_id])
         assert rows[connector_key_id]["user_id"] == owner

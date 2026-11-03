@@ -201,7 +201,7 @@ def lock_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Selec
 def reown_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Update:
     """The UPDATE that names each workspace's owner on the agents ``user_id``
     registered there, whatever their status; nothing else of the agent
-    changes. Returns ``(workspace_id, owner)`` per agent. Run after
+    changes. Returns ``(workspace_id, owner, agent id)`` per agent. Run after
     :func:`lock_agents_stmt`."""
     return (
         update(Agent)
@@ -210,7 +210,7 @@ def reown_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Upda
             *_not_owned_by(user_id, Agent.workspace_id),
         )
         .values(owner_user_id=Workspace.owner_user_id)
-        .returning(Agent.workspace_id, Workspace.owner_user_id)
+        .returning(Agent.workspace_id, Workspace.owner_user_id, Agent.id)
         .execution_options(synchronize_session=False)
     )
 
@@ -218,8 +218,8 @@ def reown_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Upda
 def suspend_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Update:
     """The UPDATE that suspends the agents the caller's key delete leaves
     without a credential (``_losing_its_last_key``). Bindings, enforcement
-    mode and owner stay. Returns ``(workspace_id, owner)`` per agent. Run after
-    :func:`lock_agents_stmt`."""
+    mode and owner stay. Returns ``(workspace_id, owner, agent id)`` per
+    agent. Run after :func:`lock_agents_stmt`."""
     return (
         update(Agent)
         .where(
@@ -227,7 +227,7 @@ def suspend_agents_stmt(user_id: str, *, workspace_id: UUID | None = None) -> Up
             *_not_owned_by(user_id, Agent.workspace_id),
         )
         .values(status=AGENT_STATUS_SUSPENDED)
-        .returning(Agent.workspace_id, Workspace.owner_user_id)
+        .returning(Agent.workspace_id, Workspace.owner_user_id, Agent.id)
         .execution_options(synchronize_session=False)
     )
 
@@ -293,12 +293,16 @@ async def settle_departing_credentials(
     not locked), the departing user is only ``new_value_hash`` = its HMAC
     under ``audit_hmac_key`` (the audit log's no-plaintext rule, as the
     ``identity_link`` rows), and ``user_metadata`` carries ``workspace_id``,
-    ``path`` and the four counts. The INSERT is flushed here, before the
-    caller's deletes.
+    ``path``, the four counts and, in id order, the ids of the agents
+    suspended and re-owned there (``suspended_agent_ids`` /
+    ``reowned_agent_ids``): the trail names the agents the owner has to
+    re-provision. The INSERT is flushed here, before the caller's deletes.
     """
     tally: dict[tuple[str, UUID], Counter[str]] = {}
+    agent_ids: dict[tuple[str, UUID], dict[str, list[UUID]]] = {}
 
     def add(rows: Iterable[Any], key: str) -> int:
+        """Key rows: ``(workspace_id, owner)`` each, or ``(…, n)`` grouped."""
         total = 0
         for ws_id, owner, *n in rows:
             count = n[0] if n else 1
@@ -306,14 +310,25 @@ async def settle_departing_credentials(
             total += count
         return total
 
+    def add_agents(rows: Iterable[Any], key: str, ids_key: str) -> int:
+        """Agent rows: ``(workspace_id, owner, agent id)`` each."""
+        total = 0
+        for ws_id, owner, agent_id in rows:
+            tally.setdefault((owner, ws_id), Counter())[key] += 1
+            agent_ids.setdefault((owner, ws_id), {}).setdefault(ids_key, []).append(agent_id)
+            total += 1
+        return total
+
     await db.execute(lock_agents_stmt(user_id, workspace_id=workspace_id))
-    agents_reowned = add(
+    agents_reowned = add_agents(
         (await db.execute(reown_agents_stmt(user_id, workspace_id=workspace_id))).all(),
         "agents_reowned",
+        "reowned_agent_ids",
     )
-    agents_suspended = add(
+    agents_suspended = add_agents(
         (await db.execute(suspend_agents_stmt(user_id, workspace_id=workspace_id))).all(),
         "agents_suspended",
+        "suspended_agent_ids",
     )
     connector_keys = add(
         (
@@ -330,7 +345,7 @@ async def settle_departing_credentials(
         "agent_api_keys_deleted",
     )
     if tally:
-        await _audit(db, user_id, path, tally)
+        await _audit(db, user_id, path, tally, agent_ids)
     return SettledCredentials(
         connector_api_keys_reowned=connector_keys,
         agent_api_keys_deleted=agent_keys,
@@ -344,6 +359,7 @@ async def _audit(
     user_id: str,
     path: DeparturePath,
     tally: dict[tuple[str, UUID], Counter[str]],
+    agent_ids: dict[tuple[str, UUID], dict[str, list[UUID]]],
 ) -> None:
     owners = sorted({owner for owner, _ in tally})
     emails: dict[str, str] = dict(
@@ -351,6 +367,10 @@ async def _audit(
     )
     departing = hmac_sha256_hex(user_id, get_settings().audit_hmac_key)
     fields = [f.name for f in dataclasses.fields(SettledCredentials)]
+
+    def ids(owner: str, ws_id: UUID, key: str) -> list[str]:
+        return [str(i) for i in sorted(agent_ids.get((owner, ws_id), {}).get(key, []))]
+
     db.add_all(
         [
             AuditLog(
@@ -363,6 +383,8 @@ async def _audit(
                     "workspace_id": str(ws_id),
                     "path": path,
                     **{name: tally[owner, ws_id][name] for name in fields},
+                    "suspended_agent_ids": ids(owner, ws_id, "suspended_agent_ids"),
+                    "reowned_agent_ids": ids(owner, ws_id, "reowned_agent_ids"),
                 },
             )
             for owner, ws_id in sorted(tally, key=lambda k: (k[0], str(k[1])))

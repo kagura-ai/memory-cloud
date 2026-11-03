@@ -252,6 +252,8 @@ class TestAgentCredentialsOfARemovedMember:
             "agent_api_keys_deleted": 1,
             "agents_suspended": 1,
             "agents_reowned": 0,
+            "suspended_agent_ids": [str(agent_id)],
+            "reowned_agent_ids": [],
         }
 
         # the owner's way back: no key for a suspended agent, so re-activate
@@ -296,6 +298,7 @@ class TestAgentCredentialsOfARemovedMember:
         (row,) = await world.departure_audits(target)
         assert row.user_metadata["agent_api_keys_deleted"] == 1
         assert row.user_metadata["agents_suspended"] == 0
+        assert row.user_metadata["suspended_agent_ids"] == []
 
     @pytest.mark.asyncio
     async def test_an_agent_whose_other_keys_have_expired_is_suspended(
@@ -330,6 +333,7 @@ class TestAgentCredentialsOfARemovedMember:
         assert set(await _key_rows(db_session, [expired_id])) == {expired_id}
         (row,) = await world.departure_audits(target)
         assert row.user_metadata["agents_suspended"] == 1
+        assert row.user_metadata["suspended_agent_ids"] == [str(agent_id)]
 
     @pytest.mark.asyncio
     async def test_a_removed_registrars_agents_name_the_owner(
@@ -367,4 +371,6 @@ class TestAgentCredentialsOfARemovedMember:
             "agent_api_keys_deleted": 0,
             "agents_suspended": 0,
             "agents_reowned": 1,
+            "suspended_agent_ids": [],
+            "reowned_agent_ids": [str(agent_id)],
         }

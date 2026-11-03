@@ -272,8 +272,9 @@ live key for (neither revoked nor expired) stays `active`. To bring a suspended 
    `agent_id`.
 
 The workspace owner also gets one `departed_member_credentials` audit row per workspace
-(section 8). Agents a departing admin registered stay as they are and name the workspace owner in
-`owner_user_id` instead; that field is display only.
+(section 8); its `suspended_agent_ids` names the agents to bring back. Agents a departing admin
+registered stay as they are and name the workspace owner in `owner_user_id` instead; that field
+is display only.
 
 ---
 
@@ -480,7 +481,9 @@ All rows/events below are shipped and verifiable in the tree:
     `new_value_hash` = HMAC of the departing user id under `AUDIT_HMAC_KEY` (no plaintext id);
     metadata: `workspace_id`, `path` (`member_removal` / `user_deletion` / `erasure`),
     `agent_api_keys_deleted`, `agents_suspended`, `agents_reowned`,
-    `connector_api_keys_reowned`.
+    `connector_api_keys_reowned`, and the agent ids (UUID strings, id order, `[]` when none):
+    `suspended_agent_ids` — the agents to re-activate and re-provision (section 4.1) —
+    and `reowned_agent_ids`.
   - **Rows written before #1008** record the integer database id instead
     (`api_key:42`). Map one to the public id the API and newer rows use:
 
