@@ -559,6 +559,26 @@ def _without_dropped_rows(
 FORGET_POINT_DELETE_TIMEOUT_SECONDS = 2.0
 
 
+@dataclass(frozen=True)
+class ForgetContextGate:
+    """``forget``'s context gate, resolved once for a batch (#2480).
+
+    What :meth:`MemoryService.forget_context_gate` passed for one caller,
+    context and key scope: ``_get_context_isolation_params``' checks
+    (membership, key-workspace confinement, the agent binding's context-level
+    write gate, the member role). None of them depends on the memory, so a
+    batch runs them once instead of once per id; each id's own checks
+    (``can_access_memory`` with its type and source, the guardrail author gate)
+    still run per id. ``forget`` refuses a gate resolved for another call.
+    """
+
+    user_id: str
+    context_id: UUID | None
+    key_workspace_id: UUID | None
+    workspace_id_str: str | None
+    context_id_str: str | None
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -656,6 +676,36 @@ class MemoryService:
             await PermissionService(self.db).ensure_memory_write_role(user_id, context.workspace_id)
 
         return context, str(context.workspace_id), str(context_id)
+
+    async def forget_context_gate(
+        self,
+        user_id: str,
+        context_id: UUID | None,
+        key_workspace_id: UUID | None = None,
+    ) -> ForgetContextGate:
+        """``forget``'s context gate, for a caller that forgets many ids in one context (#2480).
+
+        Pass the result to each ``forget(context_gate=...)`` of the same
+        caller, context and key scope.
+
+        Raises:
+            NotFoundException / AuthorizationError: as ``forget`` would, for
+                every id.
+        """
+        _context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+            user_id,
+            context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="forget",  # #1286 (P0-5): deny-capture audit identity
+        )
+        return ForgetContextGate(
+            user_id=user_id,
+            context_id=context_id,
+            key_workspace_id=key_workspace_id,
+            workspace_id_str=workspace_id_str,
+            context_id_str=context_id_str,
+        )
 
     @staticmethod
     def _apply_pin_on_write(memory: Memory) -> None:
@@ -7684,6 +7734,7 @@ class MemoryService:
         current_workspace_id: UUID | None = None,
         _skip_binding_row_filter: bool = False,
         point_queue: list[tuple[UUID, UUID, str]] | None = None,
+        context_gate: ForgetContextGate | None = None,
     ) -> ForgetResponse:
         """Delete memory (single or multiple via query).
 
@@ -7705,9 +7756,17 @@ class MemoryService:
             point_queue: A batch caller's list: the committed rows' points are
                 added to it instead of being deleted here, and the caller
                 passes it to ``delete_forgotten_points`` once (#2201).
+            context_gate: A batch caller's ``forget_context_gate`` result for
+                this caller, context and key scope, so the context checks run
+                once per batch rather than once per id (#2480). The per-memory
+                checks still run here.
 
         Returns:
             ForgetResponse with deleted count and IDs
+
+        Raises:
+            ValueError: ``context_gate`` was resolved for another caller,
+                context or key scope.
         """
         if _skip_binding_row_filter and not request.memory_id:
             raise ValueError(
@@ -7718,13 +7777,24 @@ class MemoryService:
             )
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: forget is a WRITE — gate the declared context against
-        # the agent binding (no-op for non-agent credentials).
-        context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+        # the agent binding (no-op for non-agent credentials). #2480: a batch
+        # resolved the gate once for all of its ids.
+        if context_gate is None:
+            context_gate = await self.forget_context_gate(
+                user_id, current_context_id, key_workspace_id
+            )
+        elif (context_gate.user_id, context_gate.context_id, context_gate.key_workspace_id) != (
             user_id,
             current_context_id,
-            access="write",
-            key_workspace_id=key_workspace_id,
-            operation="forget",  # #1286 (P0-5): deny-capture audit identity
+            key_workspace_id,
+        ):
+            raise ValueError(
+                "context_gate was resolved for another caller, context or key scope; "
+                "forget would skip the context checks for this one."
+            )
+        workspace_id_str, context_id_str = (
+            context_gate.workspace_id_str,
+            context_gate.context_id_str,
         )
 
         deleted_ids = []
