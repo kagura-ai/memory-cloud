@@ -1556,7 +1556,9 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
     ``SwallowFailures``: a failed patch is logged and the next one goes on; a
     row whose re-read fails is not patched (#2346), and a group's failed
     re-read is retried row by row (#2433). The summary line counts the
-    failed patches, the rows left unread and the rows the retry read."""
+    failed patches, the rows left unread and the rows the retry read: a
+    warning when a patch failed or a row was left unread, else an info line
+    when the retry read every row of a failed group."""
     if not syncs:
         return
     policy = SwallowFailures("session_rollback_payload")
@@ -1570,11 +1572,17 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
         columns=_PAYLOAD_COLUMNS,
         live_only=True,
     )
-    if policy.failed or policy.unread or policy.recovered:
+    if policy.failed or policy.unread:
         logger.warning(
             "session_rollback_payload_syncs_failed",
             failed=policy.failed,
             unread=policy.unread,
+            recovered=policy.recovered,
+            of=len(syncs),
+        )
+    elif policy.recovered:
+        logger.info(
+            "session_rollback_payload_syncs_recovered",
             recovered=policy.recovered,
             of=len(syncs),
         )

@@ -423,14 +423,16 @@ class TestRollbackApplyChecksThePointAgain:
             "session_rollback_payload_syncs_failed", failed=0, unread=1, recovered=1, of=2
         )
 
-    async def test_a_group_read_whose_rows_all_recover_is_still_reported(self):
-        """#2433: nothing is left unpatched, yet the group's read failed: the
-        summary line says how many rows the row-by-row re-read recovered."""
+    async def test_a_group_read_whose_rows_all_recover_is_reported_as_info(self):
+        """#2433: nothing is left unpatched, yet the group's read failed: no
+        ``..._syncs_failed`` warning, but an info line says how many rows the
+        row-by-row re-read recovered."""
         ids, write, log = await self._apply_after_a_failed_group_read(locked=False)
 
         assert [c.kwargs["memory_id"] for c in write.await_args_list] == ids
-        log.warning.assert_called_once_with(
-            "session_rollback_payload_syncs_failed", failed=0, unread=0, recovered=2, of=2
+        log.warning.assert_not_called()
+        log.info.assert_called_once_with(
+            "session_rollback_payload_syncs_recovered", recovered=2, of=2
         )
 
 
