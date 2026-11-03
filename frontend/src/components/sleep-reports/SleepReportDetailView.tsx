@@ -205,7 +205,14 @@ export function SleepReportDetailView({
               {/* #1229: a degraded run can now come from a phase crash with a
                   healthy judge — show the recorded cause instead of a
                   misleading "0 judge LLM calls failed". */}
-              {report.error_message
+              {/* #2219: an analysis row is degraded by failed cluster-
+                  labeling calls; the Sleep texts below would blame merge/
+                  importance judgments and point at hidden phase results. */}
+              {isAnalysis
+                ? t("detail.narrative.runDegradedAnalysis", {
+                    count: report.llm_call_failures ?? 0,
+                  })
+                : report.error_message
                 ? t("detail.narrative.runDegradedPhase", {
                     error: report.error_message,
                   })

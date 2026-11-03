@@ -3066,6 +3066,7 @@
           "runFailed": "Run failed: {error}",
           "runDegraded": "Run degraded: {count, plural, one {# judge LLM call} other {# judge LLM calls}} failed — merge/importance judgments may be incomplete. Check the phase results below.",
           "runDegradedPhase": "Run degraded: {error} — the remaining phases completed. Check the phase results below.",
+          "runDegradedAnalysis": "Run degraded: {count, plural, one {# cluster-labeling LLM call} other {# cluster-labeling LLM calls}} failed — some clusters of this analysis may have no label.",
           "skippedNoReason": "Skipped",
           "skippedUnknown": "Skipped: {reason}",
           "skipReasons": {

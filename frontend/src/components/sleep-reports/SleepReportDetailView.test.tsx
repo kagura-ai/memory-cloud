@@ -110,4 +110,43 @@ describe("SleepReportDetailView — source (#2219)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/^detail\.narrative\.headline:/)).toBeNull();
   });
+
+  it("renders an analysis row whose phase result fields are missing", () => {
+    const missing = {
+      source: "analysis",
+      edge_discovery_result: undefined,
+      dedup_result: undefined,
+      importance_result: undefined,
+      consolidation_result: undefined,
+      reindex_result: undefined,
+    } as unknown as Partial<SleepReportDetail>;
+    renderDetail(missing);
+
+    expect(screen.getByText("detail.analysisNoPhases")).toBeInTheDocument();
+  });
+
+  it("does not show the Sleep judge warning on a degraded analysis row", () => {
+    renderDetail({
+      source: "analysis",
+      status: "degraded",
+      llm_call_failures: 2,
+    });
+
+    // The Sleep text blames merge/importance judgments and points at phase
+    // results the analysis row does not show.
+    expect(
+      screen.queryByText(/^detail\.narrative\.runDegraded(Phase)?:/),
+    ).toBeNull();
+    expect(
+      screen.getByText(/^detail\.narrative\.runDegradedAnalysis/),
+    ).toHaveTextContent('"count":2');
+  });
+
+  it("keeps the Sleep judge warning on a degraded Sleep run", () => {
+    renderDetail({ source: "sleep", status: "degraded", llm_call_failures: 2 });
+
+    expect(
+      screen.getByText(/^detail\.narrative\.runDegraded:/),
+    ).toBeInTheDocument();
+  });
 });

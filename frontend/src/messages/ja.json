@@ -3066,6 +3066,7 @@
           "runFailed": "実行に失敗しました: {error}",
           "runDegraded": "一部失敗: judge LLM 呼び出し {count} 件が失敗しました — マージ・重要度の判定が不完全な可能性があります。下のフェーズ結果を確認してください。",
           "runDegradedPhase": "一部失敗: {error} — 残りのフェーズは完了しています。下のフェーズ結果を確認してください。",
+          "runDegradedAnalysis": "一部失敗: クラスタのラベル付けの LLM 呼び出し {count} 件が失敗しました — この分析の一部のクラスタにラベルが付いていない可能性があります。",
           "skippedNoReason": "スキップされました",
           "skippedUnknown": "スキップ: {reason}",
           "skipReasons": {
