@@ -128,7 +128,9 @@ async def redeem_referral(
 
     Refusals are 400s with a ``REFERRAL-*`` error code (see
     ``utils/exceptions.py``); they are deliberately uniform so probing a code
-    reveals nothing about whether it exists or who owns it.
+    reveals nothing about whether it exists or who owns it. A workspace row to
+    credit that another transaction still holds after the ``NOWAIT`` tries is
+    a 409 ``RES-002``: nothing was paid and the client retries (#2443).
 
     Args:
         payload: The submitted code.
