@@ -111,13 +111,20 @@ def dedup_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(dedup_enabled=True, threshold=0.92, provider="openai", model="gpt-5-nano"):
+def _make_config(
+    dedup_enabled=True,
+    threshold=0.92,
+    provider="openai",
+    model="gpt-5-nano",
+    exempt_tags=("status:open",),
+):
     config = MagicMock()
     config.sleep_dedup_enabled = dedup_enabled
     config.sleep_dedup_similarity_threshold = threshold
     config.sleep_dedup_supersede_enabled = False  # #1208: remove mode (default)
     config.sleep_llm_provider = provider
     config.sleep_llm_model = model
+    config.sleep_archive_exempt_tags = exempt_tags  # #2584: the config default
     return config
 
 
@@ -1021,3 +1028,122 @@ class TestPinnedNeighborWidening:
 
         dedup_phase._count_pinned.assert_awaited_once_with("user-1", "ws-1", "ctx-1")
         assert dedup_phase._find_similar_pairs.await_args.kwargs["extra_neighbors"] == 4
+
+
+class TestArchiveExemptLoser:
+    """#2584: a memory carrying one of ``sleep_archive_exempt_tags`` (default
+    ``status:open``) is never retired as the losing side of a near-duplicate
+    merge. Such a pair is skipped — not flipped: merge folds only tags into the
+    winner, so making the open memo win would discard the other memory's
+    (often newer) content, the reason #1519 kept pinned rows out of merges
+    instead of making them absolute winners. An exempt WINNER still absorbs a
+    non-exempt loser. Removing the tag returns the memory to the normal
+    lifecycle; an empty setting turns the exemption off.
+    """
+
+    OPEN = ["tech-debt", "status:open", "area:sleep"]
+
+    @staticmethod
+    def _pair(dedup_phase, *, a_tags, b_tags, a_importance=0.5, b_importance=0.5):
+        mem_a = _make_memory(summary="memo", importance=a_importance, tags=a_tags)
+        mem_b = _make_memory(summary="memo (near-dup)", importance=b_importance, tags=b_tags)
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b])
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[(mem_a.id, mem_b.id, 0.99)])
+        dedup_phase._execute_merge = AsyncMock(return_value=True)
+        return mem_a, mem_b
+
+    @pytest.mark.asyncio
+    async def test_exempt_loser_of_a_judge_decision_is_not_retired(self, dedup_phase):
+        memo, other = self._pair(dedup_phase, a_tags=self.OPEN, b_tags=["tech-debt"])
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(other.id, memo.id)])
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            _make_config(), "u", "ws", "ctx", SleepBudget(), reporter=reporter, report_id=uuid4()
+        )
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_exempt"] == 1
+        assert result.details["llm_merge_guarded"] == 0  # not a sub-threshold veto
+        dedup_phase._execute_merge.assert_not_awaited()
+        reporter.add_action.assert_not_awaited()
+        assert result.changed_memory_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_exempt_loser_of_the_rule_path_is_not_retired(self, dedup_phase):
+        """LLM off: the auto-merge picks the higher-importance side as winner."""
+        self._pair(dedup_phase, a_tags=self.OPEN, b_tags=[], a_importance=0.3, b_importance=0.8)
+
+        result = await dedup_phase.execute(
+            _make_config(provider=""), "u", "ws", "ctx", SleepBudget()
+        )
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_exempt"] == 1
+        dedup_phase._execute_merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_exempt_winner_still_absorbs(self, dedup_phase):
+        memo, other = self._pair(dedup_phase, a_tags=self.OPEN, b_tags=["tech-debt"])
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(memo.id, other.id)])
+
+        result = await dedup_phase.execute(_make_config(), "u", "ws", "ctx", SleepBudget())
+
+        assert result.details["merged"] == 1
+        assert result.details["skipped_exempt"] == 0
+        (winner, loser, *_rest), _ = dedup_phase._execute_merge.await_args
+        assert (winner.id, loser.id) == (memo.id, other.id)
+
+    @pytest.mark.asyncio
+    async def test_both_sides_exempt_skips_the_merge(self, dedup_phase):
+        memo, other = self._pair(dedup_phase, a_tags=self.OPEN, b_tags=["status:open"])
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(memo.id, other.id)])
+
+        result = await dedup_phase.execute(_make_config(), "u", "ws", "ctx", SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_exempt"] == 1
+        dedup_phase._execute_merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_removing_the_tag_makes_it_mergeable_again(self, dedup_phase):
+        memo, other = self._pair(
+            dedup_phase, a_tags=["tech-debt", "status:done"], b_tags=["tech-debt"]
+        )
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(other.id, memo.id)])
+
+        result = await dedup_phase.execute(_make_config(), "u", "ws", "ctx", SleepBudget())
+
+        assert result.details["merged"] == 1
+        (winner, loser, *_rest), _ = dedup_phase._execute_merge.await_args
+        assert (winner.id, loser.id) == (other.id, memo.id)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_setting_turns_the_exemption_off(self, dedup_phase):
+        memo, other = self._pair(dedup_phase, a_tags=self.OPEN, b_tags=[])
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(other.id, memo.id)])
+
+        result = await dedup_phase.execute(
+            _make_config(exempt_tags=()), "u", "ws", "ctx", SleepBudget()
+        )
+
+        assert result.details["merged"] == 1
+        assert result.details["skipped_exempt"] == 0
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_does_not_shadow_an_exempt_loser(self, dedup_phase):
+        """A supersedes edge hides the loser from recall — as good as retired."""
+        memo, other = self._pair(dedup_phase, a_tags=self.OPEN, b_tags=[])
+        config = _make_config()
+        config.sleep_dedup_supersede_enabled = True
+        dedup_phase._filter_already_superseded_pairs = AsyncMock(
+            side_effect=lambda pairs, _user: (pairs, 0)
+        )
+        dedup_phase._execute_shadow_merge = AsyncMock(return_value=(True, None))
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(other.id, memo.id)])
+
+        result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_exempt"] == 1
+        dedup_phase._execute_shadow_merge.assert_not_awaited()

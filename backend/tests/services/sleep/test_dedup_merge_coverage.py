@@ -1782,3 +1782,78 @@ class TestSplitOversizeCluster:
 
         assert {frozenset(s) for s in subclusters_fwd} == {frozenset(s) for s in subclusters_rev}
         assert skipped_fwd == skipped_rev
+
+
+# ---------------------------------------------------------------------------
+# #2584: an exempt-tagged loser is never retired (real db_session)
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveExemptLoserRealDB:
+    """#2584 end to end on real rows and the real config default: an open memo
+    (``status:open``) that loses a near-duplicate judgement stays live, and the
+    same pair merges on the next run once the tag is gone."""
+
+    async def test_open_memo_survives_until_its_tag_is_removed(self, db_session):
+        from neural.config import NeuralMemoryConfig
+
+        user_id = f"dedup-2584-{uuid4().hex[:8]}"
+
+        def _row(summary, *, tags, importance, days_old):
+            return Memory(
+                workspace_id=uuid4(),
+                id=uuid4(),
+                user_id=user_id,
+                summary=summary,
+                content="full content",
+                type="tech-debt",
+                importance=importance,
+                tags=tags,
+                client="pytest",
+                scope="working",
+                created_at=utcnow() - timedelta(days=days_old),
+            )
+
+        # The rule path keeps the higher-importance side, so the memo is the
+        # would-be loser on both runs whatever the tag edit does to recency.
+        memo = _row("open memo", tags=["tech-debt", "status:open"], importance=0.3, days_old=40)
+        other = _row("near-duplicate", tags=["tech-debt", "area:sleep"], importance=0.8, days_old=1)
+        db_session.add_all([memo, other])
+        await db_session.flush()
+
+        with (
+            patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
+            patch("services.sleep.dedup_merge.EmbeddingService"),
+        ):
+            phase = DedupMergePhase(db_session, AsyncMock())
+        phase.edge_repo = AsyncMock()
+        phase.edge_repo.transfer_edges = AsyncMock(return_value=0)
+        phase._find_similar_pairs = AsyncMock(return_value=[(memo.id, other.id, 0.99)])
+        config = NeuralMemoryConfig(sleep_llm_provider="")  # rule path, default exempt tags
+
+        async def _row_state(memory_id):
+            return (
+                await db_session.execute(
+                    select(Memory.deleted_at, Memory.tags).where(Memory.id == memory_id)
+                )
+            ).one()
+
+        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+            result = await phase.execute(config, user_id, None, None, SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_exempt"] == 1
+        assert (await _row_state(memo.id)).deleted_at is None
+        assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep"}
+
+        await db_session.execute(
+            update(Memory).where(Memory.id == memo.id).values(tags=["tech-debt", "status:done"])
+        )
+
+        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+            result = await phase.execute(config, user_id, None, None, SleepBudget())
+
+        assert result.details["merged"] == 1
+        assert result.details["skipped_exempt"] == 0
+        assert (await _row_state(memo.id)).deleted_at is not None
+        assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep", "status:done"}
