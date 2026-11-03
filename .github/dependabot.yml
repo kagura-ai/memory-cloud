@@ -45,3 +45,20 @@ updates:
         patterns:
           - postgres
         group-by: dependency-name
+  # The actions in .github/workflows (#2535): each is pinned to a commit SHA with its release
+  # as a trailing comment (`owner/repo@<sha> # vX.Y.Z`), and Dependabot moves both, all actions
+  # in one PR. No workflow calls a reusable workflow from another repository, so there is no
+  # `allow` list.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 14
+    groups:
+      github-actions:
+        patterns:
+          - "*"
