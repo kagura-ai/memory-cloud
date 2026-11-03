@@ -718,17 +718,17 @@ describe("SearchSettingsSection save bar (#2159)", () => {
     const icon = status.querySelector("svg");
     expect(icon).not.toBeNull();
     expect(icon).toHaveAttribute("aria-hidden", "true");
-    expect(icon!.getAttribute("class")).toContain("text-primary");
+    expect(icon!.getAttribute("class")).toContain("text-amber-500");
     // Only the label is live: the buttons' "saving" relabel is not re-read.
     expect(within(status).queryByRole("button")).toBeNull();
 
     const el = bar()!;
     expect(el.contains(status)).toBe(true);
-    expect(el.className).toContain("border-primary/40");
+    expect(el.className).toContain("border-amber-500/50");
     expect(el.className).toContain("shadow-lg");
     expect(el.className).toContain("animate-in");
     expect(el.className).toContain("motion-reduce:animate-none");
-    expect(el.querySelector(".bg-primary\\/5")).not.toBeNull();
+    expect(el.querySelector(".bg-amber-500\\/10")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
     await waitFor(() => expect(bar()).toBeNull());

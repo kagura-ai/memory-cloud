@@ -681,17 +681,17 @@ describe("SettingsTabPanel — save bar stands out (#2595)", () => {
     const icon = status.querySelector("svg");
     expect(icon).not.toBeNull();
     expect(icon).toHaveAttribute("aria-hidden", "true");
-    expect(icon!.getAttribute("class")).toContain("text-primary");
+    expect(icon!.getAttribute("class")).toContain("text-amber-500");
     // Only the label is live: the buttons' "saving" relabel is not re-read.
     expect(within(status).queryByRole("button")).toBeNull();
 
     const bar = status.closest("div.sticky");
     expect(bar).not.toBeNull();
-    expect(bar!.className).toContain("border-primary/40");
+    expect(bar!.className).toContain("border-amber-500/50");
     expect(bar!.className).toContain("shadow-lg");
     expect(bar!.className).toContain("animate-in");
     expect(bar!.className).toContain("motion-reduce:animate-none");
-    expect(bar!.querySelector(".bg-primary\\/5")).not.toBeNull();
+    expect(bar!.querySelector(".bg-amber-500\\/10")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "discard" }));
     await waitFor(() => expect(status).toBeEmptyDOMElement());

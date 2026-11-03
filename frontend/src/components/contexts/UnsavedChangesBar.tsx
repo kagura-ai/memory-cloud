@@ -6,8 +6,9 @@
  * Render it in the flow after the section's last card: while `open` it sticks
  * to the bottom of the viewport as the section is scrolled (not a fixed
  * overlay, which would cover a second section's bar) and stays last in the
- * focus order. An accent border, a primary tint over the opaque blur and a
- * raised shadow make it read as a status strip, not another card.
+ * focus order. An amber border and tint over the opaque blur (the warning
+ * accent of the "unsaved" card badges; this theme's `primary` is neutral) and
+ * a raised shadow make it read as a status strip, not another card.
  *
  * Only the message is the live region, so the Save button's "saving" relabel
  * is not re-announced. The region stays mounted, empty and visually hidden,
@@ -58,14 +59,14 @@ export function UnsavedChangesBar({
       data-testid={open ? testId : undefined}
       className={
         open
-          ? "sticky bottom-0 z-10 overflow-hidden rounded-lg border border-primary/40 bg-background/95 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/80 animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none"
+          ? "sticky bottom-0 z-10 overflow-hidden rounded-lg border border-amber-500/50 bg-background/95 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/80 animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none"
           : "sr-only"
       }
     >
       <div
         className={
           open
-            ? "flex flex-wrap items-center justify-between gap-2 bg-primary/5 px-4 py-3"
+            ? "flex flex-wrap items-center justify-between gap-2 bg-amber-500/10 px-4 py-3"
             : undefined
         }
       >
@@ -78,7 +79,7 @@ export function UnsavedChangesBar({
             <>
               <Circle
                 aria-hidden="true"
-                className="h-2.5 w-2.5 shrink-0 fill-current text-primary"
+                className="h-2.5 w-2.5 shrink-0 fill-current text-amber-500"
               />
               {message}
             </>
