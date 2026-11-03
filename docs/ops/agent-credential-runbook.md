@@ -263,7 +263,7 @@ the workspace, when its account is deleted (`DELETE /api/v1/admin/users/{user_id
 would then act with the owner's scope, and deletion never widens (design invariant 4 in
 `docs/design/agent-registry-and-bindings.md`). An active agent that this leaves with no live key
 is set to `suspended`; its bindings and its owner stay, and an agent another member still holds a
-live key for stays `active`. To bring a suspended agent back:
+live key for (neither revoked nor expired) stays `active`. To bring a suspended agent back:
 
 1. Re-activate it: `PATCH /api/v1/agents/{agent_id}` with `{"status": "active"}` (workspace
    owner/admin session or key; writes an `agent_updated` audit row with the status pair). Do
@@ -475,7 +475,8 @@ All rows/events below are shipped and verifiable in the tree:
     `revoked_key_prefix`, `self_revoke`.
   - `public_bound_key_created` / `public_bound_key_revoked` — resource `api_key:<public id>`.
   - `departed_member_credentials` (#2373) — on the workspace owner's trail, one row per
-    workspace when a member leaves it (removal, account deletion, erasure); resource `api_key`;
+    workspace when a member leaves it (removal, account deletion, erasure) and any of the counts
+    below is non-zero (no row otherwise); resource `api_key`;
     `new_value_hash` = HMAC of the departing user id under `AUDIT_HMAC_KEY` (no plaintext id);
     metadata: `workspace_id`, `path` (`member_removal` / `user_deletion` / `erasure`),
     `agent_api_keys_deleted`, `agents_suspended`, `agents_reowned`,
