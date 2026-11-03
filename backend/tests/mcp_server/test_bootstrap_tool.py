@@ -394,41 +394,54 @@ def _index_shell_chars(env):
 CURSORS = [f"cur-{i}" for i in range(6)]
 
 
-def test_index_fit_fits_guardrails_after_upcoming_and_before_changes():
-    """#2485: what pinned and upcoming leave goes to the guardrails, then to changes."""
+def _guardrail_rows(n, big=None):
+    """``n`` index guardrail rows; row ``big`` (if any) carries a huge summary."""
+    return [
+        {
+            "memory_id": f"g-{i}",
+            "summary": "g" * (10_000 if i == big else 79) + "…",
+            "summary_cut": True,
+            "importance": 0.8,
+        }
+        for i in range(n)
+    ]
+
+
+def test_index_fit_fits_the_first_guardrails_right_after_pinned():
+    """#2485: the first pass (up to INDEX_GUARDRAIL_ROWS rows) comes before
+    upcoming and changes, so neither can push the standing guardrails out."""
     env = _index_envelope()
     comps = env["components"]
-    # Room for every pinned and upcoming row and one and a half guardrail rows.
+    # Room for every pinned row and one and a half guardrail rows.
     budget = (
         _index_shell_chars(env)
         + _rows_chars(comps["pinned"]["memories"])
-        + _rows_chars(comps["upcoming"]["results"])
         + _rows_chars(env["guardrails"]["items"][:1]) * 3 // 2
     )
     out = _fit(env, budget, change_cursors=CURSORS, since=SINCE, index=True)
     comps = out["components"]
     assert len(comps["pinned"]["memories"]) == 6 and comps["pinned"]["truncated"] is False
-    assert len(comps["upcoming"]["results"]) == 6 and "truncated" not in comps["upcoming"]
     assert out["guardrails"]["items"] == env["guardrails"]["items"][:1]
     assert out["guardrails"]["truncated"] is True  # the block's own flag
     assert out["guardrails"]["total_available"] == 6  # says how many exist
+    assert comps["upcoming"]["results"] == [] and comps["upcoming"]["truncated"] is True
     assert comps["changes"]["changes"] == [] and comps["changes"]["has_more"] is True
     assert comps["changes"]["next_cursor"] == window_start_cursor(SINCE)
     assert json_chars(out) <= budget
 
 
-def test_index_fit_keeps_at_most_three_guardrails_before_changes():
-    """#2485: over budget the guardrails lane stops at INDEX_GUARDRAIL_ROWS, so a
-    context with many guardrails still leaves the rest to changes."""
+def test_index_fit_keeps_three_guardrails_ahead_of_upcoming_and_changes():
+    """#2485: past INDEX_GUARDRAIL_ROWS the guardrails wait for upcoming and
+    changes, so a context with many guardrails still gets a changes page."""
     env = _index_envelope()
     comps = env["components"]
     # Room for every pinned and upcoming row, three guardrail rows and two and a
-    # half change rows: without the cap the guardrails would take more.
+    # half change rows; a single guardrails pass would take five rows instead.
     budget = (
         _index_shell_chars(env)
         + _rows_chars(comps["pinned"]["memories"])
-        + _rows_chars(comps["upcoming"]["results"])
         + _rows_chars(env["guardrails"]["items"][:INDEX_GUARDRAIL_ROWS])
+        + _rows_chars(comps["upcoming"]["results"])
         + _rows_chars(comps["changes"]["changes"][:1]) * 5 // 2
     )
     out = _fit(env, budget, change_cursors=CURSORS, since=SINCE, index=True)
@@ -443,16 +456,43 @@ def test_index_fit_keeps_at_most_three_guardrails_before_changes():
     assert json_chars(out) <= budget
 
 
-def test_index_fit_caps_guardrails_only_when_the_reply_is_cut():
-    """A reply that fits keeps every guardrail row; one over budget by the
-    guardrails alone loses the rows past the cap and says so."""
+def test_index_fit_gives_the_other_guardrails_the_room_changes_leave():
+    """#2485, a quiet context: a reply one character over budget keeps every
+    other lane whole and more than INDEX_GUARDRAIL_ROWS guardrail rows; a reply
+    that fits comes back unchanged."""
     env = _index_envelope()
-    assert len(env["guardrails"]["items"]) > INDEX_GUARDRAIL_ROWS
+    env["guardrails"] = {**env["guardrails"], "items": _guardrail_rows(10), "total_available": 10}
     assert _fit(env, json_chars(env), change_cursors=CURSORS, since=SINCE, index=True) is env
     out = _fit(env, json_chars(env) - 1, change_cursors=CURSORS, since=SINCE, index=True)
-    assert out["guardrails"]["items"] == env["guardrails"]["items"][:INDEX_GUARDRAIL_ROWS]
-    assert out["guardrails"]["truncated"] is True
+    kept = out["guardrails"]["items"]
+    assert INDEX_GUARDRAIL_ROWS < len(kept) < 10
+    assert kept == env["guardrails"]["items"][: len(kept)]  # a prefix, in provider order
+    assert out["guardrails"]["truncated"] is True and out["guardrails"]["total_available"] == 10
     assert out["components"] == env["components"]  # every other lane whole
+
+
+def test_index_fit_second_guardrail_pass_never_skips_a_row():
+    """When the first pass is cut, the rows after it stay out even if the room
+    left after changes would hold them: the guardrails are always a prefix."""
+    env = _index_envelope()
+    env["guardrails"] = {**env["guardrails"], "items": _guardrail_rows(5, big=2)}
+    comps = env["components"]
+    small = _rows_chars(env["guardrails"]["items"][:1])
+    # Room for rows 0 and 1, every pinned, upcoming and change row, and rows 3
+    # and 4 with half a row to spare; row 2 is far larger than all of it.
+    budget = (
+        _index_shell_chars(env)
+        + _rows_chars(comps["pinned"]["memories"])
+        + _rows_chars(comps["upcoming"]["results"])
+        + _rows_chars(comps["changes"]["changes"])
+        + small * 4
+        + small // 2
+    )
+    out = _fit(env, budget, change_cursors=CURSORS, since=SINCE, index=True)
+    comps = out["components"]
+    assert out["guardrails"]["items"] == env["guardrails"]["items"][:2]
+    assert out["guardrails"]["truncated"] is True
+    assert len(comps["upcoming"]["results"]) == 6 and len(comps["changes"]["changes"]) == 6
 
 
 def test_full_fit_never_cuts_guardrails():

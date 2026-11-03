@@ -551,25 +551,33 @@ async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
     changes = comps["changes"]
     assert changes["truncated"] is True and changes["has_more"] is True
     assert len(changes["changes"]) < len(full_index["components"]["changes"]["changes"])
-    # #2485: pinned, upcoming, at most INDEX_GUARDRAIL_ROWS guardrails, changes.
-    # A later lane keeps rows only when every earlier lane kept all it may.
+    # #2485: pinned, the first INDEX_GUARDRAIL_ROWS guardrails, upcoming, changes,
+    # then the other guardrails. A later lane of the first four keeps rows only
+    # when every earlier one kept all it may.
     whole = full_index["components"]
+    guard, whole_guard = env["guardrails"]["items"], full_index["guardrails"]["items"]
     lanes = [
-        (comps["pinned"], "memories", len(whole["pinned"]["memories"])),
-        (comps["upcoming"], "results", len(whole["upcoming"]["results"])),
-        (env["guardrails"], "items", INDEX_GUARDRAIL_ROWS),
-        (changes, "changes", len(whole["changes"]["changes"])),
+        (comps["pinned"]["memories"], len(whole["pinned"]["memories"])),
+        (guard[:INDEX_GUARDRAIL_ROWS], INDEX_GUARDRAIL_ROWS),
+        (comps["upcoming"]["results"], len(whole["upcoming"]["results"])),
+        (changes["changes"], len(whole["changes"]["changes"])),
     ]
     earlier_cut = False
-    for block, key, room in lanes:
+    for kept, room in lanes:
         if earlier_cut:
-            assert block[key] == []
-        assert len(block[key]) <= room
-        if len(block[key]) < room:
+            assert kept == []
+        assert len(kept) <= room
+        earlier_cut = earlier_cut or len(kept) < room
+    for block, key, rows in (
+        (comps["pinned"], "memories", whole["pinned"]["memories"]),
+        (comps["upcoming"], "results", whole["upcoming"]["results"]),
+    ):
+        if len(block[key]) < len(rows):
             assert block["truncated"] is True
-            earlier_cut = True
-    # Six guardrails, at most three kept: cut by the cap, and it says so.
-    assert len(full_index["guardrails"]["items"]) == 6
+    # The guardrails are a prefix of the provider's six (fresh ids per call, so
+    # by summary), and say they were cut.
+    heads = [g["summary"] for g in whole_guard]
+    assert len(heads) == 6 and [g["summary"] for g in guard] == heads[: len(guard)]
     assert env["guardrails"]["truncated"] is True
 
 
@@ -580,7 +588,7 @@ _TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": 
 async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
     """#2485: on a context whose guardrail rows alone fill the session-start
     budget, the upcoming rows and a changes page still come back; the
-    guardrails lane keeps a few rows before changes and says it was cut."""
+    guardrails keep their first rows ahead of both and say they were cut."""
     owner = f"o-{uuid4().hex[:6]}"
     ws, ctx = await _scope(db_session, owner)
     now = utcnow()
@@ -662,7 +670,8 @@ async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
     assert changes["changes"], "the changes page must not be empty"
     assert changes["truncated"] is True and changes["has_more"] is True
     guard = env["guardrails"]
-    assert 1 <= len(guard["items"]) <= INDEX_GUARDRAIL_ROWS < len(full_index["guardrails"]["items"])
+    # The first pass keeps INDEX_GUARDRAIL_ROWS; the second gets what changes left.
+    assert INDEX_GUARDRAIL_ROWS <= len(guard["items"]) < len(full_index["guardrails"]["items"])
     # The first rows of the provider's order (importance first), not any rows.
     whole_ids = [g["memory_id"] for g in full_index["guardrails"]["items"]]
     assert [g["memory_id"] for g in guard["items"]] == whole_ids[: len(guard["items"])]
@@ -764,14 +773,17 @@ async def test_index_session_start_on_a_live_sized_context_at_5000(db_session):
     """#2485 on a context sized like the reproduction, at the session-start
     skill's max_chars=5000.
 
-    Measured on these sizes (upcoming / guardrail / change rows): 3,000 gives
-    3 / 2 / 0 — the context block, the pinned text and three upcoming rows
-    leave no room for a change row; 4,000 gives 3 / 3 / 4; 5,000 gives
-    3 / 3 / 10; 6,000 gives 3 / 3 / 16. The skill asks for 5,000
+    Measured on these sizes with the two-pass guardrails fit (upcoming /
+    guardrail / change rows): 3,000 gives 2 / 3 / 0 — the context block, the
+    pinned text and three guardrail rows leave room for two upcoming rows and
+    no change row; 4,000 gives 3 / 3 / 4; 5,000 gives 3 / 3 / 10; 6,000 gives
+    3 / 3 / 16 (a cut changes page leaves the second pass no room). Before it,
+    with guardrails capped after upcoming, 3,000 gave 3 / 2 / 0 and 4,000 to
+    6,000 the same as now. The skill asks for 5,000
     (claude-skills/session-start.md, pinned by
-    tests/plugin/test_session_start_bootstrap_index.py): upcoming whole, one
-    to three guardrail rows, and a changes page of three rows or more that
-    says it was cut."""
+    tests/plugin/test_session_start_bootstrap_index.py): upcoming whole, at
+    least INDEX_GUARDRAIL_ROWS guardrail rows, and a changes page of three
+    rows or more that says it was cut."""
     owner, ws, ctx = await _live_like_context(db_session)
     env = await _session_start(db_session, owner, ws, ctx, 5_000)
     assert json_chars(env) <= 5_000
@@ -779,7 +791,7 @@ async def test_index_session_start_on_a_live_sized_context_at_5000(db_session):
     assert len(comps["pinned"]["memories"]) == 2
     assert len(comps["upcoming"]["results"]) == 3 and not comps["upcoming"].get("truncated")
     guard = env["guardrails"]
-    assert 1 <= len(guard["items"]) <= INDEX_GUARDRAIL_ROWS
+    assert INDEX_GUARDRAIL_ROWS <= len(guard["items"]) < 10  # the provider's 10, cut
     assert guard["truncated"] is True and guard["total_available"] == 48
     changes = comps["changes"]
     assert len(changes["changes"]) >= 3
