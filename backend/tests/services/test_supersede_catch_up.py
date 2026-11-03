@@ -191,6 +191,42 @@ class TestApply:
         assert (result.eligible, result.planned, result.processed) == (5, 2, 2)
 
     @pytest.mark.asyncio
+    async def test_reads_the_stored_vectors_from_the_lance_store(self, tmp_path) -> None:
+        """#2520: on the LanceDB preview the pass reads each row's stored vector
+        from the store; a row without a point there is ``no_vector``."""
+        pytest.importorskip("lancedb")
+        from db.lance_store import LanceVectorStore
+
+        store = LanceVectorStore(str(tmp_path / "lance"))
+        indexed, unindexed = _memory(), _memory()
+        await store.add_memory(
+            user_id="google-oauth2|123",
+            memory_id=indexed.id,
+            vector=[1.0, 0.0, 0.0, 0.0],
+            payload={"summary": "s", "type": "note", "scope": "working"},
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+        db = _Db([indexed, unindexed], uuid4())
+        detect = AsyncMock(return_value=True)
+        with (
+            patch("db.qdrant._active_store", lambda: store),
+            patch("neural.config.NeuralMemoryConfig.from_db", AsyncMock(return_value=_config())),
+            patch(
+                "services.context_routing.resolve_context_embedding",
+                AsyncMock(return_value=("text-embedding-3-small", 512)),
+            ),
+            patch("services.memory_service._create_knn_seed_edges", detect),
+            patch.object(task, "_read_counter", AsyncMock(return_value=0)),
+        ):
+            result = await run_supersede_catch_up(db, uuid4(), dry_run=False)
+
+        assert [(c.args[1], c.args[2]) for c in detect.await_args_list] == [
+            (indexed, [1.0, 0.0, 0.0, 0.0])
+        ]
+        assert (result.processed, result.no_vector) == (1, 1)
+
+    @pytest.mark.asyncio
     async def test_tallies_from_the_column_before_and_after(self) -> None:
         target = str(uuid4())
         fresh, kept, cleared, updated = (
