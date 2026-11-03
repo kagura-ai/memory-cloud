@@ -3,11 +3,10 @@
 ``apply_pending_grants`` takes the user's oldest live owned workspace row
 ``NOWAIT`` (#2443). When the tries lose, the grants stay pending; the
 scheduler sweep (``tasks.referral_tasks``) and the referral summary are the
-points that apply them later. The fixtures are the #2443 referral section's of
-``test_erasure_lock_order_db``.
+points that apply them later. The helpers are the #2443 referral section's of
+``test_erasure_lock_order_db``; the ``referral_world`` fixture comes from the
+integration ``conftest``.
 """
-
-# ruff: noqa: F811 — the referral_world fixture is shared with test_erasure_lock_order_db
 
 from __future__ import annotations
 
@@ -32,12 +31,11 @@ from services.workspace_service import WorkspaceService
 from tasks.referral_tasks import sweep_pending_referral_grants
 from utils.datetime import utcnow
 
-from .test_erasure_lock_order_db import (  # noqa: F401 (fixtures)
+from .test_erasure_lock_order_db import (
     _assert_global_order,
     _bonus,
     _LockTrace,
     _referral,
-    referral_world,
 )
 
 pytestmark = pytest.mark.timeout(90)

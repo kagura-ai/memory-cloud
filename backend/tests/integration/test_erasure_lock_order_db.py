@@ -29,9 +29,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import delete, event, func, select, text, update
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.admin import delete_user
@@ -1450,21 +1449,6 @@ async def test_an_admin_deletion_that_settles_agents_takes_the_global_order(
 # ---------------------------------------------------------------------------
 # Referral bonus recompute (#2443)
 # ---------------------------------------------------------------------------
-
-
-@pytest_asyncio.fixture
-async def referral_world(db_session, connector_world):
-    """``connector_world``; the referral grants of its users are deleted
-    afterwards (their foreign keys only SET NULL)."""
-    yield connector_world
-    await db_session.rollback()
-    users = connector_world.targets
-    await db_session.execute(
-        delete(ReferralGrant).where(
-            ReferralGrant.referrer_user_id.in_(users) | ReferralGrant.referred_user_id.in_(users)
-        )
-    )
-    await db_session.commit()
 
 
 @dataclass(frozen=True)

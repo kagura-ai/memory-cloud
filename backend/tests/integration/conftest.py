@@ -151,3 +151,24 @@ async def connector_world(db_session):
         world = _ConnectorWorld(db_session)
         yield world
         await world.cleanup()
+
+
+@pytest_asyncio.fixture
+async def referral_world(db_session, connector_world):
+    """``connector_world``; the referral grants of its users are deleted
+    afterwards (their foreign keys only SET NULL). Shared by the referral
+    tests of ``test_erasure_lock_order_db`` (#2443) and
+    ``test_referral_pending_grants_db`` (#2563)."""
+    from sqlalchemy import delete
+
+    from models.referral import ReferralGrant
+
+    yield connector_world
+    await db_session.rollback()
+    users = connector_world.targets
+    await db_session.execute(
+        delete(ReferralGrant).where(
+            ReferralGrant.referrer_user_id.in_(users) | ReferralGrant.referred_user_id.in_(users)
+        )
+    )
+    await db_session.commit()
