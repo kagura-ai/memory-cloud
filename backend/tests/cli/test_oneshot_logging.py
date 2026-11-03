@@ -29,6 +29,7 @@ from cli import (  # noqa: E402
     backfill_deleted_context_files,
     cleanup_erased_vectors,
     observed_at_backfill,
+    rekey_erasure_pseudonyms,
     reprocess_erasures,
     resource_point_metadata_backfill,
     restore_context,
@@ -137,6 +138,7 @@ _CLI_ARGV = [
     (observed_at_backfill, []),
     (resource_point_metadata_backfill, []),
     (reprocess_erasures, ["--all"]),
+    (rekey_erasure_pseudonyms, []),
     (supersede_catch_up, ["--context", "00000000-0000-0000-0000-000000000003"]),
 ]
 

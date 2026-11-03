@@ -171,6 +171,7 @@ from services.connector_key_ownership import SettledCredentials, settle_departin
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     ERASURE_AUDIT_ACTION,
+    ERASURE_RESOURCE_PREFIX,
     RestoreReport,
     StripCounts,
     Tenure,
@@ -184,6 +185,7 @@ from services.erasure_details import (
     memory_scrub_at,
     merged_request_summary,
     payload_counts,
+    pseudonym_salt_note,
     pseudonymize_audit_trail,
     pseudonymize_revision_actor,
     pseudonymized_request_values,
@@ -346,7 +348,9 @@ def _trigger_only_details() -> Any:
 # stable per-deployment salt (not per-row) lets ops cross-correlate audit
 # rows belonging to the same erased user without revealing the email/sub.
 # Goal is irreversibility, not rainbow-table protection — once the user
-# row is gone there is no plaintext to recover.
+# row is gone there is no plaintext to recover. After a rotation the
+# pseudonyms stored under the old salt are re-keyed by
+# ``cli.rekey_erasure_pseudonyms`` (#2598).
 def _audit_salt() -> str:
     return get_settings().audit_pseudo_salt
 
@@ -1439,6 +1443,8 @@ class AccountErasureService:
         if user_row_exists and not ran:
             raise ValueError("a request that never ran with a live user row is not closed")
         values = pseudonymized_request_values(user_id, request.initiated_by)
+        # #2598: the salt the row's pseudonym was derived with (the re-key's mark)
+        salt_note = pseudonym_salt_note()
         if ran:
             if not user_row_exists:
                 # step 3a once more (#2363): the run may have died between the
@@ -1452,7 +1458,7 @@ class AccountErasureService:
             values.update(
                 status=STATUS_FAILED,
                 failure_reason=INTERRUPTED_AFTER_POSTGRES_COMMIT,
-                deleted_data_summary=summary,
+                deleted_data_summary={**summary, **salt_note},
             )
         else:
             values.update(
@@ -1461,6 +1467,7 @@ class AccountErasureService:
                 deleted_data_summary={
                     "note": NOTE_USER_ROW_ABSENT,
                     NOTE_PSEUDONYMIZED_KEY: True,
+                    **salt_note,
                 },
             )
         guard = [ErasureRequest.id == request_id, ErasureRequest.status == STATUS_IN_PROGRESS]
@@ -1579,6 +1586,8 @@ class AccountErasureService:
         # #2268: what a failure after the Postgres commit writes on the row —
         # read now, like ``request_id``
         pseudonymized_row = pseudonymized_request_values(request.user_id, request.initiated_by)
+        # #2598: and the salt's fingerprint merged into that row's summary
+        salt_note = pseudonym_salt_note()
         # #2282: earlier vector-store failures of this request. The block is
         # carried in ``summary`` from the start, so every write of the summary
         # below (``_finalize``, each failure handler) keeps the history.
@@ -1997,6 +2006,7 @@ class AccountErasureService:
                     # the class only: an exception text (a constraint's
                     # DETAIL, a Redis key) can name the account (#2268 review)
                     failure_reason=f"{FAILURE_AFTER_POSTGRES_COMMIT}{step}: {type(exc).__name__}",
+                    deleted_data_summary={**summary, **salt_note},
                 )
             # #2306: guarded by this run's claim, like the reschedule above:
             # a run that outlived the stale cutoff and was claimed again must
@@ -3300,7 +3310,7 @@ class AccountErasureService:
                 user_email=email_pseudonym,
                 user_id=user_pseudonym,
                 action=ERASURE_AUDIT_ACTION,
-                resource=f"user_pseudonym:{user_pseudonym[:16]}",
+                resource=f"{ERASURE_RESOURCE_PREFIX}{user_pseudonym[:16]}",
                 user_metadata={
                     "request_id": str(request.id),
                     "is_self_service": request.is_self_service,
@@ -3350,7 +3360,8 @@ class AccountErasureService:
         values: dict[str, Any] = {
             "status": STATUS_COMPLETE,
             "completed_at": utcnow(),
-            "deleted_data_summary": summary,
+            # #2598: with the fingerprint of the salt of the pseudonym below
+            "deleted_data_summary": {**summary, **pseudonym_salt_note()},
             # #2286: a sweep may have closed a run alive past the stale cutoff
             # as ``interrupted`` meanwhile; the run completed, so no marker
             "failure_reason": None,

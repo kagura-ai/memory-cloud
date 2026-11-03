@@ -178,6 +178,7 @@ from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
     AUDIT_SUBJECT_METADATA_KEYS,
     ERASURE_AUDIT_ACTION,
+    ERASURE_RESOURCE_PREFIX,
     REPROCESS_AUDIT_ACTION,
     USER_RESOURCE_PREFIX,
     EmailHoldings,
@@ -205,6 +206,7 @@ from services.erasure_details import (  # noqa: E402
     payload_counts,
     payloads_resynced,
     postgres_section,
+    pseudonym_salt_note,
     pseudonymize_audit_trail,
     pseudonymize_erasure_audit_initiator,
     pseudonymized_request_values,
@@ -497,8 +499,9 @@ async def _carries(db: AsyncSession, pseudonym: str) -> bool:
 async def _repair(db: AsyncSession, request_id: UUID, account_id: str) -> bool:
     """Give a request that failed after its Postgres step (before v0.124.0)
     what the failure handler writes since #2268: the pseudonym instead of
-    the account id, no request metadata, and the marker in
-    ``failure_reason``. Scoped to the one row, by its id and stored value.
+    the account id, no request metadata, the marker in ``failure_reason``
+    and the salt's fingerprint in its summary (#2598). Scoped to the one row,
+    by its id and stored value.
     The values are ``pseudonymized_request_values``'s (#2288); the row is not
     read, so ``initiated_by`` is decided in SQL.
 
@@ -514,7 +517,10 @@ async def _repair(db: AsyncSession, request_id: UUID, account_id: str) -> bool:
         .values(
             **pseudonymized_request_values(account_id, None),
             failure_reason=FAILURE_AFTER_POSTGRES_COMMIT + REPAIRED_REASON,
+            # #2598: the salt the pseudonym was derived with
+            deleted_data_summary=merged_request_summary(pseudonym_salt_note()),
         )
+        .execution_options(synchronize_session=False)
     )
     return bool(cast(CursorResult[Any], result).rowcount)
 
@@ -525,8 +531,9 @@ async def _repair_note_row(db: AsyncSession, request_id: UUID, account_id: str) 
     and the row kept the account id. It gets what the sweep writes since
     #2286 — the pseudonym, no request metadata (``pseudonymized_request_values``,
     ``initiated_by`` decided in SQL: an admin's id stays) and
-    ``pseudonymized: true`` in its summary. ``erased_pseudonyms`` derived the
-    same pseudonym from the account id before, so no later walk changes.
+    ``pseudonymized: true`` and the salt's fingerprint (#2598) in its summary.
+    ``erased_pseudonyms`` derived the same pseudonym from the account id
+    before, so no later walk changes.
     Scoped to the one row by its id, stored value and shape
     (``legacy_note_row``); status and ``completed_at`` stay.
 
@@ -542,7 +549,10 @@ async def _repair_note_row(db: AsyncSession, request_id: UUID, account_id: str) 
         )
         .values(
             **pseudonymized_request_values(account_id, None),
-            deleted_data_summary=merged_request_summary({NOTE_PSEUDONYMIZED_KEY: True}),
+            # #2598: with the salt's fingerprint, as the sweep writes it since
+            deleted_data_summary=merged_request_summary(
+                {NOTE_PSEUDONYMIZED_KEY: True, **pseudonym_salt_note()}
+            ),
         )
         .execution_options(synchronize_session=False)
     )
@@ -735,7 +745,7 @@ async def _reprocess_one(
                 user_email=await _email_pseudonym(db, pseudonym),
                 user_id=pseudonym,
                 action=AUDIT_ACTION,
-                resource=f"user_pseudonym:{pseudonym[:16]}",
+                resource=f"{ERASURE_RESOURCE_PREFIX}{pseudonym[:16]}",
                 user_metadata={
                     "request_id": str(request_id),
                     "details_restored": change.details_restored,

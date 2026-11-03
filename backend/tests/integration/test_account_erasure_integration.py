@@ -45,7 +45,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService, _audit_salt
-from services.erasure_details import erasure_pseudonym
+from services.erasure_details import erasure_pseudonym, pseudonym_salt_note
 from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ErasureAlreadyInProgressError
 from utils.hashing import sha256_hex
@@ -1875,6 +1875,7 @@ class TestARequestWhoseUserVanishedUnrun:
             assert closed["deleted_data_summary"] == {
                 "note": "user_row_already_absent",
                 "pseudonymized": True,
+                **pseudonym_salt_note(),  # #2598
             }
             assert closed["completed_at"] is not None
             assert closed["failure_reason"] is None
@@ -2054,7 +2055,7 @@ class TestAFinalizeAfterTheSweepsClose:
             assert done["failure_reason"] is None
             assert done["completed_at"] is not None
             assert done["user_id"] == pseudonym
-            assert done["deleted_data_summary"] == summary
+            assert done["deleted_data_summary"] == {**summary, **pseudonym_salt_note()}
         finally:
             await db_session.rollback()
             await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == request_id))
@@ -2323,6 +2324,7 @@ class TestAVectorStoreOutageAtStepOne:
         assert row["deleted_data_summary"] == {
             "note": "user_row_already_absent",
             "pseudonymized": True,
+            **pseudonym_salt_note(),  # #2598
         }
         assert row["user_id"] == sha256_hex(target, salt=_audit_salt())
         assert target not in repr(row)
@@ -4460,7 +4462,7 @@ async def test_reclaimed_run_rechecks_committed_marker_before_any_external_delet
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    assert fresh.deleted_data_summary == {"postgres": counts}
+    assert fresh.deleted_data_summary == {"postgres": counts, **pseudonym_salt_note()}
     assert fresh.user_id == erasure_pseudonym(sub)
     assert fresh.status == STATUS_FAILED
     # Re-running an already closed request is equally harmless.
@@ -4578,4 +4580,8 @@ async def test_stale_missing_user_without_marker_closes_with_no_raw_identifiers(
     assert fresh.status == STATUS_COMPLETE
     assert fresh.user_id == fresh.initiated_by == erasure_pseudonym(sub)
     assert fresh.ip_address is None and fresh.user_agent is None
-    assert fresh.deleted_data_summary == {"note": "user_row_already_absent", "pseudonymized": True}
+    assert fresh.deleted_data_summary == {
+        "note": "user_row_already_absent",
+        "pseudonymized": True,
+        **pseudonym_salt_note(),  # #2598
+    }

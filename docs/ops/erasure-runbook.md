@@ -116,7 +116,70 @@ v0.130.0 (#2348) への更新後は `reprocess_erasures --all` (plan) → `--all
 
 **v0.128.0 へ上げたら (f17 の index 作成後)、`reprocess_erasures --all` (plan → `--all --apply --yes`) をもう一度走らせること。** 過去の erasure が他人の行に残した本人の email / sub と、本人の行・`account_erasure` 行の IP / user agent がこれで消える。変更のない request は何も表示しない。
 
-`ENVIRONMENT=production` では `AUDIT_PSEUDO_SALT` が公開 default (`kagura-erasure-v1`) や `change-me-audit-pseudo-salt` のままだと起動しない (#2225)。default から外すのは必須だが、すでに private な値は変えないこと: pseudonym は書き込み時に一度だけ計算され再計算されないため lookup は壊れないが、変更前と変更後に pseudonymize された同一人物の行は相関しなくなる (salt の存在理由そのもの)。短い private salt も受け入れる (長さチェックなし)。salt を変更した後は `reprocess_erasures` も変更前の erasure の残留 audit 行を pseudonym で見つけられない (一致しないので行はそのまま残る)。
+`ENVIRONMENT=production` では `AUDIT_PSEUDO_SALT` が公開 default (`kagura-erasure-v1`) や `change-me-audit-pseudo-salt` のままだと起動しない (#2225)。default から外すのは必須だが、すでに private な値は変えないこと: pseudonym は書き込み時に一度だけ計算され再計算されないため lookup は壊れないが、変更前と変更後に pseudonymize された同一人物の行は相関しなくなる (salt の存在理由そのもの)。短い private salt も受け入れる (長さチェックなし)。salt を変更した後は `reprocess_erasures` も変更前の erasure の残留 audit 行を pseudonym で見つけられない (一致しないので行はそのまま残る)。salt を変更したら、変更前の salt で保存された pseudonym を §2.5.1 の手順で re-key する。
+
+### 2.5.1 `AUDIT_PSEUDO_SALT` のローテーションと re-key (v0.141.0, #2598)
+
+salt を変えても、変更前に保存された pseudonym (`sha256(旧 salt + sub)`、audit trail 上の email の `sha256(旧 salt + email)`) はそのまま残る。旧 salt を知る者 (公開 default のままだった場合は誰でも) は候補の sub / email を hash して、変更前に消去されたアカウントの行を特定できる。`rekey_erasure_pseudonyms` は保存済みの pseudonym `p` をすべて `sha256(現在の salt + p)` に置き換える。旧 salt は不要で、新しい値は現在の salt なしには導出できない。
+
+v0.141.0 から、request 行を pseudonymize するすべての書き手 (erasure の finalize・Postgres commit 後の失敗 handler・sweep の close、`reprocess_erasures` の repair) が `deleted_data_summary.pseudonym_salt` に salt の fingerprint (`sha256(salt + "erasure-pseudonym-salt")` の先頭 16 桁。salt も ID も表さない) を書く。現在の salt の fingerprint を持つ行は re-key しない。別の fingerprint の行と、fingerprint のない行 (v0.141.0 より前に書かれた行) を re-key して fingerprint を書くので、2 回目の apply は何も変えず、hash を hash し直すことはない。
+
+手順 (この順で):
+
+1. v0.141.0 へ上げる。
+2. `reprocess_erasures --all` (plan) で `would repair` / `would pseudonymize note row` が出れば、salt を変える前に `--all --apply --yes` で直す (account id を保存した行は re-key できない。下記)。`rekey_erasure_pseudonyms` の plan に `requests  N  in progress after their Postgres step ...` (Postgres ステップの後で `in_progress` のまま止まった request) か `vector erasure scopes  N  not drained ...` (`vector_erasure_jobs.completed_at IS NULL`) が出れば、salt を変える前に sweep (または `cleanup_erased_vectors --apply`) に終わらせる。
+3. salt をまだ変えていない場合: `rekey_erasure_pseudonyms --stamp-current` (plan) → `--stamp-current --apply`。fingerprint のない行に現在の salt の fingerprint を書くだけで、他は何も変えない。
+4. erasure を止める (scheduler の sweep、admin 強制削除、`reprocess_erasures`、`cleanup_erased_vectors` を走らせない。どれも自分の process の salt で pseudonym を導出する)。`AUDIT_PSEUDO_SALT` を新しい値 (`openssl rand -hex 32`) にし、API・scheduler・CLI を実行するすべての process を再起動する。
+5. `rekey_erasure_pseudonyms` (plan) → `--apply --yes`。
+6. もう一度 plan を実行し、`would re-key 0 request(s), 0 row(s)` で `payload patch pending` の行がないことを確認してから erasure を再開する。
+
+すでに salt を変えてしまった場合 (#2598 の想定) は 3 を飛ばして 4 の停止から実行する。plan の `no salt fingerprint: N` が v0.141.0 より前の行の数で、`requests  N  carry no salt fingerprint ...` の行が出る。salt を変えていない行を re-key しても漏れるものはないが、account id から pseudonym を導出する照合 (下記) が効かなくなるので、変えていなければ 3 を使う。
+
+```bash
+python -m src.cli.rekey_erasure_pseudonyms                      # plan (既定、読むだけ)
+python -m src.cli.rekey_erasure_pseudonyms --apply --yes        # re-key
+python -m src.cli.rekey_erasure_pseudonyms --stamp-current      # stamp の plan
+python -m src.cli.rekey_erasure_pseudonyms --stamp-current --apply
+```
+
+plan の出力例 (件数だけ。pseudonym・ID・email・fingerprint は表示しない):
+
+```
+erasure requests that store a pseudonym: <N>
+  under the current salt: 0
+  under another salt: 0
+  no salt fingerprint: <N>
+requests  <N>  carry no salt fingerprint (written before v0.141.0): ...
+column                                            rows
+contexts.created_by                               <n>
+memories.user_id                                  <n>
+memory_revisions.actor_user_id                    <n>
+vector_erasure_jobs.subject_pseudonym             <n>
+audit_logs.user_id                                <n>
+audit_logs.user_email                             <n>
+audit_logs.resource                               <n>
+audit_logs.user_metadata                          <n>
+erasure_requests.user_id                          <n>
+erasure_requests.initiated_by                     <n>
+vector payloads: <n> memory(ies) whose points are patched after the commit
+known limit: an email pseudonym that only other actors' rows carry is not found and stays under its salt (it cannot be counted)
+would re-key <N> request(s), <n> row(s)
+dry run — pass --apply to write
+```
+
+apply は 1 つの Postgres トランザクション: re-key する request の pseudonym (`user_id`) を、erasure が pseudonym を書くすべての列 (`erasure_requests.user_id` / `initiated_by`、`memories.user_id`、`memory_revisions.actor_user_id`、`vector_erasure_jobs.subject_pseudonym`、`secret_access_log`、`memory_access_events`、`memory_session_rollbacks`、生き残った行の作成者列、`audit_logs` の `user_id` / raw-sub fallback の `user_email` / `user:<p>` resource / `account_erasure` 行の `user_pseudonym:<先頭 16 桁>` / `user_metadata` の本人 ID キー) で値の完全一致により書き換え、本人の audit 行 (`user_id` が本人の pseudonym) にある 64 桁 hex の `user_email` と `user:<64 hex>` の値を本人の email pseudonym として、`user_email` と `user:` resource の完全一致で書き換える。本人の行のそれ以外の `resource` は値の出現箇所を書き換える (erasure が出現箇所を置換したため)。全 request で 1 つの対応表を使うので、2 人が共有する値も 1 回だけ re-key される。行は erasure と同じ順 (context → memory → revision → … → audit → request) に id 順でロックし、re-key は同時に 1 つだけ (transaction advisory lock)。
+
+commit 後に、re-key した本人の memory の vector payload (`user_id`、summary と chunk の point、Qdrant / LanceDB のどちらでも) を新しい値にする (旧い値との compare-and-set)。失敗は memory ID と例外クラスで `erasure_rekey_payload_failed` に出て件数に数え、request は summary に `pseudonym_rekey_payloads` を残す。次の apply がその memory の point をもう一度 patch する (author を現在の salt で hash すると memory の author になる point が旧い値を持つ point なので、旧い salt も旧い値も要らない)。plan は vector store を呼ばない。payload の patch が pending のまま salt をもう一度変えないこと。
+
+制限 (件数だけを表示、値は出さない):
+
+- account id を保存した request 行 (v0.124.0 より前に Postgres ステップの後で失敗した行、v0.125.0 より前の note 行、v0.58.1 より前に完了した行) は re-key できない: 旧 salt なしにその pseudonym を導出できない (`requests  N  store the account id ...`)。salt を変える前に手順 2 で直す。
+- salt を変えた時点で Postgres ステップの後の `in_progress` だった request は、後で sweep が閉じると新しい salt の pseudonym を保存し、本人の行は旧い salt のまま残る (re-key できない)。drain されていない `vector_erasure_jobs` は、salt を変えた後は account id を持つ point と一致しなくなる。どちらも plan が件数を出す (手順 2)。
+- 他人の行にだけ残る email pseudonym (本人の行のどれもその address を名指さず、`account_erasure` 行の address でもないもの) と、本人の行でも `user_email` や `user:<値>` ではなく他の `resource` の中にだけ残る email pseudonym は見つからず、旧 salt のまま残る (resource の中の 64 桁 hex は無関係な hash と区別できない)。件数は数えられない (plan の `known limit` 行)。
+- 本人の memory 行が (cascade や tombstone の削除で) 消えた後も別の live な memory が共有している point は、本人の memory から point を列挙する payload の patch では見つからない。erasure がその point の `vector_erasure_jobs` scope を記録していれば、hourly sweep の完了済み scope の検証が旧い値を re-key 後の値に置き換える (旧い値を現在の salt で hash すると scope の値になるため)。
+- 現在の salt の request が記録した email pseudonym とその request の pseudonym は、re-key する request の行にあっても書き換えない (`kept  N value(s) of a request already under the current salt`)。live なアカウントの ID と同じ値も書き換えない (`kept  N value(s) a live account uses as its id`)。
+- erasure が列長 (255) で切り詰めた `resource` の末尾に残る pseudonym の一部は、直前に hex の文字が続いていても、8 桁以上で 1 つの値の 1 つの位置にだけ一致すれば書き換え、それ以外は残る。
+- re-key の後、account id から現在の salt で導出した pseudonym は保存値と一致しない (salt を変えただけの場合と同じ、設計どおり): 古い session の書き込みを止める write guard、消去前の snapshot からの context restore、vector erasure の drain の raw author 判定は、re-key した本人の account id をもう認識しない。逆に旧い salt のまま残った値は、それらの経路と `reprocess_erasures` から本人の raw 値として認識される (現在の salt で hash すると保存値になるため)。
 
 ### 2.6 Redis (Step 5, best-effort)
 
@@ -376,6 +439,8 @@ Kagura Memory Cloud Operations
 - `embedding_points_removal_failed` — 上記の削除が失敗した (memory_id + collection + 例外クラス)。point は孤児として残る: orphan sweep を待つか、memory id で point を手動削除する
 - `embedding_unsearchable_backlog` — embedding sweep の backlog 警告。v0.129.0 から `erased` (erasure がキューから外した残存行、#2363) を別に数え、`erased` の行だけでは出ない
 - `vector_erasure_scope_failed` / `vector_erasure_collections_failed` — durable cleanup を次の sweep で再試行する。pending job が継続して増える場合は vector store を復旧する。
+- `erasure_pseudonyms_rekeyed` / `erasure_pseudonyms_rekey_payloads` — `rekey_erasure_pseudonyms` の apply の件数 (列ごとの行数、payload の patch 件数のみ。#2598, §2.5.1)
+- `erasure_rekey_payload_failed` / `erasure_rekey_payload_collections_failed` — re-key 後の vector payload の patch が失敗した (memory_id + 例外クラス)。request は `pseudonym_rekey_payloads` を残し、次の `rekey_erasure_pseudonyms --apply` がもう一度 patch する
 - `erasure_email_*` — 手動送信待ちメール
 
 監視 alert (将来):

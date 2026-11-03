@@ -77,6 +77,18 @@ INTERRUPTED_AFTER_POSTGRES_COMMIT = f"{FAILURE_AFTER_POSTGRES_COMMIT}interrupted
 NOTE_USER_ROW_ABSENT = "user_row_already_absent"
 NOTE_PSEUDONYMIZED_KEY = "pseudonymized"
 
+# #2598: in ``deleted_data_summary`` of a pseudonymized request row, the
+# fingerprint of the ``AUDIT_PSEUDO_SALT`` its pseudonyms were derived with
+# (``erasure_details.pseudonym_salt_fingerprint``). Every writer that
+# pseudonymizes a request row stamps it (``pseudonym_salt_note``);
+# ``cli.rekey_erasure_pseudonyms`` re-keys the rows whose fingerprint is not
+# the current salt's, or that have none (written before v0.141.0), and stamps
+# them, so a second run re-keys nothing.
+NOTE_PSEUDONYM_SALT_KEY = "pseudonym_salt"
+# #2598: set by the re-key on a request whose subject has surviving memories,
+# removed once their vector payloads carry the re-keyed author.
+NOTE_PSEUDONYM_REKEY_PAYLOADS_KEY = "pseudonym_rekey_payloads"
+
 # Reason codes — admin paths use the non-self_service values; the
 # self-service path is locked to ``self_service`` by the CHECK constraint.
 REASON_SELF_SERVICE = "self_service"

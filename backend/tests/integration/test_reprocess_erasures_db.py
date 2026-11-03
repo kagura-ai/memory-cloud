@@ -42,7 +42,7 @@ from models.auth import AuditLog, Context, User, Workspace
 from models.erasure import ErasureRequest
 from models.memory import Memory, MemoryRevision
 from services.details_provenance import details_key_digest
-from services.erasure_details import HeldAddress
+from services.erasure_details import HeldAddress, pseudonym_salt_note
 from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -489,6 +489,8 @@ async def test_a_request_the_sweep_never_ran_is_never_a_subject(
         assert row["deleted_data_summary"] == {
             "note": "user_row_already_absent",
             "pseudonymized": True,
+            # #2598: the salt the pseudonym was derived with
+            **pseudonym_salt_note(),
         }
         new_audit = set(after.pop("audit_logs")) - set(before.pop("audit_logs"))
         assert after == before  # memories, revisions, every other request
@@ -1670,6 +1672,7 @@ async def test_a_legacy_note_row_is_pseudonymized_with_its_audit_residue(
         assert row["deleted_data_summary"] == {
             "note": "user_row_already_absent",
             "pseudonymized": True,
+            **pseudonym_salt_note(),  # #2598
         }
         assert (row["status"], row["completed_at"]) == (old["status"], old["completed_at"])
         assert await _own_rows(session, case) == [
