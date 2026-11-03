@@ -585,6 +585,64 @@ class TestPhaseFailureIsolation:
         db.rollback.assert_not_awaited()
 
 
+class TestPointDeletesAfterTheCommit:
+    """#2565: the archive and merge points a phase queued are deleted only
+    after the caller's commit, and only for a phase whose savepoint held."""
+
+    _ENTRY = (uuid4(), uuid4(), "kagura_memories")
+
+    @staticmethod
+    def _orchestrator():
+        db = AsyncMock()
+        db.begin_nested = MagicMock(return_value=AsyncMock())
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter"),
+        ):
+            return SleepOrchestrator(db)
+
+    async def _run(self, orch, *, fails: bool) -> PhaseResult:
+        phase = MagicMock()
+        phase.pending_point_deletes = [self._ENTRY]
+        phase.execute = AsyncMock(
+            side_effect=RuntimeError("phase failed") if fails else None,
+            return_value=PhaseResult(phase_name="consolidation"),
+        )
+        return await orch._run_phase(
+            "consolidation", phase, _make_config(), "user-1", None, None, SleepBudget(), uuid4()
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_completed_phases_points_wait_for_the_commit(self):
+        orch = self._orchestrator()
+        result = await self._run(orch, fails=False)
+
+        assert result.success is True
+        assert orch.pending_point_deletes == [self._ENTRY]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_phases_points_went_with_its_savepoint(self):
+        orch = self._orchestrator()
+        result = await self._run(orch, fails=True)
+
+        assert result.success is False
+        assert orch.pending_point_deletes == []
+
+    @pytest.mark.asyncio
+    async def test_delete_committed_points_is_forgets_post_commit_step(self):
+        orch = self._orchestrator()
+        await self._run(orch, fails=False)
+
+        with patch("services.memory_service.MemoryService") as service:
+            service.return_value.delete_forgotten_points = AsyncMock()
+            await orch.delete_committed_points()
+            await orch.delete_committed_points()  # nothing left: no second call
+
+        service.assert_called_once_with(orch.db)
+        service.return_value.delete_forgotten_points.assert_awaited_once_with([self._ENTRY])
+        assert orch.pending_point_deletes == []
+
+
 class TestRaisedPhaseKeepsItsSpend:
     """#2060: a phase that raises still reports the LLM spend it already made.
 

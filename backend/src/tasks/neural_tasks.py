@@ -9,6 +9,7 @@ import math
 import os
 from collections.abc import AsyncIterator
 from typing import Any, cast
+from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -192,8 +193,12 @@ async def consolidation_task():
 
     try:
         async for db in get_db():
+            from services.memory_service import MemoryService
+
             memory_repo = MemoryRepository(db)
             graph_repo = GraphRepository(db)
+            # #2565: forget's point-delete steps (queue, post-commit delete).
+            memory_service = MemoryService(db)
 
             total_users = 0
             total_promoted = 0
@@ -204,6 +209,9 @@ async def consolidation_task():
             async for graphs in _graph_pages(graph_repo):
                 user_ids = [g.user_id for g in graphs]
                 total_users += len(user_ids)
+                # (memory id, point id, context id) of the page's deleted
+                # rows, for after its commit (#2565).
+                point_deletes: list[tuple[UUID, UUID, UUID | None]] = []
 
                 for user_id in sorted(user_ids):
                     # #1985: deleting a memory cascades to its edge rows; take the
@@ -254,28 +262,17 @@ async def consolidation_task():
 
                         # Deletion criteria
                         elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
-                            # ================================================================
-                            # BUG FIX #83-10: Delete from Qdrant to prevent orphan vectors
-                            # ================================================================
-                            # Problem: consolidation_task was deleting from PostgreSQL only,
-                            #          leaving orphan vectors in Qdrant. These orphans:
-                            #          - Waste storage
-                            #          - Pollute search results
-                            #          - Cannot be cleaned up easily
-                            #
-                            # Solution: Call delete_memory_from_qdrant() before PostgreSQL
-                            #           deletion to ensure complete cleanup.
-                            #
-                            # Note: This matches the pattern in MemoryService.forget() API.
-                            # ================================================================
-
-                            # Delete from Qdrant first
-                            from db.qdrant import delete_memory_from_qdrant
-
-                            await delete_memory_from_qdrant(user_id, memory.point_id)
-
-                            # Then delete from PostgreSQL
+                            # BUG FIX #83-10: the row's vector point goes too (no
+                            # orphan vectors). #2565: as cleanup_old_working_memories
+                            # does (#2480) — queued with the delete, removed from
+                            # Qdrant only after the page commits; deleting first left
+                            # live rows without their vectors when the commit failed.
                             await memory_repo.delete(memory.id)
+                            # The row's point id (#1829), or None when another live
+                            # row names it.
+                            point_id = await memory_service._point_to_delete(memory)
+                            if point_id is not None:
+                                point_deletes.append((memory.id, point_id, memory.context_id))
                             total_deleted += 1
 
                             logger.info(
@@ -302,7 +299,12 @@ async def consolidation_task():
                             importance=memory.importance,
                         )
 
+                # Queued in the page's transaction, beside the deletes (#2476);
+                # the collection is the row's context's.
+                forgotten = await memory_service._queue_forgotten_points(point_deletes)
                 await db.commit()
+                # Never raises; what it leaves stays queued for the drain.
+                await memory_service.delete_forgotten_points(forgotten)
 
             logger.info(
                 "consolidation_task_completed",

@@ -108,6 +108,9 @@ async def _run_sleep_job(
                 report=report,
             )
             await db.commit()
+            # #2565: the archived / merged rows' points, now that the
+            # tombstones are committed. Never raises.
+            await orchestrator.delete_committed_points()
             logger.info(
                 "manual_sleep_run_completed",
                 report_id=str(report_id),

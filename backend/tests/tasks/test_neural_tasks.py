@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from services.memory_service import MemoryService
 from tasks.neural_tasks import consolidation_task, weight_decay_task
 from tests.tasks.conftest import mock_get_db_factory
 from utils.datetime import utcnow
@@ -293,18 +294,33 @@ class TestConsolidationTask:
         mock_memory_repo.list = AsyncMock(return_value=[old_memory])
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
+        # #2565: forget's steps — queued before the page's commit, deleted after it.
+        entry = (old_memory.id, old_memory.id, "kagura_memories_x")
+        steps = MagicMock()
+        steps.attach_mock(AsyncMock(return_value=[entry]), "queue")
+        steps.attach_mock(mock_db.commit, "commit")
+        steps.attach_mock(AsyncMock(), "delete_points")
 
         with (
             patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
             patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
             patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
             patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
+            patch.object(MemoryService, "_queue_forgotten_points", steps.queue),
+            patch.object(MemoryService, "delete_forgotten_points", steps.delete_points),
         ):
             await consolidation_task()
 
-        mock_qdrant_delete.assert_called_once_with(old_memory.user_id, old_memory.id)
         mock_memory_repo.delete.assert_called_once_with(old_memory.id)
         mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
+        # No vector delete before the commit; the point, under its row's
+        # context, is queued in the page's transaction and deleted after it.
+        mock_qdrant_delete.assert_not_called()
+        steps.queue.assert_awaited_once_with(
+            [(old_memory.id, old_memory.id, old_memory.context_id)]
+        )
+        steps.delete_points.assert_awaited_once_with([entry])
+        assert [c[0] for c in steps.mock_calls] == ["queue", "commit", "delete_points"]
 
     @pytest.mark.asyncio
     async def test_never_deletes_a_pinned_memory(self):

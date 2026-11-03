@@ -3,7 +3,7 @@
 Drives ConsolidationPhase.execute() with a real MemoryRepository + real Memory
 rows (carrying the #1046 ``reference_count`` column) to verify the adoption gate
 end-to-end: an adopted memory promotes; a surfaced-but-unadopted one does not.
-Graph + Qdrant are patched (no neural edges, no real delete); LLM is off.
+Graph and the point-delete queue are patched (no neural edges); LLM is off.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ async def test_adoption_gate_switch_against_real_schema(db_session):
     phase = ConsolidationPhase(db_session, MagicMock())  # real MemoryRepository(db_session)
     with (
         patch("services.sleep.consolidation.GraphService") as GS,
-        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
     ):
         GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})  # no graph → no neural
         result = await phase.execute(config, uid, None, None, SleepBudget())

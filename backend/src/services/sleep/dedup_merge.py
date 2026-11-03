@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
+from db.qdrant import search_memories_qdrant
 from models.memory import (
     DELETED_BY_SLEEP_MERGE,
     MEMORY_TYPE_TIME,
@@ -49,6 +49,7 @@ from models.memory import (
     tool_triggered_predicate,
 )
 from repositories.neural_edge import NeuralEdgeRepository
+from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
 from services.resource_indexer import unshared_point_id
@@ -292,6 +293,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # judge can re-nominate these via third-party co-clustering; they
         # must be skipped — never guarded, never rescued into a re-merge.
         self._settled_pair_keys: set[tuple[UUID, UUID]] = set()
+        # #2565: the merge losers' points, queued in the phase's savepoint;
+        # the orchestrator deletes them after its caller commits.
+        self.pending_point_deletes: list[PointDelete] = []
 
     def _backfill_cluster_scores(
         self,
@@ -1473,18 +1477,22 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10).
         # #2065: by forget's rule — a resource point another live row still
         # names stays with that row (``unshared_point_id``).
+        # #2565: queued beside the soft delete, deleted after the caller's
+        # commit (``SleepOrchestrator.delete_committed_points``): a run that
+        # rolls back leaves the loser live with its point.
         try:
             point_id = await unshared_point_id(self.db, loser.id, loser.point_id)
-            if point_id is not None:
-                await delete_memory_from_qdrant(
-                    user_id, point_id, self.collection_name or "kagura_memories"
-                )
         except Exception as e:
+            point_id = None
             logger.warning(
                 "dedup_qdrant_delete_failed",
                 loser_id=str(loser.id),
                 error=str(e),
             )
+        if point_id is not None:
+            entry = (loser.id, point_id, self.collection_name or "kagura_memories")
+            await queue_point_deletes(self.db, [entry])
+            self.pending_point_deletes.append(entry)
 
         # Transfer edges from loser to winner
         await self.edge_repo.transfer_edges(

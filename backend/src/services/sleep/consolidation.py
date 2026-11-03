@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import delete_memory_from_qdrant
 from models.memory import (
     DELETED_BY_SLEEP_ARCHIVE,
     Memory,
@@ -38,6 +37,7 @@ from models.memory import (
     not_tool_triggered_predicate,
 )
 from repositories.memory import MemoryRepository
+from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.graph_service import GraphService
 from services.llm_service import LLMService, billed_usage
 from services.resource_indexer import unshared_point_id
@@ -166,6 +166,9 @@ class ConsolidationPhase(LLMSpendTracker):
         # dedup phase established the pattern in #475).
         self._tokens_used: int = 0
         self._llm_breakdown: LLMCallBreakdown | None = None
+        # #2565: the archived rows' points, queued in the phase's savepoint;
+        # the orchestrator deletes them after its caller commits.
+        self.pending_point_deletes: list[PointDelete] = []
 
     @staticmethod
     def _should_promote(
@@ -498,7 +501,7 @@ class ConsolidationPhase(LLMSpendTracker):
         return result
 
     async def _archive_tombstone(self, user_id: str, memory: Memory) -> bool:
-        """Tombstone one archive candidate, then drop its vector (#1520).
+        """Tombstone one archive candidate, then queue its vector (#1520).
 
         Shared by the rule and LLM paths so the archive contract lives once.
         The row is stamped FIRST: the candidate fetch is not locked, so a 0-row
@@ -509,7 +512,15 @@ class ConsolidationPhase(LLMSpendTracker):
         un-tombstone a deletion this run did not make. Returns whether the
         caller should tally and record the archive.
 
-        If the vector delete fails after the stamp, the tombstone stands and is
+        #2565: the point is not deleted here. It is queued in
+        ``deferred_point_deletes`` beside the tombstone, inside the phase's
+        savepoint, and kept in ``pending_point_deletes``; the orchestrator
+        deletes it after its caller commits
+        (``SleepOrchestrator.delete_committed_points``) and the drain retries
+        what that step leaves. A run or phase that rolls back takes the queue
+        row with the tombstone, so the row keeps its point.
+
+        If the point lookup fails after the stamp, the tombstone stands and is
         still recorded: rollback re-embeds (upsert) and the point is filtered
         at read time by the PG row, so an orphan is a logged degradation, not a
         lost restore.
@@ -536,14 +547,19 @@ class ConsolidationPhase(LLMSpendTracker):
             return False
         try:
             point_id = await unshared_point_id(self.db, memory_id, memory.point_id)
-            if point_id is not None:
-                await delete_memory_from_qdrant(user_id, point_id, self.collection_name)
         except Exception as e:  # noqa: BLE001 — the tombstone is the truth; log the orphan
             logger.warning(
                 "consolidation_archive_vector_delete_failed",
                 memory_id=str(memory_id),
                 error=str(e),
             )
+            return True
+        if point_id is not None:
+            # In the transaction, beside the tombstone: a failure here is the
+            # phase's, and its savepoint undoes the stamp too.
+            entry = (memory_id, point_id, self.collection_name)
+            await queue_point_deletes(self.db, [entry])
+            self.pending_point_deletes.append(entry)
         return True
 
     @staticmethod

@@ -34,7 +34,7 @@ def consolidation_phase(mock_db, mock_llm):
     with (
         patch("services.sleep.consolidation.MemoryRepository"),
         patch("services.sleep.consolidation.GraphService"),
-        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
     ):
         phase = ConsolidationPhase(mock_db, mock_llm)
         phase.memory_repo = AsyncMock()
@@ -74,8 +74,8 @@ async def _run_execute(
 ):
     """Drive ConsolidationPhase.execute() deterministically (LLM off, no graph).
 
-    Patches GraphService (no edges → neural_metrics None for all), the Qdrant
-    delete, and the #1049 grandfather cutoff. Returns the PhaseResult so tests can
+    Patches GraphService (no edges → neural_metrics None for all), the point
+    delete queue (#2565), and the #1049 grandfather cutoff. Returns the PhaseResult so tests can
     assert absolute promote/delete rates via result.details + promote/delete calls.
     """
     phase._fetch_working_memories = AsyncMock(return_value=memories)
@@ -85,7 +85,7 @@ async def _run_execute(
     budget = SleepBudget()
     with (
         patch("services.sleep.consolidation.GraphService") as GS,
-        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
     ):
         GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
@@ -431,8 +431,8 @@ class TestNeuralMetricsUnderIsolation:
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
             patch(
-                "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
-            ) as del_qdrant,
+                "services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock
+            ) as queue,
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -442,7 +442,7 @@ class TestNeuralMetricsUnderIsolation:
 
         _assert_graph_service_isolation(mock_graph_service)
         phase.memory_repo.soft_delete.assert_not_called()
-        del_qdrant.assert_not_called()
+        queue.assert_not_called()
         phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         assert result.details["rule_deleted"] == 0
 
@@ -466,7 +466,7 @@ class TestNeuralMetricsUnderIsolation:
             patch(
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -501,7 +501,7 @@ class TestNeuralMetricsUnderIsolation:
             patch(
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -533,7 +533,7 @@ class TestLLMArchivalEligibilityGuard:
         with (
             patch("services.sleep.consolidation.GraphService") as GS,
             patch(
-                "services.sleep.consolidation.delete_memory_from_qdrant",
+                "services.sleep.consolidation.queue_point_deletes",
                 new_callable=AsyncMock,
             ),
             patch(
