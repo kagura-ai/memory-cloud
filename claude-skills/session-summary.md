@@ -114,7 +114,7 @@ remember(..., type="troubleshooting",
 - The `summary` is the text the model reads — write the safe alternative as a fact.
 - `action: "block"` only when the call itself does the damage (hangs, destroys, irreversible); it needs `on: "pre"` and a `match` with at least one literal character. Otherwise `inform`.
 - Test the pattern against the command that actually failed; the server accepts a safe regex subset and names the rejected construct.
-- `details` is replaced wholesale on update — resend `tool_trigger` with any later `update_memory(details=...)`. Authoring needs the context editor role and a user API key. Keep a context at 20 or fewer guardrails.
+- `details` is replaced wholesale on update — resend `tool_trigger` with any later `update_memory(details=...)`, or use `details_patch`, which merges. Authoring needs the context editor role and a user API key. Keep a context at 20 or fewer guardrails.
 
 Full contract: `docs/mcp-tools.md#tool-guardrails`.
 
