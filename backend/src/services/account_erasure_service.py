@@ -2201,14 +2201,14 @@ class AccountErasureService:
                     lambda workspace_id=ws.id: self._lock_workspace_nowait(workspace_id)
                 )
             except NotFoundException:
-                # The workspace was soft-deleted concurrently (it will be cascade-
-                # cleaned anyway) — nothing to auto-transfer. A benign race must NOT
+                # Defensive, unreachable since #2455: the row is held since the
+                # owner-wide lock above, so no soft-delete commits in between.
+                # Were it gone, nothing to auto-transfer; a benign race must NOT
                 # fail the whole GDPR erasure request.
                 continue
-            # Re-read under the lock — the helper uses populate_existing, so this
-            # reflects committed concurrent changes even though the row was already
-            # in the session. If a concurrent transfer already moved ownership away
-            # from the erased user, this is no longer ours to auto-transfer.
+            # Defensive too (#2455): no owner change commits while the row is
+            # held. Kept as the #1102 guard: a workspace someone else owns now
+            # is no longer ours to auto-transfer.
             if locked_ws.owner_user_id != user_id:
                 continue
             locked_ws.owner_user_id = new_owner.user_id
@@ -2355,9 +2355,10 @@ class AccountErasureService:
         # #2418: the workspaces the subject owns, before the context union —
         # the order admin deletion takes (``delete_user_rows``). The live ones
         # NOWAIT: this transaction holds the subject's users row, and the
-        # subject's own DELETE /workspaces/W holds W and then updates it. The
-        # soft-deleted ones wait: no owner mutation or workspace delete takes
-        # them (``lock_workspace_for_update`` locks live rows only), and the
+        # subject's own DELETE /workspaces/W holds W and then updates it. Under
+        # ``_execute``, step 2 holds the live ones already (#2455): this re-take
+        # is free. The soft-deleted ones wait: no owner mutation or workspace
+        # delete takes them (``lock_workspace_for_update`` locks live rows only), and the
         # deleted-workspace file repair locks them SKIP LOCKED holding no user.
         await self._lock_owned_workspaces(user_id)
         owned_ws = select(Workspace.id).where(Workspace.owner_user_id == user_id)
