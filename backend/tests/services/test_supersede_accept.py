@@ -5,7 +5,9 @@ A ``supersede_candidate`` reaches every client, including those on the default
 but had no way to accept it: that took ``create_edge``, which core does not
 list. ``accept_supersede_candidate`` is the mirror of the dismissal. These pin
 the request contract; the database behaviour is in
-``tests/integration/test_2308_accept_supersede_candidate_db.py``.
+``tests/integration/test_2308_accept_supersede_candidate_db.py``. #2600 adds
+the same two flags to ``PATCH /api/v1/memory/{id}`` (the web dialog's accept,
+``tests/integration/test_2600_patch_accept_supersede_db.py``).
 """
 
 from uuid import uuid4
@@ -83,6 +85,85 @@ class TestAcceptRequestValidation:
         from services import memory_service
 
         assert memory_service.UPDATE_MEMORY_EDIT_FIELDS is UPDATE_MEMORY_EDIT_FIELDS
+
+
+class TestPatchAcceptRequestValidation:
+    """#2600: ``PATCH /api/v1/memory/{id}`` takes both flags with update_memory's
+    rules, so the web dialog's accept runs the same path. PATCH's field
+    presence is ``model_fields_set``: ``{"details": null}`` is an edit there."""
+
+    @staticmethod
+    def _patch(**body):
+        from models.schemas import PatchMemoryRequest
+
+        return PatchMemoryRequest.model_validate(body)
+
+    def test_both_flags_default_off(self):
+        request = self._patch(importance=0.5)
+        assert request.accept_supersede_candidate is False
+        assert request.dismiss_supersede_candidate is False
+
+    @pytest.mark.parametrize("flag", ["accept_supersede_candidate", "dismiss_supersede_candidate"])
+    def test_either_flag_alone_is_a_complete_patch(self, flag):
+        assert getattr(self._patch(**{flag: True}), flag) is True
+
+    @pytest.mark.parametrize("flag", ["accept_supersede_candidate", "dismiss_supersede_candidate"])
+    def test_either_flag_may_carry_expected_version(self, flag):
+        """As on update_memory: the version guard only refuses a stale call."""
+        assert self._patch(**{flag: True}, expected_version=3).expected_version == 3
+
+    @pytest.mark.parametrize("flag", ["accept_supersede_candidate", "dismiss_supersede_candidate"])
+    def test_a_false_flag_alone_is_an_empty_patch(self, flag):
+        with pytest.raises(ValueError, match="at least one field"):
+            self._patch(**{flag: False})
+
+    @pytest.mark.parametrize("flag", ["accept_supersede_candidate", "dismiss_supersede_candidate"])
+    @pytest.mark.parametrize("value", ["true", 1, None])
+    def test_a_flag_is_a_json_boolean(self, flag, value):
+        """Fail closed like the MCP tool's accept: a string or a number is refused."""
+        with pytest.raises(ValueError):
+            self._patch(**{flag: value})
+
+    def test_accept_and_dismiss_together_is_refused(self):
+        with pytest.raises(ValueError) as exc:
+            self._patch(accept_supersede_candidate=True, dismiss_supersede_candidate=True)
+        message = str(exc.value)
+        assert "accept_supersede_candidate" in message
+        assert "dismiss_supersede_candidate" in message
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("summary", "an edited summary long enough"),
+            ("content", "edited content"),
+            ("type", "fact"),
+            ("importance", 0.4),
+            ("tags", ["a"]),
+            ("add_tags", ["a"]),
+            ("remove_tags", ["a"]),
+            ("details", {"note": "x"}),
+            ("details", None),
+            ("details_patch", {"note": "x"}),
+            ("observed_at", "2026-11-01"),
+        ],
+    )
+    def test_accept_with_a_field_edit_is_refused(self, field, value):
+        with pytest.raises(ValueError) as exc:
+            self._patch(accept_supersede_candidate=True, **{field: value})
+        message = str(exc.value)
+        assert "accept_supersede_candidate" in message
+        assert field in message
+
+    def test_accept_with_a_null_observed_at_is_not_an_edit(self):
+        """``observed_at: null`` means unchanged on PATCH, as in the empty-patch rule."""
+        request = self._patch(accept_supersede_candidate=True, observed_at=None)
+        assert request.accept_supersede_candidate is True
+
+    def test_a_dismissal_may_share_the_patch_with_an_edit(self):
+        """As on update_memory: rejecting the suggestion while editing the memory."""
+        request = self._patch(dismiss_supersede_candidate=True, importance=0.4)
+        assert request.dismiss_supersede_candidate is True
+        assert request.importance == 0.4
 
 
 class TestOwnMemoryPredicate:

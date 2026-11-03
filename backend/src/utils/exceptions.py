@@ -251,7 +251,9 @@ class SupersedeEdgeConflictError(ConflictError):
     edge through ``create_declared_edge``, whose duplicate contract (#1321)
     refuses to retype a declared link on the same pair. Nothing was written;
     ``existing`` is the serialized declared edge, as ``create_edge``'s
-    ``edge_exists`` reply carries it.
+    ``edge_exists`` reply carries it. #2600: the REST PATCH accept answers it
+    through the global handler, so ``details`` carries it as
+    ``existing_edge``, the key ``POST /graph/edges``'s 409 uses.
     """
 
     def __init__(self, *, source_id: Any, target_id: Any, existing: dict[str, Any] | None) -> None:
@@ -260,6 +262,7 @@ class SupersedeEdgeConflictError(ConflictError):
             "values, so the suggestion was not accepted. Keep that edge and dismiss the "
             "suggestion, or replace the edge with create_edge(overwrite=true).",
             reason="edge_exists",
+            existing_edge=existing,
         )
         self.existing = existing
 
