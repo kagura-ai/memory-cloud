@@ -486,6 +486,21 @@ describe("MemoryDetailDialog — supersede acceptance (#2427)", () => {
     ).toBeInTheDocument();
   });
 
+  it("disables the action before the click when another edge links the pair", () => {
+    // #2518: the 409 the click would meet, reported by `acceptance`.
+    const onAccept = renderWith(
+      makeCandidate({
+        acceptance: { allowed: false, reason: "edge_exists" },
+      }),
+    );
+
+    expect(confirm()).toBeDisabled();
+    const reason = screen.getByText("supersede.unavailable.edgeExists");
+    expect(confirm()).toHaveAttribute("aria-describedby", reason.id);
+    fireEvent.click(confirm());
+    expect(onAccept).not.toHaveBeenCalled();
+  });
+
   it("keeps today's behaviour when the server sends no acceptance", () => {
     const onAccept = renderWith(makeCandidate());
 

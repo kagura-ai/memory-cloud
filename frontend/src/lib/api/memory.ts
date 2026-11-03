@@ -117,6 +117,13 @@ export async function recallMemories(
   return apiClient.post<RecallResponse>("/api/v1/memory/recall", params);
 }
 
+export interface ReferenceMemoryOptions {
+  // #2518: false reads without recording access stats (`access_count`, the
+  // adoption signal `reference_count`, `last_used_at`) — a re-read of the
+  // open memory, not an adoption. Omitted: the server default, true.
+  recordAccess?: boolean;
+}
+
 /**
  * Fetch full memory detail by UUID.
  *
@@ -124,9 +131,13 @@ export async function recallMemories(
  */
 export async function referenceMemory(
   memoryId: string,
+  options: ReferenceMemoryOptions = {},
 ): Promise<MemoryReference> {
   return apiClient.post<MemoryReference>("/api/v1/memory/reference", {
     memory_id: memoryId,
+    ...(options.recordAccess === undefined
+      ? {}
+      : { record_access: options.recordAccess }),
   });
 }
 

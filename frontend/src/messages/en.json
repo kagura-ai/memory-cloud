@@ -3607,7 +3607,8 @@
         "unavailable": {
           "notWritable": "You don't have write access to this context.",
           "notOwner": "Only the author of both memories can mark one as superseding the other.",
-          "newerCandidate": "The suggested memory is newer than this one, so it can't be marked as superseded."
+          "newerCandidate": "The suggested memory is newer than this one, so it can't be marked as superseded.",
+          "edgeExists": "These memories are already linked in another way. Keep that link and dismiss the suggestion, or replace the link in the Graph tab."
         },
         "errors": {
           "denied": "You can't mark this memory as superseding right now.",

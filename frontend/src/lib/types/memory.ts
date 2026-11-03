@@ -72,8 +72,14 @@ export interface SupersedeCandidate {
 
 // #2427 mirror of backend `SupersedeAcceptance`. `reason` is set only when
 // `allowed` is false; `not_owner` never says which memory is someone else's.
+// #2518: `not_writable` includes an agent binding without write access, and
+// `edge_exists` is the 409 of the click (another declared edge on the pair),
+// reported before it.
 export type SupersedeAcceptanceReason =
-  "not_writable" | "not_owner" | "newer_candidate";
+  | "not_writable"
+  | "not_owner"
+  | "newer_candidate"
+  | "edge_exists";
 
 export interface SupersedeAcceptance {
   allowed: boolean;

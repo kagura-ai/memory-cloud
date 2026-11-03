@@ -111,8 +111,9 @@ export function MemoryDetailDialog({
   const supersedeRefused = supersedeAcceptance?.allowed === false;
   // Unique per dialog instance, for the button's aria-describedby.
   const supersedeReasonId = useId();
-  // #2427: a 409 the server's `acceptance` cannot express; the inline alert
-  // explains it, so the button just stays disabled.
+  // #2427: a 409 met on click (an edge declared after the memory was read;
+  // one already there is `acceptance.reason === "edge_exists"`, #2518); the
+  // inline alert explains it, so the button just stays disabled.
   const supersedeBlocked = supersedeError?.blocksRetry === true;
   // Literal keys, one per reason (the i18n parity scan and TS exhaustiveness).
   const unavailableText = (
@@ -123,6 +124,8 @@ export function MemoryDetailDialog({
         return t("supersede.unavailable.notWritable");
       case "newer_candidate":
         return t("supersede.unavailable.newerCandidate");
+      case "edge_exists":
+        return t("supersede.unavailable.edgeExists");
       case "not_owner":
       default:
         // An unknown reason from a newer backend reads as the coarsest one.

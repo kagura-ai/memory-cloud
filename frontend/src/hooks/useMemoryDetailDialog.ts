@@ -57,8 +57,10 @@ function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
 // #2427: a failed accept, shown inline in the suggestion block (a dialog-body
 // error) rather than as a toast. `description` carries the server's text only
 // for an unmapped failure. `blocksRetry` (a 409: another declared edge links
-// the pair, which `acceptance` does not model) keeps the action disabled until
-// the dialog shows another memory, so the click cannot repeat the conflict.
+// the pair — one declared after the memory was read, since one already there
+// is `acceptance.reason === "edge_exists"`, #2518) keeps the action disabled
+// until the dialog shows another memory, so the click cannot repeat the
+// conflict.
 export interface SupersedeError {
   title: string;
   description?: string;
@@ -336,7 +338,8 @@ export function useMemoryDetailDialog(
   // refusing). `stale` when the view changed meanwhile (another memory, an
   // edit's reply, a close): nothing is applied then. `ref: null` when the
   // re-read failed: the dialog keeps its view and the caller still reports
-  // the refusal.
+  // the refusal. #2518: the re-read is not an adoption read, so it records no
+  // access stats (the dialog's first read of the memory does).
   const refreshHydrated = useCallback(
     async (
       id: string,
@@ -346,7 +349,7 @@ export function useMemoryDetailDialog(
     > => {
       let ref: MemoryReference | null = null;
       try {
-        ref = await referenceMemory(id);
+        ref = await referenceMemory(id, { recordAccess: false });
       } catch {
         ref = null;
       }
@@ -367,7 +370,8 @@ export function useMemoryDetailDialog(
 
   const acceptSupersede = useCallback(() => {
     if (!hydrated || !rawSupersedeCandidate || !contextId) return;
-    // #2427: the server said this caller may not accept it; the button is
+    // #2427: the server said this caller may not accept it — including
+    // `edge_exists` (#2518), the 409 the click would meet; the button is
     // disabled too, this guards any other caller of the action.
     if (rawSupersedeCandidate.acceptance?.allowed === false) return;
     const sourceId = hydrated.memory_id;
