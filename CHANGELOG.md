@@ -4,6 +4,30 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.140.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.140.0) — 2026-11-03
+
+Partial memory edits and the review-memo lifecycle, plus the lock-order and durability fixes left over from v0.139.0.
+
+### Added
+- **Partial edits on `update_memory` and `PATCH /api/v1/memory/{id}`** ([#2585](https://github.com/kagura-ai/memory-cloud/issues/2585)): `add_tags` / `remove_tags` edit the stored tag list (removals first, each new tag appended once; a tag that is not there is ignored) and `details_patch` shallow-merges into the stored details (a `null` value deletes the key). They cannot be combined with `tags` / `details` or with `external_id`; the tag count cap applies to the resulting list and the length cap to the added tags; the reserved details keys keep their validation, and a patch that leaves NULL details empty changes nothing.
+- **Open memos survive Sleep** ([#2584](https://github.com/kagura-ai/memory-cloud/issues/2584)): a memory carrying a tag from `SLEEP_ARCHIVE_EXEMPT_TAGS` (default `status:open`; an empty value turns it off) is never archived by consolidation (rule and LLM paths, and the legacy task) and never retired as the losing side of a near-duplicate merge; removing the tag returns it to the normal lifecycle. The `persistence` guide and `docs/mcp-tools.md` describe the lightweight-backlog pattern.
+- **Memo pattern in the kagura-memory skills** ([#2586](https://github.com/kagura-ai/memory-cloud/issues/2586)): `/kagura-memory:session-summary` offers the tech-debt / needs-decision memo buckets with the policy's fields, `/kagura-memory:maintain` lists open memos and closes or promotes one with `remove_tags` / `add_tags`, and the usage guide gains a "lightweight backlog" section.
+- **Settings save bar** ([#2595](https://github.com/kagura-ai/memory-cloud/issues/2595)): the unsaved-changes bar of the context Settings tab (shared by the context and search settings) has an amber accent, a leading dot, a stronger shadow and an enter animation, and announces the unsaved state through a `role="status"` region.
+
+### Changed
+- **Graph tab after an accept** ([#2543](https://github.com/kagura-ai/memory-cloud/issues/2543)): accepting a supersede suggestion from the Graph tab's detail dialog re-reads the graph, so the new `supersedes` edge appears without a reload; a late first load never hides it.
+
+### Fixed
+- **Recall pool after hydration** ([#2546](https://github.com/kagura-ai/memory-cloud/issues/2546)): hits whose row is gone or filtered leave the pool right after hydration, and a memory found twice (summary point and chunk) counts once, so a page fills from deeper candidates and `recall_completed.candidates` counts hydrated memories.
+- **`rollback_sleep_run` on analysis reports** ([#2547](https://github.com/kagura-ai/memory-cloud/issues/2547)): refuses `source='analysis'` rows with the error `analysis_report` instead of undoing their actions; `get_sleep_report` adds a `note` for such rows.
+- **`edge_exists` in private contexts** ([#2549](https://github.com/kagura-ai/memory-cloud/issues/2549)): the acceptance probe reads the carrier author's row and the caller's row, the two accounts an accept writes under, so a linked caller's own differing edge is reported and a third account's is not.
+- **`accept_invitation` during an account erasure** ([#2564](https://github.com/kagura-ai/memory-cloud/issues/2564)): locks the workspace row first, so a workspace deleted meanwhile gives a clean 404 instead of a 500 or a deadlock; re-reads the invitation under the lock so a single-use invitation admits one user; and leaves the accepted invitation out of the seat count.
+- **Pending referral grants** ([#2563](https://github.com/kagura-ai/memory-cloud/issues/2563)): grants whose workspace row stayed busy past the NOWAIT tries are retried by a leader sweep (`REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_SECONDS`, default 300, 0 turns it off) and on `GET /referrals/me`; the apply takes the workspace row before the grant rows under its own savepoint and re-checks ownership under the lock; `create_workspace` no longer fails after a swallowed apply error.
+- **Vector points of Sleep archives and merges** ([#2565](https://github.com/kagura-ai/memory-cloud/issues/2565)): Sleep archival, dedup-merge losers and the legacy consolidation task queue the point delete beside the row change and delete the point only after the commit, so a rolled-back run keeps its vectors; a failed queue insert fails only that phase (run `degraded`); the eval runners follow the same order.
+
+### Notes
+- No migration. Two new optional environment variables: `SLEEP_ARCHIVE_EXEMPT_TAGS` (default `status:open`) and `REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_SECONDS` (default 300). The pending-grant sweep registers itself on the scheduler leader; no operator action.
+
 ## [v0.139.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.139.0) — 2026-11-03
 
 Erasure and ownership consistency: an erasure removes the context-less memories of the workspaces it deletes, locks every workspace the subject owns before it decides which are sole-owned, hands a connector's write target to the workspace owner instead of a linked account or a pseudonym, and leaves a departing member's agent keys dead with the agent suspended rather than widening them to owner scope. Around it, referral redemption and the payload sync stop waiting on rows while holding others, the indexer's post-commit point drain is bounded and its failure record survives clean batches, and the forget paths delete their vector points after the commit.
