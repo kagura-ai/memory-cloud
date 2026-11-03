@@ -77,10 +77,18 @@ def recorded_failed_events(metrics: Any) -> list[dict[str, Any]]:
     """The skipped events held in an ``indexer_state.metrics`` value (#2254).
 
     The column is plain JSONB that the runbook edits by hand, so anything else
-    reads as no record.
+    reads as no record. So does an entry without an integer ``event_id``: the
+    batch commit sorts the record by it (#2477), and one such entry would roll
+    back every batch from then on.
     """
     failed_events = metrics.get("failed_events") if isinstance(metrics, dict) else None
-    return failed_events if isinstance(failed_events, list) else []
+    if not isinstance(failed_events, list):
+        return []
+    return [
+        entry
+        for entry in failed_events
+        if isinstance(entry, dict) and type(entry.get("event_id")) is int
+    ]
 
 
 def merge_failed_events(
@@ -100,16 +108,18 @@ def merge_failed_events(
 class IndexerMetrics:
     """Metrics from indexer run.
 
-    ``failed_events`` lists the events this run gave up on (``event_id``,
-    ``doc_id``, ``error_class``; no message, the row must not keep event
-    content). Nothing retries them once the offset has moved past them, which
-    happens as soon as a later event succeeds, so the list is the operator's
-    rewind target (docs/ops/resource-indexer-backfill.md).
+    ``failed_events`` is the row's record of the events runs gave up on
+    (``event_id``, ``doc_id``, ``error_class``; no message, the row must not
+    keep event content). Nothing retries them once the offset has moved past
+    them, which happens as soon as a later event succeeds, so the list is the
+    operator's rewind target (docs/ops/resource-indexer-backfill.md).
+    ``process_incremental`` takes the record and returns it: a committed batch
+    drops the entries it ran again and adds its own failures, any other run
+    (held back, nothing pending, rolled back) leaves it as it was. A batch with
+    no failures keeps it too; only an operator rewind or clear acts on it
+    (#2477).
 
-    ``batch_committed`` says the batch's outcome is durable, so the job folds
-    ``failed_events`` into the row's record (a batch with no failures clears
-    it). On any other run (held back, nothing pending, rolled back) the job
-    keeps the record it had. Not stored.
+    ``batch_committed`` says the batch's outcome is durable. Not stored.
     """
 
     applied_upserts: int = 0
@@ -693,6 +703,8 @@ class ResourceIndexer:
         resource_id: str,
         context_id: UUID,
         batch_size: int = 100,
+        *,
+        failed_events: Sequence[dict[str, Any]] = (),
     ) -> IndexerMetrics:
         """Process pending events since last_offset.
 
@@ -700,12 +712,19 @@ class ResourceIndexer:
             resource_id: Resource identifier
             context_id: Context ID
             batch_size: Max events per run (default: 100)
+            failed_events: The row's record of skipped events
+                (``recorded_failed_events``). The batch commit writes it
+                merged with the batch's outcome, so the record never waits for
+                a later commit (#2477).
 
         Returns:
-            IndexerMetrics with execution stats
+            IndexerMetrics with execution stats, ``failed_events`` the record
+            as the row now holds it.
         """
         start_time = utcnow()
-        metrics = IndexerMetrics()
+        recorded = list(failed_events)
+        metrics = IndexerMetrics(failed_events=list(recorded))
+        run_failures: list[dict[str, Any]] = []
         self._repointed = []
         self._retired = []
 
@@ -898,7 +917,7 @@ class ResourceIndexer:
                     # Class only: the row keeps no event content (#2254). The
                     # cause, since a wrapper like QdrantError also carries
                     # Postgres failures.
-                    metrics.failed_events.append(
+                    run_failures.append(
                         {
                             "event_id": event.id,
                             "doc_id": event.doc_id,
@@ -917,6 +936,16 @@ class ResourceIndexer:
             # 7. Update state
             # Bugfix: Remove timezone for DB compatibility (TIMESTAMP WITHOUT TIME ZONE)
             state.last_run_at = utcnow()
+            # #2477: the record goes into this commit, not into the job's later
+            # one, which a process can die before. An entry this batch ran
+            # again (after a rewind, or a failure at the end of the last batch)
+            # gives way to its new outcome; the rest stay until an operator
+            # rewinds past them or clears them.
+            ran_again = range(last_offset + 1, events[-1].id + 1)
+            metrics.failed_events = merge_failed_events(
+                [entry for entry in recorded if entry["event_id"] not in ran_again],
+                run_failures,
+            )
             state.metrics = metrics.to_dict()
             await self.db.commit()
             metrics.batch_committed = True
@@ -944,6 +973,10 @@ class ResourceIndexer:
             self._repointed = []
             self._retired = []
             await self.db.rollback()
+            if not metrics.batch_committed:
+                # The offset went back too: the batch runs again, its failures
+                # and the entries it ran with it (#2477).
+                metrics.failed_events = recorded
             logger.error(
                 "indexer_run_failed",
                 resource_id=resource_id,

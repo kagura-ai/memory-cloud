@@ -17,11 +17,7 @@ from sqlalchemy import select
 from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.resource import IndexerState
-from services.resource_indexer import (
-    ResourceIndexer,
-    merge_failed_events,
-    recorded_failed_events,
-)
+from services.resource_indexer import ResourceIndexer, recorded_failed_events
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -182,7 +178,9 @@ async def run_queued_indexers() -> None:
                 await db.commit()
 
                 # #2254: state.metrics is replaced below on every path, and the
-                # skipped events it names are the rewind target.
+                # skipped events it names are the rewind target. #2477: the run
+                # takes the record, so its batch commit already holds it merged
+                # with the batch's outcome, and returns it on every path.
                 failed_events = recorded_failed_events(state.metrics)
 
                 # Run indexer
@@ -192,6 +190,7 @@ async def run_queued_indexers() -> None:
                         state.resource_id,
                         state.context_id,
                         batch_size=100,
+                        failed_events=failed_events,
                     )
 
                     # Update state. Only an ingest event re-queues an idle row,
@@ -210,15 +209,6 @@ async def run_queued_indexers() -> None:
                     else:
                         state.job_status = "idle"
                     new_metrics = metrics.to_dict()
-                    # A run that left no batch behind (nothing pending, held
-                    # back, rolled back) says nothing about the skipped events;
-                    # a batch with no failures clears them.
-                    if not metrics.batch_committed:
-                        new_metrics["failed_events"] = failed_events
-                    elif new_metrics.get("failed_events"):
-                        new_metrics["failed_events"] = merge_failed_events(
-                            failed_events, new_metrics["failed_events"]
-                        )
                     state.metrics = new_metrics
                     failed_events = new_metrics.get("failed_events", failed_events)
                     await db.commit()
