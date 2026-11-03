@@ -2445,12 +2445,14 @@ class TestSupersedeWriteRecheck:
         assert "CAST(memories.supersede_candidate AS TEXT) =" in sql
         assert "null" in params.values()
         assert "updated_at" not in sql  # #1317: a system annotation
-        # The text this run embedded, no accepted edge, not deleted.
-        assert "md5(memories.summary) =" in sql
-        assert "md5(memories.content) =" in sql
+        # The text this run embedded (sha256, not md5: #2511), no accepted
+        # edge, not deleted.
+        assert "sha256(convert_to(memories.summary," in sql
+        assert "sha256(convert_to(memories.content," in sql
+        assert "md5(" not in sql
         assert "NOT (EXISTS (SELECT" in sql and "neural_memory_edges.edge_type" in sql
         assert "memories.deleted_at IS NULL" in sql
-        assert hashlib.md5(b"new summary").hexdigest() in params.values()
+        assert hashlib.sha256(b"new summary").digest() in params.values()
         assert "supersedes" in params.values()
         assert memory.supersede_candidate["memory_id"] == dup_id
         db.commit.assert_awaited()

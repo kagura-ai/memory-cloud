@@ -4115,6 +4115,26 @@ change.
   pgbouncer. An offline script (`alembic upgrade --sql`) does not carry it:
   `SET lock_timeout` in the `psql` session that runs the script.
 
+## FIPS-mode PostgreSQL — Issue #2511
+
+PostgreSQL 14 and later built against OpenSSL in FIPS mode refuses SQL `md5()`.
+The API does not call it: the supersede detection checks that a memory's text
+is unchanged with `sha256()` (core since PostgreSQL 11, allowed under FIPS).
+One migration does:
+
+- `f11_2092_embedded_text_digest` stamps `memories.embedded_text_digest` with
+  `md5()` on the rows already embedded. On a FIPS-mode server it skips that
+  backfill and the upgrade completes. The server log records the WARNING
+  `f11 skipped the embedded_text_digest backfill, md5() failed (...)` at the
+  default `log_min_messages`; the `alembic upgrade` output does not show it.
+  Those rows keep a NULL digest, so each runs the supersede detection once
+  (with `SUPERSEDE_VERIFY_MODE=llm`, possibly one judge call) on its next
+  re-embed, such as a content-chunk backfill or an embedding-model switch, and
+  is stamped then. Any other `md5()` error still stops the upgrade.
+
+Before v0.141.0 the f11 upgrade stopped on such a server, and the detection
+never stored a candidate.
+
 ## Database Connection Pool — Issue #1980
 
 Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (`backend/src/db/base.py`). Three variables size it:
