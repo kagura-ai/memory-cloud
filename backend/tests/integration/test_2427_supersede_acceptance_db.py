@@ -7,7 +7,9 @@ candidate not written after its carrier (#2308). Recall does not evaluate it.
 
 The parity matrix pins ``allowed`` against the edge writer's own refusal
 (``ensure_supersedes_owned``) over the #2313 author matrix, and the viewer
-case against ``POST /graph/edges``.
+case against ``POST /graph/edges``. #2518 adds the agent binding (a read-only
+one is ``not_writable``, as the accept path's 404 says) and ``edge_exists``
+(a different declared edge on the pair, the accept path's 409).
 """
 
 from __future__ import annotations
@@ -22,12 +24,15 @@ from fastapi import Response
 from sqlalchemy import text, update
 
 from api.routes.graph import CreateEdgeRequest, create_graph_edge
+from auth.agent_scope import AgentScope, set_agent_scope
+from models.agent import Agent, AgentContextBinding
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
 from models.schemas import RecallRequest
-from services.edge_service import ensure_supersedes_owned
+from services.edge_service import create_declared_edge, ensure_supersedes_owned
 from services.memory_service import MemoryService
 from services.plan_seats import slot_limit
+from services.supersede_acceptance import ACCEPT_CONFIDENCE, ACCEPT_WEIGHT
 from services.supersede_dismissal import build_tombstone
 from tests.integration.test_2308_accept_supersede_candidate_db import (
     _accept_as,
@@ -39,7 +44,7 @@ from tests.integration.test_2308_accept_supersede_candidate_db import (
 from tests.integration.test_identity_link_writes_db import _seed
 from tests.integration.test_identity_links_db import _user
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import AuthorizationError, NotFoundException, SupersedeEdgeConflictError
 
 
 async def _acceptance(db, caller: User, memory_id):
@@ -225,6 +230,157 @@ async def test_allowed_iff_the_edge_writer_accepts_the_pair(db_session, authors)
     assert writer_accepts is (authors in {"own", "linked_private"})
     if not acceptance.allowed:
         assert acceptance.reason == "not_owner"
+
+
+async def _bind(db, owner: User, ws: Workspace, ctx: Context, *, mode: str, write_policy: str):
+    """An agent of ``owner``'s bound to ``ctx``, as the request's credential would set it."""
+    agent = Agent(
+        id=uuid4(),
+        workspace_id=ws.id,
+        name=f"agent-{uuid4().hex[:6]}",
+        owner_user_id=owner.user_id,
+        status="active",
+        enforcement_mode=mode,
+    )
+    db.add(agent)
+    await db.flush()
+    db.add(
+        AgentContextBinding(
+            id=uuid4(),
+            agent_id=agent.id,
+            context_id=ctx.id,
+            created_by=owner.user_id,
+            can_read=True,
+            write_policy=write_policy,
+        )
+    )
+    await db.commit()
+    return AgentScope(agent_id=agent.id, enforcement_mode=mode, workspace_id=ws.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "write_policy", "allowed"),
+    [
+        ("enforce", "deny", False),
+        ("enforce", "direct", True),
+        # The shadow ramp lets the write proceed, so the accept goes through.
+        ("shadow", "deny", True),
+    ],
+    ids=["read_only", "writable", "shadow_read_only"],
+)
+async def test_an_agent_binding_decides_writable_as_the_accept_path_does(
+    db_session, mode, write_policy, allowed
+):
+    """#2518: a read-only binding is ``not_writable`` before the click, and the
+    accept path refuses it (the uniform 404). The probe is a read: it writes
+    no deny-audit row, whatever the binding says."""
+    a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    carrier, _ = await _pair(db_session, ctx, a, a)
+    scope = await _bind(db_session, a, ws, ctx, mode=mode, write_policy=write_policy)
+
+    emit = AsyncMock()
+    set_agent_scope(scope)
+    try:
+        with patch("services.memory_access_event_writer.emit_memory_access_event", emit):
+            acceptance = await _acceptance(db_session, a, carrier)
+        # The reference read itself is audited for an agent; no deny decision is.
+        decisions = [call.kwargs.get("policy_decision") for call in emit.await_args_list]
+        assert not {"binding_denied", "would_deny"} & set(decisions), decisions
+        assert acceptance.allowed is allowed
+        assert acceptance.reason == (None if allowed else "not_writable")
+
+        if allowed:
+            with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+                await _accept_as(db_session, a, ctx, carrier)
+            await db_session.commit()
+            assert (await _row(db_session, carrier)).supersede_candidate is None
+        else:
+            with pytest.raises(NotFoundException):
+                await _accept_as(db_session, a, ctx, carrier)
+            await db_session.rollback()
+            assert (await _row(db_session, carrier)).supersede_candidate is not None
+    finally:
+        set_agent_scope(None)
+
+
+async def _declare(db, owner: User, ws: Workspace, ctx: Context, src, dst, **values) -> None:
+    await create_declared_edge(
+        db,
+        user_id=owner.user_id,
+        source_id=src,
+        target_id=dst,
+        workspace_id=str(ws.id),
+        context_id=str(ctx.id),
+        overwrite=False,
+        **values,
+    )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"edge_type": "related_to", "weight": 1.0, "confidence": 1.0},
+        {"edge_type": "supersedes", "weight": 0.5, "confidence": 1.0},
+    ],
+    ids=["other_type", "other_weight"],
+)
+async def test_a_different_declared_edge_is_edge_exists_and_the_accept_conflicts(
+    db_session, values
+):
+    """#2518: the 409 the click would meet is reported before it."""
+    a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, ctx, a, a)
+    await _declare(db_session, a, ws, ctx, carrier, target, **values)
+    # Declaring a supersedes edge clears the suggestion it answers; put it back.
+    if values["edge_type"] == "supersedes":
+        await _store(db_session, carrier, _candidate(target))
+
+    acceptance = await _acceptance(db_session, a, carrier)
+
+    assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
+    with pytest.raises(SupersedeEdgeConflictError):
+        await _accept_as(db_session, a, ctx, carrier)
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_the_same_declared_supersedes_edge_is_still_allowed(db_session):
+    """The accept path's own values are ``unchanged``, not a conflict."""
+    a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, ctx, a, a)
+    await _declare(
+        db_session,
+        a,
+        ws,
+        ctx,
+        carrier,
+        target,
+        edge_type="supersedes",
+        weight=ACCEPT_WEIGHT,
+        confidence=ACCEPT_CONFIDENCE,
+    )
+    await _store(db_session, carrier, _candidate(target))
+
+    acceptance = await _acceptance(db_session, a, carrier)
+
+    assert acceptance.allowed is True and acceptance.reason is None
+
+
+@pytest.mark.asyncio
+async def test_ownership_wins_over_edge_exists(db_session):
+    """Precedence ``not_owner`` > ``edge_exists``: the accept path refuses in that order."""
+    a, b, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, ctx, b, a)
+    await _declare(
+        db_session, b, ws, ctx, carrier, target, edge_type="related_to", weight=1.0, confidence=1.0
+    )
+
+    acceptance = await _acceptance(db_session, b, carrier)
+
+    assert acceptance.reason == "not_owner"
 
 
 @pytest.mark.asyncio

@@ -133,8 +133,31 @@ def test_reference_passes_version_and_maps_an_unknown_one_to_422() -> None:
     assert service.reference.await_args.kwargs == {
         "user_id": "u1",
         "version": 9,
+        "record_access": True,
         "key_workspace_id": None,
     }
+
+
+@pytest.mark.parametrize(("body", "expected"), [({}, True), ({"record_access": False}, False)])
+def test_reference_passes_record_access_through(body: dict[str, Any], expected: bool) -> None:
+    """#2518: the dialog's re-read after a refused accept is not an adoption read."""
+    service = MagicMock()
+    service.reference = AsyncMock(side_effect=NotFoundException("Memory", "x"))
+    with _client(service) as client:
+        client.post("/api/v1/memory/reference", json={"memory_id": str(uuid4()), **body})
+    assert service.reference.await_args.kwargs["record_access"] is expected
+
+
+def test_reference_rejects_a_non_boolean_record_access() -> None:
+    service = MagicMock()
+    service.reference = AsyncMock()
+    with _client(service) as client:
+        response = client.post(
+            "/api/v1/memory/reference",
+            json={"memory_id": str(uuid4()), "record_access": "sometimes"},
+        )
+    assert response.status_code == 422
+    assert service.reference.await_count == 0
 
 
 def test_reference_a_historical_type_the_filter_denies_is_the_live_denials_404() -> None:

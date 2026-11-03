@@ -189,8 +189,15 @@ async def reference(
     Request:
         {
             "memory_id": "uuid",
-            "version": 3            // optional (#2043): an earlier version
+            "version": 3,           // optional (#2043): an earlier version
+            "record_access": false  // optional (#2518), default true
         }
+
+    ``record_access`` (default true) records the read in the memory's access
+    stats: ``access_count``, the adoption signal ``reference_count`` and
+    ``last_used_at``. false reads without them, for a client's own re-read
+    that is not an adoption (the web dialog after a refused accept). The
+    access check and the response are the same either way.
 
     Response:
         {
@@ -217,6 +224,7 @@ async def reference(
         request.memory_id,
         user_id=user["user_id"],
         version=request.version,
+        record_access=request.record_access,
         # #963: a workspace-scoped key reads its own workspace's memories only.
         key_workspace_id=user.get("api_key_workspace_id"),
     )

@@ -117,6 +117,49 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
     expect(result.current.supersedeAccepting).toBe(false);
   });
 
+  // #2518: the click's 409 reported before it — a different declared edge
+  // already links the pair, so the action is disabled and never sent.
+  it("does not call the edge route when another declared edge links the pair", async () => {
+    const { result } = await openDialog(
+      reference(
+        candidate({ acceptance: { allowed: false, reason: "edge_exists" } }),
+      ),
+    );
+
+    act(() => result.current.acceptSupersede());
+
+    expect(mockCreateEdge).not.toHaveBeenCalled();
+    expect(result.current.supersedeAccepting).toBe(false);
+    expect(result.current.supersedeError).toBeNull();
+    expect(result.current.supersedeCandidate?.acceptance?.reason).toBe(
+      "edge_exists",
+    );
+  });
+
+  it.each([
+    [403, "AUTH-101"],
+    [404, "RES-001"],
+    [409, "RES-002"],
+  ])(
+    "re-reads after a %s without recording an access (#2518)",
+    async (status, code) => {
+      const { result } = await openDialog(reference());
+      mockCreateEdge.mockRejectedValueOnce(apiError(status, code));
+      mockReferenceMemory.mockResolvedValueOnce(reference());
+
+      act(() => result.current.acceptSupersede());
+
+      await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalledTimes(2));
+      expect(mockReferenceMemory.mock.calls).toEqual([
+        [MEMORY_ID],
+        [MEMORY_ID, { recordAccess: false }],
+      ]);
+      await waitFor(() =>
+        expect(result.current.supersedeAccepting).toBe(false),
+      );
+    },
+  );
+
   it("maps a 403 to the denied message and re-reads the memory", async () => {
     const { result } = await openDialog(reference());
     mockCreateEdge.mockRejectedValueOnce(apiError(403, "AUTH-101"));
@@ -135,7 +178,11 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
     expect(result.current.supersedeError).toEqual({
       title: "supersede.errors.denied",
     });
-    expect(mockReferenceMemory).toHaveBeenLastCalledWith(MEMORY_ID);
+    // #2518: the first read counts as an adoption, the re-read does not.
+    expect(mockReferenceMemory).toHaveBeenNthCalledWith(1, MEMORY_ID);
+    expect(mockReferenceMemory).toHaveBeenLastCalledWith(MEMORY_ID, {
+      recordAccess: false,
+    });
     expect(mockToast).not.toHaveBeenCalled();
   });
 
@@ -176,8 +223,8 @@ describe("useMemoryDetailDialog — supersede accept (#2427)", () => {
   });
 
   it("maps a 409 to the conflict message that blocks a retry", async () => {
-    // `acceptance` does not model another declared edge on the pair, so the
-    // re-read still allows it: the error itself keeps the action disabled.
+    // An edge declared after the memory was read: the re-read may still allow
+    // it (or say edge_exists); the error itself keeps the action disabled.
     const { result } = await openDialog(reference());
     mockCreateEdge.mockRejectedValueOnce(apiError(409, "RES-002"));
     mockReferenceMemory.mockResolvedValueOnce(reference());

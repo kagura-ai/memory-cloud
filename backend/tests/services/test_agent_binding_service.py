@@ -1061,3 +1061,92 @@ class TestBindingMemorySqlPredicate:
             assert f"OR memories.context_id = '{ctx_b}'" in sql
         finally:
             set_agent_scope(None)
+
+
+# ---------------------------------------------------------------------------
+# The silent probe (#2518): a capability, not a request
+# ---------------------------------------------------------------------------
+
+
+class TestAgentBindingWouldPermit:
+    """``agent_binding_would_permit`` answers what ``evaluate_context_access``
+    would decide at the context level, without the WARNING or the deny-audit
+    row: a client asking whether to show an action is not a denied request."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_scope(self):
+        from auth.agent_scope import set_agent_scope
+
+        set_agent_scope(None)
+        yield
+        set_agent_scope(None)
+
+    async def _probe(self, scope, binding, access=ACCESS_WRITE):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import agent_binding_would_permit
+
+        set_agent_scope(scope)
+        db = MagicMock()
+        db.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=binding))
+        )
+        emit = AsyncMock()
+        with (
+            patch("services.memory_access_event_writer.emit_memory_access_event", emit),
+            patch("services.agent_binding_service.logger") as log,
+        ):
+            permitted = await agent_binding_would_permit(db, uuid.uuid4(), access)
+        assert emit.await_count == 0
+        assert log.warning.call_count == 0
+        return permitted, db
+
+    @pytest.mark.asyncio
+    async def test_a_non_agent_credential_is_a_structural_no_op(self):
+        permitted, db = await self._probe(None, None)
+        assert permitted is True
+        assert db.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("write_policy", "expected"), [("deny", False), ("direct", True)])
+    async def test_write_follows_the_write_policy(self, write_policy, expected):
+        permitted, _ = await self._probe(_scope(), _binding(write_policy=write_policy))
+        assert permitted is expected
+
+    @pytest.mark.asyncio
+    async def test_read_follows_can_read(self):
+        permitted, _ = await self._probe(_scope(), _binding(can_read=False), ACCESS_READ)
+        assert permitted is False
+
+    @pytest.mark.asyncio
+    async def test_no_binding_row_is_a_deny(self):
+        permitted, _ = await self._probe(_scope(), None)
+        assert permitted is False
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_permits_what_it_would_deny(self):
+        """The ramp lets the request proceed, so the action is not refused."""
+        permitted, db = await self._probe(_scope(mode="shadow"), _binding(write_policy="deny"))
+        assert permitted is True
+        assert db.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("access", "fields"),
+        [
+            (ACCESS_WRITE, {"write_policy": "deny"}),
+            (ACCESS_WRITE, {"write_policy": "direct"}),
+            (ACCESS_READ, {"can_read": True}),
+            (ACCESS_READ, {"can_read": False}),
+        ],
+    )
+    async def test_agrees_with_the_enforcing_evaluation(self, access, fields):
+        from auth.agent_scope import get_agent_scope
+
+        binding = _binding(**fields)
+        scope = _scope()
+        permitted, _ = await self._probe(scope, binding, access)
+        assert get_agent_scope() == scope
+        decided, _decision = await _service([binding]).evaluate_context_access(
+            scope, binding.context_id, access
+        )
+        assert permitted is decided

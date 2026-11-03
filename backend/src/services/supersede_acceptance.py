@@ -11,16 +11,19 @@ enforces it. The rule is the accept path's:
 * both memories the caller's own (#1803/#2313): in a private context a linked
   account counts, in a shared one only the caller;
 * a candidate not written after the memory carrying it (#2308): accepting it
-  would hide the newer memory behind the older one.
+  would hide the newer memory behind the older one;
+* no different declared edge already on the pair (#2518): the edge writer's
+  duplicate contract (#1321) refuses to retype it, the accept path's 409.
 
 The edge writer (``edge_service.ensure_supersedes_owned``) stays the
 authority on click and keeps its own uniform refusal; the reason reported
 here is as coarse: ``not_owner`` never says which memory is foreign.
 
-Known residual: an agent-bound API key whose binding is read-only passes the
-probe here (a binding is not a workspace role) and is refused on accept with
-the uniform 404 it already gets. The web dialog, a session caller, is not
-bound.
+Write access includes the request's agent binding (#2518): an agent-bound API
+key whose binding is read-only for the context is ``not_writable``, as the
+accept path's uniform 404 says on click. The probe reads the binding without
+the enforcing evaluation's WARNING or deny-audit row: a client asking whether
+to show the action is not a denied request.
 """
 
 from __future__ import annotations
@@ -33,13 +36,19 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.workspace_roles import WorkspaceRole
+from auth.workspace_roles import ACCESS_WRITE, WorkspaceRole
 from models.memory import Memory
 from models.schemas import SupersedeAcceptance
 from services.memory_ownership import own_memory_predicate
 from utils.exceptions import AuthorizationError, FeatureNotAvailableError
 
-AcceptanceReason = Literal["not_writable", "not_owner", "newer_candidate"]
+AcceptanceReason = Literal["not_writable", "not_owner", "newer_candidate", "edge_exists"]
+
+# The values the accept path writes its ``supersedes`` edge with:
+# ``create_edge``'s defaults for a user assertion (#738). A declared edge on
+# the pair with these values is ``unchanged``, with any others a conflict.
+ACCEPT_WEIGHT = 1.0
+ACCEPT_CONFIDENCE = 1.0
 
 
 @dataclass(frozen=True)
@@ -119,10 +128,13 @@ async def can_write_edges(
     """Whether a caller who already reads the context may write an edge in it.
 
     The delta of ``POST /graph/edges``'s gate over the read gate: a workspace
-    role of ``member`` or higher (with a plan seat) and a writable context
-    slot. Not the full context resolver: that logs a WARNING on every deny,
-    and a viewer opening a memory with a suggestion is not a denied request.
+    role of ``member`` or higher (with a plan seat), a writable context slot
+    and, for an agent-bound API key, a binding that grants the write (#2518).
+    Not the full context resolver: that logs a WARNING (and an agent deny
+    writes an audit row) on every deny, and a viewer opening a memory with a
+    suggestion is not a denied request.
     """
+    from services.agent_binding_service import agent_binding_would_permit
     from services.permission_service import PermissionService
     from services.plan_seats import ensure_context_writable
 
@@ -133,13 +145,55 @@ async def can_write_edges(
         await ensure_context_writable(db, context_id)
     except (AuthorizationError, FeatureNotAvailableError):
         return False
-    return True
+    return await agent_binding_would_permit(db, UUID(str(context_id)), ACCESS_WRITE)
+
+
+async def conflicting_declared_edge(
+    db: AsyncSession,
+    *,
+    owner_id: str,
+    workspace_id: UUID,
+    context_id: UUID,
+    carrier_id: UUID,
+    target_id: UUID,
+) -> bool:
+    """Whether the accept would meet a different declared edge on the pair.
+
+    The lookup ``create_declared_edge`` makes on the accept path: the edge
+    the carrier's author keeps from the carrier to the target. A declared one
+    with other values than the accept's (another type, weight or confidence)
+    is a ``conflict`` there — refused with a 409, nothing written. An
+    identical declared ``supersedes`` edge is ``unchanged`` and an automatic
+    (hebbian/semantic) edge is overwritten, so neither refuses.
+    """
+    from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
+    from repositories.neural_edge import NeuralEdgeRepository
+
+    existing = await NeuralEdgeRepository(db).get_edge(
+        owner_id,
+        carrier_id,
+        target_id,
+        workspace_id=str(workspace_id),
+        context_id=str(context_id),
+    )
+    if existing is None or existing.origin != EDGE_ORIGIN_DECLARED:
+        return False
+    return not (
+        existing.edge_type == EDGE_TYPE_SUPERSEDES
+        and existing.weight == ACCEPT_WEIGHT
+        and existing.confidence == ACCEPT_CONFIDENCE
+    )
 
 
 async def evaluate(
     db: AsyncSession, *, user_id: str, memory: Any, target_id: UUID
 ) -> SupersedeAcceptance:
-    """The ``acceptance`` for ``memory``'s current candidate ``target_id``."""
+    """The ``acceptance`` for ``memory``'s current candidate ``target_id``.
+
+    Reasons in the order the accept path refuses: ``not_writable`` >
+    ``not_owner`` > ``newer_candidate`` > ``edge_exists``. Each check after
+    the first runs only when the earlier ones pass.
+    """
     if not await can_write_edges(
         db,
         user_id=user_id,
@@ -154,5 +208,15 @@ async def evaluate(
         carrier_id=memory.id,
         target_id=target_id,
     )
-    reason = acceptance_reason(pair)
+    reason: AcceptanceReason | None = acceptance_reason(pair)
+    # Last, as the accept path meets it last: only a pair it would write.
+    if reason is None and await conflicting_declared_edge(
+        db,
+        owner_id=memory.user_id,
+        workspace_id=memory.workspace_id,
+        context_id=memory.context_id,
+        carrier_id=memory.id,
+        target_id=target_id,
+    ):
+        reason = "edge_exists"
     return SupersedeAcceptance(allowed=reason is None, reason=reason)

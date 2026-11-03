@@ -8009,6 +8009,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "record_access": {
+            "default": true,
+            "type": "boolean"
+          },
           "version": {
             "anyOf": [
               {
