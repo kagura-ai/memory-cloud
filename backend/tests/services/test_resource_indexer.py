@@ -2971,13 +2971,14 @@ class TestNaturalKeyMatchesEveryAuthor:
     """#2481, against the real DB: the indexer's natural-key reads find a row
     of the context's resource, document and version whoever wrote it.
 
-    Two ways such a row exists: ``context.created_by`` moved to a successor
-    after the row was indexed (``former_creator``), and a
-    ``remember(external_id)`` row of an account linked to the creator of a
-    private context (``linked_account``, #1803). The row found keeps its
-    author: it is updated in place, not re-owned, and its point follows it."""
+    Seeded two ways: an indexed row of an author other than the creator of
+    a shared context (``other_author``; a context merge copies rows with
+    their author, and another member can write the key), and a
+    ``remember(external_id)`` row of another account in a private context
+    (``linked_account``, #1803). The row found keeps its author: it is
+    updated in place, not re-owned, and its point follows it."""
 
-    AUTHOR_KINDS = ["former_creator", "linked_account"]
+    AUTHOR_KINDS = ["other_author", "linked_account"]
 
     async def _seed(self, db_session, events, author_kind, version):
         from services.resource_indexer import resource_point_id
@@ -2985,9 +2986,9 @@ class TestNaturalKeyMatchesEveryAuthor:
         ws_id, ctx_id, resource_pk, slug, owner = await _seed_indexed_resource(db_session, events)
         self.cleanup = (ws_id, ctx_id, resource_pk)
         context = await db_session.get(Context, ctx_id)
-        if author_kind == "former_creator":
+        if author_kind == "other_author":
             author = owner
-            context.created_by = f"successor-{uuid4().hex[:8]}"
+            context.created_by = f"creator-{uuid4().hex[:8]}"
         else:
             author = f"linked-{uuid4().hex[:8]}"
             context.is_private = True
@@ -3067,9 +3068,9 @@ class TestNaturalKeyMatchesEveryAuthor:
 
     @pytest.mark.asyncio
     async def test_a_duplicate_the_old_lookup_left_does_not_fail_the_event(self, db_session):
-        """A context the creator-only lookup already split: the former
-        creator's row and the copy indexed for the successor. The event
-        updates the creator's copy, as before, and leaves the other row."""
+        """A context the creator-only lookup already split: another
+        author's row and the copy indexed for the creator. The event updates
+        the creator's copy, as before, and leaves the other row."""
         from services.resource_indexer import resource_point_id
 
         self.cleanup = None
@@ -3077,7 +3078,7 @@ class TestNaturalKeyMatchesEveryAuthor:
             context, slug, author, creator, old_row_id = await self._seed(
                 db_session,
                 [{"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}],
-                "former_creator",
+                "other_author",
                 version=1,
             )
             copy = Memory(
@@ -3160,6 +3161,83 @@ class TestNaturalKeyMatchesEveryAuthor:
             assert str(resource_point_id(slug, "doc_1", 1)) in deleted
             # A new version of a known doc replaces it: nothing new to charge.
             indexer._workspace_memory_room.assert_not_awaited()
+        finally:
+            if self.cleanup:
+                await _drop_indexed_resource(db_session, *self.cleanup)
+
+    @pytest.mark.asyncio
+    async def test_a_row_scrubbed_while_the_lookup_waits_is_not_written_back(self, db_session):
+        """The context lock fences only the creator's erasure. Another
+        author's erasure locks and scrubs the row (details NULLed, the natural
+        key with them) while the event runs: the lookup waits for it and the
+        re-checked row no longer matches, so the event creates the creator's
+        row instead of writing the details it read before the scrub (the
+        author's ``location`` included) back into the erased row."""
+        from sqlalchemy import null, text, update
+
+        from db.base import isolated_session
+
+        self.cleanup = None
+        try:
+            context, slug, _, creator, row_id = await self._seed(
+                db_session,
+                [{"doc_id": "doc_1", "version": 1, "payload": {"title": "Report"}}],
+                "linked_account",
+                version=1,
+            )
+            await db_session.execute(
+                update(Memory)
+                .where(Memory.id == row_id)
+                .values(
+                    details={
+                        "resource_id": slug,
+                        "doc_id": "doc_1",
+                        "version": 1,
+                        "location": {"lat": 35.0, "lon": 139.0},
+                    }
+                )
+            )
+            await db_session.commit()
+            indexer, embedder = _db_indexer(db_session)
+            waiting = text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+
+            async with (
+                isolated_session(db_session) as eraser,
+                isolated_session(db_session) as probe,
+            ):
+                await eraser.execute(
+                    update(Memory)
+                    .where(Memory.id == row_id)
+                    .values(user_id="erased-subject", details=null())
+                )
+                run = asyncio.create_task(_db_process(indexer, embedder, slug, context.id))
+                try:
+                    async with asyncio.timeout(10):
+                        while True:
+                            blocked = await probe.scalar(waiting)
+                            # pg_stat_activity is a per-transaction snapshot.
+                            await probe.rollback()
+                            if blocked:
+                                break
+                            await asyncio.sleep(0.05)
+                    await eraser.commit()
+                    async with asyncio.timeout(30):
+                        metrics = await run
+                finally:
+                    run.cancel()
+
+            assert metrics.errors == 0, metrics.failed_events
+            assert metrics.applied_upserts == 1
+            rows = {r.id: r for r in await self._live_rows(db_session, context.id)}
+            assert rows[row_id].details is None
+            assert rows[row_id].user_id == "erased-subject"
+            (created,) = [r for r in rows.values() if r.id != row_id]
+            assert (created.user_id, created.resource_version) == (creator, 1)
+            payload = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
+            assert (payload["memory_id"], payload["user_id"]) == (str(created.id), creator)
         finally:
             if self.cleanup:
                 await _drop_indexed_resource(db_session, *self.cleanup)

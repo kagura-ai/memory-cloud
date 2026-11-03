@@ -1252,12 +1252,19 @@ class ResourceIndexer:
         # (Migration 061) instead of a JSONB search. Single Collection
         # Migration: workspace_id/context_id instead of collection_name.
         #
-        # #2481: the natural key alone, whoever wrote the row. A row indexed
-        # before ``context.created_by`` moved to a successor keeps the old
-        # creator, and a linked account's ``remember(external_id)`` row
-        # (#1803) its own author; matching the creator only re-created them
-        # as duplicates. The row found keeps its author: it is updated in
-        # place, not re-owned, and its point follows it.
+        # #2481: the natural key alone, whoever wrote the row. A
+        # ``remember(external_id, details={doc_id, version})`` row of another
+        # account (a linked account in a private context, #1803, or another
+        # member) and a row a context merge copied in keep their own author;
+        # matching the creator only re-created them as duplicates. The row
+        # found keeps its author: it is updated in place, not re-owned, and
+        # its point follows it.
+        #
+        # Locked: the context lock above fences only the creator's erasure.
+        # Another author's erasure locks and scrubs its rows (details NULLed,
+        # the natural key with them); the lookup waits for it, and the
+        # re-checked row no longer matches, instead of the update writing the
+        # details read before the scrub back into the erased row.
         #
         # #1549 review: tombstones are excluded so a doc the user forgot is
         # RE-CREATED on re-sync (a fresh, visible row — charged once by the
@@ -1285,6 +1292,8 @@ class ResourceIndexer:
                     Memory.id,
                 )
                 .limit(1)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         except Exception as e:
             logger.error(
