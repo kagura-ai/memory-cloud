@@ -13,7 +13,9 @@ enforces it. The rule is the accept path's:
 * a candidate not written after the memory carrying it (#2308): accepting it
   would hide the newer memory behind the older one;
 * no different declared edge already on the pair (#2518): the edge writer's
-  duplicate contract (#1321) refuses to retype it, the accept path's 409.
+  duplicate contract (#1321) refuses to retype it, the accept path's 409. In a
+  private context the carrier author's row and the caller's row count, the
+  two accounts an accept writes under (#2549).
 
 The edge writer (``edge_service.ensure_supersedes_owned``) stays the
 authority on click and keeps its own uniform refusal; the reason reported
@@ -39,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import ACCESS_WRITE, WorkspaceRole
 from models.memory import Memory
 from models.schemas import SupersedeAcceptance
-from services.memory_ownership import own_memory_predicate
+from services.memory_ownership import is_private_context, own_memory_predicate
 from utils.exceptions import AuthorizationError, FeatureNotAvailableError
 
 AcceptanceReason = Literal["not_writable", "not_owner", "newer_candidate", "edge_exists"]
@@ -148,10 +150,30 @@ async def can_write_edges(
     return await agent_binding_would_permit(db, UUID(str(context_id)), ACCESS_WRITE)
 
 
+async def edge_owner(
+    db: AsyncSession, *, author_id: str, caller_id: str, context_id: UUID | str | None
+) -> str | frozenset[str]:
+    """Whose edges on the pair the accept can meet (#2549).
+
+    The carrier author's row and the caller's row, the two accounts an
+    accept writes under: ``update_memory(accept_supersede_candidate=true)``
+    writes under the carrier's author (#1784), the web dialog's
+    ``POST /graph/edges`` under the caller, and ``unique_edge`` is per
+    account, so each of them can keep a row for the pair. They differ only
+    in a private context, where a linked account's memory counts as the
+    caller's own (:func:`services.memory_ownership.own_memory_predicate`);
+    elsewhere ``not_owner`` has already made the author the caller. Another
+    linked account's row is never one an accept meets, so it does not count.
+    """
+    if author_id == caller_id or not await is_private_context(db, context_id):
+        return author_id
+    return frozenset({author_id, caller_id})
+
+
 async def conflicting_declared_edge(
     db: AsyncSession,
     *,
-    owner_id: str,
+    owner: str | frozenset[str],
     workspace_id: UUID,
     context_id: UUID,
     carrier_id: UUID,
@@ -159,29 +181,34 @@ async def conflicting_declared_edge(
 ) -> bool:
     """Whether the accept would meet a different declared edge on the pair.
 
-    The lookup ``create_declared_edge`` makes on the accept path: the edge
-    the carrier's author keeps from the carrier to the target. A declared one
-    with other values than the accept's (another type, weight or confidence)
-    is a ``conflict`` there — refused with a 409, nothing written. An
-    identical declared ``supersedes`` edge is ``unchanged`` and an automatic
-    (hebbian/semantic) edge is overwritten, so neither refuses.
+    The lookup ``create_declared_edge`` makes before it writes, made for each
+    account in ``owner`` (:func:`edge_owner`): the carrier author's row and
+    the caller's row, the two accounts an accept writes under (#2549). Every
+    such row from the carrier to the target is read, not only the strongest
+    one a two-account ``get_edge`` returns. A declared row with other values
+    than the accept's (another type, weight or confidence) is a ``conflict``
+    there — refused with a 409, nothing written. An identical declared
+    ``supersedes`` row is ``unchanged`` and an automatic (hebbian/semantic)
+    row is overwritten, so neither refuses.
     """
     from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
     from repositories.neural_edge import NeuralEdgeRepository
 
-    existing = await NeuralEdgeRepository(db).get_edge(
-        owner_id,
+    rows = await NeuralEdgeRepository(db).list_pair_edges(
+        owner,
         carrier_id,
         target_id,
         workspace_id=str(workspace_id),
         context_id=str(context_id),
     )
-    if existing is None or existing.origin != EDGE_ORIGIN_DECLARED:
-        return False
-    return not (
-        existing.edge_type == EDGE_TYPE_SUPERSEDES
-        and existing.weight == ACCEPT_WEIGHT
-        and existing.confidence == ACCEPT_CONFIDENCE
+    return any(
+        row.origin == EDGE_ORIGIN_DECLARED
+        and not (
+            row.edge_type == EDGE_TYPE_SUPERSEDES
+            and row.weight == ACCEPT_WEIGHT
+            and row.confidence == ACCEPT_CONFIDENCE
+        )
+        for row in rows
     )
 
 
@@ -192,7 +219,9 @@ async def evaluate(
 
     Reasons in the order the accept path refuses: ``not_writable`` >
     ``not_owner`` > ``newer_candidate`` > ``edge_exists``. Each check after
-    the first runs only when the earlier ones pass.
+    the first runs only when the earlier ones pass. ``edge_exists`` reads the
+    carrier author's row and the caller's row, the two accounts an accept
+    writes under (#2549): a different declared edge kept by either refuses.
     """
     if not await can_write_edges(
         db,
@@ -212,7 +241,9 @@ async def evaluate(
     # Last, as the accept path meets it last: only a pair it would write.
     if reason is None and await conflicting_declared_edge(
         db,
-        owner_id=memory.user_id,
+        owner=await edge_owner(
+            db, author_id=memory.user_id, caller_id=user_id, context_id=memory.context_id
+        ),
         workspace_id=memory.workspace_id,
         context_id=memory.context_id,
         carrier_id=memory.id,
