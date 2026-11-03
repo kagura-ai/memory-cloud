@@ -349,6 +349,43 @@ class TestUpdateInPlace:
         assert result.version == 5 and locked.importance == 0.9
         assert read.importance == 0.5  # the unlocked copy is not what was edited
 
+    async def test_a_tag_edit_bumps_and_logs_the_whole_prior_list(self, service, mock_db) -> None:
+        """#2585: add_tags / remove_tags are a tags write — one version, and
+        the revision row holds the list as it was, as for a wholesale write."""
+        memory = _memory(tags=["a", "status:open"])
+        _prime(service, memory)
+        result = await _update(
+            service, memory_id=memory.id, remove_tags=["status:open"], add_tags=["status:done"]
+        )
+        assert result.version == 4 and memory.tags == ["a", "status:done"]
+        (revision,) = _added_revisions(mock_db)
+        assert revision.prior == {"tags": ["a", "status:open"]}
+
+    async def test_a_tag_edit_that_changes_nothing_keeps_the_version(
+        self, service, mock_db
+    ) -> None:
+        memory = _memory(tags=["a"])
+        _prime(service, memory)
+        result = await _update(service, memory_id=memory.id, add_tags=["a"], remove_tags=["b"])
+        assert result.version == 3
+        assert _added_revisions(mock_db) == []
+
+    async def test_a_details_patch_bumps_and_logs_the_prior_details(self, service, mock_db) -> None:
+        memory = _memory(details={"k": "v", "gone": 1})
+        _prime(service, memory)
+        result = await _update(service, memory_id=memory.id, details_patch={"gone": None, "n": 2})
+        assert result.version == 4 and memory.details == {"k": "v", "n": 2}
+        (revision,) = _added_revisions(mock_db)
+        assert revision.prior == {"details": {"k": "v", "gone": 1}}
+
+    async def test_a_stale_version_refuses_a_partial_edit(self, service, mock_db) -> None:
+        memory = _memory(tags=["a"])
+        _prime(service, memory)
+        with pytest.raises(VersionConflictError):
+            await _update(service, memory_id=memory.id, add_tags=["b"], expected_version=2)
+        assert memory.tags == ["a"] and memory.version == 3
+        mock_db.add.assert_not_called()
+
 
 @pytest.mark.asyncio
 class TestPatch:
@@ -376,6 +413,16 @@ class TestPatch:
         with pytest.raises(MemoryGoneError):
             await _patch(service, read, importance=0.9, expected_version=3)
         mock_db.add.assert_not_called()
+
+    async def test_partial_edits_bump_once_and_log_both_fields(self, service, mock_db) -> None:
+        """#2585: one PATCH with add_tags and details_patch is one version."""
+        memory = _memory(tags=["a"], details=None)
+        _prime(service, memory)
+        await _patch(service, memory, add_tags=["b"], details_patch={"k": 1})
+        assert memory.version == 4
+        assert memory.tags == ["a", "b"] and memory.details == {"k": 1}
+        (revision,) = _added_revisions(mock_db)
+        assert revision.prior == {"tags": ["a"], "details": None}
 
 
 @pytest.mark.asyncio

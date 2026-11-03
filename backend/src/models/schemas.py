@@ -36,7 +36,7 @@ MEMORY_TAGS_MAX_COUNT = 50
 MEMORY_TAG_MAX_CHARS = 100
 
 
-def _check_memory_tags(tags: list[str] | None) -> list[str] | None:
+def check_memory_tags(tags: list[str] | None) -> list[str] | None:
     """Validate a remember / update_memory ``tags`` list against the #1743 caps."""
     if tags is None:
         return tags
@@ -48,6 +48,33 @@ def _check_memory_tags(tags: list[str] | None) -> list[str] | None:
                 f"tag at index {idx} exceeds {MEMORY_TAG_MAX_CHARS} characters (got {len(tag)})"
             )
     return tags
+
+
+# ``PATCH /api/v1/memory/{id}`` keeps caps of its own (#439, older than #1743).
+PATCH_TAGS_MAX_COUNT = 100
+PATCH_TAG_MAX_CHARS = 64
+
+
+def _check_patch_tag_chars(tags: list[str]) -> list[str]:
+    """Cap each PATCH tag at PATCH_TAG_MAX_CHARS characters."""
+    for idx, tag in enumerate(tags):
+        if len(tag) > PATCH_TAG_MAX_CHARS:
+            raise ValueError(
+                f"tag at index {idx} exceeds {PATCH_TAG_MAX_CHARS} chars "
+                f"(got {len(tag)}): '{tag[:32]}…'"
+            )
+    return tags
+
+
+def check_patch_tags(tags: list[str]) -> list[str]:
+    """Validate a PATCH tag list against both caps.
+
+    For the list ``add_tags`` / ``remove_tags`` produce (#2585); a ``tags``
+    field gets the same caps from its ``max_length`` and validator.
+    """
+    if len(tags) > PATCH_TAGS_MAX_COUNT:
+        raise ValueError(f"at most {PATCH_TAGS_MAX_COUNT} tags (got {len(tags)})")
+    return _check_patch_tag_chars(tags)
 
 
 SUMMARY_SHORT_THRESHOLD = 50
@@ -181,7 +208,7 @@ class RememberRequest(BaseModel):
     @classmethod
     def _cap_tags(cls, v: list[str]) -> list[str]:
         """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each."""
-        return _check_memory_tags(v) or []
+        return check_memory_tags(v) or []
 
     @field_validator("summary")
     @classmethod
@@ -1151,7 +1178,7 @@ class ForgetBulkRequest(BaseModel):
     @classmethod
     def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
         """The remember / update_memory caps (#1743): no tag a write could store."""
-        return _check_memory_tags(v)
+        return check_memory_tags(v)
 
     @field_validator("created_before", "created_after")
     @classmethod
@@ -1211,21 +1238,44 @@ VersionNumber = Annotated[int, Field(ge=1), BeforeValidator(_reject_bool_version
 
 
 # The request fields that edit the memory itself (``_update_apply_fields`` writes
-# them onto the row). A dismissal-only update (#1504) keeps the timestamp when
-# none is set, and an acceptance (#2308) refuses to share a call with any of
-# them; adding a field to that method means adding it here.
+# them onto the row; add_tags / remove_tags / details_patch through tags and
+# details). A dismissal-only update (#1504) keeps the timestamp when none is
+# set, and an acceptance (#2308) refuses to share a call with any of them;
+# adding a field to that method means adding it here.
 UPDATE_MEMORY_EDIT_FIELDS: tuple[str, ...] = (
     "summary",
     "context_summary",
     "content",
     "details",
+    "details_patch",
     "type",
     "importance",
     "tags",
+    "add_tags",
+    "remove_tags",
     "context",
     "delivery_mode",
     "observed_at",
 )
+
+# #2585: the in-place partial edits of the stored tags / details.
+PARTIAL_EDIT_FIELDS: tuple[str, ...] = ("add_tags", "remove_tags", "details_patch")
+
+
+def _reject_partial_edit_conflicts(
+    has_tags: bool, has_tag_edits: bool, has_details: bool, has_details_patch: bool
+) -> None:
+    """#2585: a call replaces a field or edits it, not both."""
+    if has_tags and has_tag_edits:
+        raise ValueError(
+            "tags replaces the stored list and add_tags / remove_tags edit it; "
+            "give one or the other."
+        )
+    if has_details and has_details_patch:
+        raise ValueError(
+            "details replaces the stored details and details_patch merges into them; "
+            "give one or the other."
+        )
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -1257,6 +1307,18 @@ class UpdateMemoryRequest(BaseModel):
     type: str | None = Field(None, min_length=1, max_length=50, description="Updated type")
     importance: float | None = Field(None, ge=0.0, le=1.0, description="Updated importance")
     tags: list[str] | None = Field(None, description="Updated tags")
+    # #2585: edit the stored tags / details instead of replacing them, so a
+    # status flip is one call that touches nothing else. Resolved against the
+    # locked row (``MemoryService._resolve_partial_edits``): removals first,
+    # then each new tag appended once; a null details_patch value deletes the
+    # key. The result goes through the wholesale path's caps and validators.
+    add_tags: list[str] | None = Field(None, description="Tags to add to the stored list")
+    remove_tags: list[str] | None = Field(
+        None, description="Tags to remove from the stored list (absent ones are ignored)"
+    )
+    details_patch: dict | None = Field(
+        None, description="Shallow merge into the stored details; a null value deletes the key"
+    )
     context: dict | None = Field(None, description="Updated context metadata")
     # #2330 D7: sugar for details.observed_at. Without ``details`` it edits
     # only the event time of the stored details (a details edit: versioned).
@@ -1265,11 +1327,15 @@ class UpdateMemoryRequest(BaseModel):
         None, max_length=40, description="Updated event time (ISO 8601 date or datetime)"
     )
 
-    @field_validator("tags")
+    @field_validator("tags", "add_tags")
     @classmethod
     def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
-        """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each."""
-        return _check_memory_tags(v)
+        """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each.
+
+        add_tags takes the caps too (#2585); the list it produces is checked
+        again once it is resolved against the stored one.
+        """
+        return check_memory_tags(v)
 
     # Issue #886: change delivery_mode in place. Setting 'always' pins the
     # memory to persistent (like remember's pin-on-write); setting 'on_recall'
@@ -1362,6 +1428,19 @@ class UpdateMemoryRequest(BaseModel):
                 "expected_version requires memory_id (in-place mode); an external_id "
                 "upsert replaces the memory under a new id."
             )
+        # #2585: the upsert writes a new row from the request alone, so there
+        # is no stored list or details to edit.
+        if has_external_id and any(getattr(self, name) is not None for name in PARTIAL_EDIT_FIELDS):
+            raise ValueError(
+                "add_tags, remove_tags and details_patch require memory_id (in-place "
+                "mode); use tags / details with external_id."
+            )
+        _reject_partial_edit_conflicts(
+            has_tags=self.tags is not None,
+            has_tag_edits=self.add_tags is not None or self.remove_tags is not None,
+            has_details=self.details is not None,
+            has_details_patch=self.details_patch is not None,
+        )
 
         # For upsert-by-external_id mode, enforce required fields
         if has_external_id:
@@ -1419,8 +1498,10 @@ class PatchMemoryRequest(BaseModel):
     All fields are optional. Only fields explicitly provided are updated;
     omitted fields preserve their current value. ``tags`` follows replace-all
     semantics (an empty list clears tags; a non-empty list replaces the
-    whole list). ``scope`` and ``context_id`` are intentionally excluded —
-    they have orthogonal lifecycles handled by separate operations.
+    whole list); ``add_tags`` / ``remove_tags`` and ``details_patch`` edit the
+    stored list and details instead (#2585, see ``UpdateMemoryRequest``).
+    ``scope`` and ``context_id`` are intentionally excluded — they have
+    orthogonal lifecycles handled by separate operations.
     """
 
     summary: str | None = Field(None, min_length=SUMMARY_MIN_LENGTH, max_length=SUMMARY_MAX_LENGTH)
@@ -1433,8 +1514,31 @@ class PatchMemoryRequest(BaseModel):
     # paths only), so without these caps an authenticated workspace member
     # could either send 1M tags OR 100 tags of 1MB each to bloat the row's
     # PG ARRAY column. Both surfaces are now closed.
-    tags: list[str] | None = Field(None, max_length=100)
+    tags: list[str] | None = Field(None, max_length=PATCH_TAGS_MAX_COUNT)
+    # #2585: the list add_tags / remove_tags produce is checked against the
+    # same caps (``check_patch_tags``) once it is resolved.
+    add_tags: list[str] | None = Field(
+        None,
+        max_length=PATCH_TAGS_MAX_COUNT,
+        description=(
+            "Tags to append to the stored list (each once, in order; not with tags). "
+            "Applied after remove_tags."
+        ),
+    )
+    remove_tags: list[str] | None = Field(
+        None,
+        description=(
+            "Tags to remove from the stored list; one that is not there is ignored (not with tags)."
+        ),
+    )
     details: dict | None = None
+    details_patch: dict | None = Field(
+        None,
+        description=(
+            "Shallow merge into the stored details (a NULL column merges into {}); a "
+            "null value deletes the key (not with details)."
+        ),
+    )
     # #2330 D7: sugar for details.observed_at (see UpdateMemoryRequest).
     # None = unchanged.
     observed_at: str | None = Field(None, max_length=40)
@@ -1442,18 +1546,13 @@ class PatchMemoryRequest(BaseModel):
     # version_conflict otherwise, nothing written). Omitted = last writer wins.
     expected_version: VersionNumber | None = None
 
-    @field_validator("tags")
+    @field_validator("tags", "add_tags")
     @classmethod
     def _validate_tag_strings(cls, v: list[str] | None) -> list[str] | None:
         """Cap per-tag string length at 64 chars (Copilot loop 3 finding)."""
         if v is None:
             return v
-        for idx, tag in enumerate(v):
-            if len(tag) > 64:
-                raise ValueError(
-                    f"tag at index {idx} exceeds 64 chars (got {len(tag)}): '{tag[:32]}…'"
-                )
-        return v
+        return _check_patch_tag_chars(v)
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> "PatchMemoryRequest":
@@ -1475,7 +1574,7 @@ class PatchMemoryRequest(BaseModel):
         # field omission (`tags`: omit = preserve, `[]` = clear, `null` is
         # ambiguous). `details: null` is the only legitimate explicit-null
         # value (clears the JSONB column).
-        non_nullable = ("summary", "content", "type", "importance", "tags")
+        non_nullable = ("summary", "content", "type", "importance", "tags", *PARTIAL_EDIT_FIELDS)
         invalid_null = [
             f for f in non_nullable if f in self.model_fields_set and getattr(self, f) is None
         ]
@@ -1483,6 +1582,13 @@ class PatchMemoryRequest(BaseModel):
             raise ValueError(
                 "PATCH request fields must not be null when provided: " + ", ".join(invalid_null)
             )
+        # #2585: presence, not value — `{"details": null}` replaces too.
+        _reject_partial_edit_conflicts(
+            has_tags="tags" in self.model_fields_set,
+            has_tag_edits=bool({"add_tags", "remove_tags"} & self.model_fields_set),
+            has_details="details" in self.model_fields_set,
+            has_details_patch="details_patch" in self.model_fields_set,
+        )
         return self
 
 

@@ -475,3 +475,134 @@ class TestPatchMemoryRequestValidation:
         req = PatchMemoryRequest(tags=["x" * 64, "y" * 64])
         assert len(req.tags) == 2
         assert all(len(t) == 64 for t in req.tags)
+
+    # ------------------------------------------------ #2585 partial edits
+
+    @pytest.mark.parametrize("edit", [{"add_tags": ["a"]}, {"remove_tags": ["a"]}])
+    def test_tags_with_a_tag_edit_is_refused(self, edit):
+        with pytest.raises(ValueError, match="give one or the other"):
+            PatchMemoryRequest(tags=["a"], **edit)
+
+    @pytest.mark.parametrize("details", [{"a": 1}, None])
+    def test_details_with_details_patch_is_refused(self, details):
+        """Presence counts: ``{"details": null}`` replaces (clears) as well."""
+        with pytest.raises(ValueError, match="details_patch merges"):
+            PatchMemoryRequest(details=details, details_patch={"b": 2})
+
+    def test_partial_edits_alone_are_a_patch(self):
+        req = PatchMemoryRequest(add_tags=["b"], remove_tags=["a"], details_patch={"k": None})
+        assert {"add_tags", "remove_tags", "details_patch"} <= req.model_fields_set
+
+    @pytest.mark.parametrize("field", ["add_tags", "remove_tags", "details_patch"])
+    def test_explicit_null_rejected_for_partial_edits(self, field):
+        with pytest.raises(ValueError, match="must not be null"):
+            PatchMemoryRequest(**{field: None})
+
+    def test_add_tags_take_the_patch_caps(self):
+        with pytest.raises(ValueError):
+            PatchMemoryRequest(add_tags=["x"] * 101)
+        with pytest.raises(ValueError, match="exceeds 64 chars"):
+            PatchMemoryRequest(add_tags=["x" * 65])
+        # A removal never lands on the row: a longer stored tag can be removed.
+        assert PatchMemoryRequest(remove_tags=["x" * 100]).remove_tags == ["x" * 100]
+
+
+# --------------------------------------------------------------------------
+# #2585: add_tags / remove_tags / details_patch on PATCH
+# --------------------------------------------------------------------------
+
+
+def _patch_service(memory):
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.flush = AsyncMock()
+    db.rollback = AsyncMock()
+    db.execute = AsyncMock()
+    svc = MemoryService(db)
+    svc._patch_load_authorized = AsyncMock(return_value=memory)
+    svc._lock_for_edit = AsyncMock(return_value=memory)
+    svc._ensure_capacity = AsyncMock()
+    svc._require_guardrail_author = AsyncMock()
+    svc._sync_metadata_payload = AsyncMock()
+    svc._patch_build_response = AsyncMock(return_value=MagicMock())
+    return svc
+
+
+async def _patch_partial(svc, memory, **fields):
+    with patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()):
+        return await svc.patch_memory(memory.id, PatchMemoryRequest(**fields), "test_user")
+
+
+def _patch_synced(svc):
+    _memory, updates, delete_keys = svc._sync_metadata_payload.await_args.args
+    return updates, delete_keys
+
+
+@pytest.mark.asyncio
+class TestPatchPartialEdits:
+    async def test_add_and_remove_tags_edit_the_stored_list(self):
+        memory = _make_memory(tags=["a", "status:open", "b"])
+        svc = _patch_service(memory)
+        await _patch_partial(
+            svc, memory, remove_tags=["status:open", "nope"], add_tags=["status:done", "a"]
+        )
+        assert memory.tags == ["a", "b", "status:done"]
+        updates, delete_keys = _patch_synced(svc)
+        assert updates["tags"] == ["a", "b", "status:done"]
+        assert delete_keys == []
+
+    async def test_the_resulting_list_takes_the_patch_caps(self):
+        stored = [f"t{i}" for i in range(100)]
+        memory = _make_memory(tags=list(stored))
+        svc = _patch_service(memory)
+        with pytest.raises(ValueError, match=r"at most 100 tags \(got 101\)"):
+            await _patch_partial(svc, memory, add_tags=["one-more"])
+        assert memory.tags == stored
+        svc.db.commit.assert_not_awaited()
+
+    async def test_a_stored_tag_over_the_patch_length_fails_the_result(self):
+        """A 100-character tag is legal through MCP, not through PATCH; the
+        PATCH caps apply to the list the call produces."""
+        memory = _make_memory(tags=["y" * 80])
+        svc = _patch_service(memory)
+        with pytest.raises(ValueError, match="exceeds 64 chars"):
+            await _patch_partial(svc, memory, add_tags=["b"])
+        await _patch_partial(svc, memory, remove_tags=["y" * 80], add_tags=["b"])
+        assert memory.tags == ["b"]
+
+    async def test_details_patch_on_a_null_column_merges_into_an_empty_object(self):
+        memory = _make_memory(details=None)
+        svc = _patch_service(memory)
+        await _patch_partial(svc, memory, details_patch={"k": 1, "gone": None})
+        assert memory.details == {"k": 1}
+
+    async def test_details_patch_merges_and_null_deletes(self):
+        memory = _make_memory(details={"observed_at": "2026-01-02", "x": 1, "y": 2})
+        svc = _patch_service(memory)
+        await _patch_partial(svc, memory, details_patch={"observed_at": None, "y": 3})
+        assert memory.details == {"x": 1, "y": 3}
+        _, delete_keys = _patch_synced(svc)
+        assert "observed_at" in delete_keys and "location" in delete_keys
+
+    async def test_an_invalid_trigger_fails_through_a_patch(self):
+        trigger = MemoryService._apply_time_trigger("time", {"trigger": {"year": 2026, "month": 5}})
+        memory = _make_memory(type="time", details=dict(trigger or {}))
+        svc = _patch_service(memory)
+        with pytest.raises(ValueError, match="invalid details.trigger"):
+            await _patch_partial(
+                svc, memory, details_patch={"trigger": {"year": 2026, "month": 13}}
+            )
+        assert memory.details == trigger
+
+    async def test_a_patch_naming_tool_trigger_needs_a_guardrail_author(self):
+        memory = _make_memory(details={"x": 1})
+        svc = _patch_service(memory)
+        await _patch_partial(svc, memory, details_patch={"tool_trigger": None})
+        svc._require_guardrail_author.assert_awaited_once_with("test_user", memory.context_id)
+        assert memory.details == {"x": 1}
+
+    async def test_observed_at_folds_into_a_patch(self):
+        memory = _make_memory(details={"x": 1})
+        svc = _patch_service(memory)
+        await _patch_partial(svc, memory, observed_at="2026-03-04", details_patch={"x": 2})
+        assert memory.details == {"x": 2, "observed_at": "2026-03-04"}

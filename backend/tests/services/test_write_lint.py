@@ -639,3 +639,66 @@ class TestVocabularyCacheOnTheWritePath:
             1 for h in hints if h.code == "tag_near_duplicate"
         )
         assert len(kw["codes"]) == MAX_HINTS
+
+
+class TestCheckedTags:
+    """#2585: an add_tags / remove_tags call lints the tags it added only."""
+
+    @pytest.mark.asyncio
+    async def test_only_the_checked_tags_are_compared(self):
+        # 'Auth' is a drifted spelling the memory already carried; the call
+        # added 'deploy', which is fine — nothing to say about either.
+        db = _db_with_vocabulary({"auth": 12, "Auth": 1, "deploy": 3})
+        hints = await lint_write(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            summary=GOOD_SUMMARY,
+            tags=["Auth", "deploy"],
+            checked_tags=["deploy"],
+        )
+        assert hints == []
+
+    @pytest.mark.asyncio
+    async def test_an_added_drift_still_fires(self):
+        db = _db_with_vocabulary({"auth": 12, "Auth": 1})
+        hints = await lint_write(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            summary=GOOD_SUMMARY,
+            tags=["release", "Auth"],
+            checked_tags=["Auth"],
+        )
+        assert [(h.code, h.subject) for h in hints] == [("tag_near_duplicate", "Auth")]
+
+    @pytest.mark.asyncio
+    async def test_nothing_added_reads_no_vocabulary_and_is_not_untagged(self):
+        db = _db_with_vocabulary({"auth": 12})
+        hints = await lint_write(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            summary=GOOD_SUMMARY,
+            tags=["Auth"],
+            checked_tags=[],
+        )
+        assert hints == []
+        assert db.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_call_that_removed_every_tag_is_untagged(self):
+        db = _db_with_vocabulary({"auth": 12})
+        hints = await lint_write(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            summary=GOOD_SUMMARY,
+            tags=[],
+            checked_tags=[],
+        )
+        assert _codes(hints) == {"no_tags"}
