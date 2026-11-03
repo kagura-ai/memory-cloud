@@ -5,6 +5,8 @@ Issue #324: kagura_memories collection uses named vectors
 vector, not anonymous.
 """
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -1799,6 +1801,161 @@ class TestOldVersionCleanupDrainsStrays:
         }
         assert indexer._retired == []
 
+    @pytest.mark.asyncio
+    async def test_a_stalled_vector_store_is_cut_off_and_the_lock_released(self):
+        """#2478: the drain holds the point writers out, so a delete that
+        never returns must not hold them past the bound; what it did not
+        delete is left to the orphan sweep."""
+        indexer, _ = self._run("uuid5")
+
+        async def _stall(ids, _collection):
+            self.order.append(f"points:{','.join(ids)}")
+            await asyncio.Event().wait()
+
+        self.points.side_effect = _stall
+
+        started = time.monotonic()
+        with patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", 0.05):
+            metrics, log = await self._process(indexer)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2.0
+        assert metrics.errors == 0
+        assert metrics.batch_committed is True
+        # No drain commit: the cancelled session closes, which ends its
+        # transaction and with it the lock.
+        assert self.order == ["commit", "lock", "lookup", f"points:{self.version_point}"]
+        session_cm = self.isolated.return_value
+        session_cm.__aexit__.assert_awaited_once()
+        assert session_cm.__aexit__.await_args.args[0] is asyncio.CancelledError
+        timed_out = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "old_version_point_drain_timed_out"
+        ]
+        assert len(timed_out) == 1
+        assert timed_out[0].kwargs == {
+            "timeout_seconds": 0.05,
+            "points_dropped": 0,
+            "points_left": 1,
+        }
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert "old_version_point_lookup_failed" not in warned
+        assert indexer._retired == []
+
+
+def _retired_rows(*collections: str) -> list:
+    from services.resource_indexer import RetiredVersionRow
+
+    return [RetiredVersionRow(uuid4(), uuid4(), collection) for collection in collections]
+
+
+class TestRetiredPointDrainIsBounded:
+    """#2478: ``_drop_retired_points`` holds the point-writer lock exclusively
+    from its lookup to its last delete, and every new point writer queues
+    behind it. ``RETIRED_POINT_DELETE_TIMEOUT_SECONDS`` bounds the whole
+    block, as ``FORGET_POINT_DELETE_TIMEOUT_SECONDS`` bounds forget's."""
+
+    async def _drain(self, rows, delete, *, timeout=2.0, shared=(), lookup_error=None):
+        order: list[str] = []
+        _, isolated = _drain_session(order, shared=shared, lookup_error=lookup_error)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(_mock_db())
+        indexer._retired = list(rows)
+        with (
+            patch("services.resource_indexer.isolated_session", isolated),
+            patch(
+                "services.resource_indexer.try_exclude_point_writers", AsyncMock(return_value=True)
+            ),
+            patch("services.resource_indexer.delete_points_from_qdrant", delete),
+            patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", timeout),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            started = time.monotonic()
+            await indexer._drop_retired_points()
+            elapsed = time.monotonic() - started
+        return order, isolated.return_value, log, elapsed
+
+    @pytest.mark.asyncio
+    async def test_the_normal_path_deletes_every_collection_and_commits(self):
+        rows = _retired_rows("kagura_memories", "kagura_memories_other")
+        deleted: list[tuple[list[str], str]] = []
+
+        async def _delete(ids, collection):
+            deleted.append((list(ids), collection))
+
+        order, session_cm, log, _ = await self._drain(rows, _delete)
+
+        assert deleted == [
+            ([str(rows[0].version_point)], "kagura_memories"),
+            ([str(rows[1].version_point)], "kagura_memories_other"),
+        ]
+        assert order == ["lookup", "drain_commit"]
+        session_cm.__aexit__.assert_awaited_once()
+        assert session_cm.__aexit__.await_args.args[0] is None
+        dropped = [c for c in log.info.call_args_list if c.args[0] == "old_version_points_dropped"]
+        assert len(dropped) == 2
+        log.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_stall_after_one_collection_counts_what_went_and_what_is_left(self):
+        rows = _retired_rows("kagura_memories", "kagura_memories_other", "kagura_memories_other")
+        deleted: list[str] = []
+
+        async def _delete(ids, collection):
+            if collection == "kagura_memories_other":
+                await asyncio.Event().wait()
+            deleted.extend(ids)
+
+        order, session_cm, log, elapsed = await self._drain(rows, _delete, timeout=0.05)
+
+        assert elapsed < 2.0
+        assert deleted == [str(rows[0].version_point)]
+        assert order == ["lookup"]
+        assert session_cm.__aexit__.await_args.args[0] is asyncio.CancelledError
+        timed_out = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "old_version_point_drain_timed_out"
+        ]
+        assert [c.kwargs for c in timed_out] == [
+            {"timeout_seconds": 0.05, "points_dropped": 1, "points_left": 2}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_shared_point_is_not_counted_as_left(self):
+        rows = _retired_rows("kagura_memories", "kagura_memories")
+
+        async def _stall(_ids, _collection):
+            await asyncio.Event().wait()
+
+        _, _, log, _ = await self._drain(rows, _stall, timeout=0.05, shared=[rows[0].version_point])
+
+        timed_out = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "old_version_point_drain_timed_out"
+        ]
+        assert [c.kwargs for c in timed_out] == [
+            {"timeout_seconds": 0.05, "points_dropped": 0, "points_left": 1}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_error_from_inside_is_a_failure_not_the_bound(self):
+        """A ``TimeoutError`` the DB driver raises (a connect timeout) is not
+        the drain's bound expiring: it is logged as the lookup failure it is,
+        with its class, not as a stalled vector store."""
+        rows = _retired_rows("kagura_memories")
+        delete = AsyncMock()
+
+        _, _, log, _ = await self._drain(rows, delete, lookup_error=TimeoutError())
+
+        delete.assert_not_awaited()
+        warned = [(c.args[0], c.kwargs) for c in log.warning.call_args_list]
+        assert warned == [
+            ("old_version_point_lookup_failed", {"rows": 1, "error_class": "TimeoutError"})
+        ]
+
 
 class TestProcessIncrementalSavepoints:
     """#2218: every event runs in its own SAVEPOINT, so a failed event rolls
@@ -2604,3 +2761,63 @@ class TestTryExcludePointWriters:
         async with isolated_session(db_session) as drain:
             assert await try_exclude_point_writers(drain) is True
             await drain.rollback()
+
+
+class TestRetiredPointDrainReleasesTheLockAgainstTheDb:
+    """#2478, against the real DB: a drain stalled in the vector store holds
+    the point writers out only until its bound; a writer that queued behind
+    it then gets the lock."""
+
+    @pytest.mark.asyncio
+    async def test_a_writer_queued_behind_a_stalled_drain_gets_the_lock(self, db_session):
+        from db.base import isolated_session
+        from db.point_writer_lock import hold_point_writer_lock, try_exclude_point_writers
+        from services.resource_indexer import RetiredVersionRow
+
+        bound = 2.0
+        await db_session.rollback()
+        indexer, _ = _db_indexer(db_session)
+        indexer._retired = [RetiredVersionRow(uuid4(), uuid4(), "kagura_memories")]
+        stalled = asyncio.Event()
+
+        async def _stall(_ids, _collection):
+            stalled.set()
+            await asyncio.Event().wait()
+
+        # The probe and the writer connect before the drain starts, so once it
+        # stalls each needs one round trip on an open connection, far inside
+        # the bound, rather than a new connection racing it.
+        async with (
+            isolated_session(db_session) as probe,
+            isolated_session(db_session) as writer,
+        ):
+            await probe.execute(select(1))
+            await writer.execute(select(1))
+            with (
+                patch("services.resource_indexer.delete_points_from_qdrant", _stall),
+                patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", bound),
+            ):
+                started = time.monotonic()
+                drain = asyncio.create_task(indexer._drop_retired_points())
+                try:
+                    async with asyncio.timeout(bound + 10):
+                        await stalled.wait()
+                    held_during_stall = not await try_exclude_point_writers(probe)
+                    await probe.rollback()
+                    async with asyncio.timeout(bound + 10):
+                        await hold_point_writer_lock(writer)
+                    writer_waited = time.monotonic() - started
+                    await writer.rollback()
+                    async with asyncio.timeout(bound + 10):
+                        await drain
+                finally:
+                    drain.cancel()
+
+        assert held_during_stall
+        # The drain's bound starts after ``started``, so a writer let in by
+        # the bound waited at least that long; earlier means the lock went
+        # before the bound, much later that the bound did not release it.
+        assert bound - 0.05 <= writer_waited < bound + 5
+        async with isolated_session(db_session) as after:
+            assert await try_exclude_point_writers(after) is True
+            await after.rollback()

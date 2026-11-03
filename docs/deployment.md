@@ -1846,7 +1846,11 @@ version removes that version's resource point the same way. If the batch rolls
 back, the rows come back and keep their points. A crash between the commit and
 these deletes, or a point writer that is still open at that moment, leaves
 points without a row, and the sweep removes them
-([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)).
+([#2248](https://github.com/kagura-ai/memory-cloud/issues/2248)). The version
+point deletes hold the point-writer lock, and every new writer waits behind
+them, so they get at most 2 seconds together; a stalled vector store leaves the
+rest to the sweep and logs `old_version_point_drain_timed_out` with the points
+deleted and left ([#2478](https://github.com/kagura-ai/memory-cloud/issues/2478)).
 
 These deletes skip a point that another live row still names. Only one live
 context can serve a resource (`contexts.resource_id` is unique among live
