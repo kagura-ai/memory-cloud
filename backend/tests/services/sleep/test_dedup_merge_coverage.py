@@ -1847,22 +1847,32 @@ class TestArchiveExemptLoserRealDB:
                 )
             ).one()
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        # #2565: the loser's point is queued, deleted after the caller's commit.
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             result = await phase.execute(config, user_id, None, None, SleepBudget())
 
         assert result.details["merged"] == 0
         assert result.details["skipped_exempt"] == 1
         assert (await _row_state(memo.id)).deleted_at is None
         assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep"}
+        queue.assert_not_awaited()
+        assert phase.pending_point_deletes == []
 
         await db_session.execute(
             update(Memory).where(Memory.id == memo.id).values(tags=["tech-debt", "status:done"])
         )
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             result = await phase.execute(config, user_id, None, None, SleepBudget())
 
         assert result.details["merged"] == 1
         assert result.details["skipped_exempt"] == 0
         assert (await _row_state(memo.id)).deleted_at is not None
+        entry = (memo.id, memo.id, "kagura_memories")
+        queue.assert_awaited_once_with(db_session, [entry])
+        assert phase.pending_point_deletes == [entry]
         assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep", "status:done"}

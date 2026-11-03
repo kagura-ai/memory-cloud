@@ -407,31 +407,49 @@ class TestConsolidationTask:
         mock_memory_repo.list = AsyncMock(return_value=[memo])
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
+        # #2565: forget's steps — queued before the page's commit, deleted after it.
+        steps = MagicMock()
+        steps.attach_mock(
+            AsyncMock(side_effect=lambda rows: [(m, p, "kagura_memories_x") for m, p, _ in rows]),
+            "queue",
+        )
+        steps.attach_mock(mock_db.commit, "commit")
+        steps.attach_mock(AsyncMock(), "delete_points")
 
         with (
             patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
             patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
             patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
             patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
+            patch.object(MemoryService, "_queue_forgotten_points", steps.queue),
+            patch.object(MemoryService, "delete_forgotten_points", steps.delete_points),
         ):
             await consolidation_task()
-        return memo, mock_memory_repo, mock_qdrant_delete
+        # No vector delete before the commit, on either path.
+        mock_qdrant_delete.assert_not_called()
+        return memo, mock_memory_repo, steps
 
     @pytest.mark.asyncio
     async def test_never_deletes_an_open_memo(self, monkeypatch):
         """#2584: the legacy pass honours SLEEP_ARCHIVE_EXEMPT_TAGS too (default
         ``status:open``) — it is the pass a deployment without SLEEP_ENABLED runs,
         and its delete is physical."""
-        _memo, repo, qdrant_delete = await self._run_with_open_memo(monkeypatch, None)
+        _memo, repo, steps = await self._run_with_open_memo(monkeypatch, None)
 
-        qdrant_delete.assert_not_called()
         repo.delete.assert_not_called()
+        steps.queue.assert_awaited_once_with([])
+        steps.delete_points.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
     async def test_an_empty_exempt_setting_deletes_the_memo(self, monkeypatch):
-        memo, repo, _qdrant_delete = await self._run_with_open_memo(monkeypatch, "")
+        memo, repo, steps = await self._run_with_open_memo(monkeypatch, "")
 
         repo.delete.assert_called_once_with(memo.id)
+        # The task ran to the end: the memo's point queued with the delete, the
+        # page committed, then the point deleted.
+        steps.queue.assert_awaited_once_with([(memo.id, memo.id, memo.context_id)])
+        steps.delete_points.assert_awaited_once_with([(memo.id, memo.id, "kagura_memories_x")])
+        assert [c[0] for c in steps.mock_calls] == ["queue", "commit", "delete_points"]
 
     @pytest.mark.asyncio
     async def test_leaves_recent_unused_memory_alone(self):
