@@ -78,6 +78,7 @@ FK の依存逆順で削除:
 | `workspace_members` | `user_id = :uid` | |
 | `workspace_invitations` | `invited_by = :uid OR email = :email` | |
 | `plan_changes.changed_by` | SHA256 pseudonymize | legal retention 維持 |
+| `memories` (context なし) | 次行で削除する workspace の `workspace_id` かつ `context_id IS NULL` | #2445: `memories.workspace_id` に FK がなく workspace の cascade では消えないため、workspace の直前に削除 (admin のユーザー削除・`delete_admin` CLI と同じ条件)。lock は memory の lock 段階で他の memory と一緒に取る。本人著の行の point は step 1 と `vector_erasure_jobs`、他人著の行の point は `sweep_orphan_vectors` が消す (context のある行と同じ) |
 | `workspaces` | `owner_user_id = :uid` | step 3 後の sole-owner のみ。cascade で contexts/memories/etc. |
 | `memories` (残存行) | `user_id` を SHA256 pseudonymize + `details = NULL`。すべての残存行を `embedding_status = 'failed'` + `embedding_error = 'erased_author: …'` + `embedding_retry_count = 3` + `embedding_attempted_at` (#2363 / #2393) | #1336: 共有/移譲 workspace に残る本人著メモリの scrub。details の NULL 化で生成列 (location_lat/lon, trigger_from/until) も自動 NULL。tombstone 行は #2263 から scrub せず削除。embedding キューから外した件数は counts キー `memories_embedding_dequeued` (pseudonymize の前に raw sub で実行。#2393 から `success` 行も含むので残存行の数 = `memories_scrubbed` と同じ) |
 | `worker_app_identities.created_by` / `updated_by` | SHA256 pseudonymize | #1358: global 行 (workspace cascade なし)。legal retention 維持、operator sub のリンクのみ切断 |
