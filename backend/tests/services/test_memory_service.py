@@ -3306,6 +3306,125 @@ class TestForgetQueuesItsPoints:
         assert order == ["commit", "audit"]
 
 
+@pytest.mark.usefixtures("point_writer_lock_free")
+class TestCleanupDeletesThePointsAfterTheCommit:
+    """#2480: ``cleanup_old_working_memories`` hard-deletes rows. Their points
+    go after the commit, queued in its transaction (#2476): a point deleted
+    before a commit that never lands leaves a live row without its vector."""
+
+    @staticmethod
+    def _service(order, rows):
+        service = MemoryService(MagicMock())
+        service.memory_repo.get_old_working_memories = AsyncMock(return_value=rows)
+        service.memory_repo.delete = AsyncMock(side_effect=lambda mid: order.append(("row", mid)))
+
+        async def commit():
+            order.append("commit")
+
+        service.db.commit = AsyncMock(side_effect=commit)
+        return service
+
+    @staticmethod
+    def _patches(order, delete_point):
+        import contextlib
+
+        async def queue(db, entries):
+            order.append(("queue", *entries))
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch(
+                "services.deferred_point_deletes.queue_point_deletes",
+                AsyncMock(side_effect=queue),
+            )
+        )
+        stack.enter_context(
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c"))
+        )
+        stack.enter_context(patch("db.qdrant.delete_points_from_qdrant", delete_point))
+        stack.enter_context(
+            patch.object(
+                MemoryService,
+                "_point_to_delete",
+                AsyncMock(side_effect=lambda memory: memory.point_id),
+            )
+        )
+        return stack
+
+    @staticmethod
+    def _rows():
+        ws, ctx = uuid4(), uuid4()
+        kept = TestAccessEventEmission._memory_row(ws, ctx, uuid4())
+        kept.importance = 0.9  # high importance: kept
+        old = [TestAccessEventEmission._memory_row(ws, ctx, uuid4()) for _ in range(2)]
+        return old, kept
+
+    @pytest.mark.asyncio
+    async def test_the_rows_commit_then_the_points_go(self):
+        old, kept = self._rows()
+        order: list = []
+        service = self._service(order, [old[0], kept, old[1]])
+
+        async def delete_point(points, collection):
+            order.append(("points", *points))
+
+        with self._patches(order, AsyncMock(side_effect=delete_point)):
+            assert await service.cleanup_old_working_memories("u1") == 2
+
+        assert order == [
+            ("row", old[0].id),
+            ("row", old[1].id),
+            ("queue", *((m.id, m.id, "c") for m in old)),
+            "commit",
+            ("points", *(str(m.id) for m in old)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_commit_deletes_no_point(self):
+        old, _ = self._rows()
+        order: list = []
+        service = self._service(order, old)
+        service.db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        delete_point = AsyncMock()
+        # The per-row delete the old order ran before the commit.
+        one_point = AsyncMock()
+        with (
+            self._patches(order, delete_point),
+            patch("services.memory_service.delete_memory_from_qdrant", one_point),
+            pytest.raises(RuntimeError, match="commit failed"),
+        ):
+            await service.cleanup_old_working_memories("u1")
+        delete_point.assert_not_awaited()
+        one_point.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_shared_point_another_live_row_names_is_not_queued(self):
+        old, _ = self._rows()
+        order: list = []
+        service = self._service(order, old)
+        delete_point = AsyncMock()
+        with (
+            self._patches(order, delete_point),
+            patch.object(
+                MemoryService,
+                "_point_to_delete",
+                AsyncMock(side_effect=lambda m: None if m.id == old[0].id else m.point_id),
+            ),
+        ):
+            await service.cleanup_old_working_memories("u1")
+        assert ("queue", (old[1].id, old[1].id, "c")) in order
+        delete_point.assert_awaited_once_with([str(old[1].id)], "c")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_point_delete_after_the_commit_fails_soft(self):
+        old, _ = self._rows()
+        service = self._service([], old)
+        failing = AsyncMock(side_effect=RuntimeError("qdrant down"))
+        with self._patches([], failing):
+            assert await service.cleanup_old_working_memories("u1") == 2
+        failing.assert_awaited_once()
+
+
 class TestFlooredUnscoredRerankCandidates:
     """#2084: a candidate the reranker could not score reaches the readers of
     ``hybrid_score`` — recall ``score`` and the co-activation activation — at

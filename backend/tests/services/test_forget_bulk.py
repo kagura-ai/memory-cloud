@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -82,8 +83,9 @@ def _service(rows, *, can_access=True) -> tuple[MemoryService, MagicMock]:
     service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
         return_value=(MagicMock(), str(WS), str(CTX))
     )
+    # (memory id, point id) of each point to delete: own-id points here.
     service._soft_delete_chunk = AsyncMock(  # type: ignore[method-assign]
-        side_effect=lambda user_id, ids, *a, **kw: (list(ids), [str(i) for i in ids])
+        side_effect=lambda user_id, ids, *a, **kw: (list(ids), [(i, i) for i in ids])
     )
     perm = MagicMock(
         can_access_memory=AsyncMock(
@@ -97,6 +99,8 @@ AUDIT = AsyncMock()
 POINTS = AsyncMock()
 # #2015: the deleted memories' content chunk points.
 CHUNKS = AsyncMock()
+# #2480: each chunk's points, queued in its own transaction (#2476).
+QUEUE = AsyncMock()
 
 
 async def _run(service, perm, **kwargs):
@@ -109,15 +113,31 @@ def _deleted_ids(service) -> list:
     return [i for c in service._soft_delete_chunk.await_args_list for i in c.args[1]]
 
 
+@contextlib.asynccontextmanager
+async def _lock_free(self, point_deletes):
+    """The post-commit step's lock and live-owner look: free, nothing owned."""
+    yield list(point_deletes)
+
+
+def _patches(perm) -> contextlib.ExitStack:
+    stack = contextlib.ExitStack()
+    for target, mock in (
+        ("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
+        ("db.qdrant.delete_points_from_qdrant", POINTS),
+        ("db.qdrant.delete_chunk_points", CHUNKS),
+        ("services.deferred_point_deletes.queue_point_deletes", QUEUE),
+    ):
+        stack.enter_context(patch(target, mock))
+    stack.enter_context(patch("services.permission_service.PermissionService", return_value=perm))
+    stack.enter_context(patch.object(MemoryService, "_points_free_to_delete", _lock_free))
+    return stack
+
+
 async def _run_full(service, perm, **kwargs):
-    AUDIT.reset_mock()
-    POINTS.reset_mock()
-    CHUNKS.reset_mock()
+    for mock in (AUDIT, POINTS, CHUNKS, QUEUE):
+        mock.reset_mock()
     with (
-        patch("services.permission_service.PermissionService", return_value=perm),
-        patch("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
-        patch("db.qdrant.delete_points_from_qdrant", POINTS),
-        patch("db.qdrant.delete_chunk_points", CHUNKS),
+        _patches(perm),
         patch(
             "services.memory_service.resolve_collection_name",
             AsyncMock(return_value="kagura_memories"),
@@ -199,24 +219,69 @@ class TestDryRunAndDelete:
         assert call.args[2:] == (str(WS), str(CTX))
 
     @pytest.mark.asyncio
-    async def test_each_chunk_is_audited_and_its_points_removed_in_one_request(self) -> None:
+    async def test_each_chunk_is_audited_and_the_points_removed_once_after_the_loop(self) -> None:
         rows = [_row() for _ in range(5)]
         service, perm = _service(rows)
         await _run(service, perm, dry_run=False, chunk_size=2)
         assert AUDIT.await_count == 3
         assert [c.kwargs["result_count"] for c in AUDIT.await_args_list] == [2, 2, 1]
-        assert POINTS.await_count == 3
-        assert [len(c.args[0]) for c in POINTS.await_args_list] == [2, 2, 1]
-        assert all(c.args[1] == "kagura_memories" for c in POINTS.await_args_list)
+        # #2480: each chunk queues its points in its own transaction (#2476).
+        assert [len(c.args[1]) for c in QUEUE.await_args_list] == [2, 2, 1]
+        queued = [entry for c in QUEUE.await_args_list for entry in c.args[1]]
+        assert queued == [(r.id, r.id, "kagura_memories") for r in rows]
+        # The post-commit delete takes the global point-writer lock, so it
+        # runs once per request, after every commit: one point request.
+        POINTS.assert_awaited_once_with([str(r.id) for r in rows], "kagura_memories")
         # The collection is resolved once per request, not per memory.
         assert service.resolve_calls == 1
-        # #2015: each chunk's deleted memories lose their content chunk points.
-        assert [len(c.args[0]) for c in CHUNKS.await_args_list] == [2, 2, 1]
-        assert all(c.args[1] == "kagura_memories" for c in CHUNKS.await_args_list)
+        # #2015: the deleted memories lose their content chunk points too.
+        CHUNKS.assert_awaited_once_with([r.id for r in rows], "kagura_memories")
+
+    @pytest.mark.asyncio
+    async def test_the_points_go_after_the_commits(self) -> None:
+        """#2480: forget's order (#2201). Each chunk is queued and committed
+        before any point leaves the vector store."""
+        rows = [_row() for _ in range(3)]
+        service, perm = _service(rows)
+        order: list[str] = []
+        service.db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        POINTS.side_effect = lambda points, collection: order.append("points")
+        QUEUE.side_effect = lambda db, entries: order.append("queue")
+        AUDIT.side_effect = lambda **kw: order.append("audit")
+        try:
+            assert await _run(service, perm, dry_run=False, chunk_size=2) == 3
+        finally:
+            POINTS.side_effect = QUEUE.side_effect = AUDIT.side_effect = None
+        assert order == ["queue", "commit", "audit", "queue", "commit", "audit", "points"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_commit_deletes_no_point(self) -> None:
+        """#2480: the case the old points-then-commit order lost the vector —
+        the commit raises, so the rows stay live and so must their points."""
+        service, perm = _service([_row() for _ in range(2)])
+        service.db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await _run(service, perm, dry_run=False, chunk_size=2)
+        service.db.rollback.assert_awaited_once()
+        POINTS.assert_not_awaited()
+        CHUNKS.assert_not_awaited()
+        AUDIT.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_point_delete_after_the_commit_fails_soft(self) -> None:
+        """The rows are committed tombstones; their queue rows get the points
+        deleted by the drain (#2476)."""
+        service, perm = _service([_row() for _ in range(2)])
+        POINTS.side_effect = RuntimeError("qdrant down")
+        try:
+            assert await _run(service, perm, dry_run=False, chunk_size=2) == 2
+        finally:
+            POINTS.side_effect = None
+        POINTS.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_failed_chunk_point_delete_does_not_fail_the_forget(self) -> None:
-        """#2015: the rows are committed; the sweep removes the chunks later."""
+        """#2015: the rows are committed; the drain removes the chunks later."""
         rows = [_row() for _ in range(2)]
         service, perm = _service(rows)
         CHUNKS.side_effect = RuntimeError("qdrant down")
@@ -336,31 +401,18 @@ class TestBoundedReads:
 
     @pytest.mark.asyncio
     async def test_a_failure_in_chunk_two_keeps_chunk_one(self) -> None:
-        """Points-then-commit per chunk: chunk 1 stays
-        committed and audited once; chunk 2 is rolled back and the error raised."""
+        """Chunk 1 stays committed and audited once; chunk 2's commit fails, it
+        is rolled back and the error raised. No point is deleted: chunk 2's
+        rows are live again, and chunk 1's points stay queued for the drain."""
         service, perm = _service([_row() for _ in range(4)])
-        AUDIT.reset_mock()
-        POINTS.reset_mock()
-        POINTS.side_effect = [None, RuntimeError("qdrant down")]
-        try:
-            with (
-                patch("services.permission_service.PermissionService", return_value=perm),
-                patch("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
-                patch("db.qdrant.delete_points_from_qdrant", POINTS),
-                patch("db.qdrant.delete_chunk_points", CHUNKS),
-                patch(
-                    "services.memory_service.resolve_collection_name",
-                    AsyncMock(return_value="kagura_memories"),
-                ),
-                pytest.raises(RuntimeError, match="qdrant down"),
-            ):
-                await service.forget_bulk("u1", context_id=CTX, dry_run=False, chunk_size=2)
-        finally:
-            POINTS.side_effect = None
-        assert service.db.commit.await_count == 1
+        service.db.commit = AsyncMock(side_effect=[None, RuntimeError("commit failed")])
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await _run(service, perm, dry_run=False, chunk_size=2)
+        assert service.db.commit.await_count == 2
         assert AUDIT.await_count == 1
         assert AUDIT.await_args.kwargs["result_count"] == 2
         service.db.rollback.assert_awaited_once()
+        POINTS.assert_not_awaited()
 
 
 class TestForgetByQueryUsesTheSessionWorkspace:
@@ -479,8 +531,9 @@ class TestTheChunkIsAFixedNumberOfStatements:
         for fragment in ("user_id", "workspace_id", "context_id"):
             assert f"neural_memory_edges.{fragment} =" in sqls[3]
         assert deleted == [*own, resource_row]
-        # The shared point another live row owns is kept out of the index delete.
-        assert points == [str(i) for i in own]
+        # The shared point another live row owns is kept out of the index
+        # delete; the rest come as (memory id, point id) for the queue (#2480).
+        assert points == [(i, i) for i in own]
 
     @pytest.mark.asyncio
     async def test_no_shared_points_skips_the_select(self) -> None:

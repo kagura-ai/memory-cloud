@@ -1836,6 +1836,10 @@ Until the point goes it is not a recall hit, but it takes a candidate slot and
 counts in `confidence`. The sweep stays the backstop for a point an embedding
 task wrote after the forget. Apply the `f21_2476_deferred_point_deletes`
 migration before starting this version: `forget` writes to the table.
+`POST /api/v1/memory/forget-bulk`, the memories a `rollback_session` forgets
+and the working-memory cleanup take the same path: their points are queued
+with the delete, removed only after the commit, and deferred the same way
+([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)).
 
 The resource indexer cleans up after itself as well. When a new version of a
 document replaces the old one, the indexer deletes the old row. Once the

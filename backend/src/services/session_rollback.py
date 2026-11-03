@@ -88,6 +88,7 @@ from models.memory import (
     MemoryRevision,
     MemorySessionRollback,
 )
+from services.deferred_point_deletes import PointDelete
 from services.memory_versions import (
     PRIOR_RESTORED_FROM_KEY,
     _comparable,  # one "is this the same value" rule with the version bump
@@ -857,7 +858,8 @@ class RollbackResult:
     reembed_ids: list[UUID] = field(default_factory=list)
     restored_ids: list[UUID] = field(default_factory=list)
     forgotten_ids: list[UUID] = field(default_factory=list)
-    forgotten_points: list[str] = field(default_factory=list)
+    # (memory id, point id, collection), queued in this call's transaction (#2480).
+    forgotten_points: list[PointDelete] = field(default_factory=list)
     collection: str | None = None
     payload_syncs: list[PayloadSync] = field(default_factory=list)
     # (workspace_id, requested_by, context_id) for the access-event audit.
@@ -966,7 +968,10 @@ class _Executor:
         self.reembed_ids: list[UUID] = []
         self.restored_ids: list[UUID] = []
         self.forgotten_ids: list[UUID] = []
-        self.forgotten_points: list[str] = []
+        self.forgotten_points: list[PointDelete] = []
+        # The forget chunk in flight: its ids and points count only once its
+        # SAVEPOINT is released (#2480).
+        self._item_forgotten: tuple[list[UUID], list[PointDelete]] = ([], [])
         self.failed_events = 0
         self.collection: str | None = None
         self._embedding: tuple[Any, str] | None = None
@@ -1026,6 +1031,7 @@ class _Executor:
     async def _guarded(self, items: list[PlanItem], work: Callable[[list[PlanItem]], Any]) -> None:
         event_ids = [i for item in items for i in item.event_ids]
         self._item_syncs = []
+        self._item_forgotten = ([], [])
         try:
             async with self.db.begin_nested():
                 await work(items)
@@ -1035,6 +1041,13 @@ class _Executor:
             )
             # Only an item whose SAVEPOINT was released syncs its payload.
             self.payload_syncs.extend(self._item_syncs)
+            # #2480: likewise only a released forget chunk's rows are
+            # tombstones whose points finish() may delete; a rolled-back
+            # chunk's rows are live again.
+            forgotten_ids, forgotten_points = self._item_forgotten
+            self.forgotten_ids.extend(forgotten_ids)
+            self.forgotten_points.extend(forgotten_points)
+            self.summary["forgotten"] += len(forgotten_ids)
         except Exception as exc:
             # The SAVEPOINT rolled the item back whole, and its events stay
             # unhandled: the next call plans the item again from the row as it
@@ -1087,9 +1100,13 @@ class _Executor:
         this call commits once, at its end, and a point deleted before a
         rollback of that transaction would leave a live row no vector search
         finds. The other way round is safe — a tombstone's point is never a
-        hit (hits are hydrated from live rows) and the orphan sweep removes
-        one whose delete failed.
+        hit (hits are hydrated from live rows). #2480: each point is queued
+        here, inside the chunk's SAVEPOINT (#2476), so a chunk rolled back
+        takes its queue rows with it and the drain retries a delete
+        ``finish`` could not run.
         """
+        from services.deferred_point_deletes import queue_point_deletes
+
         deleted, points = await self.service._soft_delete_chunk(
             self.requested_by,
             [item.memory_id for item in items],
@@ -1097,9 +1114,11 @@ class _Executor:
             self.ctx,
             writer=REVISION_WRITER_ROLLBACK,
         )
-        self.forgotten_ids.extend(deleted)
-        self.forgotten_points.extend(points)
-        self.summary["forgotten"] += len(deleted)
+        # run() resolved the collection before the first forget chunk.
+        collection = cast(str, self.collection)
+        entries = [(mid, point, collection) for mid, point in points]
+        await queue_point_deletes(self.db, entries)
+        self._item_forgotten = (deleted, entries)
 
     async def _restore(self, items: list[PlanItem]) -> None:
         """Un-forget and/or put back the pre-session values of one memory."""
@@ -1450,10 +1469,17 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
     tombstones are committed, restored tags / importance / type reach the
     payload now that they are, and restored texts are re-embedded now that
     the restore is. Every step fails soft, as on the write paths it mirrors —
-    a tombstone's leftover point is no hit and the orphan sweep removes it; a
-    re-embed that fails leaves the row ``pending`` for the embedding sweep; a
-    payload patch that fails is logged (the payload keeps the session's
-    values until the memory's next edit or re-embed).
+    a tombstone's leftover point is no hit and its queue row gets it deleted
+    by the drain (#2476); a re-embed that fails leaves the row ``pending`` for
+    the embedding sweep; a payload patch that fails is logged (the payload
+    keeps the session's values until the memory's next edit or re-embed).
+
+    #2480: the point delete is ``forget``'s post-commit step
+    (``MemoryService.delete_forgotten_points``): under the point-writer lock,
+    only for points no live row names, within
+    ``FORGET_POINT_DELETE_TIMEOUT_SECONDS``, and it removes the queue rows of
+    what it handled. It runs on a session of its own; ``db`` only names the
+    engine (without it, the app's session factory's).
 
     With ``db`` (the call's session, committed) the payload patches are
     built from the rows as they are now, read ``FOR SHARE``: an edit that
@@ -1463,18 +1489,12 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
     (#2346): the queued values may be older than such an edit. Without
     ``db`` the patches queued at the restore are applied as they are.
     """
-    if result.forgotten_points and result.collection:
-        from db.qdrant import delete_points_from_qdrant
+    if result.forgotten_points:
+        from services.memory_service import MemoryService
 
-        try:
-            await delete_points_from_qdrant(result.forgotten_points, result.collection)
-        except Exception as exc:
-            logger.warning(
-                "session_rollback_point_delete_failed",
-                collection=result.collection,
-                points=len(result.forgotten_points),
-                error_class=type(exc).__name__,
-            )
+        # Points and their content chunks (#2015), one request each per
+        # collection. Never raises.
+        await MemoryService(cast(AsyncSession, db)).delete_forgotten_points(result.forgotten_points)
     await _apply_payload_syncs(result.payload_syncs, db)
     if result.reembed_ids:
         # One task working through the ids, not one task each: a rollback can
@@ -1482,18 +1502,6 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
         # connection while it calls the provider.
         task = asyncio.create_task(_reembed_in_turn(list(result.reembed_ids)))
         task.add_done_callback(_log_reembed_task)
-    if result.forgotten_ids and result.collection:
-        from db.qdrant import delete_chunk_points
-
-        try:
-            await delete_chunk_points(result.forgotten_ids, result.collection)
-        except Exception as exc:
-            logger.warning(
-                "content_chunks_delete_failed",
-                collection=result.collection,
-                memories=len(result.forgotten_ids),
-                error_class=type(exc).__name__,
-            )
     await _emit_access_events(result)
 
 
