@@ -496,9 +496,11 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
-| `get_sleep_history` | List past sleep runs | Viewer+ |
+| `get_sleep_history` | List past sleep runs; `source` = `sleep` (default) \| `analysis` \| `all`, and each row carries its `source` | Viewer+ |
 | `get_sleep_report` | Detailed sleep report with all actions | Viewer+ |
 | `rollback_sleep_run` | Rollback all actions from a completed sleep run | Editor+ on the report's context (report owner only; workspace viewers refused) |
+
+Since #2088 a Memory Analysis run also writes a `sleep_reports` row (`source='analysis'`) carrying its spend, so through v0.137.0 `get_sleep_history` returned those rows mixed in with the Sleep runs. Since #2219 the tool lists Sleep runs only unless you pass `source="analysis"` or `source="all"`.
 
 ## Usage (1)
 

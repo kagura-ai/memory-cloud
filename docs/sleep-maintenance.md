@@ -180,7 +180,7 @@ Every phase writes individual change records to `sleep_actions` during execution
 
 | Tool                  | Purpose                                                                  |
 |-----------------------|--------------------------------------------------------------------------|
-| `get_sleep_history`   | List recent sleep runs for a context with status, timing, and counters.  |
+| `get_sleep_history`   | List recent sleep runs for a context with status, timing, and counters. `source` picks Sleep runs (`sleep`, the default), Memory Analysis spend rows (`analysis`) or both (`all`) (#2219). |
 | `get_sleep_report`    | Fetch a single report with per-phase results and the full action audit log. |
 | `rollback_sleep_run`  | Reverse every recorded action of a run in reverse order.                 |
 
@@ -188,7 +188,7 @@ Every phase writes individual change records to `sleep_actions` during execution
 
 | Endpoint                                    | Purpose                                                   |
 |---------------------------------------------|-----------------------------------------------------------|
-| `GET /admin/sleep-reports`                  | List reports with filters (`status`, `context_id`, `user_id`) and pagination. |
+| `GET /admin/sleep-reports`                  | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep`, `analysis` or `all` (default) (#2219). |
 | `GET /admin/sleep-reports/{report_id}`      | Report detail with the full action audit log.             |
 
 Both admin endpoints require `Depends(require_admin)`.

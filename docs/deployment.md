@@ -3825,6 +3825,16 @@ The log events for the same path (`supersede_verify_*`, the k-NN seeding
 events and their levels) are listed in
 [Supersede suggestions and k-NN seeding: log events](#supersede-suggestions-and-k-nn-seeding-log-events-issue-2023).
 
+**Memory Analysis spend in Sleep Reports (#2219).** A Memory Analysis run
+records its spend as a `sleep_reports` row with `source='analysis'`, also when
+the run failed or was cancelled (#2088). The Sleep Reports pages show these rows
+next to the Sleep runs, with a *Source* column and filter; the list endpoints
+take `source=sleep|analysis|all` (default `all`). Such a row has no Sleep phase
+results: its LLM calls belong to the cluster-labeling step, whose clusters are
+on the analysis itself. The spend of LLM requests still in flight when an
+analysis is cancelled cannot be recorded: the provider bills them, but no
+response, and so no token count, ever arrives.
+
 ### Setting prices (`LLM_PRICING_OVERRIDES`)
 
 Price a model — self-hosted or any other — with a JSON array:
