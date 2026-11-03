@@ -47,6 +47,7 @@ interface GraphTabPanelProps {
   contextId: string;
 }
 
+const GRAPH_LIMIT_NODES = 200;
 const N_OPTIONS: readonly number[] = [10, 25, 50];
 const STRATEGY_OPTIONS: readonly FilterStrategy[] = [
   "degree",
@@ -109,28 +110,67 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // (and detach if we ever fall back to loading mid-life).
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
 
+  // #2543: graph reads are numbered as they start, and a reply is drawn only
+  // when it is newer than the graph on screen. An older reply that lands late
+  // (the first load after an accept made from a deep link, or the first of
+  // two accepts) never replaces a newer graph; a newer read that fails still
+  // lets an older reply through.
+  const graphReadRef = useRef(0);
+  const graphShownRef = useRef(0);
+  const showGraph = useCallback((read: number, result: GraphData) => {
+    if (read <= graphShownRef.current) return;
+    graphShownRef.current = read;
+    setGraphData(result);
+  }, []);
+
+  // #2543: an accepted supersede re-reads the graph so the new `supersedes`
+  // edge is drawn. A re-read rather than a local patch: an endpoint may not be
+  // a node yet (the graph lists only memories that already have an edge), the
+  // accept can retype an existing auto-edge on the pair instead of adding one,
+  // and node degrees (the default filter) and the totals move with it. Unlike
+  // fetchData it leaves `loading` alone, so the canvas stays mounted (see
+  // handleDeleteSuccess); a failed re-read keeps the drawn graph, the edge
+  // shows on the next load.
+  const handleSupersedeAccepted = useCallback(() => {
+    if (!contextId) return;
+    const read = ++graphReadRef.current;
+    void (async () => {
+      try {
+        const result = await graphApi.getGraphData(contextId, {
+          limit_nodes: GRAPH_LIMIT_NODES,
+        });
+        showGraph(read, result);
+      } catch (err) {
+        // Nothing to undo: the accept itself succeeded and was reported.
+        console.warn("Graph re-read after an accepted supersede failed", err);
+      }
+    })();
+  }, [contextId, showGraph]);
+
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
     setMemoryIdParam,
     contextId,
+    onSupersedeAccepted: handleSupersedeAccepted,
   });
 
   // --- Data fetch ---
   const fetchData = useCallback(async () => {
     if (!contextId) return;
+    const read = ++graphReadRef.current;
     setLoading(true);
     setError(null);
     try {
       const result = await graphApi.getGraphData(contextId, {
-        limit_nodes: 200,
+        limit_nodes: GRAPH_LIMIT_NODES,
       });
-      setGraphData(result);
+      showGraph(read, result);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("graphVizLoadError"));
     } finally {
       setLoading(false);
     }
-  }, [contextId, t]);
+  }, [contextId, t, showGraph]);
 
   useEffect(() => {
     fetchData();
