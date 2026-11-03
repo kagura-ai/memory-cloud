@@ -5,8 +5,8 @@
  *
  * Caller owns the URL param (`memoryIdParam` + `setMemoryIdParam`) and the
  * post-success side effects (toast, refetch, pagination) — those are invoked
- * AFTER `applyEditSuccess` / `applyDeleteSuccess` so this hook stays free of
- * UI dependencies.
+ * AFTER `applyEditSuccess` / `applyDeleteSuccess`, or from the optional
+ * `onSupersedeAccepted` callback, so this hook stays free of UI dependencies.
  *
  * Hook owns dialog open state, hydrated MemoryReference + linked refs, and
  * two safety refs:
@@ -65,6 +65,13 @@ export interface SupersedeError {
   blocksRetry?: boolean;
 }
 
+// #2515: the pair a successful accept linked — `sourceId` (the newer memory,
+// the one the dialog shows) now supersedes `targetId`.
+export interface AcceptedSupersede {
+  sourceId: string;
+  targetId: string;
+}
+
 export interface UseMemoryDetailDialogOpts {
   memoryIdParam: string | null;
   setMemoryIdParam: (id: string | null) => void;
@@ -72,6 +79,11 @@ export interface UseMemoryDetailDialogOpts {
   // confirm edge. Optional so callers that never surface a supersede
   // suggestion don't have to thread it (the accept action no-ops without it).
   contextId?: string;
+  // #2515: called after a successful accept, once the hook has applied its
+  // own state, so the caller can refresh rows it caches (the Memories tab's
+  // recall mode). Not called for a failed or refused accept. Fires even if
+  // the dialog moved on meanwhile: the edge exists either way.
+  onSupersedeAccepted?: (accepted: AcceptedSupersede) => void;
 }
 
 export interface UseMemoryDetailDialogResult {
@@ -113,7 +125,8 @@ export interface UseMemoryDetailDialogResult {
 export function useMemoryDetailDialog(
   opts: UseMemoryDetailDialogOpts,
 ): UseMemoryDetailDialogResult {
-  const { memoryIdParam, setMemoryIdParam, contextId } = opts;
+  const { memoryIdParam, setMemoryIdParam, contextId, onSupersedeAccepted } =
+    opts;
   const { toast } = useToast();
   const t = useTranslations("contextDetail.memoriesPanel");
   const tDetail = useTranslations("contextDetail.detailDialog");
@@ -366,6 +379,7 @@ export function useMemoryDetailDialog(
     setSupersedeAccepting(true);
     setSupersedeError(null);
     void (async () => {
+      let accepted = false;
       try {
         await graphApi.createEdge({
           context_id: contextId,
@@ -373,6 +387,7 @@ export function useMemoryDetailDialog(
           target_id: targetId,
           edge_type: "supersedes",
         });
+        accepted = true;
         setAcceptedSupersedeKey(`${sourceId}->${targetId}`);
         toast({ title: tDetail("supersede.accepted") });
       } catch (err) {
@@ -415,6 +430,9 @@ export function useMemoryDetailDialog(
       } finally {
         setSupersedeAccepting(false);
       }
+      // #2515: outside the try, so a throw in the caller's handler is never
+      // reported as a failed accept.
+      if (accepted) onSupersedeAccepted?.({ sourceId, targetId });
     })();
   }, [
     hydrated,
@@ -423,6 +441,7 @@ export function useMemoryDetailDialog(
     toast,
     tDetail,
     refreshHydrated,
+    onSupersedeAccepted,
   ]);
 
   return {

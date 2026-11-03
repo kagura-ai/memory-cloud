@@ -123,10 +123,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     error: string | null;
   } | null>(null);
 
+  // Re-run the submitted recall after an edit / delete / accepted supersede
+  // (no-op before one).
+  const refreshRecall = useCallback(() => {
+    setRecallRequest((r) => (r ? { ...r } : r));
+  }, []);
+
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
     setMemoryIdParam,
     contextId,
+    // #2515: the recall rows cache the last query, so a row that just became
+    // superseded would stay until the next search. List mode is unchanged.
+    onSupersedeAccepted: refreshRecall,
   });
 
   // #830: multi-tag AND drill-down set, URL-driven (?tags=a&tags=b) so it's
@@ -384,11 +393,6 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     if (!trimmed) return;
     setRecallRequest({ query: trimmed });
   }, [searchInput]);
-
-  // Re-run the submitted recall after an edit / delete (no-op before one).
-  const refreshRecall = useCallback(() => {
-    setRecallRequest((r) => (r ? { ...r } : r));
-  }, []);
 
   const handleView = useCallback(
     (memory: MemoryListItem) => dialog.openDetail(memory.id),
