@@ -550,3 +550,27 @@ def test_reverted_and_ambiguous_details_keys_are_counted_never_named(capsys):
     out = capsys.readouterr().out
     assert "ambiguous" not in out and "details keys" not in out
     assert "key(s)" not in cli._summary(quiet)
+
+
+@pytest.mark.parametrize("repair", ["_repair", "_repair_note_row"])
+def test_a_repaired_row_gets_the_salt_fingerprint(repair):
+    """#2598: a row the re-run pseudonymizes gets the fingerprint of the salt
+    it derived the pseudonym with, in the same UPDATE, as the live erasure's
+    writers do — the re-key after a rotation reads it."""
+    from sqlalchemy.dialects import postgresql
+
+    from models.erasure import NOTE_PSEUDONYM_SALT_KEY
+    from services.erasure_details import pseudonym_salt_fingerprint
+    from utils.hashing import sha256_hex
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+    with patch("services.account_erasure_service._audit_salt", return_value="salt"):
+        assert asyncio.run(getattr(cli, repair)(db, uuid4(), "sub")) is True
+
+    params = db.execute.await_args.args[0].compile(dialect=postgresql.dialect()).params
+    assert params["user_id"] == sha256_hex("sub", salt="salt")
+    # the merged keys (``merged_request_summary``; its other literal is the empty default)
+    (note,) = [value for value in params.values() if isinstance(value, dict) and value]
+    assert note[NOTE_PSEUDONYM_SALT_KEY] == pseudonym_salt_fingerprint("salt")
+    assert note.get("pseudonymized") is (True if repair == "_repair_note_row" else None)

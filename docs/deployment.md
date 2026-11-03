@@ -371,7 +371,9 @@ any value that is already private has side effects:
 - `AUDIT_PSEUDO_SALT`: nothing is looked up by pseudonym, but rows
   pseudonymized before and after the change for the same person no longer
   correlate. Change it only if it is still the public default; a short private
-  salt is accepted.
+  salt is accepted. After a change, re-key the pseudonyms stored under the old
+  salt with `python -m src.cli.rekey_erasure_pseudonyms` (the order of steps is
+  in [the erasure runbook, section 2.5.1](ops/erasure-runbook.md)).
 - `API_KEY_SECRET`: every stored Fernet ciphertext (BYOK provider keys,
   connector secrets, worker app identities) becomes undecryptable, so stored
   provider keys have to be entered again.

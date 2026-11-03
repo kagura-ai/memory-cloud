@@ -22,6 +22,7 @@ import pytest
 
 from auth.workspace_roles import WorkspaceRole
 from models.erasure import (
+    NOTE_PSEUDONYM_SALT_KEY,
     REASON_SELF_SERVICE,
     REASON_USER_REQUEST_VIA_SUPPORT,
     STATUS_CANCELLED,
@@ -34,6 +35,7 @@ from services.account_erasure_service import (
     AccountErasureService,
     _sha256_hex,
 )
+from services.erasure_details import pseudonym_salt_fingerprint
 from utils.exceptions import (
     EmailDispatchError,
     ErasureAlreadyInProgressError,
@@ -1665,6 +1667,11 @@ class TestErasureResiduals1365:
         assert params["initiated_by"] != "oauth-sub-123"  # self-service pseudonymized
         assert params["ip_address"] is None
         assert params["user_agent"] is None
+        # #2598: the summary, with the fingerprint of the pseudonym's salt
+        assert params["deleted_data_summary"] == {
+            "users": 1,
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint(),
+        }
         # #2286: a completed run never keeps a marker the sweep may have set
         assert "failure_reason" in params and params["failure_reason"] is None
 
@@ -2312,6 +2319,8 @@ class TestFailureAfterThePostgresCommit:
         # the summary keeps the Postgres counts and the scrub time
         summary = params["deleted_data_summary"]
         assert summary["postgres"]["memory_scrub_at"] == "2026-10-01T12:00:00Z"
+        # #2598: and gets the fingerprint of the salt the pseudonym was derived with
+        assert summary[NOTE_PSEUDONYM_SALT_KEY] == pseudonym_salt_fingerprint("salt")
 
     @pytest.mark.asyncio
     async def test_a_failure_before_the_commit_keeps_the_row_as_it_was(self):
@@ -2685,6 +2694,8 @@ class TestSweepClosesARequestWithoutAUserRow:
             "postgres": postgres,
             "qdrant_after_commit": {"kagura_memories": 2},
             "redis": {"sessions": 1, "co_act": 0},
+            # #2598: the salt the pseudonym was derived with
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint("salt"),
         }
         # guarded: a row moved since the claim is left alone
         assert params["status_1"] == "in_progress"
@@ -2748,6 +2759,7 @@ class TestSweepClosesARequestWithoutAUserRow:
         assert params["deleted_data_summary"] == {
             "note": "user_row_already_absent",
             "pseudonymized": True,
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint("salt"),
         }
         assert "failure_reason" not in params
         assert params["user_id"] == params["initiated_by"] == pseudonym
@@ -2775,6 +2787,7 @@ class TestSweepClosesARequestWithoutAUserRow:
         assert params["deleted_data_summary"] == {
             "postgres": {"users": 1},
             "qdrant_after_commit": {"kagura_memories": 2},
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint(),
         }
         svc.db.commit.assert_awaited()
         (call,) = [
@@ -3071,7 +3084,11 @@ class TestTheSweepNeverRunsAgainstAReRegisteredSub:
             assert params["initiated_by"] == pseudonym
         else:
             assert "initiated_by" not in params
-        assert params["deleted_data_summary"] == {"postgres": postgres}  # no redis key
+        # no redis key
+        assert params["deleted_data_summary"] == {
+            "postgres": postgres,
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint("salt"),
+        }
         svc._resync_interrupted_payloads.assert_awaited_once()
         (call,) = [
             c

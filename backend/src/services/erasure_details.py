@@ -77,6 +77,9 @@ past erasures by pseudonym (#2243) share one definition:
   initiated_by)`` (#2288) — the one salted pseudonym, and the values every
   writer of an erasure request row sets once its subject is erased (the
   live erasure's handler, sweep and finalize, and the re-run's repair).
+  ``pseudonym_salt_note()`` (#2598) — the salt's fingerprint each of those
+  writers stamps on the row, which ``cli.rekey_erasure_pseudonyms`` reads
+  after a salt rotation.
 
 Scope and locks (#2242): every statement reaches the log only through the
 subject's own rows (``subject_memory_ids``), never by scanning every
@@ -132,6 +135,7 @@ from db.qdrant import update_memory_payload_in_qdrant
 from models.auth import APIKey, AuditLog, Context, User
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
+    NOTE_PSEUDONYM_SALT_KEY,
     NOTE_PSEUDONYMIZED_KEY,
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -182,6 +186,15 @@ def is_pseudonym(value: str) -> bool:
     return _PSEUDONYM.fullmatch(value) is not None
 
 
+def current_pseudonym_salt() -> str:
+    """The salt pseudonyms are derived with now: ``AUDIT_PSEUDO_SALT``, looked
+    up through ``services.account_erasure_service._audit_salt`` at call time (a
+    lazy import: that module imports this one; tests patch it there)."""
+    from services import account_erasure_service
+
+    return account_erasure_service._audit_salt()
+
+
 def erasure_pseudonym(value: str) -> str:
     """The salted sha256 pseudonym an erasure stores for ``value`` (a raw sub).
 
@@ -190,14 +203,42 @@ def erasure_pseudonym(value: str) -> str:
     audit-log hashes of the subject's sub and email (``pseudonymize_audit_logs``,
     the ``account_erasure`` audit row; #2288); ``reprocess_erasures`` derives
     the pseudonym of a request row that failed after its Postgres step on a
-    version before v0.124.0 and still stores the raw sub (#2268). The salt is
-    looked up through
-    ``services.account_erasure_service._audit_salt`` at call time (a lazy
-    import: that module imports this one).
+    version before v0.124.0 and still stores the raw sub (#2268). The re-key
+    after a salt rotation (#2598, ``cli.rekey_erasure_pseudonyms``) stores the
+    pseudonym of the stored pseudonym. The salt is ``current_pseudonym_salt``'s.
     """
-    from services import account_erasure_service
+    return sha256_hex(value, salt=current_pseudonym_salt())
 
-    return sha256_hex(value, salt=account_erasure_service._audit_salt())
+
+# #2598: the domain of ``pseudonym_salt_fingerprint`` and its length (hex digits)
+PSEUDONYM_SALT_FINGERPRINT_DOMAIN = "erasure-pseudonym-salt"
+PSEUDONYM_SALT_FINGERPRINT_LENGTH = 16
+
+
+def pseudonym_salt_fingerprint(salt: str | None = None) -> str:
+    """Which salt a request row's pseudonyms were derived with (#2598).
+
+    ``sha256(salt + "erasure-pseudonym-salt")``, its first 16 hex digits:
+    tells two salts apart without naming either. Domain-separated from every
+    pseudonym (the input is a constant, never an identifier), so it says
+    nothing a stored pseudonym and a known sub do not already say.
+
+    Args:
+        salt: The salt; None for the current one (``current_pseudonym_salt``).
+    """
+    if salt is None:
+        salt = current_pseudonym_salt()
+    return sha256_hex(PSEUDONYM_SALT_FINGERPRINT_DOMAIN, salt=salt)[
+        :PSEUDONYM_SALT_FINGERPRINT_LENGTH
+    ]
+
+
+def pseudonym_salt_note() -> dict[str, str]:
+    """``{NOTE_PSEUDONYM_SALT_KEY: <the current salt's fingerprint>}`` (#2598):
+    what every writer of ``pseudonymized_request_values`` merges into the
+    row's ``deleted_data_summary`` in the same UPDATE, so the re-key after a
+    salt rotation knows which rows are under another salt."""
+    return {NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint()}
 
 
 def pseudonymized_request_values(account_id: str, initiated_by: str | None) -> dict[str, Any]:
@@ -206,7 +247,9 @@ def pseudonymized_request_values(account_id: str, initiated_by: str | None) -> d
     One definition for every writer that pseudonymizes a request row once
     its subject is erased: ``_finalize``, ``_execute``'s failure handler
     after the Postgres commit (#2268), the sweep's interrupted / user-row-gone
-    branch (#2286) and ``reprocess_erasures``'s ``_repair``.
+    branch (#2286) and ``reprocess_erasures``'s ``_repair`` /
+    ``_repair_note_row``. Each of them also merges ``pseudonym_salt_note()``
+    into the row's ``deleted_data_summary`` (#2598).
 
     ``user_id`` (always the subject, ``account_id``) becomes
     ``erasure_pseudonym(account_id)`` and the request metadata
@@ -252,6 +295,9 @@ REPROCESS_AUDIT_ACTION = "account_erasure_reprocess"
 ERASURE_WRITER_ACTIONS = (ERASURE_AUDIT_ACTION, REPROCESS_AUDIT_ACTION)
 # the ``resource`` prefix of a row about a member (``user:{email}``)
 USER_RESOURCE_PREFIX = "user:"
+# the ``resource`` of the erasure's and the re-run's own audit rows: this
+# prefix and the first 16 hex digits of the subject's pseudonym
+ERASURE_RESOURCE_PREFIX = "user_pseudonym:"
 # the sweep's crash cutoff (``sweep_pending_erasures``): a run is over by then
 ERASURE_RUN_CUTOFF = timedelta(hours=1)
 
@@ -1494,6 +1540,15 @@ def _failed_after_commit_marked() -> ColumnElement[bool]:
         ErasureRequest.failure_reason.startswith(FAILURE_AFTER_POSTGRES_COMMIT, autoescape=True),
         False,
     )
+
+
+def stores_pseudonym() -> ColumnElement[bool]:
+    """A request row whose ``user_id`` is its subject's pseudonym (#2598): a
+    finalized erasure (``finalized_erasure``) or a note row the sweep
+    pseudonymized (``note_row_pseudonymized``, since v0.125.0). A row
+    finalized before v0.58.1 matches too and stores the raw sub: the caller
+    tests the shape (``is_pseudonym``), as ``erased_pseudonyms`` does."""
+    return finalized_erasure() | (_never_ran() & note_row_pseudonymized())
 
 
 def finalized_erasure() -> ColumnElement[bool]:
