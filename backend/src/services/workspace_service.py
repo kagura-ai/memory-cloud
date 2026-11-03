@@ -543,14 +543,18 @@ class WorkspaceService:
         # holds its subject's users row and then deletes the subject's rows
         # in workspaces it does not own (external keys, files): taking them
         # here first means this transaction never holds a workspace-scoped
-        # row while it waits on a users row.
+        # row while it waits on a users row. FOR NO KEY UPDATE (the update
+        # below changes no key): a remember by one of them holds FOR KEY SHARE
+        # on its users row until it commits and locks W for its quota check
+        # meanwhile, so FOR UPDATE here would hold W and wait on it, a
+        # deadlock. It still waits on an erasure's FOR UPDATE.
         users = (
             (
                 await self.db.execute(
                     select(User)
                     .where(User.current_workspace_id == workspace_id)
                     .order_by(User.user_id)
-                    .with_for_update()
+                    .with_for_update(key_share=True)
                 )
             )
             .scalars()

@@ -1168,6 +1168,71 @@ async def test_deleting_a_workspace_the_subject_does_not_own_never_deadlocks_the
     assert deleted_at is not None
 
 
+@pytest.mark.asyncio
+async def test_a_workspace_delete_does_not_wait_on_an_open_remember_of_its_users(
+    db_session, connector_world
+):
+    """``delete_workspace`` locks the users rows whose current workspace W is
+    ``FOR NO KEY UPDATE``, which the ``FOR KEY SHARE`` a remember by M holds
+    on ``users[M]`` to its commit (``hold_remember_author``) does not block.
+    M, a member whose current workspace is W, has a remember into W open
+    while O deletes W: the delete commits at once, then the remember takes W
+    for its quota check. With ``FOR UPDATE`` the delete held W and waited on
+    the remember, which then waited on W: ``deadlock detected``."""
+    from services.erasure_write_guard import hold_remember_author
+
+    world = connector_world
+    owner = await world.user("owner")
+    member = await world.user("member")
+    ws_id = (await world.workspace(owner, **{member: "member"})).id
+    await _current_workspace(db_session, member, ws_id)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    delete_pid: int | None = None
+
+    async def delete_ws() -> None:
+        nonlocal delete_pid
+        async with maker() as db:
+            delete_pid = await _pid(db)
+            await WorkspaceService(db).delete_workspace(ws_id, deleted_by=owner)
+
+    tasks: list[asyncio.Task] = []
+    async with maker() as remember:
+        try:
+            await hold_remember_author(remember, member)
+            deleting = asyncio.create_task(delete_ws())
+            tasks.append(deleting)
+            await _done_or_blocked(maker, deleting, lambda: delete_pid)
+            deleted_at_once = deleting.done()
+            # the remember's quota check (``check_memory_quota``) locks W
+            (quota_lock,) = await asyncio.wait_for(
+                asyncio.gather(
+                    remember.execute(
+                        select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+                    ),
+                    return_exceptions=True,
+                ),
+                30,
+            )
+            await remember.rollback()
+            (delete_result,) = await asyncio.wait_for(
+                asyncio.gather(deleting, return_exceptions=True), 30
+            )
+        finally:
+            await remember.rollback()
+            await _cancel_all(tasks)
+
+    assert deleted_at_once, delete_result
+    assert not isinstance(quota_lock, BaseException), quota_lock
+    assert delete_result is None, delete_result
+    current = await db_session.scalar(
+        select(User.current_workspace_id)
+        .where(User.user_id == member)
+        .execution_options(populate_existing=True)
+    )
+    assert current is None
+
+
 # ---------------------------------------------------------------------------
 # A member's role change against step 2's choice of successor (#2571)
 # ---------------------------------------------------------------------------
