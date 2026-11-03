@@ -393,8 +393,69 @@ async def test_a_sole_owned_workspace_its_delete_holds_reschedules(db_session, c
             )
         )
     ).one()
-    assert shared.owner_user_id == subject  # the hand-over was rolled back too
+    assert shared.owner_user_id == subject  # never handed on: the step stopped first
     assert shared.ownership_epoch == 0
+    roles = dict(
+        (
+            await db_session.execute(
+                select(WorkspaceMember.user_id, WorkspaceMember.role).where(
+                    WorkspaceMember.workspace_id == shared_id
+                )
+            )
+        ).all()
+    )
+    assert roles == {subject: "owner", successor: "admin"}
+
+
+@pytest.mark.asyncio
+async def test_a_lock_conflict_at_step_three_rolls_back_the_hand_over(db_session, connector_world):
+    """Steps 2 and 3 are one transaction (v0.134.2). Step 2 holds every live
+    workspace the subject owns (#2455), so the lock conflict step 3 can still
+    meet is a deadlock it is the victim of (40P01, injected here once the
+    hand-over is in the transaction): the hand-over is rolled back with the
+    deletes and the request is rescheduled at ``postgres``."""
+    from services.account_erasure_service import DEADLOCK_ERROR_CLASS, _LockConflict
+
+    world = connector_world
+    subject = await world.user("subject")
+    successor = await world.user("successor")
+    shared_id = (await world.workspace(subject, **{successor: "admin"})).id
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    owner_in_step_three: list[str | None] = []
+
+    async def deadlocked(self, target):
+        owner_in_step_three.append(
+            await self.db.scalar(select(Workspace.owner_user_id).where(Workspace.id == shared_id))
+        )
+        raise _LockConflict(DEADLOCK_ERROR_CLASS)
+
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_pseudonymize_audit_logs", deadlocked),
+        pytest.raises(ErasureRetryScheduledError),
+    ):
+        await asyncio.wait_for(_force_erase(maker, subject), 30)
+
+    assert owner_in_step_three == [successor]  # handed on, not yet committed
+    request = await _request_of(db_session, subject)
+    assert request.status == STATUS_COOLING_OFF
+    retry = request.deleted_data_summary["retry"]
+    assert request.deleted_data_summary == {"retry": retry}
+    assert (retry["attempts"], retry["step"], retry["error_class"]) == (
+        1,
+        "postgres",
+        DEADLOCK_ERROR_CLASS,
+    )
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == subject)) == subject
+    shared = (
+        await db_session.execute(
+            select(Workspace.owner_user_id, Workspace.ownership_epoch)
+            .where(Workspace.id == shared_id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    assert (shared.owner_user_id, shared.ownership_epoch) == (subject, 0)  # rolled back
     roles = dict(
         (
             await db_session.execute(
