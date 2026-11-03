@@ -274,9 +274,11 @@ class ReferralService:
     async def redeem(self, *, referred_user_id: str, code: str) -> ReferralGrant:
         """Redeem ``code`` on behalf of ``referred_user_id`` and pay both sides.
 
-        The whole method is a single transaction. The cap check takes a row lock
-        on the referrer so two concurrent redemptions of the same code cannot
-        both observe "one slot left"; the payout itself is guarded by
+        The whole method is a single transaction. The cap check runs under row
+        locks on the referrer and the referee, taken in one ``user_id``-ordered
+        statement, so two concurrent redemptions of the same code cannot both
+        observe "one slot left" and two users redeeming each other's codes
+        cannot deadlock (#2573); the payout itself is guarded by
         ``uq_referral_grants_referred_user`` so a retry pays zero regardless.
 
         Args:
@@ -321,17 +323,43 @@ class ReferralService:
         if referrer_id == referred_user_id:
             raise ReferralSelfError()
 
-        # Lock the referrer row for the duration of the cap check + insert, so
-        # two invitees redeeming the same code cannot both see the last free
-        # slot. It is taken before any workspace lock: the global lock order
+        # Lock both users rows for the duration of the cap check + insert: the
+        # referrer's, so two invitees redeeming the same code cannot both see
+        # the last free slot, and the referee's, which the INSERT's foreign key
+        # would otherwise take later (a KEY SHARE). A transaction that needs
+        # two users rows locks both in user_id order in one statement (#2573):
+        # with the referrer's row alone, A redeeming B's code while B redeems
+        # A's each held one row and waited on the other's (a deadlock). No
+        # NOWAIT: this transaction holds nothing yet. FOR NO KEY UPDATE, the
+        # weakest lock that serializes two redeems and still waits on an
+        # erasure's FOR UPDATE / DELETE: it does not conflict with the FOR KEY
+        # SHARE a remember, a foreign-key check or a context restore takes on
+        # a users row. The restore takes its authors' rows in users.id order,
+        # so against FOR UPDATE it could hold one of the two rows and wait on
+        # the other (a deadlock). The users rows come before any workspace
+        # lock: the global lock order
         # (tests/integration/test_erasure_lock_order_db.py) is users rows, then
         # workspace rows, and a transaction holding a users row never waits on
         # a workspace row. ``DELETE /workspaces/W`` locks W first and then the
         # users rows it clears, so a wait on W here could close that cycle; the
         # workspace rows below are taken NOWAIT, UUID-ordered (#2443).
-        await self.db.execute(
-            select(User.user_id).where(User.user_id == referrer_id).with_for_update()
+        locked = set(
+            (
+                await self.db.execute(
+                    select(User.user_id)
+                    .where(User.user_id.in_([referrer_id, referred_user_id]))
+                    .order_by(User.user_id)
+                    .with_for_update(key_share=True)
+                )
+            ).scalars()
         )
+        # A row missing here was deleted (an account erasure) while the lock
+        # waited on it: the answers of the reads above, not a foreign-key
+        # failure at the INSERT.
+        if referred_user_id not in locked:
+            raise NotFoundException("User", referred_user_id)
+        if referrer_id not in locked:
+            raise ReferralCodeInvalidError()
 
         used = await self._count_active_grants(referrer_id)
         if used >= self.settings.referral_max_grants_per_referrer:
@@ -484,8 +512,8 @@ class ReferralService:
         the write one critical section.
 
         The lock is ``NOWAIT``, tried again for a moment
-        (:meth:`_lock_workspace_nowait`): ``redeem`` holds the referrer's users
-        row here, and a transaction holding a users row never waits on a
+        (:meth:`_lock_workspace_nowait`): ``redeem`` holds two users rows
+        here, and a transaction holding a users row never waits on a
         workspace row (#2443). ``revoke`` and ``apply_pending_grants`` hold none
         and get the same behaviour. Prefer ``_recompute_workspace_bonuses`` over
         calling this directly with more than one workspace — that wrapper
