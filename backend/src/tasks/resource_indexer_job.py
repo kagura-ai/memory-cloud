@@ -176,6 +176,11 @@ async def run_queued_indexers() -> None:
                 state.job_status = "running"
                 state.last_run_at = utcnow()
                 await db.commit()
+                # #2477: the runbook's rewind and clear refuse a running row,
+                # so one that landed since the refresh above is the last
+                # operator write the run can meet: start from it, not from the
+                # copy that refresh read, or the run writes the copy back.
+                await db.refresh(state)
 
                 # #2254: state.metrics is replaced below on every path, and the
                 # skipped events it names are the rewind target. #2477: the run

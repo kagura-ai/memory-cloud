@@ -31,6 +31,7 @@ import pydantic.root_model  # noqa: F401  isort: skip
 import pytest
 import pytest_asyncio
 from sqlalchemy import text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
 # ``mcp_tasks`` → ``mcp.types``, whose ``RootModel[...]`` generic submodel
@@ -490,6 +491,24 @@ async def _run_job(db_session, process_incremental, record=None):
     return indexer_instance.process_incremental
 
 
+def _operator_writes_then_allows(db_session, statement, params):
+    """A ``can_run_indexer`` that first commits ``statement`` from a session of
+    its own, as an operator's psql would.
+
+    The job calls it after the top-of-loop refresh and before the ``running``
+    commit, the window a runbook write still passes the
+    ``job_status <> 'running'`` guard in (#2477).
+    """
+
+    async def _can_run(*_a):
+        async with AsyncSession(bind=db_session.bind, expire_on_commit=False) as operator:
+            await operator.execute(text(statement), params)
+            await operator.commit()
+        return True, "ok"
+
+    return _can_run
+
+
 class TestFailedEventsSurviveTheJob:
     """#2254 / #2477: the skipped events in ``state.metrics`` are the
     operator's only rewind target. The job hands the row's record to the run,
@@ -577,6 +596,30 @@ class TestFailedEventsSurviveTheJob:
             return IndexerMetrics(skipped=True, reason="no_pending_events")
 
         await _run_job(db_session, _see_the_offset)
+
+        assert offsets == [6]
+
+    async def test_a_rewind_before_the_running_commit_is_the_offset_the_run_starts_from(
+        self, db_session, seeded_state
+    ):
+        """#2477: the rewind lands after the top-of-loop refresh, while the row
+        is not ``running`` yet, so the runbook's guard lets it through."""
+        seeded_state.last_offset = 100
+        await db_session.commit()
+        rewind = (
+            "UPDATE indexer_state SET last_offset = 6 WHERE id = :id AND job_status <> 'running'"
+        )
+        offsets = []
+
+        async def _see_the_offset(*_a, **_k):
+            offsets.append(seeded_state.last_offset)
+            return IndexerMetrics(skipped=True, reason="no_pending_events")
+
+        with patch(
+            "tasks.resource_indexer_job.can_run_indexer",
+            _operator_writes_then_allows(db_session, rewind, {"id": seeded_state.id}),
+        ):
+            await _run_job(db_session, _see_the_offset)
 
         assert offsets == [6]
 
@@ -723,6 +766,26 @@ class TestTheOperatorClearsTheRecord:
         await self._clear(db_session, seeded_state)
 
         process = await _run_job(db_session, _returns_the_record())
+
+        assert process.await_args.kwargs["failed_events"] == []
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == []
+
+    async def test_a_clear_before_the_running_commit_is_not_written_over(
+        self, db_session, seeded_state
+    ):
+        """The clear lands after the top-of-loop refresh, while the row is not
+        ``running`` yet, so the runbook's guard lets it through: the run must
+        start from it, not from the copy the refresh read."""
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        await db_session.commit()
+        params = {"resource_id": seeded_state.resource_id, "context_id": seeded_state.context_id}
+
+        with patch(
+            "tasks.resource_indexer_job.can_run_indexer",
+            _operator_writes_then_allows(db_session, _runbook_clear(), params),
+        ):
+            process = await _run_job(db_session, _returns_the_record())
 
         assert process.await_args.kwargs["failed_events"] == []
         await db_session.refresh(seeded_state)
