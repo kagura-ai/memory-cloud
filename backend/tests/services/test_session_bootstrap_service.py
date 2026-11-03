@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from functools import partial
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
+from mcp_server.tools.context import _guardrails_field
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from services.memory_listing import changes_since, decode_change_cursor
@@ -546,12 +548,13 @@ async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
     changes = comps["changes"]
     assert changes["truncated"] is True and changes["has_more"] is True
     assert len(changes["changes"]) < len(full_index["components"]["changes"]["changes"])
-    # A later lane keeps rows only when every earlier lane kept all of its rows.
+    # A later lane keeps rows only when every earlier lane kept all of its rows;
+    # guardrails come last (#2485).
     lanes = [
         (comps["pinned"], "memories", full_index["components"]["pinned"]),
-        (env["guardrails"], "items", full_index["guardrails"]),
         (comps["upcoming"], "results", full_index["components"]["upcoming"]),
         (changes, "changes", full_index["components"]["changes"]),
+        (env["guardrails"], "items", full_index["guardrails"]),
     ]
     earlier_cut = False
     for block, key, whole in lanes:
@@ -560,6 +563,99 @@ async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
         if len(block[key]) < len(whole[key]):
             assert block["truncated"] is True
             earlier_cut = True
+
+
+_TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": "inform"}
+
+
+@pytest.mark.asyncio
+async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
+    """#2485: on a context whose guardrail rows alone fill the session-start
+    budget, the upcoming rows and a changes page still come back; the
+    guardrails lane takes what the other lanes leave and says it was cut."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    now = utcnow()
+    for i in range(50):
+        await _row(
+            db_session,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=f"guardrail {i}: " + "never merge before the checks are green " * 4,
+            importance=0.8,
+            details={"tool_trigger": dict(_TOOL_TRIGGER)},
+            created_at=now - timedelta(days=30),  # outside the changes window
+        )
+    pinned = [
+        await _row(
+            db_session, owner, ws.id, ctx.id, summary=f"standing rule {i}", delivery_mode="always"
+        )
+        for i in range(2)
+    ]
+    upcoming = []
+    for months in (1, 2):
+        due = now + timedelta(days=31 * months)
+        upcoming.append(
+            await _row(
+                db_session,
+                owner,
+                ws.id,
+                ctx.id,
+                summary=f"follow-up due in {months} month(s)",
+                type="time",
+                details={
+                    "trigger": {
+                        "year": due.year,
+                        "month": due.month,
+                        "from": due.strftime("%Y-%m-01T00:00:00"),
+                        "until": due.strftime("%Y-%m-28T23:59:59"),
+                    }
+                },
+            )
+        )
+    for i in range(40):
+        await _row(
+            db_session,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=f"busy change {i} " + "y" * 200,
+            created_at=now - timedelta(hours=40 - i),
+        )
+    await db_session.commit()
+    await db_session.refresh(ctx)
+    pinned_ids = {str(m.id) for m in pinned}
+    upcoming_ids = {str(m.id) for m in upcoming}
+
+    # What the handler passes: get_context_info's block, read from the rows.
+    provider = partial(_guardrails_field, db_session, owner, ctx)
+
+    full_index = await _build(
+        db_session, owner, ws, ctx, guardrails_provider=provider, format="index"
+    )
+    assert full_index["guardrails"]["total_available"] == 50
+    assert json_chars(full_index["guardrails"]) > 3_000 // 2  # half the budget, alone
+    env = await _build(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=provider,
+        format="index",
+        max_chars=3_000,
+    )
+    assert json_chars(env) <= 3_000
+    comps = env["components"]
+    assert {m["memory_id"] for m in comps["pinned"]["memories"]} == pinned_ids
+    assert {r["memory_id"] for r in comps["upcoming"]["results"]} == upcoming_ids
+    assert not comps["upcoming"].get("truncated")
+    changes = comps["changes"]
+    assert changes["changes"], "the changes page must not be empty"
+    assert changes["truncated"] is True and changes["has_more"] is True
+    guard = env["guardrails"]
+    assert len(guard["items"]) < len(full_index["guardrails"]["items"])
+    assert guard["truncated"] is True and guard["total_available"] == 50
 
 
 @pytest.mark.asyncio

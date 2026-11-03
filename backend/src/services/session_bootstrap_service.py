@@ -13,7 +13,7 @@ change list does not answer its question.
 ``format="index"`` (#2126) turns the same reads into pointer rows: pinned
 keeps its text, guardrails / upcoming / changes rows carry an 80-character
 summary head (``summary_cut``), ``instructions`` is left out, and the
-guardrails items become a lane the budget may cut.
+guardrails items become a lane the budget may cut — the last one (#2485).
 
 Components are fail-soft: a failing one reports ``{status: error}`` while the
 rest return, with top-level ``degraded: true`` — the same contract as the
@@ -55,10 +55,12 @@ STATUS_ERROR = "error"
 # Lane priority when the envelope has to be cut: standing guardrails first,
 # then what is due, then what changed.
 _LANES = (("pinned", "memories"), ("upcoming", "results"), ("changes", "changes"))
-# #2126: in index mode the guardrails items are a lane too, right after pinned.
+# #2126: in index mode the guardrails items are a lane too. #2485: the last one,
+# so a context with many tool guardrails cannot starve upcoming and changes —
+# the hook and the guardrail digest deliver them at the matching call anyway.
 # Full mode keeps them uncut (the get_context_info contract).
 _GUARDRAILS = "guardrails"
-_INDEX_LANES = (_LANES[0], (_GUARDRAILS, "items"), *_LANES[1:])
+_INDEX_LANES = (*_LANES, (_GUARDRAILS, "items"))
 
 
 async def _component(db: AsyncSession, name: str, fn: Any) -> dict[str, Any]:
@@ -305,8 +307,8 @@ def _fit(
     or at the start of the window when nothing was kept, so paging on from the
     reply reproduces the cut items instead of skipping them.
 
-    ``index`` (#2126) adds ``guardrails.items`` as the second lane (its block's
-    own ``truncated`` turns true when cut); index rows carry no
+    ``index`` (#2126) adds ``guardrails.items`` as the last lane (#2485; its
+    block's own ``truncated`` turns true when cut); index rows carry no
     ``context_summary``, so nothing is dropped first. When the uncuttable
     shell alone exceeds ``max_chars``, every lane comes back empty with
     ``truncated: true`` — the reply may then exceed ``max_chars`` but says so."""
