@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
+from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, QuotaExceededError, ValidationError
 from utils.logger import get_logger
@@ -368,6 +369,11 @@ class InvitationService:
         Validates invitation (existence, expiration, email match) and creates
         workspace membership. Marks invitation as accepted.
 
+        The workspace row is locked (``lock_workspace_for_update``) before the
+        membership checks and held to the caller's commit, so an accept that
+        waited out an account erasure between its steps 2 and 3 finds the
+        workspace gone and raises ``NotFoundException`` (#2564).
+
         Args:
             token: Invitation token
             user_id: Accepting user's ID
@@ -408,6 +414,10 @@ class InvitationService:
                     f"You are logged in as {user_email}."
                 )
 
+        # #2564: the workspace row first, as in add_member, held to the commit.
+        # Raises NotFoundException for a missing / soft-deleted workspace.
+        workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
+
         # Check if user is already a member
         stmt = select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == invitation.workspace_id,
@@ -418,14 +428,6 @@ class InvitationService:
 
         if existing_member:
             raise ValidationError("You are already a member of this workspace")
-
-        # Get workspace
-        stmt = select(Workspace).where(Workspace.id == invitation.workspace_id)
-        result = await self.db.execute(stmt)
-        workspace = result.scalar_one_or_none()
-
-        if not workspace:
-            raise NotFoundException("Workspace")
 
         # Check member quota (Issue #229 - race condition protection)
         from services.quota_service import QuotaService

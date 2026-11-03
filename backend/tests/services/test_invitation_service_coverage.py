@@ -15,7 +15,8 @@ These tests exercise ``InvitationService`` end-to-end against a real
 - ``get_invitation`` (found + not-found)
 - ``list_invitations`` (pending-only vs include-accepted ordering)
 - ``accept_invitation`` happy path + already-accepted, expired, email
-  mismatch, already-member, workspace-missing, quota-exceeded branches
+  mismatch, already-member, workspace-missing, soft-deleted workspace,
+  quota-exceeded branches, and the workspace row lock taken first (#2564)
 - ``delete_invitation`` (found + not-found)
 - ``cleanup_expired_invitations`` (scoped + global + nothing-to-do)
 - ``get_pending_invitations_for_email`` (email match, NULL-email match,
@@ -26,8 +27,10 @@ External email I/O is always stubbed — no network calls are made.
 
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import event, func, select
 
 from models.auth import (
     Context,
@@ -666,6 +669,75 @@ class TestAcceptInvitation:
             await svc.accept_invitation(
                 token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
             )
+
+    async def test_soft_deleted_workspace_raises_not_found(self, db_session):
+        """#2564: a soft-deleted workspace takes no new member. The workspace
+        lock reads live rows only, so accept answers 404 and writes nothing."""
+        owner, ws, inv = await self._seed_pending(db_session)
+        accepter = await _make_user(db_session, email="invitee@example.com")
+        ws.deleted_at = utcnow()
+        await db_session.flush()
+        svc = _service(db_session)
+
+        with pytest.raises(NotFoundException, match="Workspace not found"):
+            await svc.accept_invitation(
+                token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
+            )
+
+        members = await db_session.scalar(
+            select(func.count())
+            .select_from(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == ws.id)
+        )
+        assert members == 0
+        assert inv.accepted_at is None
+        assert accepter.current_workspace_id is None
+
+    async def test_workspace_row_is_locked_before_the_membership_is_written(self, db_session):
+        """#2564: like ``add_member``, accept takes the workspace row lock
+        first (before the member check, the seat check and the member INSERT)
+        and holds it to the commit, so a workspace deleted while the request
+        waited ends in a 404 instead of a foreign-key violation."""
+        from services import invitation_service as invitation_module
+        from services.quota_service import QuotaService
+
+        owner, ws, inv = await self._seed_pending(db_session)
+        accepter = await _make_user(db_session, email="invitee@example.com")
+        svc = _service(db_session)
+        calls: list[str] = []
+        real_lock = invitation_module.lock_workspace_for_update
+        real_seat_check = QuotaService.check_member_quota
+
+        async def _lock(db, workspace_id, **kwargs):
+            calls.append("lock")
+            return await real_lock(db, workspace_id, **kwargs)
+
+        async def _seat_check(self_, workspace_id, raise_on_exceeded=False):
+            calls.append("seat_check")
+            return await real_seat_check(self_, workspace_id, raise_on_exceeded=raise_on_exceeded)
+
+        def _statement(conn, cursor, statement, parameters, context, executemany):
+            sql = " ".join(statement.split())
+            if sql.startswith("INSERT INTO workspace_members"):
+                calls.append("insert_member")
+            elif sql.startswith("SELECT workspace_members."):
+                calls.append("member_check")
+
+        engine = db_session.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", _statement)
+        try:
+            with (
+                patch.object(invitation_module, "lock_workspace_for_update", _lock),
+                patch.object(QuotaService, "check_member_quota", _seat_check),
+            ):
+                workspace, _ = await svc.accept_invitation(
+                    token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", _statement)
+
+        assert calls == ["lock", "member_check", "seat_check", "insert_member"]
+        assert workspace.id == ws.id
 
     async def test_quota_exceeded_raises_validation(self, db_session, monkeypatch):
         """A QuotaExceededError from the quota service surfaces as ValidationError."""
