@@ -125,6 +125,31 @@ def _restore_md5() -> None:
     engine.dispose()
 
 
+def _guarded_backfill_messages() -> list[str]:
+    """The messages the server sends a client for f11's backfill, rolled back."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / f"{F11_REV}.py"
+    spec = importlib.util.spec_from_file_location(F11_REV, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # A raw psycopg2 cursor: SQLAlchemy's execution context would move the
+    # messages from ``notices`` into its logger.
+    engine = _sync_engine()
+    raw = engine.raw_connection()
+    try:
+        raw.cursor().execute(module._GUARDED_BACKFILL)
+        messages = list(raw.dbapi_connection.notices)  # type: ignore[union-attr]
+        raw.rollback()
+    finally:
+        raw.close()
+    engine.dispose()
+    return messages
+
+
 def _column_exists(conn: Connection) -> bool:
     return (
         conn.execute(
@@ -217,6 +242,12 @@ class TestF11EmbeddedTextDigestMigration:
 
             with _alembic_at_test_db():
                 command.upgrade(_get_alembic_config(), F11_REV)
+            # A WARNING, not a NOTICE: the upgrade's asyncpg connection prints
+            # neither, and the server log keeps only a WARNING by default.
+            assert any(
+                message.startswith("WARNING:  f11 skipped the embedded_text_digest backfill")
+                for message in _guarded_backfill_messages()
+            )
             _restore_md5()
 
             engine = _sync_engine()

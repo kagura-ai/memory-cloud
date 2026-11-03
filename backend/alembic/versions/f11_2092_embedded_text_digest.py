@@ -21,9 +21,10 @@ off-peak. Both steps are re-runnable.
 
 On a FIPS-mode server ``md5()`` raises (#2511): the backfill first probes
 ``md5('')``, and on that error (PG 15+ ``internal_error``, PG 14
-``out_of_memory``) logs a NOTICE and skips the UPDATE, so the rows stay NULL
-and detect once on their next re-queue. Any other error, and any error of the
-UPDATE itself, aborts the upgrade.
+``out_of_memory``) raises a WARNING (kept in the server log; the upgrade's
+asyncpg connection prints no server message) and skips the UPDATE, so the rows
+stay NULL and detect once on their next re-queue. Any other error, and any
+error of the UPDATE itself, aborts the upgrade.
 
 Revision ID: f11_2092_embedded_text_digest
 Revises: f10_2115_revisions_actor_idx
@@ -47,7 +48,7 @@ BEGIN
     BEGIN
         PERFORM md5('');
     EXCEPTION WHEN internal_error OR out_of_memory THEN
-        RAISE NOTICE 'f11 skipped the embedded_text_digest backfill, md5() failed (%)', SQLERRM;
+        RAISE WARNING 'f11 skipped the embedded_text_digest backfill, md5() failed (%)', SQLERRM;
         RETURN;
     END;
     UPDATE memories SET embedded_text_digest = md5(summary || chr(31) || content)

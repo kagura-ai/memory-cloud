@@ -4125,12 +4125,13 @@ One migration does:
 
 - `f11_2092_embedded_text_digest` stamps `memories.embedded_text_digest` with
   `md5()` on the rows already embedded. On a FIPS-mode server it skips that
-  backfill with the NOTICE `f11 skipped the embedded_text_digest backfill,
-  md5() failed (...)` and the upgrade completes. Those rows keep a NULL digest,
-  so each runs the supersede detection once (with `SUPERSEDE_VERIFY_MODE=llm`,
-  possibly one judge call) on its next re-embed, such as a content-chunk
-  backfill or an embedding-model switch, and is stamped then. Any other
-  `md5()` error still stops the upgrade.
+  backfill and the upgrade completes. The server log records the WARNING
+  `f11 skipped the embedded_text_digest backfill, md5() failed (...)` at the
+  default `log_min_messages`; the `alembic upgrade` output does not show it.
+  Those rows keep a NULL digest, so each runs the supersede detection once
+  (with `SUPERSEDE_VERIFY_MODE=llm`, possibly one judge call) on its next
+  re-embed, such as a content-chunk backfill or an embedding-model switch, and
+  is stamped then. Any other `md5()` error still stops the upgrade.
 
 Before v0.141.0 the f11 upgrade stopped on such a server, and the detection
 never stored a candidate.
