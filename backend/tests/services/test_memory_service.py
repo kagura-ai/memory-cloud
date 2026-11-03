@@ -3306,6 +3306,239 @@ class TestForgetQueuesItsPoints:
         assert order == ["commit", "audit"]
 
 
+@pytest.mark.usefixtures("point_writer_lock_free")
+class TestForgetContextGate:
+    """#2480: the context gate (``_get_context_isolation_params``) checks the
+    caller against the context — membership, key-workspace confinement, the
+    agent binding's context-level write gate, the member role — and nothing
+    about the memory. A batch resolves it once and passes it to every id."""
+
+    @staticmethod
+    def _service(order):
+        ws, ctx = uuid4(), uuid4()
+        rows = {}
+        for _ in range(3):
+            row = TestAccessEventEmission._memory_row(ws, ctx, uuid4())
+            rows[row.id] = row
+        service = TestForgetDeletesThePointAfterTheCommit._service(rows, order)
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(ws), str(ctx))
+        )
+        return service, ctx, list(rows)
+
+    @pytest.mark.asyncio
+    async def test_the_gate_is_forgets_write_gate(self):
+        service, ctx, _ = self._service([])
+        key_ws = uuid4()
+        gate = await service.forget_context_gate("caller", ctx, key_workspace_id=key_ws)
+        service._get_context_isolation_params.assert_awaited_once_with(
+            "caller", ctx, access="write", key_workspace_id=key_ws, operation="forget"
+        )
+        assert (gate.user_id, gate.context_id, gate.key_workspace_id) == ("caller", ctx, key_ws)
+
+    @pytest.mark.asyncio
+    async def test_a_batch_runs_the_gate_once_for_all_its_ids(self):
+        order: list = []
+        service, ctx, ids = self._service(order)
+        with TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()):
+            gate = await service.forget_context_gate("caller", ctx)
+            for mid in ids:
+                res = await service.forget(
+                    ForgetRequest(memory_id=mid),
+                    "caller",
+                    current_context_id=ctx,
+                    point_queue=[],
+                    context_gate=gate,
+                )
+                assert res.deleted_count == 1
+        assert service._get_context_isolation_params.await_count == 1
+        # The per-memory checks still run for every id.
+        assert order.count("commit") == len(ids)
+
+    @pytest.mark.asyncio
+    async def test_without_a_gate_each_call_runs_it(self):
+        order: list = []
+        service, ctx, ids = self._service(order)
+        with TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()):
+            for mid in ids:
+                await service.forget(
+                    ForgetRequest(memory_id=mid), "caller", current_context_id=ctx, point_queue=[]
+                )
+        assert service._get_context_isolation_params.await_count == len(ids)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["user", "context", "key_scope", "agent_scope"])
+    async def test_a_gate_resolved_for_another_call_is_refused(self, field):
+        from auth.agent_scope import AgentScope, get_agent_scope, set_agent_scope
+
+        order: list = []
+        service, ctx, ids = self._service(order)
+        assert get_agent_scope() is None
+        gate = await service.forget_context_gate("caller", ctx)
+        kwargs = {
+            "user_id": "someone-else" if field == "user" else "caller",
+            "current_context_id": uuid4() if field == "context" else ctx,
+            "key_workspace_id": uuid4() if field == "key_scope" else None,
+        }
+        if field == "agent_scope":
+            # Resolved without an agent credential, used under one: the
+            # binding's context-level write gate never ran for this agent.
+            set_agent_scope(AgentScope(agent_id=uuid4(), enforcement_mode="enforce"))
+        try:
+            with (
+                TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()),
+                pytest.raises(ValueError, match="context_gate"),
+            ):
+                await service.forget(ForgetRequest(memory_id=ids[0]), context_gate=gate, **kwargs)
+        finally:
+            set_agent_scope(None)
+        assert "commit" not in order
+
+    @pytest.mark.asyncio
+    async def test_the_gate_records_the_agent_scope_it_ran_under(self):
+        from auth.agent_scope import AgentScope, set_agent_scope
+
+        order: list = []
+        service, ctx, ids = self._service(order)
+        scope = AgentScope(agent_id=uuid4(), enforcement_mode="enforce")
+        set_agent_scope(scope)
+        try:
+            gate = await service.forget_context_gate("caller", ctx)
+            assert gate.agent_scope == scope
+            # The same request's scope: accepted.
+            with TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()):
+                res = await service.forget(
+                    ForgetRequest(memory_id=ids[0]),
+                    "caller",
+                    current_context_id=ctx,
+                    point_queue=[],
+                    context_gate=gate,
+                )
+        finally:
+            set_agent_scope(None)
+        assert res.deleted_count == 1
+        assert service._get_context_isolation_params.await_count == 1
+
+
+@pytest.mark.usefixtures("point_writer_lock_free")
+class TestCleanupDeletesThePointsAfterTheCommit:
+    """#2480: ``cleanup_old_working_memories`` hard-deletes rows. Their points
+    go after the commit, queued in its transaction (#2476): a point deleted
+    before a commit that never lands leaves a live row without its vector."""
+
+    @staticmethod
+    def _service(order, rows):
+        service = MemoryService(MagicMock())
+        service.memory_repo.get_old_working_memories = AsyncMock(return_value=rows)
+        service.memory_repo.delete = AsyncMock(side_effect=lambda mid: order.append(("row", mid)))
+
+        async def commit():
+            order.append("commit")
+
+        service.db.commit = AsyncMock(side_effect=commit)
+        return service
+
+    @staticmethod
+    def _patches(order, delete_point):
+        import contextlib
+
+        async def queue(db, entries):
+            order.append(("queue", *entries))
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch(
+                "services.deferred_point_deletes.queue_point_deletes",
+                AsyncMock(side_effect=queue),
+            )
+        )
+        stack.enter_context(
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c"))
+        )
+        stack.enter_context(patch("db.qdrant.delete_points_from_qdrant", delete_point))
+        stack.enter_context(
+            patch.object(
+                MemoryService,
+                "_point_to_delete",
+                AsyncMock(side_effect=lambda memory: memory.point_id),
+            )
+        )
+        return stack
+
+    @staticmethod
+    def _rows():
+        ws, ctx = uuid4(), uuid4()
+        kept = TestAccessEventEmission._memory_row(ws, ctx, uuid4())
+        kept.importance = 0.9  # high importance: kept
+        old = [TestAccessEventEmission._memory_row(ws, ctx, uuid4()) for _ in range(2)]
+        return old, kept
+
+    @pytest.mark.asyncio
+    async def test_the_rows_commit_then_the_points_go(self):
+        old, kept = self._rows()
+        order: list = []
+        service = self._service(order, [old[0], kept, old[1]])
+
+        async def delete_point(points, collection):
+            order.append(("points", *points))
+
+        with self._patches(order, AsyncMock(side_effect=delete_point)):
+            assert await service.cleanup_old_working_memories("u1") == 2
+
+        assert order == [
+            ("row", old[0].id),
+            ("row", old[1].id),
+            ("queue", *((m.id, m.id, "c") for m in old)),
+            "commit",
+            ("points", *(str(m.id) for m in old)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_commit_deletes_no_point(self):
+        old, _ = self._rows()
+        order: list = []
+        service = self._service(order, old)
+        service.db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        delete_point = AsyncMock()
+        # The per-row delete the old order ran before the commit.
+        one_point = AsyncMock()
+        with (
+            self._patches(order, delete_point),
+            patch("services.memory_service.delete_memory_from_qdrant", one_point),
+            pytest.raises(RuntimeError, match="commit failed"),
+        ):
+            await service.cleanup_old_working_memories("u1")
+        delete_point.assert_not_awaited()
+        one_point.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_shared_point_another_live_row_names_is_not_queued(self):
+        old, _ = self._rows()
+        order: list = []
+        service = self._service(order, old)
+        delete_point = AsyncMock()
+        with (
+            self._patches(order, delete_point),
+            patch.object(
+                MemoryService,
+                "_point_to_delete",
+                AsyncMock(side_effect=lambda m: None if m.id == old[0].id else m.point_id),
+            ),
+        ):
+            await service.cleanup_old_working_memories("u1")
+        assert ("queue", (old[1].id, old[1].id, "c")) in order
+        delete_point.assert_awaited_once_with([str(old[1].id)], "c")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_point_delete_after_the_commit_fails_soft(self):
+        old, _ = self._rows()
+        service = self._service([], old)
+        failing = AsyncMock(side_effect=RuntimeError("qdrant down"))
+        with self._patches([], failing):
+            assert await service.cleanup_old_working_memories("u1") == 2
+        failing.assert_awaited_once()
+
+
 class TestFlooredUnscoredRerankCandidates:
     """#2084: a candidate the reranker could not score reaches the readers of
     ``hybrid_score`` — recall ``score`` and the co-activation activation — at

@@ -309,45 +309,62 @@ class TestDefaultContextOnMemberKeys:
 
 class TestCleanupReownsConnectorKeys:
     """#2352: the removed member's live connector keys in the workspace go to
-    its owner before the member's other keys are deleted."""
+    its owner before the member's other keys are deleted; #2373: its agents
+    are settled at the same point, narrowed to the workspace."""
 
     @pytest.mark.asyncio
-    async def test_reown_runs_before_the_api_keys_delete_and_is_reported(self):
-        from sqlalchemy.dialects import postgresql
-        from sqlalchemy.sql.dml import Delete, Update
+    async def test_settle_runs_before_the_api_keys_delete_and_is_reported(self):
+        from sqlalchemy.sql.dml import Delete
 
-        captured: list[Any] = []
+        from services.connector_key_ownership import SettledCredentials
+
+        order: list[Any] = []
 
         def _execute(stmt, *a, **k):
-            captured.append(stmt)
-            result = MagicMock(rowcount=1 if isinstance(stmt, Update) else 2)
+            order.append(stmt)
+            result = MagicMock(rowcount=2)
             result.scalars.return_value.all.return_value = []
             return result
+
+        async def _settle(db, user_id, **kwargs):
+            order.append(("settle", user_id, kwargs))
+            return SettledCredentials(
+                connector_api_keys_reowned=1,
+                agent_api_keys_deleted=1,
+                agents_suspended=1,
+                agents_reowned=0,
+            )
 
         db = MagicMock()
         db.execute = AsyncMock(side_effect=_execute)
         workspace_id = uuid4()
 
-        with patch("services.member_credentials_service.logger") as mock_logger:
+        with (
+            patch("services.member_credentials_service.logger") as mock_logger,
+            patch(
+                "services.member_credentials_service.settle_departing_credentials",
+                AsyncMock(side_effect=_settle),
+            ),
+        ):
             out = await MemberCredentialsService(db).cleanup_member_credentials(
                 workspace_id, "member-1"
             )
 
-        reown, delete_keys = captured[0], captured[1]
-        assert isinstance(reown, Update)
-        sql = " ".join(str(reown.compile(dialect=postgresql.dialect())).split())
-        assert sql.startswith(
-            "UPDATE api_keys SET user_id=workspaces.owner_user_id FROM workspaces WHERE "
+        settle, delete_keys = order[0], order[1]
+        assert settle == (
+            "settle",
+            "member-1",
+            {"path": "member_removal", "workspace_id": workspace_id},
         )
-        assert "api_keys.workspace_id = %(workspace_id_" in sql
-        params = reown.compile().params
-        assert params["workspace_id_1"] == workspace_id
-        assert params["workspace_id_2"] == workspace_id
         assert isinstance(delete_keys, Delete)
         assert getattr(delete_keys.table, "name", None) == "api_keys"
 
         assert out["connector_api_keys_reowned"] == 1
+        assert out["agent_api_keys_deleted"] == 1
+        assert out["agents_suspended"] == 1
+        assert out["agents_reowned"] == 0
         assert out["api_keys_deleted"] == 2
         (call,) = mock_logger.info.call_args_list
         assert call.args[0] == "member_credentials_cleaned_up"
         assert call.kwargs["connector_api_keys_reowned"] == 1
+        assert call.kwargs["agents_suspended"] == 1

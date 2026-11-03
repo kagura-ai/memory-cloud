@@ -14,7 +14,14 @@ async def test_response_reports_moved_and_deleted_keys_after_commit():
     order = []
     db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
     db.rollback = AsyncMock()
-    result = UserDeletionResult(memories=4, api_keys=3, connector_api_keys=2)
+    result = UserDeletionResult(
+        memories=4,
+        api_keys=3,
+        connector_api_keys=2,
+        agent_api_keys=1,
+        agents_suspended=1,
+        agents_reowned=5,
+    )
 
     async def finish(_result):
         assert order == ["commit"]
@@ -29,6 +36,12 @@ async def test_response_reports_moved_and_deleted_keys_after_commit():
         patch("services.user_deletion_service.finish_user_deletion", side_effect=finish),
     ):
         response = await delete_user("target", {"user_id": "operator"}, db)
-    assert response["deleted"] == {"memories": 4, "api_keys": 3, "contexts": 0}
-    assert response["reowned"] == {"connector_api_keys": 2}
+    assert response["deleted"] == {
+        "memories": 4,
+        "api_keys": 3,
+        "contexts": 0,
+        "agent_api_keys": 1,
+    }
+    assert response["reowned"] == {"connector_api_keys": 2, "agents": 5}
+    assert response["suspended"] == {"agents": 1}
     db.rollback.assert_not_awaited()

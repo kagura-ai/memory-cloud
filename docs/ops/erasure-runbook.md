@@ -97,6 +97,8 @@ FK の依存逆順で削除:
 
 #2305 より前の erasure (メンバー削除・admin のユーザー削除は #2352 より前) で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。key の名義人が workspace のメンバーでなくなっている connector も、同じ rotate で新しい key が owner 名義になる。lock 待ちが 5 秒を超えると `503` `CONNECTOR-003` (再試行する)。
 
+agent に紐付いた key (`api_keys.agent_id IS NOT NULL`) は connector key と違い owner に移さず、本人の他の key と一緒に削除する (#2373 / #2349。agent key は member/viewer のサービス用 member にだけ発行されるので、owner に移すと agent が owner の権限で動く。削除は権限を広げない、が設計の不変条件)。本人が所有しない workspace では、その削除で有効な key が 1 本もなくなる active な agent を `suspended` にし、本人が登録した agent の `agents.owner_user_id` を workspace の owner にする。counts キー = `agent_api_keys_deleted` / `agents_suspended` / `agents_reowned`、owner には workspace ごとに `departed_member_credentials` の audit 行が 1 行残り (本人の ID は `AUDIT_HMAC_KEY` の HMAC のみ)、メンバー削除・admin のユーザー削除・`delete_admin` CLI も同じ。agent の再開手順は [agent-credential-runbook.md](agent-credential-runbook.md) §4.1。
+
 ### 2.5 Audit logs (Step 4 の一部)
 
 `audit_logs` 行は **保持** (legal retention)、ただし本人が actor の行 (`user_id = :uid`) の `user_id` を SHA256 で pseudonymize、`user_email` は本人の email と一致する場合のみ pseudonymize (他人が actor の行に残る actor の email は保持)、`resource` 内の本人の email / sub も置換する (pseudonym で列長 255 を超える値は 255 文字に切り詰め、erasure が失敗しないようにする)。本人の行の `ip_address` / `user_agent` は NULL にする (v0.128.0, #2345。request 行と同じ扱い)。salt は per-deployment 定数 (`_AUDIT_PSEUDO_SALT`) で同一ユーザー由来行の cross-row 相関は維持、original sub/email は不可逆。
@@ -149,18 +151,22 @@ v0.130.0 (#2348) への更新後は `reprocess_erasures --all` (plan) → `--all
 
 ## 4. 第三者プロセッサ通知 (GDPR Art.19)
 
-採用済みプロセッサ別の通知タイプと SLA。**自動通知 = API で SDK 側に削除を伝播 / 手動通知 = support@ から運用チケットで連絡**。
+erasure の対象データを受け取り得る第三者と、erasure 時の対応。どの第三者に届くかは deployment の設定で決まるので、各行に使う条件 (設定と既定値) を書く。設定を既定のままにした deployment で第三者に届くのは OpenAI の embedding だけ (workspace が BYOK キーで Memory Analysis や rerank を使う場合を除く)。**手動 = support@ から運用チケットで連絡 / なし = 個別に削除を依頼できる識別子を送っていないので連絡しない (入力はプロバイダの保持期間で消える)**。`_execute()` が自動で削除を伝える第三者はない。
 
-| プロセッサ | データ種別 | 通知タイプ | SLA | 担当 |
-|---|---|---|---|---|
-| OpenAI (embedding) | 入力テキスト (cache) | n/a | — | — | OpenAI は user_id を保存しない、cache 自然失効 |
-| Anthropic (LLM judge) | プロンプト | n/a | — | — | request id ベース、user data なし |
-| Voyage AI (rerank) | クエリ | n/a | — | — | 同上 |
-| Stripe | customer / subscription | **auto** | 即時 | `cancel_subscription_and_delete_customer_for_erasure` で API 通知 |
-| Sentry / Datadog 等 | error / observability | (未採用なら) n/a | — | (採用後追加) |
-| Resend / SES 等 | email log | (未採用 — stub のため n/a) | — | (採用後追加) |
+| プロセッサ | 使う条件 (設定) | 届く個人データ | erasure 時の対応 |
+|---|---|---|---|
+| OpenAI (embedding) | **既定** (`EMBEDDING_PROVIDER=openai`, `EMBEDDING_MODEL=text-embedding-3-small`)。context の embedding model が OpenAI のモデル (`text-embedding-3-small` / `text-embedding-3-large`) のとき。キーは workspace の BYOK キーか `OPENAI_API_KEY` | memory の summary、recall のクエリ、resource の取り込み本文。content chunk を有効にした context (`content_chunks_enabled`、新しい context の既定は `DEFAULT_CONTENT_CHUNKS_ENABLED=false`) では長い memory の本文も。リクエストに user ID は付けない | なし |
+| OpenAI / Anthropic / Google (Gemini) (LLM) | 既定では呼ばない。Memory Analysis: workspace の OpenAI BYOK キー、または `MANAGED_LLM_PROVIDER` (既定は空 = 使わない。`openai` / `anthropic` / `gemini` / `self_hosted`)。judge: `SLEEP_LLM_PROVIDER` (未設定なら `MANAGED_LLM_PROVIDER`、それもなければ `openai`。DB の neural config があればそれが優先) を、`SLEEP_ENABLED=true` (既定 `false`)、`SUPERSEDE_VERIFY_MODE=llm` (既定 `off`)、context の `llm_selector_enabled` (既定 `false`) が使う | Memory Analysis と Sleep は memory の summary、supersede の判定は 2 件の memory の summary と本文の先頭、recall LLM selector はクエリと recall 結果の summary・本文 (`LLM_SELECTOR_MAX_PROMPT_CHARS` まで)。user ID は付けない | なし |
+| Voyage AI / Cohere (rerank) | 既定では呼ばない。workspace が Voyage / Cohere の BYOK キーを登録し、context が rerank するとき (`use_rerank`。新しい context の既定は `DEFAULT_USE_RERANK=false`、`DEFAULT_RERANKER_PROVIDER=voyage`)。platform のキーはない。`ENABLE_RERANKING=false` か `RESOLVE_STORED_BYOK_KEYS=false` で呼ばなくなる | recall のクエリと候補 memory の summary・context summary (content chunk の context では一致した chunk の本文も)。user ID は付けない | なし |
+| `SELF_HOSTED_BASE_URL` / `RERANK_BASE_URL` の先 (`self_hosted` の embedding・LLM・rerank) | context の embedding model が self_hosted のモデル (`qwen3-embedding:*` 等) のとき、または LLM / reranker に `self_hosted` を選んだとき | 上の 3 行と同じ | 自前のサーバーなら第三者ではない。外部の OpenAI 互換サービスを指す場合は、その事業者を本表に追加して保持期間を確認する |
+| Resend (メール) | `EMAIL_PROVIDER=resend` (既定は `logging` = 第三者に送らない)。`RESEND_API_KEY` / `RESEND_FROM_EMAIL` / `RESEND_DPA_ACCEPTED_AT` が必要 | 宛先アドレス、件名と本文 (表示名、workspace 名、security 通知の IP と user agent、単回リンク)。memory の本文は送らない。erasure 自体も確認・受領・cooling-off 開始・完了のメールを本人のアドレスに送る | なし: メールの本文とログは Resend のプランの保持期間だけ Resend に残る (erasure の完了メールを含む)。それより早く消す必要があるときは Resend に手動で依頼する |
+| 外部 billing service (Stripe 等の決済) | `BILLING_SERVICE_TOKEN` (`/internal/*`)、`BILLING_HANDOFF_SIGNING_KEY` + `BILLING_HANDOFF_KEY_ID` (handoff)。既定は空 = 使わない | memory-cloud が渡すのは owner の `users.user_id` と workspace ID (handoff token、`GET /internal/workspaces/{id}/owner`) だけ。customer / subscription / 支払いの情報は billing service と決済代行が持つ。memory-cloud は Stripe を呼ばず、Stripe の ID も持たない (#1096。§2.1 の Stripe ステップは廃止済み) | 手動: 本人の customer / subscription の記録の削除を billing service に依頼する。self-service の erasure は所有 workspace に契約が残っていると止まる (受付時は 409 `BILLING-005`、cooling-off 中に始まった契約は `failed` + `billing_contract_active`) ので、先に解約されている。admin 強制削除が契約を上書きした場合は `erasure_admin_override_billing_contract` (workspace_ids) が出るので、その workspace の解約も依頼する。削除した workspace の `/internal/workspaces/{id}/plan` は 404 を返す |
 
-未採用プロセッサが追加された場合は本表を更新し、必要なら自動通知を `_execute()` に組み込む。
+BYOK キーでの呼び出しは、キーを登録した workspace とプロバイダの契約で処理される (保持期間もその契約による)。「なし」の行も、プロバイダの DPA と保持期間は採用時に確認しておく (設定は [deployment.md](../deployment.md) の "LLM Credentials (BYOK vs platform-managed)"、"Reranking — Issue #1572")。
+
+本表に載せないもの: Postgres / vector store / Redis / S3 互換ストレージ (ファイル) は erasure が直接削除する (§2、"Stored file objects")。コードにエラー収集・APM (Sentry / Datadog 等) の連携はない。`EMAIL_PROVIDER=logging` のメールログ (`erasure_email_*` は `to_email` を含む、§7) を外部のログ集約に送る場合は、その保持期間も確認する。
+
+手動の連絡は §1 の期限 (受領から 1 ヶ月) 内に行う。第三者に送る経路 (provider・設定) を追加したら本表を更新し、その第三者に削除 API があれば自動通知を `_execute()` に組み込む。
 
 ---
 

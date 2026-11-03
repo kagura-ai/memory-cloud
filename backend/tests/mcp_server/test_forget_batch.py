@@ -52,6 +52,17 @@ def _patched(service, context=None, forgotten=False):
         yield SimpleNamespace(db=db, log=log, touch=touch, forgotten_by=forgotten_by)
 
 
+# #2480: what ``forget_context_gate`` resolved, passed to every id's forget.
+GATE = SimpleNamespace(name="the batch's context gate")
+
+
+def _new_service():
+    """A service stand-in whose context gate passes."""
+    service = MagicMock()
+    service.forget_context_gate = AsyncMock(return_value=GATE)
+    return service
+
+
 def _forgetter(outcomes: dict[UUID, object]):
     """A service whose forget answers per id: 1 / 0 deleted, or raises."""
 
@@ -62,7 +73,7 @@ def _forgetter(outcomes: dict[UUID, object]):
         ids = [request.memory_id] if outcome else []
         return SimpleNamespace(deleted_count=len(ids), memory_ids=ids)
 
-    service = MagicMock()
+    service = _new_service()
     service.forget = AsyncMock(side_effect=forget)
     return service
 
@@ -330,9 +341,9 @@ async def test_each_wait_is_bounded_by_the_remaining_budget():
     ):
         body, _, _ = await _call({"memory_ids": [str(a)]}, _forgetter({a: 1}))
     assert body["status"] == "success"
-    assert len(recorded) == 1
-    assert recorded[0]["timeout"] == pytest.approx(5)
-    assert recorded[0]["operation_name"] == "forget"
+    # The context gate (#2480), right after the deadline is set, then the id.
+    assert [r["timeout"] for r in recorded] == [15, pytest.approx(5)]
+    assert {r["operation_name"] for r in recorded} == {"forget"}
 
 
 @pytest.mark.asyncio
@@ -383,7 +394,7 @@ async def test_a_stalled_delete_ends_within_one_budget():
     async def stall(request, **kwargs):
         await never.wait()
 
-    service = MagicMock()
+    service = _new_service()
     service.forget = AsyncMock(side_effect=stall)
     with _budget(0.2):
         started = time.monotonic()
@@ -435,7 +446,7 @@ async def test_the_batch_deletes_its_points_once_after_the_loop():
         calls.append("drain")
         assert [entry[0] for entry in queued] == [a, c]
 
-    service = MagicMock()
+    service = _new_service()
     service.forget = AsyncMock(side_effect=forget)
     service.delete_forgotten_points = AsyncMock(side_effect=drain)
     body, _, _ = await _call({"memory_ids": [str(a), str(b), str(c)]}, service)
@@ -450,3 +461,164 @@ async def test_nothing_queued_takes_no_lock():
     service.delete_forgotten_points = AsyncMock()
     await _call({"memory_ids": [str(a)]}, service)
     service.delete_forgotten_points.assert_not_awaited()
+
+
+# ------------------------------------------------- #2480: one context gate
+
+
+@pytest.mark.asyncio
+async def test_the_batch_resolves_the_context_gate_once_and_passes_it_to_every_id():
+    a, b, c = uuid4(), uuid4(), uuid4()
+    service = _forgetter({a: 1, b: 0, c: 1})
+    body, service, _ = await _call({"memory_ids": [str(a), str(b), str(c)]}, service)
+    assert body["status"] == "success"
+    service.forget_context_gate.assert_awaited_once()
+    gate_call = service.forget_context_gate.await_args
+    assert gate_call.args[0] == "u1"
+    assert "key_workspace_id" in gate_call.kwargs
+    assert [call.kwargs["context_gate"] for call in service.forget.await_args_list] == [GATE] * 3
+
+
+@pytest.mark.asyncio
+async def test_the_context_gate_runs_once_for_a_batch_of_real_forgets():
+    """The issue's cost: ``_get_context_isolation_params`` ran once per id.
+    A real ``MemoryService.forget`` per id, the gate counted on a fake."""
+    from services.memory_service import MemoryService
+
+    ws, ctx = uuid4(), uuid4()
+    ids = [uuid4() for _ in range(5)]
+    service = MemoryService(MagicMock(commit=AsyncMock(), rollback=AsyncMock()))
+    service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+        return_value=(MagicMock(), str(ws), str(ctx))
+    )
+    # Nothing found: each id is ``skipped`` after the gate and its commit.
+    service.memory_repo.get = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    with patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()):
+        body, _, _ = await _call({"memory_ids": [str(i) for i in ids]}, service)
+    assert [r["status"] for r in body["results"]] == ["skipped"] * 5
+    assert service.memory_repo.get.await_count == 5
+    assert service._get_context_isolation_params.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_context_gate_fails_every_id_without_trying_one():
+    """Every id would have been refused alike; none is tried."""
+    a, b = uuid4(), uuid4()
+    service = _forgetter({a: 1, b: 1})
+    service.forget_context_gate = AsyncMock(side_effect=AuthorizationError("viewer"))
+    body, service, mocks = await _call({"memory_ids": [str(a), str(b)]}, service)
+    assert body["error"] == "batch_failed"
+    assert [r["error"] for r in body["results"]] == ["permission_denied"] * 2
+    assert [r["memory_id"] for r in body["results"]] == [str(a), str(b)]
+    service.forget.assert_not_awaited()
+    mocks.db.rollback.assert_awaited_once()
+    assert mocks.log.await_args.args[4] == 403
+
+
+@pytest.mark.asyncio
+async def test_a_context_gate_that_outlasts_the_budget_leaves_every_id_not_attempted():
+    """No id was tried, so none can have been deleted: ``not_attempted``
+    (resend), not ``timeout`` (verify first, the delete may have landed)."""
+    a, b = uuid4(), uuid4()
+    never = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        await never.wait()
+
+    service = _forgetter({a: 1, b: 1})
+    service.forget_context_gate = AsyncMock(side_effect=stall)
+    with _budget(0.1):
+        body, service, mocks = await _call({"memory_ids": [str(a), str(b)]}, service)
+    assert body["error"] == "batch_failed"
+    assert [r["error"] for r in body["results"]] == ["not_attempted"] * 2
+    assert all("checking the context" in r["message"] for r in body["results"])
+    assert [r["memory_id"] for r in body["results"]] == [str(a), str(b)]
+    service.forget.assert_not_awaited()
+    assert mocks.log.await_args.args[4] == 500
+
+
+# ----------------------------------- #2480: the single form's point delete
+
+
+@pytest.mark.asyncio
+async def test_the_single_form_deletes_the_points_after_the_budget():
+    mid = uuid4()
+    calls: list[str] = []
+
+    async def forget(request, **kwargs):
+        calls.append("forget")
+        kwargs["point_queue"].append((mid, mid, "c"))
+        return SimpleNamespace(deleted_count=1, memory_ids=[mid])
+
+    async def drain(queued):
+        calls.append("drain")
+        assert queued == [(mid, mid, "c")]
+
+    service = _new_service()
+    service.forget = AsyncMock(side_effect=forget)
+    service.delete_forgotten_points = AsyncMock(side_effect=drain)
+    body, _, mocks = await _call({"query": "old notes"}, service)
+    assert calls == ["forget", "drain"]
+    assert body["status"] == "success" and body["deleted_count"] == 1
+    mocks.db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_point_delete_after_the_commit_does_not_fail_a_by_query_forget():
+    """The issue's case: the by-query forget spent its budget before its
+    commit, and the point delete after it stalls. That delete has its own
+    bound (``FORGET_POINT_DELETE_TIMEOUT_SECONDS``) outside the tool budget,
+    so the committed rows are reported forgotten, not a timeout. A real
+    ``MemoryService.forget``; the vector store never answers."""
+    from services.memory_service import MemoryService
+
+    ws, ctx = uuid4(), uuid4()
+    ids = [uuid4(), uuid4()]
+    rows = {
+        mid: SimpleNamespace(
+            id=mid, workspace_id=ws, context_id=ctx, is_tool_triggered=False, point_id=mid
+        )
+        for mid in ids
+    }
+    service = MemoryService(MagicMock(commit=AsyncMock(), rollback=AsyncMock()))
+    service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+        return_value=(MagicMock(), str(ws), str(ctx))
+    )
+    service.recall = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(
+            degraded=False, results=[SimpleNamespace(memory_id=m) for m in ids]
+        )
+    )
+    service.memory_repo.get = AsyncMock(side_effect=rows.get)  # type: ignore[method-assign]
+    service._soft_delete_memory = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda user_id, memory, *a: memory.point_id
+    )
+    never = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        await never.wait()
+
+    @contextlib.asynccontextmanager
+    async def lock_free(self, point_deletes):
+        yield list(point_deletes)
+
+    with (
+        patch("mcp_server.tools._helpers.get_tool_timeout", new=MagicMock(return_value=0.2)),
+        patch("services.memory_service.FORGET_POINT_DELETE_TIMEOUT_SECONDS", 0.6),
+        patch.object(MemoryService, "_points_free_to_delete", lock_free),
+        patch("services.deferred_point_deletes.queue_point_deletes", AsyncMock()),
+        patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+        patch("db.qdrant.delete_points_from_qdrant", new=stall),
+    ):
+        started = time.monotonic()
+        body, _, mocks = await _call({"query": "old notes", "k": 2}, service)
+        elapsed = time.monotonic() - started
+
+    assert body["status"] == "success"
+    assert body["deleted_count"] == 2
+    assert body["memory_ids"] == [str(m) for m in ids]
+    # Past the tool budget, within the delete's own bound.
+    assert 0.2 < elapsed < 5.0
+    assert mocks.log.await_args.args[4] == 200
+    mocks.db.commit.assert_awaited_once()

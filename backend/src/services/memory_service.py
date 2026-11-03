@@ -147,6 +147,7 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from auth.agent_scope import AgentScope
     from models.memory import Memory
     from services.resource_indexer import ResourceIndexer
 
@@ -559,6 +560,29 @@ def _without_dropped_rows(
 FORGET_POINT_DELETE_TIMEOUT_SECONDS = 2.0
 
 
+@dataclass(frozen=True)
+class ForgetContextGate:
+    """``forget``'s context gate, resolved once for a batch (#2480).
+
+    What :meth:`MemoryService.forget_context_gate` passed for one caller,
+    context and key scope: ``_get_context_isolation_params``' checks
+    (membership, key-workspace confinement, the agent binding's context-level
+    write gate, the member role). None of them depends on the memory, so a
+    batch runs them once instead of once per id; each id's own checks
+    (``can_access_memory`` with its type and source, the guardrail author gate)
+    still run per id. ``forget`` refuses a gate resolved for another call:
+    another caller, context, key scope, or agent scope (the request's agent
+    credential, which the binding gate read).
+    """
+
+    user_id: str
+    context_id: UUID | None
+    key_workspace_id: UUID | None
+    agent_scope: AgentScope | None
+    workspace_id_str: str | None
+    context_id_str: str | None
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -656,6 +680,41 @@ class MemoryService:
             await PermissionService(self.db).ensure_memory_write_role(user_id, context.workspace_id)
 
         return context, str(context.workspace_id), str(context_id)
+
+    async def forget_context_gate(
+        self,
+        user_id: str,
+        context_id: UUID | None,
+        key_workspace_id: UUID | None = None,
+    ) -> ForgetContextGate:
+        """``forget``'s context gate, for a caller that forgets many ids in one context (#2480).
+
+        Pass the result to each ``forget(context_gate=...)`` of the same
+        caller, context and key scope, in the same request (agent scope).
+
+        Raises:
+            NotFoundException / AuthorizationError: as ``forget`` would, for
+                every id.
+        """
+        from auth.agent_scope import get_agent_scope
+
+        # Read with the gate: the binding gate below evaluates this scope.
+        agent_scope = get_agent_scope()
+        _context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+            user_id,
+            context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="forget",  # #1286 (P0-5): deny-capture audit identity
+        )
+        return ForgetContextGate(
+            user_id=user_id,
+            context_id=context_id,
+            key_workspace_id=key_workspace_id,
+            agent_scope=agent_scope,
+            workspace_id_str=workspace_id_str,
+            context_id_str=context_id_str,
+        )
 
     @staticmethod
     def _apply_pin_on_write(memory: Memory) -> None:
@@ -7197,11 +7256,36 @@ class MemoryService:
         del_collection = await resolve_collection_name(self.db, memory.context_id)
         await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
 
+    async def _queue_forgotten_points(
+        self, point_deletes: Collection[tuple[UUID, UUID, UUID | None]]
+    ) -> list[tuple[UUID, UUID, str]]:
+        """Queue the removed rows' points in this transaction (#2476); the caller commits.
+
+        ``point_deletes``: ``(memory id, point id, context id)``. Each row's
+        collection is resolved once per context, before the commit (the row's
+        route). Returns the ``(memory id, point id, collection)`` entries for
+        :meth:`delete_forgotten_points` after the commit: the queue row lands
+        with the delete of its memory row or not at all, so a point the
+        post-commit step cannot delete is retried by the drain job.
+        """
+        collections = {
+            ctx: await resolve_collection_name(self.db, ctx)
+            for ctx in {context for _, _, context in point_deletes}
+        }
+        entries = [(mid, point, collections[ctx]) for mid, point, ctx in point_deletes]
+        if entries:
+            from services.deferred_point_deletes import queue_point_deletes
+
+            await queue_point_deletes(self.db, entries)
+        return entries
+
     async def delete_forgotten_points(self, point_deletes: list[tuple[UUID, UUID, str]]) -> None:
         """Delete forgotten rows' search points and content chunks after their commit.
 
         ``point_deletes``: ``(memory id, point id, collection)``, each queued
-        in ``deferred_point_deletes`` by ``forget``'s commit (#2476). Never
+        in ``deferred_point_deletes`` by ``forget``'s commit (#2476) — or by
+        ``forget_bulk``'s, ``cleanup_old_working_memories``' or a session
+        rollback's (#2480). Never
         raises an ``Exception``: the rows are committed tombstones, a
         tombstone's leftover point is no hit, and a point left here keeps its
         queue row, which the drain job retries
@@ -7343,7 +7427,7 @@ class MemoryService:
         context_id: str,
         *,
         writer: str = REVISION_WRITER_API,
-    ) -> tuple[list[UUID], list[str]]:
+    ) -> tuple[list[UUID], list[tuple[UUID, UUID]]]:
         """``_soft_delete_memory`` for a chunk, in a fixed number of statements.
 
         One UPDATE stamps ``deleted_at`` / ``deleted_by`` and the writer's
@@ -7353,9 +7437,9 @@ class MemoryService:
         when ``rollback_session`` forgets what a session created); one SELECT
         keeps every shared point another live row still owns (#1829); one
         DELETE drops the deleted nodes' neural edges with forget's (user,
-        workspace, context) isolation. Returns the deleted ids and the point
-        ids to remove from the index. The caller deletes the points and
-        commits.
+        workspace, context) isolation. Returns the deleted ids and the
+        ``(memory id, point id)`` of each point to remove from the index. The
+        caller queues them, commits, and only then deletes the points (#2480).
         """
         from sqlalchemy import insert, update
 
@@ -7421,7 +7505,7 @@ class MemoryService:
         await NeuralEdgeRepository(self.db).delete_nodes_edges(
             user_id=user_id, node_ids=deleted, workspace_id=workspace_id, context_id=context_id
         )
-        return deleted, [str(p) for p in dict.fromkeys(points.values()) if p not in kept]
+        return deleted, [(mid, point) for mid, point in points.items() if point not in kept]
 
     async def forget_bulk(
         self,
@@ -7474,9 +7558,11 @@ class MemoryService:
             this request, whether matching rows are left, and where the next
             request resumes (``None`` when nothing remains).
 
-        Each chunk is committed, its search points removed in one request
-        (collection resolved once), and audited on its own — an interrupted
-        request leaves an audit row for every chunk it did delete.
+        Each chunk is committed and audited on its own — an interrupted
+        request leaves an audit row for every chunk it did delete. Each
+        chunk's points are queued in its transaction (#2476) and deleted after
+        the last commit, once per request (#2480, ``delete_forgotten_points``:
+        the collection is resolved once).
         """
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
@@ -7585,7 +7671,7 @@ class MemoryService:
                 break
             after = (rows[-1].created_at, rows[-1].id)
 
-        from db.qdrant import delete_chunk_points, delete_points_from_qdrant
+        from services.deferred_point_deletes import queue_point_deletes
         from services.memory_access_event_writer import (
             MAX_METADATA_MEMORY_IDS,
             emit_memory_access_event,
@@ -7596,34 +7682,28 @@ class MemoryService:
         next_after = (victims[-1][1], victims[-1][0]) if remaining and victims else None
         collection = await resolve_collection_name(self.db, context_id)
         deleted_total = 0
+        # #2480: every committed chunk's (memory id, point id, collection).
+        forgotten: list[tuple[UUID, UUID, str]] = []
         for start in range(0, len(victims), chunk_size):
             chunk = [vid for vid, _ in victims[start : start + chunk_size]]
             deleted, points = await self._soft_delete_chunk(
                 user_id, chunk, workspace_id_str, context_id_str
             )
-            # Points first, then the commit: a failed point delete raises
-            # before this chunk's rows are committed, so no committed row is
-            # left with a live search point. Earlier chunks stay committed and
-            # audited. (Single forget deletes its points after its commit
-            # instead, #2201.)
+            entries = [(mid, point, collection) for mid, point in points]
+            # #2480: the commit first, the points after it, as forget does
+            # (#2201): deleting them before a commit that never lands left
+            # live rows without their vectors. Each point is queued in its
+            # chunk's transaction (#2476), so the drain retries what the delete
+            # after the loop does not reach — also when a later chunk fails
+            # and this request ends before it. Earlier chunks stay committed
+            # and audited.
             try:
-                await delete_points_from_qdrant(points, collection)
+                await queue_point_deletes(self.db, entries)
                 await self.db.commit()
             except Exception:
                 await self.db.rollback()
                 raise
-            # #2015: their content chunk points too. Fail-soft — the rows are
-            # committed tombstones by now, and the orphan sweep removes the
-            # chunks of a tombstoned memory after the grace period.
-            try:
-                await delete_chunk_points(deleted, collection)
-            except Exception as exc:
-                logger.warning(
-                    "content_chunks_delete_failed",
-                    collection=collection,
-                    memories=len(deleted),
-                    error_class=type(exc).__name__,
-                )
+            forgotten.extend(entries)
             deleted_total += len(deleted)
             await emit_memory_access_event(
                 operation="forget",
@@ -7647,6 +7727,10 @@ class MemoryService:
             remaining=remaining,
             user_id=user_id,
         )
+        # Once per request, after every commit: the step takes the global
+        # point-writer lock (#2201). It never raises; with their content chunk
+        # points (#2015), what it leaves stays queued for the drain.
+        await self.delete_forgotten_points(forgotten)
         return deleted_total, remaining, next_after
 
     async def forget(
@@ -7659,6 +7743,7 @@ class MemoryService:
         current_workspace_id: UUID | None = None,
         _skip_binding_row_filter: bool = False,
         point_queue: list[tuple[UUID, UUID, str]] | None = None,
+        context_gate: ForgetContextGate | None = None,
     ) -> ForgetResponse:
         """Delete memory (single or multiple via query).
 
@@ -7679,10 +7764,20 @@ class MemoryService:
                 external_id. Never expose through transport layers.
             point_queue: A batch caller's list: the committed rows' points are
                 added to it instead of being deleted here, and the caller
-                passes it to ``delete_forgotten_points`` once (#2201).
+                passes it to ``delete_forgotten_points`` once (#2201) — or a
+                caller with a time budget, which runs that step outside it
+                (#2480).
+            context_gate: A batch caller's ``forget_context_gate`` result for
+                this caller, context and key scope, so the context checks run
+                once per batch rather than once per id (#2480). The per-memory
+                checks still run here.
 
         Returns:
             ForgetResponse with deleted count and IDs
+
+        Raises:
+            ValueError: ``context_gate`` was resolved for another caller,
+                context, key scope or agent scope.
         """
         if _skip_binding_row_filter and not request.memory_id:
             raise ValueError(
@@ -7693,13 +7788,28 @@ class MemoryService:
             )
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: forget is a WRITE — gate the declared context against
-        # the agent binding (no-op for non-agent credentials).
-        context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id,
-            current_context_id,
-            access="write",
-            key_workspace_id=key_workspace_id,
-            operation="forget",  # #1286 (P0-5): deny-capture audit identity
+        # the agent binding (no-op for non-agent credentials). #2480: a batch
+        # resolved the gate once for all of its ids.
+        if context_gate is None:
+            context_gate = await self.forget_context_gate(
+                user_id, current_context_id, key_workspace_id
+            )
+        else:
+            from auth.agent_scope import get_agent_scope
+
+            if (
+                context_gate.user_id,
+                context_gate.context_id,
+                context_gate.key_workspace_id,
+                context_gate.agent_scope,
+            ) != (user_id, current_context_id, key_workspace_id, get_agent_scope()):
+                raise ValueError(
+                    "context_gate was resolved for another caller, context, key scope or "
+                    "agent scope; forget would skip the context checks for this one."
+                )
+        workspace_id_str, context_id_str = (
+            context_gate.workspace_id_str,
+            context_gate.context_id_str,
         )
 
         deleted_ids = []
@@ -7871,20 +7981,11 @@ class MemoryService:
                 user_id=user_id,
             )
 
-        # Before the commit: the row's route, once per context.
-        collections = {
-            ctx: await resolve_collection_name(self.db, ctx)
-            for ctx in {context for _, _, context in point_deletes}
-        }
-        forgotten = [(mid, point, collections[ctx]) for mid, point, ctx in point_deletes]
         # #2476: each point is queued in the transaction that tombstones its
         # row, so a delete that cannot run after the commit (a point writer
         # holds the lock, the vector store stalls, a cancel) is retried by the
         # drain job instead of waiting for the orphan sweep.
-        if forgotten:
-            from services.deferred_point_deletes import queue_point_deletes
-
-            await queue_point_deletes(self.db, forgotten)
+        forgotten = await self._queue_forgotten_points(point_deletes)
         await self.db.commit()
 
         # #1286 item 2 (P0-5): audit the destructive write (no-op unless a
@@ -7951,6 +8052,9 @@ class MemoryService:
         old_memories = await self.memory_repo.get_old_working_memories(user_id, age_days)
 
         deleted_count = 0
+        # (memory id, point id, context id) of each deleted row, for after the
+        # commit (#2480).
+        point_deletes: list[tuple[UUID, UUID, UUID | None]] = []
 
         for memory in old_memories:
             # Skip if already promoted or high importance
@@ -7960,11 +8064,17 @@ class MemoryService:
             # Delete from PostgreSQL
             await self.memory_repo.delete(memory.id)
 
-            # Delete from Qdrant — by the row's point id (#1829)
-            await self._delete_memory_point(user_id, memory)
+            # The row's point id (#1829), or None when another live row names it.
+            point_id = await self._point_to_delete(memory)
+            if point_id is not None:
+                point_deletes.append((memory.id, point_id, memory.context_id))
 
             deleted_count += 1
 
+        # #2480: queued with the deletes (#2476), removed from Qdrant only
+        # after the commit — deleting first left live rows without their
+        # vectors when the commit never landed.
+        forgotten = await self._queue_forgotten_points(point_deletes)
         await self.db.commit()
 
         logger.info(
@@ -7974,6 +8084,8 @@ class MemoryService:
             age_days=age_days,
         )
 
+        # Never raises; what it leaves stays queued for the drain.
+        await self.delete_forgotten_points(forgotten)
         return deleted_count
 
     async def explore(

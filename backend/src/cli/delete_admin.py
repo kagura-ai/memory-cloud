@@ -200,6 +200,13 @@ async def _delete_admin_rows(
         print(
             f"  ✓ Connector write keys handed to their workspace owners: {result.connector_api_keys}"
         )
+    if result.agents_reowned:
+        print(f"  ✓ Agents handed to their workspace owners: {result.agents_reowned}")
+    if result.agents_suspended:
+        print(
+            f"  ✓ Agents suspended (their only key was deleted; the owner re-activates "
+            f"and re-provisions): {result.agents_suspended}"
+        )
     logger.info(
         "cli_delete_admin",
         user_id=admin_id,
@@ -207,6 +214,9 @@ async def _delete_admin_rows(
         workspaces_deleted=[str(ws.id) for ws in result.purged_workspaces],
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
+        agent_api_keys_deleted=result.agent_api_keys,
+        agents_suspended=result.agents_suspended,
+        agents_reowned=result.agents_reowned,
     )
 
 

@@ -3,21 +3,24 @@
 Shared by the #2305 erasure tests and the #2352 member-removal / admin-delete /
 ``cli.delete_admin`` tests: whatever deletes a user's ``api_keys`` rows must
 hand the live connector write keys to the workspace's owner and leave every
-other row alone. The ``connector_world`` fixture (``conftest.py``) yields a
-``_ConnectorWorld``.
+other row alone. The #2373 tests add agents: their keys die with the service
+member, their registrar's departure names the owner. The ``connector_world``
+fixture (``conftest.py``) yields a ``_ConnectorWorld``.
 """
 
 from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import APIKey, AuditLog, User, Workspace, WorkspaceMember
+from models.agent import Agent, AgentContextBinding
+from models.auth import APIKey, AuditLog, Context, User, Workspace, WorkspaceMember
 from models.erasure import REASON_USER_REQUEST_VIA_SUPPORT, STATUS_COMPLETE, ErasureRequest
 from services.account_erasure_service import AccountErasureService, _audit_salt
+from services.connector_key_ownership import DEPARTED_MEMBER_CREDENTIALS_ACTION
 from services.workspace_service import WorkspaceService
 from utils.hashing import sha256_hex
 
@@ -100,6 +103,73 @@ class _ConnectorWorld:
         await self.db.flush()
         return row.id
 
+    async def agent(self, workspace: Workspace, by: str) -> Agent:
+        """An agent ``by`` registers, bound to a context of the workspace's
+        owner (one that outlives ``by``, #2373)."""
+        agent = Agent(workspace_id=workspace.id, name=f"agent-{uuid4().hex[:8]}", owner_user_id=by)
+        context = Context(
+            id=uuid4(),
+            workspace_id=workspace.id,
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=workspace.owner_user_id,
+        )
+        self.db.add_all([agent, context])
+        await self.db.flush()
+        self.db.add(
+            AgentContextBinding(
+                agent_id=agent.id, context_id=context.id, is_default=True, created_by=by
+            )
+        )
+        await self.db.flush()
+        return agent
+
+    async def agent_key(self, user_id: str, workspace: Workspace, agent: Agent) -> tuple[str, int]:
+        """A live key bound to ``agent`` for the service member ``user_id``,
+        as the owner mint creates it; returns (plaintext, id)."""
+        from auth.api_keys import APIKeyManager
+
+        plaintext, row = await APIKeyManager(self.db).create_key(
+            name=f"agent-key-{uuid4().hex[:6]}",
+            user_id=user_id,
+            workspace_id=workspace.id,
+            agent_id=agent.id,
+        )
+        await self.db.flush()
+        return plaintext, row.id
+
+    async def agent_state(self, agent_id: UUID) -> tuple[str, str, int]:
+        """(owner_user_id, status, bindings) of the agent, read fresh."""
+        owner, status = (
+            await self.db.execute(
+                select(Agent.owner_user_id, Agent.status).where(Agent.id == agent_id)
+            )
+        ).one()
+        bindings = await self.db.scalar(
+            select(func.count())
+            .select_from(AgentContextBinding)
+            .where(AgentContextBinding.agent_id == agent_id)
+        )
+        return owner, status, bindings or 0
+
+    async def departure_audits(self, departing: str) -> list[AuditLog]:
+        """The ``departed_member_credentials`` rows naming ``departing``."""
+        from config.settings import get_settings
+        from utils.hashing import hmac_sha256_hex
+
+        return list(
+            (
+                await self.db.execute(
+                    select(AuditLog)
+                    .where(
+                        AuditLog.action == DEPARTED_MEMBER_CREDENTIALS_ACTION,
+                        AuditLog.new_value_hash
+                        == hmac_sha256_hex(departing, get_settings().audit_hmac_key),
+                    )
+                    .order_by(AuditLog.id)
+                )
+            ).scalars()
+        )
+
     async def erase(self, target: str) -> dict:
         """Force-erase ``target``; returns the summary's ``postgres`` counts."""
         await self.db.commit()
@@ -129,6 +199,12 @@ class _ConnectorWorld:
             delete(AuditLog).where(
                 AuditLog.action.in_(("account_erasure", "account_erasure_reprocess"))
                 & AuditLog.user_id.in_(pseudonyms)
+            )
+        )
+        await self.db.execute(
+            delete(AuditLog).where(
+                (AuditLog.action == DEPARTED_MEMBER_CREDENTIALS_ACTION)
+                & AuditLog.user_id.in_(self.targets)
             )
         )
         await self.db.execute(
