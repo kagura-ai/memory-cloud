@@ -723,8 +723,9 @@ class TestAdminRevoke:
 
     def test_a_busy_workspace_is_a_409_with_the_revocation_rolled_back(self, monkeypatch) -> None:
         """#2443: the recompute takes the workspace rows ``NOWAIT``; one still
-        held after the tries is a 409 the admin retries, not the 500 the
-        transaction wrapper makes of other errors, and nothing is audited."""
+        held after the tries is a 409 the admin retries (the transaction
+        wrapper rolls back and re-raises it rather than making it a 500), and
+        nothing is audited."""
 
         async def mock_admin():
             return _admin_user()
@@ -751,9 +752,10 @@ class TestAdminRevoke:
                 f"/api/v1/admin/referrals/{uuid4()}/revoke", json={"reason": "farming"}
             )
             assert response.status_code == 409
-            # an HTTPException, in the envelope ``http_exception_handler`` gives it
+            # the ConflictError itself, through ``db_transaction``, as the
+            # global handler renders it (the redeem's 409 is the same)
             assert response.json() == {
-                "error": "HTTP-409",
+                "error": "RES-002",
                 "message": "Workspace is being modified; retry the operation",
                 "details": {},
             }
