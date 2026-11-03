@@ -289,7 +289,8 @@ class TestRecallTimingsWiring:
 
         async def hydrate(*_args, **_kwargs):
             clock["now"] += 0.025
-            return {"m1": object(), "m2": object()}
+            # #2546: rows with an id — recall keeps one hit per hydrated row.
+            return {"m1": SimpleNamespace(id=uuid4()), "m2": SimpleNamespace(id=uuid4())}
 
         service._recall_hydrate_memories = hydrate
         service._recall_filter_rows_by_binding = AsyncMock(side_effect=lambda _r, m, **_k: (m, 0))
