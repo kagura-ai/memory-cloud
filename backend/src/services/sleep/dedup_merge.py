@@ -10,7 +10,9 @@ Algorithm:
    pair similarity (#1184) instead of deferred wholesale
 3. LLM on: batch judgment (merge/keep_both)
 4. LLM off: similarity >= 0.98 → auto-merge, else → flag
-5. Merge: keep winner, soft-delete losers, transfer edges, merge tags
+5. Merge: keep winner, soft-delete losers, transfer edges, merge tags; a loser
+   carrying an exempt tag (#2584, ``sleep_archive_exempt_tags``) is never
+   retired — that pair is skipped
 
 Academic notes:
 - Union-Find transitivity: A~B + B~C clusters all three even if A~C is low.
@@ -248,6 +250,10 @@ class _MergeTally:
     # deleted or gone between the candidate fetch and merge execution — the
     # execution-time recheck refused them (neither mode mutated anything).
     skipped_pinned: int = 0
+    # #2584: eligible merges not planned because the loser carries an exempt
+    # tag (an open review memo). Kept apart from the vetoes above: the judge
+    # was right that the pair is a duplicate.
+    skipped_exempt: int = 0
 
 
 class DedupMergePhase(EmbeddingSpendTracker):
@@ -336,6 +342,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         threshold: float,
         tally: _MergeTally,
         snapshot_audit: bool,
+        *,
+        exempt_tags: frozenset[str],
     ) -> list[tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]]:
         """Pass 1: filter the judge's picks and snapshot their inputs (#1229).
 
@@ -345,6 +353,13 @@ class DedupMergePhase(EmbeddingSpendTracker):
         pairwise cosine is far below the threshold — observed 0.43-0.66 under
         0.92, destroying distinct facts. A merge executes only when the pair's
         direct similarity meets the configured threshold.
+
+        #2584: a loser carrying one of ``exempt_tags`` (exact match) is never
+        retired, in either mode. The pair is skipped, not flipped: merge folds
+        only tags into the winner, so making the exempt side win would discard
+        the other side's (often newer) content — why #1519 kept pinned rows out
+        of merges instead of making them absolute winners. An exempt winner
+        still absorbs a non-exempt loser; two exempt sides never merge.
 
         Every snapshot MUST be taken BEFORE any merge in the cluster executes
         (#1229): decisions share members (one winner, several losers), and a
@@ -410,6 +425,17 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     threshold=threshold,
                 )
                 continue
+            loser = memory_map.get(loser_id)
+            if loser is not None and not exempt_tags.isdisjoint(loser.tags or ()):
+                # #2584: checked after the vetoes above so their counters keep
+                # meaning what they say; the tag is read from the candidate fetch.
+                tally.skipped_exempt += 1
+                logger.info(
+                    "dedup_merge_skipped_exempt_loser",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                )
+                continue
             if pair_key in backfilled_keys:
                 tally.rescued += 1
                 logger.info(
@@ -421,7 +447,6 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 )
 
             winner = memory_map.get(winner_id)
-            loser = memory_map.get(loser_id)
             audit: dict[str, Any] | None = None
             if snapshot_audit and winner and loser:
                 audit = {
@@ -562,6 +587,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         llm_enabled = config.sleep_llm_provider != ""
         threshold = config.sleep_dedup_similarity_threshold
+        # #2584: a loser carrying one of these tags is never retired.
+        exempt_tags = frozenset(config.sleep_archive_exempt_tags)
 
         # Step 1: Fetch active memories
         memories = await self._fetch_active_memories(
@@ -681,6 +708,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 threshold,
                 tally,
                 snapshot_audit=bool(reporter and report_id),
+                exempt_tags=exempt_tags,
             )
             await self._execute_merge_jobs(
                 merge_jobs,
@@ -737,6 +765,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # #1519: planned merges refused at execution because a row was
             # pinned/deleted after the candidate fetch (both modes).
             "skipped_pinned": tally.skipped_pinned,
+            # #2584: merges not planned because the loser carries an exempt
+            # tag (sleep_archive_exempt_tags, default status:open).
+            "skipped_exempt": tally.skipped_exempt,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.

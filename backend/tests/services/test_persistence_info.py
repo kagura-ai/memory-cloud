@@ -231,10 +231,10 @@ def test_advertised_floor_matches_the_sleep_path_archival_gate(sleep_pass):
     memory = MagicMock(reference_count=0, created_at=datetime(2020, 1, 1))  # noqa: DTZ001
     cutoff = datetime(2019, 1, 1)  # noqa: DTZ001 — operator opt-in, already elapsed
 
-    assert _archival_eligible(memory, days - 1, cutoff) is False, (
+    assert _archival_eligible(memory, days - 1, cutoff, exempt_tags=frozenset()) is False, (
         "response promises nothing is archived before this age, but the sleep path would archive it"
     )
-    assert _archival_eligible(memory, days, cutoff) is True, (
+    assert _archival_eligible(memory, days, cutoff, exempt_tags=frozenset()) is True, (
         "advertised floor is more conservative than the enforced one — it is stale"
     )
 

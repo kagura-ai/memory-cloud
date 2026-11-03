@@ -373,6 +373,41 @@ class TestGetSleepReport:
         assert data["action_count"] == 1
         assert data["report"]["status"] == "completed"
         assert data["actions"][0]["action_type"] == "create_edge"
+        # #2547: the analysis-row note is absent on a Sleep run.
+        assert "note" not in data
+
+    @pytest.mark.asyncio
+    async def test_analysis_report_explains_itself(self, user_id, workspace_id):
+        """#2547: an analysis row says what it is and that nothing rolls back."""
+        report_id = uuid4()
+        report = self._mock_report(report_id, user_id)
+        report.source = "analysis"
+
+        mock_db = AsyncMock()
+        mock_report_result = MagicMock()
+        mock_report_result.scalar_one_or_none.return_value = report
+        mock_actions_result = MagicMock()
+        mock_actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [mock_report_result, mock_actions_result, MagicMock()]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_sleep_report(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "success"
+        assert data["report"]["source"] == "analysis"
+        assert data["actions"] == []
+        assert data["action_count"] == 0
+        note = data["note"]
+        assert "Memory Analysis" in note
+        assert "no Sleep actions" in note
+        assert "rollback_sleep_run" in note
 
     @pytest.mark.asyncio
     async def test_report_not_found(self, user_id, workspace_id):
@@ -673,6 +708,92 @@ class TestRollbackSleepRun:
         data = json.loads(result[0].text)
         assert data["status"] == "error"
         assert data["error"] == "no_actions"
+
+
+class TestRollbackRefusesAnalysisReports:
+    """#2547: an analysis row (#2088) has no Sleep actions to roll back.
+
+    The rollback used to treat it like a Sleep run: a completed analysis row
+    passed the status check and answered ``no_actions`` ("may pre-date action
+    recording"), a failed or cancelled one ``invalid_status``. It is now
+    refused as what it is, after the context gate and before anything else.
+    """
+
+    @staticmethod
+    def _report(source, status="completed"):
+        report = MagicMock()
+        report.id = uuid4()
+        report.user_id = "test_user_123"
+        report.status = status
+        report.source = source
+        report.context_id = uuid4()
+        return report
+
+    @staticmethod
+    def _db(report, *more):
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        mock_db.execute.side_effect = [report_result, *more]
+        mock_db.rollback = AsyncMock()
+        return mock_db
+
+    async def _call(self, mock_db, report):
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report.id)}, report.user_id, uuid4()
+            )
+        return json.loads(result[0].text)
+
+    @pytest.mark.asyncio
+    # A failed or cancelled analysis run writes its spend row too (#2088).
+    @pytest.mark.parametrize("status", ["completed", "degraded", "failed", "cancelled"])
+    async def test_analysis_report_is_refused_before_its_actions_are_read(self, status):
+        report = self._report("analysis", status)
+        mock_db = self._db(report)
+
+        data = await self._call(mock_db, report)
+
+        assert data["status"] == "error"
+        assert data["error"] == "analysis_report"
+        assert "no Sleep actions" in data["message"]
+        assert "nothing to roll back" in data["message"]
+        assert "get_sleep_history" in data["help"]
+        # Only the report was read: no action query, no write, no commit.
+        assert mock_db.execute.await_count == 1
+        mock_db.commit.assert_not_awaited()
+        assert report.status == status
+
+    @pytest.mark.asyncio
+    async def test_sleep_report_proceeds_to_its_actions(self):
+        report = self._report("sleep")
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db = self._db(report, actions_result)
+
+        data = await self._call(mock_db, report)
+
+        # Past the source check: the actions were read (this run has none).
+        assert data["error"] == "no_actions"
+        assert mock_db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_the_context_gate_answers_first(self):
+        """A caller who cannot reach the context learns nothing about the row."""
+        report = self._report("analysis")
+        mock_db = self._db(report)
+        refusal = [MagicMock(text=json.dumps({"status": "error", "error": "report_not_found"}))]
+
+        with patch(
+            "mcp_server.tools.sleep._authorize_report_rollback",
+            new=AsyncMock(return_value=refusal),
+        ):
+            data = await self._call(mock_db, report)
+
+        assert data["error"] == "report_not_found"
 
 
 class TestShadowMergeRollbackEdgeMismatch:

@@ -28,7 +28,7 @@ from config.constants import (
 from db.base import get_db
 from db.graph_learning_lock import lock_graph_learning
 from models.memory import GraphMemory
-from neural.config import NeuralMemoryConfig
+from neural.config import NeuralMemoryConfig, sleep_archive_exempt_tags_from_env
 from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
@@ -189,6 +189,9 @@ async def consolidation_task():
     enabled (the production setting), ``services/sleep/consolidation.py``
     handles consolidation and retains its own neural metrics path.
     """
+    # #2584: SLEEP_ARCHIVE_EXEMPT_TAGS binds this pass too — it is the one a
+    # deployment without SLEEP_ENABLED runs, and its delete is physical.
+    exempt_tags = frozenset(sleep_archive_exempt_tags_from_env())
     logger.info("consolidation_task_started")
 
     try:
@@ -257,6 +260,15 @@ async def consolidation_task():
                         elif memory.is_tool_triggered:
                             logger.info(
                                 "legacy_consolidation_skipped_tool_triggered",
+                                memory_id=str(memory.id),
+                            )
+
+                        # #2584: an exempt-tagged row (an open review memo) is
+                        # never deleted; removing the tag ends the exemption.
+                        # Debug level: open memos are many and stay for months.
+                        elif not exempt_tags.isdisjoint(memory.tags or ()):
+                            logger.debug(
+                                "legacy_consolidation_skipped_exempt_tag",
                                 memory_id=str(memory.id),
                             )
 

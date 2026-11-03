@@ -120,6 +120,37 @@ async def test_recall_still_resolves_normal_memory_by_id():
 
 
 @pytest.mark.asyncio
+async def test_a_resource_memory_hit_twice_ships_once():
+    """#2546: the summary point (``summary_embedding_id``) and a point under the
+    row id (a content chunk) both hydrate to the one row. It ships once, at the
+    best hit's place and score, and its second hit leaves the slot to the next
+    candidate."""
+    mem_id, point_id, other_id = uuid4(), uuid4(), uuid4()
+    resource = _fake_resource_memory(mem_id, point_id)
+    other = _fake_resource_memory(other_id, other_id)
+
+    svc, _db = _make_service([resource, other])
+    svc.search_service.hybrid_search = AsyncMock(
+        return_value=[
+            {"id": str(point_id), "score": 0.91},
+            {"id": str(mem_id), "score": 0.84},
+            {"id": str(other_id), "score": 0.80},
+        ]
+    )
+
+    resp = await svc.recall(
+        request=RecallRequest(query="q", k=2),
+        user_id="u",
+        current_context_id=uuid4(),
+        current_workspace_id=uuid4(),
+    )
+
+    assert [r.memory_id for r in resp.results] == [mem_id, other_id]
+    assert resp.results[0].score == 0.91
+    assert resp.confidence.result_count == 2
+
+
+@pytest.mark.asyncio
 async def test_candidate_fetch_selects_by_summary_embedding_id():
     """SQL pin: the candidate fetch must query summary_embedding_id so a future
     refactor cannot silently drop the resource-projection mapping."""
