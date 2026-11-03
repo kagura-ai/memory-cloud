@@ -53,8 +53,16 @@ GUIDE_TOPICS: dict[str, str] = {
         "runs); 'persistent' is outside consolidation (delivery_mode='always' writes "
         "straight to it). consolidation_archive_min_age_days is a floor for that pass "
         "only, not a retention SLA: near-duplicate merging can retire an unpinned "
-        "memory at any age. The embedding is generated asynchronously, so a new "
-        "memory is not findable via recall() for a brief moment."
+        "memory at any age. Open memos: Sleep maintenance (promotes_via "
+        "'sleep_consolidation') never archives a memory tagged 'status:open' (the "
+        "default exempt tag) nor retires it as a merge loser; replace the tag "
+        "('status:done') and it is back on the normal lifecycle. That makes a light "
+        "backlog: type 'tech-debt' or 'needs-decision', tags 'status:open', "
+        "'source:review', 'issue:#N', 'pr:#N', 'area:<area>', 'file:<path>'; the "
+        "planning view is list(filters={'type': ['tech-debt', 'needs-decision'], "
+        "'tags': ['status:open']}), and update_memory(tags=[...]) closes one (tags "
+        "are replaced wholesale). The embedding is generated asynchronously, so a "
+        "new memory is not findable via recall() for a brief moment."
     ),
     "time-memories": (
         "A Time Memory is remember(type='time', details={'trigger': {'year': 2026, "
