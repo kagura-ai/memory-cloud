@@ -142,6 +142,10 @@ class VectorStore(Protocol):
 
     async def list_point_refs(self, collection_name: str) -> list[tuple[str, str | None]]: ...
 
+    async def retrieve_dense_vectors(
+        self, collection_name: str, point_ids: Sequence[str]
+    ) -> dict[str, list[float]]: ...
+
 
 # Cached resolution. ``None`` is a valid resolved value (default Qdrant path),
 # so a separate ``_resolved`` flag distinguishes "not yet resolved" from

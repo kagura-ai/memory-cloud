@@ -287,7 +287,6 @@ async def run_supersede_catch_up(
 
     Raises:
         ValueError: the context does not exist.
-        NotImplementedError: the vector store cannot return stored vectors.
     """
     from db.qdrant import get_collection_name, retrieve_dense_vectors
     from models.auth import Context

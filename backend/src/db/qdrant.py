@@ -2139,7 +2139,8 @@ async def retrieve_dense_vectors(
     """The stored dense vector of each point, in one retrieve (#2256).
 
     For a caller that needs a memory's vector without embedding it again (the
-    supersede catch-up pass). Batching is the caller's.
+    supersede catch-up pass, the re-embed clear). Batching is the caller's. On
+    the LanceDB preview the store answers with the same contract (#2520).
 
     Args:
         collection_name: Qdrant collection name.
@@ -2150,13 +2151,11 @@ async def retrieve_dense_vectors(
         no dense vector is absent.
 
     Raises:
-        NotImplementedError: on a non-Qdrant store (LanceDB preview).
         QdrantError: the retrieve failed.
     """
-    if _active_store() is not None:
-        raise NotImplementedError(
-            "retrieve_dense_vectors is not supported by the LanceDB backend (preview)."
-        )
+    store = _active_store()
+    if store is not None:
+        return await store.retrieve_dense_vectors(collection_name, point_ids)
     if not point_ids:
         return {}
     client = get_qdrant_client()
