@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
+from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, QuotaExceededError, ValidationError
 from utils.logger import get_logger
@@ -368,6 +369,11 @@ class InvitationService:
         Validates invitation (existence, expiration, email match) and creates
         workspace membership. Marks invitation as accepted.
 
+        The workspace row is locked (``lock_workspace_for_update``) before the
+        membership checks and held to the caller's commit, so an accept that
+        waited out an account erasure between its steps 2 and 3 finds the
+        workspace gone and raises ``NotFoundException`` (#2564).
+
         Args:
             token: Invitation token
             user_id: Accepting user's ID
@@ -408,6 +414,25 @@ class InvitationService:
                     f"You are logged in as {user_email}."
                 )
 
+        # #2564: the workspace row first, as in add_member, held to the commit.
+        # Raises NotFoundException for a missing / soft-deleted workspace.
+        workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
+
+        # #2564: re-read the invitation under that lock. Every accept of this
+        # token waits on the same workspace row, so one that got it first has
+        # committed by now: a single-use invitation admits one user.
+        invitation = (
+            await self.db.execute(
+                select(WorkspaceInvitation)
+                .where(WorkspaceInvitation.id == invitation.id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if invitation is None:
+            raise NotFoundException("Invitation")
+        if invitation.is_accepted():
+            raise ValidationError("This invitation has already been accepted and cannot be reused")
+
         # Check if user is already a member
         stmt = select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == invitation.workspace_id,
@@ -419,21 +444,18 @@ class InvitationService:
         if existing_member:
             raise ValidationError("You are already a member of this workspace")
 
-        # Get workspace
-        stmt = select(Workspace).where(Workspace.id == invitation.workspace_id)
-        result = await self.db.execute(stmt)
-        workspace = result.scalar_one_or_none()
-
-        if not workspace:
-            raise NotFoundException("Workspace")
-
         # Check member quota (Issue #229 - race condition protection)
         from services.quota_service import QuotaService
 
         quota_service = QuotaService(self.db)
 
         try:
-            await quota_service.check_member_quota(invitation.workspace_id, raise_on_exceeded=True)
+            # #2564: this invitation's own reserved seat is the one it takes.
+            await quota_service.check_member_quota(
+                invitation.workspace_id,
+                raise_on_exceeded=True,
+                exclude_invitation_id=invitation.id,
+            )
         except QuotaExceededError as e:
             raise ValidationError(f"Cannot accept invitation: {str(e)}") from e
 

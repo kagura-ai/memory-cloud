@@ -844,6 +844,8 @@ class QuotaService:
         self,
         workspace_id: UUID,
         raise_on_exceeded: bool = False,
+        *,
+        exclude_invitation_id: int | None = None,
     ) -> tuple[bool, str | None]:
         """Check if workspace can invite more members.
 
@@ -853,6 +855,10 @@ class QuotaService:
         Args:
             workspace_id: Workspace ID
             raise_on_exceeded: If True, raise QuotaExceededError
+            exclude_invitation_id: The pending invitation being accepted. It is
+                left out of the pending count: accepting it turns the seat it
+                reserved into the member's seat instead of taking a second one
+                (#2564).
 
         Returns:
             Tuple of (can_invite, error_message)
@@ -883,16 +889,17 @@ class QuotaService:
         member_count = member_count_result.scalar() or 0
 
         # Count pending invitations (not accepted, not expired)
-        pending_count_result = await self.db.execute(
-            select(func.count(WorkspaceInvitation.id)).where(
-                WorkspaceInvitation.workspace_id == workspace_id,
-                WorkspaceInvitation.accepted_at.is_(None),
-                or_(
-                    WorkspaceInvitation.expires_at.is_(None),
-                    WorkspaceInvitation.expires_at > utcnow(),
-                ),
-            )
+        pending_stmt = select(func.count(WorkspaceInvitation.id)).where(
+            WorkspaceInvitation.workspace_id == workspace_id,
+            WorkspaceInvitation.accepted_at.is_(None),
+            or_(
+                WorkspaceInvitation.expires_at.is_(None),
+                WorkspaceInvitation.expires_at > utcnow(),
+            ),
         )
+        if exclude_invitation_id is not None:
+            pending_stmt = pending_stmt.where(WorkspaceInvitation.id != exclude_invitation_id)
+        pending_count_result = await self.db.execute(pending_stmt)
         pending_count = pending_count_result.scalar() or 0
 
         total_used = member_count + pending_count
