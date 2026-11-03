@@ -58,8 +58,9 @@ which fails when the lock is out of date, and the `lint` job runs
   `make type-check` runs the pyright in `backend/.venv` against that venv's
   interpreter, whichever venv is active in your shell
   (`make type-check BACKEND_VENV=/abs/path/.venv` picks another one).
-- `uv sync` is exact: a later sync with fewer extras (`--extra dev` alone, as
-  `setup.sh` runs) removes the provider packages again. Re-run `make install`.
+- `uv sync` is exact: a later sync with fewer extras (`--extra dev` alone)
+  removes the provider packages again. Re-run `make install`; `setup.sh`
+  installs the same set.
 - After editing `pyproject.toml`: `cd backend && uv lock` (or `make lock`) and
   commit `uv.lock` with the change. `make lock-check` is the CI gate.
 - Move one package inside its range: `uv lock --upgrade-package NAME`.

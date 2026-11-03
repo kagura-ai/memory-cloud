@@ -13,11 +13,13 @@ Dependencies are installed from the tracked lock, `uv.lock`, so every checkout,
 CI job and the Docker image run the same releases:
 
 ```bash
-# Dev dependencies (tests, ruff, pyright) — creates ./.venv
-uv sync --locked --extra dev
+# Dev dependencies (tests, ruff, pyright) plus the optional provider and lite
+# packages pyright resolves — creates ./.venv. Same as `make install` from the
+# repository root (see CONTRIBUTING.md).
+uv sync --locked --extra dev --extra llm_providers --extra lite
 
-# With neural memory support
-uv sync --locked --extra dev --extra neural
+# With neural memory support (uv sync is exact: keep the other extras)
+uv sync --locked --extra dev --extra llm_providers --extra lite --extra neural
 
 # Then either activate the environment or prefix commands with `uv run`
 source .venv/bin/activate

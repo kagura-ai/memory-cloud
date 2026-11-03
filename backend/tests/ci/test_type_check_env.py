@@ -16,7 +16,10 @@ nothing pyright checks imports it. The last test keeps that true.
 """
 
 import ast
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -95,6 +98,20 @@ def test_make_install_matches_ci_type_check() -> None:
     assert _extras(install) == _extras(_ci_type_check_sync()) - _LOCAL_SKIP
 
 
+def test_setup_sh_installs_the_make_install_set() -> None:
+    """README's one-line setup builds the same venv as ``make install``.
+
+    ``uv sync`` is exact: a smaller set in setup.sh would remove the provider
+    packages again, and ``make type-check`` would fail on their imports.
+    """
+    syncs = [
+        line for line in _uv_sync_lines(_read("setup.sh")) if not re.match(r"\s*(#|echo\b)", line)
+    ]
+    assert len(syncs) == 1, f"setup.sh: expected one `uv sync` command, got {syncs}"
+    assert "--locked" in syncs[0], syncs[0]
+    assert _extras(syncs[0]) == _extras(_make_install_sync())
+
+
 def _pyright_line() -> str:
     """The recipe's pyright command (the ``@`` lines are its guard and echoes)."""
     lines = [
@@ -114,10 +131,35 @@ def test_make_type_check_takes_pyright_and_interpreter_from_one_venv() -> None:
     assert match.group(2) == venv, line
     variable = re.fullmatch(r"\$\((\w+)\)", venv)
     if variable:
-        definition = re.search(rf"^{variable.group(1)}\s*=\s*(.+)$", _read("Makefile"), re.M)
+        definition = re.search(rf"^{variable.group(1)}\s*[?:]?=\s*(.+)$", _read("Makefile"), re.M)
         assert definition, f"Makefile does not define {venv}"
         venv = definition.group(1)
     assert re.search(r"(\$\(BACKEND_DIR\)|backend)/\.venv\b", venv), f"default venv: {venv}"
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+@pytest.mark.parametrize("given_as", ["argument", "environment"])
+def test_make_type_check_resolves_backend_venv_from_the_repo_root(given_as: str) -> None:
+    """A relative BACKEND_VENV, as a make argument or from the environment.
+
+    The guard runs in the repository root and pyright after ``cd backend``, so
+    both must see the same absolute path.
+    """
+    relative = "some/where/.venv"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"BACKEND_VENV", "MAKEFLAGS", "MAKELEVEL", "MFLAGS"}
+    }
+    args = ["make", "--no-print-directory", "-n", "-C", str(_REPO_ROOT), "type-check"]
+    if given_as == "argument":
+        args.append(f"BACKEND_VENV={relative}")
+    else:
+        env["BACKEND_VENV"] = relative
+    dry_run = subprocess.run(args, capture_output=True, text=True, env=env, check=True).stdout
+    venv = _REPO_ROOT / relative
+    assert f"test -x {venv}/bin/pyright " in dry_run, dry_run
+    assert f"{venv}/bin/pyright --pythonpath {venv}/bin/python " in dry_run, dry_run
 
 
 def _checked_dirs() -> list[Path]:

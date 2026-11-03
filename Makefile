@@ -361,8 +361,11 @@ format:
 # --pythonpath that is the first `python` on PATH, not the venv pyright was
 # installed into. Both come from one venv: backend/.venv, the one `make
 # install` builds, unless BACKEND_VENV names another (e.g. from a worktree
-# without its own) (#2523).
-BACKEND_VENV = $(abspath $(BACKEND_DIR)/.venv)
+# without its own) (#2523). BACKEND_VENV may come from the make command line
+# or the environment; a relative one is taken from the repository root, since
+# pyright runs after `cd $(BACKEND_DIR)`.
+BACKEND_VENV ?= $(BACKEND_DIR)/.venv
+override BACKEND_VENV := $(abspath $(BACKEND_VENV))
 
 .PHONY: type-check
 type-check:
