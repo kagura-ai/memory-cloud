@@ -16,11 +16,11 @@ then re-checks the caller is still owner *under* the lock. The other paths:
 
 * workspace *creation* (``workspace_service`` / ``context_service`` personal
   workspace) — a brand-new workspace, never a live concurrent-transfer target.
-* ``WorkspaceService.update_member_role`` — takes the shared lock whenever the
-  role change adds OR removes an OWNER (#1102), in addition to its own
-  single-owner guard. NOTE: it adjusts ``WorkspaceMember.role`` only, never
-  ``owner_user_id`` (that canonical pointer is moved solely by this service and
-  by erasure). Demoting the ``owner_user_id`` holder via this path therefore
+* ``WorkspaceService.update_member_role`` — takes the shared lock for every role
+  change (#2571; before, only when it added OR removed an OWNER, #1102), in
+  addition to its own single-owner guard. NOTE: it adjusts
+  ``WorkspaceMember.role`` only, never ``owner_user_id`` (that canonical
+  pointer is moved solely by this service and by erasure). Demoting the ``owner_user_id`` holder via this path therefore
   leaves the two representations out of sync — a pre-existing gap the lock does
   NOT close; tracked separately, not in #1102's scope.
 * the account-erasure auto-transfer (``account_erasure_service``) — takes the

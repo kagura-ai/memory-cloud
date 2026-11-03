@@ -2064,7 +2064,9 @@ class AccountErasureService:
         the 7-day cooling-off window, so the cron's identical check is the
         actual enforcement point. This method just surfaces the issue at
         confirm time so the user gets a 409 instead of waiting a week to
-        learn their request will fail.
+        learn their request will fail. It reads without locks and nothing
+        relies on its answer: ``_handle_owned_workspaces`` repeats the check
+        under the workspace locks, where role changes wait (#2571).
         """
         owned = await self._list_owned_workspaces(user_id)
         if not owned:
@@ -2115,7 +2117,10 @@ class AccountErasureService:
         every live workspace the subject owns, in id order, ``NOWAIT``
         (``_lock_without_waiting``), before their members are read (#2455):
         a member added to a sole-owned one afterwards waits for the commit
-        instead of going with the workspace at step 3. Each workspace to hand
+        instead of going with the workspace at step 3, and a role change
+        waits too, so the successor read is still an admin at the commit
+        (#2571). The rows that lock returns are the live workspaces handled
+        here, so the handled set is the locked set. Each workspace to hand
         on is locked again before its transfer (a row this transaction holds:
         free). This transaction holds a ``users`` row, so it never waits on a
         workspace row: the subject's own ``DELETE /workspaces/W`` holds W and
@@ -2126,8 +2131,9 @@ class AccountErasureService:
 
         Args:
             user_id: The subject.
-            listed: When given, extended with the workspaces read here (the
-                caller's billing-contract check, #1940).
+            listed: When given, extended with the workspaces read here, the
+                locked live ones and the soft-deleted ones (the caller's
+                billing-contract check, #1940).
 
         Raises:
             WorkspaceTransferRequiredError: Members but no other admin.
@@ -2147,16 +2153,27 @@ class AccountErasureService:
         await lock_identity_links(self.db)
         # #2455: every live workspace the subject owns, NOWAIT, before the
         # members are read. A membership insert (``add_member`` locks the
-        # workspace FOR UPDATE, the FK takes KEY SHARE) waits from here to the
-        # commit, so a workspace counted sole-owned below has no other member
-        # when step 3 hard-deletes it. Soft-deleted ones are not handed on and
-        # stay for step 3, which locks them after the live ones.
-        await self._lock_without_waiting(lambda: self._lock_live_owned_workspaces_nowait(user_id))
-        # Read under the locks, not before step 1: a workspace handed to the
-        # subject meanwhile (another erasure's step 2) is handed on too.
-        workspaces = await self._list_owned_workspaces(user_id)
+        # workspace FOR UPDATE, the FK takes KEY SHARE) and a role change
+        # (``update_member_role`` locks it for every change, #2571) wait from
+        # here to the commit, so a workspace counted sole-owned below has no
+        # other member when step 3 hard-deletes it, and the admins read below
+        # are still the admins at the hand-over. Read under the locks, not
+        # before step 1: a workspace handed to the subject meanwhile (another
+        # erasure's step 2) is handed on too.
+        # #2571: the live workspaces are the rows this lock returns, so the
+        # set handed on is the locked set by construction.
+        workspaces = await self._lock_without_waiting(
+            lambda: self._lock_live_owned_workspaces_nowait(user_id)
+        )
         if listed is not None:
+            # The soft-deleted ones too: their owner deleted them, so they are
+            # never handed on (#2406) and step 3, which locks them after the
+            # live ones, hard-deletes them with the sole-owned ones; the
+            # caller's billing check still sees them.
             listed.extend(workspaces)
+            listed.extend(
+                ws for ws in await self._list_owned_workspaces(user_id) if ws.deleted_at is not None
+            )
         if not workspaces:
             return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
         # Bulk-load every member row for these workspaces in one round-trip
@@ -2173,10 +2190,6 @@ class AccountErasureService:
             members_by_ws.setdefault(m.workspace_id, []).append(m)
 
         for ws in sorted(workspaces, key=lambda w: w.id):
-            if ws.deleted_at is not None:
-                # Its owner deleted it: never handed on, hard-deleted with the
-                # sole-owned ones (#2406).
-                continue
             other_members = [m for m in members_by_ws.get(ws.id, []) if m.user_id != user_id]
             if not other_members:
                 sole_owner_count += 1
@@ -2256,20 +2269,26 @@ class AccountErasureService:
                 raise
             raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
 
-    async def _lock_live_owned_workspaces_nowait(self, user_id: str) -> None:
-        """The live workspaces ``user_id`` owns, in id order, ``NOWAIT``
-        (step 2 before it reads their members, #2455; step 3 again, #2418)."""
+    async def _lock_live_owned_workspaces_nowait(self, user_id: str) -> list[Workspace]:
+        """Lock the live workspaces ``user_id`` owns, in id order, ``NOWAIT``
+        (step 2 before it reads their members, #2455; step 3 again, #2418),
+        and return them in that order: step 2 hands on exactly these (#2571).
+
+        ``populate_existing``: a row already in the session shows what is
+        committed under the lock, not what an earlier read loaded."""
         try:
-            await self.db.execute(
-                select(Workspace.id)
+            result = await self.db.execute(
+                select(Workspace)
                 .where(Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None))
                 .order_by(Workspace.id)
                 .with_for_update(nowait=True)
+                .execution_options(populate_existing=True)
             )
         except DBAPIError as exc:
             if is_lock_not_available(exc):
                 raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
             raise
+        return list(result.scalars().all())
 
     async def _lock_owned_workspaces(self, user_id: str) -> None:
         """Lock the workspaces ``user_id`` owns in id order (#2418): the live

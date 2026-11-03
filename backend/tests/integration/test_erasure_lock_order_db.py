@@ -1169,6 +1169,285 @@ async def test_deleting_a_workspace_the_subject_does_not_own_never_deadlocks_the
 
 
 # ---------------------------------------------------------------------------
+# A member's role change against step 2's choice of successor (#2571)
+# ---------------------------------------------------------------------------
+
+
+async def _member_roles(db, workspace_id) -> dict[str, str]:
+    return dict(
+        (
+            await db.execute(
+                select(WorkspaceMember.user_id, WorkspaceMember.role)
+                .where(WorkspaceMember.workspace_id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+
+
+async def _owner_of(db, workspace_id) -> str | None:
+    return await db.scalar(
+        select(Workspace.owner_user_id)
+        .where(Workspace.id == workspace_id)
+        .execution_options(populate_existing=True)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_role_change_waits_for_step_two_of_the_owners_erasure(db_session, connector_world):
+    """#2571: step 2 of S's erasure holds W since its owner-wide lock and has
+    read W's members, so A, the only other admin, is the successor. A
+    demotion of A meanwhile waits on W's row, which ``update_member_role``
+    takes for every role change, and runs once the erasure has committed.
+    Before #2571 it committed at once, between the read and the hand-over,
+    and step 2 then made the just-demoted A the owner, overwriting the
+    demotion it had already answered.
+
+    What the demotion finds after the wait is a workspace A owns, so it is
+    refused like any demotion of the owner (#1108: owners change through
+    ``transfer_ownership``) and A keeps the OWNER role. The test is about
+    the order, not the final role: the demotion never lands inside step 2,
+    and nothing deadlocks."""
+    import services.account_erasure_service as erasure_module
+
+    world = connector_world
+    subject = await world.user("subject")
+    admin = await world.user("admin")
+    member = await world.user("member")
+    ws_id = (await world.workspace(subject, **{admin: "admin", member: "member"})).id
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    erasure_pid: int | None = None
+    demote_pid: int | None = None
+    original = erasure_module.lock_workspace_for_update
+
+    async def paused_lock(db, workspace_id, **kwargs):
+        # step 2's re-lock of W before its hand-over: after the owner-wide
+        # lock and the member read
+        nonlocal erasure_pid
+        workspace = await original(db, workspace_id, **kwargs)
+        erasure_pid = await _pid(db)
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return workspace
+
+    async def demote():
+        nonlocal demote_pid
+        async with maker() as db:
+            demote_pid = await _pid(db)
+            return await WorkspaceService(db).update_member_role(ws_id, admin, "member")
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(erasure_module, "lock_workspace_for_update", paused_lock),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            demoting = asyncio.create_task(demote())
+            tasks.append(demoting)
+            await _done_or_blocked(maker, demoting, lambda: demote_pid)
+            # before #2571 nothing held W for this change: it committed here
+            demoted_during_step_two = demoting.done()
+            async with maker() as observer:
+                blockers = await observer.scalar(
+                    text("SELECT pg_blocking_pids(:pid)"), {"pid": demote_pid}
+                )
+            release.set()
+            erasure_result, demote_result = await asyncio.wait_for(
+                asyncio.gather(erasing, demoting, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not demoted_during_step_two, demote_result
+    assert blockers == [erasure_pid]
+    assert not isinstance(erasure_result, BaseException), erasure_result
+    assert erasure_result.status == "complete"
+    request = await _request_of(db_session, subject)
+    assert request.deleted_data_summary["workspaces"]["transferred"] == [
+        {"workspace_id": str(ws_id), "new_owner_user_id": admin}
+    ]
+    assert isinstance(demote_result, ValidationError), demote_result
+    assert "Cannot demote the workspace owner" in demote_result.message
+    assert await _owner_of(db_session, ws_id) == admin
+    assert await _member_roles(db_session, ws_id) == {admin: "owner", member: "member"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_admin", [False, True], ids=["no-other-admin", "another-admin"])
+async def test_step_two_reads_the_members_after_a_role_change_that_holds_the_workspace(
+    db_session, connector_world, second_admin
+):
+    """#2571, the other order: the demotion of A, the lowest-id admin, holds
+    W when step 2 of S's erasure comes. Step 2's owner-wide ``NOWAIT`` lock
+    loses and is tried again for a moment (#2443); the demotion commits in
+    between, and step 2 reads W's members after it. With no other admin it
+    refuses (``WorkspaceTransferRequiredError``: members, no admin); with B
+    it hands W to B. Never to the demoted A."""
+    import services.workspace_service as workspace_module
+    from services.account_erasure_service import _LockConflict
+    from utils.exceptions import WorkspaceTransferRequiredError
+
+    world = connector_world
+    subject = await world.user("subject")
+    admin = await world.user("admin-a")
+    member = await world.user("member")
+    roles = {admin: "admin", member: "member"}
+    other = None
+    if second_admin:
+        other = await world.user("admin-b")
+        roles[other] = "admin"
+    ws_id = (await world.workspace(subject, **roles)).id
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release, lost = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_lock = workspace_module.lock_workspace_for_update
+    original_owner_wide = AccountErasureService._lock_live_owned_workspaces_nowait
+
+    async def paused_lock(db, workspace_id, **kwargs):
+        # the demotion holds W, before it reads or writes A's member row
+        workspace = await original_lock(db, workspace_id, **kwargs)
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return workspace
+
+    async def owner_wide_lock(self, user_id):
+        try:
+            return await original_owner_wide(self, user_id)
+        except _LockConflict:
+            lost.set()
+            raise
+
+    async def demote():
+        async with maker() as db:
+            return await WorkspaceService(db).update_member_role(ws_id, admin, "member")
+
+    async def step_two() -> dict:
+        async with maker() as db:
+            await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
+            result = await AccountErasureService(db)._handle_owned_workspaces(subject)
+            await db.commit()
+            return result
+
+    tasks: list[asyncio.Task] = []
+    with (
+        patch.object(workspace_module, "lock_workspace_for_update", paused_lock),
+        patch.object(AccountErasureService, "_lock_live_owned_workspaces_nowait", owner_wide_lock),
+    ):
+        try:
+            demoting = asyncio.create_task(demote())
+            tasks.append(demoting)
+            await asyncio.wait_for(holding.wait(), 15)
+            erasing = asyncio.create_task(step_two())
+            tasks.append(erasing)
+            await asyncio.wait_for(lost.wait(), 15)  # step 2 met the demotion's lock
+            release.set()
+            demote_result, step_result = await asyncio.wait_for(
+                asyncio.gather(demoting, erasing, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not isinstance(demote_result, BaseException), demote_result
+    assert demote_result.role == "member"
+    if other is None:
+        assert isinstance(step_result, WorkspaceTransferRequiredError), step_result
+        assert await _owner_of(db_session, ws_id) == subject
+        assert await _member_roles(db_session, ws_id) == {
+            subject: "owner",
+            admin: "member",
+            member: "member",
+        }
+    else:
+        assert not isinstance(step_result, BaseException), step_result
+        assert step_result["transferred"] == [
+            {"workspace_id": str(ws_id), "new_owner_user_id": other}
+        ]
+        assert await _owner_of(db_session, ws_id) == other
+        assert (await _member_roles(db_session, ws_id))[admin] == "member"
+        assert (await _member_roles(db_session, ws_id))[other] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_a_role_change_takes_the_global_order(db_session, connector_world):
+    """#2571: ``PUT /workspaces/W/members/A`` from admin to member holds no
+    ``users`` row, so it may wait on W: W first, then A's member row."""
+    from api.routes.workspaces import UpdateMemberRoleRequest, update_member_role
+
+    world = connector_world
+    owner = await world.user("owner")
+    admin = await world.user("admin")
+    ws_id = (await world.workspace(owner, **{admin: "admin"})).id
+    await db_session.commit()
+
+    with _LockTrace(db_session.bind) as trace:
+        response = await update_member_role(
+            ws_id,
+            admin,
+            UpdateMemberRoleRequest(role="member"),
+            {"user_id": owner, "sub": owner},
+            db_session,
+        )
+
+    assert response.role == "member"
+    _assert_global_order(trace)
+    assert trace.kinds() == [[("ws_live", False), ("child", False)]], trace.kinds()
+
+
+@pytest.mark.asyncio
+async def test_the_owner_wide_lock_returns_the_workspaces_step_two_hands_on(
+    db_session, connector_world
+):
+    """#2571: the owner-wide lock statement returns the live rows it locked,
+    in id order and as committed under the lock (a row the session loaded
+    before is re-read), and step 2 hands on and counts exactly those. The
+    soft-deleted workspace, a member and no admin in it, is only listed for
+    the caller's billing check."""
+    world = connector_world
+    subject = await world.user("subject")
+    admin = await world.user("admin")
+    shared_id = (await world.workspace(subject, **{admin: "admin"})).id
+    sole_id = (await world.workspace(subject)).id
+    gone_id = (await world.workspace(subject, **{admin: "member"})).id
+    await db_session.execute(
+        update(Workspace).where(Workspace.id == gone_id).values(deleted_at=func.now())
+    )
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async with maker() as db:
+        loaded = await db.get(Workspace, shared_id)
+        async with maker() as other:
+            await other.execute(
+                update(Workspace).where(Workspace.id == shared_id).values(name="renamed")
+            )
+            await other.commit()
+        await db.execute(select(User.id).where(User.user_id == subject).with_for_update())
+        service = AccountErasureService(db)
+        locked = await service._lock_live_owned_workspaces_nowait(subject)
+        locked_ids = [ws.id for ws in locked]
+        reread = (any(ws is loaded for ws in locked), loaded.name if loaded else None)
+        listed: list[Workspace] = []
+        result = await service._handle_owned_workspaces(subject, listed=listed)
+        listed_ids = sorted(ws.id for ws in listed)
+        await db.rollback()
+
+    assert locked_ids == sorted([shared_id, sole_id])
+    assert reread == (True, "renamed")
+    assert result == {
+        "transferred": [{"workspace_id": str(shared_id), "new_owner_user_id": admin}],
+        "sole_owner_workspaces": 1,
+    }
+    assert listed_ids == sorted([shared_id, sole_id, gone_id])
+
+
+# ---------------------------------------------------------------------------
 # The order itself: a lock trace of every holder
 # ---------------------------------------------------------------------------
 

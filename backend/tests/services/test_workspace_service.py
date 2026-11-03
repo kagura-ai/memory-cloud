@@ -523,9 +523,10 @@ class TestUpdateMemberRole:
         assert owners[0].user_id == "real_owner"
 
     @pytest.mark.asyncio
-    async def test_non_owner_change_skips_workspace_lock(self, db_session) -> None:
-        # A plain member<->viewer/admin change never touches ownership → no lock,
-        # keeping the common path contention-free.
+    async def test_non_owner_change_takes_workspace_lock(self, db_session) -> None:
+        # #2571: a member<->admin change moves who erasure step 2 can hand the
+        # workspace to, so it serializes on the workspace row too, taken before
+        # the member is read (it used to skip the lock).
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="WLk2", owner_user_id="o2", plan_name="free")
         db_session.add(ws)
@@ -533,10 +534,24 @@ class TestUpdateMemberRole:
         db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="o2", role=WorkspaceRole.OWNER))
         db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="m2", role=WorkspaceRole.MEMBER))
         await db_session.flush()
+        order: list[str] = []
+        get_member = service.get_member
 
-        with patch("services.workspace_service.lock_workspace_for_update", AsyncMock()) as lock:
-            await service.update_member_role(ws.id, "m2", "admin")
-        lock.assert_not_awaited()
+        async def reading(*args, **kwargs):
+            order.append("member")
+            return await get_member(*args, **kwargs)
+
+        async def locking(db, workspace_id):
+            order.append("lock")
+            return ws
+
+        with (
+            patch("services.workspace_service.lock_workspace_for_update", side_effect=locking),
+            patch.object(service, "get_member", side_effect=reading),
+        ):
+            updated = await service.update_member_role(ws.id, "m2", "admin")
+        assert updated.role == "admin"
+        assert order == ["lock", "member"]
 
 
 # ---------------------------------------------------------------------------
