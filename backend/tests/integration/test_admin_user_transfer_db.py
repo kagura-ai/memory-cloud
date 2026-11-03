@@ -367,7 +367,7 @@ async def test_a_linked_contributor_does_not_take_a_connector_write_target(
         UserDeleteRequest(context_transfers={ctx_id: owner}),
     )
     assert response["deleted"]["contexts"] == 0
-    assert response["reowned"] == {"connector_api_keys": 1}
+    assert response["reowned"] == {"connector_api_keys": 1, "agents": 0}
     db_session.expire_all()
     assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
     assert await db_session.get(Memory, theirs_id) is not None
