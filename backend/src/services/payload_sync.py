@@ -37,6 +37,8 @@ from typing import Any, Generic, Protocol, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, InterfaceError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
@@ -92,10 +94,17 @@ class PayloadFailurePolicy(Protocol):
         """
         ...
 
-    async def row_read_failed(self, db: AsyncSession, memory_id: UUID, exc: Exception) -> None:
-        """A row's own read, after ``read_failed`` asked for it, failed too;
-        the row is not patched. The policy rolls the read's transaction back
-        so the next row's read runs in a fresh one."""
+    async def row_read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
+        """A row's own read, after ``read_failed`` asked for it, failed too.
+
+        ``ids`` is that row, then the rows of its group not read yet. The
+        policy rolls the read's transaction back so the next read runs in a
+        fresh one.
+
+        Returns:
+            True: only the first of ``ids`` is not patched, and the next row
+            is read. False: none of ``ids`` is read (the next group goes on).
+        """
         ...
 
     async def patch_failed(
@@ -124,7 +133,11 @@ class SwallowFailures:
     one at a time, each in a transaction of its own (#2433): the rows that
     can be read are patched from that read, and only a row whose own read
     fails too is left as it is (``<prefix>_reread_failed`` with its id; a
-    one-row group's read is that row's own). A group whose commit fails
+    one-row group's read is that row's own). A read that fails on the
+    connection (the database cannot be reached, the pool has no connection
+    to give, the connection broke) or whose rollback fails stops that: each
+    row's own read would fail, and wait, the same way, so the group's rows
+    not read yet are left as they are too. A group whose commit fails
     is rolled back, so the next group's read runs in a fresh transaction. A
     rollback that fails too is logged (``<prefix>_tx_end_failed``), never
     raised. Events are ``<prefix>_reread_failed``, ``<prefix>_sync_failed``,
@@ -133,9 +146,11 @@ class SwallowFailures:
 
     Attributes:
         failed: Patches that failed.
-        unread: Rows not patched because their own read failed.
-        recovered: Rows of a group whose read failed that were then read on
-            their own, and planned and applied as in a group.
+        unread: Rows not patched because their read failed and was not, or
+            could not be, retried on its own.
+        recovered: Rows of a group whose read failed that their own read
+            then read (planned and applied like any group's rows: a patch
+            that fails there counts in ``failed`` too).
     """
 
     def __init__(self, event_prefix: str) -> None:
@@ -145,20 +160,33 @@ class SwallowFailures:
         self.recovered = 0
 
     async def read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
-        if len(ids) == 1:  # read on its own already
-            await self._unread(db, ids, exc)
-            return False
-        await _rollback_or_log(db, self.event_prefix)
-        self.recovered += len(ids)  # less each row whose own read fails too
-        return True
+        # a one-row group's read was that row's own already
+        retry = await self._rows_readable(db, exc) and len(ids) > 1
+        if retry:
+            self.recovered += len(ids)  # less each row whose own read fails too
+        else:
+            self._unread(ids, exc)
+        return retry
 
-    async def row_read_failed(self, db: AsyncSession, memory_id: UUID, exc: Exception) -> None:
-        self.recovered -= 1
-        await self._unread(db, [memory_id], exc)
+    async def row_read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
+        go_on = await self._rows_readable(db, exc)
+        lost = ids[:1] if go_on else ids
+        self.recovered -= len(lost)
+        self._unread(lost, exc)
+        return go_on
 
-    async def _unread(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> None:
+    async def _rows_readable(self, db: AsyncSession, exc: Exception) -> bool:
+        """Roll the failed read back; whether a row's own read can still
+        work: not after a failed rollback or on a connection-level error."""
+        return await _rollback_or_log(db, self.event_prefix) and not _connection_lost(exc)
+
+    def _unread(self, ids: list[UUID], exc: Exception) -> None:
         self.unread += len(ids)
-        await _group_failed(db, f"{self.event_prefix}_reread_failed", self.event_prefix, ids, exc)
+        logger.warning(
+            f"{self.event_prefix}_reread_failed",
+            memory_ids=[str(i) for i in ids],
+            error_class=type(exc).__name__,
+        )
 
     async def patch_failed(
         self, db: AsyncSession | None, patch: PlannedPatch[Any], exc: Exception
@@ -211,10 +239,10 @@ class RequeueEmbeddingOnFailure:
         await _group_failed(db, f"{self.event_prefix}_read_failed", self.event_prefix, ids, exc)
         return False  # its rows are not read again one at a time
 
-    async def row_read_failed(self, db: AsyncSession, memory_id: UUID, exc: Exception) -> None:
+    async def row_read_failed(self, db: AsyncSession, ids: list[UUID], exc: Exception) -> bool:
         # Not reached (``read_failed`` never asks for a row's own read); were
-        # it, the row would count as a group of one whose read failed.
-        await self.read_failed(db, [memory_id], exc)
+        # it, the rows would count as a group whose read failed.
+        return await self.read_failed(db, ids, exc)
 
     async def patch_failed(
         self, db: AsyncSession | None, patch: PlannedPatch[Any], exc: Exception
@@ -267,12 +295,26 @@ def _log_tx_end_failed(event_prefix: str, exc: Exception) -> None:
     logger.warning(f"{event_prefix}_tx_end_failed", error_class=type(exc).__name__)
 
 
-async def _rollback_or_log(db: AsyncSession, event_prefix: str) -> None:
-    """Roll the group's transaction back; a failed rollback is logged, not raised."""
+async def _rollback_or_log(db: AsyncSession, event_prefix: str) -> bool:
+    """Roll the group's transaction back; a failed rollback is logged, not
+    raised. Returns whether the rollback worked."""
     try:
         await db.rollback()
     except Exception as exc:
         _log_tx_end_failed(event_prefix, exc)
+        return False
+    return True
+
+
+def _connection_lost(exc: Exception) -> bool:
+    """Whether a read failed on the connection rather than on a row: the
+    database could not be reached (``OSError``: refused, timed out), the
+    pool had no connection to give (SQLAlchemy's ``TimeoutError``), or the
+    connection broke (an ``InterfaceError`` or an invalidated connection).
+    Every row's own read would then fail, and wait, the same way (#2433)."""
+    if isinstance(exc, DBAPIError):
+        return exc.connection_invalidated or isinstance(exc, InterfaceError)
+    return isinstance(exc, (OSError, PoolTimeoutError))
 
 
 def _extra(patch: PlannedPatch[Any], *own: str) -> dict[str, Any]:
@@ -329,7 +371,8 @@ async def sync_payloads_after_commit(
     locks. A failure goes to ``on_failure``; nothing here raises for the
     vector store's sake. When a group's read fails and the policy asks for
     it, the group's rows are then worked one at a time, each the same way
-    in a transaction of its own (#2433).
+    in a transaction of its own, until a row's failed read makes the policy
+    stop (#2433).
 
     Args:
         db: The session, its write committed; None applies what ``plan``
@@ -378,10 +421,10 @@ async def sync_payloads_after_commit(
         exc = await sync(group, ids)
         if exc is None or db is None or not await on_failure.read_failed(db, ids, exc):
             continue
-        for item, item_id in zip(group, ids, strict=True):
+        for n, (item, item_id) in enumerate(zip(group, ids, strict=True)):
             row_exc = await sync([item], [item_id])
-            if row_exc is not None:
-                await on_failure.row_read_failed(db, item_id, row_exc)
+            if row_exc is not None and not await on_failure.row_read_failed(db, ids[n:], row_exc):
+                break  # the rest of the group is not read either
 
 
 __all__ = [

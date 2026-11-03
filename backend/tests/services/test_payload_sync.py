@@ -9,7 +9,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from services import payload_sync as ps
 from utils.exceptions import QdrantError
@@ -181,6 +182,87 @@ async def test_swallow_reads_a_failed_groups_rows_one_at_a_time() -> None:
     assert (db.rollbacks, db.commits) == (2, 2)  # the group's and the locked row's reads
     log.warning.assert_called_once_with(
         "p_reread_failed", memory_ids=[str(locked)], error_class="OperationalError"
+    )
+
+
+_LOST_CONNECTIONS = [
+    ConnectionRefusedError("refused"),
+    TimeoutError("connect timed out"),
+    PoolTimeoutError("QueuePool limit reached"),
+    InterfaceError("SELECT", {}, Exception("connection is closed")),
+    DBAPIError("SELECT", {}, Exception("terminated"), connection_invalidated=True),
+]
+
+
+@pytest.mark.parametrize("exc", _LOST_CONNECTIONS, ids=lambda e: type(e).__name__)
+async def test_swallow_reads_no_row_on_its_own_after_a_lost_connection(exc: Exception) -> None:
+    """#2433: a group read that failed on the connection, not on a row, is
+    not retried row by row: each row's read would fail (and wait) the same
+    way. The group is left unread, as before #2433."""
+    ids = _ids(3)
+    db = _db()
+    read = AsyncMock(side_effect=exc)
+    policy = ps.SwallowFailures("p")
+    with patch(_READ, read), patch.object(ps, "logger") as log:
+        await ps.sync_payloads_after_commit(
+            db, ids, memory_id=lambda i: i, plan=_plan_all(), apply=AsyncMock(),
+            on_failure=policy,
+        )  # fmt: skip
+    read.assert_awaited_once()
+    assert (policy.failed, policy.unread, policy.recovered) == (0, 3, 0)
+    db.rollback.assert_awaited_once()
+    log.warning.assert_called_once_with(
+        "p_reread_failed", memory_ids=[str(i) for i in ids], error_class=type(exc).__name__
+    )
+
+
+async def test_swallow_reads_no_row_on_its_own_after_a_failed_rollback() -> None:
+    """#2433: a group whose rollback fails after its read failed is not
+    retried row by row either."""
+    ids = _ids(3)
+    db = _db()
+    db.rollback = AsyncMock(side_effect=RuntimeError("connection gone"))
+    read = AsyncMock(side_effect=_lock_timeout())
+    policy = ps.SwallowFailures("p")
+    with patch(_READ, read), patch.object(ps, "logger") as log:
+        await ps.sync_payloads_after_commit(
+            db, ids, memory_id=lambda i: i, plan=_plan_all(), apply=AsyncMock(),
+            on_failure=policy,
+        )  # fmt: skip
+    read.assert_awaited_once()
+    assert (policy.unread, policy.recovered) == (3, 0)
+    assert [c.args[0] for c in log.warning.call_args_list] == ["p_tx_end_failed", "p_reread_failed"]
+
+
+async def test_swallow_stops_reading_rows_once_the_connection_is_lost() -> None:
+    """#2433: the retry stops at a row whose own read fails on the
+    connection; that row and the rest of the group are left unread, in one
+    log line, without a read each."""
+    first, second, third, fourth = ids = _ids(4)
+    db = _db()
+    reads: list[list[uuid.UUID]] = []
+
+    async def read(_db: Any, group: list[uuid.UUID], **_: Any) -> dict[uuid.UUID, Any]:
+        reads.append(list(group))
+        if len(group) > 1:
+            raise _lock_timeout()
+        if group == [second]:
+            raise ConnectionRefusedError("refused")
+        return {i: SimpleNamespace(id=i) for i in group}
+
+    applied, apply = _applier(set(), RuntimeError())
+    policy = ps.SwallowFailures("p")
+    with patch(_READ, side_effect=read), patch.object(ps, "logger") as log:
+        await ps.sync_payloads_after_commit(
+            db, ids, memory_id=lambda i: i, plan=_plan_all(), apply=apply, on_failure=policy
+        )
+    assert reads == [ids, [first], [second]]
+    assert applied == [first]
+    assert (policy.failed, policy.unread, policy.recovered) == (0, 3, 1)
+    log.warning.assert_called_once_with(
+        "p_reread_failed",
+        memory_ids=[str(i) for i in (second, third, fourth)],
+        error_class="ConnectionRefusedError",
     )
 
 
