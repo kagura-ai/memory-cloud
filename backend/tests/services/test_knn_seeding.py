@@ -16,6 +16,7 @@ import pytest
 
 from services import memory_service
 from services.memory_service import _create_knn_seed_edges
+from utils.exceptions import QdrantError
 
 
 @pytest.fixture(autouse=True)
@@ -3212,21 +3213,18 @@ class TestMechanicalReembed:
         db.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_an_unsupported_backend_is_reported_once(self, monkeypatch):
-        monkeypatch.setattr(memory_service, "_SUPERSEDE_CLEAR_UNSUPPORTED_REPORTED", False)
+    async def test_a_failed_vector_read_leaves_the_candidate(self):
+        """Every store answers the read (#2520); a read that fails is logged on
+        each re-embed and the candidate stays as it is."""
         stored = {"memory_id": str(uuid4()), "similarity": 0.90}
-        logs = []
         for _ in range(2):
             memory, db, run = await self._clear(
-                stored, None, stored_vectors=AsyncMock(side_effect=NotImplementedError("lance"))
+                stored, None, stored_vectors=AsyncMock(side_effect=QdrantError("down"))
             )
             assert memory.supersede_candidate == stored
             db.execute.assert_not_awaited()
-            logs.append([c for c in run.log.warning.call_args_list if c.args])
-        first, second = ([c.args[0] for c in calls] for calls in logs)
-        assert first == ["supersede_clear_unsupported_backend"]
-        assert second == []
-        assert set(logs[0][0].kwargs) == {"hint"}  # no row data
+            events = [c.args[0] for c in run.log.warning.call_args_list if c.args]
+            assert events == ["supersede_clear_check_failed"]
 
     @pytest.mark.asyncio
     async def test_mechanical_reembed_keeps_a_candidate_hovering_at_the_floor(self):

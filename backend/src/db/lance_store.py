@@ -872,6 +872,44 @@ class LanceVectorStore:
         except Exception as e:
             raise QdrantError(f"Failed to list LanceDB points: {e}") from e
 
+    async def retrieve_dense_vectors(
+        self, collection_name: str, point_ids: Sequence[str]
+    ) -> dict[str, list[float]]:
+        """The stored vector of each row, a chunk of ids per read (#2520).
+
+        Same contract as ``db.qdrant.retrieve_dense_vectors``: a row that does
+        not exist or has no vector is absent; no ids read nothing.
+        """
+        ids = [str(pid) for pid in point_ids]
+        if not ids:
+            return {}
+
+        def _run() -> dict[str, list[float]]:
+            out: dict[str, list[float]] = {}
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return out
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    rows = (
+                        tbl.search()
+                        .where(f"id IN ({', '.join(_sql_str(pid) for pid in chunk)})")
+                        .select(["id", "vector"])
+                        .limit(len(chunk))
+                        .to_list()
+                    )
+                    for row in rows:
+                        vector = row.get("vector")
+                        if vector is not None and len(vector):
+                            out[str(row["id"])] = [float(x) for x in vector]
+            return out
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to read vectors from LanceDB: {e}") from e
+
     async def erasure_point_identities(
         self, collection: str
     ) -> list[tuple[str, str, str | None, datetime | None]]:
