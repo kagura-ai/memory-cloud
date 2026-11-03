@@ -1459,9 +1459,11 @@ async def finish(result: RollbackResult, db: AsyncSession | None = None) -> None
     built from the rows as they are now, read ``FOR SHARE``: an edit that
     committed after the rollback is not overwritten by the restored values,
     and one still in flight (it holds the row lock while it patches the
-    payload) finishes first. A group whose re-read fails is not patched
-    (#2346): the queued values may be older than such an edit. Without
-    ``db`` the patches queued at the restore are applied as they are.
+    payload) finishes first. A row whose re-read fails is not patched
+    (#2346): the queued values may be older than such an edit. A group
+    whose re-read fails has its rows re-read one at a time, so only the rows
+    that cannot be read are left unpatched (#2433). Without ``db`` the
+    patches queued at the restore are applied as they are.
     """
     if result.forgotten_points and result.collection:
         from db.qdrant import delete_points_from_qdrant
@@ -1552,7 +1554,9 @@ async def _apply_payload_sync(
 async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None) -> None:
     """The shared post-commit payload step (``payload_sync``, #2283) with
     ``SwallowFailures``: a failed patch is logged and the next one goes on; a
-    group whose re-read fails is not patched (#2346)."""
+    row whose re-read fails is not patched (#2346), and a group's failed
+    re-read is retried row by row (#2433). The summary line counts the
+    failed patches, the rows left unread and the rows the retry read."""
     if not syncs:
         return
     policy = SwallowFailures("session_rollback_payload")
@@ -1566,11 +1570,12 @@ async def _apply_payload_syncs(syncs: list[PayloadSync], db: AsyncSession | None
         columns=_PAYLOAD_COLUMNS,
         live_only=True,
     )
-    if policy.failed or policy.unread:
+    if policy.failed or policy.unread or policy.recovered:
         logger.warning(
             "session_rollback_payload_syncs_failed",
             failed=policy.failed,
             unread=policy.unread,
+            recovered=policy.recovered,
             of=len(syncs),
         )
 
