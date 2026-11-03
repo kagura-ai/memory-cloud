@@ -141,7 +141,9 @@ jobs:
       # (`llm_providers`) hid #1443 — Gemini list_models always returning its
       # hardcoded fallback — behind exactly that. lancedb/pyarrow (`lite`) were
       # missed on the first attempt at this job and CI caught it.
-      # If a new extra is added to pyproject.toml, add it here too.
+      # If a new extra is added to pyproject.toml, add it here too, and to
+      # `make install` (the local set: this one minus `neural`, #2523).
+      # backend/tests/ci/test_type_check_env.py checks both.
       - name: Install dependencies
         run: |
           cd backend

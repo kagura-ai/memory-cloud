@@ -63,7 +63,10 @@ if ! command -v uv >/dev/null 2>&1 || [ "$(uv --version 2>/dev/null | awk '{prin
   echo "Later 'uv' commands in backend/ need this version too: put backend/.uv-bin on PATH,"
   echo "or install uv ${UV_REQUIRED} for your user (curl -LsSf https://astral.sh/uv/${UV_REQUIRED}/install.sh | sh)."
 fi
-cd backend && uv sync --locked --extra dev
+# The same extras as `make install` (#2523): `uv sync` is exact, so a smaller
+# set here would remove the provider packages `make type-check` needs.
+# backend/tests/ci/test_type_check_env.py keeps the two in step.
+cd backend && uv sync --locked --extra dev --extra llm_providers --extra lite
 cd ..
 echo "Backend dependencies are in backend/.venv (activate it, or run commands with 'uv run')."
 # The SDK is a command-line tool for you, not a backend dependency: install it
