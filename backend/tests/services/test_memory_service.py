@@ -2030,6 +2030,262 @@ class TestRecallConfidencePool:
         assert response.confidence.top_score is None
 
 
+def _hit(hit_id, score, **extra):
+    """One hybrid-search hit with its ranking score."""
+    return {"id": str(hit_id), "score": score, "hybrid_score": score, **extra}
+
+
+class TestPruneUnhydratedHits:
+    """#2546: the pool keeps one hit per hydrated memory, in pool order."""
+
+    def test_hits_without_a_row_leave_the_pool(self):
+        from services.memory_service import _prune_unhydrated_hits
+
+        kept, gone = SimpleNamespace(id=uuid4()), uuid4()
+        pool = [_hit(gone, 0.9), _hit(kept.id, 0.8)]
+
+        assert _prune_unhydrated_hits(pool, {str(kept.id): kept}) == (1, 0)
+        assert [h["id"] for h in pool] == [str(kept.id)]
+
+    def test_a_memory_hit_twice_keeps_one_hit_at_its_best_place(self):
+        from services.memory_service import _prune_unhydrated_hits
+
+        resource, other = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
+        point = uuid4()  # the resource row's summary point; the row id is a chunk's
+        pool = [
+            _hit(point, 0.9, semantic_score_raw=0.7, embedding=[1.0, 0.0]),
+            _hit(other.id, 0.85, semantic_score_raw=0.6),
+            _hit(resource.id, 0.8, semantic_score_raw=0.8, embedding=[]),
+        ]
+        memories = {str(point): resource, str(resource.id): resource, str(other.id): other}
+
+        assert _prune_unhydrated_hits(pool, memories) == (0, 1)
+
+        assert [h["id"] for h in pool] == [str(point), str(other.id)]
+        survivor = pool[0]
+        assert survivor["hybrid_score"] == survivor["score"] == 0.9
+        # Confidence reads the raw cosine maximum (absence detection), so the
+        # collapse must not lower it — as a fold group's head does (#2123).
+        assert survivor["semantic_score_raw"] == 0.8
+        assert survivor["embedding"] == [1.0, 0.0]
+
+    def test_the_best_scored_duplicate_survives_in_an_unranked_pool(self):
+        from services.memory_service import _prune_unhydrated_hits
+
+        row, other = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
+        point = uuid4()
+        pool = [_hit(point, 0.5), _hit(other.id, 0.7), _hit(row.id, 0.9)]
+        memories = {str(point): row, str(row.id): row, str(other.id): other}
+
+        assert _prune_unhydrated_hits(pool, memories) == (0, 1)
+
+        assert [h["id"] for h in pool] == [str(row.id), str(other.id)]
+        assert pool[0]["hybrid_score"] == 0.9
+
+    def test_a_tie_keeps_the_earlier_hit(self):
+        from services.memory_service import _prune_unhydrated_hits
+
+        row = SimpleNamespace(id=uuid4())
+        point = uuid4()
+        pool = [_hit(point, 0.9), _hit(row.id, 0.9)]
+
+        _prune_unhydrated_hits(pool, {str(point): row, str(row.id): row})
+
+        assert [h["id"] for h in pool] == [str(point)]
+
+    def test_a_chunk_only_survivor_takes_the_summary_points_vector(self):
+        """The chunk group's hit has no vector (``collapse_chunk_hits``); the
+        Hebbian pass would skip its cosine gate without the summary one."""
+        from services.memory_service import _prune_unhydrated_hits
+
+        row = SimpleNamespace(id=uuid4())
+        point = uuid4()
+        pool = [_hit(row.id, 0.9, embedding=[]), _hit(point, 0.6, embedding=[0.0, 1.0])]
+
+        _prune_unhydrated_hits(pool, {str(point): row, str(row.id): row})
+
+        assert [h["id"] for h in pool] == [str(row.id)]
+        assert pool[0]["embedding"] == [0.0, 1.0]
+        assert pool[0]["hybrid_score"] == 0.9
+
+    def test_a_clean_pool_is_left_as_it_is(self):
+        from services.memory_service import _prune_unhydrated_hits
+
+        rows = [SimpleNamespace(id=uuid4()) for _ in range(3)]
+        pool = [_hit(r.id, 0.9 - i * 0.1) for i, r in enumerate(rows)]
+        before = [dict(h) for h in pool]
+
+        assert _prune_unhydrated_hits(pool, {str(r.id): r for r in rows}) == (0, 0)
+        assert pool == before
+
+
+def _page_row(context_id, **overrides):
+    """A hydrated Memory stand-in with every field the page builder reads."""
+    row_id = uuid4()
+    values = {
+        "id": row_id,
+        "summary_embedding_id": row_id,
+        "context_id": context_id,
+        "summary": "s",
+        "context_summary": None,
+        "content": None,
+        "type": "fact",
+        "importance": 0.5,
+        "scope": "working",
+        "created_at": datetime(2026, 10, 1),
+        "updated_at": None,
+        "client": "test",
+        "tags": [],
+        "context": None,
+        "details": None,
+        "source_uri": None,
+        "source_type": None,
+        "version": 1,
+        "supersede_candidate": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.asyncio
+class TestRecallPoolPrunedAfterHydration:
+    """#2546: a hit with no hydrated row, or a second hit of one memory, used
+    to stay in the pool after hydration: it took a top-k page slot (the page
+    could not fill from deeper candidates), ``recall_completed.candidates``
+    counted it, and reinforce, the fold and the Hebbian pass all saw it.
+
+    Real hydration (on a stubbed SELECT) and the real page builder; the
+    stages after hydration are recorders."""
+
+    K = 3
+
+    def _scenario(self):
+        ctx, other_ctx = uuid4(), uuid4()
+        resource = _page_row(ctx)
+        point = uuid4()  # resource point id != Memory.id (#972)
+        resource.summary_embedding_id = point
+        top, deep, deeper = _page_row(ctx), _page_row(ctx), _page_row(ctx)
+        # Its row lives in ``ctx``, the point says ``other_ctx``: post-filtered.
+        moved = _page_row(ctx)
+        # No row comes back for it: deleted, or kept out by the trust tier /
+        # source / cluster filters in the SELECT.
+        gone = uuid4()
+        search_results = [
+            _hit(gone, 0.95, semantic_score_raw=0.9),
+            _hit(point, 0.9, semantic_score_raw=0.7, embedding=[1.0, 0.0]),
+            _hit(top.id, 0.85, semantic_score_raw=0.6, embedding=[0.0, 1.0]),
+            # The same resource memory again, through a chunk point (row id).
+            _hit(resource.id, 0.8, semantic_score_raw=0.8, embedding=[]),
+            _hit(moved.id, 0.75, semantic_score_raw=0.5, payload={"context_id": str(other_ctx)}),
+            _hit(deep.id, 0.7, semantic_score_raw=0.4, embedding=[0.5, 0.5]),
+            _hit(deeper.id, 0.65, semantic_score_raw=0.3, embedding=[0.5, 0.4]),
+        ]
+        rows = [resource, top, moved, deep, deeper]
+        return SimpleNamespace(
+            ctx=ctx,
+            point=point,
+            resource=resource,
+            top=top,
+            deep=deep,
+            deeper=deeper,
+            search_results=search_results,
+            rows=rows,
+        )
+
+    async def _recall(self, s, monkeypatch):
+        from services import memory_service as ms
+
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        db = AsyncMock()
+        selected = MagicMock()
+        selected.scalars.return_value.all.return_value = s.rows
+        db.execute = AsyncMock(return_value=selected)
+        service = MemoryService(db=db)
+        ws = uuid4()
+        request = RecallRequest(query="q", k=self.K)
+        plan = SimpleNamespace(
+            request=request,
+            effective_workspace_id=ws,
+            is_shared_context_read=False,
+            neural_enabled=True,
+            search_config=None,
+            search_context_id=str(s.ctx),
+        )
+        seen: dict[str, list[dict]] = {}
+
+        def recorder(name, result=None):
+            async def _record(pool, *_args, **_kwargs):
+                seen[name] = [dict(h) for h in pool]
+                return result
+
+            return _record
+
+        service._recall_check_agent_bindings = AsyncMock()
+        service._recall_prepare = AsyncMock(return_value=plan)
+        service._recall_resolve_cluster_filter = AsyncMock(return_value=None)
+        service.search_service = MagicMock()
+        service.search_service.hybrid_search = AsyncMock(return_value=s.search_results)
+        service._recall_filter_rows_by_binding = AsyncMock(side_effect=lambda _r, m, **_k: (m, 0))
+        service._apply_supersede_shadowing = recorder("shadowing", ({}, {}))
+        service._apply_supersede_fold = recorder("fold", {})
+        service._maybe_reinforce_rerank = recorder("reinforce")
+        service._maybe_graph_boost = recorder("graph_boost")
+        service._resolve_supersede_candidates = AsyncMock(return_value={})
+        service._recall_record_access = AsyncMock()
+        service._recall_run_hebbian_learning = AsyncMock()
+        with patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()):
+            response = await service.recall(
+                request,
+                "u",
+                current_context_id=s.ctx,
+                current_workspace_id=ws,
+                capacity_gate=False,
+            )
+        hebbian = service._recall_run_hebbian_learning.await_args
+        seen["hebbian"] = list(hebbian.args[1]) if hebbian is not None else []
+        completed = [c.kwargs for c in log.info.call_args_list if c.args[0] == "recall_completed"]
+        return response, seen, completed
+
+    def _pruned_ids(self, s):
+        return [str(s.point), str(s.top.id), str(s.deep.id), str(s.deeper.id)]
+
+    async def test_every_stage_after_hydration_sees_the_pruned_pool(self, monkeypatch):
+        s = self._scenario()
+        _response, seen, _completed = await self._recall(s, monkeypatch)
+
+        for stage in ("shadowing", "fold", "reinforce", "graph_boost", "hebbian"):
+            assert [h["id"] for h in seen[stage]] == self._pruned_ids(s), stage
+
+    async def test_the_page_fills_from_deeper_candidates(self, monkeypatch):
+        s = self._scenario()
+        response, _seen, _completed = await self._recall(s, monkeypatch)
+
+        assert [r.memory_id for r in response.results] == [s.resource.id, s.top.id, s.deep.id]
+
+    async def test_candidates_and_confidence_count_each_hydrated_memory_once(self, monkeypatch):
+        s = self._scenario()
+        response, _seen, completed = await self._recall(s, monkeypatch)
+
+        assert len(completed) == 1
+        assert completed[0]["candidates"] == 4
+        assert completed[0]["results"] == self.K
+        assert response.confidence.result_count == 4
+        # The gone hit's 0.9 does not count; the resource memory counts once,
+        # with the higher raw cosine of its two hits.
+        assert response.confidence.top_score == 0.8
+
+    async def test_the_resource_memory_keeps_its_best_hit(self, monkeypatch):
+        s = self._scenario()
+        _response, seen, _completed = await self._recall(s, monkeypatch)
+
+        survivor = seen["reinforce"][0]
+        assert survivor["id"] == str(s.point)
+        assert survivor["hybrid_score"] == 0.9
+        assert survivor["semantic_score_raw"] == 0.8
+        assert survivor["embedding"] == [1.0, 0.0]
+
+
 class TestReinforceFactor:
     """Issue #1048: bounded, importance-weighted reinforce factor — the 2-population
     eval guard (adopted improves; rare-but-correct does not regress; popularity is

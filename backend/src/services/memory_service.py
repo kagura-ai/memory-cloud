@@ -554,6 +554,75 @@ def _without_dropped_rows(
     ]
 
 
+def _hit_rank_score(hit: Mapping[str, Any]) -> float:
+    """The score a hit ranks by: ``hybrid_score`` (the reranker writes its own
+    score there), else ``score`` (a semantic- or keyword-only search)."""
+    score = hit.get("hybrid_score", hit.get("score"))
+    return float(score) if isinstance(score, (int, float)) else float("-inf")
+
+
+def _collapse_memory_hits(hits: list[dict]) -> dict:
+    """One hit for a memory the search found more than once (#2546).
+
+    The best-scored hit survives, the earlier one on a tie, so its scores rank
+    it among its neighbours. It takes the group's highest raw cosine, which
+    confidence reads for absence detection (as a fold head does, #2123), and a
+    vector from another hit when it has none (a chunk-only hit carries none,
+    see ``collapse_chunk_hits``; the Hebbian pass gates on it).
+    """
+    if len(hits) == 1:
+        return hits[0]
+    survivor = dict(max(hits, key=_hit_rank_score))
+    raw = [
+        h["semantic_score_raw"]
+        for h in hits
+        if isinstance(h.get("semantic_score_raw"), (int, float))
+    ]
+    if raw:
+        survivor["semantic_score_raw"] = max(raw)
+    if not survivor.get("embedding"):
+        embedding = next((h["embedding"] for h in hits if h.get("embedding")), None)
+        if embedding is not None:
+            survivor["embedding"] = embedding
+    return survivor
+
+
+def _prune_unhydrated_hits(
+    search_results: list[dict], memories: Mapping[str, Any]
+) -> tuple[int, int]:
+    """Keep one hit per hydrated memory in the recall pool, in place (#2546).
+
+    A hit with no row in ``memories`` (deleted, kept out by the #214 / #887 /
+    #496 filters, or found in another context than its row's) leaves the
+    pool, and several hits of one memory (a resource row's summary point and
+    a point under its row id, such as a content chunk) become one, at the
+    first one's place. Run right after hydration, so the page fills from the
+    candidates below, and shadowing, the fold, the re-ranks, the Hebbian pass
+    and the ``recall_completed`` count see each hydrated memory once.
+
+    Returns:
+        (hits without a hydrated row, duplicate hits merged away).
+    """
+    slots: dict[Any, int] = {}
+    groups: list[list[dict]] = []
+    unhydrated = 0
+    for hit in search_results:
+        memory = memories.get(hit["id"])
+        if memory is None:
+            unhydrated += 1
+            continue
+        slot = slots.get(memory.id)
+        if slot is None:
+            slots[memory.id] = len(groups)
+            groups.append([hit])
+        else:
+            groups[slot].append(hit)
+    duplicates = len(search_results) - unhydrated - len(groups)
+    if unhydrated or duplicates:
+        search_results[:] = [_collapse_memory_hits(group) for group in groups]
+    return unhydrated, duplicates
+
+
 #: #2201: the bound on forget's whole post-commit point delete, so the global
 #: lock is never held past it and a stalled vector store cannot turn a
 #: committed delete into a tool timeout.
@@ -6317,6 +6386,9 @@ class MemoryService:
         # nothing (its row is gone, or the #214 / #887 / #496 filters kept it
         # out) cannot be in the reply, so it must not lift the level; one the
         # #1299 binding hides must not show through the scores either.
+        # recall() already pruned such hits right after hydration (#2546);
+        # this keeps the rule for a pool passed in directly. Shadowed and
+        # folded rows have left the pool, so they do not count either.
         confidence_pool = [r for r in search_results if r["id"] in memories]
         if dropped := len(search_results) - len(confidence_pool):
             logger.debug(
@@ -6741,6 +6813,17 @@ class MemoryService:
                 search_results=search_results,
                 searched_context_id=plan.search_context_id,
                 cluster_memory_ids=cluster_memory_ids,
+            )
+            # #2546: one hit per hydrated memory from here on. A hit without a
+            # row would hold a page slot the candidates below could fill, and
+            # one memory hit twice would ship and count twice.
+            unhydrated, duplicates = _prune_unhydrated_hits(search_results, memories)
+        if unhydrated or duplicates:
+            logger.debug(
+                "recall_pool_pruned",
+                unhydrated=unhydrated,
+                duplicates=duplicates,
+                candidates=len(search_results),
             )
 
         # #1299: per-memory type/source binding filter over the FULL candidate
