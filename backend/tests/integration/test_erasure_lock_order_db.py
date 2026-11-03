@@ -12,7 +12,9 @@ workspace rows ``NOWAIT`` and reschedules the request when one is busy.
 Steps 2 and 3 are one transaction: step 2 reads the owned workspaces under the
 identity-link lock and nothing is committed before step 3's commit.
 A transaction that needs two ``users`` rows locks both in ``user_id`` order in
-one statement (#2573). A referral redemption holds the referrer's and the
+one statement (#2573), ``FOR NO KEY UPDATE`` when it changes no key: a ``FOR
+KEY SHARE`` holder, which may lock users rows in another order, never waits on
+it. A referral redemption holds the referrer's and the
 referee's ``users`` rows from its cap check, so it takes workspace rows
 ``NOWAIT`` too and answers 409 when one stays busy (#2443).
 Each test drives two real Postgres sessions and waits on
@@ -1888,7 +1890,8 @@ async def test_a_redeem_locks_both_users_rows_first_in_one_statement(db_session,
     (users_lock,) = users_locks
     assert not users_lock.nowait
     in_list = re.search(
-        r"WHERE users\.user_id IN \(([^)]*)\) ORDER BY users\.user_id FOR UPDATE$", users_lock.sql
+        r"WHERE users\.user_id IN \(([^)]*)\) ORDER BY users\.user_id FOR NO KEY UPDATE$",
+        users_lock.sql,
     )
     assert in_list and len(in_list.group(1).split(",")) == 2, users_lock.sql
 
@@ -1994,7 +1997,7 @@ async def test_mutual_redemptions_wait_on_the_users_rows_instead_of_deadlocking(
     assert results == [b, a], results
     assert blockers == [pids[a]], blockers
     assert waiting_in.startswith("SELECT users.user_id FROM users WHERE"), waiting_in
-    assert waiting_in.endswith("FOR UPDATE"), waiting_in
+    assert waiting_in.endswith("FOR NO KEY UPDATE"), waiting_in
     paid = (
         await db_session.execute(
             select(ReferralGrant.referred_user_id, ReferralGrant.referrer_user_id).where(
@@ -2059,3 +2062,71 @@ async def test_a_users_row_deleted_while_the_redeem_waits_on_it_refuses_the_rede
         .where(ReferralGrant.referred_user_id == referee)
     )
     assert grants == 0
+
+
+@pytest.mark.asyncio
+async def test_a_redeem_and_a_restore_locking_its_users_rows_by_id_never_deadlock(
+    db_session, referral_world
+):
+    """A context restore locks its authors' ``users`` rows ``FOR KEY SHARE``
+    in ``users.id`` order (``lock_recovery_authors``), not ``user_id`` order
+    (#2573). The referrer sorts first by ``user_id``, the invitee has the
+    lower ``id``. One redeem of the referrer's code holds the referrer's row,
+    a second waits on it, and the restore takes the invitee's row and then
+    waits on the referrer's too. When the first commits, the second takes the
+    referrer's row and needs the invitee's: a ``FOR UPDATE`` there would wait
+    on the restore's KEY SHARE (a deadlock); ``FOR NO KEY UPDATE`` does not,
+    and all three finish."""
+    from services.context_restore import lock_recovery_authors
+
+    world = referral_world
+    invitee = await world.user("z-invitee")  # the lower users.id
+    referrer = await world.user("a-referrer")  # the lower user_id
+    first_invitee = await world.user("c-invitee")
+    code = f"code{uuid4().hex[:16]}"
+    await world.db.execute(update(User).where(User.user_id == referrer).values(referral_code=code))
+    await world.db.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict = {}
+
+    async def redeem(referee: str) -> str:
+        async with maker() as db:
+            pids[referee] = await _pid(db)
+            grant = await ReferralService(db).redeem(referred_user_id=referee, code=code)
+            return grant.referrer_user_id
+
+    async def restore_authors() -> set[str]:
+        async with maker() as db:
+            pids["restore"] = await _pid(db)
+            locked = await lock_recovery_authors(db, {referrer, invitee})
+            await db.commit()
+            return set(locked)
+
+    tasks: list[asyncio.Task] = []
+    try:
+        with _redeem_paused_after_its_users_lock() as (holding, release):
+            first = asyncio.create_task(redeem(first_invitee))
+            tasks.append(first)
+            await asyncio.wait_for(holding.wait(), 15)
+            second = asyncio.create_task(redeem(invitee))
+            tasks.append(second)
+            await _done_or_blocked(maker, second, lambda: pids.get(invitee))
+            assert not second.done(), "the second redeem did not wait on the first"
+            restoring = asyncio.create_task(restore_authors())
+            tasks.append(restoring)
+            await _done_or_blocked(maker, restoring, lambda: pids.get("restore"))
+            release.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(first, second, restoring, return_exceptions=True), 30
+            )
+    finally:
+        await _cancel_all(tasks)
+
+    # with FOR UPDATE the restore (or the second redeem) was a 40P01
+    assert results == [referrer, referrer, {referrer, invitee}], results
+    paid = await db_session.scalar(
+        select(func.count())
+        .select_from(ReferralGrant)
+        .where(ReferralGrant.referrer_user_id == referrer)
+    )
+    assert paid == 2

@@ -280,8 +280,14 @@ class ReferralService:
         # two users rows locks both in user_id order in one statement (#2573):
         # with the referrer's row alone, A redeeming B's code while B redeems
         # A's each held one row and waited on the other's (a deadlock). No
-        # NOWAIT: this transaction holds nothing yet. The users rows come
-        # before any workspace lock: the global lock order
+        # NOWAIT: this transaction holds nothing yet. FOR NO KEY UPDATE, the
+        # weakest lock that serializes two redeems and still waits on an
+        # erasure's FOR UPDATE / DELETE: it does not conflict with the FOR KEY
+        # SHARE a remember, a foreign-key check or a context restore takes on
+        # a users row. The restore takes its authors' rows in users.id order,
+        # so against FOR UPDATE it could hold one of the two rows and wait on
+        # the other (a deadlock). The users rows come before any workspace
+        # lock: the global lock order
         # (tests/integration/test_erasure_lock_order_db.py) is users rows, then
         # workspace rows, and a transaction holding a users row never waits on
         # a workspace row. ``DELETE /workspaces/W`` locks W first and then the
@@ -293,7 +299,7 @@ class ReferralService:
                     select(User.user_id)
                     .where(User.user_id.in_([referrer_id, referred_user_id]))
                     .order_by(User.user_id)
-                    .with_for_update()
+                    .with_for_update(key_share=True)
                 )
             ).scalars()
         )
