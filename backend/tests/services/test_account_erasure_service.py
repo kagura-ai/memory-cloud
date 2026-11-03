@@ -1060,13 +1060,14 @@ class TestHandleOwnedWorkspaces:
     async def test_no_workspaces_short_circuits(self):
         svc = _service()
         svc._list_owned_workspaces = AsyncMock(return_value=[])
-        # The identity-link lock only: no member bulk-load when the subject
-        # owns no workspace under it.
+        # The identity-link lock and the (empty) live-workspace lock only: no
+        # member bulk-load when the subject owns no workspace under them.
         svc.db.execute = AsyncMock()
         out = await svc._handle_owned_workspaces("u-1")
         assert out == {"transferred": [], "sole_owner_workspaces": 0}
-        (call,) = svc.db.execute.await_args_list
-        assert "pg_advisory_xact_lock" in str(call.args[0])
+        link, live = svc.db.execute.await_args_list
+        assert "pg_advisory_xact_lock" in str(link.args[0])
+        assert "FROM workspaces" in str(live.args[0])
         svc._list_owned_workspaces.assert_awaited_once_with("u-1")
 
     @pytest.mark.asyncio
@@ -1108,6 +1109,45 @@ class TestHandleOwnedWorkspaces:
         )
         assert lock_at < owned_at
         assert out["transferred"] == [{"workspace_id": str(ws_id), "new_owner_user_id": "u-2"}]
+        svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_live_owned_workspaces_are_locked_before_the_members_are_read(self):
+        """#2455: a sole-owned workspace too. Every live workspace the
+        subject owns is locked ``NOWAIT`` after the identity-link lock and
+        before the member rows are read, so a member added after the read
+        waits for the run's commit instead of being deleted with the
+        workspace at step 3."""
+        from sqlalchemy.dialects import postgresql
+
+        svc = _service()
+        ws_id = uuid4()
+        ws = SimpleNamespace(id=ws_id, deleted_at=None, owner_user_id="u-1")
+        members = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER)]
+        statements: list[str] = []
+
+        async def execute(statement, *args, **kwargs):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            statements.append(sql)
+            result = MagicMock()
+            if "FROM workspace_members" in sql:
+                result.scalars.return_value.all.return_value = members
+            return result
+
+        svc.db.execute = AsyncMock(side_effect=execute)
+        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+
+        out = await svc._handle_owned_workspaces("u-1")
+
+        link_at = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        (locked_at,) = (i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
+        live = statements[locked_at]
+        assert "workspaces.owner_user_id = " in live
+        assert "workspaces.deleted_at IS NULL" in live
+        assert live.endswith("ORDER BY workspaces.id FOR UPDATE NOWAIT")
+        members_at = next(i for i, sql in enumerate(statements) if "FROM workspace_members" in sql)
+        assert link_at < locked_at < members_at
+        assert out == {"transferred": [], "sole_owner_workspaces": 1}
         svc.db.commit.assert_not_awaited()
 
 
@@ -4633,7 +4673,8 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
         assert [c.args[1] for c in lock.await_args_list] == [low] + [high] * 5
         assert all(c.kwargs == {"nowait": True} for c in lock.await_args_list)
         assert [c.args[0] for c in sleep.await_args_list] == [0.05, 0.1, 0.2, 0.4]
-        assert svc.db.begin_nested.call_count == 6  # one savepoint per try
+        # one savepoint per try, after the one for every owned workspace (#2455)
+        assert svc.db.begin_nested.call_count == 7
         # stopped, not skipped: nothing is committed (the caller rolls back)
         svc.db.commit.assert_not_awaited()
         assert caught.value.error_class == "LockNotAvailable"

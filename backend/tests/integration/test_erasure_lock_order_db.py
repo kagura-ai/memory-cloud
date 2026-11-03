@@ -40,7 +40,7 @@ from models.erasure import (
 from services.account_erasure_service import AccountErasureService
 from services.file_storage_service import FileStorageService
 from services.workspace_service import WorkspaceService
-from utils.exceptions import ConflictError, ErasureRetryScheduledError
+from utils.exceptions import ConflictError, ErasureRetryScheduledError, NotFoundException
 
 from .test_delete_admin_cli_db import (  # noqa: F401 (fixtures)
     _password_admin,
@@ -310,18 +310,20 @@ async def test_step_two_that_got_the_workspace_first_finishes_its_transfer(
 
 
 # ---------------------------------------------------------------------------
-# Cycle C: erasure step 3 against the same workspace delete
+# Cycle C: a sole-owned workspace against the same workspace delete
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_step_three_reschedules_on_a_workspace_its_delete_holds(db_session, connector_world):
-    """A sole-owned W: step 2 has nothing to hand on, and step 3's deletes
-    of W's rows would wait on the delete that holds W while erasure holds
-    ``users[S]``. Step 3 takes the owned workspaces ``NOWAIT`` first and the
-    request is rescheduled; nothing is erased and the delete completes. The
-    shared workspace step 2 handed on is rolled back with step 3: one
-    transaction, so the hand-over is not left behind."""
+async def test_a_sole_owned_workspace_its_delete_holds_reschedules(db_session, connector_world):
+    """A sole-owned W: nothing to hand on, and step 3's deletes of W's rows
+    would wait on the delete that holds W while erasure holds ``users[S]``.
+    Step 2 takes every live workspace S owns ``NOWAIT`` before it reads their
+    members (#2455; until then step 3 was the first to lock W), so the
+    request is rescheduled at step 2; nothing is erased and the delete
+    completes. The shared workspace is not handed on: the step stops before
+    any hand-over, and steps 2 and 3 are one transaction, so none is left
+    behind."""
     world = connector_world
     subject = await world.user("subject")
     successor = await world.user("successor")
@@ -377,7 +379,7 @@ async def test_step_three_reschedules_on_a_workspace_its_delete_holds(db_session
     assert request.deleted_data_summary == {"retry": retry}
     assert (retry["attempts"], retry["step"], retry["error_class"]) == (
         1,
-        "postgres",
+        "workspaces",
         "LockNotAvailable",
     )
     # nothing erased: the account and the (now soft-deleted) workspace stay
@@ -628,6 +630,76 @@ async def test_a_workspace_handed_to_the_subject_during_step_one_is_handed_on(
     assert request.deleted_data_summary["workspaces"]["transferred"] == [
         {"workspace_id": str(ws_id), "new_owner_user_id": admin}
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_member_added_to_a_sole_owned_workspace_waits_for_the_erasure(
+    db_session, connector_world
+):
+    """#2455: step 2 finds no other member in W, so step 3 hard-deletes it.
+    Step 2 locks the live workspaces the subject owns before it reads their
+    members, so an ``add_member`` (``FOR UPDATE`` on W) while the run is
+    between steps 2 and 3 waits for the run's commit and then finds W gone:
+    the newcomer's membership is never deleted with W."""
+    world = connector_world
+    subject = await world.user("subject")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(subject)).id
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    add_pid: int | None = None
+    original = AccountErasureService._delete_postgres
+
+    async def paused_step_three(self, target, **kwargs):
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return await original(self, target, **kwargs)
+
+    async def add() -> None:
+        nonlocal add_pid
+        async with maker() as db:
+            add_pid = await _pid(db)
+            await WorkspaceService(db).add_member(ws_id, newcomer, invited_by=subject)
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_delete_postgres", paused_step_three),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            adding = asyncio.create_task(add())
+            tasks.append(adding)
+            await _done_or_blocked(maker, adding, lambda: add_pid)
+            # before #2455 nothing held W here: the add committed at once
+            added_between_the_steps = adding.done()
+            release.set()
+            erasure_result, add_result = await asyncio.wait_for(
+                asyncio.gather(erasing, adding, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not added_between_the_steps, add_result
+    assert not isinstance(erasure_result, BaseException), erasure_result
+    assert erasure_result.status == "complete"
+    assert isinstance(add_result, NotFoundException), add_result
+    assert await db_session.scalar(select(Workspace.id).where(Workspace.id == ws_id)) is None
+    members = await db_session.scalar(
+        select(func.count())
+        .select_from(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == ws_id)
+    )
+    assert members == 0
+    request = await _request_of(db_session, subject)
+    assert request.deleted_data_summary["workspaces"] == {
+        "transferred": [],
+        "sole_owner_workspaces": 1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1103,48 @@ async def test_the_erasure_steps_take_the_global_order(db_session, connector_wor
         await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == shared_id))
         == successor
     )
+
+
+@pytest.mark.asyncio
+async def test_step_two_locks_every_live_owned_workspace_before_the_members(
+    db_session, connector_world
+):
+    """#2455: one shared and one sole-owned workspace. Right after the link
+    lock, step 2 takes every live workspace the subject owns ``NOWAIT`` in
+    one statement, before any other row; the shared one's re-lock for its
+    hand-over comes after it."""
+    world = connector_world
+    subject = await world.user("subject")
+    successor = await world.user("successor")
+    shared_id = (await world.workspace(subject, **{successor: "admin"})).id
+    sole_id = (await world.workspace(subject)).id
+    await db_session.commit()
+
+    with _external_stores_stubbed(), _LockTrace(db_session.bind) as trace:
+        await world.erase(subject)
+
+    _assert_global_order(trace)
+    # steps 2 and 3: one transaction, the one that locks the soft-deleted rows
+    (steps,) = [tx for tx in trace.transactions if any(lock.kind == "ws_soft" for lock in tx)]
+    kinds = [(lock.kind, lock.nowait) for lock in steps]
+    first_ws = next(i for i, lock in enumerate(steps) if lock.kind == "ws_live")
+    assert kinds[first_ws - 1] == ("link", False), kinds
+    assert not {kind for kind, _ in kinds[:first_ws]} & {"other", "child"}, kinds
+    owned = steps[first_ws]
+    assert owned.nowait, owned.sql
+    assert "WHERE workspaces.owner_user_id = " in owned.sql, owned.sql
+    assert "workspaces.deleted_at IS NULL" in owned.sql, owned.sql
+    relock = next(
+        i
+        for i, lock in enumerate(steps)
+        if lock.kind == "ws_live" and "WHERE workspaces.id = " in lock.sql
+    )
+    assert first_ws < relock, kinds
+    assert (
+        await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == shared_id))
+        == successor
+    )
+    assert await db_session.scalar(select(Workspace.id).where(Workspace.id == sole_id)) is None
 
 
 @pytest.mark.asyncio
