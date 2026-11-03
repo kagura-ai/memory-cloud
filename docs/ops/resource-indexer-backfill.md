@@ -87,11 +87,14 @@ run, once one is queued. `indexer-status` reports the count as
 `state.metrics.failed_events`; `metrics.failed_events` on the row lists the
 events (`event_id`, `doc_id`, `error_class`), the oldest 20.
 
-The list grows until a batch finishes with no failures. That batch empties it
-even though the skipped events were not re-applied, so rewind soon after the
-count shows up. A run with nothing pending, a held-back run and a run that
-fails outright keep the list. For anything older, the `indexer_event_failed`
-log lines are the record.
+The list stays until you act on it (#2477): a rewind, or the clear below.
+Every other run keeps it, a batch with no failures included, and a batch with
+failures adds to it. The batch commit writes it, so it does not depend on the
+job's later commit. A listed event leaves the list once a committed batch runs
+it again (after a rewind, or on the next run for a failure at the end of a
+batch) and is listed again if it fails again. When the list holds 20 entries,
+a newer failure is in its `indexer_event_failed` log line only; a rewind to
+the lowest `event_id` runs it again with the rest, a clear does not.
 
 ```sql
 SELECT resource_id, context_id, last_offset, job_status, metrics->'failed_events'
@@ -149,8 +152,26 @@ WHERE resource_id = '<resource_id>' AND context_id = '<context_id>'
 
 One run handles 100 events and then parks the row until the next ingest event.
 After a longer rewind, queue the row again (`job_status`, `next_run_at`) until
-`last_offset` is back where it was. A batch with no failures empties
-`metrics.failed_events`; an event that fails again is listed again.
+`last_offset` is back where it was. Each batch takes the listed events it ran
+again off `metrics.failed_events` and lists the ones that failed again. An
+entry at or below the rewind target stays (the target above has none), and so
+does one the replay has not reached yet. Once `last_offset` is back, the list
+holds the events that failed during the replay.
+
+### Clear the list
+
+When every listed event has been dealt with another way (sent again through
+ingest, or not worth a replay), clear the list instead of rewinding. As with
+the rewind, do it while `job_status` is not `running`, or the run in progress
+writes the list back. The rest of `metrics` stays, and the next run starts from
+an empty list.
+
+```sql
+UPDATE indexer_state
+SET metrics = metrics - 'failed_events'
+WHERE resource_id = '<resource_id>' AND context_id = '<context_id>'
+  AND job_status <> 'running';
+```
 
 ## Post-check
 

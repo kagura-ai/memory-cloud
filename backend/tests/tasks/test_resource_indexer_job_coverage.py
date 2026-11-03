@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
 import pydantic.root_model  # noqa: F401  isort: skip
 import pytest
 import pytest_asyncio
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
 # ``mcp_tasks`` → ``mcp.types``, whose ``RootModel[...]`` generic submodel
@@ -39,7 +40,11 @@ from sqlalchemy import update
 # first so the import chain is stable with and without ``--cov``.
 from models.auth import Context, Workspace
 from models.resource import IndexerState, Resource
-from services.resource_indexer import IndexerMetrics, get_indexer_status_for_context
+from services.resource_indexer import (
+    IndexerMetrics,
+    get_indexer_status_for_context,
+    recorded_failed_events,
+)
 from tasks.resource_indexer_job import (
     MAX_RUNS_PER_HOUR,
     MIN_INTERVAL_SECONDS,
@@ -668,6 +673,71 @@ class TestFailedEventsSurviveTheJob:
         status = await get_indexer_status_for_context(db_session, context)
 
         assert status["state"]["metrics"]["failed_events"] == 0
+
+
+_RUNBOOK = Path(__file__).resolve().parents[3] / "docs" / "ops" / "resource-indexer-backfill.md"
+
+
+def _runbook_clear() -> str:
+    """The runbook's clear of ``metrics.failed_events`` (#2477), its
+    placeholders turned into bind parameters."""
+    docs = _RUNBOOK.read_text()
+    section = docs[docs.index("### Clear the list") :]
+    block = section[section.index("```sql\n") + len("```sql\n") :]
+    statement = block[: block.index("```")]
+    assert "'<resource_id>'" in statement and "'<context_id>'" in statement, statement
+    return statement.replace("'<resource_id>'", ":resource_id").replace(
+        "'<context_id>'", ":context_id"
+    )
+
+
+class TestTheOperatorClearsTheRecord:
+    """#2477: the record stays until an operator acts on it. The runbook's
+    clear, run as written, is how they drop it without a rewind."""
+
+    async def _clear(self, db_session, state) -> None:
+        await db_session.execute(
+            text(_runbook_clear()),
+            {"resource_id": state.resource_id, "context_id": state.context_id},
+        )
+        await db_session.commit()
+
+    async def test_the_clear_empties_the_record_and_keeps_the_rest(self, db_session, seeded_state):
+        seeded_state.metrics = {"errors": 1, "failed_events": [FAILED_EVENT]}
+        seeded_state.job_status = "idle"
+        await db_session.commit()
+
+        await self._clear(db_session, seeded_state)
+
+        await db_session.refresh(seeded_state)
+        assert recorded_failed_events(seeded_state.metrics) == []
+        assert seeded_state.metrics["errors"] == 1
+        context = await db_session.get(Context, seeded_state.context_id)
+        context.resource_id = seeded_state.resource_id
+        status = await get_indexer_status_for_context(db_session, context)
+        assert status["state"]["metrics"]["failed_events"] == 0
+
+    async def test_the_next_run_is_given_an_empty_record(self, db_session, seeded_state):
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        await db_session.commit()
+        await self._clear(db_session, seeded_state)
+
+        process = await _run_job(db_session, _returns_the_record())
+
+        assert process.await_args.kwargs["failed_events"] == []
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == []
+
+    async def test_the_clear_leaves_a_running_row_alone(self, db_session, seeded_state):
+        """The run in progress would write its record back over the clear."""
+        seeded_state.metrics = {"failed_events": [FAILED_EVENT]}
+        seeded_state.job_status = "running"
+        await db_session.commit()
+
+        await self._clear(db_session, seeded_state)
+
+        await db_session.refresh(seeded_state)
+        assert seeded_state.metrics["failed_events"] == [FAILED_EVENT]
 
 
 class TestScheduleResourceIndexerJobs:
