@@ -82,9 +82,9 @@ def supersede_suggest_threshold_llm_from_env() -> float:
     return clamped
 
 
-# #2584: memories carrying one of these tags (exact match) are never archived by
-# Sleep consolidation and never retired as the losing side of a near-duplicate
-# merge. ``status:open`` is the open review memo of the follow-up workflow.
+# #2584: memories carrying one of these tags (exact match) are never archived (or,
+# on the legacy pass, deleted) by consolidation and never retired as the losing
+# side of a near-duplicate merge. ``status:open`` marks an open review memo.
 SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT: tuple[str, ...] = ("status:open",)
 
 
