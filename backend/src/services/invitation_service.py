@@ -450,7 +450,12 @@ class InvitationService:
         quota_service = QuotaService(self.db)
 
         try:
-            await quota_service.check_member_quota(invitation.workspace_id, raise_on_exceeded=True)
+            # #2564: this invitation's own reserved seat is the one it takes.
+            await quota_service.check_member_quota(
+                invitation.workspace_id,
+                raise_on_exceeded=True,
+                exclude_invitation_id=invitation.id,
+            )
         except QuotaExceededError as e:
             raise ValidationError(f"Cannot accept invitation: {str(e)}") from e
 
