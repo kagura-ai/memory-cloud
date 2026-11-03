@@ -46,9 +46,10 @@ updates:
           - postgres
         group-by: dependency-name
   # The actions in .github/workflows (#2535): each is pinned to a commit SHA with its release
-  # as a trailing comment (`owner/repo@<sha> # vX.Y.Z`), and Dependabot moves both, all actions
-  # in one PR. No workflow calls a reusable workflow from another repository, so there is no
-  # `allow` list.
+  # as a trailing comment (`owner/repo@<sha> # vX.Y.Z`), and Dependabot moves both. Minors and
+  # patches come in one PR; a major comes as a PR of its own per action, since it can change
+  # inputs or the runtime. No workflow calls a reusable workflow from another repository, so
+  # there is no `allow` list.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -62,3 +63,6 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch

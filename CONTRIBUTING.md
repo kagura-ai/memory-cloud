@@ -69,8 +69,9 @@ which fails when the lock is out of date, and the `lint` job runs
 - Actions in `.github/workflows/` are pinned to a full commit SHA with the
   release as a trailing comment, e.g.
   `actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0`, so a
-  moved tag cannot change what CI runs. Add a new action the same way. A third
-  weekly Dependabot PR moves the SHAs and the comments together (`#2535`).
+  moved tag cannot change what CI runs. Add a new action the same way.
+  Dependabot moves the SHAs and the comments together: minors and patches in
+  one weekly PR, each major in a PR of its own (`#2535`).
 
 ## Code Style
 
