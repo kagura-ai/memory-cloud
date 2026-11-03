@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import text
 
+from mcp_server.tools._helpers import _context_response_fields
+from mcp_server.tools.bootstrap import envelope_budget
 from mcp_server.tools.context import _guardrails_field
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
@@ -665,6 +667,120 @@ async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
     whole_ids = [g["memory_id"] for g in full_index["guardrails"]["items"]]
     assert [g["memory_id"] for g in guard["items"]] == whole_ids[: len(guard["items"])]
     assert guard["truncated"] is True and guard["total_available"] == 50
+
+
+_JA = (
+    "設計判断とリリース手順の記録。MCP ツールの使い方、テスト用 DB の作り方、"
+    "レビューで指摘された点をまとめる。"
+)
+_EN = "Release checklist: bump the version files, run the suites, open the PR, wait for review. "
+
+
+def _text(phrase: str, chars: int, lead: str = "") -> str:
+    """``chars`` characters (not bytes) of ``lead`` then ``phrase`` repeated."""
+    return (lead + phrase * (chars // len(phrase) + 1))[:chars]
+
+
+async def _live_like_context(db):
+    """A context sized like the one #2485 was reproduced on (characters, not
+    bytes): summary 150 and usage_guide 160, mostly Japanese; 2 pinned
+    (160 and 230, one Japanese); 3 upcoming Time Memories (200); 48 tool
+    guardrails; 40 changes (120) in the window. Everything but the changes
+    is older than the window, so the change log holds the 40 alone."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db, owner)
+    ctx.display_name = "Kagura 開発メモ"
+    ctx.summary = _text(_JA, 150)
+    ctx.usage_guide = _text(_JA, 160, "使い方: ")
+    now = utcnow()
+    old = now - timedelta(days=30)
+    for i in range(48):
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_EN, 150, f"guardrail {i}: "),
+            importance=0.8,
+            details={"tool_trigger": dict(_TOOL_TRIGGER)},
+            created_at=old,
+        )
+    for summary in (_text(_EN, 160, "Standing rule: "), _text(_JA, 230, "常設ルール: ")):
+        await _row(
+            db, owner, ws.id, ctx.id, summary=summary, delivery_mode="always", created_at=old
+        )
+    for months in (1, 2, 3):
+        due = now + timedelta(days=31 * months)
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_JA, 200, f"{months} か月後の確認: "),
+            type="time",
+            details={
+                "trigger": {
+                    "year": due.year,
+                    "month": due.month,
+                    "from": due.strftime("%Y-%m-01T00:00:00"),
+                    "until": due.strftime("%Y-%m-28T23:59:59"),
+                }
+            },
+            created_at=old,
+        )
+    for i in range(40):
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_JA, 120, f"変更 {i}: "),
+            created_at=now - timedelta(hours=40 - i),
+        )
+    await db.commit()
+    await db.refresh(ctx)
+    return owner, ws, ctx
+
+
+async def _session_start(db, owner, ws, ctx, max_chars: int):
+    """``bootstrap(format="index", max_chars=...)`` as the handler runs it: its
+    guardrails provider and its budget for the ``context_*`` fields it adds."""
+    fields = _context_response_fields(ctx)  # before any lane can expire ctx
+    env = await _build(
+        db,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=partial(_guardrails_field, db, owner, ctx),
+        format="index",
+        max_chars=envelope_budget(max_chars, "index", fields),
+    )
+    env.update(fields)
+    return env
+
+
+@pytest.mark.asyncio
+async def test_index_session_start_on_a_live_sized_context_at_4000(db_session):
+    """#2485 on a context sized like the reproduction, at max_chars=4000.
+
+    Measured on these sizes: at 3,000 the reply holds every upcoming row and
+    two guardrail rows but no change row (the context block, the pinned text
+    and three upcoming rows take the rest); 4,000 is the smallest of 3,000 /
+    4,000 / 5,000 / 6,000 that returns at least three change rows. This test
+    holds that budget: upcoming whole, one to three guardrail rows, and a
+    changes page of three rows or more that says it was cut."""
+    owner, ws, ctx = await _live_like_context(db_session)
+    env = await _session_start(db_session, owner, ws, ctx, 4_000)
+    assert json_chars(env) <= 4_000
+    comps = env["components"]
+    assert len(comps["pinned"]["memories"]) == 2
+    assert len(comps["upcoming"]["results"]) == 3 and not comps["upcoming"].get("truncated")
+    guard = env["guardrails"]
+    assert 1 <= len(guard["items"]) <= INDEX_GUARDRAIL_ROWS
+    assert guard["truncated"] is True and guard["total_available"] == 48
+    changes = comps["changes"]
+    assert len(changes["changes"]) >= 3
+    assert changes["truncated"] is True and changes["has_more"] is True
 
 
 @pytest.mark.asyncio
