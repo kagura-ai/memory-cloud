@@ -20,8 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslations } from "next-intl";
-import { referenceMemory } from "@/lib/api/memory";
-import { graphApi } from "@/lib/api/graph";
+import { referenceMemory, updateMemoryById } from "@/lib/api/memory";
 import { ApiError } from "@/lib/api/base";
 import type {
   LinkedMemoryRef,
@@ -77,10 +76,6 @@ export interface AcceptedSupersede {
 export interface UseMemoryDetailDialogOpts {
   memoryIdParam: string | null;
   setMemoryIdParam: (id: string | null) => void;
-  // #1416: the context the memories live in — required to POST the supersede
-  // confirm edge. Optional so callers that never surface a supersede
-  // suggestion don't have to thread it (the accept action no-ops without it).
-  contextId?: string;
   // #2515: called after a successful accept, once the hook has applied its
   // own state, so the caller can refresh rows it caches (the Memories tab's
   // recall mode). Not called for a failed or refused accept. Fires even if
@@ -98,8 +93,9 @@ export interface UseMemoryDetailDialogResult {
 
   // #1403/#1416: the current memory's supersede suggestion (null once accepted
   // this session or when there is none), a pending flag for the confirm button,
-  // and the accept action (POSTs a `supersedes` edge, self-healing the
-  // suggestion server-side).
+  // and the accept action (#2600: the memory's PATCH with
+  // `accept_supersede_candidate`, which writes the `supersedes` edge and clears
+  // the suggestion server-side).
   supersedeCandidate: SupersedeCandidate | null;
   supersedeAccepting: boolean;
   acceptSupersede: () => void;
@@ -127,8 +123,7 @@ export interface UseMemoryDetailDialogResult {
 export function useMemoryDetailDialog(
   opts: UseMemoryDetailDialogOpts,
 ): UseMemoryDetailDialogResult {
-  const { memoryIdParam, setMemoryIdParam, contextId, onSupersedeAccepted } =
-    opts;
+  const { memoryIdParam, setMemoryIdParam, onSupersedeAccepted } = opts;
   const { toast } = useToast();
   const t = useTranslations("contextDetail.memoriesPanel");
   const tDetail = useTranslations("contextDetail.detailDialog");
@@ -314,7 +309,8 @@ export function useMemoryDetailDialog(
     if (memoryIdParam) setMemoryIdParam(null);
   }, [memoryIdParam, setMemoryIdParam]);
 
-  // #1403/#1416: supersede suggestion + confirm→create_edge accept flow.
+  // #1403/#1416: supersede suggestion + confirm→accept flow (#2600: the
+  // accept of MCP update_memory, through the memory's PATCH).
   const [supersedeAccepting, setSupersedeAccepting] = useState(false);
   // Key of the (source→target) suggestion accepted in this session, so the
   // block hides immediately on success without waiting for a re-fetch (the
@@ -369,7 +365,7 @@ export function useMemoryDetailDialog(
   );
 
   const acceptSupersede = useCallback(() => {
-    if (!hydrated || !rawSupersedeCandidate || !contextId) return;
+    if (!hydrated || !rawSupersedeCandidate) return;
     // #2427: the server said this caller may not accept it — including
     // `edge_exists` (#2518), the 409 the click would meet; the button is
     // disabled too, this guards any other caller of the action.
@@ -385,40 +381,57 @@ export function useMemoryDetailDialog(
     void (async () => {
       let accepted = false;
       try {
-        await graphApi.createEdge({
-          context_id: contextId,
-          source_id: sourceId,
-          target_id: targetId,
-          edge_type: "supersedes",
+        // #2600: MCP update_memory's accept, so the edge is kept under the
+        // memory's author (in a private context possibly an account linked
+        // to the caller), where supersede detection looks for it. The server
+        // accepts the suggestion as it stands, under the row lock.
+        const updated = await updateMemoryById(sourceId, {
+          accept_supersede_candidate: true,
         });
         accepted = true;
         setAcceptedSupersedeKey(`${sourceId}->${targetId}`);
+        // The reply is the memory as it now stands (the suggestion cleared,
+        // the new link listed), for the view that sent the accept only.
+        if (viewIsCurrent()) {
+          setHydrated(updated);
+          setLinkedRefs(linkedRefsFromMemoryReference(updated));
+        }
         toast({ title: tDetail("supersede.accepted") });
       } catch (err) {
         // A reply for a view the dialog no longer shows is dropped.
         if (!viewIsCurrent()) return;
-        // Status, not server prose: 403 is a lost role, ownership or plan
-        // slot (the copy names none of them), 404 a candidate, context or
-        // write access gone (the route's deny is a uniform 404), 409 another
-        // declared edge on the pair. Each re-reads the memory first, so the
-        // message and the block follow the server's current answer.
+        // Status, not server prose: 403 an endpoint no longer the caller's
+        // own when the edge was written (the copy names nothing), 404 the
+        // memory or write access gone (the route's deny is a uniform 404),
+        // 410 the memory forgotten, 409 another declared edge on the pair,
+        // 422 an accept the server refused (no live suggestion, not the
+        // caller's own, a newer candidate). Each re-reads the memory first,
+        // so the message and the block follow the server's current answer.
         const status = err instanceof ApiError ? err.status : undefined;
-        if (status === 403 || status === 404 || status === 409) {
+        if (
+          status === 403 ||
+          status === 404 ||
+          status === 409 ||
+          status === 410 ||
+          status === 422
+        ) {
           const refreshed = await refreshHydrated(sourceId, generation);
           if (refreshed.stale) return;
           let title: string;
           if (status === 409) {
             title = tDetail("supersede.errors.conflict");
           } else if (
-            status === 404 &&
+            status !== 403 &&
             refreshed.ref?.supersede_candidate?.memory_id !== targetId
           ) {
-            // The suggestion is gone (or the memory could not be re-read).
+            // The suggestion is gone or names another memory now (or the
+            // memory could not be re-read).
             title = tDetail("supersede.errors.stale");
           } else {
-            // A 403, or a 404 while the suggestion still surfaces — e.g. a
-            // member downgraded to viewer, whose refusal the route keeps a
-            // uniform 404; the refreshed `acceptance` disables the button.
+            // A 403, or a refusal while the suggestion still surfaces — e.g.
+            // a member downgraded to viewer, whose refusal the route keeps a
+            // uniform 404, or a 422 for a pair that is not the caller's own;
+            // the refreshed `acceptance` disables the button.
             title = tDetail("supersede.errors.denied");
           }
           setSupersedeError({
@@ -441,7 +454,6 @@ export function useMemoryDetailDialog(
   }, [
     hydrated,
     rawSupersedeCandidate,
-    contextId,
     toast,
     tDetail,
     refreshHydrated,

@@ -53,8 +53,9 @@ export interface LinkedMemoryRef {
 
 // #1403 mirror of backend `SupersedeCandidate` (schemas.py) — a near-duplicate
 // this memory likely supersedes, detected at ingest. A *suggestion* only: the
-// `supersedes` edge is created on explicit confirm via `POST /graph/edges`
-// (#1416), never automatically. `similarity` is cosine in [0, 1]; `detected_at`
+// `supersedes` edge is created on explicit confirm (#1416; #2600: the memory's
+// PATCH with `accept_supersede_candidate`), never automatically. `similarity`
+// is cosine in [0, 1]; `detected_at`
 // is an ISO-8601 string (or null on legacy rows).
 export interface SupersedeCandidate {
   memory_id: string;

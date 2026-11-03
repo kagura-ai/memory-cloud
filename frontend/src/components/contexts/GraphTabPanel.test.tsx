@@ -45,17 +45,18 @@ vi.mock("next/navigation", () => ({
 }));
 
 const mockGetGraphData = vi.fn();
-const mockCreateEdge = vi.fn();
 vi.mock("@/lib/api/graph", () => ({
   graphApi: {
     getGraphData: (...a: unknown[]) => mockGetGraphData(...a),
-    createEdge: (...a: unknown[]) => mockCreateEdge(...a),
   },
 }));
 
 const mockReferenceMemory = vi.fn();
+// #2600: the dialog's accept is the memory's PATCH.
+const mockUpdateMemoryById = vi.fn();
 vi.mock("@/lib/api/memory", () => ({
   referenceMemory: (...a: unknown[]) => mockReferenceMemory(...a),
+  updateMemoryById: (...a: unknown[]) => mockUpdateMemoryById(...a),
   forgetMemory: vi.fn(),
 }));
 
@@ -201,7 +202,7 @@ function makeRef(
 beforeEach(() => {
   mockReplace.mockReset();
   mockGetGraphData.mockReset();
-  mockCreateEdge.mockReset();
+  mockUpdateMemoryById.mockReset();
   mockReferenceMemory.mockReset();
   mockToast.mockReset();
   mockSearchParams.current = new URLSearchParams();
@@ -384,6 +385,11 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
     });
   }
 
+  // The PATCH reply after an accept: the suggestion cleared.
+  function accepted(id: string): MemoryReference {
+    return makeRef(id, { supersede_candidate: null });
+  }
+
   function supersedes(source: string, target: string) {
     return {
       source,
@@ -448,7 +454,7 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
       .mockResolvedValueOnce(SAMPLE_GRAPH)
       .mockReturnValueOnce(reread.promise);
     mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
-    mockCreateEdge.mockResolvedValueOnce({ operation: "updated", edge: null });
+    mockUpdateMemoryById.mockResolvedValueOnce(accepted(NODE_A_ID));
     await renderGraph();
     expect(simCallbacks.edges.map((e) => e.type)).toEqual(["co_recall"]);
 
@@ -456,11 +462,8 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
     await accept();
 
     await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
-    expect(mockCreateEdge).toHaveBeenCalledWith({
-      context_id: "ctx-1",
-      source_id: NODE_A_ID,
-      target_id: NODE_B_ID,
-      edge_type: "supersedes",
+    expect(mockUpdateMemoryById).toHaveBeenCalledWith(NODE_A_ID, {
+      accept_supersede_candidate: true,
     });
     expect(mockGetGraphData).toHaveBeenLastCalledWith("ctx-1", {
       limit_nodes: 200,
@@ -484,7 +487,7 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
 
   it("does not re-read the graph when the accept fails", async () => {
     mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
-    mockCreateEdge.mockRejectedValueOnce(new Error("boom"));
+    mockUpdateMemoryById.mockRejectedValueOnce(new Error("boom"));
     await renderGraph();
 
     clickNode(NODE_A_ID);
@@ -500,7 +503,7 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
       .mockResolvedValueOnce(SAMPLE_GRAPH)
       .mockReturnValueOnce(reread.promise);
     mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
-    mockCreateEdge.mockResolvedValueOnce({ operation: "created", edge: null });
+    mockUpdateMemoryById.mockResolvedValueOnce(accepted(NODE_A_ID));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await renderGraph();
 
@@ -529,7 +532,7 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
       .mockReturnValueOnce(reread.promise);
     mockSearchParams.current = new URLSearchParams(`memoryId=${NODE_A_ID}`);
     mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
-    mockCreateEdge.mockResolvedValueOnce({ operation: "updated", edge: null });
+    mockUpdateMemoryById.mockResolvedValueOnce(accepted(NODE_A_ID));
     render(<GraphTabPanel contextId="ctx-1" />);
 
     // The dialog opens from the URL while the first load is still running.
@@ -561,7 +564,7 @@ describe("GraphTabPanel — accepted supersede (#2543)", () => {
         ? withCandidate(NODE_A_ID, NODE_B_ID)
         : withCandidate(NODE_B_ID, NODE_C_ID),
     );
-    mockCreateEdge.mockResolvedValue({ operation: "created", edge: null });
+    mockUpdateMemoryById.mockImplementation(async (id: string) => accepted(id));
     await renderGraph();
 
     clickNode(NODE_A_ID);
