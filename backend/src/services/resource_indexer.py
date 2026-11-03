@@ -22,7 +22,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 
 # Third-party imports (PEP8)
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import exists, or_, select
+from sqlalchemy import case, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
@@ -529,6 +529,7 @@ def build_resource_point(
     embedding: list[float],
     updated_at: datetime,
     memory_id: UUID,
+    user_id: str | None = None,
     tags: list[str] | None = None,
     memory_type: str | None = None,
     context_summary: str | None = None,
@@ -550,6 +551,9 @@ def build_resource_point(
         embedding: Dense vector of ``content``.
         updated_at: When the document version was ingested.
         memory_id: The Memory row that owns the point.
+        user_id: The owning row's author. ``None`` means the context's
+            creator, whom a new row is written for; a row found by its
+            natural key keeps its own (#2481).
         tags / memory_type / context_summary / location: The owning row's
             editable metadata (#2160, #2218), so an indexed, re-indexed or
             rebuilt point agrees with the row and recall's ``tags`` /
@@ -583,6 +587,7 @@ def build_resource_point(
         row_metadata["context_summary"] = normalize_for_search(context_summary)
     if location is not None:
         row_metadata["location"] = dict(location)
+    author = user_id if user_id is not None else str(context.created_by)
 
     # Qdrant requires a UUID or integer point id, not a string.
     return PointStruct(
@@ -593,7 +598,7 @@ def build_resource_point(
             **row_metadata,
             "workspace_id": str(context.workspace_id),  # 3-level isolation
             "context_id": str(context.id),  # 3-level isolation
-            "user_id": str(context.created_by),  # 3-level isolation
+            "user_id": author,  # 3-level isolation
             "resource_id": resource_id,
             "doc_id": doc_id,
             "version": version,
@@ -1244,18 +1249,36 @@ class ResourceIndexer:
         # by it (#1808).
         #
         # Idempotency lookup for re-indexing. Performance: generated columns
-        # (Migration 061) instead of a JSONB search. Context uses 'created_by',
-        # not 'owner_id'. Single Collection Migration: workspace_id/context_id
-        # instead of collection_name. #1549 review: tombstones are excluded so
-        # a doc the user forgot is RE-CREATED on re-sync (a fresh, visible row
-        # — charged once by the batch gate, which ignores tombstones the same
-        # way) instead of being patched in place under its deleted_at and
-        # staying invisible. Tombstones are terminal: the #1521 sweep
-        # hard-deletes them later.
+        # (Migration 061) instead of a JSONB search. Single Collection
+        # Migration: workspace_id/context_id instead of collection_name.
+        #
+        # #2481: the natural key alone, whoever wrote the row. A
+        # ``remember(external_id, details={doc_id, version})`` row of another
+        # account (a linked account in a private context, #1803, or another
+        # member) and a row a context merge copied in keep their own author;
+        # matching the creator only re-created them as duplicates. The row
+        # found keeps its author: it is updated in place, not re-owned, and
+        # its point follows it.
+        #
+        # Locked: the context lock above fences only the creator's erasure.
+        # Another author's erasure locks and scrubs its rows (details NULLed,
+        # the natural key with them); the lookup waits for it, and the
+        # re-checked row no longer matches, instead of the update writing the
+        # details read before the scrub back into the erased row.
+        #
+        # #1549 review: tombstones are excluded so a doc the user forgot is
+        # RE-CREATED on re-sync (a fresh, visible row — charged once by the
+        # batch gate, which ignores tombstones the same way) instead of being
+        # patched in place under its deleted_at and staying invisible.
+        # Tombstones are terminal: the #1521 sweep hard-deletes them later.
+        #
+        # A context the creator-only lookup already split holds two live rows
+        # of one key (no unique index): the creator's copy is the one updated,
+        # as before, then the oldest; the other row is left as it is.
         try:
             existing_memory_query = await self.db.execute(
-                select(Memory).where(
-                    Memory.user_id == str(context.created_by),
+                select(Memory)
+                .where(
                     Memory.workspace_id == context.workspace_id,
                     Memory.context_id == context.id,
                     Memory.resource_id == event.resource_id,  # Generated column (fast!)
@@ -1263,6 +1286,14 @@ class ResourceIndexer:
                     Memory.resource_version == event.version,  # Generated column (fast!)
                     Memory.deleted_at.is_(None),
                 )
+                .order_by(
+                    case((Memory.user_id == str(context.created_by), 0), else_=1),
+                    Memory.created_at,
+                    Memory.id,
+                )
+                .limit(1)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         except Exception as e:
             logger.error(
@@ -1331,6 +1362,9 @@ class ResourceIndexer:
             embedding=embedding,
             updated_at=event.created_at,
             memory_id=memory_id,
+            # #2481: the author of the row the point names, as the rebuild
+            # writes it (``rebuild_point``); erasure finds a point by it.
+            user_id=existing_memory.user_id if existing_memory is not None else None,
             **row_metadata,
         )
 
@@ -1488,14 +1522,14 @@ class ResourceIndexer:
             # to ``_drop_retired_points``. A row that did not own it (a
             # ``remember(external_id)`` row, #2164) also leaves its own-id
             # point and its chunks, which ``_drop_repointed_points`` drops by
-            # the same rule as for a re-pointed row.
+            # the same rule as for a re-pointed row. #2481: every author's old
+            # versions, like the idempotency lookup above.
             try:
                 retired: list[RetiredVersionRow] = []
                 unowned: list[tuple[UUID, UUID | None, str]] = []
                 async with self.db.begin_nested():
                     old_memories_result = await self.db.execute(
                         select(Memory).where(
-                            Memory.user_id == str(context.created_by),
                             Memory.workspace_id == context.workspace_id,
                             Memory.context_id == context.id,
                             Memory.resource_id == event.resource_id,
@@ -2004,15 +2038,15 @@ class ResourceIndexer:
         One SELECT on the generated ``resource_doc_id`` column, scoped exactly
         like ``_apply_upsert``'s existing-memory lookup minus the version, so
         the daily quota charges only doc_ids the batch will actually create.
-        Soft-deleted rows do not count: a doc the user forgot is a creation
-        again when the connector re-syncs it.
+        Like that lookup it matches any author's row (#2481): a row the upsert
+        updates or retires is no creation. Soft-deleted rows do not count: a
+        doc the user forgot is a creation again when the connector re-syncs it.
         """
         if not doc_ids:
             return set()
         result = await self.db.execute(
             select(Memory.resource_doc_id)
             .where(
-                Memory.user_id == str(context.created_by),
                 Memory.workspace_id == context.workspace_id,
                 Memory.context_id == context.id,
                 Memory.resource_id == resource_id,
