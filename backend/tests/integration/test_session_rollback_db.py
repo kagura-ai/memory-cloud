@@ -1925,3 +1925,58 @@ async def test_mcp_reply_names_the_context_after_a_session_rollback(
     assert (done["context_id"], done["context_name"]) == (str(w.context_id), "sessions")
     assert (await w.row(target))["tags"] == ["orig"]
     _stubs["payload"].assert_not_awaited()  # the unread group is not patched
+
+
+async def test_a_lock_timeout_on_one_row_leaves_the_rest_of_its_group_patched(
+    world: World, async_engine: AsyncEngine, _stubs: dict[str, Any]
+) -> None:
+    """#2433: another transaction holds one restored row; the payload step's
+    ``FOR SHARE`` read of the group runs into its lock timeout (a real one,
+    here set for the read's transaction only). The group is rolled back and
+    its rows are read again one at a time: the free row is patched from its
+    own read — an edit committed after the rollback wins over the restored
+    values — and the held row is not patched at all."""
+    from services import payload_sync as ps
+
+    w = world
+    free = await w.create(w.member, None, tags=["orig"])
+    held = await w.create(w.member, None, tags=["orig"])
+    for memory_id in (free, held):
+        await w.update(memory_id, w.owner, "LT", tags=["session"])
+    await w.session.commit()
+    done = await _rollback(w, "LT", SessionPrincipal(w.owner, None), dry_run=False)
+    await w.session.commit()
+    assert {sync.memory_id for sync in done.payload_syncs} == {free, held}
+    await w.update(free, w.member, "later", tags=["later"])
+    await w.session.commit()
+
+    share_lock_rows = ps.share_lock_rows
+    reads: list[set[uuid.UUID]] = []
+
+    async def read_under_a_lock_timeout(
+        db: AsyncSession, ids: list[uuid.UUID], **kwargs: Any
+    ) -> dict[uuid.UUID, Any]:
+        reads.append(set(ids))
+        await db.execute(text("SELECT set_config('lock_timeout', '200ms', true)"))
+        return await share_lock_rows(db, ids, **kwargs)
+
+    async with _maker(async_engine)() as other:
+        await other.execute(select(Memory.id).where(Memory.id == held).with_for_update())
+        try:
+            with (
+                patch("services.payload_sync.share_lock_rows", read_under_a_lock_timeout),
+                patch.object(sr, "logger") as log,
+            ):
+                await sr.finish(done, w.session)
+        finally:
+            await other.rollback()
+
+    assert reads[0] == {free, held}
+    assert sorted(reads[1:], key=lambda r: r != {free}) == [{free}, {held}]
+    _stubs["payload"].assert_awaited_once()
+    kwargs = _stubs["payload"].await_args.kwargs
+    assert kwargs["memory_id"] == free
+    assert kwargs["payload_updates"]["tags"] == ["later"]
+    log.warning.assert_any_call(
+        "session_rollback_payload_syncs_failed", failed=0, unread=1, recovered=1, of=2
+    )
