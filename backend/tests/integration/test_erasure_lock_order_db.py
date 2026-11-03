@@ -1128,7 +1128,7 @@ def _waited_on_the_users_row(run: SimpleNamespace) -> None:
     assert run.waited is not None, run.accept_result  # it did not finish first
     blocking, query = run.waited
     assert blocking == [run.erasure_pid], (blocking, query)
-    assert query.startswith("SELECT users.") and query.endswith("FOR UPDATE"), query
+    assert query.startswith("SELECT users.") and query.endswith("FOR NO KEY UPDATE"), query
 
 
 @pytest.mark.asyncio
@@ -1191,6 +1191,68 @@ async def test_an_accept_waits_out_a_rolled_back_erasure_of_the_accepter_and_joi
         .execution_options(populate_existing=True)
     )
     assert (member_role, accepted_by, current) == ("member", run.newcomer, run.ws_id)
+
+
+@pytest.mark.asyncio
+async def test_an_accept_does_not_wait_on_the_accepters_open_remember(db_session, connector_world):
+    """#2601: the accept locks ``users[N]`` ``FOR NO KEY UPDATE``, which the
+    ``FOR KEY SHARE`` a remember by N holds on it to its commit
+    (``hold_remember_author``) does not block. N, a member of W, has a
+    remember into W open and accepts an invitation to W: the accept answers
+    "already a member" at once, then the remember takes W for its quota
+    check. With ``FOR UPDATE`` the accept held W and waited on the remember,
+    which then waited on W: ``deadlock detected``."""
+    from services.erasure_write_guard import hold_remember_author
+
+    world = connector_world
+    owner = await world.user("owner")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(owner, **{newcomer: "member"})).id
+    email = f"{newcomer}@example.com"
+    token = await _pending_invitation(db_session, ws_id, owner, email)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    accept_pid: int | None = None
+
+    async def accept() -> None:
+        nonlocal accept_pid
+        async with maker() as db:
+            accept_pid = await _pid(db)
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=newcomer, user_email=email
+            )
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    async with maker() as remember:
+        try:
+            await hold_remember_author(remember, newcomer)
+            accepting = asyncio.create_task(accept())
+            tasks.append(accepting)
+            await _done_or_blocked(maker, accepting, lambda: accept_pid)
+            accepted_at_once = accepting.done()
+            # the remember's quota check (``check_memory_quota``) locks W
+            (quota_lock,) = await asyncio.wait_for(
+                asyncio.gather(
+                    remember.execute(
+                        select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+                    ),
+                    return_exceptions=True,
+                ),
+                30,
+            )
+            await remember.rollback()
+            (accept_result,) = await asyncio.wait_for(
+                asyncio.gather(accepting, return_exceptions=True), 30
+            )
+        finally:
+            await remember.rollback()
+            await _cancel_all(tasks)
+
+    assert accepted_at_once, accept_result
+    assert not isinstance(quota_lock, BaseException), quota_lock
+    assert isinstance(accept_result, ValidationError), accept_result
+    assert str(accept_result) == "You are already a member of this workspace"
 
 
 # ---------------------------------------------------------------------------

@@ -429,11 +429,14 @@ class InvitationService:
         # and then deletes the accepter's invitations: taking the users row
         # first, this transaction never holds the invitation while it waits.
         # Gone (the erasure committed meanwhile): a 404, nothing written.
+        # FOR NO KEY UPDATE, the lock the users UPDATE below takes: it waits
+        # on the erasure's FOR UPDATE, not on the FOR KEY SHARE an open
+        # remember by the accepter holds before it locks this workspace.
         accepter = (
             await self.db.execute(
                 select(User)
                 .where(User.user_id == user_id)
-                .with_for_update()
+                .with_for_update(key_share=True)
                 .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
