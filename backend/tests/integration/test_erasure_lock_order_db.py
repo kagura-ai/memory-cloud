@@ -11,9 +11,10 @@ subject's ``users`` row from its first step, so at steps 2 and 3 it takes the
 workspace rows ``NOWAIT`` and reschedules the request when one is busy.
 Steps 2 and 3 are one transaction: step 2 reads the owned workspaces under the
 identity-link lock and nothing is committed before step 3's commit.
-A referral redemption holds the referrer's ``users`` row from its cap check,
-so it takes workspace rows ``NOWAIT`` too and answers 409 when one stays
-busy (#2443).
+A transaction that needs two ``users`` rows locks both in ``user_id`` order in
+one statement (#2573). A referral redemption holds the referrer's and the
+referee's ``users`` rows from its cap check, so it takes workspace rows
+``NOWAIT`` too and answers 409 when one stays busy (#2443).
 Each test drives two real Postgres sessions and waits on
 ``pg_blocking_pids`` before releasing the paused one.
 """
@@ -1699,7 +1700,7 @@ async def _bonus(db, workspace_id) -> int:
 
 @pytest.mark.asyncio
 async def test_redeem_and_revoke_take_the_global_order(db_session, referral_world):
-    """``redeem`` holds the referrer's users row from its cap check on, so it
+    """``redeem`` holds both users rows from its cap check on, so it
     takes the workspace rows ``NOWAIT``: before its INSERT (whose foreign keys
     take a KEY SHARE on them) and again for the recompute. ``revoke`` takes
     them ``NOWAIT`` too."""
@@ -1760,7 +1761,7 @@ async def test_a_redeem_does_not_wait_on_a_workspace_another_transaction_holds(
 ):
     """Another transaction holds a workspace row the redeem credits, as
     ``DELETE /workspaces/W`` does before it locks the users rows it clears.
-    The redeem, which holds the referrer's users row, does not wait on it
+    The redeem, which holds the users rows, does not wait on it
     (neither in its INSERT's foreign-key check nor in the recompute): after
     its tries it raises ``ConflictError`` (409) and nothing is paid. Once the
     holder commits, the same redeem goes through."""
@@ -1825,7 +1826,7 @@ async def test_a_redeem_that_loses_a_try_goes_on_in_its_transaction(db_session, 
     """The workspace row the redeem locks second is held, and the holder
     commits during the backoff after the lost try. That try rolls back only
     its savepoint: the redeem goes on in the same transaction, still holding
-    the referrer's users row and the first workspace row, and pays both."""
+    the users rows and the first workspace row, and pays both."""
     referral = await _referral(referral_world)
     assert referral.referee_ws is not None
     second = max(referral.referrer_ws, referral.referee_ws)  # the UUID order
@@ -1866,3 +1867,195 @@ async def test_a_redeem_that_loses_a_try_goes_on_in_its_transaction(db_session, 
     assert (
         await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
     )
+
+
+@pytest.mark.asyncio
+async def test_a_redeem_locks_both_users_rows_first_in_one_statement(db_session, referral_world):
+    """Two ``users`` rows (#2573): the redeem locks the referrer's and the
+    referee's in one ``user_id``-ordered statement, waiting (it holds nothing
+    yet), before any other lock."""
+    referral = await _referral(referral_world)
+
+    with _LockTrace(db_session.bind) as trace:
+        await ReferralService(db_session).redeem(
+            referred_user_id=referral.referee, code=referral.code
+        )
+
+    _assert_global_order(trace)
+    (redeem_tx,) = trace.transactions
+    users_locks = [lock for lock in redeem_tx if lock.kind in ("users", "users_dml")]
+    assert users_locks == redeem_tx[:1], trace.kinds()
+    (users_lock,) = users_locks
+    assert not users_lock.nowait
+    in_list = re.search(
+        r"WHERE users\.user_id IN \(([^)]*)\) ORDER BY users\.user_id FOR UPDATE$", users_lock.sql
+    )
+    assert in_list and len(in_list.group(1).split(",")) == 2, users_lock.sql
+
+
+@dataclass(frozen=True)
+class _MutualReferral:
+    a: str
+    b: str
+    code_of: dict[str, str]
+    workspace_of: dict[str, UUID]
+
+
+async def _mutual_referral(world, *, own_workspaces: bool) -> _MutualReferral:
+    """Two new users, each holding the other's code (#2573)."""
+    a, b = await world.user("mutual"), await world.user("mutual")
+    code_of: dict[str, str] = {}
+    workspace_of: dict[str, UUID] = {}
+    for user_id in (a, b):
+        code_of[user_id] = f"code{uuid4().hex[:16]}"
+        await world.db.execute(
+            update(User).where(User.user_id == user_id).values(referral_code=code_of[user_id])
+        )
+        if own_workspaces:
+            workspace_of[user_id] = (await world.workspace(user_id)).id
+    await world.db.commit()
+    return _MutualReferral(a, b, code_of, workspace_of)
+
+
+@contextmanager
+def _redeem_paused_after_its_users_lock():
+    """The first ``redeem`` to reach its cap check stops there, holding the
+    ``users`` rows it locked; the ones after it run through."""
+    holding, release = asyncio.Event(), asyncio.Event()
+    original = ReferralService._count_active_grants
+
+    async def paused(self, referrer_user_id: str) -> int:
+        if not holding.is_set():
+            holding.set()
+            await asyncio.wait_for(release.wait(), 30)
+        return await original(self, referrer_user_id)
+
+    with patch.object(ReferralService, "_count_active_grants", paused):
+        yield holding, release
+
+
+async def _blockers_and_query(maker, pid: int) -> tuple[list[int], str]:
+    """The backends ``pid`` waits on, and the statement it waits in."""
+    async with maker() as observer:
+        row = (
+            await observer.execute(
+                text("SELECT pg_blocking_pids(pid), query FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": pid},
+            )
+        ).one()
+    return list(row[0]), " ".join(row[1].split())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("own_workspaces", [False, True], ids=["no_workspaces", "own_workspaces"])
+async def test_mutual_redemptions_wait_on_the_users_rows_instead_of_deadlocking(
+    db_session, referral_world, own_workspaces
+):
+    """A redeems B's code while B redeems A's, both new (#2573). Each redeem
+    locks both ``users`` rows in ``user_id`` order in one statement, so the
+    second waits on the first right there, holding nothing, and both are
+    paid. Before, each locked only its referrer's row and its INSERT's foreign
+    key then waited on the other's: without workspaces Postgres broke the
+    cycle (``deadlock detected``, a 503), with them the first lost its
+    ``NOWAIT`` tries on the workspace rows the second held (a 409)."""
+    mutual = await _mutual_referral(referral_world, own_workspaces=own_workspaces)
+    a, b = mutual.a, mutual.b
+    settings = get_settings()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict = {}
+
+    async def redeem(referee: str, referrer: str) -> str | None:
+        async with maker() as db:
+            pids[referee] = await _pid(db)
+            grant = await ReferralService(db).redeem(
+                referred_user_id=referee, code=mutual.code_of[referrer]
+            )
+            return grant.referrer_user_id
+
+    tasks: list[asyncio.Task] = []
+    try:
+        with _redeem_paused_after_its_users_lock() as (holding, release):
+            first = asyncio.create_task(redeem(a, b))
+            tasks.append(first)
+            await asyncio.wait_for(holding.wait(), 15)
+            second = asyncio.create_task(redeem(b, a))
+            tasks.append(second)
+            await _done_or_blocked(maker, second, lambda: pids.get(b))
+            assert not second.done(), "the second redeem did not wait on the first"
+            blockers, waiting_in = await _blockers_and_query(maker, pids[b])
+            release.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(first, second, return_exceptions=True), 30
+            )
+    finally:
+        await _cancel_all(tasks)
+
+    # each returns its referrer; before the fix one was a 40P01 or a ConflictError
+    assert results == [b, a], results
+    assert blockers == [pids[a]], blockers
+    assert waiting_in.startswith("SELECT users.user_id FROM users WHERE"), waiting_in
+    assert waiting_in.endswith("FOR UPDATE"), waiting_in
+    paid = (
+        await db_session.execute(
+            select(ReferralGrant.referred_user_id, ReferralGrant.referrer_user_id).where(
+                ReferralGrant.referred_user_id.in_([a, b])
+            )
+        )
+    ).all()
+    assert {tuple(row) for row in paid} == {(a, b), (b, a)}
+    both_sides = (
+        settings.referral_referrer_reward_memories + settings.referral_referee_reward_memories
+    )
+    for workspace_id in mutual.workspace_of.values():
+        assert await _bonus(db_session, workspace_id) == both_sides
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gone", ["referrer", "referee"])
+async def test_a_users_row_deleted_while_the_redeem_waits_on_it_refuses_the_redeem(
+    db_session, referral_world, gone
+):
+    """The redeem's users lock waits on a transaction that deletes the
+    referrer's or the referee's row (as an account erasure does). Once that
+    commits, the lock returns the other row only, and the redeem answers as
+    its reads before the lock would have: REFERRAL-001 for the referrer, 404
+    for the referee. Nothing is paid; the INSERT's foreign key is never
+    reached."""
+    from utils.exceptions import ReferralCodeInvalidError
+
+    mutual = await _mutual_referral(referral_world, own_workspaces=False)
+    referee, referrer = mutual.a, mutual.b
+    deleted = referrer if gone == "referrer" else referee
+    refusal = ReferralCodeInvalidError if gone == "referrer" else NotFoundException
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict = {}
+
+    async def redeem() -> None:
+        async with maker() as db:
+            pids["redeem"] = await _pid(db)
+            await ReferralService(db).redeem(
+                referred_user_id=referee, code=mutual.code_of[referrer]
+            )
+
+    tasks: list[asyncio.Task] = []
+    try:
+        async with maker() as holder:
+            await holder.execute(
+                text("DELETE FROM users WHERE user_id = :user_id"), {"user_id": deleted}
+            )
+            redeeming = asyncio.create_task(redeem())
+            tasks.append(redeeming)
+            await _done_or_blocked(maker, redeeming, lambda: pids.get("redeem"))
+            assert not redeeming.done(), "the redeem did not wait on the users row"
+            await holder.commit()
+        with pytest.raises(refusal):
+            await asyncio.wait_for(redeeming, 15)
+    finally:
+        await _cancel_all(tasks)
+
+    grants = await db_session.scalar(
+        select(func.count())
+        .select_from(ReferralGrant)
+        .where(ReferralGrant.referred_user_id == referee)
+    )
+    assert grants == 0
