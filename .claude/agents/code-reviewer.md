@@ -64,3 +64,17 @@ For each finding:
 [I] file:line - Description
   Suggestion: ...
 ```
+
+Then close with a **Routing** section that sorts every finding the PR should
+not or need not fix into the three buckets of
+`.claude/rules/development-workflow.md` ("Follow-ups"):
+
+```
+## Routing
+Fix now:        <findings that block the PR: regressions of this change, small nearby bugs>
+Bug (milestone): <pre-existing bugs with a failure scenario, not small or not nearby>
+Memo (Kagura Memory): <refactors, nits, docs, dead code → tech-debt; owner questions → needs-decision>
+```
+
+Name the files each memo concerns (they become `file:` tags). Do not propose
+`backlog` issues; memos are not issues.
