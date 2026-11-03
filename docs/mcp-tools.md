@@ -667,7 +667,7 @@ filters={"within": {"polygon": [{"lat": 35.6, "lon": 139.7}, ...]}}  # geofence,
 - `none` / `low` (or `count` 0): likely nothing relevant is stored in this context. Prefer an external source over forcing an answer out of the results. This signal is reliable even without a reranker.
 - `high` / `moderate`: relevant memory is likely present, so read the summaries and judge from their content. `level` measures topical match strength, so a closely related near-miss can also read `high`; it does not guarantee the exact fact is stored. To separate a near-miss from an exact match pass `use_rerank=true` (a cross-encoder) — plain cosine cannot.
 - `relative_margin` is kept for transparency but inflates on off-topic queries; do not use it to decide relevance.
-- Examples: `{"level": "high", "top_score": 0.92, "prominence": 0.55, "result_count": 20}`; an empty pool returns `{"level": "none", "top_score": null, "result_count": 0}`.
+- Examples: `{"level": "high", "top_score": 0.92, "prominence": 0.55, "result_count": 20}`; an empty pool returns `{"level": "none", "top_score": null, "result_count": 0}`. The pool holds only hits the reply could carry: a hit whose memory is gone, or that a filter or the agent's binding keeps out, is left out of every figure ([#2479](https://github.com/kagura-ai/memory-cloud/issues/2479)).
 
 **`degraded: true`** means the semantic half of the search was unavailable (`degraded_reason` says which), so the result set is keyword-only and `confidence` was computed on a different basis. A degraded empty or low result means "the search was impaired", not "nothing is stored": retry later rather than concluding absence. A healthy search carries neither key.
 

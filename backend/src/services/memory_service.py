@@ -6125,6 +6125,7 @@ class MemoryService:
         responses: list[MemoryResponse],
         *,
         user_id: str,
+        memories: Mapping[str, Memory],
         current_context_id: UUID,
         effective_workspace_id: UUID,
         neural_enabled: bool,
@@ -6142,9 +6143,13 @@ class MemoryService:
             request: The recall request.
             search_results: The full candidate pool (wider than the returned page
                 when neural over-fetch is on) — the confidence distribution is
-                computed over all of it.
+                computed over its hits that are in ``memories``.
             responses: The page being returned.
             user_id: Caller identity.
+            memories: The hydrated, binding-filtered hit id → Memory map
+                (#2479): a hit missing from it hydrated to nothing or is
+                hidden by the caller's binding, so it does not count towards
+                ``confidence``.
             current_context_id: Context that was searched.
             effective_workspace_id: #708-aware search workspace.
             neural_enabled: Whether the neural graph is available to hint from.
@@ -6168,6 +6173,7 @@ class MemoryService:
                 search_results,
                 responses,
                 user_id=user_id,
+                memories=memories,
                 current_context_id=current_context_id,
                 effective_workspace_id=effective_workspace_id,
                 neural_enabled=neural_enabled,
@@ -6197,6 +6203,7 @@ class MemoryService:
         responses: list[MemoryResponse],
         *,
         user_id: str,
+        memories: Mapping[str, Memory],
         current_context_id: UUID,
         effective_workspace_id: UUID,
         neural_enabled: bool,
@@ -6210,8 +6217,8 @@ class MemoryService:
 
         Builds the page: explore hints (opt-in), related tags, the
         ``memory_access_events`` audit row, the relevance confidence over the
-        full candidate pool, and the empty-result tag suggestions. Arguments
-        are :meth:`_recall_finalize`'s, which documents them.
+        candidate pool's hydrated hits, and the empty-result tag suggestions.
+        Arguments are :meth:`_recall_finalize`'s, which documents them.
 
         Returns:
             The completed RecallResponse.
@@ -6239,14 +6246,25 @@ class MemoryService:
         # (ranking order); ``semantic_scores`` are the RAW per-memory cosines that
         # carry absolute match strength for absence detection (#1052). See
         # _compute_recall_confidence.
+        # #2479: only hits still in ``memories`` count. A hit that hydrated to
+        # nothing (its row is gone, or the #214 / #887 / #496 filters kept it
+        # out) cannot be in the reply, so it must not lift the level; one the
+        # #1299 binding hides must not show through the scores either.
+        confidence_pool = [r for r in search_results if r["id"] in memories]
+        if dropped := len(search_results) - len(confidence_pool):
+            logger.debug(
+                "recall_confidence_hits_dropped",
+                dropped=dropped,
+                candidates=len(search_results),
+            )
         candidate_scores = [
             score
-            for r in search_results
+            for r in confidence_pool
             if (score := r.get("hybrid_score", r.get("score"))) is not None
         ]
         semantic_scores = [
             r["semantic_score_raw"]
-            for r in search_results
+            for r in confidence_pool
             if r.get("semantic_score_raw") is not None
         ]
         # #1278/#1281 item 7: audit the recall (no-op unless verified agent
@@ -6812,6 +6830,7 @@ class MemoryService:
             search_results,
             responses,
             user_id=user_id,
+            memories=memories,
             current_context_id=current_context_id,
             effective_workspace_id=effective_workspace_id,
             neural_enabled=neural_enabled,
