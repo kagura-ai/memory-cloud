@@ -42,10 +42,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Save,
   AlertCircle,
-  Circle,
-  Loader2,
   Brain,
   Lock,
   Copy,
@@ -69,6 +66,7 @@ import {
   featureGateToast,
   type FeatureGateScope,
 } from "@/components/common/FeatureGateNotice";
+import { UnsavedChangesBar } from "@/components/contexts/UnsavedChangesBar";
 import {
   gateFromFacts,
   isBlocked,
@@ -874,40 +872,18 @@ export function SettingsTabPanel({
 
         {/* Save bar (#2159): in the flow after the last card and sticky
             within this section, like the search settings bar below it — a
-            viewport-fixed bar here would cover that one. #2595: an accent
-            border, a primary tint over the opaque blur and a raised shadow
-            so it reads as a status strip, not another card. Only the label
-            is the live region, so the buttons' "saving" relabel is not
-            re-announced. */}
+            viewport-fixed bar here would cover that one. */}
         {isDirty && (
-          <div className="sticky bottom-0 z-10 overflow-hidden rounded-lg border border-primary/40 bg-background/95 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/80 animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none">
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-primary/5 px-4 py-3">
-              <p
-                role="status"
-                aria-live="polite"
-                className="flex items-center gap-2 text-sm font-medium text-foreground"
-              >
-                <Circle
-                  aria-hidden="true"
-                  className="h-2.5 w-2.5 shrink-0 fill-current text-primary"
-                />
-                {t("unsavedChanges")}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={refreshContext}>
-                  {t("discard")}
-                </Button>
-                <Button size="sm" onClick={handleSave} disabled={saving}>
-                  {saving ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4 mr-2" />
-                  )}
-                  {saving ? t("saving") : t("saveChanges")}
-                </Button>
-              </div>
-            </div>
-          </div>
+          <UnsavedChangesBar
+            message={t("unsavedChanges")}
+            discardLabel={t("discard")}
+            saveLabel={t("saveChanges")}
+            savingLabel={t("saving")}
+            onDiscard={refreshContext}
+            onSave={handleSave}
+            saving={saving}
+            saveDisabled={saving}
+          />
         )}
       </div>
 
