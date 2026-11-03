@@ -140,6 +140,22 @@ class TestLanceStore:
         assert await retrieve_dense_vectors(DEFAULT, []) == {}
         assert opened == []
 
+    async def test_a_row_without_a_vector_is_absent(self, lance):
+        """As on Qdrant, a point that carries no vector is left out."""
+        import pyarrow as pa
+
+        kept = uuid4()
+        await _add(lance, kept, [0.1, 0.2, 0.3, 0.4])
+        tbl = lance._open(DEFAULT)
+        blank = str(uuid4())
+        row = dict.fromkeys(tbl.schema.names)
+        row["id"] = blank
+        tbl.add(pa.Table.from_pylist([row], schema=tbl.schema))
+
+        vectors = await retrieve_dense_vectors(DEFAULT, [str(kept), blank])
+
+        assert set(vectors) == {str(kept)}
+
     async def test_a_missing_collection_reads_nothing(self, lance):
         await _add(lance, uuid4(), [0.1, 0.2, 0.3, 0.4])
 
