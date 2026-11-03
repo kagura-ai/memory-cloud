@@ -45,6 +45,7 @@ import {
 } from "@/lib/utils/sleep-narrative";
 import {
   getSleepStatusColor,
+  getSleepSourceColor,
   formatUserPartitionLabel,
 } from "@/lib/sleep-report";
 import type { SleepReportDetailResponse } from "@/lib/api/sleep-reports";
@@ -133,13 +134,26 @@ export function SleepReportDetailView({
     { key: "reindex", result: report.reindex_result },
   ];
 
-  const headline = buildHeadline(
-    {
-      context_name: report.context_name,
-      context_deleted: report.context_deleted,
-    },
-    report,
-  );
+  // #2219: an analysis row records the LLM spend of a Memory Analysis run
+  // (cluster labeling). None of the five Sleep phases ran, and the labeling
+  // phase has no result column on the report, so the Sleep headline, the
+  // Sleep-only KPIs and the empty phase list would all misdescribe it.
+  const isAnalysis = report.source === "analysis";
+  const headline = isAnalysis
+    ? {
+        key: "detail.narrative.headlineAnalysis",
+        values: {
+          calls: report.llm_calls_made,
+          tokens: report.llm_tokens_used,
+        },
+      }
+    : buildHeadline(
+        {
+          context_name: report.context_name,
+          context_deleted: report.context_deleted,
+        },
+        report,
+      );
 
   const relativeStarted = formatRelativeTime(report.started_at, locale);
   const duration = formatDuration(report.started_at, report.completed_at);
@@ -191,7 +205,14 @@ export function SleepReportDetailView({
               {/* #1229: a degraded run can now come from a phase crash with a
                   healthy judge — show the recorded cause instead of a
                   misleading "0 judge LLM calls failed". */}
-              {report.error_message
+              {/* #2219: an analysis row is degraded by failed cluster-
+                  labeling calls; the Sleep texts below would blame merge/
+                  importance judgments and point at hidden phase results. */}
+              {isAnalysis
+                ? t("detail.narrative.runDegradedAnalysis", {
+                    count: report.llm_call_failures ?? 0,
+                  })
+                : report.error_message
                 ? t("detail.narrative.runDegradedPhase", {
                     error: report.error_message,
                   })
@@ -209,6 +230,12 @@ export function SleepReportDetailView({
                 className={`inline-flex items-center px-3 py-1 text-sm font-medium rounded ${getSleepStatusColor(report.status)}`}
               >
                 {t(`status.${report.status}`)}
+              </span>
+              <span
+                data-testid="sleep-report-source"
+                className={`inline-flex items-center px-3 py-1 text-sm font-medium rounded ${getSleepSourceColor(report.source)}`}
+              >
+                {t(`source.${report.source}`)}
               </span>
               <div>
                 <div className="text-sm text-gray-500 dark:text-gray-400">
@@ -231,21 +258,25 @@ export function SleepReportDetailView({
             label={t("detail.memoriesProcessed")}
             value={report.memories_processed}
           />
-          <KpiTile
-            icon={Link2}
-            label={t("detail.edgesCreated")}
-            value={report.edges_created}
-          />
-          <KpiTile
-            icon={Merge}
-            label={t("detail.memoriesMerged")}
-            value={report.memories_merged}
-          />
-          <KpiTile
-            icon={TrendingUp}
-            label={t("detail.memoriesPromoted")}
-            value={report.memories_promoted}
-          />
+          {!isAnalysis && (
+            <>
+              <KpiTile
+                icon={Link2}
+                label={t("detail.edgesCreated")}
+                value={report.edges_created}
+              />
+              <KpiTile
+                icon={Merge}
+                label={t("detail.memoriesMerged")}
+                value={report.memories_merged}
+              />
+              <KpiTile
+                icon={TrendingUp}
+                label={t("detail.memoriesPromoted")}
+                value={report.memories_promoted}
+              />
+            </>
+          )}
           <KpiTile
             icon={Sparkles}
             label={t("detail.llmCallsMade")}
@@ -258,7 +289,12 @@ export function SleepReportDetailView({
             <CardTitle>{t("detail.phaseResults")}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {phaseResults.map(({ key, result }) => {
+            {isAnalysis && (
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {t("detail.analysisNoPhases")}
+              </p>
+            )}
+            {!isAnalysis && phaseResults.map(({ key, result }) => {
               const narrative = buildPhaseNarrative(key, result);
               const judgeNote = buildJudgeFailureNote(result);
               return (
@@ -302,63 +338,67 @@ export function SleepReportDetailView({
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              {t("detail.actionLog", { count: action_count })}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {actions.length === 0 ? (
-              <div className="text-center py-6">
-                <Clock className="h-8 w-8 text-gray-300 dark:text-gray-600 mx-auto mb-2" />
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  {t("detail.noActions")}
-                </p>
-                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                  {t("detail.noActionsHint")}
-                </p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t("detail.phase")}</TableHead>
-                      <TableHead>{t("detail.actionType")}</TableHead>
-                      <TableHead>{t("detail.memoryId")}</TableHead>
-                      <TableHead>{t("detail.targetId")}</TableHead>
-                      <TableHead>{t("detail.details")}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {actions.map((action) => (
-                      <TableRow key={action.id}>
-                        <TableCell className="text-xs">
-                          {action.phase}
-                        </TableCell>
-                        <TableCell className="text-xs font-medium">
-                          {action.action_type}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs break-all max-w-[180px]">
-                          {action.memory_id || "-"}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs break-all max-w-[180px]">
-                          {action.target_id || "-"}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs max-w-md">
-                          {action.details
-                            ? JSON.stringify(action.details)
-                            : "-"}
-                        </TableCell>
+        {/* #2219: an analysis run records no Sleep actions; its empty log's
+            "recorded before #164" hint would be wrong. */}
+        {(!isAnalysis || action_count > 0) && (
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                {t("detail.actionLog", { count: action_count })}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {actions.length === 0 ? (
+                <div className="text-center py-6">
+                  <Clock className="h-8 w-8 text-gray-300 dark:text-gray-600 mx-auto mb-2" />
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    {t("detail.noActions")}
+                  </p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                    {t("detail.noActionsHint")}
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("detail.phase")}</TableHead>
+                        <TableHead>{t("detail.actionType")}</TableHead>
+                        <TableHead>{t("detail.memoryId")}</TableHead>
+                        <TableHead>{t("detail.targetId")}</TableHead>
+                        <TableHead>{t("detail.details")}</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                    </TableHeader>
+                    <TableBody>
+                      {actions.map((action) => (
+                        <TableRow key={action.id}>
+                          <TableCell className="text-xs">
+                            {action.phase}
+                          </TableCell>
+                          <TableCell className="text-xs font-medium">
+                            {action.action_type}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs break-all max-w-[180px]">
+                            {action.memory_id || "-"}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs break-all max-w-[180px]">
+                            {action.target_id || "-"}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs max-w-md">
+                            {action.details
+                              ? JSON.stringify(action.details)
+                              : "-"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         <div>
           <button

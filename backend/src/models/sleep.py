@@ -5,7 +5,7 @@ Issue #101: Sleep Maintenance Foundation — report tracking and audit log.
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from sqlalchemy import (
     BigInteger,
@@ -35,6 +35,12 @@ from models.json_types import NullableJSON
 # and the matching ``ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`` strings in
 # the migration (raw ``op.execute(sa.text(...))`` form, see d05_523).
 SLEEP_REPORT_SOURCES: tuple[str, ...] = ("sleep", "analysis")
+# #2219: the ``source`` list filter of the Sleep Reports API and of the MCP
+# ``get_sleep_history`` tool — one of SLEEP_REPORT_SOURCES, or "all".
+SLEEP_REPORT_SOURCE_ALL = "all"
+SleepReportSourceFilter = Literal["sleep", "analysis", "all"]
+SLEEP_REPORT_SOURCE_FILTERS: tuple[str, ...] = (*SLEEP_REPORT_SOURCES, SLEEP_REPORT_SOURCE_ALL)
+assert set(get_args(SleepReportSourceFilter)) == set(SLEEP_REPORT_SOURCE_FILTERS)
 SLEEP_REPORT_PAID_BY_VALUES: tuple[str, ...] = ("platform", "byok")
 
 # Issue #504: per-context sleep_mode is the source of truth for which Sleep

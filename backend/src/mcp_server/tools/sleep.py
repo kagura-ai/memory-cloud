@@ -67,6 +67,8 @@ def _report_to_summary(report: Any) -> dict[str, Any]:
         "report_id": str(report.id),
         "context_id": str(report.context_id) if report.context_id else None,
         "status": report.status,
+        # #2219: 'sleep' (Sleep Maintenance run) or 'analysis' (analysis spend row).
+        "source": report.source,
         "started_at": report.started_at.isoformat() if report.started_at else None,
         "completed_at": report.completed_at.isoformat() if report.completed_at else None,
         "memories_processed": report.memories_processed,
@@ -273,9 +275,14 @@ async def _re_embed_to_qdrant(
 async def handle_get_sleep_history(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List recent sleep maintenance runs for a context."""
+    """List recent sleep maintenance runs for a context.
+
+    ``source`` (#2219) picks Sleep runs (default), analysis rows or both,
+    through the same filter as the REST list endpoints.
+    """
     from db.base import get_db
     from models.sleep import SleepReport
+    from services.sleep_reporter_service import sleep_report_source_condition
 
     raw_limit = args.get("limit", 10)
     try:
@@ -286,18 +293,27 @@ async def handle_get_sleep_history(
         )
     limit = max(1, min(limit, 50))
 
+    source = args.get("source") or "sleep"
+    try:
+        source_condition = sleep_report_source_condition(source)
+    except ValueError as e:
+        return _error_response("validation_error", str(e), received=source)
+
     start_time = time.time()
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
             await _resolve_context_for_read(db, user_id, current_context_id)
 
+            conditions = [
+                SleepReport.user_id == user_id,
+                SleepReport.context_id == current_context_id,
+            ]
+            if source_condition is not None:
+                conditions.append(source_condition)
             stmt = (
                 select(SleepReport)
-                .where(
-                    SleepReport.user_id == user_id,
-                    SleepReport.context_id == current_context_id,
-                )
+                .where(*conditions)
                 .order_by(SleepReport.started_at.desc())
                 .limit(limit)
             )

@@ -1309,6 +1309,7 @@ Notes:
 - `context_id: UUID | None` — required
 - `context_name: str | None` — optional
 - `status: str` — required
+- `source: str` — required (`sleep` or `analysis`; the list endpoints filter on it with `source=sleep|analysis|all`, #2219)
 - `started_at: datetime` — required
 - `completed_at: datetime | None` — required
 - `memories_processed: int` — required
