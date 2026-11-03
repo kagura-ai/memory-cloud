@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from services.sleep.reporter import SleepReporter
 
 from sqlalchemy import and_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
@@ -262,6 +263,14 @@ class ConsolidationPhase(LLMSpendTracker):
                         memory.reference_count or 0,
                         mode="tombstone",
                     )
+                except SQLAlchemyError:
+                    # #2565: a database error (the stamp, the point's queue
+                    # row) aborted the phase's transaction. Going on would fail
+                    # every later statement, and a failed savepoint RELEASE
+                    # cannot roll back, which loses the whole run: fail the
+                    # phase here, so its savepoint takes the stamps and queue
+                    # rows with it.
+                    raise
                 except Exception as e:
                     logger.warning(
                         "consolidation_delete_failed",

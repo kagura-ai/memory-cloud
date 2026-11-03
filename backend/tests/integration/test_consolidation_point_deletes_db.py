@@ -27,7 +27,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from db.qdrant import KAGURA_MEMORIES_COLLECTION
 from models.auth import Context
@@ -172,7 +172,7 @@ def _sleep_patches(world: World, stack: ExitStack, phase: str) -> None:
 
 async def _run_sleep(
     world: World, phase: str = "consolidation", *, commit_fails: bool = False
-) -> None:
+) -> uuid.UUID:
     """The admin trigger's job: the orchestrator, then the caller's commit."""
     from api.routes.admin_sleep import _run_sleep_job
 
@@ -183,6 +183,7 @@ async def _run_sleep(
             stack.enter_context(_commit_fails(world))
         # Logs a failure and marks the report, never raises.
         await _run_sleep_job(report_id, world.owner, str(world.workspace_id), str(world.context_id))
+    return report_id
 
 
 async def test_a_sleep_archive_whose_commit_fails_keeps_the_rows_and_their_points(
@@ -220,6 +221,32 @@ async def test_a_sleep_archive_deletes_the_points_after_the_callers_commit(
     assert set(chunks.await_args.args[0]) == set(ids)
     # The fast path dequeued what it handled, under the lock.
     assert await _queued(world, ids) == set()
+
+
+async def test_a_failed_queue_insert_fails_the_archive_phase_and_keeps_the_rows(
+    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
+) -> None:
+    """A queue INSERT that fails on the rule path fails the consolidation phase
+    alone: its savepoint takes the stamps with it, so no row is left without its
+    queue row, and the run still completes (the rule pass used to log the error
+    and go on in the aborted transaction, which then lost the whole run)."""
+    ids = await _old_working(world, 2)
+
+    async def insert_fails(db: Any, _entries: Any) -> None:
+        await db.execute(text("SELECT 1 / 0"))  # a database error in the phase's transaction
+
+    with patch("services.sleep.consolidation.queue_point_deletes", insert_fails):
+        report_id = await _run_sleep(world)
+
+    report = await world.session.get(SleepReport, report_id, populate_existing=True)
+    assert report is not None and report.status == "degraded"
+    assert report.consolidation_result is not None
+    assert report.consolidation_result["success"] is False
+    assert await _live(world, ids) == 2
+    assert await _queued(world, ids) == set()
+    client.delete.assert_not_awaited()
+    _stubs["points"].assert_not_awaited()
+    chunks.assert_not_awaited()
 
 
 async def test_a_failed_sleep_phase_takes_its_queue_rows_down_with_its_savepoint(
