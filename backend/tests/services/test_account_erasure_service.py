@@ -2336,66 +2336,54 @@ def _delete_postgres_service() -> AccountErasureService:
 class TestConnectorKeysReownedInThePostgresStep:
     """#2305: the subject's live connector write keys go to their workspace's
     owner before the per-user ``api_keys`` delete, so the connector keeps
-    working."""
+    working; #2373: its agents are settled at the same point (the statements
+    are pinned in ``tests/services/test_connector_key_ownership.py``)."""
 
     @pytest.mark.asyncio
-    async def test_the_update_hands_live_connector_keys_to_the_owner(self):
-        from sqlalchemy.dialects import postgresql
+    async def test_it_settles_the_subject_as_an_erasure(self):
+        from services.connector_key_ownership import SettledCredentials
 
         svc = _service()
-        captured: list[Any] = []
-        svc.db.execute = AsyncMock(
-            side_effect=lambda stmt, *a, **k: captured.append(stmt) or MagicMock(rowcount=2)
-        )
+        settle = AsyncMock(return_value=SettledCredentials(connector_api_keys_reowned=2))
 
-        assert await svc._reown_connector_keys("raw-sub") == 2
+        with patch("services.account_erasure_service.settle_departing_credentials", settle):
+            settled = await svc._settle_departing_credentials("raw-sub")
 
-        (stmt,) = captured
-        sql = " ".join(str(stmt.compile(dialect=postgresql.dialect())).split())
-        assert sql.startswith(
-            "UPDATE api_keys SET user_id=workspaces.owner_user_id FROM workspaces WHERE "
-        )
-        # the id-ordered lock over the subject's live connector rows
-        assert (
-            "api_keys.id IN (SELECT api_keys_1.id FROM api_keys AS api_keys_1 "
-            "WHERE api_keys_1.user_id = %(user_id_1)s::VARCHAR "
-            "AND api_keys_1.connector_id IS NOT NULL AND api_keys_1.revoked_at IS NULL "
-            "ORDER BY api_keys_1.id FOR UPDATE)"
-        ) in sql
-        assert "api_keys.user_id = %(user_id_2)s::VARCHAR" in sql
-        assert "api_keys.connector_id IS NOT NULL" in sql
-        assert "api_keys.revoked_at IS NULL" in sql
-        assert "api_keys.workspace_id = workspaces.id" in sql
-        assert "workspaces.owner_user_id != %(owner_user_id_1)s::VARCHAR" in sql
-        assert stmt.compile().params == {
-            "user_id_1": "raw-sub",
-            "user_id_2": "raw-sub",
-            "owner_user_id_1": "raw-sub",
-        }
+        assert settled.connector_api_keys_reowned == 2
+        settle.assert_awaited_once_with(svc.db, "raw-sub", path="erasure")
 
     @pytest.mark.asyncio
     async def test_it_runs_before_the_api_keys_delete_and_is_counted(self):
         from models.auth import APIKey
+        from services.connector_key_ownership import SettledCredentials
 
         svc = _delete_postgres_service()
         order: list[Any] = []
 
-        async def _reown(user_id: str) -> int:
-            order.append(("reown", user_id))
-            return 4
+        async def _settle(user_id: str) -> SettledCredentials:
+            order.append(("settle", user_id))
+            return SettledCredentials(
+                connector_api_keys_reowned=4,
+                agent_api_keys_deleted=3,
+                agents_suspended=2,
+                agents_reowned=1,
+            )
 
         async def _delete(model: Any, where_clause: Any) -> int:
             order.append(model)
             return 1
 
-        svc._reown_connector_keys = AsyncMock(side_effect=_reown)
+        svc._settle_departing_credentials = AsyncMock(side_effect=_settle)
         svc._count_and_delete = AsyncMock(side_effect=_delete)
 
         counts = (await svc._delete_postgres(_user())).counts
 
-        assert order.index(("reown", "u-1")) < order.index(APIKey)
-        assert order.count(("reown", "u-1")) == 1
+        assert order.index(("settle", "u-1")) < order.index(APIKey)
+        assert order.count(("settle", "u-1")) == 1
         assert counts["connector_api_keys_reowned"] == 4
+        assert counts["agent_api_keys_deleted"] == 3
+        assert counts["agents_suspended"] == 2
+        assert counts["agents_reowned"] == 1
         assert counts["api_keys"] == 1
 
 

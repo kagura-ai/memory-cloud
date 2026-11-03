@@ -204,3 +204,133 @@ class TestConnectorKeysSurviveMemberRemoval:
             await world.remove(ws_id, owner)
 
         assert await _key_rows(db_session, [key_id]) == before
+
+
+class TestAgentCredentialsOfARemovedMember:
+    """#2373: a removed service member's agent key is deleted, never handed to
+    the owner (deletion never widens); the agent it leaves without a key is
+    suspended until the owner re-activates it and mints a key for another
+    service member. A removed registrar's agents name the owner."""
+
+    @pytest.mark.asyncio
+    async def test_the_key_dies_the_agent_is_suspended_and_can_be_reprovisioned(
+        self, db_session: AsyncSession, connector_world
+    ):
+        from auth.api_keys import APIKeyManager
+        from models.agent import Agent
+        from services.agent_registry_service import AgentRegistryService
+
+        world = connector_world
+        target = await world.user("svc")
+        owner = await world.user("owner")
+        successor = await world.user("svc2")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.MEMBER, successor: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=owner)
+        agent_id = agent.id
+        plaintext, key_id = await world.agent_key(target, ws, agent)
+
+        with patch("services.workspace_service.logger") as mock_logger:
+            await world.remove(ws_id, target)
+
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert await APIKeyManager(db_session).verify_key(plaintext) is None
+        assert await world.agent_state(agent_id) == (owner, "suspended", 1)
+        log = _removal_log(mock_logger)
+        assert log["agent_api_keys_deleted"] == 1
+        assert log["agents_suspended"] == 1
+        assert log["agents_reowned"] == 0
+        assert log["api_keys_deleted"] == 1
+        (row,) = await world.departure_audits(target)
+        assert row.user_id == owner
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "member_removal",
+            "connector_api_keys_reowned": 0,
+            "agent_api_keys_deleted": 1,
+            "agents_suspended": 1,
+            "agents_reowned": 0,
+        }
+
+        # the owner's way back: no key for a suspended agent, so re-activate
+        # it first (the audited agent update), then mint for another member
+        workspace = await db_session.get(type(ws), ws_id)
+        agent = await db_session.get(Agent, agent_id)
+        assert workspace is not None and agent is not None
+        with pytest.raises(ValueError, match="only be minted for active agents"):
+            await world.agent_key(successor, workspace, agent)
+        changes = await AgentRegistryService(db_session).update_agent(agent, {"status": "active"})
+        assert changes == {"status": {"old": "suspended", "new": "active"}}
+        new_plaintext, _ = await world.agent_key(successor, workspace, agent)
+        verified = await APIKeyManager(db_session).verify_key(new_plaintext)
+        assert verified is not None
+        assert (verified.user_id, verified.agent_id) == (successor, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_an_agent_another_member_holds_a_key_for_keeps_working(
+        self, db_session: AsyncSession, connector_world
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("svc")
+        owner = await world.user("owner")
+        other = await world.user("svc2")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.MEMBER, other: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=owner)
+        agent_id = agent.id
+        _, key_id = await world.agent_key(target, ws, agent)
+        others_plaintext, _ = await world.agent_key(other, ws, agent)
+
+        await world.remove(ws_id, target)
+
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert await world.agent_state(agent_id) == (owner, "active", 1)
+        verified = await APIKeyManager(db_session).verify_key(others_plaintext)
+        assert verified is not None and verified.user_id == other
+        (row,) = await world.departure_audits(target)
+        assert row.user_metadata["agent_api_keys_deleted"] == 1
+        assert row.user_metadata["agents_suspended"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_removed_registrars_agents_name_the_owner(
+        self, db_session: AsyncSession, connector_world
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("registrar")
+        owner = await world.user("owner")
+        svc = await world.user("svc")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, svc: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=target)
+        agent_id = agent.id
+        plaintext, _ = await world.agent_key(svc, ws, agent)
+        # an agent the registrar made in a workspace it stays in is its own
+        elsewhere = await world.workspace(f"else_{uuid4().hex[:8]}", **{target: "admin"})
+        kept_id = (await world.agent(elsewhere, by=target)).id
+
+        await world.remove(ws_id, target)
+
+        assert await world.agent_state(agent_id) == (owner, "active", 1)
+        assert (await world.agent_state(kept_id))[:2] == (target, "active")
+        verified = await APIKeyManager(db_session).verify_key(plaintext)
+        assert verified is not None and verified.user_id == svc
+        (row,) = await world.departure_audits(target)
+        assert row.user_id == owner
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "member_removal",
+            "connector_api_keys_reowned": 0,
+            "agent_api_keys_deleted": 0,
+            "agents_suspended": 0,
+            "agents_reowned": 1,
+        }

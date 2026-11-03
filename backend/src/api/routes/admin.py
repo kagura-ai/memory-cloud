@@ -1027,9 +1027,12 @@ async def delete_user(
     passes to a linked account that wrote in it, otherwise it is deleted with
     the user (#2417). A soft-deleted workspace the user owns takes no
     successor: it is hard-deleted with the user, everything in it included,
-    and listed under ``purged_workspaces`` (#2406). Initial/last admin and
-    self-deletion protections remain in force. The transfer and deletion
-    commit together.
+    and listed under ``purged_workspaces`` (#2406). In a workspace someone
+    else owns, the user's connector keys and the agents it registered go to
+    that owner (``reowned``), its agent-bound keys are deleted
+    (``deleted.agent_api_keys``) and an agent left without a key is suspended
+    (``suspended``, #2373). Initial/last admin and self-deletion protections
+    remain in force. The transfer and deletion commit together.
     """
     from services.ownership_notifications import notify_new_owner_best_effort
     from services.system_admin_service import SystemAdminService
@@ -1085,6 +1088,9 @@ async def delete_user(
         api_keys_deleted=result.api_keys,
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
+        agent_api_keys_deleted=result.agent_api_keys,
+        agents_suspended=result.agents_suspended,
+        agents_reowned=result.agents_reowned,
         workspaces_transferred=[str(ws_id) for ws_id in transferred],
         workspaces_purged=[str(ws.id) for ws in result.purged_workspaces],
     )
@@ -1095,8 +1101,14 @@ async def delete_user(
             "memories": result.memories,
             "api_keys": result.api_keys,
             "contexts": result.contexts,
+            # #2373: of ``api_keys``, the live agent-bound keys (never handed over)
+            "agent_api_keys": result.agent_api_keys,
         },
-        "reowned": {"connector_api_keys": result.connector_api_keys},
+        "reowned": {
+            "connector_api_keys": result.connector_api_keys,
+            "agents": result.agents_reowned,
+        },
+        "suspended": {"agents": result.agents_suspended},
         "transferred_workspaces": {str(k): v for k, v in transferred.items()},
         "purged_workspaces": [ws.summary() for ws in result.purged_workspaces],
     }

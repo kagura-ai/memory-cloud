@@ -951,10 +951,15 @@ class WorkspaceService:
 
         Re-owns:
         - The member's live connector write keys in this workspace (#2352)
+        - The agents the member registered here (#2373)
+
+        Suspends:
+        - The active agents whose only live key is the member's (#2373)
 
         Deletes:
         - Context memberships
-        - API credentials (keys, OAuth clients/tokens, external keys)
+        - API credentials (keys, agent-bound ones included, OAuth
+          clients/tokens, external keys)
         - Pending invitations sent by this member
 
         Args:
@@ -1062,6 +1067,9 @@ class WorkspaceService:
                 user_id=user_id,
                 context_members_deleted=context_cleanup["context_members_deleted"],
                 connector_api_keys_reowned=cred_cleanup["connector_api_keys_reowned"],
+                agent_api_keys_deleted=cred_cleanup["agent_api_keys_deleted"],
+                agents_suspended=cred_cleanup["agents_suspended"],
+                agents_reowned=cred_cleanup["agents_reowned"],
                 api_keys_deleted=cred_cleanup["api_keys_deleted"],
                 oauth_clients_deleted=cred_cleanup["oauth_clients_deleted"],
                 oauth_tokens_revoked=cred_cleanup["oauth_tokens_revoked"],

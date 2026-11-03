@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from api.routes.admin import delete_user
 from auth.api_keys import APIKeyManager
 from models.auth import APIKey
-from services.connector_key_ownership import reown_connector_keys
+from services.connector_key_ownership import settle_departing_credentials
 from services.connector_provisioning import ConnectorProvisioningService
 from services.workspace_service import WorkspaceService
 
@@ -30,10 +30,10 @@ async def test_rotation_waits_across_reown_and_delete(db_session, connector_worl
     rotation_pid = None
 
     async def pause_after_reown(db, subject, **kwargs):
-        count = await reown_connector_keys(db, subject, **kwargs)
+        settled = await settle_departing_credentials(db, subject, **kwargs)
         gap.set()
         await asyncio.wait_for(resume.wait(), 15)
-        return count
+        return settled
 
     async def remove():
         async with maker() as db:
@@ -67,7 +67,7 @@ async def test_rotation_waits_across_reown_and_delete(db_session, connector_worl
         else "services.member_credentials_service"
     )
     tasks = []
-    with patch(f"{module}.reown_connector_keys", pause_after_reown):
+    with patch(f"{module}.settle_departing_credentials", pause_after_reown):
         try:
             deletion = asyncio.create_task(remove())
             tasks.append(deletion)

@@ -93,9 +93,12 @@ class Agent(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # OAuth sub; plain string per repo convention (cf. workspaces.owner_user_id).
-    # Pseudonymized by account_erasure_service for erased subjects whose rows
-    # survive (agents in co-owned workspaces that are not hard-deleted).
+    # OAuth sub of whoever registered the agent; plain string per repo
+    # convention (cf. workspaces.owner_user_id). Display only: nothing
+    # authorizes on it. When that user leaves a workspace someone else owns
+    # (erasure, member removal, user deletion) it names the workspace owner
+    # (#2373, services.connector_key_ownership); erasure pseudonymizes any
+    # value left after that.
     owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     framework: Mapped[str | None] = mapped_column(String(100), nullable=True)
     environment: Mapped[str | None] = mapped_column(String(100), nullable=True)
