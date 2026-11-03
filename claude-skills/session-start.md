@@ -44,7 +44,7 @@ If multiple contexts exist, pick the one whose name best matches the current pro
 **One call when the server lists `bootstrap`** (the tool is in the client's tool list — v0.93.0 and later). Call it once for the chosen context. **If `bootstrap`'s parameters include `format`** (v0.115.0 and later), ask for the compact index:
 
 ```
-bootstrap(context_id=..., since="7d", format="index", max_chars=3000)
+bootstrap(context_id=..., since="7d", format="index", max_chars=5000)
 ```
 
 Otherwise (an older server) call `bootstrap(context_id=..., since="7d")` and read the full shape. If the index call answers `error: invalid_argument` or `validation_error` and the message names `format` or `max_chars`, repeat it once as `bootstrap(context_id=..., since="7d")` and read the full shape; never try a third time.

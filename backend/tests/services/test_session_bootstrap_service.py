@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from functools import partial
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
+from mcp_server.tools._helpers import _context_response_fields
+from mcp_server.tools.bootstrap import envelope_budget
+from mcp_server.tools.context import _guardrails_field
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from services.memory_listing import changes_since, decode_change_cursor
 from services.session_bootstrap_service import (
     COMPONENTS,
+    INDEX_GUARDRAIL_ROWS,
     SessionBootstrapService,
     window_start_cursor,
 )
@@ -546,20 +551,251 @@ async def test_index_at_three_thousand_cuts_lanes_in_order(db_session, seeded):
     changes = comps["changes"]
     assert changes["truncated"] is True and changes["has_more"] is True
     assert len(changes["changes"]) < len(full_index["components"]["changes"]["changes"])
-    # A later lane keeps rows only when every earlier lane kept all of its rows.
+    # #2485: pinned, the first INDEX_GUARDRAIL_ROWS guardrails, upcoming, changes,
+    # then the other guardrails. A later lane of the first four keeps rows only
+    # when every earlier one kept all it may.
+    whole = full_index["components"]
+    guard, whole_guard = env["guardrails"]["items"], full_index["guardrails"]["items"]
     lanes = [
-        (comps["pinned"], "memories", full_index["components"]["pinned"]),
-        (env["guardrails"], "items", full_index["guardrails"]),
-        (comps["upcoming"], "results", full_index["components"]["upcoming"]),
-        (changes, "changes", full_index["components"]["changes"]),
+        (comps["pinned"]["memories"], len(whole["pinned"]["memories"])),
+        (guard[:INDEX_GUARDRAIL_ROWS], INDEX_GUARDRAIL_ROWS),
+        (comps["upcoming"]["results"], len(whole["upcoming"]["results"])),
+        (changes["changes"], len(whole["changes"]["changes"])),
     ]
     earlier_cut = False
-    for block, key, whole in lanes:
+    for kept, room in lanes:
         if earlier_cut:
-            assert block[key] == []
-        if len(block[key]) < len(whole[key]):
+            assert kept == []
+        assert len(kept) <= room
+        earlier_cut = earlier_cut or len(kept) < room
+    for block, key, rows in (
+        (comps["pinned"], "memories", whole["pinned"]["memories"]),
+        (comps["upcoming"], "results", whole["upcoming"]["results"]),
+    ):
+        if len(block[key]) < len(rows):
             assert block["truncated"] is True
-            earlier_cut = True
+    # The guardrails are a prefix of the provider's six (fresh ids per call, so
+    # by summary), and say they were cut.
+    heads = [g["summary"] for g in whole_guard]
+    assert len(heads) == 6 and [g["summary"] for g in guard] == heads[: len(guard)]
+    assert env["guardrails"]["truncated"] is True
+
+
+_TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": "inform"}
+
+
+@pytest.mark.asyncio
+async def test_index_guardrails_do_not_starve_upcoming_and_changes(db_session):
+    """#2485: on a context whose guardrail rows alone fill the session-start
+    budget, the upcoming rows and a changes page still come back; the
+    guardrails keep their first rows ahead of both and say they were cut."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    now = utcnow()
+    for i in range(50):
+        await _row(
+            db_session,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=f"guardrail {i}: " + "never merge before the checks are green " * 4,
+            importance=0.8,
+            details={"tool_trigger": dict(_TOOL_TRIGGER)},
+            created_at=now - timedelta(days=30),  # outside the changes window
+        )
+    pinned = [
+        await _row(
+            db_session, owner, ws.id, ctx.id, summary=f"standing rule {i}", delivery_mode="always"
+        )
+        for i in range(2)
+    ]
+    upcoming = []
+    for months in (1, 2):
+        due = now + timedelta(days=31 * months)
+        upcoming.append(
+            await _row(
+                db_session,
+                owner,
+                ws.id,
+                ctx.id,
+                summary=f"follow-up due in {months} month(s)",
+                type="time",
+                details={
+                    "trigger": {
+                        "year": due.year,
+                        "month": due.month,
+                        "from": due.strftime("%Y-%m-01T00:00:00"),
+                        "until": due.strftime("%Y-%m-28T23:59:59"),
+                    }
+                },
+            )
+        )
+    for i in range(40):
+        await _row(
+            db_session,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=f"busy change {i} " + "y" * 200,
+            created_at=now - timedelta(hours=40 - i),
+        )
+    await db_session.commit()
+    await db_session.refresh(ctx)
+    pinned_ids = {str(m.id) for m in pinned}
+    upcoming_ids = {str(m.id) for m in upcoming}
+
+    # What the handler passes: get_context_info's block, read from the rows.
+    provider = partial(_guardrails_field, db_session, owner, ctx)
+
+    full_index = await _build(
+        db_session, owner, ws, ctx, guardrails_provider=provider, format="index"
+    )
+    assert full_index["guardrails"]["total_available"] == 50
+    assert json_chars(full_index["guardrails"]) > 3_000 // 2  # half the budget, alone
+    env = await _build(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=provider,
+        format="index",
+        max_chars=3_000,
+    )
+    assert json_chars(env) <= 3_000
+    comps = env["components"]
+    assert {m["memory_id"] for m in comps["pinned"]["memories"]} == pinned_ids
+    assert {r["memory_id"] for r in comps["upcoming"]["results"]} == upcoming_ids
+    assert not comps["upcoming"].get("truncated")
+    changes = comps["changes"]
+    assert changes["changes"], "the changes page must not be empty"
+    assert changes["truncated"] is True and changes["has_more"] is True
+    guard = env["guardrails"]
+    # The first pass keeps INDEX_GUARDRAIL_ROWS; the second gets what changes left.
+    assert INDEX_GUARDRAIL_ROWS <= len(guard["items"]) < len(full_index["guardrails"]["items"])
+    # The first rows of the provider's order (importance first), not any rows.
+    whole_ids = [g["memory_id"] for g in full_index["guardrails"]["items"]]
+    assert [g["memory_id"] for g in guard["items"]] == whole_ids[: len(guard["items"])]
+    assert guard["truncated"] is True and guard["total_available"] == 50
+
+
+_JA = (
+    "設計判断とリリース手順の記録。MCP ツールの使い方、テスト用 DB の作り方、"
+    "レビューで指摘された点をまとめる。"
+)
+_EN = "Release checklist: bump the version files, run the suites, open the PR, wait for review. "
+
+
+def _text(phrase: str, chars: int, lead: str = "") -> str:
+    """``chars`` characters (not bytes) of ``lead`` then ``phrase`` repeated."""
+    return (lead + phrase * (chars // len(phrase) + 1))[:chars]
+
+
+async def _live_like_context(db):
+    """A context sized like the one #2485 was reproduced on (characters, not
+    bytes): summary 150 and usage_guide 160, mostly Japanese; 2 pinned
+    (160 and 230, one Japanese); 3 upcoming Time Memories (200); 48 tool
+    guardrails; 40 changes (120) in the window. Everything but the changes
+    is older than the window, so the change log holds the 40 alone."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db, owner)
+    ctx.display_name = "Kagura 開発メモ"
+    ctx.summary = _text(_JA, 150)
+    ctx.usage_guide = _text(_JA, 160, "使い方: ")
+    now = utcnow()
+    old = now - timedelta(days=30)
+    for i in range(48):
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_EN, 150, f"guardrail {i}: "),
+            importance=0.8,
+            details={"tool_trigger": dict(_TOOL_TRIGGER)},
+            created_at=old,
+        )
+    for summary in (_text(_EN, 160, "Standing rule: "), _text(_JA, 230, "常設ルール: ")):
+        await _row(
+            db, owner, ws.id, ctx.id, summary=summary, delivery_mode="always", created_at=old
+        )
+    for months in (1, 2, 3):
+        due = now + timedelta(days=31 * months)
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_JA, 200, f"{months} か月後の確認: "),
+            type="time",
+            details={
+                "trigger": {
+                    "year": due.year,
+                    "month": due.month,
+                    "from": due.strftime("%Y-%m-01T00:00:00"),
+                    "until": due.strftime("%Y-%m-28T23:59:59"),
+                }
+            },
+            created_at=old,
+        )
+    for i in range(40):
+        await _row(
+            db,
+            owner,
+            ws.id,
+            ctx.id,
+            summary=_text(_JA, 120, f"変更 {i}: "),
+            created_at=now - timedelta(hours=40 - i),
+        )
+    await db.commit()
+    await db.refresh(ctx)
+    return owner, ws, ctx
+
+
+async def _session_start(db, owner, ws, ctx, max_chars: int):
+    """``bootstrap(format="index", max_chars=...)`` as the handler runs it: its
+    guardrails provider and its budget for the ``context_*`` fields it adds."""
+    fields = _context_response_fields(ctx)  # before any lane can expire ctx
+    env = await _build(
+        db,
+        owner,
+        ws,
+        ctx,
+        guardrails_provider=partial(_guardrails_field, db, owner, ctx),
+        format="index",
+        max_chars=envelope_budget(max_chars, "index", fields),
+    )
+    env.update(fields)
+    return env
+
+
+@pytest.mark.asyncio
+async def test_index_session_start_on_a_live_sized_context_at_5000(db_session):
+    """#2485 on a context sized like the reproduction, at the session-start
+    skill's max_chars=5000.
+
+    Measured on these sizes with the two-pass guardrails fit (upcoming /
+    guardrail / change rows): 3,000 gives 2 / 3 / 0 — the context block, the
+    pinned text and three guardrail rows leave room for two upcoming rows and
+    no change row; 4,000 gives 3 / 3 / 4; 5,000 gives 3 / 3 / 10; 6,000 gives
+    3 / 3 / 16 (a cut changes page leaves the second pass no room). Before it,
+    with guardrails capped after upcoming, 3,000 gave 3 / 2 / 0 and 4,000 to
+    6,000 the same as now. The skill asks for 5,000
+    (claude-skills/session-start.md, pinned by
+    tests/plugin/test_session_start_bootstrap_index.py): upcoming whole, at
+    least INDEX_GUARDRAIL_ROWS guardrail rows, and a changes page of three
+    rows or more that says it was cut."""
+    owner, ws, ctx = await _live_like_context(db_session)
+    env = await _session_start(db_session, owner, ws, ctx, 5_000)
+    assert json_chars(env) <= 5_000
+    comps = env["components"]
+    assert len(comps["pinned"]["memories"]) == 2
+    assert len(comps["upcoming"]["results"]) == 3 and not comps["upcoming"].get("truncated")
+    guard = env["guardrails"]
+    assert INDEX_GUARDRAIL_ROWS <= len(guard["items"]) < 10  # the provider's 10, cut
+    assert guard["truncated"] is True and guard["total_available"] == 48
+    changes = comps["changes"]
+    assert len(changes["changes"]) >= 3
+    assert changes["truncated"] is True and changes["has_more"] is True
 
 
 @pytest.mark.asyncio

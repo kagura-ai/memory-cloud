@@ -13,7 +13,9 @@ change list does not answer its question.
 ``format="index"`` (#2126) turns the same reads into pointer rows: pinned
 keeps its text, guardrails / upcoming / changes rows carry an 80-character
 summary head (``summary_cut``), ``instructions`` is left out, and the
-guardrails items become a lane the budget may cut.
+guardrails items become a lane the budget may cut, fitted in two passes
+(#2485): up to ``INDEX_GUARDRAIL_ROWS`` rows right after pinned, the rest
+after changes.
 
 Components are fail-soft: a failing one reports ``{status: error}`` while the
 rest return, with top-level ``degraded: true`` — the same contract as the
@@ -52,13 +54,20 @@ UPCOMING_K = 20
 CHANGES_LIMIT = 50
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
-# Lane priority when the envelope has to be cut: standing guardrails first,
-# then what is due, then what changed.
+# Lane priority when the envelope has to be cut: pinned first, then what is
+# due, then what changed.
 _LANES = (("pinned", "memories"), ("upcoming", "results"), ("changes", "changes"))
 # #2126: in index mode the guardrails items are a lane too, right after pinned.
-# Full mode keeps them uncut (the get_context_info contract).
+# #2485: a cut envelope fits them in two passes — the first
+# INDEX_GUARDRAIL_ROWS rows (the provider's order, importance first) in that
+# place, the rest after changes with whatever room is left. A context with many
+# tool guardrails cannot starve upcoming and changes, a long upcoming list or a
+# busy changes window cannot push the first guardrails out, and a quiet context
+# leaves no room unused. Full mode keeps them uncut (the get_context_info
+# contract).
 _GUARDRAILS = "guardrails"
 _INDEX_LANES = (_LANES[0], (_GUARDRAILS, "items"), *_LANES[1:])
+INDEX_GUARDRAIL_ROWS = 3
 
 
 async def _component(db: AsyncSession, name: str, fn: Any) -> dict[str, Any]:
@@ -305,8 +314,10 @@ def _fit(
     or at the start of the window when nothing was kept, so paging on from the
     reply reproduces the cut items instead of skipping them.
 
-    ``index`` (#2126) adds ``guardrails.items`` as the second lane (its block's
-    own ``truncated`` turns true when cut); index rows carry no
+    ``index`` (#2126) adds ``guardrails.items`` in two passes (#2485): up to
+    ``INDEX_GUARDRAIL_ROWS`` rows right after pinned, the rest after changes
+    with the room left, and only when the first pass kept all of its rows (the
+    block's own ``truncated`` turns true when any row is missing); index rows carry no
     ``context_summary``, so nothing is dropped first. When the uncuttable
     shell alone exceeds ``max_chars``, every lane comes back empty with
     ``truncated: true`` — the reply may then exceed ``max_chars`` but says so."""
@@ -344,14 +355,27 @@ def _fit(
     budget = max_chars - json_chars(shell)
     if droppable is not None:
         budget -= len('"context_summary_omitted":true,')
-    bounded, cut, dropped = fit_lanes(
-        [container(name)[key] for name, key in present], budget, droppable=droppable
-    )
+
+    lanes = [container(name)[key] for name, key in present]
+    # #2485: guardrails (index mode only) in two passes — the first rows in
+    # their lane, the rest as a last lane after changes.
+    first_pass = next((i for i, (name, _) in enumerate(present) if name == _GUARDRAILS), None)
+    if first_pass is not None:
+        rows = lanes[first_pass]
+        lanes[first_pass] = rows[:INDEX_GUARDRAIL_ROWS]
+        lanes.append(rows[INDEX_GUARDRAIL_ROWS:])
+    bounded, _, dropped = fit_lanes(lanes, budget, droppable=droppable)
+    if first_pass is not None:
+        second = bounded.pop()  # the last lane: dropping it frees no room for another
+        # The second pass only continues a whole first pass: the kept rows
+        # stay a prefix of the provider's order, never skipping one.
+        if len(bounded[first_pass]) == len(lanes[first_pass]):
+            bounded[first_pass] = bounded[first_pass] + second
     out = dict(envelope)
     new_components = dict(components)
-    for (name, key), items, was_cut in zip(present, bounded, cut, strict=True):
+    for (name, key), items in zip(present, bounded, strict=True):
         block = {**container(name), key: items}
-        if was_cut:
+        if len(items) < len(container(name)[key]):
             block["truncated"] = True
             if name == "changes":
                 block["has_more"] = True

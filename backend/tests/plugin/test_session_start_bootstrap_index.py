@@ -17,7 +17,9 @@ SKILLS = [
     "claude-skills/session-start.md",
     "plugins/kagura-memory/skills/kagura-memory/SKILL.md",
 ]
-INDEX_CALL = 'bootstrap(context_id=..., since="7d", format="index", max_chars=3000)'
+# #2485: 5000, not 3000 — on a context sized like the one the bug was
+# reproduced on, 3000 left no change row (test_session_bootstrap_service.py).
+INDEX_CALL = 'bootstrap(context_id=..., since="7d", format="index", max_chars=5000)'
 PLAIN_CALL = 'bootstrap(context_id=..., since="7d")'
 
 
