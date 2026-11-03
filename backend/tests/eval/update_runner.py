@@ -155,6 +155,8 @@ async def _run_mc_sleep(db: Any, owner: str, ws_id: Any, ctx_id: Any) -> dict[st
     per D1. A failed Sleep run is recorded, not raised — the MC arm is still
     scored (a failed consolidation is itself part of the honest result), and
     ``_summarize_sleep_report`` never raises for an unexpected report shape.
+    As in production (#2565), the merged and archived rows' points are deleted
+    right after the commit: no drain job runs in the harness.
     """
     from neural.config import NeuralMemoryConfig
     from services.sleep.orchestrator import SleepOrchestrator
@@ -162,10 +164,13 @@ async def _run_mc_sleep(db: Any, owner: str, ws_id: Any, ctx_id: Any) -> dict[st
     NeuralMemoryConfig.invalidate_cache()
     config = await NeuralMemoryConfig.from_db(db)
     try:
-        await SleepOrchestrator(db).run(
+        orchestrator = SleepOrchestrator(db)
+        await orchestrator.run(
             owner, workspace_id=str(ws_id), context_id=str(ctx_id), config=config
         )
         await db.commit()
+        # Never raises, bounded; what it leaves stays queued.
+        await orchestrator.delete_committed_points()
     except Exception as exc:  # noqa: BLE001 — recorded in results, not fatal
         await db.rollback()
         return {"ran": True, "ok": False, "error": str(exc)}

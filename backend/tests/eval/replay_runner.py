@@ -695,7 +695,9 @@ async def _run_sleep(db: Any, owner: str, ctx: Any, ws: Any) -> dict[str, Any]:
     so the run is deterministic and free — edge discovery still performs the
     real Qdrant similarity sweep and persists ``semantic``-origin edges.
     Failure is recorded, not raised: the warm_sleep checkpoint still runs and
-    the results JSON carries the honest sleep status.
+    the results JSON carries the honest sleep status. The run is committed and
+    its archived and merged rows' points deleted right after, as in production
+    (#2565): no drain job runs in the harness.
     """
     from dataclasses import replace
 
@@ -708,9 +710,13 @@ async def _run_sleep(db: Any, owner: str, ctx: Any, ws: Any) -> dict[str, Any]:
     NeuralMemoryConfig.invalidate_cache()
     config = replace(await NeuralMemoryConfig.from_db(db), sleep_llm_provider="")
     try:
-        await SleepOrchestrator(db).run(
+        orchestrator = SleepOrchestrator(db)
+        await orchestrator.run(
             owner, workspace_id=str(ws.id), context_id=str(ctx.id), config=config
         )
+        await db.commit()
+        # Never raises, bounded; what it leaves stays queued.
+        await orchestrator.delete_committed_points()
     except Exception as exc:  # noqa: BLE001 — recorded in results, not fatal
         await db.rollback()
         return {"ok": False, "error": str(exc)}
