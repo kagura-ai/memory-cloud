@@ -1,6 +1,11 @@
 """Integration tests for single collection 3-level isolation.
 
 Tests the most critical security feature: ensuring workspace/context/user boundaries are enforced.
+
+The tests that write to the vector store skip when ``QDRANT_URL`` is
+unreachable, as the Qdrant tests under ``tests/integration`` do (#2462); the
+rest need only Postgres. CI's backend-integration job runs this file against a
+live Qdrant and fails if it does not come up.
 """
 
 import os
@@ -8,9 +13,12 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
 
 from auth.workspace_roles import WorkspaceRole
+from config.database import get_qdrant_url
+from config.settings import get_settings
 from db.qdrant import ensure_kagura_memories_collection
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory
@@ -215,6 +223,28 @@ _NEEDS_OPENAI = pytest.mark.skipif(
 )
 
 
+@pytest_asyncio.fixture(loop_scope="session")
+async def qdrant_reachable() -> None:
+    """Skip the test when Qdrant is unreachable (#2462).
+
+    The probe the ``tests/integration`` Qdrant fixtures use, on the URL and API
+    key the code under test connects with. The probe client is closed again:
+    the tests keep using the client ``db.qdrant`` builds.
+    """
+    url = get_qdrant_url()
+    client = AsyncQdrantClient(url=url, api_key=get_settings().qdrant_api_key or None, timeout=5)
+    try:
+        await client.get_collections()
+    except Exception as exc:  # noqa: BLE001 — intentional broad skip guard
+        pytest.skip(f"Qdrant unreachable at {url}: {exc}")
+    finally:
+        await client.close()
+
+
+# The tests that create the collection and write points to it.
+_NEEDS_QDRANT = pytest.mark.usefixtures("qdrant_reachable")
+
+
 @pytest.mark.asyncio
 class TestSingleCollectionIsolation:
     """Test 3-level isolation (workspace, context, user) in single collection design.
@@ -223,6 +253,7 @@ class TestSingleCollectionIsolation:
     because process_pending_embedding creates its own DB session via get_db().
     """
 
+    @_NEEDS_QDRANT
     @_NEEDS_OPENAI
     async def test_cross_workspace_isolation(
         self,
@@ -300,6 +331,7 @@ class TestSingleCollectionIsolation:
             f"Workspace1 should have exactly 1 memory, got {workspace1_count}"
         )
 
+    @_NEEDS_QDRANT
     @_NEEDS_OPENAI
     async def test_cross_context_isolation_within_same_workspace(
         self,
@@ -366,6 +398,7 @@ class TestSingleCollectionIsolation:
             "ISOLATION FAIL: Saw context2 memory from context1!"
         )
 
+    @_NEEDS_QDRANT
     @_NEEDS_OPENAI
     async def test_shared_context_members_see_all_memories(
         self, db_session, test_workspace1, test_context1, pending_embedding_tasks
@@ -427,6 +460,7 @@ class TestSingleCollectionIsolation:
             "User1 should also see user2's memory (shared context)"
         )
 
+    @_NEEDS_QDRANT
     @_NEEDS_OPENAI
     async def test_context_deletion_only_deletes_own_points(
         self,
@@ -489,6 +523,7 @@ class TestSingleCollectionIsolation:
         )
         assert len(memory_ids) == 1, f"Should have exactly 1 memory, got {len(memory_ids)}"
 
+    @_NEEDS_QDRANT
     async def test_graph_traversal_respects_context_boundary(
         self, db_session, test_workspace1, test_context1, test_context2
     ):
