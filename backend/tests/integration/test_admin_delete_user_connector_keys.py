@@ -54,7 +54,7 @@ class TestConnectorKeysSurviveAdminDelete:
         response = await _delete(db_session, target)
 
         assert response["deleted"]["api_keys"] == 1
-        assert response["reowned"] == {"connector_api_keys": 1}
+        assert response["reowned"] == {"connector_api_keys": 1, "agents": 0}
         after = (await _key_rows(db_session, [live_id]))[live_id]
         assert after["user_id"] == owner
         assert _without_owner(after) == _without_owner(before)
@@ -132,7 +132,7 @@ class TestConnectorKeysSurviveAdminDelete:
         rows = await _key_rows(db_session, [key_1, key_2])
         assert rows[key_1]["user_id"] == owner_1
         assert rows[key_2]["user_id"] == owner_2
-        assert response["reowned"] == {"connector_api_keys": 2}
+        assert response["reowned"] == {"connector_api_keys": 2, "agents": 0}
 
     @pytest.mark.asyncio
     async def test_other_users_and_workspaces_keys_are_untouched(
@@ -164,3 +164,84 @@ class TestConnectorKeysSurviveAdminDelete:
 
         assert await _key_rows(db_session, bystanders) == before
         assert (await _key_rows(db_session, [mine_id]))[mine_id]["user_id"] == owner
+
+
+class TestAgentCredentialsOfADeletedUser:
+    """#2373: the admin user delete deletes a service member's agent key
+    (never handed to the owner) and suspends the agent it leaves without a
+    key; a deleted registrar's agents name the owner."""
+
+    @pytest.mark.asyncio
+    async def test_the_key_dies_and_the_agent_is_suspended(
+        self, db_session: AsyncSession, connector_world
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("svc")
+        owner = await world.user("owner")
+        ws = await world.workspace(owner, **{target: WorkspaceRole.MEMBER})
+        ws_id = ws.id
+        agent = await world.agent(ws, by=owner)
+        agent_id = agent.id
+        plaintext, key_id = await world.agent_key(target, ws, agent)
+
+        response = await _delete(db_session, target)
+
+        assert response["deleted"]["agent_api_keys"] == 1
+        assert response["deleted"]["api_keys"] == 1
+        assert response["suspended"] == {"agents": 1}
+        assert response["reowned"] == {"connector_api_keys": 0, "agents": 0}
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert await APIKeyManager(db_session).verify_key(plaintext) is None
+        assert await world.agent_state(agent_id) == (owner, "suspended", 1)
+        (row,) = await world.departure_audits(target)
+        assert row.user_id == owner
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "user_deletion",
+            "connector_api_keys_reowned": 0,
+            "agent_api_keys_deleted": 1,
+            "agents_suspended": 1,
+            "agents_reowned": 0,
+            "suspended_agent_ids": [str(agent_id)],
+            "reowned_agent_ids": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_registrars_agents_name_the_owner(
+        self, db_session: AsyncSession, connector_world
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("registrar")
+        owner = await world.user("owner")
+        svc = await world.user("svc")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, svc: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=target)
+        agent_id = agent.id
+        plaintext, _ = await world.agent_key(svc, ws, agent)
+
+        response = await _delete(db_session, target)
+
+        assert response["reowned"] == {"connector_api_keys": 0, "agents": 1}
+        assert response["suspended"] == {"agents": 0}
+        assert await world.agent_state(agent_id) == (owner, "active", 1)
+        verified = await APIKeyManager(db_session).verify_key(plaintext)
+        assert verified is not None and verified.user_id == svc
+        (row,) = await world.departure_audits(target)
+        assert row.user_id == owner
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "user_deletion",
+            "connector_api_keys_reowned": 0,
+            "agent_api_keys_deleted": 0,
+            "agents_suspended": 0,
+            "agents_reowned": 1,
+            "suspended_agent_ids": [],
+            "reowned_agent_ids": [str(agent_id)],
+        }

@@ -1287,3 +1287,76 @@ async def test_linking_member_removal_and_workspace_delete_take_the_global_order
     # delete_workspace: its workspace row, then the users whose preference it
     # clears, before any of its rows
     assert any(tx[:2] == [("ws_live", False), ("users", False)] for tx in kinds), kinds
+
+
+def _written_table(sql: str) -> str:
+    """The table a traced statement writes or locks rows of."""
+    dml = _DML.match(sql)
+    if dml:
+        return dml.group(2)
+    lock = _ROW_LOCK.search(sql)
+    return _locked_table(sql, lock.start()) if lock else ""
+
+
+def _agents_before_keys(trace: _LockTrace) -> None:
+    """In the transaction that settles the departing user's agents (#2373),
+    the agent rows are locked before any ``api_keys`` row, the order
+    ``verify_key`` takes (the agent's ``last_seen_at``, then the key's)."""
+    settling = [
+        tx
+        for tx in trace.transactions
+        if any(lock.sql.startswith("SELECT agents_1.id") for lock in tx)
+    ]
+    assert len(settling) == 1, trace.kinds()
+    sqls = [lock.sql for lock in settling[0]]
+    agents = next(i for i, sql in enumerate(sqls) if sql.startswith("SELECT agents_1.id"))
+    assert "FOR NO KEY UPDATE" in sqls[agents]
+    keys = [i for i, sql in enumerate(sqls) if _written_table(sql) == "api_keys"]
+    assert keys and agents < min(keys), sqls
+
+
+async def _agent_world(world, subject: str):
+    """A shared workspace where ``subject`` registered one agent and holds the
+    only key of another, so both agent updates and the key delete run."""
+    owner = await world.user("owner")
+    shared = await world.workspace(owner, **{subject: "admin"})
+    registered = await world.agent(shared, by=subject)
+    served = await world.agent(shared, by=owner)
+    await world.agent_key(subject, shared, served)
+    return owner, registered.id, served.id
+
+
+@pytest.mark.asyncio
+async def test_an_erasure_that_settles_agents_takes_the_global_order(db_session, connector_world):
+    world = connector_world
+    subject = await world.user("subject")
+    owner, registered_id, served_id = await _agent_world(world, subject)
+    await world.workspace(subject)  # sole-owned: deleted with its agents
+    await db_session.commit()
+
+    with _external_stores_stubbed(), _LockTrace(db_session.bind) as trace:
+        counts = await world.erase(subject)
+
+    _assert_global_order(trace)
+    _agents_before_keys(trace)
+    assert (counts["agents_reowned"], counts["agents_suspended"]) == (1, 1)
+    assert (await world.agent_state(registered_id))[:2] == (owner, "active")
+    assert (await world.agent_state(served_id))[:2] == (owner, "suspended")
+
+
+@pytest.mark.asyncio
+async def test_an_admin_deletion_that_settles_agents_takes_the_global_order(
+    db_session, connector_world
+):
+    world = connector_world
+    subject = await world.user("departing")
+    owner, registered_id, served_id = await _agent_world(world, subject)
+    await db_session.commit()
+
+    with _LockTrace(db_session.bind) as trace:
+        response = await delete_user(subject, {"user_id": "operator"}, db_session)
+
+    _assert_global_order(trace)
+    _agents_before_keys(trace)
+    assert response["reowned"]["agents"] == 1
+    assert response["suspended"] == {"agents": 1}

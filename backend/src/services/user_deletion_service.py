@@ -53,7 +53,7 @@ from models.auth import (
 from models.memory import Memory
 from models.resource import WorkspaceConnector
 from services.billing_contract import ensure_no_billing_contract, workspaces_under_contract
-from services.connector_key_ownership import reown_connector_keys
+from services.connector_key_ownership import settle_departing_credentials
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
 from services.identity_link_service import (
@@ -147,7 +147,13 @@ class UserDeletionResult:
 
     memories: int = 0
     api_keys: int = 0
+    # #2352 / #2373 (``settle_departing_credentials``), in the workspaces
+    # someone else owns: connector keys re-owned, live agent keys deleted (of
+    # ``api_keys``), agents suspended, agents re-owned.
     connector_api_keys: int = 0
+    agent_api_keys: int = 0
+    agents_suspended: int = 0
+    agents_reowned: int = 0
     contexts: int = 0
     released_bytes: dict[UUID, int] = field(default_factory=dict)
     purged_workspaces: list[PurgedWorkspace] = field(default_factory=list)
@@ -531,7 +537,11 @@ async def delete_user_rows(
         for context, owner in rows:
             context.created_by = owner
         await db.flush()
-    result.connector_api_keys = await reown_connector_keys(db, user_id)
+    settled = await settle_departing_credentials(db, user_id, path="user_deletion")
+    result.connector_api_keys = settled.connector_api_keys_reowned
+    result.agent_api_keys = settled.agent_api_keys_deleted
+    result.agents_suspended = settled.agents_suspended
+    result.agents_reowned = settled.agents_reowned
     await db.execute(
         delete(Memory).where(Memory.id.in_(locked_ids(Memory, lambda m: (m.user_id == user_id,))))
     )
