@@ -536,6 +536,13 @@ class ReferralService:
             # holding it FOR UPDATE. Held here, those checks and the
             # recompute's re-lock are free.
             await self._lock_workspace_nowait(workspace_id)
+            # It was picked by a plain read. An ownership transfer or a delete
+            # that committed since (one that held the row while the tries ran)
+            # has moved it on: re-homed onto it, the bonus would go to someone
+            # else's workspace. The grants stay pending for the next apply.
+            if not await self._owns_live_workspace(user_id, workspace_id):
+                await savepoint.rollback()
+                return 0
             updated = 0
             for user_col, workspace_col in _GRANT_SIDES:
                 result = await self.db.execute(
@@ -561,6 +568,19 @@ class ReferralService:
             grants_applied=updated,
         )
         return updated
+
+    async def _owns_live_workspace(self, user_id: str, workspace_id: uuid.UUID) -> bool:
+        """Whether ``user_id`` still owns ``workspace_id`` and it is live."""
+        return (
+            await self.db.scalar(
+                select(Workspace.id).where(
+                    Workspace.id == workspace_id,
+                    Workspace.owner_user_id == user_id,
+                    Workspace.deleted_at.is_(None),
+                )
+            )
+            is not None
+        )
 
     async def _has_pending_grants(self, user_id: str) -> bool:
         """Whether a live grant credits no live workspace on ``user_id``'s side.

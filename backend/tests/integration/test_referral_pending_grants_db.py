@@ -131,9 +131,12 @@ async def test_a_sweep_that_finds_the_workspace_busy_leaves_the_grant_for_the_ne
     db_session, referral_world
 ):
     """A sweep loses its tries too: the user is counted busy, the grant stays
-    pending with nothing of the apply committed, and the next run credits it."""
+    pending with nothing of the apply committed, and the same run goes on to
+    credit the next user (newer grant) in its own transaction. The next run
+    credits the busy one."""
     world = referral_world
     referral, workspace_id = await _pending_referee_with_a_workspace(world, db_session)
+    later, later_workspace_id = await _pending_referee_with_a_workspace(world, db_session)
     maker = _sessions(db_session)
 
     async with maker() as holder:
@@ -145,9 +148,13 @@ async def test_a_sweep_that_finds_the_workspace_busy_leaves_the_grant_for_the_ne
                 busy = await asyncio.wait_for(sweep_pending_referral_grants(db), 15)
         await holder.rollback()
 
-    assert busy.busy >= 1
+    assert busy.busy >= 1 and busy.users_applied >= 1
     assert await _referee_workspace(db_session, referral.referee) is None
     assert await _bonus(db_session, workspace_id) == 0
+    assert await _referee_workspace(db_session, later.referee) == later_workspace_id
+    assert await _bonus(db_session, later_workspace_id) == (
+        get_settings().referral_referee_reward_memories
+    )
 
     async with maker() as db:
         await asyncio.wait_for(sweep_pending_referral_grants(db), 15)
@@ -272,6 +279,52 @@ async def test_an_apply_that_finds_nothing_to_rehome_lets_go_of_the_workspace(
             )
             await other.rollback()
     assert locked == workspace_id
+
+
+@pytest.mark.asyncio
+async def test_an_apply_whose_workspace_changed_owner_before_the_lock_leaves_the_grant_pending(
+    db_session, referral_world
+):
+    """The workspace is picked by a plain read and locked after it. An
+    ownership transfer that commits in between (one that held the row while
+    the ``NOWAIT`` tries ran) gives it to another user: the apply re-homes
+    nothing onto it, so the bonus does not go to someone else's workspace,
+    lets go of the row, and the grant stays pending."""
+    world = referral_world
+    referral, workspace_id = await _pending_referee_with_a_workspace(world, db_session)
+    new_owner = await world.user("newowner")
+    await db_session.commit()
+    maker = _sessions(db_session)
+    resolve = ReferralService._resolve_owned_workspace_id
+
+    async def resolved_then_transferred(self, user_id):
+        picked = await resolve(self, user_id)
+        async with maker() as other:
+            await other.execute(
+                update(Workspace).where(Workspace.id == picked).values(owner_user_id=new_owner)
+            )
+            await other.commit()
+        return picked
+
+    async with maker() as db:
+        with patch.object(
+            ReferralService, "_resolve_owned_workspace_id", resolved_then_transferred
+        ):
+            applied = await asyncio.wait_for(
+                ReferralService(db).apply_pending_grants(referral.referee), 15
+            )
+        async with maker() as other:
+            locked = await other.scalar(
+                select(Workspace.id)
+                .where(Workspace.id == workspace_id)
+                .with_for_update(nowait=True)
+            )
+            await other.rollback()
+
+    assert applied == 0
+    assert locked == workspace_id
+    assert await _referee_workspace(db_session, referral.referee) is None
+    assert await _bonus(db_session, workspace_id) == 0
 
 
 @pytest.mark.asyncio
