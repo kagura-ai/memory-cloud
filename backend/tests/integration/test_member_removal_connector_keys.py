@@ -298,6 +298,40 @@ class TestAgentCredentialsOfARemovedMember:
         assert row.user_metadata["agents_suspended"] == 0
 
     @pytest.mark.asyncio
+    async def test_an_agent_whose_other_keys_have_expired_is_suspended(
+        self, db_session: AsyncSession, connector_world
+    ):
+        """An expired key is no credential: verify refuses it and the
+        regenerate does not select it, so it does not keep the agent active."""
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("svc")
+        owner = await world.user("owner")
+        other = await world.user("svc2")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.MEMBER, other: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=owner)
+        agent_id = agent.id
+        await world.agent_key(target, ws, agent)
+        expired_plaintext, expired_id = await world.agent_key(other, ws, agent)
+        await db_session.execute(
+            update(APIKey)
+            .where(APIKey.id == expired_id)
+            .values(expires_at=to_naive_utc(datetime(2020, 1, 1, tzinfo=UTC)))
+        )
+        assert await APIKeyManager(db_session).verify_key(expired_plaintext) is None
+
+        await world.remove(ws_id, target)
+
+        assert await world.agent_state(agent_id) == (owner, "suspended", 1)
+        assert set(await _key_rows(db_session, [expired_id])) == {expired_id}
+        (row,) = await world.departure_audits(target)
+        assert row.user_metadata["agents_suspended"] == 1
+
+    @pytest.mark.asyncio
     async def test_a_removed_registrars_agents_name_the_owner(
         self, db_session: AsyncSession, connector_world
     ):

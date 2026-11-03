@@ -156,11 +156,15 @@ class TestAgentStatements:
             "WHERE api_keys_1.user_id = %(user_id_1)s::VARCHAR "
             "AND api_keys_1.agent_id IS NOT NULL AND api_keys_1.revoked_at IS NULL)"
         ) in sql
+        # another account's key keeps the agent only while it is usable:
+        # neither revoked nor expired
         assert (
             "NOT (EXISTS (SELECT api_keys_2.id FROM api_keys AS api_keys_2 "
             "WHERE api_keys_2.agent_id = agents.id "
             "AND api_keys_2.user_id != %(user_id_2)s::VARCHAR "
-            "AND api_keys_2.revoked_at IS NULL))"
+            "AND api_keys_2.revoked_at IS NULL "
+            "AND (api_keys_2.expires_at IS NULL "
+            "OR api_keys_2.expires_at > %(expires_at_1)s::TIMESTAMP WITHOUT TIME ZONE)))"
         ) in sql
         assert "workspaces.owner_user_id != %(owner_user_id_1)s::VARCHAR" in sql
         assert "owner_user_id=" not in sql  # the owner stays

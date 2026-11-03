@@ -53,6 +53,7 @@ from config.settings import get_settings
 from models.agent import AGENT_STATUS_ACTIVE, AGENT_STATUS_SUSPENDED, Agent
 from models.auth import APIKey, AuditLog, User, Workspace
 from services.erasure_details import locked_ids
+from utils.datetime import utcnow
 from utils.hashing import hmac_sha256_hex
 
 DEPARTED_MEMBER_CREDENTIALS_ACTION = "departed_member_credentials"
@@ -147,9 +148,18 @@ def _registered_by(a: Any, user_id: str, workspace_id: UUID | None) -> ColumnEle
 
 def _losing_its_last_key(a: Any, user_id: str, workspace_id: UUID | None) -> ColumnElement[bool]:
     """``a`` is active, bound to a live key of ``user_id`` (in scope), and no
-    other account holds a live key bound to it: the caller's delete leaves it
-    without a credential. An agent another member still holds a key for keeps
-    working (suspending it would stop that member's key too)."""
+    other account holds a usable key bound to it: the caller's delete leaves
+    it without a credential. An agent another member still holds a key for
+    keeps working (suspending it would stop that member's key too). Usable =
+    neither revoked nor expired: ``verify_key`` refuses an expired key and the
+    member-key regenerate does not select one, so it is no credential.
+
+    Every departure path takes the ``identity_links`` advisory lock before it
+    settles, so two departures that share an agent see each other's deletes.
+    A single key's revoke or mint is not serialized with this read: at worst
+    an agent stays active with no key (as a newly registered one is), or is
+    suspended next to a fresh key the kill switch then refuses (fail-closed).
+    """
     mine = aliased(APIKey)
     others = aliased(APIKey)
     return and_(
@@ -160,6 +170,7 @@ def _losing_its_last_key(a: Any, user_id: str, workspace_id: UUID | None) -> Col
             others.agent_id == a.id,
             others.user_id != user_id,
             others.revoked_at.is_(None),
+            or_(others.expires_at.is_(None), others.expires_at > utcnow()),
         )
         .exists(),
     )
