@@ -7,6 +7,8 @@ Migrates logic from neural_tasks.py:consolidation_task (lines 92-225):
 - Borderline: LLM decides promote/keep (#1233: archival is rule-path only)
 - LLM off: identical behavior to legacy consolidation_task
 - Bridge node protection: never delete memories with high centrality
+- Exempt tags (#2584, ``sleep_archive_exempt_tags``): never archive a memory
+  carrying one (an open review memo, ``status:open`` by default)
 
 Backward compatibility:
 - When sleep_enabled=false, the legacy consolidation_task runs unchanged
@@ -107,7 +109,9 @@ def _adoption_delete_cutoff() -> datetime | None:
     return cutoff
 
 
-def _archival_eligible(memory: Memory, age_days: int, cutoff: datetime | None) -> bool:
+def _archival_eligible(
+    memory: Memory, age_days: int, cutoff: datetime | None, *, exempt_tags: frozenset[str]
+) -> bool:
     """Deterministic archival eligibility (#1049/#1229), defined once.
 
     The rule path ANDs this with the isolation check; the LLM path refuses
@@ -115,12 +119,17 @@ def _archival_eligible(memory: Memory, age_days: int, cutoff: datetime | None) -
     call, so the two paths cannot drift apart (#1229: the LLM path used to
     bypass all three gates, archiving memories written minutes earlier and
     violating the #1049 cutoff-unset RELEASE BLOCKER guarantee).
+
+    #2584: a memory carrying one of ``exempt_tags`` (exact match, the run's
+    ``sleep_archive_exempt_tags``) is never eligible. The tag is the only
+    state, so removing it makes the memory eligible again on the next run.
     """
     return (
         age_days >= ARCHIVE_MIN_AGE_DAYS
         and (memory.reference_count or 0) == 0
         and cutoff is not None
         and memory.created_at >= cutoff
+        and exempt_tags.isdisjoint(memory.tags or ())
     )
 
 
@@ -208,6 +217,7 @@ class ConsolidationPhase(LLMSpendTracker):
         has_graph: bool,
         thresholds: _NeuralThresholds,
         adoption_delete_cutoff: datetime | None,
+        archive_exempt_tags: frozenset[str],
         result: PhaseResult,
         tally: _ConsolidationTally,
         reporter: SleepReporter | None,
@@ -218,7 +228,8 @@ class ConsolidationPhase(LLMSpendTracker):
         Promote, archive, or defer. Archival gates on adoption==0 AND is
         grandfathered — only memories created at/after the cutoff are eligible
         (RELEASE BLOCKER, see ``_adoption_delete_cutoff``); ``cutoff=None``
-        disables adoption-based deletion entirely.
+        disables adoption-based deletion entirely. A memory carrying an
+        exempt tag (#2584) is never archived; it can still be promoted.
 
         Returns:
             The memories that matched neither rule — the LLM pass adjudicates
@@ -236,9 +247,9 @@ class ConsolidationPhase(LLMSpendTracker):
             if has_graph:
                 neural_metrics = await graph_service.get_node_metrics(str(memory.id))
 
-            should_delete = _archival_eligible(memory, age_days, adoption_delete_cutoff) and (
-                not neural_metrics or neural_metrics["is_isolated"]
-            )
+            should_delete = _archival_eligible(
+                memory, age_days, adoption_delete_cutoff, exempt_tags=archive_exempt_tags
+            ) and (not neural_metrics or neural_metrics["is_isolated"])
 
             if self._should_promote(memory, age_days, neural_metrics, thresholds):
                 to_promote[memory.id] = (memory, age_days)
@@ -328,6 +339,7 @@ class ConsolidationPhase(LLMSpendTracker):
         graph_service: GraphService,
         has_graph: bool,
         adoption_delete_cutoff: datetime | None,
+        archive_exempt_tags: frozenset[str],
         result: PhaseResult,
         tally: _ConsolidationTally,
         reporter: SleepReporter | None,
@@ -364,7 +376,9 @@ class ConsolidationPhase(LLMSpendTracker):
                     # #1229: the LLM only chooses AMONG deterministically
                     # archival-eligible candidates (shared predicate with the
                     # rule path — see _archival_eligible).
-                    if not _archival_eligible(mem, mem_age_days, adoption_delete_cutoff):
+                    if not _archival_eligible(
+                        mem, mem_age_days, adoption_delete_cutoff, exempt_tags=archive_exempt_tags
+                    ):
                         tally.llm_archive_guarded += 1
                         logger.info(
                             "consolidation_llm_archive_guarded",
@@ -372,6 +386,8 @@ class ConsolidationPhase(LLMSpendTracker):
                             age_days=mem_age_days,
                             adoption=mem.reference_count or 0,
                             cutoff_set=adoption_delete_cutoff is not None,
+                            # #2584: the gate the three above do not show.
+                            exempt_tag=not archive_exempt_tags.isdisjoint(mem.tags or ()),
                         )
                         continue
                     neural = None
@@ -436,6 +452,8 @@ class ConsolidationPhase(LLMSpendTracker):
         weight_threshold = float(os.getenv("NEURAL_EDGE_WEIGHT_THRESHOLD", "0.8"))
         # Issue #1049: grandfather cutoff for the adoption==0 archival path (read once).
         adoption_delete_cutoff = _adoption_delete_cutoff()
+        # #2584: tags that keep a memory out of archival (both paths).
+        archive_exempt_tags = frozenset(config.sleep_archive_exempt_tags)
 
         tally = _ConsolidationTally()
         thresholds = _NeuralThresholds(
@@ -449,6 +467,7 @@ class ConsolidationPhase(LLMSpendTracker):
             has_graph=has_graph,
             thresholds=thresholds,
             adoption_delete_cutoff=adoption_delete_cutoff,
+            archive_exempt_tags=archive_exempt_tags,
             result=result,
             tally=tally,
             reporter=reporter,
@@ -467,6 +486,7 @@ class ConsolidationPhase(LLMSpendTracker):
                 graph_service=graph_service,
                 has_graph=has_graph,
                 adoption_delete_cutoff=adoption_delete_cutoff,
+                archive_exempt_tags=archive_exempt_tags,
                 result=result,
                 tally=tally,
                 reporter=reporter,

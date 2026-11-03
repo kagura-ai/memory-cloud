@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.admin import delete_user
 from config.settings import get_settings
-from models.auth import User, Workspace, WorkspaceMember
+from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
     STATUS_COOLING_OFF,
@@ -46,10 +46,16 @@ from models.erasure import (
 from models.referral import ReferralGrant
 from services.account_erasure_service import AccountErasureService
 from services.file_storage_service import FileStorageService
+from services.invitation_service import InvitationService
 from services.referral_service import ReferralService
 from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS
 from services.workspace_service import WorkspaceService
-from utils.exceptions import ConflictError, ErasureRetryScheduledError, NotFoundException
+from utils.exceptions import (
+    ConflictError,
+    ErasureRetryScheduledError,
+    NotFoundException,
+    ValidationError,
+)
 
 from .test_delete_admin_cli_db import (  # noqa: F401 (fixtures)
     _password_admin,
@@ -770,6 +776,219 @@ async def test_a_member_added_to_a_sole_owned_workspace_waits_for_the_erasure(
         "transferred": [],
         "sole_owner_workspaces": 1,
     }
+
+
+async def _pending_invitation(db, workspace_id, invited_by: str, email: str) -> str:
+    """A pending member invitation to ``workspace_id`` for ``email``; its token."""
+    token = uuid4().hex + uuid4().hex
+    db.add(
+        WorkspaceInvitation(
+            workspace_id=workspace_id,
+            token=token,
+            email=email,
+            role="member",
+            invited_by=invited_by,
+        )
+    )
+    await db.flush()
+    return token
+
+
+async def _accept_left_nothing(db, workspace_id, token: str, user_id: str, current_id) -> None:
+    """The failed accept wrote nothing: no membership of the accepter in the
+    workspace, the invitation not accepted (or gone with its workspace), and
+    the accepter's current workspace unchanged."""
+    members = await db.scalar(
+        select(func.count())
+        .select_from(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id, WorkspaceMember.user_id == user_id)
+    )
+    accepted_by = await db.scalar(
+        select(WorkspaceInvitation.accepted_by).where(WorkspaceInvitation.token == token)
+    )
+    current = await db.scalar(select(User.current_workspace_id).where(User.user_id == user_id))
+    assert (members, accepted_by, current) == (0, None, current_id)
+
+
+@pytest.mark.asyncio
+async def test_an_invitation_accepted_into_a_sole_owned_workspace_waits_for_the_erasure(
+    db_session, connector_world
+):
+    """#2564: the accept path of the #2455 race. Step 2 holds W, which the
+    subject owns alone, so step 3 hard-deletes it. An ``accept_invitation``
+    to W while the run is between steps 2 and 3 waits on W's row lock and then
+    finds W gone: a 404, not the foreign-key violation (500) its member INSERT
+    used to end in."""
+    world = connector_world
+    subject = await world.user("subject")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(subject)).id
+    own_id = (await world.workspace(newcomer)).id
+    await _current_workspace(db_session, newcomer, own_id)
+    email = f"{newcomer}@example.com"
+    token = await _pending_invitation(db_session, ws_id, subject, email)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    accept_pid: int | None = None
+    original = AccountErasureService._delete_postgres
+
+    async def paused_step_three(self, target, **kwargs):
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return await original(self, target, **kwargs)
+
+    async def accept() -> None:
+        nonlocal accept_pid
+        async with maker() as db:
+            accept_pid = await _pid(db)
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=newcomer, user_email=email
+            )
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_delete_postgres", paused_step_three),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            accepting = asyncio.create_task(accept())
+            tasks.append(accepting)
+            await _done_or_blocked(maker, accepting, lambda: accept_pid)
+            accepted_between_the_steps = accepting.done()
+            release.set()
+            erasure_result, accept_result = await asyncio.wait_for(
+                asyncio.gather(erasing, accepting, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not accepted_between_the_steps, accept_result
+    assert not isinstance(erasure_result, BaseException), erasure_result
+    assert erasure_result.status == "complete"
+    assert isinstance(accept_result, NotFoundException), accept_result
+    assert await db_session.scalar(select(Workspace.id).where(Workspace.id == ws_id)) is None
+    await _accept_left_nothing(db_session, ws_id, token, newcomer, own_id)
+
+
+@pytest.mark.asyncio
+async def test_an_invitation_accepted_into_a_workspace_deleted_meanwhile_is_a_404(
+    db_session, connector_world
+):
+    """#2564: a holder has W's row; the accept waits on it. The holder
+    soft-deletes W and commits: the accept's lock re-reads the row, finds it
+    deleted and answers 404. Before, the accept read W unlocked and joined
+    the deleted workspace."""
+    world = connector_world
+    owner = await world.user("owner")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(owner)).id
+    email = f"{newcomer}@example.com"
+    token = await _pending_invitation(db_session, ws_id, owner, email)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    accept_pid: int | None = None
+
+    async def accept() -> None:
+        nonlocal accept_pid
+        async with maker() as db:
+            accept_pid = await _pid(db)
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=newcomer, user_email=email
+            )
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    async with maker() as holder:
+        try:
+            await holder.execute(
+                select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+            )
+            accepting = asyncio.create_task(accept())
+            tasks.append(accepting)
+            await _done_or_blocked(maker, accepting, lambda: accept_pid)
+            accepted_while_held = accepting.done()
+            await holder.execute(
+                update(Workspace).where(Workspace.id == ws_id).values(deleted_at=func.now())
+            )
+            await holder.commit()
+            (accept_result,) = await asyncio.wait_for(
+                asyncio.gather(accepting, return_exceptions=True), 30
+            )
+        finally:
+            await holder.rollback()
+            await _cancel_all(tasks)
+
+    assert not accepted_while_held, accept_result
+    assert isinstance(accept_result, NotFoundException), accept_result
+    await _accept_left_nothing(db_session, ws_id, token, newcomer, None)
+
+
+@pytest.mark.asyncio
+async def test_two_accepts_of_one_invitation_admit_one_user(db_session, connector_world):
+    """#2564: two users accept one invitation with no email restriction and
+    both wait on W's row lock. The one that gets it second re-reads the
+    invitation, finds it accepted and answers 400. Before, it went on with the
+    invitation it had read before the wait and joined too."""
+    world = connector_world
+    owner = await world.user("owner")
+    first = await world.user("first")
+    second = await world.user("second")
+    ws_id = (await world.workspace(owner)).id
+    token = uuid4().hex + uuid4().hex
+    db_session.add(
+        WorkspaceInvitation(
+            workspace_id=ws_id, token=token, email=None, role="member", invited_by=owner
+        )
+    )
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict[str, int] = {}
+
+    async def accept(user_id: str) -> None:
+        async with maker() as db:
+            pids[user_id] = await _pid(db)
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=user_id, user_email=f"{user_id}@example.com"
+            )
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    async with maker() as holder:
+        try:
+            await holder.execute(
+                select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+            )
+            for user_id in (first, second):
+                task = asyncio.create_task(accept(user_id))
+                tasks.append(task)
+                await _done_or_blocked(maker, task, lambda u=user_id: pids.get(u))
+            accepted_while_held = [task.done() for task in tasks]
+            await holder.commit()
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 30)
+        finally:
+            await holder.rollback()
+            await _cancel_all(tasks)
+
+    assert accepted_while_held == [False, False], results
+    winners = [u for u, r in zip((first, second), results, strict=True) if r is None]
+    losers = [r for r in results if r is not None]
+    assert len(winners) == 1 and len(losers) == 1, results
+    assert isinstance(losers[0], ValidationError), losers[0]
+    joined = await db_session.scalars(
+        select(WorkspaceMember.user_id).where(
+            WorkspaceMember.workspace_id == ws_id, WorkspaceMember.user_id.in_([first, second])
+        )
+    )
+    accepted_by = await db_session.scalar(
+        select(WorkspaceInvitation.accepted_by).where(WorkspaceInvitation.token == token)
+    )
+    assert (list(joined), accepted_by) == (winners, winners[0])
 
 
 # ---------------------------------------------------------------------------

@@ -42,9 +42,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Save,
   AlertCircle,
-  Loader2,
   Brain,
   Lock,
   Copy,
@@ -68,6 +66,7 @@ import {
   featureGateToast,
   type FeatureGateScope,
 } from "@/components/common/FeatureGateNotice";
+import { UnsavedChangesBar } from "@/components/contexts/UnsavedChangesBar";
 import {
   gateFromFacts,
   isBlocked,
@@ -873,29 +872,19 @@ export function SettingsTabPanel({
 
         {/* Save bar (#2159): in the flow after the last card and sticky
             within this section, like the search settings bar below it — a
-            viewport-fixed bar here would cover that one. */}
-        {isDirty && (
-          <div className="sticky bottom-0 z-10 rounded-lg border bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-              <p className="text-sm text-muted-foreground">
-                {t("unsavedChanges")}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={refreshContext}>
-                  {t("discard")}
-                </Button>
-                <Button size="sm" onClick={handleSave} disabled={saving}>
-                  {saving ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4 mr-2" />
-                  )}
-                  {saving ? t("saving") : t("saveChanges")}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+            viewport-fixed bar here would cover that one. Shown only while
+            something is unsaved; its live region stays mounted (#2595). */}
+        <UnsavedChangesBar
+          open={isDirty}
+          message={t("unsavedChanges")}
+          discardLabel={t("discard")}
+          saveLabel={t("saveChanges")}
+          savingLabel={t("saving")}
+          onDiscard={refreshContext}
+          onSave={handleSave}
+          saving={saving}
+          saveDisabled={saving}
+        />
       </div>
 
       {/* Privacy Change Confirmation Dialog */}

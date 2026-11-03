@@ -152,3 +152,35 @@ async def test_patch_with_observed_at_alone(env, db_session):
     stored = await db_session.get(Memory, env["memory"])
     await db_session.refresh(stored)
     assert stored.details["note"] == "keep"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_details_patch_null_removes_observed_at_and_its_payload(env, db_session):
+    """#2585: a details_patch null deletes the key — the generated column goes
+    NULL, the payload key is deleted, the other keys stay, one new version."""
+    svc = MemoryService(db_session)
+    p1, p2 = _side_effects()
+    with p1 as payload, p2:
+        response = await svc.update_memory(
+            UpdateMemoryRequest(
+                memory_id=env["memory"], details_patch={"observed_at": None, "extra": 1}
+            ),
+            user_id=env["uid"],
+            current_context_id=env["ctx"],
+        )
+    assert response.version == 2
+    assert await _column(db_session, env["memory"]) is None
+    stored = await db_session.get(Memory, env["memory"])
+    await db_session.refresh(stored)
+    assert stored.details == {"note": "keep", "extra": 1}
+    assert "observed_at" in payload.await_args.kwargs["delete_keys"]
+
+    with p1, p2:
+        patched = await svc.patch_memory(
+            env["memory"],
+            PatchMemoryRequest(details_patch={"observed_at": "2025-05-05"}),
+            user_id=env["uid"],
+        )
+    assert patched.observed_at == "2025-05-05"
+    assert patched.details == {"note": "keep", "extra": 1, "observed_at": "2025-05-05"}
+    assert await _column(db_session, env["memory"]) == "2025-05-05T00:00:00Z"

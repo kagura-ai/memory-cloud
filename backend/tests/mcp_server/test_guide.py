@@ -159,6 +159,21 @@ def test_guidance_removed_from_the_descriptions_lives_in_the_guide(phrase):
     assert any(phrase in text for text in GUIDE_TOPICS.values()), phrase
 
 
+def test_update_memory_modes_carries_the_partial_edit_rules():
+    """#2585: the parameter descriptions are one line each; the rules live here."""
+    text = GUIDE_TOPICS["update_memory.modes"]
+    for phrase in (
+        "details_patch (memory_id only, not with details) merges",
+        "a key set to null is deleted",
+        "reserved keys (location, trigger, tool_trigger, observed_at) keep their rules",
+        "add_tags / remove_tags (memory_id only, not with tags)",
+        "removals first",
+        "The 50-tag cap applies to the resulting list and the 100-character cap to the added tags",
+        "update_memory(memory_id, remove_tags=['status:open'], add_tags=['status:done'])",
+    ):
+        assert phrase in text, phrase
+
+
 def test_dedupe_off_permanence_comes_first():
     """#2024: the first sentence about 'off' says it is permanent for that
     memory, before the long paragraph about 'check'."""

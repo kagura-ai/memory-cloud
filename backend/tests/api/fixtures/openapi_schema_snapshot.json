@@ -6751,6 +6751,20 @@
       },
       "PatchMemoryRequest": {
         "properties": {
+          "add_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 100,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "content": {
             "anyOf": [
               {
@@ -6763,6 +6777,17 @@
             ]
           },
           "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details_patch": {
             "anyOf": [
               {
                 "additionalProperties": true,
@@ -6801,6 +6826,19 @@
               {
                 "maxLength": 40,
                 "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remove_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               {
                 "type": "null"

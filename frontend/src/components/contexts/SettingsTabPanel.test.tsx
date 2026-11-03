@@ -22,7 +22,14 @@
  *     reachable contract.
  */
 
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { useState } from "react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsTabPanel } from "./SettingsTabPanel";
@@ -634,6 +641,67 @@ describe("SettingsTabPanel — save bar placement (#2159)", () => {
     expect(bar).not.toBeNull();
     expect(bar!.className).toContain("bottom-0");
     expect(bar!.className).not.toMatch(/\bfixed\b/);
+  });
+});
+
+describe("SettingsTabPanel — save bar stands out (#2595)", () => {
+  // Discard reloads the context and hands it to the parent; the bar only
+  // clears when the parent passes the fresh context back down.
+  function Harness() {
+    const [ctx, setCtx] = useState(() => makeContext());
+    return (
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={ctx}
+        onContextUpdated={setCtx}
+      />
+    );
+  }
+
+  it("announces the unsaved state in an accented strip that goes on discard", async () => {
+    mockGetContext.mockResolvedValue(makeContext());
+    render(<Harness />);
+    // The live region is already mounted, and empty, before anything is
+    // unsaved: a region inserted together with its text is not reliably
+    // announced, a change inside an existing one is.
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toBeEmptyDOMElement();
+    expect(status.closest("div.sticky")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("Demo Context"), {
+      target: { value: "Renamed" },
+    });
+
+    await waitFor(() => expect(status).toHaveTextContent("unsavedChanges"));
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status.className).toContain("font-medium");
+    expect(status.className).toContain("text-foreground");
+    // A decorative leading icon in the accent colour.
+    const icon = status.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon!.getAttribute("class")).toContain("text-amber-500");
+    // Only the label is live: the buttons' "saving" relabel is not re-read.
+    expect(within(status).queryByRole("button")).toBeNull();
+
+    const bar = status.closest("div.sticky");
+    expect(bar).not.toBeNull();
+    expect(bar!.className).toContain("border-amber-500/50");
+    expect(bar!.className).toContain("shadow-lg");
+    expect(bar!.className).toContain("animate-in");
+    expect(bar!.className).toContain("motion-reduce:animate-none");
+    expect(bar!.querySelector(".bg-amber-500\\/10")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "discard" }));
+    await waitFor(() => expect(status).toBeEmptyDOMElement());
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status.closest("div.sticky")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "discard" }),
+    ).not.toBeInTheDocument();
+    expect(mockGetContext).toHaveBeenCalledWith(CTX_ID);
+    expect(screen.getByDisplayValue("Demo Context")).toBeInTheDocument();
   });
 });
 

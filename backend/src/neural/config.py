@@ -82,6 +82,47 @@ def supersede_suggest_threshold_llm_from_env() -> float:
     return clamped
 
 
+# #2584: memories carrying one of these tags (exact match) are never archived (or,
+# on the legacy pass, deleted) by consolidation and never retired as the losing
+# side of a near-duplicate merge. ``status:open`` marks an open review memo.
+SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT: tuple[str, ...] = ("status:open",)
+
+
+def sleep_archive_exempt_tags_from_env() -> tuple[str, ...]:
+    """``SLEEP_ARCHIVE_EXEMPT_TAGS`` as a tuple of tags (#2584).
+
+    Unset → the default. A value starting with ``[`` is a JSON array of
+    strings (``["status:open"]``, ``[]``); anything else is a comma-separated
+    list (``status:open,status:blocked``). Entries are stripped, blanks and
+    repeats dropped, so an empty value turns the exemption off. A JSON value
+    that does not parse to strings keeps the default and logs a warning: a
+    typo must not stop the service, nor silently archive what it protects.
+    """
+    import json
+    import os
+
+    raw = os.getenv("SLEEP_ARCHIVE_EXEMPT_TAGS")
+    if raw is None:
+        return SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT
+    text = raw.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, list) or not all(isinstance(tag, str) for tag in parsed):
+            logger.warning(
+                "sleep_archive_exempt_tags_invalid",
+                value=raw,
+                used=list(SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT),
+            )
+            return SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT
+        items: list[str] = parsed
+    else:
+        items = text.split(",")
+    return tuple(dict.fromkeys(tag.strip() for tag in items if tag.strip()))
+
+
 @dataclass
 class NeuralMemoryConfig:
     """Configuration for Neural Memory Network.
@@ -163,6 +204,9 @@ class NeuralMemoryConfig:
         sleep_edge_discovery_enabled: Enable edge discovery phase
         sleep_edge_discovery_sample_size: Memories sampled for edge discovery
         sleep_importance_reeval_enabled: Enable importance re-evaluation phase
+        sleep_archive_exempt_tags: Tags (exact match) that keep a memory out of
+            consolidation archive and off the losing side of a near-duplicate
+            merge (env-only, #2584)
 
         # Tag Co-Occurrence Cold-Start Seeding (Issue #223, Tier 2)
         tag_cooccurrence_enabled: Master switch for tag-cooccurrence seeding
@@ -370,6 +414,11 @@ class NeuralMemoryConfig:
     sleep_edge_discovery_enabled: bool = True  # Phase 1 on/off
     sleep_edge_discovery_sample_size: int = 30  # Memories sampled per run
     sleep_importance_reeval_enabled: bool = True  # Phase 3 on/off
+    # #2584: a memory carrying one of these tags is exempt from consolidation
+    # archive and is never the retired side of a near-duplicate merge; removing
+    # the tag returns it to the normal lifecycle. Empty = no exemption. Env-only
+    # (SLEEP_ARCHIVE_EXEMPT_TAGS, see sleep_archive_exempt_tags_from_env).
+    sleep_archive_exempt_tags: tuple[str, ...] = SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT
 
     def __post_init__(self) -> None:
         """Validate configuration parameters.
@@ -774,6 +823,7 @@ class NeuralMemoryConfig:
             sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", True),
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
             sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", True),
+            sleep_archive_exempt_tags=sleep_archive_exempt_tags_from_env(),
         )
 
     @staticmethod
@@ -1075,6 +1125,7 @@ class NeuralMemoryConfig:
                 "sleep_importance_reeval_enabled",
                 base_config.sleep_importance_reeval_enabled,
             ),
+            sleep_archive_exempt_tags=base_config.sleep_archive_exempt_tags,  # env-only (#2584)
         )
 
         # Store in cache

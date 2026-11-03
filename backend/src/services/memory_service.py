@@ -53,6 +53,8 @@ from models.memory import (
     tool_triggered_predicate,
 )
 from models.schemas import (
+    MEMORY_TAGS_MAX_COUNT,
+    PATCH_TAGS_MAX_COUNT,
     UPDATE_MEMORY_EDIT_FIELDS,
     ExploreHint,
     ExploreRequest,
@@ -84,6 +86,7 @@ from models.schemas import (
     UpdateMemoryRequest,
     UpdateMemoryResponse,
     WriteLintHint,
+    check_tag_count,
 )
 from repositories.memory import AccessStats, MemoryRepository
 from services import plan_seats
@@ -554,6 +557,75 @@ def _without_dropped_rows(
     ]
 
 
+def _hit_rank_score(hit: Mapping[str, Any]) -> float:
+    """The score a hit ranks by: ``hybrid_score`` (the reranker writes its own
+    score there), else ``score`` (a semantic- or keyword-only search)."""
+    score = hit.get("hybrid_score", hit.get("score"))
+    return float(score) if isinstance(score, (int, float)) else float("-inf")
+
+
+def _collapse_memory_hits(hits: list[dict]) -> dict:
+    """One hit for a memory the search found more than once (#2546).
+
+    The best-scored hit survives, the earlier one on a tie, so its scores rank
+    it among its neighbours. It takes the group's highest raw cosine, which
+    confidence reads for absence detection (as a fold head does, #2123), and a
+    vector from another hit when it has none (a chunk-only hit carries none,
+    see ``collapse_chunk_hits``; the Hebbian pass gates on it).
+    """
+    if len(hits) == 1:
+        return hits[0]
+    survivor = dict(max(hits, key=_hit_rank_score))
+    raw = [
+        h["semantic_score_raw"]
+        for h in hits
+        if isinstance(h.get("semantic_score_raw"), (int, float))
+    ]
+    if raw:
+        survivor["semantic_score_raw"] = max(raw)
+    if not survivor.get("embedding"):
+        embedding = next((h["embedding"] for h in hits if h.get("embedding")), None)
+        if embedding is not None:
+            survivor["embedding"] = embedding
+    return survivor
+
+
+def _prune_unhydrated_hits(
+    search_results: list[dict], memories: Mapping[str, Any]
+) -> tuple[int, int]:
+    """Keep one hit per hydrated memory in the recall pool, in place (#2546).
+
+    A hit with no row in ``memories`` (deleted, kept out by the #214 / #887 /
+    #496 filters, or found in another context than its row's) leaves the
+    pool, and several hits of one memory (a resource row's summary point and
+    a point under its row id, such as a content chunk) become one, at the
+    first one's place. Run right after hydration, so the page fills from the
+    candidates below, and shadowing, the fold, the re-ranks, the Hebbian pass
+    and the ``recall_completed`` count see each hydrated memory once.
+
+    Returns:
+        (hits without a hydrated row, duplicate hits merged away).
+    """
+    slots: dict[Any, int] = {}
+    groups: list[list[dict]] = []
+    unhydrated = 0
+    for hit in search_results:
+        memory = memories.get(hit["id"])
+        if memory is None:
+            unhydrated += 1
+            continue
+        slot = slots.get(memory.id)
+        if slot is None:
+            slots[memory.id] = len(groups)
+            groups.append([hit])
+        else:
+            groups[slot].append(hit)
+    duplicates = len(search_results) - unhydrated - len(groups)
+    if unhydrated or duplicates:
+        search_results[:] = [_collapse_memory_hits(group) for group in groups]
+    return unhydrated, duplicates
+
+
 #: #2201: the bound on forget's whole post-commit point delete, so the global
 #: lock is never held past it and a stalled vector store cannot turn a
 #: committed delete into a tool timeout.
@@ -868,6 +940,92 @@ class MemoryService:
         return {**base, "observed_at": observed_at}
 
     @staticmethod
+    def _apply_tag_edits(
+        stored_tags: Any, add_tags: list[str] | None, remove_tags: list[str] | None
+    ) -> list[str]:
+        """The tag list ``remove_tags`` / ``add_tags`` make of the stored one (#2585).
+
+        Removals first (every exact match; one that is not there is ignored),
+        then each added tag not already present is appended once, in order. A
+        new list, so the version snapshot never sees the stored one mutated.
+        """
+        removed = set(remove_tags or ())
+        result = [tag for tag in (stored_tags or []) if tag not in removed]
+        present = set(result)
+        for tag in add_tags or ():
+            if tag not in present:
+                result.append(tag)
+                present.add(tag)
+        return result
+
+    @staticmethod
+    def _merge_details_patch(stored_details: Any, patch: dict, observed_at: str | None) -> dict:
+        """The details ``details_patch`` makes of the stored ones (#2585).
+
+        A shallow merge into the stored details (a NULL column merges into
+        ``{}``); a ``None`` value deletes the key. A top-level ``observed_at``
+        must agree with the patch's own (``_fold_observed_at``'s rule, checked
+        on the patch, so a ``null`` that deletes the key disagrees too).
+
+        Raises:
+            ValueError: ``details_patch.observed_at`` and ``observed_at`` disagree.
+        """
+        patch = MemoryService._fold_observed_at(patch, None, observed_at) or patch
+        merged = dict(stored_details) if isinstance(stored_details, dict) else {}
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _resolve_partial_edits(
+        memory: Any,
+        request: UpdateMemoryRequest | PatchMemoryRequest,
+        max_tags: int,
+    ) -> set[str]:
+        """Turn ``add_tags`` / ``remove_tags`` / ``details_patch`` into ``tags`` / ``details``.
+
+        #2585: resolved against the LOCKED row, before anything reads
+        ``request.tags`` or ``request.details``, so from here on the call is an
+        ordinary wholesale write of what they produce: the surface's tag count
+        cap (``max_tags``) applies to the resulting list — its length cap only
+        to the added tags (the ``add_tags`` validators), so a longer stored tag
+        written through the other surface does not block the edit — and the
+        reserved details keys, the size guard, the guardrail gate, versioning
+        and the payload sync all see the merged details: a patch cannot step
+        around a validator by naming one key. The schemas refuse ``tags`` /
+        ``details`` alongside, and a null for any of the three on PATCH.
+
+        Returns:
+            The request fields written (``tags``, ``details``), for PATCH's
+            provided-field set.
+
+        Raises:
+            ValueError: the resulting list is over the count cap, or
+                ``observed_at`` disagrees with the patch.
+        """
+        resolved: set[str] = set()
+        if request.add_tags is not None or request.remove_tags is not None:
+            tags = MemoryService._apply_tag_edits(
+                memory.tags, request.add_tags, request.remove_tags
+            )
+            check_tag_count(tags, max_tags)
+            request.tags = tags
+            resolved.add("tags")
+        if request.details_patch is not None:
+            merged = MemoryService._merge_details_patch(
+                memory.details, request.details_patch, request.observed_at
+            )
+            # A NULL column the patch leaves empty is unchanged: writing {}
+            # over it would only move the version.
+            if merged or isinstance(memory.details, dict):
+                request.details = merged
+                resolved.add("details")
+        return resolved
+
+    @staticmethod
     def _apply_tool_trigger(details: dict | None) -> dict | None:
         """Validate + normalize ``details.tool_trigger`` (tool guardrail marking).
 
@@ -894,7 +1052,11 @@ class MemoryService:
 
     @staticmethod
     def _touches_tool_trigger(
-        existing_details: Any, new_details: Any, *, details_supplied: bool
+        existing_details: Any,
+        new_details: Any,
+        *,
+        details_supplied: bool,
+        details_patch: dict | None = None,
     ) -> bool:
         """Does this write add, change or remove a guardrail marking?
 
@@ -902,11 +1064,15 @@ class MemoryService:
         edit or delete of a guardrail is a protection change — including a
         summary rewrite, or a wholesale ``details`` replace that drops the
         key) or when caller-supplied details name the key (adding, changing,
-        or an explicit ``null`` to unmark). A stored ``tool_trigger: null`` or
-        non-object legacy shape is "not a guardrail", matching
-        ``Memory.is_tool_triggered`` and the SQL predicate.
+        or an explicit ``null`` to unmark). A ``details_patch`` (#2585) that
+        names the key counts too, its ``null`` included, although the merge
+        has already dropped that key from ``new_details``. A stored
+        ``tool_trigger: null`` or non-object legacy shape is "not a
+        guardrail", matching ``Memory.is_tool_triggered`` and the SQL predicate.
         """
         if MemoryService._carries_tool_trigger(existing_details):
+            return True
+        if details_patch is not None and "tool_trigger" in details_patch:
             return True
         return details_supplied and isinstance(new_details, dict) and "tool_trigger" in new_details
 
@@ -1942,6 +2108,10 @@ class MemoryService:
         # field is applied, so a refused edit writes nothing.
         memory = await self._lock_for_edit(memory.id)
         check_expected_version(memory, request.expected_version)
+        # #2585: add_tags / remove_tags / details_patch are a tags / details
+        # write from here on (the stored list, for the lint below).
+        stored_tags = set(memory.tags or [])
+        self._resolve_partial_edits(memory, request, MEMORY_TAGS_MAX_COUNT)
         # #2330 D7: a top-level observed_at is a details write from here on.
         request.details = self._fold_observed_at(
             request.details, memory.details, request.observed_at
@@ -1952,7 +2122,10 @@ class MemoryService:
         # (can_access_memory checked the member role only). Before any
         # field is applied, so a deny leaves the row untouched.
         if self._touches_tool_trigger(
-            memory.details, request.details, details_supplied=request.details is not None
+            memory.details,
+            request.details,
+            details_supplied=request.details is not None,
+            details_patch=request.details_patch,
         ):
             await self._require_guardrail_author(user_id, memory.context_id)
 
@@ -2047,8 +2220,19 @@ class MemoryService:
             re_embedded=needs_reembed,
         )
 
+        # #2585: an add_tags / remove_tags call lints the tags it added, not the
+        # ones it left alone.
+        added_tags = (
+            [tag for tag in request.tags or [] if tag not in stored_tags]
+            if request.add_tags is not None or request.remove_tags is not None
+            else None
+        )
         return await self._in_place_updated(
-            memory, user_id, re_embedded=needs_reembed, dismissed=dismissed_target
+            memory,
+            user_id,
+            re_embedded=needs_reembed,
+            dismissed=dismissed_target,
+            lint_checked_tags=added_tags,
         )
 
     async def _in_place_updated(
@@ -2059,11 +2243,13 @@ class MemoryService:
         re_embedded: bool,
         dismissed: UUID | None = None,
         superseded: UUID | None = None,
+        lint_checked_tags: list[str] | None = None,
     ) -> UpdateMemoryResponse:
         """The committed in-place update's audit event and response.
 
         Shared by the edit path and the #2308 acceptance, so the two cannot
-        drift in what they audit or return.
+        drift in what they audit or return. ``lint_checked_tags`` narrows the
+        tag lint to the tags a call added (None: every tag).
         """
         # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
         from services.memory_access_event_writer import emit_memory_access_event
@@ -2100,6 +2286,7 @@ class MemoryService:
                 summary=memory.summary,
                 tags=memory.tags,
                 memory_id=memory.id,
+                checked_tags=lint_checked_tags,
             ),
         )
 
@@ -2981,6 +3168,9 @@ class MemoryService:
         # not. Cheaper than `model_dump(exclude_unset=True)` for large
         # `details` payloads — no deep serialization, just a name set.
         provided_fields = set(request.model_fields_set)
+        # #2585: add_tags / remove_tags / details_patch are a tags / details
+        # patch from here on, under PATCH's own tag count cap.
+        provided_fields |= self._resolve_partial_edits(memory, request, PATCH_TAGS_MAX_COUNT)
         # #2330 D7: a top-level observed_at is a details patch from here on.
         # ``{"details": null}`` with it keeps only the event time.
         if request.observed_at is not None:
@@ -2995,7 +3185,10 @@ class MemoryService:
         # row (including ``{"details": null}``, which drops the marking) or a
         # details patch naming tool_trigger needs context EDITOR or above.
         if self._touches_tool_trigger(
-            memory.details, request.details, details_supplied="details" in provided_fields
+            memory.details,
+            request.details,
+            details_supplied="details" in provided_fields,
+            details_patch=request.details_patch,
         ):
             await self._require_guardrail_author(user_id, memory.context_id)
 
@@ -6317,6 +6510,11 @@ class MemoryService:
         # nothing (its row is gone, or the #214 / #887 / #496 filters kept it
         # out) cannot be in the reply, so it must not lift the level; one the
         # #1299 binding hides must not show through the scores either.
+        # recall() already pruned such hits right after hydration (#2546);
+        # this keeps the rule for a pool passed in directly. Shadowed and
+        # folded rows have left the pool, so they do not count either; with
+        # include_superseded=True nothing folds and shadowed rows stay in the
+        # pool, annotated, so there they count.
         confidence_pool = [r for r in search_results if r["id"] in memories]
         if dropped := len(search_results) - len(confidence_pool):
             logger.debug(
@@ -6391,6 +6589,7 @@ class MemoryService:
         summary: str | None,
         tags: list[str] | None,
         memory_id: UUID | None = None,
+        checked_tags: list[str] | None = None,
     ) -> list[WriteLintHint]:
         """#1502: advisory recall-ability hints for a completed write.
 
@@ -6418,6 +6617,7 @@ class MemoryService:
                 summary=summary,
                 tags=tags,
                 memory_id=memory_id,
+                checked_tags=checked_tags,
             )
         except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
             logger.warning("write_lint_unavailable", error=str(e))
@@ -6741,6 +6941,17 @@ class MemoryService:
                 search_results=search_results,
                 searched_context_id=plan.search_context_id,
                 cluster_memory_ids=cluster_memory_ids,
+            )
+            # #2546: one hit per hydrated memory from here on. A hit without a
+            # row would hold a page slot the candidates below could fill, and
+            # one memory hit twice would ship and count twice.
+            unhydrated, duplicates = _prune_unhydrated_hits(search_results, memories)
+        if unhydrated or duplicates:
+            logger.debug(
+                "recall_pool_pruned",
+                unhydrated=unhydrated,
+                duplicates=duplicates,
+                candidates=len(search_results),
             )
 
         # #1299: per-memory type/source binding filter over the FULL candidate

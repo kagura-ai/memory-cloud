@@ -745,3 +745,60 @@ class TestSupersedeSuggestThresholdLlm:
         from services.memory_service import _SUPERSEDE_SUGGEST_THRESHOLD
 
         assert SUPERSEDE_SUGGEST_THRESHOLD_LLM_MAX == _SUPERSEDE_SUGGEST_THRESHOLD
+
+
+class TestSleepArchiveExemptTagsConfig:
+    """#2584: ``SLEEP_ARCHIVE_EXEMPT_TAGS`` — env-only, default ``status:open``,
+    a JSON array or a comma-separated list; empty turns the exemption off. A
+    value that cannot be read keeps the default (more protective) and warns."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        monkeypatch.delenv("SLEEP_ARCHIVE_EXEMPT_TAGS", raising=False)
+        NeuralMemoryConfig.invalidate_cache()
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    def test_default_is_status_open(self):
+        assert NeuralMemoryConfig().sleep_archive_exempt_tags == ("status:open",)
+        assert NeuralMemoryConfig.from_env().sleep_archive_exempt_tags == ("status:open",)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ('["status:open"]', ("status:open",)),
+            ('["status:open", "status:blocked"]', ("status:open", "status:blocked")),
+            ("status:open, status:blocked", ("status:open", "status:blocked")),
+            ("status:open,,status:open", ("status:open",)),
+            ('["a,b"]', ("a,b",)),  # JSON keeps a comma inside a tag
+            ("[]", ()),
+            ("", ()),
+            ("  ", ()),
+        ],
+    )
+    def test_env_forms(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("SLEEP_ARCHIVE_EXEMPT_TAGS", raw)
+        assert NeuralMemoryConfig.from_env().sleep_archive_exempt_tags == expected
+
+    @pytest.mark.parametrize("raw", ['["status:open"', "[1, 2]", '["ok", null]'])
+    def test_unreadable_json_keeps_the_default_and_warns(self, monkeypatch, raw):
+        import neural.config as neural_config_mod
+
+        spy = MagicMock()
+        monkeypatch.setattr(neural_config_mod, "logger", spy)
+        monkeypatch.setenv("SLEEP_ARCHIVE_EXEMPT_TAGS", raw)
+
+        assert NeuralMemoryConfig.from_env().sleep_archive_exempt_tags == ("status:open",)
+        events = [c.args[0] for c in spy.warning.call_args_list]
+        assert "sleep_archive_exempt_tags_invalid" in events
+
+    async def test_env_value_survives_from_db_merge(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_ARCHIVE_EXEMPT_TAGS", "")
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        config = await NeuralMemoryConfig.from_db(db)
+
+        assert config.sleep_archive_exempt_tags == ()

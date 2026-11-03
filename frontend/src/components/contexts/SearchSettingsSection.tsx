@@ -14,7 +14,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useFormatter, useTranslations } from "next-intl";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -46,11 +45,9 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Settings,
-  Save,
   AlertCircle,
   Info,
   Database,
-  Loader2,
   Sparkles,
   Layers,
   ListFilter,
@@ -72,6 +69,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
+import { UnsavedChangesBar } from "@/components/contexts/UnsavedChangesBar";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -1235,48 +1233,31 @@ export function SearchSettingsSection({
         {/* Save bar for the staged fields (#2159): in the flow after the
             last card (so it is also last in the focus order), sticking to
             the bottom of the viewport while the section is scrolled — not a
-            fixed overlay. Only rendered when something is unsaved. */}
-        {isDirty && (
-          <div
-            data-testid="search-settings-save-bar"
-            className="sticky bottom-0 z-10 rounded-lg border bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-              <p className="text-sm text-muted-foreground" role="status">
-                {cannotSave
-                  ? t("providerUnavailableCannotSave")
-                  : t("unsavedFields", {
-                      fields: format.list(dirtyNames, {
-                        style: "short",
-                        type: "unit",
-                      }),
-                    })}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={refreshConfig}
-                  disabled={saving || toggleSaving}
-                >
-                  {t("discardChanges")}
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={handleSave}
-                  disabled={saving || toggleSaving || !!cannotSave}
-                >
-                  {saving ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4 mr-2" />
-                  )}
-                  {saving ? t("saving") : t("saveChanges")}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+            fixed overlay. Shown only while something is unsaved; its live
+            region stays mounted. The same bar as the context settings above
+            it (#2595). */}
+        <UnsavedChangesBar
+          open={isDirty}
+          data-testid="search-settings-save-bar"
+          message={
+            cannotSave
+              ? t("providerUnavailableCannotSave")
+              : t("unsavedFields", {
+                  fields: format.list(dirtyNames, {
+                    style: "short",
+                    type: "unit",
+                  }),
+                })
+          }
+          discardLabel={t("discardChanges")}
+          saveLabel={t("saveChanges")}
+          savingLabel={t("saving")}
+          onDiscard={refreshConfig}
+          onSave={handleSave}
+          saving={saving}
+          discardDisabled={saving || toggleSaving}
+          saveDisabled={saving || toggleSaving || !!cannotSave}
+        />
       </div>
 
       {/* #2104: confirm a content chunk change; confirming saves it (#2159) */}

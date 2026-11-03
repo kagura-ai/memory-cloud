@@ -30,6 +30,7 @@ from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
 from models.schemas import RecallRequest
 from services.edge_service import create_declared_edge, ensure_supersedes_owned
+from services.identity_link_service import IdentityLinkService
 from services.memory_service import MemoryService
 from services.plan_seats import slot_limit
 from services.supersede_acceptance import ACCEPT_CONFIDENCE, ACCEPT_WEIGHT
@@ -44,7 +45,12 @@ from tests.integration.test_2308_accept_supersede_candidate_db import (
 from tests.integration.test_identity_link_writes_db import _seed
 from tests.integration.test_identity_links_db import _user
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError, NotFoundException, SupersedeEdgeConflictError
+from utils.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    NotFoundException,
+    SupersedeEdgeConflictError,
+)
 
 
 async def _acceptance(db, caller: User, memory_id):
@@ -367,6 +373,118 @@ async def test_the_same_declared_supersedes_edge_is_still_allowed(db_session):
     acceptance = await _acceptance(db_session, a, carrier)
 
     assert acceptance.allowed is True and acceptance.reason is None
+
+
+async def _post_supersedes(db, caller: User, ctx: Context, carrier, target) -> None:
+    """The web dialog's accept: ``POST /graph/edges`` as the caller."""
+    await create_graph_edge(
+        CreateEdgeRequest(
+            context_id=ctx.id, source_id=carrier, target_id=target, edge_type="supersedes"
+        ),
+        {"user_id": caller.user_id},
+        Response(),
+        db,
+    )
+
+
+_OTHER = {"edge_type": "related_to", "weight": 0.5, "confidence": 1.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("behind", [False, True], ids=["alone", "behind_the_authors_clean_row"])
+async def test_the_linked_callers_own_edge_is_edge_exists_in_a_private_context(db_session, behind):
+    """#2549: the carrier is admin's, the caller oauth (linked). oauth's own
+    different declared edge on the pair is the one the web dialog's write (under
+    the caller) meets: reported before the click, not only as its 409. Behind
+    admin's own accept-valued row too, which a single strongest-row read
+    returns in its place."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
+    carrier, target = await _pair(db_session, ctx, admin, admin)
+    if behind:
+        await _declare(
+            db_session,
+            admin,
+            ws,
+            ctx,
+            carrier,
+            target,
+            edge_type="supersedes",
+            weight=ACCEPT_WEIGHT,
+            confidence=ACCEPT_CONFIDENCE,
+        )
+    await _declare(db_session, oauth, ws, ctx, carrier, target, **_OTHER)
+    # Declaring a supersedes edge clears the suggestion it answers; put it back.
+    await _store(db_session, carrier, _candidate(target))
+
+    acceptance = await _acceptance(db_session, oauth, carrier)
+
+    assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
+    with pytest.raises(ConflictError):
+        await _post_supersedes(db_session, oauth, ctx, carrier, target)
+
+
+@pytest.mark.asyncio
+async def test_the_authors_edge_is_edge_exists_for_a_linked_caller(db_session):
+    """#2549: admin's different declared edge is what the accept path (under
+    the carrier's author) meets when oauth accepts."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
+    carrier, target = await _pair(db_session, ctx, admin, admin)
+    await _declare(db_session, admin, ws, ctx, carrier, target, **_OTHER)
+
+    acceptance = await _acceptance(db_session, oauth, carrier)
+
+    assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
+    with pytest.raises(SupersedeEdgeConflictError):
+        await _accept_as(db_session, oauth, ctx, carrier)
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_a_shared_context_reads_only_the_authors_edge(db_session):
+    """#2549: outside a private context a linked account's edge is its own,
+    not the author's: the accept (under the author) writes past it."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=False, link=True)
+    carrier, target = await _pair(db_session, ctx, admin, admin)
+    await _declare(db_session, oauth, ws, ctx, carrier, target, **_OTHER)
+
+    acceptance = await _acceptance(db_session, admin, carrier)
+
+    assert acceptance.allowed is True and acceptance.reason is None
+    with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+        await _accept_as(db_session, admin, ctx, carrier)
+    await db_session.commit()
+    assert (await _row(db_session, carrier)).supersede_candidate is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["author", "linked"])
+@pytest.mark.parametrize("writer", ["accept", "post"])
+async def test_another_linked_accounts_edge_is_allowed_in_a_private_context(
+    db_session, caller, writer
+):
+    """#2549: the probe reads the carrier author's row and the caller's row,
+    the two accounts an accept writes under. A different declared edge kept by
+    a third linked account is met by neither write: ``allowed``, and both the
+    accept (under the author) and ``POST /graph/edges`` (under the caller) go
+    through."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
+    third = await _user(db_session, "github")
+    await IdentityLinkService(db_session).link(admin.user_id, third.user_id)
+    await db_session.commit()
+    carrier, target = await _pair(db_session, ctx, admin, admin)
+    accepter, holder = (admin, oauth) if caller == "author" else (oauth, third)
+    await _declare(db_session, holder, ws, ctx, carrier, target, **_OTHER)
+
+    acceptance = await _acceptance(db_session, accepter, carrier)
+
+    assert acceptance.allowed is True and acceptance.reason is None
+    if writer == "accept":
+        with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+            await _accept_as(db_session, accepter, ctx, carrier)
+    else:
+        await _post_supersedes(db_session, accepter, ctx, carrier, target)
+    await db_session.commit()
+    assert (await _row(db_session, carrier)).supersede_candidate is None
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ import {
   waitFor,
   cleanup,
   fireEvent,
+  within,
 } from "@testing-library/react";
 import type { PlanTierFeature } from "@/lib/api/workspaces";
 
@@ -693,5 +694,45 @@ describe("SearchSettingsSection save bar (#2159)", () => {
     expect(
       (screen.getByLabelText("fetchFactorLabel") as HTMLInputElement).value,
     ).toBe("3");
+  });
+
+  it("is the same accented status strip as the context settings bar (#2595)", async () => {
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    const input = await screen.findByLabelText("fetchFactorLabel");
+    // Mounted and empty before the edit, so the message is a change inside
+    // an existing live region (one inserted with its text is not reliably
+    // announced).
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toBeEmptyDOMElement();
+    expect(bar()).toBeNull();
+    fireEvent.change(input, { target: { value: "5" } });
+
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent(
+      "unsavedFields(fields=unsavedFieldFetchFactor)",
+    );
+    expect(status.className).toContain("font-medium");
+    expect(status.className).toContain("text-foreground");
+    // A decorative leading icon in the accent colour.
+    const icon = status.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon!.getAttribute("class")).toContain("text-amber-500");
+    // Only the label is live: the buttons' "saving" relabel is not re-read.
+    expect(within(status).queryByRole("button")).toBeNull();
+
+    const el = bar()!;
+    expect(el.contains(status)).toBe(true);
+    expect(el.className).toContain("border-amber-500/50");
+    expect(el.className).toContain("shadow-lg");
+    expect(el.className).toContain("animate-in");
+    expect(el.className).toContain("motion-reduce:animate-none");
+    expect(el.querySelector(".bg-amber-500\\/10")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
+    await waitFor(() => expect(bar()).toBeNull());
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toBeEmptyDOMElement();
   });
 });

@@ -131,7 +131,7 @@ remember(
 - Write the `summary` as the safe alternative, stated as a fact — it is the text the model reads.
 - Use `action: "block"` only when the call itself does the damage (it hangs, destroys, or is irreversible); it needs `on: "pre"` and a `match` naming at least one literal character. Otherwise `inform`.
 - Test the pattern against the command that actually failed before storing it; the server accepts a safe regex subset only and reports the offending construct as `invalid details.tool_trigger: <code>`.
-- `details` is replaced wholesale on `update_memory` — resend `tool_trigger` when you update details. Marking, changing or deleting a guardrail needs the context editor role and a user API key.
+- `details` is replaced wholesale on `update_memory` — resend `tool_trigger` when you update details, or send `details_patch`, which merges into the stored details. Marking, changing or deleting a guardrail needs the context editor role and a user API key.
 - Keep a context at 20 or fewer tool guardrails.
 
 ### 4. Confirm

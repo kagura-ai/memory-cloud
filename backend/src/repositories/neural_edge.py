@@ -102,6 +102,27 @@ def _edges_matching(
     return select(NeuralMemoryEdge).where(one_row_per_pair(user_id, conditions))
 
 
+def _pair_rows(
+    user_id: str | frozenset[str],
+    src_id: UUID,
+    dst_id: UUID,
+    workspace_id: str | None,
+    context_id: str | None,
+) -> Select[NeuralMemoryEdge]:
+    """The rows ``user_id`` keeps from ``src_id`` to ``dst_id``, scoped to the
+    workspace/context when given (``get_edge`` / ``list_pair_edges``)."""
+    conditions = [
+        owner_condition(user_id),
+        NeuralMemoryEdge.src_id == src_id,
+        NeuralMemoryEdge.dst_id == dst_id,
+    ]
+    if workspace_id:
+        conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+    if context_id:
+        conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+    return select(NeuralMemoryEdge).where(and_(*conditions))
+
+
 class NeuralEdgeRepository:
     """Repository for Neural Memory edge operations (Issue #84).
 
@@ -548,23 +569,42 @@ class NeuralEdgeRepository:
         Returns:
             Edge or None if not found
         """
-        conditions = [
-            owner_condition(user_id),
-            NeuralMemoryEdge.src_id == src_id,
-            NeuralMemoryEdge.dst_id == dst_id,
-        ]
-
-        if workspace_id:
-            conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
-        if context_id:
-            conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
-
-        stmt = select(NeuralMemoryEdge).where(and_(*conditions))
+        stmt = _pair_rows(user_id, src_id, dst_id, workspace_id, context_id)
         if reads_parallel_rows(user_id):
             result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST).limit(1))
             return result.scalars().first()
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_pair_edges(
+        self,
+        user_id: str | frozenset[str],
+        src_id: UUID,
+        dst_id: UUID,
+        *,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> list[NeuralMemoryEdge]:
+        """Every row ``user_id`` keeps from ``src_id`` to ``dst_id`` (#2549).
+
+        :meth:`get_edge` stands the strongest row in for an identity-link
+        set's parallel rows (#1867); a check that must see each account's row
+        — a differing declared edge behind a stronger one — reads them all
+        here. At most one per account (``unique_edge``), strongest first.
+
+        Args:
+            user_id: User identifier, or the identity-link set of a read
+            src_id: Source node ID
+            dst_id: Destination node ID
+            workspace_id: Workspace ID (for isolation)
+            context_id: Context ID (for isolation)
+
+        Returns:
+            The pair's rows, empty when there is none
+        """
+        stmt = _pair_rows(user_id, src_id, dst_id, workspace_id, context_id)
+        result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST))
+        return list(result.scalars().all())
 
     async def get_outgoing_edges(
         self,

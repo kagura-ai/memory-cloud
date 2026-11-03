@@ -60,6 +60,18 @@ _PARTIAL_ROLLBACK_HELP = (
     "if present, when reporting a failed action."
 )
 
+# #2547: since #2088 a Memory Analysis run writes a ``sleep_reports`` row with
+# ``source='analysis'`` that carries its LLM spend. No Sleep phase ran under
+# it, so it records no Sleep actions: ``get_sleep_report`` says so and
+# ``rollback_sleep_run`` refuses it (the web UI's note on these rows is #2219).
+_SOURCE_ANALYSIS = "analysis"
+_ANALYSIS_REPORT_NOTE = (
+    "This is an analysis report (source 'analysis'): it records the LLM spend of a "
+    "Memory Analysis run (cluster labeling). No Sleep phase ran and it has no Sleep "
+    "actions, so rollback_sleep_run has nothing to roll back. The clusters are on the "
+    "analysis run itself (list_analyses)."
+)
+
 
 def _report_to_summary(report: Any) -> dict[str, Any]:
     """Convert SleepReport to summary dict for history listing."""
@@ -433,9 +445,10 @@ async def handle_get_sleep_report(
             rows = rows[:actions_limit]
 
             detail = _report_to_detail(report)
+            note = {"note": _ANALYSIS_REPORT_NOTE} if report.source == _SOURCE_ANALYSIS else {}
             budget = (
                 max_chars
-                - json_chars({"status": "success", "report": detail})
+                - json_chars({"status": "success", "report": detail, **note})
                 - _SLEEP_REPORT_ENVELOPE_RESERVE
             )
             actions, cut = _page_actions([_action_to_dict(a) for a in rows], budget)
@@ -472,6 +485,7 @@ async def handle_get_sleep_report(
                 action_count=action_count,
                 actions_has_more=has_more,
                 actions_next_cursor=actions[-1]["id"] if has_more and actions else None,
+                **note,
             )
         except Exception:
             await db.rollback()
@@ -901,6 +915,21 @@ async def handle_rollback_sleep_run(
             refusal = await _authorize_report_rollback(db, user_id, report)
             if refusal:
                 return refusal
+
+            # #2547: after the context gate (a caller who cannot reach the
+            # context learns nothing about the row) and before the status
+            # check, so a failed or cancelled analysis row gets this answer too.
+            if report.source == _SOURCE_ANALYSIS:
+                return _error_response(
+                    "analysis_report",
+                    f"Report {report_uuid} is an analysis report: it records the LLM spend "
+                    "of a Memory Analysis run and has no Sleep actions, so there is "
+                    "nothing to roll back.",
+                    help=(
+                        "get_sleep_history lists the context's Sleep runs (source 'sleep', "
+                        "its default); roll back one of those."
+                    ),
+                )
 
             # #1183: 'degraded' runs (partial judge failures) still executed
             # real merges/promotions — they must stay rollbackable.
