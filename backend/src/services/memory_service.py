@@ -2034,7 +2034,7 @@ class MemoryService:
         check_expected_version(memory, request.expected_version)
         # #2585: add_tags / remove_tags / details_patch are a tags / details
         # write from here on (the stored list, for the lint below).
-        stored_tags = list(memory.tags or [])
+        stored_tags = set(memory.tags or [])
         self._resolve_partial_edits(memory, request, check_memory_tags)
         # #2330 D7: a top-level observed_at is a details write from here on.
         request.details = self._fold_observed_at(
@@ -2147,7 +2147,7 @@ class MemoryService:
         # #2585: an add_tags / remove_tags call lints the tags it added, not the
         # ones it left alone.
         added_tags = (
-            [tag for tag in request.tags or [] if tag not in set(stored_tags)]
+            [tag for tag in request.tags or [] if tag not in stored_tags]
             if request.add_tags is not None or request.remove_tags is not None
             else None
         )
