@@ -2784,30 +2784,40 @@ class TestRetiredPointDrainReleasesTheLockAgainstTheDb:
             stalled.set()
             await asyncio.Event().wait()
 
-        with (
-            patch("services.resource_indexer.delete_points_from_qdrant", _stall),
-            patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", bound),
+        # The probe and the writer connect before the drain starts, so once it
+        # stalls each needs one round trip on an open connection, far inside
+        # the bound, rather than a new connection racing it.
+        async with (
+            isolated_session(db_session) as probe,
+            isolated_session(db_session) as writer,
         ):
-            started = time.monotonic()
-            drain = asyncio.create_task(indexer._drop_retired_points())
-            try:
-                async with asyncio.timeout(bound + 10):
-                    await stalled.wait()
-                async with isolated_session(db_session) as probe:
+            await probe.execute(select(1))
+            await writer.execute(select(1))
+            with (
+                patch("services.resource_indexer.delete_points_from_qdrant", _stall),
+                patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", bound),
+            ):
+                started = time.monotonic()
+                drain = asyncio.create_task(indexer._drop_retired_points())
+                try:
+                    async with asyncio.timeout(bound + 10):
+                        await stalled.wait()
                     held_during_stall = not await try_exclude_point_writers(probe)
                     await probe.rollback()
-                async with isolated_session(db_session) as writer:
                     async with asyncio.timeout(bound + 10):
                         await hold_point_writer_lock(writer)
                     writer_waited = time.monotonic() - started
                     await writer.rollback()
-                async with asyncio.timeout(bound + 10):
-                    await drain
-            finally:
-                drain.cancel()
+                    async with asyncio.timeout(bound + 10):
+                        await drain
+                finally:
+                    drain.cancel()
 
         assert held_during_stall
-        assert writer_waited < bound + 5
+        # The drain's bound starts after ``started``, so a writer let in by
+        # the bound waited at least that long; earlier means the lock went
+        # before the bound, much later that the bound did not release it.
+        assert bound - 0.05 <= writer_waited < bound + 5
         async with isolated_session(db_session) as after:
             assert await try_exclude_point_writers(after) is True
             await after.rollback()
