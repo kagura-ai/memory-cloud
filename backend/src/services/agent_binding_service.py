@@ -30,6 +30,7 @@ from auth.workspace_roles import ACCESS_READ, Access
 from models.agent import (
     _ALL_BINDING_WRITE_POLICIES,
     AGENT_ENFORCEMENT_SHADOW,
+    BINDING_WRITE_POLICY_DIRECT,
     Agent,
     AgentContextBinding,
 )
@@ -473,6 +474,43 @@ async def agent_binding_permits(
     return allowed
 
 
+def binding_grants(binding: AgentContextBinding | None, access: Access) -> bool:
+    """The context-level binding decision, before the enforcement mode.
+
+    ``can_read`` grants a read, ``write_policy='direct'`` a write. No row =
+    not in the agent's binding set: default-deny (applies only to newly bound
+    agents — unbound keys never reach a binding evaluation).
+    """
+    if binding is None:
+        return False
+    if access == ACCESS_READ:
+        return bool(binding.can_read)
+    return binding.write_policy == BINDING_WRITE_POLICY_DIRECT
+
+
+async def agent_binding_would_permit(
+    db: AsyncSession, context_id: uuid.UUID, access: Access
+) -> bool:
+    """Whether the request's agent binding would let ``access`` through (#2518).
+
+    The same context-level answer :meth:`AgentBindingService.evaluate_context_access`
+    gives — a shadow-mode agent proceeds, so it is permitted — but silent: no
+    WARNING and no deny-audit row. For a capability a client reads before it
+    offers an action (``supersede_candidate.acceptance``), where a "no" is not
+    a denied request; the action itself still goes through the enforcing
+    chokepoint. No-op for every non-agent credential (one contextvar read).
+    The per-memory type/source filter is not applied: the caller has already
+    read the row through it.
+    """
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    if scope is None or scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
+        return True
+    binding = await AgentBindingService(db).get_binding_for_context(scope.agent_id, context_id)
+    return binding_grants(binding, access)
+
+
 class AgentBindingService:
     """CRUD + subtractive evaluation over ``agent_context_bindings``."""
 
@@ -729,15 +767,7 @@ class AgentBindingService:
             )
         )
         binding = result.scalar_one_or_none()
-
-        if binding is not None:
-            permitted = (
-                binding.can_read if access == ACCESS_READ else (binding.write_policy == "direct")
-            )
-        else:
-            # No row = not in the agent's binding set: default-deny (applies
-            # only to newly bound agents — unbound keys never reach here).
-            permitted = False
+        permitted = binding_grants(binding, access)
 
         row_filter_denied = False
         if (

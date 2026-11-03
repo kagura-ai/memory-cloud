@@ -2070,7 +2070,12 @@ class MemoryService:
         """
         from models.memory import EDGE_TYPE_SUPERSEDES
         from services.edge_service import create_declared_edge
-        from services.supersede_acceptance import acceptance_reason, pair_ownership
+        from services.supersede_acceptance import (
+            ACCEPT_CONFIDENCE,
+            ACCEPT_WEIGHT,
+            acceptance_reason,
+            pair_ownership,
+        )
         from utils.exceptions import SupersedeEdgeConflictError
 
         # Not fail-open here: a lookup failure is a server error, not "no
@@ -2140,9 +2145,10 @@ class MemoryService:
             source_id=memory.id,
             target_id=target_id,
             edge_type=EDGE_TYPE_SUPERSEDES,
-            # create_edge's defaults for a user assertion (#738).
-            weight=1.0,
-            confidence=1.0,
+            # create_edge's defaults for a user assertion (#738); acceptance
+            # reads the same values for its edge_exists check (#2518).
+            weight=ACCEPT_WEIGHT,
+            confidence=ACCEPT_CONFIDENCE,
             workspace_id=str(memory.workspace_id),
             context_id=str(memory.context_id),
             overwrite=False,
@@ -3320,8 +3326,10 @@ class MemoryService:
                 last_used_at). The MCP handler passes False for a
                 continuation page (it records a continuation that is the
                 session's first read via ``record_adoption``, #2139) and for a
-                call that returns no Layer-3 field (#1685). The access check
-                and the access audit event run either way.
+                call that returns no Layer-3 field (#1685); REST passes the
+                request's ``record_access`` (#2518, the web dialog's re-read
+                after a refused accept). The access check and the access
+                audit event run either way.
             version: An earlier version to read (#2043): the versioned fields
                 are rebuilt from the revision log, ``historical`` is true and
                 the links / supersede suggestion (which describe the memory

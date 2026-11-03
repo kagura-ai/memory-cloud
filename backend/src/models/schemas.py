@@ -387,16 +387,20 @@ class SupersedeAcceptance(TZAwareBaseModel):
     """#2427: whether the caller may accept a supersede suggestion.
 
     The server's answer, from the rule the accept path enforces: write access
-    to the context, both memories the caller's own (#1803/#2313), and a
-    candidate not written after the memory carrying it (#2308). ``reason`` is
-    set only when ``allowed`` is false: ``not_writable`` (no write access to
-    the context), ``not_owner`` (either memory, or both, is not the caller's
-    own; which one is never said), ``newer_candidate`` (the candidate was
-    written after this memory). The write path still checks on its own.
+    to the context, both memories the caller's own (#1803/#2313), a candidate
+    not written after the memory carrying it (#2308), and no different
+    declared edge on the pair (#2518). ``reason`` is set only when ``allowed``
+    is false: ``not_writable`` (no write access to the context, an agent
+    binding that does not grant the write included), ``not_owner`` (either
+    memory, or both, is not the caller's own; which one is never said),
+    ``newer_candidate`` (the candidate was written after this memory),
+    ``edge_exists`` (a different declared edge already links the pair: keep it
+    and dismiss the suggestion, or replace it with
+    ``create_edge(overwrite=true)``). The write path still checks on its own.
     """
 
     allowed: bool
-    reason: Literal["not_writable", "not_owner", "newer_candidate"] | None = None
+    reason: Literal["not_writable", "not_owner", "newer_candidate", "edge_exists"] | None = None
 
 
 class SupersedeCandidate(TZAwareBaseModel):
@@ -859,6 +863,10 @@ class ReferenceRequest(BaseModel):
     # #2043: read an earlier version, rebuilt from the revision log. Omitted
     # (or the current version): the memory as it is.
     version: int | None = Field(default=None, ge=1)
+    # #2518: false reads without recording access stats (access_count, the
+    # #1046 adoption signal reference_count, last_used_at) — a client's own
+    # re-read, not an adoption. The access check and audit run either way.
+    record_access: bool = True
 
 
 class LinkedMemoryRef(TZAwareBaseModel):
