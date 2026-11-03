@@ -11,8 +11,10 @@ import type {
 } from "../types/graph";
 
 // #1416 mirror of backend `CreateEdgeRequest` (routes/graph.py). Creates a
-// user-declared edge between two memories in a context. The supersede-suggestion
-// confirm flow (#1403) posts with `edge_type: "supersedes"`.
+// user-declared edge between two memories in a context, under the caller. The
+// supersede-suggestion confirm flow (#1403) no longer posts here: it accepts
+// through the memory's PATCH (#2600), which keeps the edge under the memory's
+// author.
 export interface CreateEdgeRequest {
   context_id: string;
   source_id: string;
@@ -62,8 +64,8 @@ export const graphApi = {
   },
 
   // #1416: create a user-declared edge (REST twin of the MCP `create_edge`
-  // tool). Used by the supersede-suggestion confirm flow to POST a
-  // `supersedes` edge, which self-heals the stored suggestion (#1403).
+  // tool). A `supersedes` edge self-heals the stored suggestion (#1403); the
+  // web confirm flow accepts through `updateMemoryById` instead (#2600).
   async createEdge(request: CreateEdgeRequest): Promise<CreateEdgeResponse> {
     return apiClient.post<CreateEdgeResponse>("/api/v1/graph/edges", request);
   },

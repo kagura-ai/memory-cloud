@@ -196,11 +196,22 @@ export async function forgetBulk(
  * subset of the patchable fields. Omitted fields preserve their current
  * value; `tags` follows replace-all semantics (an empty array clears tags).
  *
+ * `accept_supersede_candidate` / `dismiss_supersede_candidate` (#2600) accept
+ * or reject the memory's current supersede suggestion, as MCP `update_memory`
+ * does: the accept writes the `supersedes` edge under the memory's author and
+ * takes no field edits; the two cannot be combined.
+ *
  * Status code surfacing:
  *   - 200: returns the full `MemoryReference`
+ *   - 403: an accept whose memories stopped being the caller's own between
+ *     resolving the suggestion and writing the edge
  *   - 404: memory does not exist OR caller lacks access (existence not leaked)
+ *   - 409: `expected_version` is stale, or an accept met a different declared
+ *     edge on the pair (`details.reason`: `version_conflict` / `edge_exists`)
  *   - 410: memory was soft-deleted (distinct from 404 so retries can stop)
- *   - 422: validation error (empty patch, importance > 1, etc.)
+ *   - 422: validation error (empty patch, importance > 1, etc.), or an accept
+ *     the server refused (no live suggestion, not the caller's own memories,
+ *     a candidate newer than the memory)
  *
  * Caller propagates errors as `ApiError` (see `lib/api/base.ts`).
  */
@@ -211,6 +222,8 @@ export interface UpdateMemoryByIdPatch {
   importance?: number;
   tags?: string[];
   details?: Record<string, unknown> | null;
+  accept_supersede_candidate?: boolean;
+  dismiss_supersede_candidate?: boolean;
 }
 
 export async function updateMemoryById(

@@ -11,21 +11,24 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const mockPost = vi.fn();
+const mockPatch = vi.fn();
 
 vi.mock("./base", () => ({
   apiClient: {
     get: vi.fn(),
     post: (...args: unknown[]) => mockPost(...args),
+    patch: (...args: unknown[]) => mockPatch(...args),
   },
 }));
 
-import { rememberMemory, recallMemories } from "./memory";
+import { rememberMemory, recallMemories, updateMemoryById } from "./memory";
 
 const REMEMBER = "/api/v1/memory/remember";
 const RECALL = "/api/v1/memory/recall";
 
 beforeEach(() => {
   mockPost.mockReset();
+  mockPatch.mockReset();
 });
 
 describe("rememberMemory", () => {
@@ -141,5 +144,21 @@ describe("recallMemories", () => {
       filters: { context_id: "ctx-1", tags: ["a"], tags_match: "all" },
     });
     expect(res.results[0].folded).toEqual({ count: 1, memory_ids: ["m-old"] });
+  });
+});
+
+// #2600: the web dialog's supersede accept is the memory's PATCH with the
+// update_memory flag, and nothing else in the body (the server refuses an
+// accept that carries a field edit).
+describe("updateMemoryById", () => {
+  it("PATCHes the memory with only the accept flag", async () => {
+    mockPatch.mockResolvedValue({ memory_id: "m 1", supersede_candidate: null });
+    const res = await updateMemoryById("m 1", {
+      accept_supersede_candidate: true,
+    });
+    expect(mockPatch).toHaveBeenCalledWith("/api/v1/memory/m%201", {
+      accept_supersede_candidate: true,
+    });
+    expect(res.supersede_candidate).toBeNull();
   });
 });

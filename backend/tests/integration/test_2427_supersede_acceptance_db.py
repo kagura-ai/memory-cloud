@@ -9,7 +9,9 @@ The parity matrix pins ``allowed`` against the edge writer's own refusal
 (``ensure_supersedes_owned``) over the #2313 author matrix, and the viewer
 case against ``POST /graph/edges``. #2518 adds the agent binding (a read-only
 one is ``not_writable``, as the accept path's 404 says) and ``edge_exists``
-(a different declared edge on the pair, the accept path's 409).
+(a different declared edge on the pair, the accept path's 409). #2600 adds the
+web dialog's accept, ``PATCH /memory/{id}`` with ``accept_supersede_candidate``,
+to the matrix: the same accept path, so the same answers.
 """
 
 from __future__ import annotations
@@ -20,15 +22,16 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from sqlalchemy import text, update
 
 from api.routes.graph import CreateEdgeRequest, create_graph_edge
+from api.routes.memory import patch_memory as patch_route
 from auth.agent_scope import AgentScope, set_agent_scope
 from models.agent import Agent, AgentContextBinding
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
-from models.schemas import RecallRequest
+from models.schemas import PatchMemoryRequest, RecallRequest
 from services.edge_service import create_declared_edge, ensure_supersedes_owned
 from services.identity_link_service import IdentityLinkService
 from services.memory_service import MemoryService
@@ -57,6 +60,21 @@ async def _acceptance(db, caller: User, memory_id):
     candidate = (await MemoryService(db).reference(memory_id, caller.user_id)).supersede_candidate
     assert candidate is not None, "the suggestion itself must surface"
     return candidate.acceptance
+
+
+async def _rest_accept(db, caller: User, _ctx: Context, memory_id):
+    """The web dialog's accept (#2600): ``PATCH /memory/{id}``, the route handler."""
+    with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+        return await patch_route(
+            memory_id,
+            PatchMemoryRequest(accept_supersede_candidate=True),
+            {"user_id": caller.user_id},
+            MemoryService(db),
+        )
+
+
+# The two transports of the one accept path: update_memory and the PATCH route.
+_ACCEPTS = {"update_memory": _accept_as, "patch": _rest_accept}
 
 
 async def _viewer(db, workspace: Workspace) -> User:
@@ -238,6 +256,37 @@ async def test_allowed_iff_the_edge_writer_accepts_the_pair(db_session, authors)
         assert acceptance.reason == "not_owner"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authors",
+    ["own", "foreign_source", "foreign_target", "foreign_both", "linked_private", "linked_shared"],
+)
+async def test_allowed_iff_the_web_accept_goes_through(db_session, authors):
+    """#2600: the same author matrix through ``PATCH /memory/{id}``: ``allowed``
+    ⇔ a 200 with the edge under the carrier's author; a refusal is the 422."""
+    from tests.integration.test_2308_accept_supersede_candidate_db import _edges
+
+    private = authors == "linked_private"
+    a, b, _, ctx, _ = await _seed(db_session, private=private, link=authors.startswith("linked"))
+    source_author = a if authors in {"foreign_source", "foreign_both", "linked_private"} else b
+    target_author = b if authors in {"own", "foreign_source"} else a
+    src, dst = await _pair(db_session, ctx, source_author, target_author)
+
+    acceptance = await _acceptance(db_session, b, src)
+    try:
+        await _rest_accept(db_session, b, ctx, src)
+        await db_session.commit()
+        accepted = True
+    except HTTPException as exc:
+        assert exc.status_code == 422
+        await db_session.rollback()
+        accepted = False
+
+    assert acceptance.allowed is accepted
+    owners = [e.user_id for e in await _edges(db_session, src, dst)]
+    assert owners == ([source_author.user_id] if accepted else [])
+
+
 async def _bind(db, owner: User, ws: Workspace, ctx: Context, *, mode: str, write_policy: str):
     """An agent of ``owner``'s bound to ``ctx``, as the request's credential would set it."""
     agent = Agent(
@@ -333,8 +382,9 @@ async def _declare(db, owner: User, ws: Workspace, ctx: Context, src, dst, **val
     ],
     ids=["other_type", "other_weight"],
 )
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
 async def test_a_different_declared_edge_is_edge_exists_and_the_accept_conflicts(
-    db_session, values
+    db_session, values, transport
 ):
     """#2518: the 409 the click would meet is reported before it."""
     a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
@@ -348,7 +398,7 @@ async def test_a_different_declared_edge_is_edge_exists_and_the_accept_conflicts
 
     assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
     with pytest.raises(SupersedeEdgeConflictError):
-        await _accept_as(db_session, a, ctx, carrier)
+        await _ACCEPTS[transport](db_session, a, ctx, carrier)
     await db_session.rollback()
 
 
@@ -424,9 +474,10 @@ async def test_the_linked_callers_own_edge_is_edge_exists_in_a_private_context(d
 
 
 @pytest.mark.asyncio
-async def test_the_authors_edge_is_edge_exists_for_a_linked_caller(db_session):
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
+async def test_the_authors_edge_is_edge_exists_for_a_linked_caller(db_session, transport):
     """#2549: admin's different declared edge is what the accept path (under
-    the carrier's author) meets when oauth accepts."""
+    the carrier's author) meets when oauth accepts — from the web too (#2600)."""
     admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
     carrier, target = await _pair(db_session, ctx, admin, admin)
     await _declare(db_session, admin, ws, ctx, carrier, target, **_OTHER)
@@ -435,7 +486,7 @@ async def test_the_authors_edge_is_edge_exists_for_a_linked_caller(db_session):
 
     assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
     with pytest.raises(SupersedeEdgeConflictError):
-        await _accept_as(db_session, oauth, ctx, carrier)
+        await _ACCEPTS[transport](db_session, oauth, ctx, carrier)
     await db_session.rollback()
 
 
@@ -458,15 +509,15 @@ async def test_a_shared_context_reads_only_the_authors_edge(db_session):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("caller", ["author", "linked"])
-@pytest.mark.parametrize("writer", ["accept", "post"])
+@pytest.mark.parametrize("writer", ["accept", "patch", "post"])
 async def test_another_linked_accounts_edge_is_allowed_in_a_private_context(
     db_session, caller, writer
 ):
     """#2549: the probe reads the carrier author's row and the caller's row,
     the two accounts an accept writes under. A different declared edge kept by
     a third linked account is met by neither write: ``allowed``, and both the
-    accept (under the author) and ``POST /graph/edges`` (under the caller) go
-    through."""
+    accept (under the author; from MCP or, #2600, the web) and ``POST
+    /graph/edges`` (under the caller) go through."""
     admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
     third = await _user(db_session, "github")
     await IdentityLinkService(db_session).link(admin.user_id, third.user_id)
@@ -481,6 +532,8 @@ async def test_another_linked_accounts_edge_is_allowed_in_a_private_context(
     if writer == "accept":
         with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
             await _accept_as(db_session, accepter, ctx, carrier)
+    elif writer == "patch":
+        await _rest_accept(db_session, accepter, ctx, carrier)
     else:
         await _post_supersedes(db_session, accepter, ctx, carrier, target)
     await db_session.commit()

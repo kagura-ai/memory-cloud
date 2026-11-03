@@ -2132,7 +2132,10 @@ class MemoryService:
         if request.accept_supersede_candidate:
             # #2308: a graph action only — the schema refuses field edits in the
             # same call, so nothing below (re-embed, versioning) applies.
-            return await self._accept_supersede_candidate(memory, user_id)
+            superseded = await self._accept_supersede_candidate(memory, user_id)
+            return await self._in_place_updated(
+                memory, user_id, re_embedded=False, superseded=superseded
+            )
 
         # Pre-compute normalized values (avoid double normalization)
         normalized_summary = (
@@ -2251,17 +2254,7 @@ class MemoryService:
         drift in what they audit or return. ``lint_checked_tags`` narrows the
         tag lint to the tags a call added (None: every tag).
         """
-        # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
-        from services.memory_access_event_writer import emit_memory_access_event
-
-        await emit_memory_access_event(
-            operation="update",
-            outcome="success",
-            workspace_id=memory.workspace_id,
-            user_id=user_id,
-            context_id=memory.context_id,
-            memory_id=memory.id,
-        )
+        await self._audit_update(memory, user_id)
 
         return UpdateMemoryResponse(
             memory_id=memory.id,
@@ -2290,7 +2283,26 @@ class MemoryService:
             ),
         )
 
-    async def _accept_supersede_candidate(self, memory: Any, user_id: str) -> UpdateMemoryResponse:
+    @staticmethod
+    async def _audit_update(memory: Any, user_id: str) -> None:
+        """#1286 item 2 (P0-5): audit a committed in-place write.
+
+        A no-op unless the caller is a verified agent. ``update_memory`` and
+        the REST PATCH (#439) both emit ``operation="update"``, so the audit
+        vocabulary stays unified across surfaces (#1291/#1292 parity).
+        """
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="update",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory.id,
+        )
+
+    async def _accept_supersede_candidate(self, memory: Any, user_id: str) -> UUID:
         """#2308: accept ``memory``'s current supersede suggestion.
 
         The candidate is the one the read path would show for this row as it
@@ -2302,6 +2314,12 @@ class MemoryService:
         stale copy. The edge is written by ``create_declared_edge`` — the
         function ``create_edge`` uses — which also clears the suggestion, so
         the duplicate contract and the self-heal are create_edge's own.
+
+        The one accept of both transports: ``update_memory`` and, #2600, the
+        REST PATCH (the web dialog), each building its own response.
+
+        Returns:
+            The accepted candidate's memory id, after the commit.
 
         Raises:
             ValueError: no live suggestion to accept, one written after this
@@ -2415,10 +2433,7 @@ class MemoryService:
             # success here would leave the suggestion surfacing next to its edge.
             raise RuntimeError("supersede suggestion was not cleared on accept")
         await self.db.commit()
-
-        return await self._in_place_updated(
-            memory, user_id, re_embedded=False, superseded=target_id
-        )
+        return target_id
 
     async def _parallel_verdict_current(self, memory: Any) -> bool:
         """#2059: whether ``memory``'s stored ``parallel`` verdict still hides it.
@@ -2464,7 +2479,7 @@ class MemoryService:
     @staticmethod
     def _apply_supersede_dismissal(
         memory: Any,
-        request: UpdateMemoryRequest,
+        request: UpdateMemoryRequest | PatchMemoryRequest,
         *,
         drop_baseline: bool = False,
         parallel_current: bool = False,
@@ -2473,7 +2488,7 @@ class MemoryService:
 
         Args:
             memory: The loaded update target.
-            request: The update request.
+            request: The update request, or the REST PATCH (#2600).
             drop_baseline: Set when this same call also re-embeds the memory.
                 The tombstone normally records the similarity at dismissal so a
                 later MATERIAL change can re-surface the pair; but a re-embed in
@@ -3140,6 +3155,12 @@ class MemoryService:
         the full request body (including ``details`` JSON) just to extract
         a key set — wasteful for our use case.
 
+        ``accept_supersede_candidate`` / ``dismiss_supersede_candidate``
+        (#2600) run update_memory's accept and dismissal: the accept is
+        ``_accept_supersede_candidate`` itself (ValueError when refused,
+        ``SupersedeEdgeConflictError`` on a different declared edge), so the
+        web dialog's edge lands under the carrier's author as the MCP one does.
+
         Returns the updated memory as ``ReferenceResponse`` (full detail). The
         response is constructed inline from the in-scope ORM object to avoid
         a second permission check + extra commit round-trip that delegating
@@ -3192,6 +3213,16 @@ class MemoryService:
         ):
             await self._require_guardrail_author(user_id, memory.context_id)
 
+        if request.accept_supersede_candidate:
+            # #2600: the web dialog's accept is update_memory's (#2308): the
+            # same ownership rules and the edge under the carrier's author,
+            # where detection looks the pair's edge up, so a linked account's
+            # accept does not let the next re-embed resurface the suggestion.
+            # A graph action only: the schema refuses field edits with it.
+            await self._accept_supersede_candidate(memory, user_id)
+            await self._audit_update(memory, user_id)
+            return await self._patch_build_response(memory, user_id)
+
         normalized_summary = (
             normalize_for_search(request.summary) if "summary" in provided_fields else None
         )
@@ -3202,11 +3233,26 @@ class MemoryService:
         if "content" in provided_fields and request.content != memory.content:
             needs_reembed = True
 
+        # #2600: the dismissal as update_memory applies it (#1504, #2059):
+        # the parallel verdict is judged on the texts before this patch's
+        # own edit, and a dismissal-only patch keeps the timestamp.
+        parallel_current = (
+            await self._parallel_verdict_current(memory)
+            if request.dismiss_supersede_candidate and not needs_reembed
+            else False
+        )
+        updated_at_before = memory.updated_at
+
         self._patch_guard_size(memory, request, provided_fields, normalized_summary)
         before = versioned_snapshot(memory)
         effective_details = self._patch_apply_fields(
             memory, request, provided_fields, normalized_summary
         )
+        self._apply_supersede_dismissal(
+            memory, request, drop_baseline=needs_reembed, parallel_current=parallel_current
+        )
+        if request.dismiss_supersede_candidate and not request.edit_fields():
+            memory.updated_at = updated_at_before
         record_edit(self.db, memory, before, actor_user_id=user_id)  # #2043
 
         memory_workspace_id = str(memory.workspace_id)
@@ -3244,20 +3290,9 @@ class MemoryService:
             re_embedded=needs_reembed,
         )
 
-        # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
         # PATCH is the REST-side update surface (#439); MCP's is
-        # `_update_in_place` — both emit operation="update" so the audit
-        # vocabulary stays unified across surfaces (#1291/#1292 parity).
-        from services.memory_access_event_writer import emit_memory_access_event
-
-        await emit_memory_access_event(
-            operation="update",
-            outcome="success",
-            workspace_id=memory.workspace_id,
-            user_id=user_id,
-            context_id=memory.context_id,
-            memory_id=memory.id,
-        )
+        # `_update_in_place` — both audit as operation="update".
+        await self._audit_update(memory, user_id)
 
         return await self._patch_build_response(memory, user_id)
 

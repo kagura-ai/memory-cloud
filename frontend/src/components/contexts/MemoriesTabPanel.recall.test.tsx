@@ -38,16 +38,14 @@ vi.mock("next/navigation", () => ({
 const mockGetMemories = vi.fn();
 const mockReferenceMemory = vi.fn();
 const mockRecallMemories = vi.fn();
+// #2600: the dialog's accept is the memory's PATCH.
+const mockUpdateMemoryById = vi.fn();
 vi.mock("@/lib/api/memory", () => ({
   getMemories: (...a: unknown[]) => mockGetMemories(...a),
   referenceMemory: (...a: unknown[]) => mockReferenceMemory(...a),
   recallMemories: (...a: unknown[]) => mockRecallMemories(...a),
+  updateMemoryById: (...a: unknown[]) => mockUpdateMemoryById(...a),
   forgetMemory: vi.fn(),
-}));
-
-const mockCreateEdge = vi.fn();
-vi.mock("@/lib/api/graph", () => ({
-  graphApi: { createEdge: (...a: unknown[]) => mockCreateEdge(...a) },
 }));
 
 vi.mock("@/components/contexts/TagCloud", () => ({
@@ -311,7 +309,7 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     submitQuery("deploy");
     await screen.findByText("Deploy target is region B");
     const listCalls = mockGetMemories.mock.calls.length;
-    mockReferenceMemory.mockResolvedValueOnce({
+    const newest = {
       memory_id: NEWEST,
       summary: "Deploy target is region B",
       context_summary: null,
@@ -325,6 +323,9 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
       created_at: "2026-10-01T00:00:00Z",
       updated_at: "2026-10-01T00:00:00Z",
       client: "api",
+    };
+    mockReferenceMemory.mockResolvedValueOnce({
+      ...newest,
       supersede_candidate: {
         memory_id: OLDER,
         summary: "Deploy target is region A",
@@ -333,7 +334,11 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
         acceptance: { allowed: true },
       },
     });
-    mockCreateEdge.mockResolvedValueOnce({ operation: "created" });
+    // The PATCH reply: the suggestion cleared.
+    mockUpdateMemoryById.mockResolvedValueOnce({
+      ...newest,
+      supersede_candidate: null,
+    });
     fireEvent.click(screen.getByRole("button", { name: "view" }));
 
     fireEvent.click(
@@ -341,11 +346,8 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     );
 
     await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(2));
-    expect(mockCreateEdge).toHaveBeenCalledWith({
-      context_id: "ctx-1",
-      source_id: NEWEST,
-      target_id: OLDER,
-      edge_type: "supersedes",
+    expect(mockUpdateMemoryById).toHaveBeenCalledWith(NEWEST, {
+      accept_supersede_candidate: true,
     });
     expect(mockRecallMemories).toHaveBeenLastCalledWith({
       query: "deploy",

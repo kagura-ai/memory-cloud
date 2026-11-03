@@ -6751,6 +6751,10 @@
       },
       "PatchMemoryRequest": {
         "properties": {
+          "accept_supersede_candidate": {
+            "default": false,
+            "type": "boolean"
+          },
           "add_tags": {
             "anyOf": [
               {
@@ -6797,6 +6801,10 @@
                 "type": "null"
               }
             ]
+          },
+          "dismiss_supersede_candidate": {
+            "default": false,
+            "type": "boolean"
           },
           "expected_version": {
             "anyOf": [

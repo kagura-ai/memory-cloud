@@ -70,9 +70,9 @@ interface MemoryDetailDialogProps {
   incomingHasMore?: boolean;
   onOpenLinkedMemory?: (memoryId: string) => void;
   // #1403/#1416: supersede suggestion + confirm action. Optional — omit (or
-  // pass null) to hide the suggestion block. `onAcceptSupersede` POSTs the
-  // `supersedes` edge; `supersedeAccepting` drives the confirm button's
-  // pending state.
+  // pass null) to hide the suggestion block. `onAcceptSupersede` accepts it
+  // (the `supersedes` edge, #2600: through the memory's PATCH);
+  // `supersedeAccepting` drives the confirm button's pending state.
   supersedeCandidate?: SupersedeCandidate | null;
   onAcceptSupersede?: () => void;
   supersedeAccepting?: boolean;

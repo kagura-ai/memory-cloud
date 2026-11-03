@@ -150,7 +150,6 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
     setMemoryIdParam,
-    contextId,
     onSupersedeAccepted: handleSupersedeAccepted,
   });
 

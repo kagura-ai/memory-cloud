@@ -589,20 +589,33 @@ async def patch_memory(
     into the stored details (a ``null`` value deletes the key) (#2585); not
     together with ``tags`` / ``details``. ``expected_version`` (#2043)
     makes the patch conditional on the memory's current version.
+    ``accept_supersede_candidate`` / ``dismiss_supersede_candidate`` (#2600)
+    accept or reject the memory's current supersede suggestion as
+    ``update_memory`` does: the accept writes the declared ``supersedes``
+    edge under the memory's author and takes no field edits; a dismissal may
+    share the patch with them.
 
     Status codes:
         200: Updated successfully. Body is the full ``ReferenceResponse``.
+        403: An accept whose memories stopped being the caller's own (or
+             live) between resolving the suggestion and writing the edge
+             (#2313's final check); nothing was written.
         404: Memory does not exist OR the caller lacks access (existence
              is intentionally not leaked).
         409: ``expected_version`` is not the memory's current version
              (``details.reason`` = ``version_conflict``, ``details.
-             current_version``); nothing was written (#2043).
+             current_version``); nothing was written (#2043). Or an accept
+             met a different declared edge on the pair (``details.reason`` =
+             ``edge_exists``, ``details.existing_edge``); nothing was written.
         410: Memory was soft-deleted; the tombstone exists but the resource
              is gone. Distinguishing 410 from 404 lets clients stop retrying.
         422: Request body validation failed (empty patch, importance out of
              range, summary < 10 chars, ``tags`` with ``add_tags``, an added
              tag over 64 chars, a result over 100 tags, an invalid reserved
-             ``details`` key, etc.).
+             ``details`` key, an accept with a field edit or with a
+             dismissal, etc.). Also an accept the server refuses: no live
+             suggestion, a memory that is not the caller's own, or a
+             candidate written after the memory carrying it.
         429: The patched memory's post-patch size exceeds ``MAX_CONTENT_SIZE``
              (1MB) — same envelope as ``remember`` / ``update_memory``.
 

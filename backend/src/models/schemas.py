@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -1263,6 +1264,13 @@ UPDATE_MEMORY_EDIT_FIELDS: tuple[str, ...] = (
 # #2585: the in-place partial edits of the stored tags / details.
 PARTIAL_EDIT_FIELDS: tuple[str, ...] = ("add_tags", "remove_tags", "details_patch")
 
+# #2600: the PatchMemoryRequest fields that write nothing onto the memory's
+# own fields: a precondition and the supersede actions. Every other field the
+# body carries is an edit (``PatchMemoryRequest.edit_fields``).
+PATCH_MEMORY_NON_EDIT_FIELDS: frozenset[str] = frozenset(
+    {"expected_version", "accept_supersede_candidate", "dismiss_supersede_candidate"}
+)
+
 
 def _reject_partial_edit_conflicts(
     has_tags: bool, has_tag_edits: bool, has_details: bool, has_details_patch: bool
@@ -1505,6 +1513,9 @@ class PatchMemoryRequest(BaseModel):
     stored list and details instead (#2585, see ``UpdateMemoryRequest``).
     ``scope`` and ``context_id`` are intentionally excluded — they have
     orthogonal lifecycles handled by separate operations.
+    ``accept_supersede_candidate`` / ``dismiss_supersede_candidate`` (#2600)
+    are update_memory's flags with its rules: the web dialog's accept runs
+    the same path, so the edge is kept under the carrier's author.
     """
 
     summary: str | None = Field(None, min_length=SUMMARY_MIN_LENGTH, max_length=SUMMARY_MAX_LENGTH)
@@ -1548,6 +1559,25 @@ class PatchMemoryRequest(BaseModel):
     # #2043: apply the patch only while the memory is at this version (409
     # version_conflict otherwise, nothing written). Omitted = last writer wins.
     expected_version: VersionNumber | None = None
+    # #2600: update_memory's supersede flags (#1504 / #2308), so the web
+    # dialog's accept writes the edge where the MCP accept does: under the
+    # carrier's author, the account detection looks the pair's edge up under.
+    # Strict booleans: the accept writes a shadowing edge, so a string or a
+    # number is refused rather than coerced (the MCP tool's accept rule).
+    dismiss_supersede_candidate: StrictBool = Field(
+        default=False,
+        description=(
+            "Reject the memory's current supersede_candidate (the pair is tombstoned; "
+            "neither memory is deleted). May share the patch with field edits."
+        ),
+    )
+    accept_supersede_candidate: StrictBool = Field(
+        default=False,
+        description=(
+            "Accept the memory's current supersede_candidate: a declared supersedes "
+            "edge from this memory to the candidate. No field edits in the same patch."
+        ),
+    )
 
     @field_validator("tags", "add_tags")
     @classmethod
@@ -1557,6 +1587,19 @@ class PatchMemoryRequest(BaseModel):
             return v
         return _check_patch_tag_chars(v)
 
+    def edit_fields(self) -> set[str]:
+        """The fields this patch writes onto the memory (presence, not value).
+
+        ``expected_version`` is a precondition and the two supersede flags a
+        graph / suggestion action, not field edits; ``observed_at: null``
+        means "unchanged". The empty-patch rule, the accept's no-edit rule
+        (#2600) and the service's dismissal-only check read this one set.
+        """
+        fields = self.model_fields_set - PATCH_MEMORY_NON_EDIT_FIELDS
+        if self.observed_at is None:
+            fields = fields - {"observed_at"}
+        return fields
+
     @model_validator(mode="after")
     def _at_least_one_field(self) -> "PatchMemoryRequest":
         # `model_fields_set` is a name-only set; cheap. The previous
@@ -1564,13 +1607,22 @@ class PatchMemoryRequest(BaseModel):
         # request (including `details` JSON) just to check emptiness — the
         # service layer already prefers `model_fields_set` for the same
         # reason, so the validator is now consistent with it.
-        # expected_version is a precondition, not a field to update.
-        # observed_at: null means "unchanged", so it is not a field to update.
-        fields = self.model_fields_set - {"expected_version"}
-        if self.observed_at is None:
-            fields = fields - {"observed_at"}
-        if not fields:
+        fields = self.edit_fields()
+        # #2600: a supersede flag set to true is a complete patch on its own
+        # (a false one does nothing, so it is not).
+        if not fields and not (self.accept_supersede_candidate or self.dismiss_supersede_candidate):
             raise ValueError("PATCH request must include at least one field to update")
+        # #2600: update_memory's rules (UpdateMemoryRequest), on presence.
+        if self.accept_supersede_candidate and self.dismiss_supersede_candidate:
+            raise ValueError(
+                "accept_supersede_candidate and dismiss_supersede_candidate cannot "
+                "both be true: accept the suggestion or reject it."
+            )
+        if self.accept_supersede_candidate and fields:
+            raise ValueError(
+                "accept_supersede_candidate cannot be combined with field edits "
+                f"({', '.join(sorted(fields))}); send the edit in a separate PATCH."
+            )
         # Reject explicit `null` for fields that either map to NOT NULL DB
         # columns (`summary`/`content`/`type`/`importance`) — would 500 with a
         # PG integrity error — or would otherwise duplicate semantics with

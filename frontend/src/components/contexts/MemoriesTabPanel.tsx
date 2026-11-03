@@ -132,7 +132,6 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
     setMemoryIdParam,
-    contextId,
     // #2515: the recall rows cache the last query, so a row that just became
     // superseded would stay until the next search. List mode is unchanged.
     onSupersedeAccepted: refreshRecall,
