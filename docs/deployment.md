@@ -1069,7 +1069,10 @@ the subscription refusal). Use the API for successor selections when retiring
 an account with owned resources. API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
 keys and memberships, preserve live connector keys under the workspace owner,
-and remove its identity link. Link provenance (`linked_by`) becomes empty when
+and remove its identity link. Its agent-bound keys are deleted, never handed
+over; an agent left without a live key is suspended and the agents it
+registered name the workspace owner (#2373,
+[agent-credential-runbook.md](ops/agent-credential-runbook.md) §4.1). Link provenance (`linked_by`) becomes empty when
 the account is gone (#1807).
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
@@ -1836,6 +1839,10 @@ Until the point goes it is not a recall hit, but it takes a candidate slot and
 counts in `confidence`. The sweep stays the backstop for a point an embedding
 task wrote after the forget. Apply the `f21_2476_deferred_point_deletes`
 migration before starting this version: `forget` writes to the table.
+`POST /api/v1/memory/forget-bulk` and the memories a `rollback_session` forgets
+take the same path: their points are queued with the delete, removed only
+after the commit, and deferred the same way
+([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)).
 
 The resource indexer cleans up after itself as well. When a new version of a
 document replaces the old one, the indexer deletes the old row. Once the

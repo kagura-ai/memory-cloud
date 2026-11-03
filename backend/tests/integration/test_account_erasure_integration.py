@@ -2821,6 +2821,120 @@ class TestConnectorKeysSurviveErasure:
         assert counts["connector_api_keys_reowned"] == 1
 
 
+class TestAgentCredentialsOfAnErasedMember:
+    """#2373 / #2349: an erased service member's agent key is deleted, never
+    handed to the owner (deletion never widens), and the agent it leaves
+    without a key is suspended; an erased registrar's agents name the owner."""
+
+    @pytest.mark.asyncio
+    async def test_the_service_members_key_dies_and_its_agent_is_suspended(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("svc")
+        owner = await world.user("owner")
+        ws = await world.workspace(owner, **{target: WorkspaceRole.MEMBER})
+        ws_id = ws.id
+        agent = await world.agent(ws, by=owner)
+        agent_id = agent.id
+        plaintext, key_id = await world.agent_key(target, ws, agent)
+
+        counts = await world.erase(target)
+
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert await APIKeyManager(db_session).verify_key(plaintext) is None
+        assert await world.agent_state(agent_id) == (owner, "suspended", 1)
+        assert counts["agent_api_keys_deleted"] == 1
+        assert counts["agents_suspended"] == 1
+        assert counts["agents_reowned"] == 0
+        (row,) = await world.departure_audits(target)
+        assert (row.user_id, row.user_email, row.resource) == (
+            owner,
+            f"{owner}@example.com",
+            "api_key",
+        )
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "erasure",
+            "connector_api_keys_reowned": 0,
+            "agent_api_keys_deleted": 1,
+            "agents_suspended": 1,
+            "agents_reowned": 0,
+            "suspended_agent_ids": [str(agent_id)],
+            "reowned_agent_ids": [],
+        }
+        assert target not in json.dumps(row.user_metadata)
+
+    @pytest.mark.asyncio
+    async def test_a_registrars_agents_name_the_owner_and_keep_working(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from auth.api_keys import APIKeyManager
+
+        world = connector_world
+        target = await world.user("registrar")
+        owner = await world.user("owner")
+        svc = await world.user("svc")
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, svc: WorkspaceRole.MEMBER}
+        )
+        ws_id = ws.id
+        agent = await world.agent(ws, by=target)
+        agent_id = agent.id
+        plaintext, _ = await world.agent_key(svc, ws, agent)
+        provisioned = await world.connector(ws, by=target)
+        connector_key_id = (await _live_connector_key(db_session, provisioned.connector.id)).id
+
+        counts = await world.erase(target)
+
+        assert await world.agent_state(agent_id) == (owner, "active", 1)
+        verified = await APIKeyManager(db_session).verify_key(plaintext)
+        assert verified is not None and verified.user_id == svc
+        assert counts["agents_reowned"] == 1
+        assert counts["agents_suspended"] == 0
+        assert counts["agents_pseudonymized"] == 0
+        assert counts["connector_api_keys_reowned"] == 1
+        (row,) = await world.departure_audits(target)
+        assert row.user_id == owner
+        assert row.user_metadata == {
+            "workspace_id": str(ws_id),
+            "path": "erasure",
+            "connector_api_keys_reowned": 1,
+            "agent_api_keys_deleted": 0,
+            "agents_suspended": 0,
+            "agents_reowned": 1,
+            "suspended_agent_ids": [],
+            "reowned_agent_ids": [str(agent_id)],
+        }
+        rows = await _key_rows(db_session, [connector_key_id])
+        assert rows[connector_key_id]["user_id"] == owner
+
+    @pytest.mark.asyncio
+    async def test_a_sole_owned_workspace_takes_its_agents_with_it(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from models.agent import Agent
+
+        world = connector_world
+        target = await world.user("target")
+        ws = await world.workspace(target)
+        ws_id = ws.id
+        agent = await world.agent(ws, by=target)
+        agent_id = agent.id
+        _, key_id = await world.agent_key(target, ws, agent)
+
+        counts = await world.erase(target)
+
+        assert await db_session.get(Workspace, ws_id) is None
+        assert await db_session.get(Agent, agent_id) is None
+        assert await _key_rows(db_session, [key_id]) == {}
+        assert (counts["agents_reowned"], counts["agents_suspended"]) == (0, 0)
+        assert counts["agent_api_keys_deleted"] == 0
+        assert await world.departure_audits(target) == []
+
+
 async def _private_context(db: AsyncSession, workspace: Workspace, creator: str) -> UUID:
     from models.auth import Context
 

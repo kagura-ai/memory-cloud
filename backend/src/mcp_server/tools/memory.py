@@ -1554,7 +1554,16 @@ async def handle_recall(
 async def handle_forget(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Delete memories (soft delete)."""
+    """Delete memories (soft delete).
+
+    #2480: the committed rows' search points are deleted after the tool
+    budget, not inside it (``delete_forgotten_points``, with its own bound,
+    ``FORGET_POINT_DELETE_TIMEOUT_SECONDS``). A by-query forget that spent
+    most of the budget before its commit would otherwise answer a timeout for
+    rows it had deleted. The step never raises and what it leaves stays
+    queued for the deferred point delete drain (#2476), so the reply is the
+    committed rows either way, as when ``forget`` defers the delete itself.
+    """
     from db.base import get_db
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
@@ -1581,6 +1590,7 @@ async def handle_forget(
             )
 
             service = MemoryService(db)
+            forgotten_points: list[tuple[UUID, UUID, str]] = []
             result = await execute_with_timeout(
                 service.forget(
                     request,
@@ -1589,9 +1599,13 @@ async def handle_forget(
                     key_workspace_id=get_mcp_key_workspace_scope(),
                     # forget(query=...) recalls from the session workspace.
                     current_workspace_id=workspace_id,
+                    point_queue=forgotten_points,
                 ),
                 operation_name="forget",
             )
+            if forgotten_points:
+                # #2480: outside the budget; never raises.
+                await service.delete_forgotten_points(forgotten_points)
 
             await _log_tool_usage(
                 db, user_id, "forget", start_time, 200, current_context_id, workspace_id
@@ -1642,6 +1656,10 @@ _FORGET_NOT_ATTEMPTED_SESSION = (
 )
 _FORGET_NOT_ATTEMPTED_BUDGET = (
     "Not attempted: the call's time budget was spent on earlier ids. Retry it in a new call."
+)
+# #2480: the context check before the first id did not finish in the budget.
+_FORGET_NOT_ATTEMPTED_GATE = (
+    "Not attempted: the call's time budget was spent checking the context. Retry it in a new call."
 )
 # The least of the budget an id must still have to be tried: an id started
 # with a sliver left would only be cancelled mid-forget — rolled back and
@@ -1781,11 +1799,19 @@ async def _handle_forget_many(
     budget like the usage row, and it fails soft: each forget queued its
     points in its own commit, and the deferred point delete drain (#2476)
     retries what this step did not delete.
+
+    #2480: the context gate (``MemoryService.forget_context_gate``) runs once,
+    inside the budget, before the first id, and each id's forget reuses it:
+    its checks are the caller's on the context, the same for every id. The
+    per-memory checks still run per id. A gate that raises fails every id
+    with that error, none of them tried — what each would have answered. A
+    gate that outlasts the budget leaves every id ``not_attempted``: nothing
+    was tried, so nothing can have been deleted.
     """
     from types import SimpleNamespace
 
     from db.base import get_db
-    from mcp_server.tools._errors import describe_tool_exception
+    from mcp_server.tools._errors import CAUSE_TIMEOUT, describe_tool_exception
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
 
@@ -1823,7 +1849,39 @@ async def _handle_forget_many(
             budget = get_tool_timeout("forget")
             min_slice = min(_FORGET_MIN_SLICE_MAX, budget * _FORGET_MIN_SLICE_FRACTION)
             deadline = _monotonic() + budget
-            for memory_uuid in memory_ids:
+            key_scope = get_mcp_key_workspace_scope()
+            gate = None
+            try:
+                gate = await execute_with_timeout(
+                    service.forget_context_gate(
+                        user_id, current_context_id, key_workspace_id=key_scope
+                    ),
+                    timeout=budget,
+                    operation_name="forget",
+                )
+            except Exception as exc:
+                failure = describe_tool_exception("forget", exc)
+                if failure.error == CAUSE_TIMEOUT:
+                    # The budget ran out before the first id: none was tried,
+                    # so none can have been deleted — not_attempted, as when
+                    # the budget is spent on earlier ids (#2191), not a timeout
+                    # whose delete may have landed.
+                    results = [
+                        _forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_GATE)
+                        for memory_uuid in memory_ids
+                    ]
+                else:
+                    results = [
+                        _forget_error_row(memory_uuid, failure) for memory_uuid in memory_ids
+                    ]
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.warning("forget_batch_session_failed", exc_info=True)
+                    session_ok = False
+            # A refused gate refused every id alike: none is tried.
+            to_try = memory_ids if gate is not None else []
+            for memory_uuid in to_try:
                 if not session_ok:
                     results.append(
                         _forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_SESSION)
@@ -1841,9 +1899,10 @@ async def _handle_forget_many(
                             ForgetRequest(memory_id=memory_uuid),
                             user_id=user_id,
                             current_context_id=current_context_id,
-                            key_workspace_id=get_mcp_key_workspace_scope(),
+                            key_workspace_id=key_scope,
                             current_workspace_id=workspace_id,
                             point_queue=forgotten_points,
+                            context_gate=gate,
                         ),
                         timeout=remaining,
                         operation_name="forget",

@@ -488,10 +488,14 @@ async def test_failed_items_keep_the_rollback_open_as_partial():
     assert (result.remaining, result.events) == (6, 0)
 
 
-@pytest.mark.asyncio
-async def test_finish_deletes_points_and_audits_after_the_commit():
-    deleted = [uuid.uuid4(), uuid.uuid4()]
-    result = sr.RollbackResult(
+@asynccontextmanager
+async def _lock_free(self: Any, point_deletes: list[Any]) -> Any:
+    """forget's post-commit lock and live-owner look: free, nothing owned."""
+    yield list(point_deletes)
+
+
+def _forgot(deleted: list[uuid.UUID]) -> sr.RollbackResult:
+    return sr.RollbackResult(
         dry_run=False,
         items=[],
         events=3,
@@ -499,25 +503,123 @@ async def test_finish_deletes_points_and_audits_after_the_commit():
         rollback_id=4,
         restored_ids=[MID],
         forgotten_ids=deleted,
-        forgotten_points=["p1", "p2"],
+        forgotten_points=[(mid, mid, "coll") for mid in deleted],
         collection="coll",
         audit=(uuid.uuid4(), ME, uuid.uuid4()),
     )
+
+
+@pytest.mark.asyncio
+async def test_finish_deletes_points_and_audits_after_the_commit():
+    from services.memory_service import MemoryService
+
+    deleted = [uuid.uuid4(), uuid.uuid4()]
     with (
-        patch(
-            "db.qdrant.delete_points_from_qdrant", AsyncMock(side_effect=OSError("down"))
-        ) as points,
+        patch.object(MemoryService, "_points_free_to_delete", _lock_free),
+        patch("db.qdrant.delete_points_from_qdrant", AsyncMock()) as points,
         patch("db.qdrant.delete_chunk_points", AsyncMock()) as chunks,
         patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()) as emit,
     ):
-        await sr.finish(result)  # a failed vector delete does not raise
-    points.assert_awaited_once_with(["p1", "p2"], "coll")
+        await sr.finish(_forgot(deleted), MagicMock())
+    # #2480: forget's post-commit step — one point and one chunk request per
+    # collection, under the point-writer lock.
+    points.assert_awaited_once_with([str(m) for m in deleted], "coll")
     chunks.assert_awaited_once_with(deleted, "coll")
     calls = {c.kwargs["operation"]: c.kwargs for c in emit.await_args_list}
     assert calls["forget"]["result_count"] == 2
     assert calls["forget"]["extra_metadata"]["memory_ids"] == [str(m) for m in deleted]
     assert calls["update"]["memory_id"] == MID
     assert calls["update"]["extra_metadata"] == {"rollback_id": 4}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_vector_delete_in_finish_does_not_raise():
+    """The rows are committed tombstones; their queue rows get the points
+    deleted by the drain (#2476)."""
+    from services.memory_service import MemoryService
+
+    deleted = [uuid.uuid4()]
+    with (
+        patch.object(MemoryService, "_points_free_to_delete", _lock_free),
+        patch(
+            "db.qdrant.delete_points_from_qdrant", AsyncMock(side_effect=OSError("down"))
+        ) as points,
+        patch("db.qdrant.delete_chunk_points", AsyncMock()),
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()) as emit,
+    ):
+        await sr.finish(_forgot(deleted), MagicMock())
+    points.assert_awaited_once()
+    assert {c.kwargs["operation"] for c in emit.await_args_list} == {"forget", "update"}
+
+
+@pytest.mark.asyncio
+async def test_finish_without_forgotten_points_takes_no_lock():
+    from services.memory_service import MemoryService
+
+    with (
+        patch.object(MemoryService, "delete_forgotten_points", AsyncMock()) as deleting,
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+    ):
+        await sr.finish(_forgot([]), MagicMock())
+    deleting.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_forget_chunk_queues_its_points_inside_its_savepoint():
+    """#2480: the queue rows go with the chunk's SAVEPOINT, so a chunk rolled
+    back takes them with it, and what finish() cannot delete the drain does."""
+    db = _db()
+    order: list[Any] = []
+
+    @asynccontextmanager
+    async def nested() -> Any:
+        order.append("savepoint")
+        yield
+        order.append("released")
+
+    db.begin_nested = MagicMock(side_effect=lambda: nested())
+    executor = _executor(db, {})
+    executor._collection = AsyncMock(return_value="coll")  # type: ignore[method-assign]
+    ids = [uuid.uuid4(), uuid.uuid4()]
+    executor.service._soft_delete_chunk = AsyncMock(return_value=(ids, [(m, m) for m in ids]))
+
+    async def queue(_db: Any, entries: list[Any]) -> None:
+        order.append(("queue", *entries))
+
+    with (
+        patch("services.deferred_point_deletes.queue_point_deletes", AsyncMock(side_effect=queue)),
+        patch.object(sr, "_mark_handled", AsyncMock()),
+    ):
+        await executor.run([PlanItem(m, "created", ACTION_FORGET, event_ids=(1,)) for m in ids])
+    assert order == ["savepoint", ("queue", *((m, m, "coll") for m in ids)), "released"]
+    assert executor.forgotten_points == [(m, m, "coll") for m in ids]
+    assert executor.forgotten_ids == ids
+    assert executor.summary["forgotten"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_forget_chunk_whose_savepoint_rolls_back_forgets_nothing():
+    """#2480: the chunk's rows are live again, so finish() must not delete
+    their points, and the call does not count them as forgotten."""
+    db = _db()
+    executor = _executor(db, {})
+    executor._collection = AsyncMock(return_value="coll")  # type: ignore[method-assign]
+    ids = [uuid.uuid4()]
+    executor.service._soft_delete_chunk = AsyncMock(return_value=(ids, [(m, m) for m in ids]))
+
+    async def mark(_db: Any, event_ids: list[int], rollback_id: int) -> None:
+        if event_ids:  # the chunk's events, inside its SAVEPOINT
+            raise RuntimeError("db")
+
+    with (
+        patch("services.deferred_point_deletes.queue_point_deletes", AsyncMock()),
+        patch.object(sr, "_mark_handled", mark),
+    ):
+        await executor.run([PlanItem(ids[0], "created", ACTION_FORGET, event_ids=(1,))])
+    assert executor.forgotten_points == []
+    assert executor.forgotten_ids == []
+    assert executor.summary["forgotten"] == 0
+    assert executor.summary["failed"] == 1
 
 
 def test_principal_predicates_compile_index_friendly():

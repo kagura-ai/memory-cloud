@@ -208,6 +208,7 @@ async def test_bulk_delete_unlocks_on_the_real_schema(db_session, free_ws) -> No
     service = MemoryService(db_session)
     with (
         patch("db.qdrant.delete_points_from_qdrant", AsyncMock()) as points,
+        patch("db.qdrant.delete_chunk_points", AsyncMock()),
         patch(
             "services.memory_service.resolve_collection_name",
             AsyncMock(return_value="kagura_memories"),
@@ -218,5 +219,7 @@ async def test_bulk_delete_unlocks_on_the_real_schema(db_session, free_ws) -> No
             owner, context_id=ctx.id, created_before=utcnow(), dry_run=False, chunk_size=2
         )
     assert (count, remaining) == (MEMORY_LIMIT + 3, False)
-    assert points.await_count == 3
+    # #2480: once per request, after the chunk commits, for every point.
+    points.assert_awaited_once()
+    assert len(points.await_args.args[0]) == MEMORY_LIMIT + 3
     assert await capacity_lock_state(db_session, ws) is None

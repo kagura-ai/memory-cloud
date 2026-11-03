@@ -167,7 +167,7 @@ from services.billing_contract import (
     workspaces_under_contract,
 )
 from services.connector_contexts import reown_connector_contexts
-from services.connector_key_ownership import reown_connector_keys
+from services.connector_key_ownership import SettledCredentials, settle_departing_credentials
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
     ERASURE_AUDIT_ACTION,
@@ -2322,9 +2322,10 @@ class AccountErasureService:
         cross-table user references are plain VARCHAR (OAuth2 sub) with
         no cascade. The full sweep here is the application-layer
         equivalent of `ON DELETE CASCADE` for all per-user data. The
-        transfers to the workspace's owner: the subject's live connector keys,
-        before the per-user ``api_keys`` delete (#2305), and the connector
-        write targets it created, before the authorship sweep (#2422).
+        transfers: the subject's live connector keys and the agents it
+        registered go to their workspace's owner before the per-user
+        ``api_keys`` delete (#2305, #2373). The connector write targets it
+        created go to the same owner before the authorship sweep (#2422).
 
         Args:
             target: The user being erased.
@@ -2443,7 +2444,9 @@ class AccountErasureService:
         # workspace, not the person — after step 2 the owner is never the
         # subject (a sole-owned workspace goes with its keys below), so hand
         # the live keys to the owner; the revoked ones are deleted with the rest.
-        counts["connector_api_keys_reowned"] = await self._reown_connector_keys(user_id)
+        # #2373: its agent keys are deleted, never handed over; the agents it
+        # registered name the owner, an agent left without a key is suspended.
+        counts.update((await self._settle_departing_credentials(user_id)).counts())
         counts["api_keys"] = await self._count_and_delete(APIKey, APIKey.user_id == user_id)
         counts["graph_memory"] = await self._count_and_delete(
             GraphMemory, GraphMemory.user_id == user_id
@@ -2517,9 +2520,10 @@ class AccountErasureService:
         )
 
         # Pseudonymize agents.owner_user_id (#1274, RFC-0002 P0-1) AFTER the
-        # workspace cascade so the count reflects only survivors — agents in
-        # co-owned (transferred) workspaces whose rows outlive the erased
-        # subject. Same legal-retention posture as plan_changes.changed_by.
+        # workspace cascade so the count reflects only survivors. Since #2373
+        # the agents of co-owned (transferred) workspaces already name their
+        # owner (``_settle_departing_credentials`` above), so this is a
+        # backstop. Same legal-retention posture as plan_changes.changed_by.
         counts["agents_pseudonymized"] = await self._pseudonymize_field(
             Agent, Agent.owner_user_id, user_id
         )
@@ -2795,16 +2799,19 @@ class AccountErasureService:
         """
         return erasure_pseudonym(value)
 
-    async def _reown_connector_keys(self, user_id: str) -> int:
+    async def _settle_departing_credentials(self, user_id: str) -> SettledCredentials:
         """Hand the subject's live connector write keys to their workspace's
-        owner (#2305) and return how many moved (summary key
-        ``connector_api_keys_reowned``).
+        owner (#2305), and settle its agents (#2373): the ones it registered
+        name the owner, an active one left without a key by the following
+        delete is suspended. The counts are summary keys
+        (``SettledCredentials.counts``); one ``departed_member_credentials``
+        audit row per receiving owner and workspace commits with the step.
 
         The contract — scope, the ``owner_user_id <> subject`` guard and the
         lock order — lives in ``services.connector_key_ownership``, shared with
         member removal, the admin user delete and ``cli.delete_admin`` (#2352).
         """
-        return await reown_connector_keys(self.db, user_id)
+        return await settle_departing_credentials(self.db, user_id, path="erasure")
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.

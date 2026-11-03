@@ -24,7 +24,7 @@ from models.auth import (
     OAuth2Token,
     WorkspaceMember,
 )
-from services.connector_key_ownership import reown_connector_keys
+from services.connector_key_ownership import settle_departing_credentials
 from services.credential_default_context import default_context_names
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthorizationError, ValidationError
@@ -349,13 +349,16 @@ class MemberCredentialsService:
         (the member-removal route).
         Issue #275: Added ExternalAPIKey cleanup.
 
-        Re-owns:
+        Settles first (#2352, #2373, ``services.connector_key_ownership``):
         - The member's live connector write keys in this workspace, handed to
-          the workspace's owner so the connector keeps writing (#2352,
-          ``services.connector_key_ownership``)
+          the workspace's owner so the connector keeps writing
+        - The agents the member registered here, which name the owner instead
+        - The active agents whose only live key is the member's, suspended:
+          that key is deleted below, never handed over (deletion never widens)
 
         Deletes:
-        - All other API keys for this user + workspace
+        - All other API keys for this user + workspace (agent-bound ones
+          included)
         - All OAuth clients for this user + workspace
         - All OAuth tokens for this user + workspace
         - All workspace-scoped external API keys
@@ -367,14 +370,20 @@ class MemberCredentialsService:
         Returns:
             Dict with cleanup stats:
                 - connector_api_keys_reowned: int
+                - agent_api_keys_deleted: int (the live ones, of api_keys_deleted)
+                - agents_suspended: int
+                - agents_reowned: int
                 - api_keys_deleted: int
                 - oauth_clients_deleted: int
                 - oauth_tokens_revoked: int
                 - external_keys_deleted: int
         """
         # #2352: the member's live connector keys serve the workspace — hand
-        # them to the owner before the delete below takes the rest.
-        reowned = await reown_connector_keys(self.db, user_id, workspace_id=workspace_id)
+        # them to the owner before the delete below takes the rest. #2373: the
+        # agent keys are not handed over; their agents are settled instead.
+        settled = await settle_departing_credentials(
+            self.db, user_id, path="member_removal", workspace_id=workspace_id
+        )
 
         # 1. Delete API keys (bulk operation)
         # Issue #200: Use rowcount for efficient counting without loading data
@@ -444,7 +453,7 @@ class MemberCredentialsService:
             "member_credentials_cleaned_up",
             workspace_id=str(workspace_id),
             user_id=user_id,
-            connector_api_keys_reowned=reowned,
+            **settled.counts(),
             api_keys=api_keys_count,
             oauth_clients=oauth_clients_count,
             tokens_revoked=tokens_count,
@@ -452,7 +461,7 @@ class MemberCredentialsService:
         )
 
         return {
-            "connector_api_keys_reowned": reowned,
+            **settled.counts(),
             "api_keys_deleted": api_keys_count,
             "oauth_clients_deleted": oauth_clients_count,
             "oauth_tokens_revoked": tokens_count,
