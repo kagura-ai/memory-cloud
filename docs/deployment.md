@@ -3755,6 +3755,26 @@ Plan display names in the web UI can be customized via `NEXT_PUBLIC_PLAN_FREE_DI
 
 The referral payout budget is the effective FREE → BASIC memory gap (`PLAN_BASIC_MEMORY_LIMIT − PLAN_FREE_MEMORY_LIMIT`), so lowering `PLAN_BASIC_MEMORY_LIMIT` — or otherwise narrowing the gap — shrinks it. When `ENABLE_REFERRALS=true`, the API refuses to start if `REFERRAL_MAX_GRANTS_PER_REFERRER × REFERRAL_REFERRER_REWARD_MEMORIES + REFERRAL_REFEREE_REWARD_MEMORIES` reaches the new gap (a fully-used referral chain would hand out the whole paid tier) — retune the `REFERRAL_*` values first.
 
+### Pending referral grants
+
+A referral bonus is credited to the oldest live workspace the user owns. A
+grant earned while the user owns none (pending team invitations skip the
+personal workspace), or one whose workspace was soft-deleted, is *pending*
+until the user owns a live workspace again; creating one applies it. The
+workspace row is taken without waiting, so when it stays busy for a moment
+(a memory write holds it until its commit) the grant stays pending
+([#2563](https://github.com/kagura-ai/memory-cloud/issues/2563)). It is then
+applied when the user next opens the referral card (`GET /api/v1/referrals/me`),
+and by a scheduler job every `REFERRAL_PENDING_GRANT_SWEEP_INTERVAL_SECONDS`
+(default 300; 0 turns it off), which takes up to 100 users per run, oldest
+grant first. The job runs whether or not `ENABLE_REFERRALS` is set, like the
+apply on workspace creation: it credits grants already earned. Its log lines
+are `referral_pending_grant_sweep_done` (with `candidates`, `users_applied`,
+`grants_applied`, `busy`, `failed`), `referral_pending_grant_sweep_busy` (that
+user's workspace was still busy; the next run retries),
+`referral_pending_grant_sweep_user_failed` and
+`referral_pending_grant_sweep_failed` (the run itself raised).
+
 ## LLM & Embedding Pricing (cost tracking and spend caps)
 
 Every token count the platform records — recall / remember embeddings, Sleep
