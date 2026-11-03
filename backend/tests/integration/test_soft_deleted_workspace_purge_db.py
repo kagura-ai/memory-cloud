@@ -334,8 +334,10 @@ async def test_erasure_deletes_the_contextless_memories_of_the_workspaces_it_rem
     leaves a memory with no context behind: erasure deletes those of the
     sole-owned and soft-deleted workspaces it removes, as user deletion does
     (#2445). The subject's own keep their vector-erasure scope (captured
-    before the delete); a handed-on workspace keeps its rows."""
+    before the delete); a handed-on workspace keeps its rows, the subject's
+    own scrubbed rather than deleted."""
     from models.vector_erasure import VectorErasureJob
+    from services.erasure_details import erasure_pseudonym
 
     world = connector_world
     target = await world.user("erased")
@@ -349,6 +351,7 @@ async def test_erasure_deletes_the_contextless_memories_of_the_workspaces_it_rem
         for author in (target, other)
     }
     kept = await _memory(db_session, shared_id, None, other)
+    scrubbed = await _memory(db_session, shared_id, None, target)
     await _soft_delete(db_session, gone_id)
     await db_session.commit()
 
@@ -359,6 +362,7 @@ async def test_erasure_deletes_the_contextless_memories_of_the_workspaces_it_rem
         assert await _count(db_session, Workspace, Workspace.id.in_([sole_id, gone_id])) == 0
         assert (await db_session.get(Workspace, shared_id)).owner_user_id == other
         assert (await db_session.get(Memory, kept)).user_id == other
+        assert (await db_session.get(Memory, scrubbed)).user_id == erasure_pseudonym(target)
         own = {memory_id for memory_id, author in removed.items() if author == target}
         scoped = await db_session.scalars(
             select(VectorErasureJob.memory_id).where(VectorErasureJob.memory_id.in_(own))
@@ -367,7 +371,7 @@ async def test_erasure_deletes_the_contextless_memories_of_the_workspaces_it_rem
     finally:
         # no foreign key takes them with the workspaces the fixture deletes
         await db_session.rollback()
-        await db_session.execute(delete(Memory).where(Memory.id.in_([*removed, kept])))
+        await db_session.execute(delete(Memory).where(Memory.id.in_([*removed, kept, scrubbed])))
         await db_session.commit()
 
 
