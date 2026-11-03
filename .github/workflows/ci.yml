@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# One group per PR (a new push cancels its older run); any other event is its own run_id group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
