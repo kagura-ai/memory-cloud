@@ -35,6 +35,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import AuditLog
 from services.referral_service import ReferralService
 from utils.db_helpers import db_transaction
+from utils.exceptions import ConflictError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -157,13 +158,21 @@ async def revoke_referral_grant(
         The revoked grant.
 
     Raises:
-        HTTPException: 404 if no such grant exists.
+        HTTPException: 404 if no such grant exists; 409 if a workspace row the
+            recompute locks stays busy (the admin retries).
     """
     service = ReferralService(db)
     actor_id = user.get("user_id", "unknown")
 
     async with db_transaction(db, "revoke_referral_grant", "Failed to revoke referral grant"):
-        grant, changed = await service.revoke(grant_id=grant_id, reason=payload.reason)
+        try:
+            grant, changed = await service.revoke(grant_id=grant_id, reason=payload.reason)
+        except ConflictError as exc:
+            # #2443: the recompute takes the workspace rows NOWAIT. One still
+            # held after its tries is a 409 to retry, not the 500
+            # ``db_transaction`` makes of any other error.
+            await db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message) from exc
         if grant is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
