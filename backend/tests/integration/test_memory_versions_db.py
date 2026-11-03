@@ -220,6 +220,29 @@ async def test_two_unconditional_edits_both_count(
     ]
 
 
+async def test_two_overlapping_tag_edits_lose_neither_tag(
+    async_engine: AsyncEngine, seeded: dict[str, Any]
+) -> None:
+    """#2585: add_tags / remove_tags / details_patch resolve against the LOCKED
+    row, so the second edit builds on the first instead of overwriting it —
+    the read-modify-write a client doing reference() + tags= cannot make safe."""
+    memory_id = seeded["memory_id"]
+    a, b = await _two_overlapping_edits(
+        async_engine,
+        memory_id,
+        {"add_tags": ["b"], "details_patch": {"from_a": 1}},
+        {"remove_tags": ["a"], "add_tags": ["c"], "details_patch": {"k": None}},
+    )
+    assert (a.version, b.version) == (4, 5)
+    memory, revisions = await _state(async_engine, memory_id)
+    assert memory.tags == ["b", "c"]
+    assert memory.details == {"from_a": 1}
+    assert [(r.version, r.prior) for r in revisions] == [
+        (4, {"tags": ["a"], "details": {"k": "v"}}),
+        (5, {"tags": ["a", "b"], "details": {"k": "v", "from_a": 1}}),
+    ]
+
+
 async def test_revisions_go_with_a_hard_deleted_memory(
     async_engine: AsyncEngine, seeded: dict[str, Any]
 ) -> None:
