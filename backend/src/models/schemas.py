@@ -36,7 +36,7 @@ MEMORY_TAGS_MAX_COUNT = 50
 MEMORY_TAG_MAX_CHARS = 100
 
 
-def check_memory_tags(tags: list[str] | None) -> list[str] | None:
+def _check_memory_tags(tags: list[str] | None) -> list[str] | None:
     """Validate a remember / update_memory ``tags`` list against the #1743 caps."""
     if tags is None:
         return tags
@@ -66,15 +66,17 @@ def _check_patch_tag_chars(tags: list[str]) -> list[str]:
     return tags
 
 
-def check_patch_tags(tags: list[str]) -> list[str]:
-    """Validate a PATCH tag list against both caps.
+def check_tag_count(tags: list[str], max_count: int) -> list[str]:
+    """Cap the length of the list ``add_tags`` / ``remove_tags`` produce (#2585).
 
-    For the list ``add_tags`` / ``remove_tags`` produce (#2585); a ``tags``
-    field gets the same caps from its ``max_length`` and validator.
+    The count cap only: the per-tag length cap applies to the tags a call adds
+    (the ``add_tags`` validators), so a stored tag longer than this surface
+    allows, written through the other one, never blocks an edit that leaves it
+    alone. The message matches the ``tags`` caps' own.
     """
-    if len(tags) > PATCH_TAGS_MAX_COUNT:
-        raise ValueError(f"at most {PATCH_TAGS_MAX_COUNT} tags (got {len(tags)})")
-    return _check_patch_tag_chars(tags)
+    if len(tags) > max_count:
+        raise ValueError(f"at most {max_count} tags (got {len(tags)})")
+    return tags
 
 
 SUMMARY_SHORT_THRESHOLD = 50
@@ -208,7 +210,7 @@ class RememberRequest(BaseModel):
     @classmethod
     def _cap_tags(cls, v: list[str]) -> list[str]:
         """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each."""
-        return check_memory_tags(v) or []
+        return _check_memory_tags(v) or []
 
     @field_validator("summary")
     @classmethod
@@ -1178,7 +1180,7 @@ class ForgetBulkRequest(BaseModel):
     @classmethod
     def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
         """The remember / update_memory caps (#1743): no tag a write could store."""
-        return check_memory_tags(v)
+        return _check_memory_tags(v)
 
     @field_validator("created_before", "created_after")
     @classmethod
@@ -1311,7 +1313,8 @@ class UpdateMemoryRequest(BaseModel):
     # status flip is one call that touches nothing else. Resolved against the
     # locked row (``MemoryService._resolve_partial_edits``): removals first,
     # then each new tag appended once; a null details_patch value deletes the
-    # key. The result goes through the wholesale path's caps and validators.
+    # key. The tag count cap applies to the resulting list and the length cap
+    # to add_tags; the details go through the wholesale path's validators.
     add_tags: list[str] | None = Field(None, description="Tags to add to the stored list")
     remove_tags: list[str] | None = Field(
         None, description="Tags to remove from the stored list (absent ones are ignored)"
@@ -1332,10 +1335,10 @@ class UpdateMemoryRequest(BaseModel):
     def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
         """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each.
 
-        add_tags takes the caps too (#2585); the list it produces is checked
-        again once it is resolved against the stored one.
+        add_tags takes the caps too (#2585); the count cap is checked again
+        on the list it produces once it is resolved against the stored one.
         """
-        return check_memory_tags(v)
+        return _check_memory_tags(v)
 
     # Issue #886: change delivery_mode in place. Setting 'always' pins the
     # memory to persistent (like remember's pin-on-write); setting 'on_recall'
@@ -1515,8 +1518,8 @@ class PatchMemoryRequest(BaseModel):
     # could either send 1M tags OR 100 tags of 1MB each to bloat the row's
     # PG ARRAY column. Both surfaces are now closed.
     tags: list[str] | None = Field(None, max_length=PATCH_TAGS_MAX_COUNT)
-    # #2585: the list add_tags / remove_tags produce is checked against the
-    # same caps (``check_patch_tags``) once it is resolved.
+    # #2585: add_tags takes both caps; the list add_tags / remove_tags produce
+    # takes the count cap once it is resolved (``check_tag_count``).
     add_tags: list[str] | None = Field(
         None,
         max_length=PATCH_TAGS_MAX_COUNT,

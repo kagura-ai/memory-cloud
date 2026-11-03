@@ -46,8 +46,15 @@ def test_the_definition_declares_the_three_parameters():
         ({"tags": ["a"], "remove_tags": ["b"]}, "give one or the other"),
         ({"details": {"a": 1}, "details_patch": {"b": 2}}, "details_patch merges"),
         ({"add_tags": ["t"] * 51}, "at most 50 tags"),
+        ({"add_tags": ["x" * 101]}, "exceeds 100 characters"),
     ],
-    ids=["tags+add_tags", "tags+remove_tags", "details+details_patch", "add_tags-cap"],
+    ids=[
+        "tags+add_tags",
+        "tags+remove_tags",
+        "details+details_patch",
+        "add_tags-cap",
+        "add_tags-length",
+    ],
 )
 async def test_a_conflict_is_a_validation_error_from_the_dispatcher(args, phrase):
     """Through ``execute_tool_call``: the closed schema accepts the new names and
@@ -170,6 +177,25 @@ async def test_a_details_patch_through_the_tool():
     assert payload["status"] == "success"
     assert memory.details == {"pr": 2600}
     assert memory.tags == ["tech-debt", "status:open", "area:mcp"]
+
+
+@pytest.mark.asyncio
+async def test_a_stored_tag_over_the_length_cap_survives_a_status_flip():
+    """The 100-character cap applies to the added tags; a longer stored one
+    (written before the #1743 caps) is left alone."""
+    long_tag = "x" * 101
+    memory = _stored_row()
+    memory.tags = [long_tag, "status:open"]
+    payload, _db = await _call(
+        memory,
+        {
+            "memory_id": str(memory.id),
+            "remove_tags": ["status:open"],
+            "add_tags": ["status:done"],
+        },
+    )
+    assert payload["status"] == "success", payload
+    assert memory.tags == [long_tag, "status:done"]
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,8 @@
 
 The route runs the real ``MemoryService.patch_memory`` with only its I/O
 edges stubbed, so the response shows what the merge made of the stored row; a
-conflict, an explicit null or a result over the PATCH tag caps is a 422 and
-writes nothing.
+conflict, an explicit null, an added tag over 64 characters or a result over
+100 tags is a 422 and writes nothing.
 """
 
 from __future__ import annotations
@@ -152,6 +152,28 @@ def test_a_result_over_the_patch_caps_is_a_422_and_writes_nothing():
     assert response.status_code == 422
     assert "at most 100 tags (got 101)" in response.json()["detail"]
     assert memory.tags == stored
+    db.commit.assert_not_awaited()
+
+
+def test_a_stored_tag_over_64_characters_survives_a_status_flip():
+    """A memo's ``file:`` tag written through MCP (100-character cap) is longer
+    than PATCH allows; the 64-character cap applies to the added tags only."""
+    long_tag = "file:backend/tests/integration/test_consolidation_point_deletes_db.py"
+    assert len(long_tag) > 64
+    memory = _stored_row(tags=["tech-debt", long_tag, "status:open"])
+    response, _service, db = _patch(
+        memory, {"remove_tags": ["status:open"], "add_tags": ["status:done"]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["tags"] == ["tech-debt", long_tag, "status:done"]
+    db.commit.assert_awaited()
+
+
+def test_an_added_tag_over_64_characters_is_still_a_422():
+    memory = _stored_row(tags=["tech-debt", "x" * 65])
+    response, service, db = _patch(memory, {"add_tags": ["y" * 65]})
+    assert response.status_code == 422, response.text
+    service._lock_for_edit.assert_not_awaited()
     db.commit.assert_not_awaited()
 
 

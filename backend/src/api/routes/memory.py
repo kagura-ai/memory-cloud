@@ -584,7 +584,8 @@ async def patch_memory(
     ``tags``/``details``. Omitted fields preserve their current value;
     ``tags`` follows replace-all semantics. ``add_tags`` / ``remove_tags``
     edit the stored list instead (removals first, then each new tag appended
-    once; the 100 x 64 caps apply to the result) and ``details_patch`` merges
+    once; the 100-tag cap applies to the result, the 64-character cap to the
+    added tags) and ``details_patch`` merges
     into the stored details (a ``null`` value deletes the key) (#2585); not
     together with ``tags`` / ``details``. ``expected_version`` (#2043)
     makes the patch conditional on the memory's current version.
@@ -599,8 +600,9 @@ async def patch_memory(
         410: Memory was soft-deleted; the tombstone exists but the resource
              is gone. Distinguishing 410 from 404 lets clients stop retrying.
         422: Request body validation failed (empty patch, importance out of
-             range, summary < 10 chars, ``tags`` with ``add_tags``, a result
-             over the tag caps, an invalid reserved ``details`` key, etc.).
+             range, summary < 10 chars, ``tags`` with ``add_tags``, an added
+             tag over 64 chars, a result over 100 tags, an invalid reserved
+             ``details`` key, etc.).
         429: The patched memory's post-patch size exceeds ``MAX_CONTENT_SIZE``
              (1MB) — same envelope as ``remember`` / ``update_memory``.
 

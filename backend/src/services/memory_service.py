@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -53,6 +53,8 @@ from models.memory import (
     tool_triggered_predicate,
 )
 from models.schemas import (
+    MEMORY_TAGS_MAX_COUNT,
+    PATCH_TAGS_MAX_COUNT,
     UPDATE_MEMORY_EDIT_FIELDS,
     ExploreHint,
     ExploreRequest,
@@ -84,8 +86,7 @@ from models.schemas import (
     UpdateMemoryRequest,
     UpdateMemoryResponse,
     WriteLintHint,
-    check_memory_tags,
-    check_patch_tags,
+    check_tag_count,
 )
 from repositories.memory import AccessStats, MemoryRepository
 from services import plan_seats
@@ -913,33 +914,35 @@ class MemoryService:
     def _resolve_partial_edits(
         memory: Any,
         request: UpdateMemoryRequest | PatchMemoryRequest,
-        check_tags: Callable[[list[str]], Any],
+        max_tags: int,
     ) -> set[str]:
         """Turn ``add_tags`` / ``remove_tags`` / ``details_patch`` into ``tags`` / ``details``.
 
         #2585: resolved against the LOCKED row, before anything reads
         ``request.tags`` or ``request.details``, so from here on the call is an
-        ordinary wholesale write of what they produce: the tag caps of the
-        surface (``check_tags``) apply to the resulting list, and the reserved
-        details keys, the size guard, the guardrail gate, versioning and the
-        payload sync all see the merged details — a patch cannot step around a
-        validator by naming one key. The schemas refuse ``tags`` / ``details``
-        alongside, and a null for any of the three on PATCH.
+        ordinary wholesale write of what they produce: the surface's tag count
+        cap (``max_tags``) applies to the resulting list — its length cap only
+        to the added tags (the ``add_tags`` validators), so a longer stored tag
+        written through the other surface does not block the edit — and the
+        reserved details keys, the size guard, the guardrail gate, versioning
+        and the payload sync all see the merged details: a patch cannot step
+        around a validator by naming one key. The schemas refuse ``tags`` /
+        ``details`` alongside, and a null for any of the three on PATCH.
 
         Returns:
             The request fields written (``tags``, ``details``), for PATCH's
             provided-field set.
 
         Raises:
-            ValueError: the resulting list breaks the caps, or ``observed_at``
-                disagrees with the patch.
+            ValueError: the resulting list is over the count cap, or
+                ``observed_at`` disagrees with the patch.
         """
         resolved: set[str] = set()
         if request.add_tags is not None or request.remove_tags is not None:
             tags = MemoryService._apply_tag_edits(
                 memory.tags, request.add_tags, request.remove_tags
             )
-            check_tags(tags)
+            check_tag_count(tags, max_tags)
             request.tags = tags
             resolved.add("tags")
         if request.details_patch is not None:
@@ -2039,7 +2042,7 @@ class MemoryService:
         # #2585: add_tags / remove_tags / details_patch are a tags / details
         # write from here on (the stored list, for the lint below).
         stored_tags = set(memory.tags or [])
-        self._resolve_partial_edits(memory, request, check_memory_tags)
+        self._resolve_partial_edits(memory, request, MEMORY_TAGS_MAX_COUNT)
         # #2330 D7: a top-level observed_at is a details write from here on.
         request.details = self._fold_observed_at(
             request.details, memory.details, request.observed_at
@@ -3097,8 +3100,8 @@ class MemoryService:
         # `details` payloads — no deep serialization, just a name set.
         provided_fields = set(request.model_fields_set)
         # #2585: add_tags / remove_tags / details_patch are a tags / details
-        # patch from here on, under PATCH's own tag caps.
-        provided_fields |= self._resolve_partial_edits(memory, request, check_patch_tags)
+        # patch from here on, under PATCH's own tag count cap.
+        provided_fields |= self._resolve_partial_edits(memory, request, PATCH_TAGS_MAX_COUNT)
         # #2330 D7: a top-level observed_at is a details patch from here on.
         # ``{"details": null}`` with it keeps only the event time.
         if request.observed_at is not None:

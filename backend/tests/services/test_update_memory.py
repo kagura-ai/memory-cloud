@@ -442,14 +442,16 @@ class TestPartialTagEdits:
         await _edit(svc, memory_id=memory.id, remove_tags=["t0"], add_tags=["one-more"])
         assert len(memory.tags) == 50 and memory.tags[-1] == "one-more"
 
-    async def test_a_stored_over_long_tag_fails_the_result_until_it_is_removed(self):
-        long_tag = "x" * 101  # written before the #1743 caps
-        memory = _stored(tags=["a", long_tag])
+    async def test_a_stored_over_long_tag_survives_a_tag_edit(self):
+        """The length cap applies to the tags a call adds; a stored tag over it
+        (written before the #1743 caps) does not block a flip that leaves it alone."""
+        long_tag = "x" * 101
+        memory = _stored(tags=["a", long_tag, "status:open"])
         svc = _partial_service(memory)
-        with pytest.raises(ValueError, match="tag at index 1 exceeds 100 characters"):
-            await _edit(svc, memory_id=memory.id, add_tags=["b"])
-        await _edit(svc, memory_id=memory.id, remove_tags=[long_tag], add_tags=["b"])
-        assert memory.tags == ["a", "b"]
+        await _edit(svc, memory_id=memory.id, remove_tags=["status:open"], add_tags=["status:done"])
+        assert memory.tags == ["a", long_tag, "status:done"]
+        await _edit(svc, memory_id=memory.id, remove_tags=[long_tag])
+        assert memory.tags == ["a", "status:done"]
 
     async def test_lint_checks_only_the_added_tags(self):
         memory = _stored(tags=["a", "status:open"])

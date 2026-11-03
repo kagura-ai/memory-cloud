@@ -560,15 +560,17 @@ class TestPatchPartialEdits:
         assert memory.tags == stored
         svc.db.commit.assert_not_awaited()
 
-    async def test_a_stored_tag_over_the_patch_length_fails_the_result(self):
-        """A 100-character tag is legal through MCP, not through PATCH; the
-        PATCH caps apply to the list the call produces."""
-        memory = _make_memory(tags=["y" * 80])
+    async def test_a_stored_tag_over_the_patch_length_survives_a_tag_edit(self):
+        """A 65-100-character tag is legal through MCP, not through PATCH; the
+        64-character cap applies to the tags a PATCH adds, so a status flip
+        leaves the stored one alone, and it can still be removed."""
+        long_tag = "y" * 65
+        memory = _make_memory(tags=[long_tag, "status:open"])
         svc = _patch_service(memory)
-        with pytest.raises(ValueError, match="exceeds 64 chars"):
-            await _patch_partial(svc, memory, add_tags=["b"])
-        await _patch_partial(svc, memory, remove_tags=["y" * 80], add_tags=["b"])
-        assert memory.tags == ["b"]
+        await _patch_partial(svc, memory, remove_tags=["status:open"], add_tags=["status:done"])
+        assert memory.tags == [long_tag, "status:done"]
+        await _patch_partial(svc, memory, remove_tags=[long_tag])
+        assert memory.tags == ["status:done"]
 
     async def test_details_patch_on_a_null_column_merges_into_an_empty_object(self):
         memory = _make_memory(details=None)

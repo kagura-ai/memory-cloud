@@ -58,12 +58,17 @@ def test_update_memory_add_tags_take_the_caps_and_remove_tags_do_not():
 
 
 def test_patch_tag_caps_are_100_tags_of_64_characters():
-    from models.schemas import PATCH_TAG_MAX_CHARS, PATCH_TAGS_MAX_COUNT, check_patch_tags
+    from models.schemas import PATCH_TAG_MAX_CHARS, PATCH_TAGS_MAX_COUNT
 
     assert (PATCH_TAGS_MAX_COUNT, PATCH_TAG_MAX_CHARS) == (100, 64)
-    tags = ["x" * PATCH_TAG_MAX_CHARS] * PATCH_TAGS_MAX_COUNT
-    assert check_patch_tags(tags) == tags
-    with pytest.raises(ValueError, match="at most 100 tags"):
-        check_patch_tags(["t"] * (PATCH_TAGS_MAX_COUNT + 1))
-    with pytest.raises(ValueError, match="exceeds 64 chars"):
-        check_patch_tags(["ok", "x" * (PATCH_TAG_MAX_CHARS + 1)])
+
+
+def test_the_resulting_list_takes_the_count_cap_only():
+    """#2585: the length cap applies to the added tags (their validators), so
+    the list add_tags / remove_tags produce is checked for its count alone."""
+    from models.schemas import check_tag_count
+
+    tags = ["x" * (MEMORY_TAG_MAX_CHARS + 1)] * MEMORY_TAGS_MAX_COUNT
+    assert check_tag_count(tags, MEMORY_TAGS_MAX_COUNT) == tags
+    with pytest.raises(ValueError, match=r"at most 50 tags \(got 51\)"):
+        check_tag_count(["t"] * (MEMORY_TAGS_MAX_COUNT + 1), MEMORY_TAGS_MAX_COUNT)

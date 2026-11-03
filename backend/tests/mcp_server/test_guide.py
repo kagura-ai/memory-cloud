@@ -168,7 +168,7 @@ def test_update_memory_modes_carries_the_partial_edit_rules():
         "reserved keys (location, trigger, tool_trigger, observed_at) keep their rules",
         "add_tags / remove_tags (memory_id only, not with tags)",
         "removals first",
-        "caps apply to the resulting list",
+        "The 50-tag cap applies to the resulting list and the 100-character cap to the added tags",
         "update_memory(memory_id, remove_tags=['status:open'], add_tags=['status:done'])",
     ):
         assert phrase in text, phrase
