@@ -73,8 +73,10 @@ a workspace row: the subject's own workspace delete locks the workspace and
 then updates that ``users`` row. They are one transaction: step 2 reads the
 workspaces the subject owns under the identity-link lock and its hand-overs
 commit with step 3's deletes, so every owner change made after the run's first
-lock either waits for its commit or is seen by step 2. They take the live
-workspace rows ``NOWAIT`` (the order is in
+lock either waits for its commit or is seen by step 2. Step 2 locks every live
+workspace the subject owns before it reads their members (#2455), so a member
+added to one it counts sole-owned waits for the commit and finds it gone. They
+take the live workspace rows ``NOWAIT`` (the order is in
 ``identity_link_service.lock_identity_links``); a busy one, or a deadlock this
 run is the victim of, rolls both steps back (the hand-overs too) and
 reschedules the request like a vector-store failure, on the same attempt
@@ -2107,14 +2109,17 @@ class AccountErasureService:
 
         Lock order (#2418, ``lock_identity_links``): the subject's ``users``
         row (held since ``_guard_erasure_run``) -> the identity-link lock ->
-        each workspace to hand on, in id order (sorted here), ``NOWAIT``
-        (``_lock_without_waiting``). This transaction holds a ``users`` row,
-        so it never waits on a workspace row: the subject's own
-        ``DELETE /workspaces/W`` holds W and then updates that ``users`` row.
-        A workspace still busy after the tries raises :class:`_LockConflict`
-        and stops the step (``_execute`` reschedules the request); it is not
-        skipped, or a shared workspace could be left to the sole-owner
-        cascade of step 3.
+        every live workspace the subject owns, in id order, ``NOWAIT``
+        (``_lock_without_waiting``), before their members are read (#2455):
+        a member added to a sole-owned one afterwards waits for the commit
+        instead of going with the workspace at step 3. Each workspace to hand
+        on is locked again before its transfer (a row this transaction holds:
+        free). This transaction holds a ``users`` row, so it never waits on a
+        workspace row: the subject's own ``DELETE /workspaces/W`` holds W and
+        then updates that ``users`` row. A workspace still busy after the
+        tries raises :class:`_LockConflict` and stops the step (``_execute``
+        reschedules the request); it is not skipped, or a shared workspace
+        could be left to the sole-owner cascade of step 3.
 
         Args:
             user_id: The subject.
@@ -2123,8 +2128,8 @@ class AccountErasureService:
 
         Raises:
             WorkspaceTransferRequiredError: Members but no other admin.
-            _LockConflict: A workspace to hand on is locked by another
-                transaction.
+            _LockConflict: A live workspace the subject owns is locked by
+                another transaction.
         """
         transfers: list[dict[str, str]] = []
         sole_owner_count = 0
@@ -2137,7 +2142,14 @@ class AccountErasureService:
         from services.identity_link_service import lock_identity_links
 
         await lock_identity_links(self.db)
-        # Read under the lock, not before step 1: a workspace handed to the
+        # #2455: every live workspace the subject owns, NOWAIT, before the
+        # members are read. A membership insert (``add_member`` locks the
+        # workspace FOR UPDATE, the FK takes KEY SHARE) waits from here to the
+        # commit, so a workspace counted sole-owned below has no other member
+        # when step 3 hard-deletes it. Soft-deleted ones are not handed on and
+        # stay for step 3, which locks them after the live ones.
+        await self._lock_without_waiting(lambda: self._lock_live_owned_workspaces_nowait(user_id))
+        # Read under the locks, not before step 1: a workspace handed to the
         # subject meanwhile (another erasure's step 2) is handed on too.
         workspaces = await self._list_owned_workspaces(user_id)
         if listed is not None:
@@ -2179,9 +2191,9 @@ class AccountErasureService:
             new_owner = other_admins[0]
             # #1102: take the SHARED workspace-row lock so this owner-mutation
             # serializes with transfer_ownership / update_member_role on the same
-            # FOR UPDATE row — the workspaces were loaded by an UNLOCKED SELECT
-            # (_list_owned_workspaces), so without this the epoch read-modify-write
-            # below could race a concurrent transfer and lose an increment.
+            # FOR UPDATE row. #2455: the row is held since the lock above, so
+            # this re-take is free; it re-reads the row (populate_existing) for
+            # the epoch read-modify-write below.
             # #2418: NOWAIT — this transaction holds the subject's users row.
             # A _LockConflict stops the step, never ``continue``: a skipped
             # shared workspace would still be owned by the subject at step 3.
@@ -2190,14 +2202,14 @@ class AccountErasureService:
                     lambda workspace_id=ws.id: self._lock_workspace_nowait(workspace_id)
                 )
             except NotFoundException:
-                # The workspace was soft-deleted concurrently (it will be cascade-
-                # cleaned anyway) — nothing to auto-transfer. A benign race must NOT
+                # Defensive, unreachable since #2455: the row is held since the
+                # owner-wide lock above, so no soft-delete commits in between.
+                # Were it gone, nothing to auto-transfer; a benign race must NOT
                 # fail the whole GDPR erasure request.
                 continue
-            # Re-read under the lock — the helper uses populate_existing, so this
-            # reflects committed concurrent changes even though the row was already
-            # in the session. If a concurrent transfer already moved ownership away
-            # from the erased user, this is no longer ours to auto-transfer.
+            # Defensive too (#2455): no owner change commits while the row is
+            # held. Kept as the #1102 guard: a workspace someone else owns now
+            # is no longer ours to auto-transfer.
             if locked_ws.owner_user_id != user_id:
                 continue
             locked_ws.owner_user_id = new_owner.user_id
@@ -2243,7 +2255,7 @@ class AccountErasureService:
 
     async def _lock_live_owned_workspaces_nowait(self, user_id: str) -> None:
         """The live workspaces ``user_id`` owns, in id order, ``NOWAIT``
-        (step 3, #2418)."""
+        (step 2 before it reads their members, #2455; step 3 again, #2418)."""
         try:
             await self.db.execute(
                 select(Workspace.id)
@@ -2344,9 +2356,10 @@ class AccountErasureService:
         # #2418: the workspaces the subject owns, before the context union —
         # the order admin deletion takes (``delete_user_rows``). The live ones
         # NOWAIT: this transaction holds the subject's users row, and the
-        # subject's own DELETE /workspaces/W holds W and then updates it. The
-        # soft-deleted ones wait: no owner mutation or workspace delete takes
-        # them (``lock_workspace_for_update`` locks live rows only), and the
+        # subject's own DELETE /workspaces/W holds W and then updates it. Under
+        # ``_execute``, step 2 holds the live ones already (#2455): this re-take
+        # is free. The soft-deleted ones wait: no owner mutation or workspace
+        # delete takes them (``lock_workspace_for_update`` locks live rows only), and the
         # deleted-workspace file repair locks them SKIP LOCKED holding no user.
         await self._lock_owned_workspaces(user_id)
         owned_ws = select(Workspace.id).where(Workspace.owner_user_id == user_id)
