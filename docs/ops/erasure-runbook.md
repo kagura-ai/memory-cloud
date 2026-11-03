@@ -96,6 +96,8 @@ FK の依存逆順で削除:
 
 #2305 より前の erasure (メンバー削除・admin のユーザー削除は #2352 より前) で write key を削除された connector (worker の key が認証されず書けない) は、workspace の owner か admin が `POST /api/v1/workspace-connectors/{connector_id}/rotate-kmc-key` を一度呼べば復旧する: connector に有効な key が 1 本も紐付いていなければ、workspace の owner 名義で新しい key を発行する (worker は次の poll で取り直す)。有効な key が別にある場合は従来どおり `422` で、connector を削除して再登録する。key の名義人が workspace のメンバーでなくなっている connector も、同じ rotate で新しい key が owner 名義になる。lock 待ちが 5 秒を超えると `503` `CONNECTOR-003` (再試行する)。
 
+agent に紐付いた key (`api_keys.agent_id IS NOT NULL`) は connector key と違い owner に移さず、本人の他の key と一緒に削除する (#2373 / #2349。agent key は member/viewer のサービス用 member にだけ発行されるので、owner に移すと agent が owner の権限で動く。削除は権限を広げない、が設計の不変条件)。本人が所有しない workspace では、その削除で有効な key が 1 本もなくなる active な agent を `suspended` にし、本人が登録した agent の `agents.owner_user_id` を workspace の owner にする。counts キー = `agent_api_keys_deleted` / `agents_suspended` / `agents_reowned`、owner には workspace ごとに `departed_member_credentials` の audit 行が 1 行残り (本人の ID は `AUDIT_HMAC_KEY` の HMAC のみ)、メンバー削除・admin のユーザー削除・`delete_admin` CLI も同じ。agent の再開手順は [agent-credential-runbook.md](agent-credential-runbook.md) §4.1。
+
 ### 2.5 Audit logs (Step 4 の一部)
 
 `audit_logs` 行は **保持** (legal retention)、ただし本人が actor の行 (`user_id = :uid`) の `user_id` を SHA256 で pseudonymize、`user_email` は本人の email と一致する場合のみ pseudonymize (他人が actor の行に残る actor の email は保持)、`resource` 内の本人の email / sub も置換する (pseudonym で列長 255 を超える値は 255 文字に切り詰め、erasure が失敗しないようにする)。本人の行の `ip_address` / `user_agent` は NULL にする (v0.128.0, #2345。request 行と同じ扱い)。salt は per-deployment 定数 (`_AUDIT_PSEUDO_SALT`) で同一ユーザー由来行の cross-row 相関は維持、original sub/email は不可逆。

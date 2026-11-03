@@ -255,6 +255,26 @@ Semantics on the programmatic (owner-key) path:
   every key bound to that agent at verify time — one row update instead of revoking N keys.
   Until then, per-key revocation is the only lever.
 
+### 4.1 When the service member is removed, deleted or erased (#2373)
+
+The service member's agent-bound keys are deleted with its other keys when it is removed from
+the workspace, when its account is deleted (`DELETE /api/v1/admin/users/{user_id}`,
+`cli.delete_admin`) or when it is erased. They are never handed to the workspace owner: the key
+would then act with the owner's scope, and deletion never widens (design invariant 4 in
+`docs/design/agent-registry-and-bindings.md`). An active agent that this leaves with no live key
+is set to `suspended`; its bindings and its owner stay, and an agent another member still holds a
+live key for stays `active`. To bring a suspended agent back:
+
+1. Re-activate it: `PATCH /api/v1/agents/{agent_id}` with `{"status": "active"}` (workspace
+   owner/admin session or key; writes an `agent_updated` audit row with the status pair). Do
+   this first: the mint refuses a key for an agent that is not active (400).
+2. Mint a key for another member/viewer service identity (section 2) with the agent's
+   `agent_id`.
+
+The workspace owner also gets one `departed_member_credentials` audit row per workspace
+(section 8). Agents a departing admin registered stay as they are and name the workspace owner in
+`owner_user_id` instead; that field is display only.
+
 ---
 
 ## 5. Expiry policy for workload credentials
@@ -454,6 +474,12 @@ All rows/events below are shipped and verifiable in the tree:
   - `member_api_key_revoked` — resource `api_key:<public id>`; metadata: `key_prefix` (acting key),
     `revoked_key_prefix`, `self_revoke`.
   - `public_bound_key_created` / `public_bound_key_revoked` — resource `api_key:<public id>`.
+  - `departed_member_credentials` (#2373) — on the workspace owner's trail, one row per
+    workspace when a member leaves it (removal, account deletion, erasure); resource `api_key`;
+    `new_value_hash` = HMAC of the departing user id under `AUDIT_HMAC_KEY` (no plaintext id);
+    metadata: `workspace_id`, `path` (`member_removal` / `user_deletion` / `erasure`),
+    `agent_api_keys_deleted`, `agents_suspended`, `agents_reowned`,
+    `connector_api_keys_reowned`.
   - **Rows written before #1008** record the integer database id instead
     (`api_key:42`). Map one to the public id the API and newer rows use:
 

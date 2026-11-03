@@ -1069,7 +1069,10 @@ the subscription refusal). Use the API for successor selections when retiring
 an account with owned resources. API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
 keys and memberships, preserve live connector keys under the workspace owner,
-and remove its identity link. Link provenance (`linked_by`) becomes empty when
+and remove its identity link. Its agent-bound keys are deleted, never handed
+over; an agent left without a live key is suspended and the agents it
+registered name the workspace owner (#2373,
+[agent-credential-runbook.md](ops/agent-credential-runbook.md) §4.1). Link provenance (`linked_by`) becomes empty when
 the account is gone (#1807).
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
