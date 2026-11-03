@@ -41,10 +41,12 @@ def consolidation_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(provider="openai", model="gpt-5-nano"):
+def _make_config(provider="openai", model="gpt-5-nano", exempt_tags=("status:open",)):
     config = MagicMock()
     config.sleep_llm_provider = provider
     config.sleep_llm_model = model
+    # #2584: the NeuralMemoryConfig default.
+    config.sleep_archive_exempt_tags = exempt_tags
     return config
 
 
@@ -55,6 +57,7 @@ def _make_working_memory(
     reference_count=0,
     age_days=10,
     created_at=None,
+    tags=None,
 ):
     m = MagicMock()
     m.id = memory_id or uuid4()
@@ -64,13 +67,21 @@ def _make_working_memory(
     m.access_count = access_count
     m.reference_count = reference_count  # #1049: adoption signal the gate reads
     m.scope = "working"
+    m.tags = tags or []
     # Age-accurate created_at so execute()'s (utcnow()-created_at).days matches age_days.
     m.created_at = created_at if created_at is not None else (utcnow() - timedelta(days=age_days))
     return m
 
 
 async def _run_execute(
-    phase, memories, *, cutoff=None, reporter=None, report_id=None, soft_delete_rows=1
+    phase,
+    memories,
+    *,
+    cutoff=None,
+    reporter=None,
+    report_id=None,
+    soft_delete_rows=1,
+    exempt_tags=("status:open",),
 ):
     """Drive ConsolidationPhase.execute() deterministically (LLM off, no graph).
 
@@ -81,7 +92,8 @@ async def _run_execute(
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
     phase.memory_repo.soft_delete = AsyncMock(return_value=soft_delete_rows)
-    config = _make_config(provider="")  # LLM off → borderline memories stay put
+    # LLM off → borderline memories stay put
+    config = _make_config(provider="", exempt_tags=exempt_tags)
     budget = SleepBudget()
     with (
         patch("services.sleep.consolidation.GraphService") as GS,
@@ -523,12 +535,13 @@ class TestLLMArchivalEligibilityGuard:
     silently bypassed by the LLM path.
     """
 
-    async def _run_llm_archive(self, phase, memory, *, cutoff):
+    @staticmethod
+    async def _run_llm_archive(phase, memory, *, cutoff, exempt_tags=("status:open",)):
         phase._fetch_working_memories = AsyncMock(return_value=[memory])
         phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         phase.memory_repo.soft_delete = AsyncMock(return_value=1)
         phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
-        config = _make_config()  # LLM on
+        config = _make_config(exempt_tags=exempt_tags)  # LLM on
         budget = SleepBudget()
         with (
             patch("services.sleep.consolidation.GraphService") as GS,
@@ -598,3 +611,112 @@ class TestLLMArchivalEligibilityGuard:
         )
         assert result.details["rule_deleted"] == 1
         assert result.details["llm_archive_guarded"] == 0
+
+
+class TestArchiveExemptTags:
+    """#2584: a memory carrying one of ``sleep_archive_exempt_tags`` (default
+    ``status:open``) is never archived — not by the rule path, not by an LLM
+    archive verdict. An open review memo waits for the change that touches its
+    files, often longer than the 30-day floor and with no ``reference()`` call.
+    The tag is the only state: removing it returns the memory to the normal
+    lifecycle.
+    """
+
+    OPEN = ["tech-debt", "status:open", "source:review", "area:sleep"]
+    DONE = ["tech-debt", "status:done", "source:review", "area:sleep"]
+
+    @staticmethod
+    def _old_unadopted(tags):
+        """Archival-eligible on every other gate: 40 days old, never adopted,
+        created after a cutoff set 60 days ago, isolated (no graph)."""
+        return _make_working_memory(
+            reference_count=0,
+            access_count=0,
+            importance=0.1,
+            created_at=utcnow() - timedelta(days=40),
+            tags=tags,
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_memo_survives_the_rule_path(self, consolidation_phase):
+        memo = self._old_unadopted(self.OPEN)
+
+        result = await _run_execute(
+            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
+        )
+
+        assert result.details["rule_deleted"] == 0
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_removing_the_tag_makes_it_eligible_again(self, consolidation_phase):
+        memo = self._old_unadopted(self.DONE)
+
+        result = await _run_execute(
+            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
+        )
+
+        assert result.details["rule_deleted"] == 1
+        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
+            memo.id, deleted_by="sleep_consolidation", only_if=ANY
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tag", ["Status:Open", "status:opened", "status: open"])
+    async def test_the_match_is_exact(self, consolidation_phase, tag):
+        memo = self._old_unadopted(["tech-debt", tag])
+
+        result = await _run_execute(
+            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
+        )
+
+        assert result.details["rule_deleted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_empty_setting_turns_the_exemption_off(self, consolidation_phase):
+        memo = self._old_unadopted(self.OPEN)
+
+        result = await _run_execute(
+            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60), exempt_tags=()
+        )
+
+        assert result.details["rule_deleted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_setting_can_widen_the_set(self, consolidation_phase):
+        memo = self._old_unadopted(["status:blocked"])
+
+        result = await _run_execute(
+            consolidation_phase,
+            [memo],
+            cutoff=utcnow() - timedelta(days=60),
+            exempt_tags=("status:open", "status:blocked"),
+        )
+
+        assert result.details["rule_deleted"] == 0
+
+    @pytest.mark.asyncio
+    async def test_open_memo_survives_an_llm_archive_verdict(self, consolidation_phase):
+        """The rule path defers the memo to the judge; an archive verdict for it
+        is refused by the shared eligibility predicate."""
+        memo = self._old_unadopted(self.OPEN)
+
+        result = await TestLLMArchivalEligibilityGuard._run_llm_archive(
+            consolidation_phase, memo, cutoff=utcnow() - timedelta(days=60)
+        )
+
+        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
+        assert result.details["rule_deleted"] == 0
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 1
+
+    @pytest.mark.asyncio
+    async def test_open_memo_can_still_be_promoted(self, consolidation_phase):
+        """The exemption is from archival only: adoption still promotes it."""
+        memo = _make_working_memory(
+            reference_count=ADOPTION_PROMOTE_MIN, importance=0.1, age_days=40, tags=self.OPEN
+        )
+
+        result = await _run_execute(consolidation_phase, [memo], cutoff=utcnow())
+
+        assert result.details["rule_promoted"] == 1

@@ -48,6 +48,7 @@ def _make_memory(
     mem.created_at = utcnow() - timedelta(days=age_days)
     mem.is_pinned = False  # #1523: a bare MagicMock attribute would read as pinned
     mem.is_tool_triggered = False  # same trap for the tool-guardrail exemption
+    mem.tags = []  # #2584: no exempt tag
     mem.point_id = mem.id  # #1829: Memory.point_id is a property (falls back to id)
     return mem
 
@@ -369,6 +370,52 @@ class TestConsolidationTask:
         mock_qdrant_delete.assert_not_called()
         mock_memory_repo.delete.assert_not_called()
         mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
+
+    @staticmethod
+    async def _run_with_open_memo(monkeypatch, exempt_env: str | None):
+        """One old, never-accessed working memory tagged ``status:open``."""
+        if exempt_env is None:
+            monkeypatch.delenv("SLEEP_ARCHIVE_EXEMPT_TAGS", raising=False)
+        else:
+            monkeypatch.setenv("SLEEP_ARCHIVE_EXEMPT_TAGS", exempt_env)
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
+
+        memo = _make_memory(access_count=0, importance=0.0, age_days=45)
+        memo.tags = ["tech-debt", "status:open"]
+        mock_memory_repo = MagicMock()
+        mock_memory_repo.list = AsyncMock(return_value=[memo])
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
+        mock_memory_repo.delete = AsyncMock()
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
+            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
+        ):
+            await consolidation_task()
+        return memo, mock_memory_repo, mock_qdrant_delete
+
+    @pytest.mark.asyncio
+    async def test_never_deletes_an_open_memo(self, monkeypatch):
+        """#2584: the legacy pass honours SLEEP_ARCHIVE_EXEMPT_TAGS too (default
+        ``status:open``) — it is the pass a deployment without SLEEP_ENABLED runs,
+        and its delete is physical."""
+        _memo, repo, qdrant_delete = await self._run_with_open_memo(monkeypatch, None)
+
+        qdrant_delete.assert_not_called()
+        repo.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_exempt_setting_deletes_the_memo(self, monkeypatch):
+        memo, repo, _qdrant_delete = await self._run_with_open_memo(monkeypatch, "")
+
+        repo.delete.assert_called_once_with(memo.id)
 
     @pytest.mark.asyncio
     async def test_leaves_recent_unused_memory_alone(self):
