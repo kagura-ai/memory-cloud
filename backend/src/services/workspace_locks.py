@@ -2,9 +2,10 @@
 owner-mutating path (#1102).
 
 Workspace ownership is reassigned from three places: ``WorkspaceOwnershipService.
-transfer_ownership`` (voluntary), ``WorkspaceService.update_member_role`` (role
-promotion/demotion that touches OWNER), and ``account_erasure_service`` (owner
-erasure auto-transfer). All three acquire THIS ``SELECT ... FOR UPDATE`` on the
+transfer_ownership`` (voluntary), ``WorkspaceService.update_member_role`` (every
+role change since #2571: an admin <-> member change moves who the owner erasure
+can hand the workspace to), and ``account_erasure_service`` (owner erasure
+auto-transfer). All three acquire THIS ``SELECT ... FOR UPDATE`` on the
 workspace row before mutating ownership, so concurrent owner-mutations on the
 same workspace **serialize** (row-level mutual exclusion) instead of racing —
 e.g. two paths can no longer read the same ``ownership_epoch`` and both write

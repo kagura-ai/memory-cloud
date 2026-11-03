@@ -924,7 +924,7 @@ class TestHandleOwnedWorkspaces:
         rows = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER)]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[ws])
 
         out = await svc._handle_owned_workspaces("u-1")
         assert out["sole_owner_workspaces"] == 1
@@ -942,7 +942,7 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[ws])
 
         # #1102: the auto-transfer takes the SHARED workspace-row lock (returning
         # the same locked row) so it serializes with transfer_ownership.
@@ -977,7 +977,7 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[ws])
 
         with patch(
             "services.account_erasure_service.lock_workspace_for_update",
@@ -1005,7 +1005,7 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[ws])
 
         with patch(
             "services.account_erasure_service.lock_workspace_for_update",
@@ -1029,7 +1029,7 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[ws])
 
         with pytest.raises(WorkspaceTransferRequiredError) as exc_info:
             await svc._handle_owned_workspaces("u-1")
@@ -1049,11 +1049,16 @@ class TestHandleOwnedWorkspaces:
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
+        # #2571: the owner-wide lock takes the live ones only; the listing
+        # adds the soft-deleted one for the caller
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[])
         svc._list_owned_workspaces = AsyncMock(return_value=[ws])
+        listed: list = []
 
-        out = await svc._handle_owned_workspaces("u-1")
+        out = await svc._handle_owned_workspaces("u-1", listed=listed)
 
         assert out["transferred"] == []
+        assert listed == [ws]
         svc.db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1062,8 +1067,8 @@ class TestHandleOwnedWorkspaces:
         svc._list_owned_workspaces = AsyncMock(return_value=[])
         # The identity-link lock and the (empty) live-workspace lock only: no
         # member bulk-load when the subject owns no workspace under them.
-        svc.db.execute = AsyncMock()
-        out = await svc._handle_owned_workspaces("u-1")
+        svc.db.execute = AsyncMock(return_value=MagicMock())  # no rows locked
+        out = await svc._handle_owned_workspaces("u-1", listed=[])
         assert out == {"transferred": [], "sole_owner_workspaces": 0}
         link, live = svc.db.execute.await_args_list
         assert "pg_advisory_xact_lock" in str(link.args[0])
@@ -1132,10 +1137,11 @@ class TestHandleOwnedWorkspaces:
             result = MagicMock()
             if "FROM workspace_members" in sql:
                 result.scalars.return_value.all.return_value = members
+            elif "FOR UPDATE" in sql:
+                result.scalars.return_value.all.return_value = [ws]
             return result
 
         svc.db.execute = AsyncMock(side_effect=execute)
-        svc._list_owned_workspaces = AsyncMock(return_value=[ws])
 
         out = await svc._handle_owned_workspaces("u-1")
 
@@ -1149,6 +1155,44 @@ class TestHandleOwnedWorkspaces:
         assert link_at < locked_at < members_at
         assert out == {"transferred": [], "sole_owner_workspaces": 1}
         svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_step_two_hands_on_the_rows_its_owner_wide_lock_returned(self):
+        """#2571: the live workspaces step 2 handles are the rows its
+        owner-wide lock returned, never a live one only a second read saw;
+        the listing adds just the soft-deleted ones for the caller."""
+        svc = _service()
+        locked_id, unlocked_id, soft_id = uuid4(), uuid4(), uuid4()
+        locked = SimpleNamespace(
+            id=locked_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=1
+        )
+        unlocked = SimpleNamespace(
+            id=unlocked_id, deleted_at=None, owner_user_id="u-1", ownership_epoch=1
+        )
+        soft = SimpleNamespace(id=soft_id, deleted_at=object(), owner_user_id="u-1")
+        rows = [
+            SimpleNamespace(workspace_id=ws_id, user_id=user, role=role)
+            for ws_id in (locked_id, unlocked_id)
+            for user, role in (("u-1", WorkspaceRole.OWNER), ("u-2", WorkspaceRole.ADMIN))
+        ]
+        svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[locked])
+        svc._list_owned_workspaces = AsyncMock(return_value=[unlocked, soft])
+        listed: list = []
+
+        with patch(
+            "services.account_erasure_service.lock_workspace_for_update",
+            AsyncMock(return_value=locked),
+        ) as relock:
+            out = await svc._handle_owned_workspaces("u-1", listed=listed)
+
+        assert out == {
+            "transferred": [{"workspace_id": str(locked_id), "new_owner_user_id": "u-2"}],
+            "sole_owner_workspaces": 0,
+        }
+        assert [c.args[1] for c in relock.await_args_list] == [locked_id]
+        assert unlocked.owner_user_id == "u-1"  # not handled
+        assert listed == [locked, soft]
 
 
 # ---------------------------------------------------------------------------
@@ -4641,7 +4685,7 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
         members.scalars.return_value.all.return_value = rows
         svc.db.execute = AsyncMock(return_value=members)
         svc.db.commit = AsyncMock()
-        svc._list_owned_workspaces = AsyncMock(return_value=[second, first])
+        svc._lock_live_owned_workspaces_nowait = AsyncMock(return_value=[second, first])
 
         async def locking(db, workspace_id, **kwargs):
             if workspace_id == low:
@@ -4654,7 +4698,7 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
             patch("services.account_erasure_service.asyncio.sleep", AsyncMock()) as sleep,
         ):
             with pytest.raises(_LockConflict) as caught:
-                # listed out of order: locked in id order all the same
+                # returned out of order: locked in id order all the same
                 await svc._handle_owned_workspaces("u-1")
 
         # the busy one is tried WORKSPACE_LOCK_TRIES times, sleeping between
@@ -4674,7 +4718,9 @@ class TestTheWorkspaceStepsNeverWaitOnAWorkspace:
 
         svc = _service()
         statements: list[Any] = []
-        svc.db.execute = AsyncMock(side_effect=lambda stmt, *a, **k: statements.append(stmt))
+        svc.db.execute = AsyncMock(
+            side_effect=lambda stmt, *a, **k: statements.append(stmt) or MagicMock()
+        )
 
         await svc._lock_owned_workspaces("u-1")
 

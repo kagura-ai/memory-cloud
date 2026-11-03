@@ -543,14 +543,18 @@ class WorkspaceService:
         # holds its subject's users row and then deletes the subject's rows
         # in workspaces it does not own (external keys, files): taking them
         # here first means this transaction never holds a workspace-scoped
-        # row while it waits on a users row.
+        # row while it waits on a users row. FOR NO KEY UPDATE (the update
+        # below changes no key): a remember by one of them holds FOR KEY SHARE
+        # on its users row until it commits and locks W for its quota check
+        # meanwhile, so FOR UPDATE here would hold W and wait on it, a
+        # deadlock. It still waits on an erasure's FOR UPDATE.
         users = (
             (
                 await self.db.execute(
                     select(User)
                     .where(User.current_workspace_id == workspace_id)
                     .order_by(User.user_id)
-                    .with_for_update()
+                    .with_for_update(key_share=True)
                 )
             )
             .scalars()
@@ -725,6 +729,7 @@ class WorkspaceService:
         user_id: str,
         raise_if_not_found: bool = True,
         with_lock: bool = False,
+        populate_existing: bool = False,
     ) -> WorkspaceMember | None:
         """Get workspace member.
 
@@ -733,6 +738,9 @@ class WorkspaceService:
             user_id: User ID
             raise_if_not_found: Raise exception if not found
             with_lock: Use SELECT FOR UPDATE to prevent race conditions
+            populate_existing: Overwrite a row this session already loaded
+                with what is committed now (a read under a lock taken after
+                that earlier load).
 
         Returns:
             Membership or None
@@ -748,6 +756,8 @@ class WorkspaceService:
         # Issue #275 High: Row-level locking for concurrent member operations
         if with_lock:
             stmt = stmt.with_for_update()
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
 
         result = await self.db.execute(stmt)
         member = result.scalar_one_or_none()
@@ -798,23 +808,32 @@ class WorkspaceService:
 
         Raises:
             ValidationError: If trying to create multiple owners
+            NotFoundException: The workspace is missing or soft-deleted, or
+                the user is not a member of it.
         """
         self.validate_role(new_role)
 
-        member = await self.get_member(workspace_id, user_id)
+        # #1102: a role change that ADDS or REMOVES an OWNER serializes on the
+        # workspace row with the other owner-mutating paths (transfer_ownership,
+        # account_erasure), so the single-owner invariant is structural rather
+        # than emergent. #2571: every role change takes it, before the member is
+        # read, because an admin <-> member change moves who can succeed the
+        # owner. Erasure step 2 holds the row from before it reads the members
+        # until its commit and hands the workspace to the lowest-id admin it
+        # read; a demotion that committed in between was lost when step 2 made
+        # the ex-admin the owner. This transaction holds no ``users`` row, so
+        # it may wait on the workspace row (the global lock order,
+        # tests/integration/test_erasure_lock_order_db.py).
+        locked_workspace = await lock_workspace_for_update(self.db, workspace_id)
+
+        # populate_existing: the route loaded this row before the lock (its
+        # owner check); a plain re-read returns that instance with the role it
+        # had before the wait, and a change committed meanwhile is lost.
+        member = await self.get_member(workspace_id, user_id, populate_existing=True)
         if member is None:
             # get_member raises by default; narrow for pyright + any future
             # call site that passes raise_if_not_found=False.
             raise NotFoundException("Member", f"{user_id} in workspace {workspace_id}")
-
-        # #1102: a role change that ADDS or REMOVES an OWNER must serialize on the
-        # workspace row with the other owner-mutating paths (transfer_ownership,
-        # account_erasure) so the single-owner invariant is structural rather than
-        # emergent. Plain member<->viewer changes never touch ownership and skip
-        # the lock to keep the common path contention-free.
-        locked_workspace = None
-        if WorkspaceRole.OWNER in (new_role, member.role):
-            locked_workspace = await lock_workspace_for_update(self.db, workspace_id)
 
         # #1108: refuse to demote the workspace owner via this path. The source of
         # truth for ownership is ``workspace.owner_user_id`` (what transfer_ownership
@@ -828,14 +847,10 @@ class WorkspaceService:
         # ``owner_user_id`` holder, which is the repair path out of a multi-owner
         # corruption. Owner changes must go through transfer_ownership, which moves
         # both representations atomically under this same lock (mirrors the
-        # promote-to-owner guard below). ``locked_workspace`` is always present when
-        # ``member.role == OWNER`` (the lock fires on that branch), so the consistent
-        # owner-demotion case is always covered and the check runs serialized.
-        if (
-            new_role != WorkspaceRole.OWNER
-            and locked_workspace is not None
-            and locked_workspace.owner_user_id == user_id
-        ):
+        # promote-to-owner guard below). ``locked_workspace`` is read under the lock
+        # taken above for every role change (#2571), so the owner-demotion check
+        # always runs serialized.
+        if new_role != WorkspaceRole.OWNER and locked_workspace.owner_user_id == user_id:
             raise ValidationError(
                 "Cannot demote the workspace owner via a role change. "
                 "Only one owner is allowed per workspace. "
