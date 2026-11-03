@@ -1601,8 +1601,9 @@ class ResourceIndexer:
         points = {row.version_point for row in retired}
         shared: set[UUID | None] = set()
         dropped: set[str] = set()
+        bound = asyncio.timeout(RETIRED_POINT_DELETE_TIMEOUT_SECONDS)
         try:
-            async with asyncio.timeout(RETIRED_POINT_DELETE_TIMEOUT_SECONDS):
+            async with bound:
                 async with isolated_session(self.db) as session:
                     if not await try_exclude_point_writers(session):
                         logger.info("old_version_points_deferred", rows=len(retired))
@@ -1616,15 +1617,18 @@ class ResourceIndexer:
                     shared = set(named.scalars().all())
                     await self._delete_unshared_version_points(retired, shared, dropped)
                     await session.commit()
-        except TimeoutError:
-            logger.warning(
-                "old_version_point_drain_timed_out",
-                timeout_seconds=RETIRED_POINT_DELETE_TIMEOUT_SECONDS,
-                points_dropped=len(dropped),
-                # Not deleted and not known to be shared: the sweep's to judge.
-                points_left=len({str(point) for point in points - shared} - dropped),
-            )
         except Exception as e:  # noqa: BLE001 — best effort, the sweep is the backstop
+            # Only the bound's own expiry is a timeout here: a TimeoutError
+            # the driver raises (a connect timeout) is a failure like any other.
+            if bound.expired():
+                logger.warning(
+                    "old_version_point_drain_timed_out",
+                    timeout_seconds=RETIRED_POINT_DELETE_TIMEOUT_SECONDS,
+                    points_dropped=len(dropped),
+                    # Not deleted and not known to be shared: the sweep's to judge.
+                    points_left=len({str(point) for point in points - shared} - dropped),
+                )
+                return
             logger.warning(
                 "old_version_point_lookup_failed",
                 rows=len(retired),

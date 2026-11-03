@@ -1856,9 +1856,9 @@ class TestRetiredPointDrainIsBounded:
     behind it. ``RETIRED_POINT_DELETE_TIMEOUT_SECONDS`` bounds the whole
     block, as ``FORGET_POINT_DELETE_TIMEOUT_SECONDS`` bounds forget's."""
 
-    async def _drain(self, rows, delete, *, timeout=2.0, shared=()):
+    async def _drain(self, rows, delete, *, timeout=2.0, shared=(), lookup_error=None):
         order: list[str] = []
-        _, isolated = _drain_session(order, shared=shared)
+        _, isolated = _drain_session(order, shared=shared, lookup_error=lookup_error)
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(_mock_db())
         indexer._retired = list(rows)
@@ -1938,6 +1938,22 @@ class TestRetiredPointDrainIsBounded:
         ]
         assert [c.kwargs for c in timed_out] == [
             {"timeout_seconds": 0.05, "points_dropped": 0, "points_left": 1}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_error_from_inside_is_a_failure_not_the_bound(self):
+        """A ``TimeoutError`` the DB driver raises (a connect timeout) is not
+        the drain's bound expiring: it is logged as the lookup failure it is,
+        with its class, not as a stalled vector store."""
+        rows = _retired_rows("kagura_memories")
+        delete = AsyncMock()
+
+        _, _, log, _ = await self._drain(rows, delete, lookup_error=TimeoutError())
+
+        delete.assert_not_awaited()
+        warned = [(c.args[0], c.kwargs) for c in log.warning.call_args_list]
+        assert warned == [
+            ("old_version_point_lookup_failed", {"rows": 1, "error_class": "TimeoutError"})
         ]
 
 
