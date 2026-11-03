@@ -17,8 +17,9 @@
  */
 
 import type { ReactNode } from "react";
-import { Circle, Loader2, Save } from "lucide-react";
+import { Circle, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { InlineSpinner } from "@/components/common/LoadingState";
 
 interface UnsavedChangesBarProps {
   /** Whether something is unsaved: shows the bar and fills the status. */
@@ -95,7 +96,7 @@ export function UnsavedChangesBar({
             </Button>
             <Button size="sm" onClick={onSave} disabled={saveDisabled}>
               {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                <InlineSpinner className="mr-2" />
               ) : (
                 <Save className="h-4 w-4 mr-2" />
               )}
