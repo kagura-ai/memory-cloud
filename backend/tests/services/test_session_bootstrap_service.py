@@ -760,18 +760,21 @@ async def _session_start(db, owner, ws, ctx, max_chars: int):
 
 
 @pytest.mark.asyncio
-async def test_index_session_start_on_a_live_sized_context_at_4000(db_session):
-    """#2485 on a context sized like the reproduction, at max_chars=4000.
+async def test_index_session_start_on_a_live_sized_context_at_5000(db_session):
+    """#2485 on a context sized like the reproduction, at the session-start
+    skill's max_chars=5000.
 
-    Measured on these sizes: at 3,000 the reply holds every upcoming row and
-    two guardrail rows but no change row (the context block, the pinned text
-    and three upcoming rows take the rest); 4,000 is the smallest of 3,000 /
-    4,000 / 5,000 / 6,000 that returns at least three change rows. This test
-    holds that budget: upcoming whole, one to three guardrail rows, and a
-    changes page of three rows or more that says it was cut."""
+    Measured on these sizes (upcoming / guardrail / change rows): 3,000 gives
+    3 / 2 / 0 — the context block, the pinned text and three upcoming rows
+    leave no room for a change row; 4,000 gives 3 / 3 / 4; 5,000 gives
+    3 / 3 / 10; 6,000 gives 3 / 3 / 16. The skill asks for 5,000
+    (claude-skills/session-start.md, pinned by
+    tests/plugin/test_session_start_bootstrap_index.py): upcoming whole, one
+    to three guardrail rows, and a changes page of three rows or more that
+    says it was cut."""
     owner, ws, ctx = await _live_like_context(db_session)
-    env = await _session_start(db_session, owner, ws, ctx, 4_000)
-    assert json_chars(env) <= 4_000
+    env = await _session_start(db_session, owner, ws, ctx, 5_000)
+    assert json_chars(env) <= 5_000
     comps = env["components"]
     assert len(comps["pinned"]["memories"]) == 2
     assert len(comps["upcoming"]["results"]) == 3 and not comps["upcoming"].get("truncated")
