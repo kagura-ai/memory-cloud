@@ -378,6 +378,18 @@ class TestUpdateInPlace:
         (revision,) = _added_revisions(mock_db)
         assert revision.prior == {"details": {"k": "v", "gone": 1}}
 
+    @pytest.mark.parametrize("patch_value", [{}, {"absent": None}])
+    async def test_a_details_patch_that_leaves_a_null_column_empty_keeps_the_version(
+        self, service, mock_db, patch_value
+    ) -> None:
+        """Merging into a NULL column that stays empty changes nothing: no
+        ``{}`` written over NULL, no version, no revision (the guide's promise)."""
+        memory = _memory(details=None)
+        _prime(service, memory)
+        result = await _update(service, memory_id=memory.id, details_patch=patch_value)
+        assert result.version == 3 and memory.details is None
+        assert _added_revisions(mock_db) == []
+
     async def test_a_stale_version_refuses_a_partial_edit(self, service, mock_db) -> None:
         memory = _memory(tags=["a"])
         _prime(service, memory)
@@ -423,6 +435,16 @@ class TestPatch:
         assert memory.tags == ["a", "b"] and memory.details == {"k": 1}
         (revision,) = _added_revisions(mock_db)
         assert revision.prior == {"tags": ["a"], "details": None}
+
+    @pytest.mark.parametrize("patch_value", [{}, {"absent": None}])
+    async def test_a_details_patch_that_leaves_a_null_column_empty_keeps_the_version(
+        self, service, mock_db, patch_value
+    ) -> None:
+        memory = _memory(details=None)
+        _prime(service, memory)
+        await _patch(service, memory, details_patch=patch_value)
+        assert memory.version == 3 and memory.details is None
+        assert _added_revisions(mock_db) == []
 
 
 @pytest.mark.asyncio

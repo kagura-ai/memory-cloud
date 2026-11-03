@@ -943,10 +943,14 @@ class MemoryService:
             request.tags = tags
             resolved.add("tags")
         if request.details_patch is not None:
-            request.details = MemoryService._merge_details_patch(
+            merged = MemoryService._merge_details_patch(
                 memory.details, request.details_patch, request.observed_at
             )
-            resolved.add("details")
+            # A NULL column the patch leaves empty is unchanged: writing {}
+            # over it would only move the version.
+            if merged or isinstance(memory.details, dict):
+                request.details = merged
+                resolved.add("details")
         return resolved
 
     @staticmethod
