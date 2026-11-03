@@ -2821,6 +2821,157 @@ class TestConnectorKeysSurviveErasure:
         assert counts["connector_api_keys_reowned"] == 1
 
 
+async def _private_context(db: AsyncSession, workspace: Workspace, creator: str) -> UUID:
+    from models.auth import Context
+
+    context = Context(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        name=f"priv_{uuid4().hex[:8]}",
+        created_by=creator,
+        is_private=True,
+    )
+    db.add(context)
+    await db.flush()
+    return context.id
+
+
+async def _memory_in(db: AsyncSession, workspace: Workspace, context_id: UUID, author: str) -> UUID:
+    from models.memory import Memory
+
+    memory = Memory(
+        id=uuid4(),
+        user_id=author,
+        workspace_id=workspace.id,
+        context_id=context_id,
+        summary="a summary long enough",
+        content="content",
+        type="note",
+        client="pytest",
+    )
+    db.add(memory)
+    await db.flush()
+    return memory.id
+
+
+async def _created_by(db: AsyncSession, context_id: UUID) -> str | None:
+    from models.auth import Context
+
+    return await db.scalar(select(Context.created_by).where(Context.id == context_id))
+
+
+class TestConnectorWriteTargetsFollowTheWorkspace:
+    """#2422: a connector's write target the subject created goes to the
+    workspace's owner with the connector's key — not to a linked account
+    through the identity-link hand-over, and not to the pseudonym the
+    authorship sweep writes, where nobody could read what the connector
+    keeps writing."""
+
+    @pytest.mark.asyncio
+    async def test_the_owner_takes_it_where_a_linked_admin_wrote_in_it(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from sqlalchemy import update
+
+        from models.auth import IdentityLink
+        from models.memory import Memory
+        from models.resource import WorkspaceConnector
+
+        world = connector_world
+        target = await world.user("target")
+        linked = await world.user("linked")
+        owner = f"owner_{uuid4().hex[:8]}"
+        ws = await world.workspace(
+            owner, **{target: WorkspaceRole.ADMIN, linked: WorkspaceRole.ADMIN}
+        )
+        connector_id = (await world.connector(ws, by=target)).connector.id
+        key_id = (await _live_connector_key(db_session, connector_id)).id
+        # the target's own private context as the write target (an
+        # auto-created one is the workspace owner's already)
+        target_ctx = await _private_context(db_session, ws, target)
+        await db_session.execute(
+            update(WorkspaceConnector)
+            .where(WorkspaceConnector.id == connector_id)
+            .values(context_id=target_ctx)
+        )
+        # control: a private context with no connector still passes to the
+        # linked admin
+        sibling_ctx = await _private_context(db_session, ws, target)
+        theirs = await _memory_in(db_session, ws, target_ctx, linked)
+        theirs_sibling = await _memory_in(db_session, ws, sibling_ctx, linked)
+        group = uuid4()
+        db_session.add_all(
+            [
+                IdentityLink(group_id=group, user_id=target, linked_by=target),
+                IdentityLink(group_id=group, user_id=linked, linked_by=target),
+            ]
+        )
+        await db_session.flush()
+
+        counts = await world.erase(target)
+
+        assert await _created_by(db_session, target_ctx) == owner
+        assert await _created_by(db_session, sibling_ctx) == linked
+        assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == owner
+        left = set(
+            (
+                await db_session.execute(
+                    select(Memory.id).where(Memory.id.in_([theirs, theirs_sibling]))
+                )
+            ).scalars()
+        )
+        assert left == {theirs, theirs_sibling}
+        assert counts["connector_contexts_reowned"] == 1
+        assert counts["contexts_handed_over"] == 1
+        assert counts["connector_api_keys_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_owners_write_target_follows_the_workspace_to_its_new_owner(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from models.resource import WorkspaceConnector
+
+        world = connector_world
+        target = await world.user("target")
+        heir = f"a_heir_{uuid4().hex[:8]}"
+        ws = await world.workspace(target, **{heir: WorkspaceRole.ADMIN})
+        provisioned = await world.connector(ws, by=target)
+        connector_id = provisioned.connector.id
+        key_id = (await _live_connector_key(db_session, connector_id)).id
+        # auto-created: the workspace owner's, the target's here
+        context_id = await db_session.scalar(
+            select(WorkspaceConnector.context_id).where(WorkspaceConnector.id == connector_id)
+        )
+        assert await _created_by(db_session, context_id) == target
+
+        counts = await world.erase(target)
+
+        assert await _created_by(db_session, context_id) == heir
+        assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == heir
+        assert counts["connector_contexts_reowned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_sole_owned_workspace_takes_its_write_target_with_it(
+        self, db_session: AsyncSession, connector_world, patched_external_stores
+    ):
+        from models.auth import Context
+        from models.resource import WorkspaceConnector
+
+        world = connector_world
+        target = await world.user("target")
+        ws = await world.workspace(target)
+        connector_id = (await world.connector(ws, by=target)).connector.id
+        context_id = await db_session.scalar(
+            select(WorkspaceConnector.context_id).where(WorkspaceConnector.id == connector_id)
+        )
+
+        counts = await world.erase(target)
+
+        assert await db_session.get(Context, context_id) is None
+        assert counts["connector_contexts_reowned"] == 0
+        assert counts["connector_api_keys_reowned"] == 0
+
+
 class TestContextAuthorshipSweepLocksInIdOrder:
     """#2278: the ``contexts.created_by`` sweep reaches its rows through an
     id-ordered ``FOR UPDATE`` subquery and rewrites only the subject's."""

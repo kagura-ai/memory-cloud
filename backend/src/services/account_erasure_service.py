@@ -10,7 +10,9 @@ deletion (Qdrant -> workspace transfer -> Postgres (incl. audit-log
 pseudonymize) -> Redis -> audit row -> finalize) covered by the design pin
 in #360. The subject's live connector write keys are not deleted with their
 other keys: they serve the workspace, so the Postgres step hands them to the
-workspace's owner (#2305, ``services.connector_key_ownership``).
+workspace's owner (#2305, ``services.connector_key_ownership``), and the
+connector write targets the subject created with them (#2422,
+``services.connector_contexts``).
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers
@@ -162,6 +164,7 @@ from services.billing_contract import (
     owned_workspaces_under_contract,
     workspaces_under_contract,
 )
+from services.connector_contexts import reown_connector_contexts
 from services.connector_key_ownership import reown_connector_keys
 from services.email_service import EmailService, get_email_service
 from services.erasure_details import (
@@ -2305,9 +2308,10 @@ class AccountErasureService:
         Order matters because not every column is FK-cascaded — most
         cross-table user references are plain VARCHAR (OAuth2 sub) with
         no cascade. The full sweep here is the application-layer
-        equivalent of `ON DELETE CASCADE` for all per-user data. The one
-        transfer: the subject's live connector keys go to their workspace's
-        owner before the per-user ``api_keys`` delete (#2305).
+        equivalent of `ON DELETE CASCADE` for all per-user data. The
+        transfers to the workspace's owner: the subject's live connector keys,
+        before the per-user ``api_keys`` delete (#2305), and the connector
+        write targets it created, before the authorship sweep (#2422).
 
         Args:
             target: The user being erased.
@@ -2564,6 +2568,10 @@ class AccountErasureService:
             locked_ids(Context, lambda c: (or_(c.created_by == user_id, c.deleted_by == user_id),))
         )
         counts.update(await hand_over_private_contexts(self.db, user_id))
+        # #2422: a connector's write target is the workspace's; the hand-over
+        # leaves it, and the sweep below would put it under the pseudonym, so
+        # it goes to the workspace's owner first, as the connector's key did.
+        counts["connector_contexts_reowned"] = await reown_connector_contexts(self.db, user_id)
 
         authorship_sweeps: tuple[tuple[Any, Any], ...] = (
             (WorkspaceConnector, WorkspaceConnector.created_by),
