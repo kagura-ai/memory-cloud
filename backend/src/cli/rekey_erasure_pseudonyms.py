@@ -69,13 +69,28 @@ Limits (counts only, never a value):
   v0.125.0, a row finalized before v0.58.1) cannot be re-keyed: their
   pseudonym cannot be derived without the old salt. Run ``reprocess_erasures
   --all --apply`` under the salt the erasures used before the rotation.
-- An email pseudonym that only other actors' rows carry (no row of the
-  subject's own names the address, and it is not the address the
-  ``account_erasure`` row recorded) is not found and stays under the old salt.
-  It cannot be counted.
-- An email pseudonym of a request already under the current salt is never
-  re-keyed, even where a request to re-key carries it too (counted), nor a
-  value that is a live account's id (counted).
+- An email pseudonym that only other actors' rows carry, or that the
+  subject's own rows carry only inside a ``resource`` other than a whole
+  ``user:`` value (no own row has it as ``user_email`` or ``user:<value>``,
+  and it is not the address the ``account_erasure`` row recorded), is not
+  found and stays under the old salt: a 64-hex token inside a resource
+  cannot be told from an unrelated hash. It cannot be counted.
+- The pseudonym of a request already under the current salt, and the address
+  its ``account_erasure`` / ``account_erasure_reprocess`` row recorded, are
+  never re-keyed, even where a request to re-key carries them too (counted),
+  nor is a value that is a live account's id (counted). Another address that
+  subject held is not known to be under the current salt: where the own rows
+  of a request to re-key name it, it is hashed once more, in every row that
+  carries it as ``user_email`` or a whole ``user:`` value — those rows still
+  agree with each other, nothing is exposed, but an occurrence of it inside
+  another resource of the current subject's own rows keeps the earlier
+  value.
+- A vector point another live memory shares and whose memory of the subject
+  is gone (a cascade, a tombstone) is not reached by the payload step, which
+  enumerates the subject's memories: where the erasure captured a
+  vector-erasure scope for it, the erasure sweep's check of the completed
+  scopes replaces its old value with the re-keyed one (the old value's
+  pseudonym under the current salt is the scope's).
 - Run it while no erasure, re-run (``reprocess_erasures``,
   ``cleanup_erased_vectors``) or sweep runs: they derive pseudonyms with the
   salt of their own process.
@@ -291,8 +306,9 @@ SCOPES_PENDING = (
     "before the salt is rotated, or a point that still carries the account id keeps it"
 )
 KNOWN_LIMIT = (
-    "known limit: an email pseudonym that only other actors' rows carry is not found "
-    "and stays under its salt (it cannot be counted)"
+    "known limit: an email pseudonym that only other actors' rows carry, or only the "
+    "inside of a resource on the subject's own rows, is not found and stays under its "
+    "salt (it cannot be counted)"
 )
 
 
@@ -559,14 +575,24 @@ async def _rewrite_column(
     return cast(CursorResult[Any], result).rowcount or 0
 
 
-def _cut_value(run: str, keys: Sequence[str]) -> str | None:
-    """The one stored value ``run`` is the leading part of, else None."""
-    i = bisect.bisect_left(keys, run)
-    matches = []
-    while i < len(keys) and keys[i].startswith(run) and len(matches) < 2:
-        matches.append(keys[i])
-        i += 1
-    return matches[0] if len(matches) == 1 else None
+def _cut_value(run: str, keys: Sequence[str]) -> tuple[int, str] | None:
+    """Where in ``run`` (a trailing hex run) a stored value cut at the
+    column's length starts, and that value: the suffix of ``run`` from there
+    (at least ``_CUT_MIN``, fewer than ``_PSEUDONYM_LENGTH`` digits) is its
+    leading part. Hex text right before the cut value is part of ``run``, so
+    every such suffix is tried. None unless exactly one (offset, value) pair
+    matches."""
+    found: list[tuple[int, str]] = []
+    first = max(0, len(run) - _PSEUDONYM_LENGTH + 1)
+    for offset in range(first, len(run) - _CUT_MIN + 1):
+        suffix = run[offset:]
+        i = bisect.bisect_left(keys, suffix)
+        while i < len(keys) and keys[i].startswith(suffix):
+            found.append((offset, keys[i]))
+            if len(found) > 1:
+                return None
+            i += 1
+    return found[0] if found else None
 
 
 def rekeyed_resource(
@@ -585,7 +611,8 @@ def rekeyed_resource(
     ``user_pseudonym:<first 16>`` resource, and any occurrence in any other
     resource, including the leading part of one the erasure cut at the
     column's ``length`` (at least ``_CUT_MIN`` digits, of exactly one stored
-    value). Another actor's row is never matched by substring.
+    value at exactly one offset, also right after other hex text:
+    ``_cut_value``). Another actor's row is never matched by substring.
 
     Args:
         subs: The sub pseudonyms to re-key, old -> new.
@@ -614,9 +641,10 @@ def rekeyed_resource(
             else:
                 pos += 1
     if len(resource) >= length and (tail := _TRAILING_HEX.search(resource, done)) is not None:
-        run = tail.group()
-        if _CUT_MIN <= len(run) < _PSEUDONYM_LENGTH and (value := _cut_value(run, keys)):
-            parts += [resource[done : tail.start()], values[value][: len(run)]]
+        if (cut := _cut_value(tail.group(), keys)) is not None:
+            offset, value = cut
+            start = tail.start() + offset
+            parts += [resource[done:start], values[value][: len(resource) - start]]
             done = len(resource)
     parts.append(resource[done:])
     return "".join(parts)[:length]

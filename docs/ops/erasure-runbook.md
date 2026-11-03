@@ -175,9 +175,10 @@ commit 後に、re-key した本人の memory の vector payload (`user_id`、su
 
 - account id を保存した request 行 (v0.124.0 より前に Postgres ステップの後で失敗した行、v0.125.0 より前の note 行、v0.58.1 より前に完了した行) は re-key できない: 旧 salt なしにその pseudonym を導出できない (`requests  N  store the account id ...`)。salt を変える前に手順 2 で直す。
 - salt を変えた時点で Postgres ステップの後の `in_progress` だった request は、後で sweep が閉じると新しい salt の pseudonym を保存し、本人の行は旧い salt のまま残る (re-key できない)。drain されていない `vector_erasure_jobs` は、salt を変えた後は account id を持つ point と一致しなくなる。どちらも plan が件数を出す (手順 2)。
-- 他人の行にだけ残る email pseudonym (本人の行のどれもその address を名指さず、`account_erasure` 行の address でもないもの) は見つからず、旧 salt のまま残る。件数は数えられない (plan の `known limit` 行)。
+- 他人の行にだけ残る email pseudonym (本人の行のどれもその address を名指さず、`account_erasure` 行の address でもないもの) と、本人の行でも `user_email` や `user:<値>` ではなく他の `resource` の中にだけ残る email pseudonym は見つからず、旧 salt のまま残る (resource の中の 64 桁 hex は無関係な hash と区別できない)。件数は数えられない (plan の `known limit` 行)。
+- 本人の memory 行が (cascade や tombstone の削除で) 消えた後も別の live な memory が共有している point は、本人の memory から point を列挙する payload の patch では見つからない。erasure がその point の `vector_erasure_jobs` scope を記録していれば、hourly sweep の完了済み scope の検証が旧い値を re-key 後の値に置き換える (旧い値を現在の salt で hash すると scope の値になるため)。
 - 現在の salt の request が記録した email pseudonym とその request の pseudonym は、re-key する request の行にあっても書き換えない (`kept  N value(s) of a request already under the current salt`)。live なアカウントの ID と同じ値も書き換えない (`kept  N value(s) a live account uses as its id`)。
-- erasure が列長 (255) で切り詰めた `resource` の末尾に残る pseudonym の一部は、8 桁以上で 1 つの値にだけ一致すれば書き換え、それ以外は残る。
+- erasure が列長 (255) で切り詰めた `resource` の末尾に残る pseudonym の一部は、直前に hex の文字が続いていても、8 桁以上で 1 つの値の 1 つの位置にだけ一致すれば書き換え、それ以外は残る。
 - re-key の後、account id から現在の salt で導出した pseudonym は保存値と一致しない (salt を変えただけの場合と同じ、設計どおり): 古い session の書き込みを止める write guard、消去前の snapshot からの context restore、vector erasure の drain の raw author 判定は、re-key した本人の account id をもう認識しない。逆に旧い salt のまま残った値は、それらの経路と `reprocess_erasures` から本人の raw 値として認識される (現在の salt で hash すると保存値になるため)。
 
 ### 2.6 Redis (Step 5, best-effort)

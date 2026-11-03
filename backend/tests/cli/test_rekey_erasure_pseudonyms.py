@@ -237,6 +237,17 @@ class TestTheResourceRewrite:
         # not at the column's length: not a cut value
         assert _rekeyed(resource, P, length=101) == f"path/{NEW[P]}/{E[:30]}"
 
+    def test_a_cut_value_right_after_other_hex_text(self):
+        # the erasure's literal replacement left hex digits right before it
+        resource = f"{'x' * 221}ab{P[:32]}"
+        assert len(resource) == 255
+
+        assert _rekeyed(resource, P) == f"{'x' * 221}ab{NEW[P][:32]}"
+        # a run of 64 or more digits the full-value search did not match
+        long_run = f"{'x' * 185}{'f' * 40}{E[:30]}"
+        assert len(long_run) == 255
+        assert _rekeyed(long_run, P) == f"{'x' * 185}{'f' * 40}{NEW[E][:30]}"
+
     def test_a_short_or_ambiguous_cut_is_left(self):
         short = f"{'x' * 93}{E[:7]}"
         assert _rekeyed(short, P, length=100) == short
@@ -244,6 +255,11 @@ class TestTheResourceRewrite:
         values = {**VALUES, twin: "f" * 64}
         resource = f"{'x' * 88}{E[:12]}"
         assert cli.rekeyed_resource(resource, P, SUBS, values, sorted(values), 100) == resource
+        # two values at two offsets of the same run: neither is rewritten
+        shifted = P[1:32] + "0" * 33
+        values = {**VALUES, shifted: "f" * 64}
+        resource = f"{'x' * 221}ab{P[:32]}"
+        assert cli.rekeyed_resource(resource, P, SUBS, values, sorted(values), 255) == resource
 
 
 class TestTheColumnList:
