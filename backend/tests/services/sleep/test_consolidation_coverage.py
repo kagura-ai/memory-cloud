@@ -13,7 +13,7 @@ house-style suite leaves uncovered:
   accumulation, and the per-batch budget consume.
 - ``_record_action`` with and without a reporter/report_id.
 
-All external I/O (Qdrant delete, LLM service, GraphService) is mocked; the DB
+All external I/O (point-delete queue, LLM service, GraphService) is mocked; the DB
 is the ``AsyncMock`` repo from the source's own seam so no network call is made.
 """
 
@@ -106,7 +106,7 @@ async def _run_with_graph(phase, *, total_edges=0, node_metrics=None, cutoff=Non
     graph.get_node_metrics = AsyncMock(return_value=node_metrics)
     with (
         patch("services.sleep.consolidation.GraphService", return_value=graph),
-        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
     ):
         result = await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
@@ -274,7 +274,7 @@ class TestLLMBorderlinePath:
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
             patch(
-                "services.sleep.consolidation.delete_memory_from_qdrant",
+                "services.sleep.consolidation.queue_point_deletes",
                 new_callable=AsyncMock,
             ),
             patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
@@ -315,7 +315,7 @@ class TestLLMBorderlinePath:
         budget = SleepBudget(max_llm_calls=0)
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
             patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=None),
         ):
             result = await phase.execute(_make_config(), "u", "ws", "ctx", budget)
@@ -580,7 +580,7 @@ class TestExecuteReporterAndRollup:
         graph.get_node_metrics = AsyncMock(return_value=None)
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
             patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=None),
         ):
             result = await phase.execute(
@@ -619,15 +619,16 @@ class TestExecuteReporterAndRollup:
 # delete failure handling in the rule path
 # --------------------------------------------------------------------------- #
 class TestRuleDeleteFailure:
-    """The rule-archival ``except Exception`` branch (#qdrant delete raises)."""
+    """The rule-archival point step: the point lookup that fails, and the queue (#2565)."""
 
     @pytest.mark.asyncio
-    async def test_qdrant_delete_failure_is_swallowed(self):
+    async def test_point_lookup_failure_is_swallowed(self):
         # adoption==0, old, isolated, post-cutoff → should_delete True. The row
         # is stamped FIRST (#1520 review: a soft-deleted context keeps its
-        # points, so the vector must never go before the tombstone). A qdrant
-        # failure after the stamp is logged, and the tombstone still counts and
-        # is recorded — otherwise rollback could not restore a row that IS gone.
+        # points, so the vector must never go before the tombstone). A point
+        # lookup failure after the stamp is logged, and the tombstone still
+        # counts and is recorded — otherwise rollback could not restore a row
+        # that IS gone. Nothing is queued: the point is left to the orphan sweep.
         cutoff = utcnow() - timedelta(days=90)
         mem = _make_memory(
             reference_count=0,
@@ -642,10 +643,11 @@ class TestRuleDeleteFailure:
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
             patch(
-                "services.sleep.consolidation.delete_memory_from_qdrant",
+                "services.sleep.consolidation.unshared_point_id",
                 new_callable=AsyncMock,
-                side_effect=RuntimeError("qdrant unreachable"),
+                side_effect=RuntimeError("lookup failed"),
             ),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock) as q,
             patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
         ):
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
@@ -654,12 +656,15 @@ class TestRuleDeleteFailure:
         phase.memory_repo.soft_delete.assert_awaited_once_with(
             mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
+        q.assert_not_awaited()
+        assert phase.pending_point_deletes == []
 
     @pytest.mark.asyncio
     async def test_rule_delete_success_records_archive_action(self):
-        # Mirror image: qdrant delete succeeds → delete() called, counted, and
-        # an "archive"/"rule" action recorded (covers the success body of the
-        # rule-archival branch).
+        # Mirror image: the point is queued beside the tombstone, in the phase's
+        # transaction, and kept for the orchestrator's post-commit delete
+        # (#2565); counted, and an "archive"/"rule" action recorded (covers the
+        # success body of the rule-archival branch).
         cutoff = utcnow() - timedelta(days=90)
         mem = _make_memory(
             reference_count=0,
@@ -675,7 +680,12 @@ class TestRuleDeleteFailure:
         graph.get_node_metrics = AsyncMock(return_value=None)
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            patch(
+                "services.sleep.consolidation.unshared_point_id",
+                new_callable=AsyncMock,
+                return_value=mem.id,
+            ),
+            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock) as q,
             patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
         ):
             result = await phase.execute(
@@ -692,6 +702,9 @@ class TestRuleDeleteFailure:
         phase.memory_repo.soft_delete.assert_awaited_once_with(
             mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
+        entry = (mem.id, mem.id, "kagura_memories")
+        q.assert_awaited_once_with(phase.db, [entry])
+        assert phase.pending_point_deletes == [entry]
         reporter.add_action.assert_awaited_once()
         _, kwargs = reporter.add_action.call_args
         assert kwargs["action_type"] == "archive"

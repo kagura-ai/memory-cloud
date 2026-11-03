@@ -7496,7 +7496,8 @@ class MemoryService:
         ``point_deletes``: ``(memory id, point id, collection)``, each queued
         in ``deferred_point_deletes`` by ``forget``'s commit (#2476) — or by
         ``forget_bulk``'s, ``cleanup_old_working_memories``' or a session
-        rollback's (#2480). Never
+        rollback's (#2480), or a Sleep run's archives and merges or the legacy
+        consolidation task's deletes (#2565). Never
         raises an ``Exception``: the rows are committed tombstones, a
         tombstone's leftover point is no hit, and a point left here keeps its
         queue row, which the drain job retries

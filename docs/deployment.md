@@ -1842,7 +1842,10 @@ migration before starting this version: `forget` writes to the table.
 `POST /api/v1/memory/forget-bulk` and the memories a `rollback_session` forgets
 take the same path: their points are queued with the delete, removed only
 after the commit, and deferred the same way
-([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)).
+([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)). So do the
+memories Sleep archives or merges away and the ones the legacy consolidation
+task (`SLEEP_ENABLED=false`) deletes: a run whose commit fails leaves them
+with their points ([#2565](https://github.com/kagura-ai/memory-cloud/issues/2565)).
 
 The resource indexer cleans up after itself as well. When a new version of a
 document replaces the old one, the indexer deletes the old row. Once the

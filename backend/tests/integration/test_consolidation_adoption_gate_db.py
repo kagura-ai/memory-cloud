@@ -3,7 +3,7 @@
 Drives ConsolidationPhase.execute() with a real MemoryRepository + real Memory
 rows (carrying the #1046 ``reference_count`` column) to verify the adoption gate
 end-to-end: an adopted memory promotes; a surfaced-but-unadopted one does not.
-Graph + Qdrant are patched (no neural edges, no real delete); LLM is off.
+Graph and the point-delete queue are patched (no neural edges); LLM is off.
 Also pins the #2584 archive exemption (``status:open``) on real rows.
 """
 
@@ -54,7 +54,7 @@ async def test_adoption_gate_switch_against_real_schema(db_session):
     phase = ConsolidationPhase(db_session, MagicMock())  # real MemoryRepository(db_session)
     with (
         patch("services.sleep.consolidation.GraphService") as GS,
-        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
     ):
         GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})  # no graph → no neural
         result = await phase.execute(config, uid, None, None, SleepBudget())
@@ -105,18 +105,25 @@ async def test_open_memo_survives_archival_until_its_tag_is_removed(db_session):
     config = NeuralMemoryConfig(sleep_llm_provider="")  # LLM off, default exempt tags
     assert config.sleep_archive_exempt_tags == ("status:open",)
 
+    queued: list = []
+
     async def _run():
         phase = ConsolidationPhase(db_session, MagicMock())
         with (
             patch("services.sleep.consolidation.GraphService") as GS,
-            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+            # #2565: the archived row's point is queued, deleted after the commit.
+            patch(
+                "services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock
+            ) as queue,
             patch(
                 "services.sleep.consolidation._adoption_delete_cutoff",
                 return_value=utcnow() - timedelta(days=60),
             ),
         ):
             GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
-            return await phase.execute(config, uid, None, None, SleepBudget())
+            result = await phase.execute(config, uid, None, None, SleepBudget())
+        queued[:] = [entry[0] for call in queue.await_args_list for entry in call.args[1]]
+        return result
 
     async def _deleted_by(memory_id):
         return (
@@ -129,6 +136,7 @@ async def test_open_memo_survives_archival_until_its_tag_is_removed(db_session):
     assert result.details["rule_deleted"] == 1
     assert await _deleted_by(closed.id) == "sleep_consolidation"
     assert await _deleted_by(memo.id) is None
+    assert queued == [closed.id]
 
     await db_session.execute(
         update(Memory).where(Memory.id == memo.id).values(tags=["tech-debt", "status:done"])
@@ -140,3 +148,4 @@ async def test_open_memo_survives_archival_until_its_tag_is_removed(db_session):
 
     assert result.details["rule_deleted"] == 1
     assert await _deleted_by(memo.id) == "sleep_consolidation"
+    assert queued == [memo.id]

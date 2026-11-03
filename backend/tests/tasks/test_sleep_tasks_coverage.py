@@ -364,6 +364,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         with (
@@ -377,6 +378,46 @@ class TestSleepMaintenanceRun:
         assert orch_instance.run.await_count == 2
         assert db.commit.await_count == 2
         db.rollback.assert_not_awaited()
+        # #2565: each run's points are deleted after its own commit.
+        assert orch_instance.delete_committed_points.await_count == 2
+
+    async def test_points_are_deleted_after_the_commit_and_never_when_it_fails(self):
+        """#2565: the run's queued points go only once its tombstones committed."""
+        from tasks import sleep_tasks
+
+        contexts = [("u1", uuid4(), uuid4()), ("u2", uuid4(), uuid4())]
+        db = self._make_db(contexts)
+        order: list[str] = []
+
+        async def commit() -> None:
+            order.append("commit")
+            if len(order) == 1:
+                raise RuntimeError("commit failed")
+
+        db.commit = AsyncMock(side_effect=commit)
+        cfg = MagicMock()
+        cfg.tag_cooccurrence_enabled = False
+        orch_instance = MagicMock()
+        orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock(
+            side_effect=lambda: order.append("points")
+        )
+
+        with (
+            self._patch_get_db(sleep_tasks, db),
+            patch("neural.config.NeuralMemoryConfig.from_db", AsyncMock(return_value=cfg)),
+            patch("neural.config.NeuralMemoryConfig.invalidate_cache", MagicMock()),
+            patch(
+                "services.sleep.orchestrator.SleepOrchestrator",
+                MagicMock(return_value=orch_instance),
+            ),
+        ):
+            await _sleep_maintenance_run()
+
+        # The first context's commit failed (rolled back, no delete); the
+        # second's landed, then its points went.
+        assert order == ["commit", "commit", "points"]
+        db.rollback.assert_awaited_once()
 
     async def test_skips_context_with_null_workspace_or_context(self):
         """Rows with NULL workspace_id or context_id are skipped, not run."""
@@ -395,6 +436,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         with (
@@ -423,6 +465,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock(side_effect=[RuntimeError("boom"), None])
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         with (
@@ -437,6 +480,8 @@ class TestSleepMaintenanceRun:
         assert orch_instance.run.await_count == 2
         db.rollback.assert_awaited_once()
         db.commit.assert_awaited_once()
+        # #2565: only the committed run deletes its points.
+        orch_instance.delete_committed_points.assert_awaited_once()
 
     async def test_hub_tag_refresh_runs_when_enabled_and_dedupes_ws_ctx(self):
         """tag_cooccurrence_enabled → hub refresh once per (ws, ctx), deduped."""
@@ -459,6 +504,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         refresh = AsyncMock(return_value=3)
@@ -494,6 +540,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         # First refresh raises, second succeeds.
@@ -532,6 +579,7 @@ class TestSleepMaintenanceRun:
 
         orch_instance = MagicMock()
         orch_instance.run = AsyncMock()
+        orch_instance.delete_committed_points = AsyncMock()
         orch_cls = MagicMock(return_value=orch_instance)
 
         refresh = AsyncMock(return_value=0)

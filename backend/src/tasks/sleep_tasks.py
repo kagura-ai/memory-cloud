@@ -309,6 +309,9 @@ async def _sleep_maintenance_run() -> None:
                     orchestrator = SleepOrchestrator(db)
                     await orchestrator.run(user_id, workspace_id, context_id, config=config)
                     await db.commit()
+                    # #2565: the archived / merged rows' points, now that the
+                    # tombstones are committed. Never raises.
+                    await orchestrator.delete_committed_points()
                     total_runs += 1
                 except Exception as e:
                     await db.rollback()

@@ -4,7 +4,8 @@ A row the resource indexer wrote owns the indexer's point, whose id is
 ``Memory.point_id`` (the uuid5 of the document version), never the row id; the
 same document indexed into two contexts that share a collection is one point
 for two rows. The archive and merge vector deletes go to that point, by
-forget's rule, and leave a point another live row still names alone. The
+forget's rule, and leave a point another live row still names alone; they are
+queued in the phase's transaction and run after the commit (#2565). The
 importance payload writes skip such a row: the indexer's point carries no
 importance, and the reindex rebuilds it whole. Rows are real; the vector
 store is faked.
@@ -14,9 +15,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
@@ -50,6 +52,21 @@ def _indexer_row(doc_id: str = "doc-1", version: int = 2, **overrides) -> Memory
         details={"resource_id": "reports", "doc_id": doc_id, "version": str(version)},
         summary_embedding_id=resource_point_id("reports", doc_id, version),
         **overrides,
+    )
+
+
+async def _queued_points(db: AsyncSession, memory_id: UUID) -> list[UUID]:
+    """The points queued for ``memory_id`` in ``db``'s transaction (#2565)."""
+    from models.deferred_point_delete import DeferredPointDelete
+
+    return list(
+        (
+            await db.execute(
+                select(DeferredPointDelete.point_id).where(
+                    DeferredPointDelete.memory_id == memory_id
+                )
+            )
+        ).scalars()
     )
 
 
@@ -100,37 +117,33 @@ class TestArchiveDeletesTheRowsOwnPoint:
         db_session.add(row)
         await db_session.flush()
 
-        with patch(
-            "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as delete:
-            assert await self._phase(db_session)._archive_tombstone(_USER, row) is True
+        phase = self._phase(db_session)
+        assert await phase._archive_tombstone(_USER, row) is True
 
-        delete.assert_awaited_once()
-        assert delete.await_args.args[1] == resource_point_id("reports", "doc-1", 2)
+        point = resource_point_id("reports", "doc-1", 2)
+        assert phase.pending_point_deletes == [(row.id, point, "kagura_memories")]
+        assert await _queued_points(db_session, row.id) == [point]
 
     async def test_a_point_another_live_row_names_stays(self, db_session: AsyncSession):
         row, other = _indexer_row(), _indexer_row()
         db_session.add_all([row, other])
         await db_session.flush()
 
-        with patch(
-            "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as delete:
-            assert await self._phase(db_session)._archive_tombstone(_USER, row) is True
+        phase = self._phase(db_session)
+        assert await phase._archive_tombstone(_USER, row) is True
 
-        delete.assert_not_awaited()
+        assert phase.pending_point_deletes == []
+        assert await _queued_points(db_session, row.id) == []
 
     async def test_a_plain_row_loses_the_point_under_its_id(self, db_session: AsyncSession):
         row = _row()
         db_session.add(row)
         await db_session.flush()
 
-        with patch(
-            "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as delete:
-            assert await self._phase(db_session)._archive_tombstone(_USER, row) is True
+        phase = self._phase(db_session)
+        assert await phase._archive_tombstone(_USER, row) is True
 
-        assert delete.await_args.args[1] == row.id
+        assert await _queued_points(db_session, row.id) == [row.id]
 
 
 class TestMergeDeletesTheLosersOwnPoint:
@@ -158,15 +171,16 @@ class TestMergeDeletesTheLosersOwnPoint:
             db_session.add(_indexer_row())
         await db_session.flush()
 
-        with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as delete:
-            await self._phase(db_session)._execute_merge(winner, loser, _USER, None, None)
+        phase = self._phase(db_session)
+        await phase._execute_merge(winner, loser, _USER, None, None)
 
         if shared:
-            delete.assert_not_awaited()
+            assert phase.pending_point_deletes == []
+            assert await _queued_points(db_session, loser.id) == []
         else:
-            assert delete.await_args.args[1] == resource_point_id("reports", "doc-1", 2)
+            point = resource_point_id("reports", "doc-1", 2)
+            assert phase.pending_point_deletes == [(loser.id, point, "kagura_memories")]
+            assert await _queued_points(db_session, loser.id) == [point]
 
 
 class TestImportanceSkipsTheIndexerPoint:

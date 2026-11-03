@@ -23,6 +23,7 @@ from db.graph_learning_lock import lock_graph_learning
 from models.auth import Context, Workspace
 from models.sleep import SleepReport
 from neural.config import NeuralMemoryConfig
+from services.deferred_point_deletes import PointDelete
 from services.llm_service import LLMService
 from services.plan_suspension import sleep_suspended
 from services.sleep.consolidation import ConsolidationPhase
@@ -65,6 +66,9 @@ class SleepOrchestrator:
         self.db = db
         self.llm_service = LLMService(db)
         self.reporter = SleepReporter(db)
+        # #2565: the points the completed phases queued in this run's
+        # transaction, for ``delete_committed_points`` after the caller's commit.
+        self.pending_point_deletes: list[PointDelete] = []
 
     async def run(
         self,
@@ -212,6 +216,26 @@ class SleepOrchestrator:
             await self.reporter.fail_report(report, str(e))
             raise
 
+    async def delete_committed_points(self) -> None:
+        """Delete the points this run queued; call only after the caller's commit.
+
+        #2565: the archive and merge steps queue each point in
+        ``deferred_point_deletes`` beside the tombstone, inside the phase's
+        savepoint (``pending_point_deletes``), instead of deleting it before
+        the commit — a run that rolled back left live rows without their
+        vectors. This is ``forget``'s post-commit step
+        (``MemoryService.delete_forgotten_points``): under the point-writer
+        lock, only for points no live row names, bounded, and it never raises;
+        what it leaves stays queued for the drain job. A caller that rolled
+        back does not call it, and its queue rows are gone with the run.
+        """
+        entries, self.pending_point_deletes = self.pending_point_deletes, []
+        if not entries:
+            return
+        from services.memory_service import MemoryService
+
+        await MemoryService(self.db).delete_forgotten_points(entries)
+
     async def _run_phase(
         self,
         name: str,
@@ -254,6 +278,9 @@ class SleepOrchestrator:
                     reporter=self.reporter,
                     report_id=report_id,
                 )
+            # #2565: only a phase whose savepoint held; a failed one's queue
+            # rows went with it.
+            self.pending_point_deletes.extend(getattr(phase, "pending_point_deletes", ()))
             logger.info(
                 "sleep_phase_completed",
                 phase=name,

@@ -604,7 +604,7 @@ class TestParseDedupResponseBranches:
 
 
 class TestExecuteMergeRealDB:
-    """Soft-delete, tag union, qdrant-delete failure swallow, edge transfer."""
+    """Soft-delete, tag union, the queued loser point (#2565), lookup failure, edge transfer."""
 
     async def _phase_for_db(self, db_session):
         with (
@@ -622,9 +622,9 @@ class TestExecuteMergeRealDB:
         phase = await self._phase_for_db(db_session)
 
         with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant",
+            "services.sleep.dedup_merge.queue_point_deletes",
             new_callable=AsyncMock,
-        ) as del_qdrant:
+        ) as queue:
             await phase._execute_merge(winner, loser, "dedup-user", None, None)
 
         # Re-read column values directly. A scalar-column select avoids any
@@ -641,18 +641,24 @@ class TestExecuteMergeRealDB:
         assert set(w_tags) == {"a", "b", "c"}  # union of both tag sets
         assert loser_row.deleted_at is not None
         assert loser_row.deleted_by == "sleep_maintenance"
-        del_qdrant.assert_awaited_once()
+        # #2565: queued in the transaction, deleted after the caller's commit.
+        entry = (loser.id, loser.id, "kagura_memories")
+        queue.assert_awaited_once_with(db_session, [entry])
+        assert phase.pending_point_deletes == [entry]
         phase.edge_repo.transfer_edges.assert_awaited_once()
 
-    async def test_qdrant_delete_failure_is_swallowed_merge_still_completes(self, db_session):
+    async def test_point_lookup_failure_is_swallowed_merge_still_completes(self, db_session):
         winner = await _make_db_memory(db_session, summary="w2", tags=["x"])
         loser = await _make_db_memory(db_session, summary="l2", tags=None)
         phase = await self._phase_for_db(db_session)
 
-        with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("qdrant unreachable"),
+        with (
+            patch(
+                "services.sleep.dedup_merge.unshared_point_id",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("lookup failed"),
+            ),
+            patch("services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock) as q,
         ):
             # Must NOT raise — failure is logged and the merge proceeds.
             await phase._execute_merge(winner, loser, "dedup-user", "ws", "ctx")
@@ -660,20 +666,23 @@ class TestExecuteMergeRealDB:
         loser_deleted_at = (
             await db_session.execute(select(Memory.deleted_at).where(Memory.id == loser.id))
         ).scalar_one()
-        assert loser_deleted_at is not None  # soft-delete happened before qdrant call
-        # Edge transfer still runs after the swallowed qdrant failure.
+        assert loser_deleted_at is not None  # soft-delete happened before the lookup
+        # Nothing queued: the point is left to the orphan sweep.
+        q.assert_not_awaited()
+        assert phase.pending_point_deletes == []
+        # Edge transfer still runs after the swallowed lookup failure.
         phase.edge_repo.transfer_edges.assert_awaited_once()
 
     async def test_none_winner_or_loser_is_noop(self, db_session):
         phase = await self._phase_for_db(db_session)
         with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant",
+            "services.sleep.dedup_merge.queue_point_deletes",
             new_callable=AsyncMock,
-        ) as del_qdrant:
+        ) as queue:
             await phase._execute_merge(None, _make_memory(), "u", None, None)
             await phase._execute_merge(_make_memory(), None, "u", None, None)
 
-        del_qdrant.assert_not_called()
+        queue.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
 
@@ -805,8 +814,8 @@ class TestPinRecheckAtExecution:
         await self._pin_after_fetch(db_session, loser.id)
 
         with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as del_qdrant:
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
 
         assert executed is False
@@ -821,7 +830,7 @@ class TestPinRecheckAtExecution:
             await db_session.execute(select(Memory.tags).where(Memory.id == winner.id))
         ).scalar_one()
         assert list(w_tags) == ["a"]  # no tag union either
-        del_qdrant.assert_not_called()
+        queue.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
     async def test_loser_turned_time_memory_after_fetch_is_refused(self, db_session):
@@ -849,8 +858,8 @@ class TestPinRecheckAtExecution:
         )
 
         with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as del_qdrant:
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
 
         assert executed is False
@@ -861,7 +870,7 @@ class TestPinRecheckAtExecution:
         ).one()
         assert loser_row.deleted_at is None
         assert loser_row.type == MEMORY_TYPE_TIME
-        del_qdrant.assert_not_called()
+        queue.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
     async def test_shadow_mode_winner_pinned_after_fetch_is_refused(self, db_session):
@@ -899,8 +908,8 @@ class TestPinRecheckAtExecution:
         )
 
         with patch(
-            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
-        ) as del_qdrant:
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
 
         assert executed is False
@@ -911,7 +920,7 @@ class TestPinRecheckAtExecution:
         ).one()
         assert loser_row.deleted_at is None
         assert loser_row.details["tool_trigger"]["tool"] == "Bash"
-        del_qdrant.assert_not_called()
+        queue.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
     async def test_loser_forgotten_after_fetch_is_refused(self, db_session):
@@ -924,7 +933,7 @@ class TestPinRecheckAtExecution:
             update(Memory).where(Memory.id == loser.id).values(deleted_at=utcnow())
         )
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        with patch("services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock):
             executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
 
         assert executed is False
@@ -940,7 +949,7 @@ class TestPinRecheckAtExecution:
         assert prior is None
         phase.edge_repo.create_or_update_edge.assert_awaited_once()
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        with patch("services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock):
             executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
         assert executed is True
         loser_deleted_at = (
@@ -1838,22 +1847,32 @@ class TestArchiveExemptLoserRealDB:
                 )
             ).one()
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        # #2565: the loser's point is queued, deleted after the caller's commit.
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             result = await phase.execute(config, user_id, None, None, SleepBudget())
 
         assert result.details["merged"] == 0
         assert result.details["skipped_exempt"] == 1
         assert (await _row_state(memo.id)).deleted_at is None
         assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep"}
+        queue.assert_not_awaited()
+        assert phase.pending_point_deletes == []
 
         await db_session.execute(
             update(Memory).where(Memory.id == memo.id).values(tags=["tech-debt", "status:done"])
         )
 
-        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
             result = await phase.execute(config, user_id, None, None, SleepBudget())
 
         assert result.details["merged"] == 1
         assert result.details["skipped_exempt"] == 0
         assert (await _row_state(memo.id)).deleted_at is not None
+        entry = (memo.id, memo.id, "kagura_memories")
+        queue.assert_awaited_once_with(db_session, [entry])
+        assert phase.pending_point_deletes == [entry]
         assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep", "status:done"}
