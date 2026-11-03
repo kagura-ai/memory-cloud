@@ -2203,6 +2203,42 @@ class TestProcessIncrementalSavepoints:
         assert self.state.metrics["failed_events"] == recorded
 
     @pytest.mark.asyncio
+    async def test_a_full_record_lists_an_event_that_failed_again_once(self):
+        """#2477: the entry the batch ran again gives way to its new outcome
+        before the cap is applied, so it is neither counted twice nor cut."""
+        indexer = self._indexer(_after(100, _upsert("doc_101"), _upsert("doc_102")))
+        self.state.last_offset = 100
+        indexer._apply_upsert.side_effect = [ValueError("again"), RuntimeError("new")]
+        recorded = [_entry(i) for i in range(1, MAX_RECORDED_FAILED_EVENTS)] + [_entry(101)]
+
+        metrics = await self._process(indexer, failed_events=recorded)
+
+        assert metrics.failed_events == [*recorded[:-1], _entry(101, "ValueError")]
+        assert self.state.metrics["failed_events"] == metrics.failed_events
+
+    @pytest.mark.asyncio
+    async def test_a_failure_at_the_end_of_a_batch_leaves_once_the_next_run_applies_it(self):
+        """#2477: the offset stays below a trailing failure, so the next run
+        runs it again; once it succeeds it is off the record."""
+        first = self._indexer(_after(10, _upsert("doc_11"), _upsert("doc_12")))
+        self.state.last_offset = 10
+        first._apply_upsert.side_effect = [None, RuntimeError("boom")]
+
+        after_first = await self._process(first, failed_events=[_entry(7)])
+
+        assert self.state.last_offset == 11
+        assert after_first.failed_events == [_entry(7), _entry(12)]
+
+        second = self._indexer(_after(11, _upsert("doc_12"), _upsert("doc_13")))
+        self.state.last_offset = 11
+
+        after_second = await self._process(second, failed_events=after_first.failed_events)
+
+        assert self.state.last_offset == 13
+        assert after_second.failed_events == [_entry(7)]
+        assert self.state.metrics["failed_events"] == [_entry(7)]
+
+    @pytest.mark.asyncio
     async def test_a_rolled_back_batch_returns_the_record_it_was_given(self):
         """The offset went back with the batch, so the batch runs again: its
         own failures are not skipped, and 11, which it ran, stays listed."""
