@@ -261,6 +261,85 @@ async def test_cli_hands_the_admins_workspace_and_connector_keys_over(
 
 
 @pytest.mark.asyncio
+async def test_a_connector_write_target_goes_to_the_owner_not_the_linked_account(
+    db_session: AsyncSession, connector_world, sole_password_admin
+) -> None:
+    """#2422: the admin's OAuth account, linked to it and an admin of the
+    workspace, wrote in the private context the admin's connector writes
+    into. The hand-over leaves that context to the workspace, so it follows
+    the connector's key to the owner; a private context without a connector
+    still passes to the linked account."""
+    from models.auth import Context, IdentityLink
+    from models.memory import Memory
+    from models.resource import WorkspaceConnector
+
+    world = connector_world
+    admin_id = await _password_admin(db_session, world)
+    oauth = await world.user("oauth")
+    owner = await world.user("owner")
+    ws = await world.workspace(owner, **{admin_id: WorkspaceRole.ADMIN, oauth: WorkspaceRole.ADMIN})
+    connector_id = (await world.connector(ws, by=admin_id)).connector.id
+    key_id = (await _live_connector_key(db_session, connector_id)).id
+    target_ctx, sibling_ctx = (
+        Context(
+            id=uuid4(),
+            workspace_id=ws.id,
+            name=f"priv_{uuid4().hex[:8]}",
+            created_by=admin_id,
+            is_private=True,
+        )
+        for _ in range(2)
+    )
+    db_session.add_all([target_ctx, sibling_ctx])
+    await db_session.flush()
+    target_id, sibling_id = target_ctx.id, sibling_ctx.id
+    await db_session.execute(
+        update(WorkspaceConnector)
+        .where(WorkspaceConnector.id == connector_id)
+        .values(context_id=target_id)
+    )
+    group = uuid4()
+    theirs = [
+        Memory(
+            id=uuid4(),
+            user_id=oauth,
+            workspace_id=ws.id,
+            context_id=context_id,
+            summary="a summary long enough",
+            content="content",
+            type="note",
+            client="pytest",
+        )
+        for context_id in (target_id, sibling_id)
+    ]
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=admin_id, linked_by=admin_id),
+            IdentityLink(group_id=group, user_id=oauth, linked_by=admin_id),
+            *theirs,
+        ]
+    )
+    theirs_ids = [m.id for m in theirs]
+
+    assert await _run(db_session) == 0
+
+    assert not await _exists(db_session, admin_id)
+    owners = dict(
+        (
+            await db_session.execute(
+                select(Context.id, Context.created_by).where(
+                    Context.id.in_([target_id, sibling_id])
+                )
+            )
+        ).all()
+    )
+    assert owners == {target_id: owner, sibling_id: oauth}
+    assert (await _key_rows(db_session, [key_id]))[key_id]["user_id"] == owner
+    left = (await db_session.execute(select(Memory.id).where(Memory.id.in_(theirs_ids)))).scalars()
+    assert set(left) == set(theirs_ids)
+
+
+@pytest.mark.asyncio
 async def test_a_workspace_only_the_admin_is_in_goes_with_it(
     db_session: AsyncSession, connector_world, sole_password_admin, capsys, purge_audits
 ) -> None:

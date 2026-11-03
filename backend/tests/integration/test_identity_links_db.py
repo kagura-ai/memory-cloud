@@ -1278,6 +1278,72 @@ class TestErasingOneLinkedAccount:
         assert counts["contexts_handed_over"] == (1 if inherits else 0)
         assert context.created_by == (oauth.user_id if inherits else admin.user_id)
 
+    @pytest.mark.asyncio
+    async def test_a_connector_write_target_stays_with_the_workspace(
+        self, async_engine, db_session
+    ):
+        """#2422: a connector's write target is the workspace's whatever its
+        privacy flag, so the hand-over leaves it to the caller even though a
+        linked admin wrote in it, and the prediction the admin deletion reads
+        agrees. A private context of the same account with no connector
+        passes as before. Which contexts are write targets is one query for
+        the whole list, not one per context."""
+        from sqlalchemy import event
+
+        from services.identity_link_service import (
+            hand_over_private_contexts,
+            predict_private_context_takeovers,
+        )
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin, oauth)
+        target = await _private_context(db_session, workspace, admin)
+        sibling = await _private_context(db_session, workspace, admin)
+        await _make_connector_write_target(db_session, target)
+        await _memory(db_session, target, oauth)
+        await _memory(db_session, sibling, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        statements: list[str] = []
+
+        def record(_conn, _cursor, statement, *_rest) -> None:
+            statements.append(" ".join(statement.split()))
+
+        event.listen(async_engine.sync_engine, "before_cursor_execute", record)
+        try:
+            predicted = await predict_private_context_takeovers(
+                db_session, admin.user_id, [target, sibling]
+            )
+        finally:
+            event.remove(async_engine.sync_engine, "before_cursor_execute", record)
+        counts = await hand_over_private_contexts(db_session, admin.user_id)
+        await db_session.flush()
+
+        assert predicted == {sibling.id: oauth.user_id}
+        assert len([s for s in statements if "FROM workspace_connectors" in s]) == 1
+        assert counts["contexts_handed_over"] == 1
+        assert (target.created_by, sibling.created_by) == (admin.user_id, oauth.user_id)
+
+
+async def _make_connector_write_target(db: AsyncSession, context: Context) -> None:
+    """A workspace connector (and its resource) writing into ``context``."""
+    from models.resource import Resource, WorkspaceConnector
+
+    resource = Resource(
+        id=uuid4(), workspace_id=context.workspace_id, resource_id=f"slack_{uuid4().hex[:8]}"
+    )
+    db.add(resource)
+    await db.flush()
+    db.add(
+        WorkspaceConnector(
+            resource_pk=resource.id,
+            workspace_id=context.workspace_id,
+            connector_type="slack",
+            context_id=context.id,
+        )
+    )
+    await db.flush()
+
 
 class TestWritesByMemoryId:
     """PATCH and forget address a memory by id and rely on ``can_access_memory``."""
