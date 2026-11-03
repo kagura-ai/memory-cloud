@@ -1781,6 +1781,12 @@ async def _handle_forget_many(
     budget like the usage row, and it fails soft: each forget queued its
     points in its own commit, and the deferred point delete drain (#2476)
     retries what this step did not delete.
+
+    #2480: the context gate (``MemoryService.forget_context_gate``) runs once,
+    inside the budget, before the first id, and each id's forget reuses it:
+    its checks are the caller's on the context, the same for every id. The
+    per-memory checks still run per id. A gate that raises fails every id
+    with that error, none of them tried — what each would have answered.
     """
     from types import SimpleNamespace
 
@@ -1823,7 +1829,27 @@ async def _handle_forget_many(
             budget = get_tool_timeout("forget")
             min_slice = min(_FORGET_MIN_SLICE_MAX, budget * _FORGET_MIN_SLICE_FRACTION)
             deadline = _monotonic() + budget
-            for memory_uuid in memory_ids:
+            key_scope = get_mcp_key_workspace_scope()
+            gate = None
+            try:
+                gate = await execute_with_timeout(
+                    service.forget_context_gate(
+                        user_id, current_context_id, key_workspace_id=key_scope
+                    ),
+                    timeout=budget,
+                    operation_name="forget",
+                )
+            except Exception as exc:
+                failure = describe_tool_exception("forget", exc)
+                results = [_forget_error_row(memory_uuid, failure) for memory_uuid in memory_ids]
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.warning("forget_batch_session_failed", exc_info=True)
+                    session_ok = False
+            # A refused gate refused every id alike: none is tried.
+            to_try = memory_ids if gate is not None else []
+            for memory_uuid in to_try:
                 if not session_ok:
                     results.append(
                         _forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_SESSION)
@@ -1841,9 +1867,10 @@ async def _handle_forget_many(
                             ForgetRequest(memory_id=memory_uuid),
                             user_id=user_id,
                             current_context_id=current_context_id,
-                            key_workspace_id=get_mcp_key_workspace_scope(),
+                            key_workspace_id=key_scope,
                             current_workspace_id=workspace_id,
                             point_queue=forgotten_points,
+                            context_gate=gate,
                         ),
                         timeout=remaining,
                         operation_name="forget",
