@@ -47,6 +47,7 @@ interface GraphTabPanelProps {
   contextId: string;
 }
 
+const GRAPH_LIMIT_NODES = 200;
 const N_OPTIONS: readonly number[] = [10, 25, 50];
 const STRATEGY_OPTIONS: readonly FilterStrategy[] = [
   "degree",
@@ -109,20 +110,49 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // (and detach if we ever fall back to loading mid-life).
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
 
+  // #2543: bumped by every graph read, so a re-read that a later read
+  // overtook (two accepts in a row, or a reload) is dropped when it lands.
+  const graphReadRef = useRef(0);
+
+  // #2543: an accepted supersede re-reads the graph so the new `supersedes`
+  // edge is drawn. A re-read rather than a local patch: an endpoint may not be
+  // a node yet (the graph lists only memories that already have an edge), the
+  // accept can retype an existing auto-edge on the pair instead of adding one,
+  // and node degrees (the default filter) and the totals move with it. Unlike
+  // fetchData it leaves `loading` alone, so the canvas stays mounted (see
+  // handleDeleteSuccess); a failed re-read keeps the drawn graph, the edge
+  // shows on the next load.
+  const handleSupersedeAccepted = useCallback(() => {
+    if (!contextId) return;
+    const read = ++graphReadRef.current;
+    void (async () => {
+      try {
+        const result = await graphApi.getGraphData(contextId, {
+          limit_nodes: GRAPH_LIMIT_NODES,
+        });
+        if (read === graphReadRef.current) setGraphData(result);
+      } catch {
+        // Nothing to undo: the accept itself succeeded and was reported.
+      }
+    })();
+  }, [contextId]);
+
   const dialog = useMemoryDetailDialog({
     memoryIdParam,
     setMemoryIdParam,
     contextId,
+    onSupersedeAccepted: handleSupersedeAccepted,
   });
 
   // --- Data fetch ---
   const fetchData = useCallback(async () => {
     if (!contextId) return;
+    graphReadRef.current += 1;
     setLoading(true);
     setError(null);
     try {
       const result = await graphApi.getGraphData(contextId, {
-        limit_nodes: 200,
+        limit_nodes: GRAPH_LIMIT_NODES,
       });
       setGraphData(result);
     } catch (err) {

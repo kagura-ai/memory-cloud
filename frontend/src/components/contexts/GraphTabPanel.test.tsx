@@ -11,10 +11,17 @@
  *   - Edge click renders the metadata overlay
  *   - Outside click on overlay dismisses it
  *   - URL gets ?memoryId= updated when a node is clicked
+ *   - An accepted supersede re-reads the graph so the new edge is drawn (#2543)
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 import { GraphTabPanel } from "./GraphTabPanel";
 import type { GraphData } from "@/lib/types/graph";
@@ -37,9 +44,11 @@ vi.mock("next/navigation", () => ({
 }));
 
 const mockGetGraphData = vi.fn();
+const mockCreateEdge = vi.fn();
 vi.mock("@/lib/api/graph", () => ({
   graphApi: {
     getGraphData: (...a: unknown[]) => mockGetGraphData(...a),
+    createEdge: (...a: unknown[]) => mockCreateEdge(...a),
   },
 }));
 
@@ -68,9 +77,10 @@ vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-a", timezone: "UTC" } }),
 }));
 
-// Mock useForceSimulation to expose the click callbacks. We use a hoisted
-// container ref so the mock factory (which runs before any imports) and the
-// test body can both reach it without TDZ issues.
+// Mock useForceSimulation to expose the click callbacks and the edges it was
+// last asked to draw. We use a hoisted container ref so the mock factory
+// (which runs before any imports) and the test body can both reach it
+// without TDZ issues.
 const { simCallbacks } = vi.hoisted(() => ({
   simCallbacks: {
     onNodeClick: undefined as
@@ -94,11 +104,13 @@ const { simCallbacks } = vi.hoisted(() => ({
           y: number,
         ) => void)
       | undefined,
+    edges: [] as { source: string; target: string; type: string }[],
   },
 }));
 
 vi.mock("@/hooks/useForceSimulation", () => ({
   useForceSimulation: (input: {
+    edges: readonly { source: string; target: string; type: string }[];
     onNodeClick?: (n: unknown) => void;
     onEdgeClick?: (e: unknown, x: number, y: number) => void;
   }) => {
@@ -106,6 +118,7 @@ vi.mock("@/hooks/useForceSimulation", () => ({
       input.onNodeClick as typeof simCallbacks.onNodeClick;
     simCallbacks.onEdgeClick =
       input.onEdgeClick as typeof simCallbacks.onEdgeClick;
+    simCallbacks.edges = [...input.edges];
   },
 }));
 
@@ -187,11 +200,13 @@ function makeRef(
 beforeEach(() => {
   mockReplace.mockReset();
   mockGetGraphData.mockReset();
+  mockCreateEdge.mockReset();
   mockReferenceMemory.mockReset();
   mockToast.mockReset();
   mockSearchParams.current = new URLSearchParams();
   simCallbacks.onNodeClick = undefined;
   simCallbacks.onEdgeClick = undefined;
+  simCallbacks.edges = [];
   mockGetGraphData.mockResolvedValue(SAMPLE_GRAPH);
 });
 
@@ -340,5 +355,192 @@ describe("GraphTabPanel — edge click integration (Issue #435)", () => {
     await waitFor(() => {
       expect(screen.queryByText("co_recall")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("GraphTabPanel — accepted supersede (#2543)", () => {
+  const NODE_C_ID = "33333333-3333-3333-3333-333333333333";
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function withCandidate(id: string, candidateId: string): MemoryReference {
+    return makeRef(id, {
+      supersede_candidate: {
+        memory_id: candidateId,
+        summary: "Older memory",
+        similarity: 0.93,
+        detected_at: "2026-10-01T00:00:00Z",
+        acceptance: { allowed: true },
+      },
+    });
+  }
+
+  function supersedes(source: string, target: string) {
+    return {
+      source,
+      target,
+      weight: 1,
+      type: "supersedes",
+      created_at: "2026-11-01T00:00:00Z",
+      confidence: 1,
+    };
+  }
+
+  // The accept retyped the A→B auto-edge (one row per pair and author).
+  const GRAPH_AFTER_FIRST: GraphData = {
+    ...SAMPLE_GRAPH,
+    edges: [supersedes(NODE_A_ID, NODE_B_ID)],
+  };
+  const GRAPH_AFTER_SECOND: GraphData = {
+    nodes: [
+      ...SAMPLE_GRAPH.nodes,
+      {
+        id: NODE_C_ID,
+        summary: "Node C summary",
+        type: "note",
+        importance: 0.5,
+        degree: 1,
+      },
+    ],
+    edges: [supersedes(NODE_A_ID, NODE_B_ID), supersedes(NODE_B_ID, NODE_C_ID)],
+    stats: {
+      total_nodes: 3,
+      total_edges: 2,
+      filtered_nodes: 3,
+      filtered_edges: 2,
+    },
+  };
+
+  function clickNode(id: string) {
+    simCallbacks.onNodeClick!({
+      id,
+      summary: "node",
+      type: "note",
+      importance: 0.5,
+      degree: 1,
+    });
+  }
+
+  async function accept() {
+    fireEvent.click(
+      await screen.findByRole("button", { name: "supersede.confirm" }),
+    );
+  }
+
+  async function renderGraph() {
+    render(<GraphTabPanel contextId="ctx-1" />);
+    await screen.findByText("graphVizNodeCount");
+    await waitFor(() => expect(simCallbacks.onNodeClick).toBeDefined());
+  }
+
+  it("draws the new supersedes edge after an accept, without a reload", async () => {
+    const reread = deferred<GraphData>();
+    mockGetGraphData
+      .mockResolvedValueOnce(SAMPLE_GRAPH)
+      .mockReturnValueOnce(reread.promise);
+    mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
+    mockCreateEdge.mockResolvedValueOnce({ operation: "updated", edge: null });
+    await renderGraph();
+    expect(simCallbacks.edges.map((e) => e.type)).toEqual(["co_recall"]);
+
+    clickNode(NODE_A_ID);
+    await accept();
+
+    await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
+    expect(mockCreateEdge).toHaveBeenCalledWith({
+      context_id: "ctx-1",
+      source_id: NODE_A_ID,
+      target_id: NODE_B_ID,
+      edge_type: "supersedes",
+    });
+    expect(mockGetGraphData).toHaveBeenLastCalledWith("ctx-1", {
+      limit_nodes: 200,
+    });
+    // The canvas stays mounted while the graph is re-read: no spinner.
+    expect(screen.queryByText("graphVizLoading")).not.toBeInTheDocument();
+    expect(screen.getByText("graphVizNodeCount")).toBeInTheDocument();
+
+    await act(async () => reread.resolve(GRAPH_AFTER_FIRST));
+
+    await waitFor(() =>
+      expect(simCallbacks.edges).toEqual([
+        expect.objectContaining({
+          source: NODE_A_ID,
+          target: NODE_B_ID,
+          type: "supersedes",
+        }),
+      ]),
+    );
+  });
+
+  it("does not re-read the graph when the accept fails", async () => {
+    mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
+    mockCreateEdge.mockRejectedValueOnce(new Error("boom"));
+    await renderGraph();
+
+    clickNode(NODE_A_ID);
+    await accept();
+
+    await screen.findByText("supersede.acceptFailed");
+    expect(mockGetGraphData).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the drawn graph when the re-read fails", async () => {
+    const reread = deferred<GraphData>();
+    mockGetGraphData
+      .mockResolvedValueOnce(SAMPLE_GRAPH)
+      .mockReturnValueOnce(reread.promise);
+    mockReferenceMemory.mockResolvedValue(withCandidate(NODE_A_ID, NODE_B_ID));
+    mockCreateEdge.mockResolvedValueOnce({ operation: "created", edge: null });
+    await renderGraph();
+
+    clickNode(NODE_A_ID);
+    await accept();
+    await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
+    await act(async () => reread.reject(new Error("graph down")));
+
+    expect(screen.queryByText("graph down")).not.toBeInTheDocument();
+    expect(screen.getByText("graphVizNodeCount")).toBeInTheDocument();
+    expect(simCallbacks.edges.map((e) => e.type)).toEqual(["co_recall"]);
+  });
+
+  it("drops an older re-read that lands after a newer one", async () => {
+    const first = deferred<GraphData>();
+    const second = deferred<GraphData>();
+    mockGetGraphData
+      .mockResolvedValueOnce(SAMPLE_GRAPH)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    mockReferenceMemory.mockImplementation(async (id: string) =>
+      id === NODE_A_ID
+        ? withCandidate(NODE_A_ID, NODE_B_ID)
+        : withCandidate(NODE_B_ID, NODE_C_ID),
+    );
+    mockCreateEdge.mockResolvedValue({ operation: "created", edge: null });
+    await renderGraph();
+
+    clickNode(NODE_A_ID);
+    await accept();
+    await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(2));
+    clickNode(NODE_B_ID);
+    await accept();
+    await waitFor(() => expect(mockGetGraphData).toHaveBeenCalledTimes(3));
+
+    await act(async () => second.resolve(GRAPH_AFTER_SECOND));
+    await waitFor(() => expect(simCallbacks.edges).toHaveLength(2));
+    await act(async () => first.resolve(GRAPH_AFTER_FIRST));
+
+    expect(simCallbacks.edges).toEqual([
+      expect.objectContaining({ source: NODE_A_ID, target: NODE_B_ID }),
+      expect.objectContaining({ source: NODE_B_ID, target: NODE_C_ID }),
+    ]);
   });
 });
