@@ -91,6 +91,9 @@ FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session j
 # #2313 owner guidance plus create_edge trim: core list 41,381 (119 chars spare).
 # #2470 took explore out of core: core list 39,751, and the ceiling came down with it
 # so that the room it freed does not pay for the next tool.
+# #2585 added update_memory's add_tags / remove_tags / details_patch and paid for
+# them by trimming update_memory's own text (the semantics live in the guide topic
+# update_memory.modes): core list 39,840 under an unchanged ceiling.
 CORE_LIST_BUDGET = 40_000  # (#2470) 21 core tools
 RECALL_BUDGET = 4_000  # (#1850) was 6,900
 REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
