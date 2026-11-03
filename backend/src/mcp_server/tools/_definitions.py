@@ -1202,7 +1202,7 @@ Returns: {status, plan, memories: {used, limit, percentage}, contexts: {used, li
             "readOnly": True,
             "description": """List recent Sleep Maintenance runs for a context — what consolidation did and when it last ran. Pass a report_id to get_sleep_report for action-level detail.
 
-Returns: {status, reports: [{report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, llm_call_failures}], count}. llm_call_failures is the magnitude behind a 'degraded' / 'failed' run status.""",
+Returns: {status, reports: [{report_id, context_id, status, source, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, llm_call_failures}], count}. llm_call_failures is the magnitude behind a 'degraded' / 'failed' run status.""",
             "inputSchema": {
                 "type": "object",
                 "required": [],
@@ -1217,6 +1217,12 @@ Returns: {status, reports: [{report_id, context_id, status, started_at, complete
                         "description": "Number of reports (default 10, max 50).",
                         "default": 10,
                     },
+                    "source": {
+                        "type": "string",
+                        "enum": ["sleep", "analysis", "all"],
+                        "description": "sleep = Sleep runs (default); analysis = Memory Analysis spend rows; all = both.",
+                        "default": "sleep",
+                    },
                 },
             },
         },
@@ -1225,7 +1231,7 @@ Returns: {status, reports: [{report_id, context_id, status, started_at, complete
             "readOnly": True,
             "description": """Get one Sleep Maintenance run: per-phase results, cost tracking and its audit log of actions, a page at a time in id order. Find report_ids with get_sleep_history().
 
-Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count, actions_has_more, actions_next_cursor}. action_count is the run's total; pass actions_next_cursor as actions_cursor for the next page. An action too large for the page has details_omitted instead of details. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
+Returns: {status, report: {report_id, context_id, status, source, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count, actions_has_more, actions_next_cursor}. action_count is the run's total; pass actions_next_cursor as actions_cursor for the next page. An action too large for the page has details_omitted instead of details. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],

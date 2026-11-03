@@ -132,11 +132,12 @@ class TestGetSleepHistory:
     def context_id(self):
         return uuid4()
 
-    def _mock_report(self, context_id, status="completed"):
+    def _mock_report(self, context_id, status="completed", source="sleep"):
         r = MagicMock()
         r.id = uuid4()
         r.context_id = context_id
         r.status = status
+        r.source = source  # #2219
         r.started_at = datetime(2026, 4, 5, 2, 0, 0, tzinfo=UTC)
         r.completed_at = datetime(2026, 4, 5, 2, 3, 0, tzinfo=UTC)
         r.memories_processed = 45
@@ -215,6 +216,81 @@ class TestGetSleepHistory:
         assert data["reports"] == []
 
 
+class TestGetSleepHistorySource:
+    """#2219: ``source`` (sleep | analysis | all), default ``sleep``."""
+
+    async def _call(self, args, reports=()):
+        context_id = uuid4()
+        mock_db = AsyncMock()
+        reports_result = MagicMock()
+        reports_result.scalars.return_value.all.return_value = list(reports)
+        mock_db.execute.side_effect = [reports_result, MagicMock()]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_ctx = MagicMock()
+        mock_ctx.id = context_id
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._resolve_context_for_read",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+        ):
+            result = await handle_get_sleep_history(
+                {"context_id": str(context_id), **args}, "test_user_123", uuid4()
+            )
+        return json.loads(result[0].text), mock_db
+
+    @staticmethod
+    def _query(mock_db) -> tuple[str, dict]:
+        compiled = mock_db.execute.await_args_list[0].args[0].compile()
+        return str(compiled), dict(compiled.params)
+
+    def _report(self, source):
+        return TestGetSleepHistory()._mock_report(uuid4(), source=source)
+
+    @pytest.mark.asyncio
+    async def test_default_lists_sleep_runs_only(self):
+        data, mock_db = await self._call({}, [self._report("sleep")])
+
+        assert data["status"] == "success"
+        assert data["reports"][0]["source"] == "sleep"
+        sql, params = self._query(mock_db)
+        assert "sleep_reports.source =" in sql
+        assert "sleep" in params.values()
+
+    @pytest.mark.asyncio
+    async def test_analysis_lists_analysis_rows(self):
+        data, mock_db = await self._call({"source": "analysis"}, [self._report("analysis")])
+
+        assert data["reports"][0]["source"] == "analysis"
+        sql, params = self._query(mock_db)
+        assert "sleep_reports.source =" in sql
+        assert "analysis" in params.values()
+
+    @pytest.mark.asyncio
+    async def test_all_does_not_filter_on_source(self):
+        data, mock_db = await self._call(
+            {"source": "all"}, [self._report("sleep"), self._report("analysis")]
+        )
+
+        assert [r["source"] for r in data["reports"]] == ["sleep", "analysis"]
+        sql, _ = self._query(mock_db)
+        assert "sleep_reports.source =" not in sql
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_is_refused_before_the_query(self):
+        data, mock_db = await self._call({"source": "bogus"})
+
+        assert data["status"] == "error"
+        assert "source" in json.dumps(data)
+        mock_db.execute.assert_not_awaited()
+
+
 class TestGetSleepReport:
     """Test get_sleep_report MCP tool handler."""
 
@@ -233,6 +309,7 @@ class TestGetSleepReport:
         r.context_id = uuid4()
         r.workspace_id = uuid4()
         r.status = "completed"
+        r.source = "sleep"  # #2219
         r.started_at = datetime(2026, 4, 5, 2, 0, 0, tzinfo=UTC)
         r.completed_at = datetime(2026, 4, 5, 2, 3, 0, tzinfo=UTC)
         r.memories_processed = 10

@@ -1009,6 +1009,15 @@
         "limit": {
           "type": "integer",
           "default": 10
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "sleep",
+            "analysis",
+            "all"
+          ],
+          "default": "sleep"
         }
       },
       "additionalProperties": false
