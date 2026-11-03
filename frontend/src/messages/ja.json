@@ -2995,13 +2995,16 @@
         "back": "一覧に戻る"
       },
       "filter": {
-        "title": "ステータスでフィルター",
-        "all": "すべて ({count})"
+        "title": "フィルター",
+        "all": "すべて ({count})",
+        "sourceLabel": "種類",
+        "sourceAll": "すべての種類"
       },
       "table": {
         "startedAt": "開始時刻",
         "context": "コンテキスト",
         "user": "ユーザー",
+        "source": "種類",
         "status": "ステータス",
         "memoriesProcessed": "処理メモリ数",
         "edgesCreated": "作成エッジ数",
@@ -3017,6 +3020,10 @@
         "failed": "失敗",
         "cancelled": "キャンセル",
         "rolled_back": "ロールバック済み"
+      },
+      "source": {
+        "sleep": "Sleep",
+        "analysis": "分析"
       },
       "detail": {
         "phaseResults": "フェーズ結果",
@@ -3090,8 +3097,10 @@
               "success": "{count} 件のメモリを再インデックス{failed, plural, =0 {} other {（{failed} 件失敗）}}",
               "empty": "再インデックス対象はありませんでした"
             }
-          }
-        }
+          },
+          "headlineAnalysis": "メモリ分析の費用: LLM 呼び出し {calls} 回 / {tokens} トークン"
+        },
+        "analysisNoPhases": "この行はメモリ分析の実行 (クラスタのラベル付け) にかかった LLM 費用の記録です。Sleep のフェーズは実行されておらず、ラベル付けフェーズの結果もここには保存されません。クラスタは分析本体で確認できます。"
       },
       "pagination": {
         "showing": "{total} 件中 {from}〜{to} 件目",

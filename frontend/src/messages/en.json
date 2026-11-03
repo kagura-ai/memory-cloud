@@ -2995,13 +2995,16 @@
         "back": "Back to List"
       },
       "filter": {
-        "title": "Filter by Status",
-        "all": "All ({count})"
+        "title": "Filter",
+        "all": "All ({count})",
+        "sourceLabel": "Source",
+        "sourceAll": "All sources"
       },
       "table": {
         "startedAt": "Started",
         "context": "Context",
         "user": "User",
+        "source": "Source",
         "status": "Status",
         "memoriesProcessed": "Memories",
         "edgesCreated": "Edges",
@@ -3017,6 +3020,10 @@
         "failed": "Failed",
         "cancelled": "Cancelled",
         "rolled_back": "Rolled back"
+      },
+      "source": {
+        "sleep": "Sleep",
+        "analysis": "Analysis"
       },
       "detail": {
         "phaseResults": "Phase Results",
@@ -3090,8 +3097,10 @@
               "success": "Reindexed {count, plural, one {# memory} other {# memories}}{failed, plural, =0 {} other {, {failed} failed}}",
               "empty": "Nothing to reindex"
             }
-          }
-        }
+          },
+          "headlineAnalysis": "Memory Analysis spend: {calls, plural, one {# LLM call} other {# LLM calls}}, {tokens} tokens"
+        },
+        "analysisNoPhases": "This row records the LLM spend of a Memory Analysis run (cluster labeling). None of the Sleep phases ran, and the labeling phase keeps no per-phase result here: the clusters are on the analysis itself."
       },
       "pagination": {
         "showing": "Showing {from}-{to} of {total}",

@@ -6,15 +6,22 @@
  * - GET /api/v1/admin/sleep-reports (admin cross-workspace)
  * - GET /api/v1/workspaces/{workspace_id}/sleep-reports (owner/admin scoped)
  *
- * Both endpoints accept the same status / limit / offset / user_id /
+ * Both endpoints accept the same status / source / limit / offset / user_id /
  * context_id filters; the workspace-scoped one omits ``workspace_id``
  * from the query string because it comes from the path.
  */
 
 import { apiClient } from "./base";
-import { SLEEP_STATUS_OPTIONS, type SleepStatus } from "@/lib/sleep-report";
+import {
+  SLEEP_STATUS_OPTIONS,
+  type SleepReportSource,
+  type SleepStatus,
+} from "@/lib/sleep-report";
 
-export { SLEEP_STATUS_OPTIONS, type SleepStatus };
+export { SLEEP_STATUS_OPTIONS, type SleepReportSource, type SleepStatus };
+
+/** #2219: the list filter; the API defaults to "all" when it is left out. */
+export type SleepReportSourceFilter = SleepReportSource | "all";
 
 export interface SleepReportSummary {
   id: string;
@@ -30,6 +37,8 @@ export interface SleepReportSummary {
   // then falls back to a shortened user_id (see formatUserPartitionLabel).
   user_email: string | null;
   status: SleepStatus;
+  // #2219: a Sleep run, or a Memory Analysis run's spend row.
+  source: SleepReportSource;
   started_at: string;
   completed_at: string | null;
   memories_processed: number;
@@ -98,6 +107,7 @@ export interface SleepRunResponse {
 
 export interface FetchAdminSleepReportsParams {
   status?: SleepStatus;
+  source?: SleepReportSourceFilter;
   limit?: number;
   offset?: number;
   user_id?: string;
@@ -106,6 +116,7 @@ export interface FetchAdminSleepReportsParams {
 
 export interface FetchWorkspaceSleepReportsParams {
   status?: SleepStatus;
+  source?: SleepReportSourceFilter;
   limit?: number;
   offset?: number;
   user_id?: string;
@@ -120,6 +131,7 @@ export async function fetchAdminSleepReports(
 ): Promise<SleepReportListResponse> {
   const search = new URLSearchParams();
   if (params.status) search.set("status", params.status);
+  if (params.source) search.set("source", params.source);
   if (params.limit !== undefined) search.set("limit", String(params.limit));
   if (params.offset !== undefined) search.set("offset", String(params.offset));
   if (params.user_id) search.set("user_id", params.user_id);
@@ -150,6 +162,7 @@ export async function fetchWorkspaceSleepReports(
 ): Promise<SleepReportListResponse> {
   const search = new URLSearchParams();
   if (params.status) search.set("status", params.status);
+  if (params.source) search.set("source", params.source);
   if (params.limit !== undefined) search.set("limit", String(params.limit));
   if (params.offset !== undefined) search.set("offset", String(params.offset));
   if (params.user_id) search.set("user_id", params.user_id);

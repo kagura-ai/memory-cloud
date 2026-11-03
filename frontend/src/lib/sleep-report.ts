@@ -16,6 +16,21 @@ export const SLEEP_STATUS_OPTIONS: SleepStatus[] = [
 ];
 
 /**
+ * #2219: what a sleep_reports row records — a Sleep Maintenance run, or the
+ * LLM spend of a Memory Analysis run (written since #2088 also when the
+ * analysis failed or was cancelled).
+ */
+export type SleepReportSource = "sleep" | "analysis";
+
+export const SLEEP_SOURCE_OPTIONS: SleepReportSource[] = ["sleep", "analysis"];
+
+export function getSleepSourceColor(source: SleepReportSource): string {
+  return source === "analysis"
+    ? "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300"
+    : "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300";
+}
+
+/**
  * #1201: label for the user partition a Sleep run belongs to.
  *
  * Sleep runs per (user_id, workspace_id, context_id), so a workspace-scoped

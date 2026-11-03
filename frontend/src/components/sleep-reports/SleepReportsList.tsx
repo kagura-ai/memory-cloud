@@ -35,8 +35,11 @@ import { ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   getSleepStatusColor,
+  getSleepSourceColor,
   formatUserPartitionLabel,
   SLEEP_STATUS_OPTIONS,
+  SLEEP_SOURCE_OPTIONS,
+  type SleepReportSource,
   type SleepStatus,
 } from "@/lib/sleep-report";
 import type {
@@ -46,8 +49,17 @@ import type {
 
 const PAGE_SIZE = 50;
 
+const FILTER_BUTTON_BASE =
+  "inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900";
+const FILTER_BUTTON_IDLE =
+  "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800";
+const FILTER_BUTTON_ALL_ACTIVE =
+  "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 border-transparent";
+
 export interface SleepReportsListFetchParams {
   status?: SleepStatus;
+  // #2219: left out = every source (the API default "all").
+  source?: SleepReportSource;
   limit?: number;
   offset?: number;
   user_id?: string;
@@ -93,6 +105,9 @@ export function SleepReportsList({
   const [selectedStatus, setSelectedStatus] = useState<SleepStatus | null>(
     null,
   );
+  // #2219: null = every source.
+  const [selectedSource, setSelectedSource] =
+    useState<SleepReportSource | null>(null);
   const [offset, setOffset] = useState(0);
   const loadingRef = useRef(false);
 
@@ -104,6 +119,7 @@ export function SleepReportsList({
       setLoading(true);
       const data = await fetchData({
         status: selectedStatus ?? undefined,
+        source: selectedSource ?? undefined,
         limit: PAGE_SIZE,
         offset,
       });
@@ -115,7 +131,7 @@ export function SleepReportsList({
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [offset, selectedStatus, fetchData, ready, t]);
+  }, [offset, selectedStatus, selectedSource, fetchData, ready, t]);
 
   useEffect(() => {
     loadReports();
@@ -224,10 +240,10 @@ export function SleepReportsList({
           <button
             type="button"
             aria-pressed={selectedStatus === null}
-            className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900 ${
+            className={`${FILTER_BUTTON_BASE} ${
               selectedStatus === null
-                ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 border-transparent"
-                : "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                ? FILTER_BUTTON_ALL_ACTIVE
+                : FILTER_BUTTON_IDLE
             }`}
             onClick={() => {
               setSelectedStatus(null);
@@ -241,10 +257,10 @@ export function SleepReportsList({
               key={status}
               type="button"
               aria-pressed={selectedStatus === status}
-              className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900 ${
+              className={`${FILTER_BUTTON_BASE} ${
                 selectedStatus === status
                   ? `${getSleepStatusColor(status)} border-transparent`
-                  : "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  : FILTER_BUTTON_IDLE
               }`}
               onClick={() => {
                 setSelectedStatus(status);
@@ -252,6 +268,49 @@ export function SleepReportsList({
               }}
             >
               {t(`status.${status}`)}
+            </button>
+          ))}
+        </div>
+        {/* #2219: Sleep runs vs Memory Analysis spend rows. */}
+        <div
+          className="flex flex-wrap items-center gap-2 mb-4"
+          role="group"
+          aria-label={t("filter.sourceLabel")}
+        >
+          <span className="text-sm text-gray-500 dark:text-gray-400 mr-1">
+            {t("filter.sourceLabel")}
+          </span>
+          <button
+            type="button"
+            aria-pressed={selectedSource === null}
+            className={`${FILTER_BUTTON_BASE} ${
+              selectedSource === null
+                ? FILTER_BUTTON_ALL_ACTIVE
+                : FILTER_BUTTON_IDLE
+            }`}
+            onClick={() => {
+              setSelectedSource(null);
+              setOffset(0);
+            }}
+          >
+            {t("filter.sourceAll")}
+          </button>
+          {SLEEP_SOURCE_OPTIONS.map((source) => (
+            <button
+              key={source}
+              type="button"
+              aria-pressed={selectedSource === source}
+              className={`${FILTER_BUTTON_BASE} ${
+                selectedSource === source
+                  ? `${getSleepSourceColor(source)} border-transparent`
+                  : FILTER_BUTTON_IDLE
+              }`}
+              onClick={() => {
+                setSelectedSource(source);
+                setOffset(0);
+              }}
+            >
+              {t(`source.${source}`)}
             </button>
           ))}
         </div>
@@ -276,6 +335,7 @@ export function SleepReportsList({
                   <TableHead>{t("table.startedAt")}</TableHead>
                   <TableHead>{t("table.context")}</TableHead>
                   <TableHead>{t("table.user")}</TableHead>
+                  <TableHead>{t("table.source")}</TableHead>
                   <TableHead>{t("table.status")}</TableHead>
                   <TableHead className="text-right">
                     {t("table.memoriesProcessed")}
@@ -311,6 +371,14 @@ export function SleepReportsList({
                         report.user_email,
                         report.user_id,
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <span
+                        data-testid="sleep-report-source"
+                        className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded ${getSleepSourceColor(report.source)}`}
+                      >
+                        {t(`source.${report.source}`)}
+                      </span>
                     </TableCell>
                     <TableCell>
                       <span
