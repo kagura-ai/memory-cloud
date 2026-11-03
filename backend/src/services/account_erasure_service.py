@@ -191,6 +191,7 @@ from services.erasure_details import (
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
+from services.user_deletion_service import _contextless_in
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.db_helpers import is_deadlock, is_lock_not_available
@@ -2368,6 +2369,8 @@ class AccountErasureService:
                 ),
             )
         )
+        # The memories the workspace delete below removes, its context-less
+        # ones included (#2445), are in this one id-ordered memory phase.
         await self.db.execute(
             locked_ids(
                 Memory,
@@ -2376,6 +2379,7 @@ class AccountErasureService:
                         m.id.in_(subject_memory_ids(user_id)),
                         m.deleted_by == user_id,
                         m.context_id.in_(affected_contexts),
+                        _contextless_in(m, owned_ws),
                     ),
                 ),
             )
@@ -2476,6 +2480,16 @@ class AccountErasureService:
             counts["vector_erasure_scopes"] = await capture_vector_erasure(
                 self.db, request_id, user_id
             )
+
+        # #2445: ``memories.workspace_id`` has no foreign key, so a memory with
+        # no context would outlive the workspace delete below. Deleted here,
+        # as ``delete_user_rows`` does, after the capture above (the subject's
+        # own keep their vector-erasure scope); locked in the memory phase.
+        await self.db.execute(
+            delete(Memory).where(
+                Memory.id.in_(locked_ids(Memory, lambda m: (_contextless_in(m, owned_ws),)))
+            )
+        )
 
         # Workspaces owned by the user. After step 3 ran, only sole-owner
         # workspaces remain pointing here. The cascade chain wipes
