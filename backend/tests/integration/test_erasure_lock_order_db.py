@@ -850,6 +850,7 @@ async def test_an_invitation_accepted_into_a_sole_owned_workspace_waits_for_the_
     with (
         _external_stores_stubbed(),
         patch.object(AccountErasureService, "_delete_postgres", paused_step_three),
+        _LockTrace(db_session.bind) as trace,
     ):
         try:
             erasing = asyncio.create_task(_force_erase(maker, subject))
@@ -867,6 +868,7 @@ async def test_an_invitation_accepted_into_a_sole_owned_workspace_waits_for_the_
             release.set()
             await _cancel_all(tasks)
 
+    _assert_global_order(trace)  # #2601
     assert not accepted_between_the_steps, accept_result
     assert not isinstance(erasure_result, BaseException), erasure_result
     assert erasure_result.status == "complete"
@@ -903,26 +905,28 @@ async def test_an_invitation_accepted_into_a_workspace_deleted_meanwhile_is_a_40
             await db.commit()
 
     tasks: list[asyncio.Task] = []
-    async with maker() as holder:
-        try:
-            await holder.execute(
-                select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
-            )
-            accepting = asyncio.create_task(accept())
-            tasks.append(accepting)
-            await _done_or_blocked(maker, accepting, lambda: accept_pid)
-            accepted_while_held = accepting.done()
-            await holder.execute(
-                update(Workspace).where(Workspace.id == ws_id).values(deleted_at=func.now())
-            )
-            await holder.commit()
-            (accept_result,) = await asyncio.wait_for(
-                asyncio.gather(accepting, return_exceptions=True), 30
-            )
-        finally:
-            await holder.rollback()
-            await _cancel_all(tasks)
+    with _LockTrace(db_session.bind) as trace:
+        async with maker() as holder:
+            try:
+                await holder.execute(
+                    select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+                )
+                accepting = asyncio.create_task(accept())
+                tasks.append(accepting)
+                await _done_or_blocked(maker, accepting, lambda: accept_pid)
+                accepted_while_held = accepting.done()
+                await holder.execute(
+                    update(Workspace).where(Workspace.id == ws_id).values(deleted_at=func.now())
+                )
+                await holder.commit()
+                (accept_result,) = await asyncio.wait_for(
+                    asyncio.gather(accepting, return_exceptions=True), 30
+                )
+            finally:
+                await holder.rollback()
+                await _cancel_all(tasks)
 
+    _assert_global_order(trace)  # #2601
     assert not accepted_while_held, accept_result
     assert isinstance(accept_result, NotFoundException), accept_result
     await _accept_left_nothing(db_session, ws_id, token, newcomer, None)
@@ -958,22 +962,25 @@ async def test_two_accepts_of_one_invitation_admit_one_user(db_session, connecto
             await db.commit()
 
     tasks: list[asyncio.Task] = []
-    async with maker() as holder:
-        try:
-            await holder.execute(
-                select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
-            )
-            for user_id in (first, second):
-                task = asyncio.create_task(accept(user_id))
-                tasks.append(task)
-                await _done_or_blocked(maker, task, lambda u=user_id: pids.get(u))
-            accepted_while_held = [task.done() for task in tasks]
-            await holder.commit()
-            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 30)
-        finally:
-            await holder.rollback()
-            await _cancel_all(tasks)
+    with _LockTrace(db_session.bind) as trace:
+        async with maker() as holder:
+            try:
+                await holder.execute(
+                    select(Workspace.id).where(Workspace.id == ws_id).with_for_update()
+                )
+                for user_id in (first, second):
+                    task = asyncio.create_task(accept(user_id))
+                    tasks.append(task)
+                    await _done_or_blocked(maker, task, lambda u=user_id: pids.get(u))
+                accepted_while_held = [task.done() for task in tasks]
+                await holder.commit()
+                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 30)
+            finally:
+                await holder.rollback()
+                await _cancel_all(tasks)
 
+    # #2601: the winner's accept ran to its writes: workspace, users row, rows
+    _assert_global_order(trace)
     assert accepted_while_held == [False, False], results
     winners = [u for u, r in zip((first, second), results, strict=True) if r is None]
     losers = [r for r in results if r is not None]
@@ -988,6 +995,202 @@ async def test_two_accepts_of_one_invitation_admit_one_user(db_session, connecto
         select(WorkspaceInvitation.accepted_by).where(WorkspaceInvitation.token == token)
     )
     assert (list(joined), accepted_by) == (winners, winners[0])
+
+
+def _first_of_each(kinds: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """``kinds`` without the re-takes: each phase where it is first taken."""
+    return list(dict.fromkeys(kinds))
+
+
+@pytest.mark.asyncio
+async def test_an_accept_locks_the_accepters_users_row_before_its_rows(db_session, connector_world):
+    """#2601: an accept takes the workspace row, then the accepter's
+    ``users`` row (its ``current_workspace_id`` is set), and only then writes
+    (the invitation UPDATE, the ``users`` UPDATE, in the flush's order): the
+    ``delete_workspace`` order. Before, its first lock on the ``users`` row
+    was that UPDATE, flushed with the invitation's."""
+    world = connector_world
+    owner = await world.user("owner")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(owner)).id
+    email = f"{newcomer}@example.com"
+    token = await _pending_invitation(db_session, ws_id, owner, email)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    with _LockTrace(db_session.bind) as trace:
+        async with maker() as db:
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=newcomer, user_email=email
+            )
+            await db.commit()
+
+    _assert_global_order(trace)
+    (accept,) = trace.kinds()
+    phases = _first_of_each(accept)
+    # the users lock waits: only the workspace row is held then
+    assert phases[:2] == [("ws_live", False), ("users", False)], accept
+    assert set(phases[2:]) == {("child", False), ("users_dml", False)}, accept
+    current = await db_session.scalar(
+        select(User.current_workspace_id)
+        .where(User.user_id == newcomer)
+        .execution_options(populate_existing=True)
+    )
+    assert current == ws_id
+
+
+async def _lock_wait_of(maker, pid: int) -> tuple[list[int], str]:
+    """The backends ``pid`` waits on, and the statement it waits in."""
+    async with maker() as observer:
+        blocking, query = (
+            await observer.execute(
+                text("SELECT pg_blocking_pids(:pid), query FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": pid},
+            )
+        ).one()
+    return list(blocking), " ".join(query.split())
+
+
+async def _accept_during_the_accepters_erasure(
+    db_session, world, *, step_three_fails: bool
+) -> SimpleNamespace:
+    """#2601: N's erasure stops between its steps 2 and 3, holding
+    ``users[N]``; N accepts an invitation to O's W, addressed to N's email
+    (step 3 deletes it). Then the erasure goes on: it finishes, or with
+    ``step_three_fails`` it fails at step 3 and rolls back."""
+    owner = await world.user("owner")
+    newcomer = await world.user("newcomer")
+    ws_id = (await world.workspace(owner)).id
+    own_id = (await world.workspace(newcomer)).id
+    await _current_workspace(db_session, newcomer, own_id)
+    email = f"{newcomer}@example.com"
+    token = await _pending_invitation(db_session, ws_id, owner, email)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    pids: dict[str, int] = {}
+    original = AccountErasureService._delete_postgres
+
+    async def paused_step_three(self, target, **kwargs):
+        pids["erasure"] = await _pid(self.db)
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        if step_three_fails:
+            raise RuntimeError("step 3 failed")
+        return await original(self, target, **kwargs)
+
+    async def accept() -> None:
+        async with maker() as db:
+            pids["accept"] = await _pid(db)
+            await InvitationService(db).accept_invitation(
+                token=token, user_id=newcomer, user_email=email
+            )
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    waited: tuple[list[int], str] | None = None
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_delete_postgres", paused_step_three),
+        _LockTrace(db_session.bind) as trace,
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, newcomer))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 15)
+            accepting = asyncio.create_task(accept())
+            tasks.append(accepting)
+            await _done_or_blocked(maker, accepting, lambda: pids.get("accept"))
+            if not accepting.done():
+                waited = await _lock_wait_of(maker, pids["accept"])
+            release.set()
+            erasure_result, accept_result = await asyncio.wait_for(
+                asyncio.gather(erasing, accepting, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    return SimpleNamespace(
+        newcomer=newcomer,
+        ws_id=ws_id,
+        token=token,
+        erasure_pid=pids["erasure"],
+        waited=waited,
+        erasure_result=erasure_result,
+        accept_result=accept_result,
+        trace=trace,
+    )
+
+
+def _waited_on_the_users_row(run: SimpleNamespace) -> None:
+    """The accept waited on the erasure, in its ``users`` row lock."""
+    assert run.waited is not None, run.accept_result  # it did not finish first
+    blocking, query = run.waited
+    assert blocking == [run.erasure_pid], (blocking, query)
+    assert query.startswith("SELECT users.") and query.endswith("FOR UPDATE"), query
+
+
+@pytest.mark.asyncio
+async def test_an_accept_waits_out_the_accepters_erasure_and_is_a_404(db_session, connector_world):
+    """#2601: N's erasure holds ``users[N]`` between its steps 2 and 3; N's
+    accept takes W, then waits on ``users[N]`` before it writes any row. Step
+    3 deletes N's invitations, the one the accept read among them, without
+    waiting, and commits; the accept finds N gone and answers 404. Before, the
+    accept held the invitation it had marked accepted while it waited on
+    ``users[N]`` for its ``current_workspace_id``, and step 3 waited on that
+    invitation: ``deadlock detected``, one side killed."""
+    run = await _accept_during_the_accepters_erasure(
+        db_session, connector_world, step_three_fails=False
+    )
+
+    _waited_on_the_users_row(run)
+    _assert_global_order(run.trace)
+    assert not isinstance(run.erasure_result, BaseException), run.erasure_result
+    assert run.erasure_result.status == "complete"
+    assert isinstance(run.accept_result, NotFoundException), run.accept_result
+    assert str(run.accept_result) == f"User not found: {run.newcomer}"
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == run.newcomer)) is None
+    # gone with N's other invitations (step 3), never accepted
+    assert (
+        await db_session.scalar(
+            select(WorkspaceInvitation.id).where(WorkspaceInvitation.token == run.token)
+        )
+        is None
+    )
+    await _accept_left_nothing(db_session, run.ws_id, run.token, run.newcomer, None)
+
+
+@pytest.mark.asyncio
+async def test_an_accept_waits_out_a_rolled_back_erasure_of_the_accepter_and_joins(
+    db_session, connector_world
+):
+    """#2601: as above, but step 3 fails and the erasure rolls back: the
+    accept gets ``users[N]`` and joins W, its current workspace W."""
+    run = await _accept_during_the_accepters_erasure(
+        db_session, connector_world, step_three_fails=True
+    )
+
+    _waited_on_the_users_row(run)
+    _assert_global_order(run.trace)
+    assert isinstance(run.erasure_result, RuntimeError), run.erasure_result
+    assert run.accept_result is None, run.accept_result
+    request = await _request_of(db_session, run.newcomer)
+    assert request.status == STATUS_FAILED
+    member_role = await db_session.scalar(
+        select(WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id == run.ws_id, WorkspaceMember.user_id == run.newcomer
+        )
+    )
+    accepted_by = await db_session.scalar(
+        select(WorkspaceInvitation.accepted_by).where(WorkspaceInvitation.token == run.token)
+    )
+    current = await db_session.scalar(
+        select(User.current_workspace_id)
+        .where(User.user_id == run.newcomer)
+        .execution_options(populate_existing=True)
+    )
+    assert (member_role, accepted_by, current) == ("member", run.newcomer, run.ws_id)
 
 
 # ---------------------------------------------------------------------------

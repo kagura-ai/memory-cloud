@@ -369,10 +369,14 @@ class InvitationService:
         Validates invitation (existence, expiration, email match) and creates
         workspace membership. Marks invitation as accepted.
 
-        The workspace row is locked (``lock_workspace_for_update``) before the
-        membership checks and held to the caller's commit, so an accept that
-        waited out an account erasure between its steps 2 and 3 finds the
-        workspace gone and raises ``NotFoundException`` (#2564).
+        Lock order, each lock held to the caller's commit: the workspace row
+        (``lock_workspace_for_update``), then the accepter's ``users`` row,
+        then the rows in the workspace (the membership, the invitation) — the
+        order ``delete_workspace`` takes, so the accept never holds a row of
+        the workspace while it waits on a ``users`` row (#2601). An accept
+        that waited out an account erasure between its steps 2 and 3 finds
+        the workspace gone (the owner's erasure, #2564) or the accepter gone
+        (the accepter's) and raises ``NotFoundException``.
 
         Args:
             token: Invitation token
@@ -384,7 +388,8 @@ class InvitationService:
 
         Raises:
             ValidationError: If validation fails (expired, email mismatch, already member, etc.)
-            NotFoundException: If invitation or workspace not found
+            NotFoundException: If the invitation, the workspace or the accepter's
+                ``users`` row is not found
         """
         # Get invitation
         invitation = await self.get_invitation(token)
@@ -418,9 +423,26 @@ class InvitationService:
         # Raises NotFoundException for a missing / soft-deleted workspace.
         workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
 
-        # #2564: re-read the invitation under that lock. Every accept of this
-        # token waits on the same workspace row, so one that got it first has
-        # committed by now: a single-use invitation admits one user.
+        # #2601: the accepter's users row (its current workspace is set below)
+        # right after the workspace row and before any row in it, as in
+        # delete_workspace. An erasure of the accepter holds that users row
+        # and then deletes the accepter's invitations: taking the users row
+        # first, this transaction never holds the invitation while it waits.
+        # Gone (the erasure committed meanwhile): a 404, nothing written.
+        accepter = (
+            await self.db.execute(
+                select(User)
+                .where(User.user_id == user_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if accepter is None:
+            raise NotFoundException("User", user_id)
+
+        # #2564: re-read the invitation under the workspace lock. Every accept
+        # of this token waits on the same workspace row, so one that got it
+        # first has committed by now: a single-use invitation admits one user.
         invitation = (
             await self.db.execute(
                 select(WorkspaceInvitation)
@@ -480,18 +502,12 @@ class InvitationService:
         # Set user's current workspace to invited workspace (Issue #165)
         # CRITICAL: Always set to invited workspace, even if user already has one
         # This ensures invited users land in the correct workspace
-        from models.auth import User
-
-        stmt = select(User).where(User.user_id == user_id)
-        result = await self.db.execute(stmt)
-        user_record = result.scalar_one_or_none()
-
-        if user_record:
-            user_record.current_workspace_id = invitation.workspace_id
-            logger.info(
-                f"Set user {user_id} current_workspace_id to {invitation.workspace_id} "
-                f"(invited workspace)"
-            )
+        # (#2601: on the users row locked above)
+        accepter.current_workspace_id = invitation.workspace_id
+        logger.info(
+            f"Set user {user_id} current_workspace_id to {invitation.workspace_id} "
+            f"(invited workspace)"
+        )
 
         # Issue #276: Do NOT auto-create personal workspace for invited users.
         # Invited users land directly in the invited workspace.
