@@ -30,6 +30,7 @@ from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
 from models.schemas import RecallRequest
 from services.edge_service import create_declared_edge, ensure_supersedes_owned
+from services.identity_link_service import IdentityLinkService
 from services.memory_service import MemoryService
 from services.plan_seats import slot_limit
 from services.supersede_acceptance import ACCEPT_CONFIDENCE, ACCEPT_WEIGHT
@@ -451,6 +452,37 @@ async def test_a_shared_context_reads_only_the_authors_edge(db_session):
     assert acceptance.allowed is True and acceptance.reason is None
     with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
         await _accept_as(db_session, admin, ctx, carrier)
+    await db_session.commit()
+    assert (await _row(db_session, carrier)).supersede_candidate is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["author", "linked"])
+@pytest.mark.parametrize("writer", ["accept", "post"])
+async def test_another_linked_accounts_edge_is_allowed_in_a_private_context(
+    db_session, caller, writer
+):
+    """#2549: the probe reads the carrier author's row and the caller's row,
+    the two accounts an accept writes under. A different declared edge kept by
+    a third linked account is met by neither write: ``allowed``, and both the
+    accept (under the author) and ``POST /graph/edges`` (under the caller) go
+    through."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
+    third = await _user(db_session, "github")
+    await IdentityLinkService(db_session).link(admin.user_id, third.user_id)
+    await db_session.commit()
+    carrier, target = await _pair(db_session, ctx, admin, admin)
+    accepter, holder = (admin, oauth) if caller == "author" else (oauth, third)
+    await _declare(db_session, holder, ws, ctx, carrier, target, **_OTHER)
+
+    acceptance = await _acceptance(db_session, accepter, carrier)
+
+    assert acceptance.allowed is True and acceptance.reason is None
+    if writer == "accept":
+        with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+            await _accept_as(db_session, accepter, ctx, carrier)
+    else:
+        await _post_supersedes(db_session, accepter, ctx, carrier, target)
     await db_session.commit()
     assert (await _row(db_session, carrier)).supersede_candidate is None
 

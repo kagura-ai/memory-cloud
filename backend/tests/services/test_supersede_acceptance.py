@@ -159,17 +159,17 @@ class TestConflictingDeclaredEdge:
 
     @pytest.mark.asyncio
     async def test_every_row_of_the_owner_filter_is_read(self):
-        """#2549: an identity-link set reads each account's row of the pair."""
-        owners = frozenset({"author", "linked"})
+        """#2549: the carrier author's row and the caller's row are each read."""
+        owners = frozenset({"author", "caller"})
         _, listed = await self._conflicts(owner=owners)
         assert listed.await_args.args[0] == owners
 
     @pytest.mark.asyncio
     async def test_a_conflict_behind_a_clean_stronger_row_is_seen(self):
-        """#2549: the strongest parallel row is the accept's own edge, a weaker
-        row of another linked account differs — the click can still meet it."""
+        """#2549: the strongest parallel row is the accept's own edge, the
+        caller's weaker row differs — the web dialog's click still meets it."""
         clean = _edge()
-        weaker = _edge(edge_type="related_to", weight=0.5, user_id="linked")
+        weaker = _edge(edge_type="related_to", weight=0.5, user_id="caller")
         assert (await self._conflicts(clean, weaker))[0] is True
 
     @pytest.mark.asyncio
@@ -179,39 +179,42 @@ class TestConflictingDeclaredEdge:
 
 
 class TestEdgeOwner:
-    """#2549: whose declared edges on the pair the probe reads — ownership as
-    ``own_memory_predicate`` resolves it."""
+    """#2549: whose declared edges on the pair the probe reads — the carrier
+    author's row and the caller's row, the two accounts an accept writes under."""
 
-    async def _owner(self, *, private: bool) -> tuple[str | frozenset[str], AsyncMock]:
-        linked = AsyncMock(return_value=frozenset({"author", "linked"}))
-        with (
-            patch(
-                "services.supersede_acceptance.is_private_context",
-                AsyncMock(return_value=private),
-            ),
-            patch("services.supersede_acceptance.linked_user_ids", linked),
-        ):
-            owner = await edge_owner(MagicMock(), author_id="author", context_id=uuid4())
-        return owner, linked
+    async def _owner(
+        self, *, private: bool, caller_id: str = "caller"
+    ) -> tuple[str | frozenset[str], AsyncMock]:
+        probe_private = AsyncMock(return_value=private)
+        with patch("services.supersede_acceptance.is_private_context", probe_private):
+            owner = await edge_owner(
+                MagicMock(), author_id="author", caller_id=caller_id, context_id=uuid4()
+            )
+        return owner, probe_private
 
     @pytest.mark.asyncio
-    async def test_a_private_context_reads_the_authors_link_set(self):
-        owner, linked = await self._owner(private=True)
-        assert owner == frozenset({"author", "linked"})
-        assert linked.await_args.args[1] == "author"
+    async def test_a_linked_caller_in_a_private_context_reads_both_rows(self):
+        owner, _ = await self._owner(private=True)
+        assert owner == frozenset({"author", "caller"})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("private", [True, False], ids=["private", "shared"])
+    async def test_the_author_as_caller_reads_the_author_alone(self, private):
+        owner, probe_private = await self._owner(private=private, caller_id="author")
+        assert owner == "author"
+        assert probe_private.await_count == 0
 
     @pytest.mark.asyncio
     async def test_a_shared_context_reads_the_author_alone(self):
-        owner, linked = await self._owner(private=False)
+        owner, _ = await self._owner(private=False)
         assert owner == "author"
-        assert linked.await_count == 0
 
 
 class TestEvaluatePrecedence:
     """``not_writable`` > ``not_owner`` > ``newer_candidate`` > ``edge_exists``;
     a later check runs only when the earlier ones pass."""
 
-    _OWNERS = frozenset({"owner", "linked"})
+    _OWNERS = frozenset({"owner", "caller"})
 
     async def _evaluate(self, *, writable: bool, pair: PairOwnership, edge: bool):
         memory = SimpleNamespace(
@@ -228,7 +231,7 @@ class TestEvaluatePrecedence:
             patch("services.supersede_acceptance.edge_owner", self.probe_owner),
             patch("services.supersede_acceptance.conflicting_declared_edge", probe_edge),
         ):
-            result = await evaluate(MagicMock(), user_id="owner", memory=memory, target_id=uuid4())
+            result = await evaluate(MagicMock(), user_id="caller", memory=memory, target_id=uuid4())
         return result, probe_pair, probe_edge
 
     @pytest.mark.asyncio
@@ -254,10 +257,11 @@ class TestEvaluatePrecedence:
 
     @pytest.mark.asyncio
     async def test_edge_exists_when_everything_else_passes(self):
-        """#2549: the edge is looked up under the carrier author's owner filter."""
+        """#2549: the edge is looked up under the carrier author and the caller."""
         result, _, probe_edge = await self._evaluate(writable=True, pair=_pair(), edge=True)
         assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
         assert self.probe_owner.await_args.kwargs["author_id"] == "owner"
+        assert self.probe_owner.await_args.kwargs["caller_id"] == "caller"
         assert probe_edge.await_args.kwargs["owner"] == self._OWNERS
 
     @pytest.mark.asyncio
