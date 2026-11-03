@@ -872,19 +872,19 @@ export function SettingsTabPanel({
 
         {/* Save bar (#2159): in the flow after the last card and sticky
             within this section, like the search settings bar below it — a
-            viewport-fixed bar here would cover that one. */}
-        {isDirty && (
-          <UnsavedChangesBar
-            message={t("unsavedChanges")}
-            discardLabel={t("discard")}
-            saveLabel={t("saveChanges")}
-            savingLabel={t("saving")}
-            onDiscard={refreshContext}
-            onSave={handleSave}
-            saving={saving}
-            saveDisabled={saving}
-          />
-        )}
+            viewport-fixed bar here would cover that one. Shown only while
+            something is unsaved; its live region stays mounted (#2595). */}
+        <UnsavedChangesBar
+          open={isDirty}
+          message={t("unsavedChanges")}
+          discardLabel={t("discard")}
+          saveLabel={t("saveChanges")}
+          savingLabel={t("saving")}
+          onDiscard={refreshContext}
+          onSave={handleSave}
+          saving={saving}
+          saveDisabled={saving}
+        />
       </div>
 
       {/* Privacy Change Confirmation Dialog */}

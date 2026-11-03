@@ -699,11 +699,16 @@ describe("SearchSettingsSection save bar (#2159)", () => {
   it("is the same accented status strip as the context settings bar (#2595)", async () => {
     render(<SearchSettingsSection contextId="ctx-1" />);
     const input = await screen.findByLabelText("fetchFactorLabel");
-    expect(screen.queryByRole("status")).toBeNull();
-    fireEvent.change(input, { target: { value: "5" } });
-
+    // Mounted and empty before the edit, so the message is a change inside
+    // an existing live region (one inserted with its text is not reliably
+    // announced).
     const status = screen.getByRole("status");
     expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toBeEmptyDOMElement();
+    expect(bar()).toBeNull();
+    fireEvent.change(input, { target: { value: "5" } });
+
+    expect(screen.getByRole("status")).toBe(status);
     expect(status).toHaveTextContent(
       "unsavedFields(fields=unsavedFieldFetchFactor)",
     );
@@ -727,6 +732,7 @@ describe("SearchSettingsSection save bar (#2159)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
     await waitFor(() => expect(bar()).toBeNull());
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toBeEmptyDOMElement();
   });
 });

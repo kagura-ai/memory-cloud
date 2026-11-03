@@ -661,15 +661,20 @@ describe("SettingsTabPanel — save bar stands out (#2595)", () => {
   it("announces the unsaved state in an accented strip that goes on discard", async () => {
     mockGetContext.mockResolvedValue(makeContext());
     render(<Harness />);
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // The live region is already mounted, and empty, before anything is
+    // unsaved: a region inserted together with its text is not reliably
+    // announced, a change inside an existing one is.
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toBeEmptyDOMElement();
+    expect(status.closest("div.sticky")).toBeNull();
 
     fireEvent.change(screen.getByDisplayValue("Demo Context"), {
       target: { value: "Renamed" },
     });
 
-    const status = await screen.findByRole("status");
-    expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveTextContent("unsavedChanges");
+    await waitFor(() => expect(status).toHaveTextContent("unsavedChanges"));
+    expect(screen.getByRole("status")).toBe(status);
     expect(status.className).toContain("font-medium");
     expect(status.className).toContain("text-foreground");
     // A decorative leading icon in the accent colour.
@@ -689,9 +694,12 @@ describe("SettingsTabPanel — save bar stands out (#2595)", () => {
     expect(bar!.querySelector(".bg-primary\\/5")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "discard" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("status")).not.toBeInTheDocument();
-    });
+    await waitFor(() => expect(status).toBeEmptyDOMElement());
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status.closest("div.sticky")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "discard" }),
+    ).not.toBeInTheDocument();
     expect(mockGetContext).toHaveBeenCalledWith(CTX_ID);
     expect(screen.getByDisplayValue("Demo Context")).toBeInTheDocument();
   });

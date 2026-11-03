@@ -1233,31 +1233,31 @@ export function SearchSettingsSection({
         {/* Save bar for the staged fields (#2159): in the flow after the
             last card (so it is also last in the focus order), sticking to
             the bottom of the viewport while the section is scrolled — not a
-            fixed overlay. Only rendered when something is unsaved. The
-            same bar as the context settings above it (#2595). */}
-        {isDirty && (
-          <UnsavedChangesBar
-            data-testid="search-settings-save-bar"
-            message={
-              cannotSave
-                ? t("providerUnavailableCannotSave")
-                : t("unsavedFields", {
-                    fields: format.list(dirtyNames, {
-                      style: "short",
-                      type: "unit",
-                    }),
-                  })
-            }
-            discardLabel={t("discardChanges")}
-            saveLabel={t("saveChanges")}
-            savingLabel={t("saving")}
-            onDiscard={refreshConfig}
-            onSave={handleSave}
-            saving={saving}
-            discardDisabled={saving || toggleSaving}
-            saveDisabled={saving || toggleSaving || !!cannotSave}
-          />
-        )}
+            fixed overlay. Shown only while something is unsaved; its live
+            region stays mounted. The same bar as the context settings above
+            it (#2595). */}
+        <UnsavedChangesBar
+          open={isDirty}
+          data-testid="search-settings-save-bar"
+          message={
+            cannotSave
+              ? t("providerUnavailableCannotSave")
+              : t("unsavedFields", {
+                  fields: format.list(dirtyNames, {
+                    style: "short",
+                    type: "unit",
+                  }),
+                })
+          }
+          discardLabel={t("discardChanges")}
+          saveLabel={t("saveChanges")}
+          savingLabel={t("saving")}
+          onDiscard={refreshConfig}
+          onSave={handleSave}
+          saving={saving}
+          discardDisabled={saving || toggleSaving}
+          saveDisabled={saving || toggleSaving || !!cannotSave}
+        />
       </div>
 
       {/* #2104: confirm a content chunk change; confirming saves it (#2159) */}
