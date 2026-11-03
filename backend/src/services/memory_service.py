@@ -7755,7 +7755,9 @@ class MemoryService:
                 external_id. Never expose through transport layers.
             point_queue: A batch caller's list: the committed rows' points are
                 added to it instead of being deleted here, and the caller
-                passes it to ``delete_forgotten_points`` once (#2201).
+                passes it to ``delete_forgotten_points`` once (#2201) — or a
+                caller with a time budget, which runs that step outside it
+                (#2480).
             context_gate: A batch caller's ``forget_context_gate`` result for
                 this caller, context and key scope, so the context checks run
                 once per batch rather than once per id (#2480). The per-memory

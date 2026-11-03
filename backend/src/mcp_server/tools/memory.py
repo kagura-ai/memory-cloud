@@ -1554,7 +1554,16 @@ async def handle_recall(
 async def handle_forget(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Delete memories (soft delete)."""
+    """Delete memories (soft delete).
+
+    #2480: the committed rows' search points are deleted after the tool
+    budget, not inside it (``delete_forgotten_points``, with its own bound,
+    ``FORGET_POINT_DELETE_TIMEOUT_SECONDS``). A by-query forget that spent
+    most of the budget before its commit would otherwise answer a timeout for
+    rows it had deleted. The step never raises and what it leaves stays
+    queued for the deferred point delete drain (#2476), so the reply is the
+    committed rows either way, as when ``forget`` defers the delete itself.
+    """
     from db.base import get_db
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
@@ -1581,6 +1590,7 @@ async def handle_forget(
             )
 
             service = MemoryService(db)
+            forgotten_points: list[tuple[UUID, UUID, str]] = []
             result = await execute_with_timeout(
                 service.forget(
                     request,
@@ -1589,9 +1599,13 @@ async def handle_forget(
                     key_workspace_id=get_mcp_key_workspace_scope(),
                     # forget(query=...) recalls from the session workspace.
                     current_workspace_id=workspace_id,
+                    point_queue=forgotten_points,
                 ),
                 operation_name="forget",
             )
+            if forgotten_points:
+                # #2480: outside the budget; never raises.
+                await service.delete_forgotten_points(forgotten_points)
 
             await _log_tool_usage(
                 db, user_id, "forget", start_time, 200, current_context_id, workspace_id
