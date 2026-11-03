@@ -5,7 +5,6 @@ Implements:
 - Memory consolidation (daily)
 """
 
-import math
 import os
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -32,6 +31,7 @@ from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
+from tasks.env import env_interval_seconds, env_seconds
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -464,36 +464,16 @@ async def sweep_orphan_vectors_task() -> None:
         logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
 
 
-def _env_seconds(name: str, default: float, maximum: float | None = None) -> float:
-    """A non-negative number of seconds from ``name``. Read at call time.
-
-    An unparsable, negative or above-``maximum`` value falls back to
-    ``default`` and is logged, like the tombstone retention window, so a typo
-    never turns into a wait without bound or a job silently switched off.
-    """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        value = -1.0
-    if not math.isfinite(value) or value < 0 or (maximum is not None and value > maximum):
-        logger.warning("env_seconds_invalid", name=name, value=raw, fallback=default)
-        return default
-    return value
-
-
 def _deferred_point_drain_interval() -> int:
     """Seconds between drain runs (#2476); 0 turns the job off."""
-    seconds = _env_seconds(DEFERRED_POINT_DRAIN_INTERVAL_ENV, DEFERRED_POINT_DRAIN_INTERVAL_DEFAULT)
-    # A fraction of a second still means "on": never round it down to off.
-    return max(1, int(seconds)) if seconds > 0 else 0
+    return env_interval_seconds(
+        DEFERRED_POINT_DRAIN_INTERVAL_ENV, DEFERRED_POINT_DRAIN_INTERVAL_DEFAULT
+    )
 
 
 def _deferred_point_drain_wait() -> float:
     """Seconds a drain run waits for the point writers (#2476); 0 does not wait."""
-    return _env_seconds(
+    return env_seconds(
         DEFERRED_POINT_DRAIN_WAIT_ENV,
         DEFERRED_POINT_DRAIN_WAIT_DEFAULT,
         maximum=DEFERRED_POINT_DRAIN_WAIT_MAX,
