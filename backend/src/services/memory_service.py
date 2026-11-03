@@ -147,6 +147,7 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from auth.agent_scope import AgentScope
     from models.memory import Memory
     from services.resource_indexer import ResourceIndexer
 
@@ -569,12 +570,15 @@ class ForgetContextGate:
     write gate, the member role). None of them depends on the memory, so a
     batch runs them once instead of once per id; each id's own checks
     (``can_access_memory`` with its type and source, the guardrail author gate)
-    still run per id. ``forget`` refuses a gate resolved for another call.
+    still run per id. ``forget`` refuses a gate resolved for another call:
+    another caller, context, key scope, or agent scope (the request's agent
+    credential, which the binding gate read).
     """
 
     user_id: str
     context_id: UUID | None
     key_workspace_id: UUID | None
+    agent_scope: AgentScope | None
     workspace_id_str: str | None
     context_id_str: str | None
 
@@ -686,12 +690,16 @@ class MemoryService:
         """``forget``'s context gate, for a caller that forgets many ids in one context (#2480).
 
         Pass the result to each ``forget(context_gate=...)`` of the same
-        caller, context and key scope.
+        caller, context and key scope, in the same request (agent scope).
 
         Raises:
             NotFoundException / AuthorizationError: as ``forget`` would, for
                 every id.
         """
+        from auth.agent_scope import get_agent_scope
+
+        # Read with the gate: the binding gate below evaluates this scope.
+        agent_scope = get_agent_scope()
         _context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
             user_id,
             context_id,
@@ -703,6 +711,7 @@ class MemoryService:
             user_id=user_id,
             context_id=context_id,
             key_workspace_id=key_workspace_id,
+            agent_scope=agent_scope,
             workspace_id_str=workspace_id_str,
             context_id_str=context_id_str,
         )
@@ -7768,7 +7777,7 @@ class MemoryService:
 
         Raises:
             ValueError: ``context_gate`` was resolved for another caller,
-                context or key scope.
+                context, key scope or agent scope.
         """
         if _skip_binding_row_filter and not request.memory_id:
             raise ValueError(
@@ -7785,15 +7794,19 @@ class MemoryService:
             context_gate = await self.forget_context_gate(
                 user_id, current_context_id, key_workspace_id
             )
-        elif (context_gate.user_id, context_gate.context_id, context_gate.key_workspace_id) != (
-            user_id,
-            current_context_id,
-            key_workspace_id,
-        ):
-            raise ValueError(
-                "context_gate was resolved for another caller, context or key scope; "
-                "forget would skip the context checks for this one."
-            )
+        else:
+            from auth.agent_scope import get_agent_scope
+
+            if (
+                context_gate.user_id,
+                context_gate.context_id,
+                context_gate.key_workspace_id,
+                context_gate.agent_scope,
+            ) != (user_id, current_context_id, key_workspace_id, get_agent_scope()):
+                raise ValueError(
+                    "context_gate was resolved for another caller, context, key scope or "
+                    "agent scope; forget would skip the context checks for this one."
+                )
         workspace_id_str, context_id_str = (
             context_gate.workspace_id_str,
             context_gate.context_id_str,

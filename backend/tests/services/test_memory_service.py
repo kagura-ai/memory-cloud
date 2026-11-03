@@ -3367,22 +3367,57 @@ class TestForgetContextGate:
         assert service._get_context_isolation_params.await_count == len(ids)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("field", ["user", "context", "key_scope"])
+    @pytest.mark.parametrize("field", ["user", "context", "key_scope", "agent_scope"])
     async def test_a_gate_resolved_for_another_call_is_refused(self, field):
+        from auth.agent_scope import AgentScope, get_agent_scope, set_agent_scope
+
         order: list = []
         service, ctx, ids = self._service(order)
+        assert get_agent_scope() is None
         gate = await service.forget_context_gate("caller", ctx)
         kwargs = {
             "user_id": "someone-else" if field == "user" else "caller",
             "current_context_id": uuid4() if field == "context" else ctx,
             "key_workspace_id": uuid4() if field == "key_scope" else None,
         }
-        with (
-            TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()),
-            pytest.raises(ValueError, match="context_gate"),
-        ):
-            await service.forget(ForgetRequest(memory_id=ids[0]), context_gate=gate, **kwargs)
+        if field == "agent_scope":
+            # Resolved without an agent credential, used under one: the
+            # binding's context-level write gate never ran for this agent.
+            set_agent_scope(AgentScope(agent_id=uuid4(), enforcement_mode="enforce"))
+        try:
+            with (
+                TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()),
+                pytest.raises(ValueError, match="context_gate"),
+            ):
+                await service.forget(ForgetRequest(memory_id=ids[0]), context_gate=gate, **kwargs)
+        finally:
+            set_agent_scope(None)
         assert "commit" not in order
+
+    @pytest.mark.asyncio
+    async def test_the_gate_records_the_agent_scope_it_ran_under(self):
+        from auth.agent_scope import AgentScope, set_agent_scope
+
+        order: list = []
+        service, ctx, ids = self._service(order)
+        scope = AgentScope(agent_id=uuid4(), enforcement_mode="enforce")
+        set_agent_scope(scope)
+        try:
+            gate = await service.forget_context_gate("caller", ctx)
+            assert gate.agent_scope == scope
+            # The same request's scope: accepted.
+            with TestForgetDeletesThePointAfterTheCommit._patches(order, AsyncMock()):
+                res = await service.forget(
+                    ForgetRequest(memory_id=ids[0]),
+                    "caller",
+                    current_context_id=ctx,
+                    point_queue=[],
+                    context_gate=gate,
+                )
+        finally:
+            set_agent_scope(None)
+        assert res.deleted_count == 1
+        assert service._get_context_isolation_params.await_count == 1
 
 
 @pytest.mark.usefixtures("point_writer_lock_free")
