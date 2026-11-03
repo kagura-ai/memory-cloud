@@ -6388,7 +6388,9 @@ class MemoryService:
         # #1299 binding hides must not show through the scores either.
         # recall() already pruned such hits right after hydration (#2546);
         # this keeps the rule for a pool passed in directly. Shadowed and
-        # folded rows have left the pool, so they do not count either.
+        # folded rows have left the pool, so they do not count either; with
+        # include_superseded=True nothing folds and shadowed rows stay in the
+        # pool, annotated, so there they count.
         confidence_pool = [r for r in search_results if r["id"] in memories]
         if dropped := len(search_results) - len(confidence_pool):
             logger.debug(
