@@ -418,6 +418,21 @@ class InvitationService:
         # Raises NotFoundException for a missing / soft-deleted workspace.
         workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
 
+        # #2564: re-read the invitation under that lock. Every accept of this
+        # token waits on the same workspace row, so one that got it first has
+        # committed by now: a single-use invitation admits one user.
+        invitation = (
+            await self.db.execute(
+                select(WorkspaceInvitation)
+                .where(WorkspaceInvitation.id == invitation.id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if invitation is None:
+            raise NotFoundException("Invitation")
+        if invitation.is_accepted():
+            raise ValidationError("This invitation has already been accepted and cannot be reused")
+
         # Check if user is already a member
         stmt = select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == invitation.workspace_id,
