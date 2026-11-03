@@ -8,7 +8,7 @@ Two endpoints share one ``SleepReporterService`` instance:
   ``PermissionService.check_workspace_admin``. The path-bound
   ``workspace_id`` is the only allowed scope.
 
-Both endpoints accept the same status / limit / offset / user_id /
+Both endpoints accept the same status / source / limit / offset / user_id /
 context_id filters; the workspace-scoped one omits ``workspace_id``
 from the query string because it comes from the path.
 
@@ -31,6 +31,7 @@ from auth.dependencies import get_current_user, require_admin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
+from models.sleep import SLEEP_REPORT_SOURCE_ALL, SleepReportSourceFilter
 from services.capacity_lock import ensure_not_capacity_locked
 from services.permission_service import PermissionService
 from services.sleep_reporter_service import SleepReporterService
@@ -63,6 +64,9 @@ class SleepReportSummary(TZAwareBaseModel):
     # user_id).
     user_email: str | None = None
     status: str
+    # #2219: 'sleep' (a Sleep Maintenance run) or 'analysis' (a Memory Analysis
+    # run's spend row, written since #2088 also when it failed or was cancelled).
+    source: str
     started_at: datetime
     completed_at: datetime | None
     memories_processed: int
@@ -138,6 +142,13 @@ def _validate_status(status_filter: str | None) -> None:
         )
 
 
+# #2219: shared by both list endpoints.
+_SOURCE_QUERY_DESCRIPTION = (
+    "Which rows to list: 'sleep' (Sleep Maintenance runs), 'analysis' "
+    "(Memory Analysis spend rows) or 'all' (default). Unknown values are a 422."
+)
+
+
 # ============================================================================
 # Admin (cross-workspace) endpoints
 # ============================================================================
@@ -155,12 +166,15 @@ async def list_sleep_reports(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status_filter: str | None = Query(None, alias="status"),
+    source: SleepReportSourceFilter = Query(
+        SLEEP_REPORT_SOURCE_ALL, description=_SOURCE_QUERY_DESCRIPTION
+    ),
     context_id: UUID | None = Query(None),
     user_id: str | None = Query(None),
 ) -> SleepReportListResponse:
     """List Sleep Maintenance reports with filters and pagination.
 
-    Admin-only. Filterable by status, context_id, user_id.
+    Admin-only. Filterable by status, source, context_id, user_id.
     Sorted by started_at DESC.
     """
     _validate_status(status_filter)
@@ -170,6 +184,7 @@ async def list_sleep_reports(
         status_filter=status_filter,
         context_id=context_id,
         user_id=user_id,
+        source=source,
         limit=limit,
         offset=offset,
     )
@@ -278,6 +293,9 @@ async def workspace_list_sleep_reports(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status_filter: str | None = Query(None, alias="status"),
+    source: SleepReportSourceFilter = Query(
+        SLEEP_REPORT_SOURCE_ALL, description=_SOURCE_QUERY_DESCRIPTION
+    ),
     context_id: UUID | None = Query(None),
     user_id: str | None = Query(None),
 ) -> SleepReportListResponse:
@@ -305,6 +323,7 @@ async def workspace_list_sleep_reports(
         status_filter=status_filter,
         context_id=context_id,
         user_id=user_id,
+        source=source,
         limit=limit,
         offset=offset,
     )

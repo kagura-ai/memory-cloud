@@ -39,6 +39,7 @@ def _make_mock_report(
     status: str = "completed",
     workspace_id=_WORKSPACE_ID,
     context_id=None,
+    source: str = "sleep",
 ):
     r = MagicMock()
     r.id = uuid4()
@@ -46,6 +47,7 @@ def _make_mock_report(
     r.workspace_id = workspace_id
     r.context_id = context_id
     r.status = status
+    r.source = source  # #2219
     r.started_at = datetime(2026, 4, 6, 3, 0, 0)
     r.completed_at = datetime(2026, 4, 6, 3, 3, 0)
     r.memories_processed = 7
@@ -292,6 +294,60 @@ class TestWorkspaceListSleepReports:
         assert response.status_code == 200
         data = response.json()
         assert data["reports"][0]["user_email"] is None
+
+
+class TestWorkspaceListSleepReportsSourceFilter:
+    """#2219: ``source`` filter (sleep | analysis | all, default all)."""
+
+    def _db(self, reports):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = len(reports)
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        return mock_db
+
+    @staticmethod
+    def _list_sql(mock_db) -> tuple[str, dict]:
+        compiled = mock_db.execute.await_args_list[1].args[0].compile()
+        return str(compiled), dict(compiled.params)
+
+    def test_default_lists_every_source_and_rows_carry_source(self, client):
+        mock_db = self._db(
+            [_make_mock_report(source="sleep"), _make_mock_report(source="analysis")]
+        )
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+
+        assert response.status_code == 200
+        assert [r["source"] for r in response.json()["reports"]] == ["sleep", "analysis"]
+        sql, _ = self._list_sql(mock_db)
+        assert "sleep_reports.source =" not in sql
+
+    @pytest.mark.parametrize("source", ["sleep", "analysis"])
+    def test_source_narrows_the_query(self, client, source):
+        mock_db = self._db([_make_mock_report(source=source)])
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports?source={source}")
+
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["source"] == source
+        sql, params = self._list_sql(mock_db)
+        assert "sleep_reports.source =" in sql
+        assert "sleep_reports.workspace_id =" in sql
+        assert source in params.values()
+
+    def test_unknown_source_returns_422(self, client):
+        mock_db = AsyncMock()
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports?source=bogus")
+
+        assert response.status_code == 422
+        mock_db.execute.assert_not_awaited()
 
 
 # ============================================================================

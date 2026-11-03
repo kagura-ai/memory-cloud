@@ -36,6 +36,7 @@ def _make_mock_report(
     memories_processed: int = 7,
     context_id=_SENTINEL,
     user_id: str = "local:admin",
+    source: str = "sleep",
 ):
     r = MagicMock()
     r.id = uuid4()
@@ -43,6 +44,7 @@ def _make_mock_report(
     r.workspace_id = uuid4()
     r.context_id = uuid4() if context_id is _SENTINEL else context_id
     r.status = status
+    r.source = source  # #2219
     r.started_at = datetime(2026, 4, 6, 3, 0, 0)
     r.completed_at = datetime(2026, 4, 6, 3, 3, 0)
     r.memories_processed = memories_processed
@@ -295,6 +297,76 @@ class TestListSleepReports:
         response = client.get("/api/v1/admin/sleep-reports")
         assert response.status_code == 200
         assert response.json()["reports"][0]["context_name"] is None
+
+
+def _list_sql(mock_db) -> tuple[str, dict]:
+    """SQL text and bound params of the list query (the second execute call)."""
+    stmt = mock_db.execute.await_args_list[1].args[0]
+    compiled = stmt.compile()
+    return str(compiled), dict(compiled.params)
+
+
+class TestListSleepReportsSourceFilter:
+    """#2219: ``source`` filter (sleep | analysis | all, default all)."""
+
+    def _db(self, reports):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = len(reports)
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        return mock_db
+
+    def test_default_lists_every_source_and_rows_carry_source(self, client):
+        mock_db = self._db(
+            [
+                _make_mock_report(context_id=None, source="sleep"),
+                _make_mock_report(context_id=None, source="analysis"),
+            ]
+        )
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+
+        assert response.status_code == 200
+        assert [r["source"] for r in response.json()["reports"]] == ["sleep", "analysis"]
+        sql, _ = _list_sql(mock_db)
+        assert "sleep_reports.source =" not in sql
+
+    @pytest.mark.parametrize("source", ["sleep", "analysis"])
+    def test_source_narrows_the_query(self, client, source):
+        mock_db = self._db([_make_mock_report(context_id=None, source=source)])
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports?source={source}")
+
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["source"] == source
+        sql, params = _list_sql(mock_db)
+        assert "sleep_reports.source =" in sql
+        assert source in params.values()
+        count_sql = str(mock_db.execute.await_args_list[0].args[0])
+        assert "sleep_reports.source =" in count_sql
+
+    def test_all_does_not_filter(self, client):
+        mock_db = self._db([_make_mock_report(context_id=None)])
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports?source=all")
+
+        assert response.status_code == 200
+        sql, _ = _list_sql(mock_db)
+        assert "sleep_reports.source =" not in sql
+
+    def test_unknown_source_returns_422(self, client):
+        mock_db = AsyncMock()
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports?source=bogus")
+
+        assert response.status_code == 422
+        mock_db.execute.assert_not_awaited()
 
 
 class TestGetSleepReportDetail:

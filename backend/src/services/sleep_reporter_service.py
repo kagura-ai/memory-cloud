@@ -13,15 +13,43 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context
-from models.sleep import SleepAction, SleepReport
+from models.sleep import (
+    SLEEP_REPORT_SOURCE_ALL,
+    SLEEP_REPORT_SOURCE_FILTERS,
+    SleepAction,
+    SleepReport,
+)
 from services.label_resolver import resolve_user_labels
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def sleep_report_source_condition(source: str) -> ColumnElement[bool] | None:
+    """The WHERE condition for a ``source`` list filter (#2219).
+
+    Shared by the Sleep Reports list endpoints and the MCP
+    ``get_sleep_history`` tool, so the filter has one implementation.
+
+    Args:
+        source: ``"sleep"``, ``"analysis"`` or ``"all"``
+            (``SLEEP_REPORT_SOURCE_FILTERS``).
+
+    Returns:
+        ``SleepReport.source == source``, or ``None`` for ``"all"``.
+
+    Raises:
+        ValueError: ``source`` is not one of ``SLEEP_REPORT_SOURCE_FILTERS``.
+    """
+    if source not in SLEEP_REPORT_SOURCE_FILTERS:
+        raise ValueError(f"Invalid source. Must be one of: {list(SLEEP_REPORT_SOURCE_FILTERS)}")
+    if source == SLEEP_REPORT_SOURCE_ALL:
+        return None
+    return SleepReport.source == source
 
 
 class SleepReporterService:
@@ -45,10 +73,14 @@ class SleepReporterService:
         status_filter: str | None = None,
         context_id: UUID | None = None,
         user_id: str | None = None,
+        source: str = SLEEP_REPORT_SOURCE_ALL,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[SleepReport], int]:
         """List sleep reports with filters and pagination.
+
+        ``source`` narrows to Sleep runs or analysis rows (#2219); the
+        default ``"all"`` lists both.
 
         Returns:
             (list of ORM instances, total count).  Callers must
@@ -63,6 +95,9 @@ class SleepReporterService:
             conditions.append(SleepReport.context_id == context_id)
         if user_id is not None:
             conditions.append(SleepReport.user_id == user_id)
+        source_condition = sleep_report_source_condition(source)
+        if source_condition is not None:
+            conditions.append(source_condition)
 
         count_stmt = select(func.count()).select_from(SleepReport)
         if conditions:

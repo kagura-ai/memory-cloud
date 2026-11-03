@@ -9600,6 +9600,7 @@
           "memories_promoted": {},
           "merge_retention_result": {},
           "reindex_result": {},
+          "source": {},
           "started_at": {},
           "status": {},
           "user_email": {},
@@ -9624,6 +9625,7 @@
           "memories_processed",
           "memories_promoted",
           "reindex_result",
+          "source",
           "started_at",
           "status",
           "user_id",
@@ -9693,6 +9695,7 @@
           "memories_merged": {},
           "memories_processed": {},
           "memories_promoted": {},
+          "source": {},
           "started_at": {},
           "status": {},
           "user_email": {},
@@ -9710,6 +9713,7 @@
           "memories_merged",
           "memories_processed",
           "memories_promoted",
+          "source",
           "started_at",
           "status",
           "user_id",
@@ -13946,6 +13950,20 @@
                   "type": "null"
                 }
               ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "sleep",
+                "analysis",
+                "all"
+              ],
+              "type": "string"
             }
           },
           {
@@ -28533,6 +28551,20 @@
                   "type": "null"
                 }
               ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "sleep",
+                "analysis",
+                "all"
+              ],
+              "type": "string"
             }
           },
           {
