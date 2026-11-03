@@ -1749,7 +1749,7 @@ Admin endpoints require `system_admin` or `workspace_admin` role.
 
 | Endpoint                                         | Purpose                                                       |
 |--------------------------------------------------|---------------------------------------------------------------|
-| `GET /api/v1/admin/sleep-reports`                | List Sleep runs with filters (`status`, `context_id`, `user_id`) and pagination. |
+| `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). |
 | `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log. |
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.

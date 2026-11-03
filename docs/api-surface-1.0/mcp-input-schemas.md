@@ -290,7 +290,7 @@ Get current workspace usage and quota limits (plan, memories, contexts, members,
 List recent Sleep Maintenance runs for a context.
 
 - **Required**: `context_id` — string, format `uuid`
-- **Optional**: `limit` — integer (schema `default: 10`, max 50)
+- **Optional**: `limit` — integer (schema `default: 10`, max 50); `source` — string, enum [`sleep`, `analysis`, `all`] (schema `default: sleep`, #2219). Through v0.137.0 the tool returned Memory Analysis spend rows mixed in with the Sleep runs; since #2219 it lists Sleep runs only unless `source` is `analysis` or `all`.
 
 ### get_sleep_report
 
