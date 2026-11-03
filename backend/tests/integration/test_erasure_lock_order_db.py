@@ -1866,3 +1866,269 @@ async def test_a_redeem_that_loses_a_try_goes_on_in_its_transaction(db_session, 
     assert (
         await _bonus(db_session, referral.referee_ws) == settings.referral_referee_reward_memories
     )
+
+
+@dataclass(frozen=True)
+class _PendingPair:
+    """A user with a live workspace and one grant pending on each side."""
+
+    user: str
+    workspace: UUID
+    dead_workspace: UUID
+    as_referrer: UUID  # credits no workspace on the user's side
+    as_referee: UUID  # credits the user's soft-deleted workspace
+
+
+def _ledger_row(**columns) -> ReferralGrant:
+    settings = get_settings()
+    return ReferralGrant(
+        id=uuid4(),
+        referrer_bonus_memories=settings.referral_referrer_reward_memories,
+        referred_bonus_memories=settings.referral_referee_reward_memories,
+        **columns,
+    )
+
+
+async def _pending_pair(world) -> _PendingPair:
+    """#2602: the user referred someone while owning no workspace, and was
+    referred onto a workspace they soft-deleted since; they own a live one
+    now (created directly, so nothing applied the grants yet)."""
+    user = await world.user("pending")
+    referee = await world.user("referee")
+    referrer = await world.user("referrer")
+    workspace = (await world.workspace(user)).id
+    dead = (await world.workspace(user)).id
+    referrer_ws = (await world.workspace(referrer)).id
+    await world.db.execute(
+        update(Workspace).where(Workspace.id == dead).values(deleted_at=func.now())
+    )
+    as_referrer = _ledger_row(referrer_user_id=user, referred_user_id=referee)
+    as_referee = _ledger_row(
+        referrer_user_id=referrer,
+        referrer_workspace_id=referrer_ws,
+        referred_user_id=user,
+        referred_workspace_id=dead,
+    )
+    world.db.add_all([as_referrer, as_referee])
+    await world.db.commit()
+    return _PendingPair(user, workspace, dead, as_referrer.id, as_referee.id)
+
+
+async def _user_side_workspaces(db, pair: _PendingPair) -> dict[str, UUID | None]:
+    """The workspace each of ``pair``'s grants credits on the user's side."""
+    return {
+        "as_referrer": await db.scalar(
+            select(ReferralGrant.referrer_workspace_id).where(ReferralGrant.id == pair.as_referrer)
+        ),
+        "as_referee": await db.scalar(
+            select(ReferralGrant.referred_workspace_id).where(ReferralGrant.id == pair.as_referee)
+        ),
+    }
+
+
+def _side_rewards() -> dict[str, int]:
+    settings = get_settings()
+    return {
+        "as_referrer": settings.referral_referrer_reward_memories,
+        "as_referee": settings.referral_referee_reward_memories,
+    }
+
+
+@contextmanager
+def _every_statement(engine):
+    """Every statement ``engine`` runs, whitespace-flattened, in order; the
+    ones ``_LockTrace`` leaves out (``SKIP LOCKED``) included."""
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+
+@pytest.mark.asyncio
+async def test_an_apply_locks_its_grant_rows_skip_locked_after_the_workspace(
+    db_session, referral_world
+):
+    """#2602: the apply takes the workspace row ``NOWAIT``, then the grant
+    rows it re-homes in one id-ordered ``SKIP LOCKED`` select, and its two
+    UPDATEs touch only those rows: it holds the workspace and its grant rows
+    and waits on nothing after."""
+    pair = await _pending_pair(referral_world)
+
+    with _LockTrace(db_session.bind) as trace, _every_statement(db_session.bind) as statements:
+        applied = await ReferralService(db_session).apply_pending_grants(pair.user)
+
+    assert applied == 2
+    _assert_global_order(trace)
+    (apply_tx,) = trace.kinds()
+    # the recompute re-takes the workspace row it holds
+    assert apply_tx == [("ws_live", True), ("child", False), ("child", False), ("ws_live", True)]
+    workspace_lock = next(
+        i for i, sql in enumerate(statements) if "FROM workspaces" in sql and "NOWAIT" in sql
+    )
+    (grant_lock,) = [i for i, sql in enumerate(statements) if "SKIP LOCKED" in sql]
+    updates = [i for i, sql in enumerate(statements) if sql.startswith("UPDATE referral_grants")]
+    assert workspace_lock < grant_lock < min(updates) and len(updates) == 2, statements
+    locking = statements[grant_lock]
+    assert locking.startswith("SELECT referral_grants.id FROM referral_grants "), locking
+    assert locking.endswith("ORDER BY referral_grants.id FOR UPDATE SKIP LOCKED"), locking
+    assert _classify(locking, None) is None  # never waits
+    assert all("referral_grants.id IN (" in statements[i] for i in updates), statements
+    assert await _user_side_workspaces(db_session, pair) == {
+        "as_referrer": pair.workspace,
+        "as_referee": pair.workspace,
+    }
+    assert await _bonus(db_session, pair.workspace) == sum(_side_rewards().values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", ["as_referrer", "as_referee"])
+async def test_an_apply_skips_a_grant_row_another_transaction_holds(
+    db_session, referral_world, held
+):
+    """#2602: another transaction holds one of the user's pending grant rows,
+    as an account erasure's ``SET NULL`` cascade does until its commit. The
+    apply, which holds the workspace row, does not wait on it: it re-homes
+    the other grant and leaves the held one pending. Once the holder commits,
+    the next apply re-homes it."""
+    pair = await _pending_pair(referral_world)
+    held_id = getattr(pair, held)
+    other = "as_referee" if held == "as_referrer" else "as_referrer"
+    pending_before = {"as_referrer": None, "as_referee": pair.dead_workspace}
+    rewards = _side_rewards()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    pids: dict = {}
+
+    async def apply() -> int:
+        async with maker() as db:
+            pids["apply"] = await _pid(db)
+            return await ReferralService(db).apply_pending_grants(pair.user)
+
+    tasks: list[asyncio.Task] = []
+    try:
+        async with maker() as holder:
+            await holder.execute(
+                select(ReferralGrant.id).where(ReferralGrant.id == held_id).with_for_update()
+            )
+            applying = asyncio.create_task(apply())
+            tasks.append(applying)
+            await _done_or_blocked(maker, applying, lambda: pids.get("apply"))
+            assert applying.done(), "the apply waits on the held grant row"
+            assert await applying == 1
+            await holder.commit()
+    finally:
+        await _cancel_all(tasks)
+
+    assert await _user_side_workspaces(db_session, pair) == {
+        other: pair.workspace,
+        held: pending_before[held],
+    }
+    assert await _bonus(db_session, pair.workspace) == rewards[other]
+
+    assert await asyncio.wait_for(apply(), 15) == 1
+    assert await _user_side_workspaces(db_session, pair) == {
+        "as_referrer": pair.workspace,
+        "as_referee": pair.workspace,
+    }
+    assert await _bonus(db_session, pair.workspace) == sum(rewards.values())
+
+
+@pytest.mark.asyncio
+async def test_an_apply_during_the_counterpartys_erasure_never_deadlocks(
+    db_session, referral_world
+):
+    """#2602, the issue's case with the real cascade. The user and the
+    erasure's subject referred each other; both grants are pending on the
+    user's side (``referred_by_subject`` credits a workspace the user
+    soft-deleted, ``referred_the_subject`` credits none yet). The erasure
+    deletes the subject's workspaces, whose ``SET NULL`` cascade locks
+    ``referred_by_subject``, and pauses there; deleting the subject's users
+    row later locks ``referred_the_subject`` through its cascade. An apply
+    for the user used to lock ``referred_the_subject`` and wait on the other
+    row: once the erasure went on, each waited on the other (``deadlock
+    detected``). Now the apply skips the held row, re-homes the other and
+    commits while the erasure is paused; the erasure completes, and the next
+    apply re-homes the rest."""
+    world = referral_world
+    user = await world.user("applying")
+    subject = await world.user("erased")
+    workspace = (await world.workspace(user)).id
+    dead = (await world.workspace(user)).id
+    subject_ws = (await world.workspace(subject)).id
+    await db_session.execute(
+        update(Workspace).where(Workspace.id == dead).values(deleted_at=func.now())
+    )
+    referred_by_subject = _ledger_row(
+        referrer_user_id=subject,
+        referrer_workspace_id=subject_ws,
+        referred_user_id=user,
+        referred_workspace_id=dead,
+    )
+    referred_the_subject = _ledger_row(referrer_user_id=user, referred_user_id=subject)
+    db_session.add_all([referred_by_subject, referred_the_subject])
+    await db_session.commit()
+    rewards = _side_rewards()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    pids: dict = {}
+    original = AccountErasureService._count_and_delete
+
+    async def paused_after_the_workspaces(self, model, where_clause):
+        deleted = await original(self, model, where_clause)
+        if model is Workspace:
+            holding.set()
+            await asyncio.wait_for(release.wait(), 30)
+        return deleted
+
+    async def apply() -> int:
+        async with maker() as db:
+            pids["apply"] = await _pid(db)
+            return await ReferralService(db).apply_pending_grants(user)
+
+    async def side_workspace(column, grant_id) -> UUID | None:
+        return await db_session.scalar(select(column).where(ReferralGrant.id == grant_id))
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        patch.object(AccountErasureService, "_count_and_delete", paused_after_the_workspaces),
+    ):
+        try:
+            erasing = asyncio.create_task(_force_erase(maker, subject))
+            tasks.append(erasing)
+            await asyncio.wait_for(holding.wait(), 30)
+            applying = asyncio.create_task(apply())
+            tasks.append(applying)
+            await _done_or_blocked(maker, applying, lambda: pids.get("apply"))
+            applied_while_paused = applying.done()
+            release.set()
+            erasure_result, apply_result = await asyncio.wait_for(
+                asyncio.gather(erasing, applying, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not isinstance(apply_result, BaseException), apply_result
+    assert not isinstance(erasure_result, BaseException), erasure_result
+    assert erasure_result.status == "complete", erasure_result.status
+    assert applied_while_paused, "the apply waits on the row the cascade holds"
+    assert apply_result == 1
+    assert (
+        await side_workspace(ReferralGrant.referrer_workspace_id, referred_the_subject.id)
+        == workspace
+    )
+    assert await side_workspace(ReferralGrant.referred_workspace_id, referred_by_subject.id) == dead
+    assert await _bonus(db_session, workspace) == rewards["as_referrer"]
+
+    assert await asyncio.wait_for(apply(), 15) == 1
+    assert (
+        await side_workspace(ReferralGrant.referred_workspace_id, referred_by_subject.id)
+        == workspace
+    )
+    assert await _bonus(db_session, workspace) == sum(rewards.values())

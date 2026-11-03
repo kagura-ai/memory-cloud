@@ -11,9 +11,10 @@ user's grants in a transaction of its own. A user whose workspace row is still
 busy is left for the next run. ``GET /referrals/me`` applies them as well.
 
 Lock order: each apply starts with no row lock held — no ``users`` row — and
-takes one workspace row ``NOWAIT`` and then the user's grant rows (whose
-foreign-key check takes a KEY SHARE on that workspace row), so the job never
-waits on a workspace row.
+takes one workspace row ``NOWAIT`` and then, ``SKIP LOCKED``, the user's grant
+rows (whose foreign-key check takes a KEY SHARE on that workspace row), so the
+job never waits on a row lock. A grant row another transaction holds (an
+account erasure's cascade) is left for the next run (#2602).
 
 No single_flight: the scheduler leader runs one copy and APScheduler does not
 start a run while the last one is still running. A copy in another process

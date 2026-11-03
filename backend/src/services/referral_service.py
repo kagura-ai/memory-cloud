@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, func, or_, select, union_all, update
+from sqlalchemy import CursorResult, and_, func, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,11 +73,62 @@ def _uncredited(workspace_col: Any) -> Any:
     return workspace_col.is_(None) | workspace_col.in_(dead_workspaces)
 
 
+def _pending_on_side(
+    user_col: Any, workspace_col: Any, user_id: str, workspace_id: uuid.UUID
+) -> Any:
+    """A grant of ``user_id`` on this side that credits no live workspace there
+    and does not already point at ``workspace_id``."""
+    return and_(
+        user_col == user_id,
+        _uncredited(workspace_col),
+        # NULL-safe inequality, and it has to be. ``!=`` evaluates to NULL
+        # (not TRUE) for exactly the NULL rows the apply exists to fix, so
+        # it would silently match nothing. ``is_not`` emits SQL
+        # ``IS NOT <uuid>``, which PostgreSQL accepts only for
+        # NULL / TRUE / FALSE / UNKNOWN — a syntax error against a UUID.
+        workspace_col.is_distinct_from(workspace_id),
+    )
+
+
+def build_pending_grant_lock(user_id: str, workspace_id: uuid.UUID) -> Any:
+    """Build the SELECT that locks the grant rows an apply re-homes (#2602).
+
+    The user's live grants pending on either side, ``FOR UPDATE SKIP LOCKED``
+    in id order: a row another transaction holds (an account erasure's
+    ``SET NULL`` cascade, until its commit) is skipped, not waited on, and
+    stays pending for the next apply. Asserted at compile time in
+    ``tests/api/test_referrals.py::TestPendingGrantSQL``.
+
+    Args:
+        user_id: Owner of the grants being re-homed.
+        workspace_id: The live workspace they are about to point at.
+
+    Returns:
+        A SQLAlchemy ``Select`` of ``referral_grants.id``.
+    """
+    return (
+        select(ReferralGrant.id)
+        .where(
+            ReferralGrant.revoked_at.is_(None),
+            or_(
+                *(
+                    _pending_on_side(user_col, workspace_col, user_id, workspace_id)
+                    for user_col, workspace_col in _GRANT_SIDES
+                )
+            ),
+        )
+        .order_by(ReferralGrant.id)
+        .with_for_update(skip_locked=True)
+    )
+
+
 def build_pending_grant_update(
     user_col: Any,
     workspace_col: Any,
     user_id: str,
     workspace_id: uuid.UUID,
+    *,
+    ids: Collection[uuid.UUID] = (),
 ) -> Any:
     """Build the UPDATE that re-homes one side of a user's unresolved grants.
 
@@ -88,13 +140,17 @@ def build_pending_grant_update(
     catches cheaply.
 
     Selects grants for ``user_id`` whose workspace on this side is either unset
-    or points at a soft-deleted workspace, and is not already the target.
+    or points at a soft-deleted workspace, and is not already the target, among
+    ``ids``.
 
     Args:
         user_col: ``referrer_user_id`` or ``referred_user_id``.
         workspace_col: The matching ``*_workspace_id`` column.
         user_id: Owner of the grants being re-homed.
         workspace_id: The live workspace to point them at.
+        ids: The grant rows the caller holds (:func:`build_pending_grant_lock`).
+            The UPDATE touches no other row, so it never waits on one (#2602);
+            the default, none, matches nothing.
 
     Returns:
         A SQLAlchemy ``Update`` statement.
@@ -102,15 +158,9 @@ def build_pending_grant_update(
     return (
         update(ReferralGrant)
         .where(
-            user_col == user_id,
-            _uncredited(workspace_col),
-            # NULL-safe inequality, and it has to be. ``!=`` evaluates to NULL
-            # (not TRUE) for exactly the NULL rows this UPDATE exists to fix, so
-            # it would silently match nothing. ``is_not`` emits SQL
-            # ``IS NOT <uuid>``, which PostgreSQL accepts only for
-            # NULL / TRUE / FALSE / UNKNOWN — a syntax error against a UUID.
-            workspace_col.is_distinct_from(workspace_id),
+            _pending_on_side(user_col, workspace_col, user_id, workspace_id),
             ReferralGrant.revoked_at.is_(None),
+            ReferralGrant.id.in_(ids),
         )
         .values({workspace_col.key: workspace_id})
     )
@@ -511,8 +561,11 @@ class ReferralService:
 
         The caller holds no row lock (in particular no ``users`` row). When a
         grant is pending this takes the workspace row ``NOWAIT``, then the
-        grant rows it re-homes — the global order's workspace rows before
-        child rows — and never waits on the workspace row (#2443, #2563).
+        grant rows it re-homes ``SKIP LOCKED`` — the global order's workspace
+        rows before child rows — so it holds the workspace row and its grant
+        rows and waits on nothing after (#2443, #2563, #2602): it is never in a
+        lock cycle. A grant row another transaction holds stays pending for
+        the next apply (the sweep, or the next summary read).
 
         Args:
             user_id: The user whose grants should be re-resolved.
@@ -543,19 +596,28 @@ class ReferralService:
             if not await self._owns_live_workspace(user_id, workspace_id):
                 await savepoint.rollback()
                 return 0
+            # Then the grant rows, in one id-ordered ``SKIP LOCKED`` select: a
+            # row another transaction holds (an account erasure's ``SET NULL``
+            # cascade, until its commit) is skipped and stays pending, not
+            # waited on (#2602). The UPDATEs touch only the rows locked here.
+            locked = list(await self.db.scalars(build_pending_grant_lock(user_id, workspace_id)))
             updated = 0
-            for user_col, workspace_col in _GRANT_SIDES:
-                result = await self.db.execute(
-                    build_pending_grant_update(user_col, workspace_col, user_id, workspace_id)
-                )
-                # ``AsyncSession.execute`` is typed as returning ``Result``, which
-                # has no ``rowcount``; a DML statement always yields a
-                # ``CursorResult`` at runtime. Narrow explicitly rather than
-                # suppressing the diagnostic.
-                updated += cast(CursorResult[Any], result).rowcount or 0
+            if locked:
+                for user_col, workspace_col in _GRANT_SIDES:
+                    result = await self.db.execute(
+                        build_pending_grant_update(
+                            user_col, workspace_col, user_id, workspace_id, ids=locked
+                        )
+                    )
+                    # ``AsyncSession.execute`` is typed as returning ``Result``,
+                    # which has no ``rowcount``; a DML statement always yields
+                    # a ``CursorResult`` at runtime. Narrow explicitly rather
+                    # than suppressing the diagnostic.
+                    updated += cast(CursorResult[Any], result).rowcount or 0
             if not updated:
-                # Another transaction applied them since the check: let go of
-                # the workspace row rather than hold it for the caller.
+                # Another transaction applied them since the check, or holds
+                # every one of them: let go of the workspace row rather than
+                # hold it for the caller.
                 await savepoint.rollback()
                 return 0
             await self._recompute_workspace_bonus(workspace_id)
