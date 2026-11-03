@@ -1930,6 +1930,106 @@ class TestRecallConfidenceSemantic:
         assert c.level == "moderate"
 
 
+@pytest.mark.asyncio
+class TestRecallConfidencePool:
+    """#2479: ``confidence`` describes the hits the reply could carry. A hit
+    that hydrates to nothing (row gone, or the #214 / #887 / #496 filters keep
+    it out) or that the #1299 binding hides must not count, or a query reports
+    ``high`` with that hit missing from the reply."""
+
+    STRONG = 0.95
+    WEAK = (0.55, 0.54, 0.53, 0.52)
+
+    def _pool(self):
+        """One strong hit over four weak ones: ``high`` while the strong one counts."""
+        rows = [SimpleNamespace(id=uuid4()) for _ in range(1 + len(self.WEAK))]
+        cosines = (self.STRONG, *self.WEAK)
+        search_results = [
+            {
+                "id": str(row.id),
+                "score": 1.0 - i * 0.1,
+                "hybrid_score": 1.0 - i * 0.1,
+                "semantic_score_raw": cos,
+            }
+            for i, (row, cos) in enumerate(zip(rows, cosines, strict=True))
+        ]
+        memories = {str(row.id): row for row in rows}
+        return rows, search_results, memories
+
+    async def _recall(self, search_results, hydrated):
+        """Drive the real recall() with every lane but hydration's output, the
+        binding row filter and the page builder stubbed."""
+        service = MemoryService(db=AsyncMock())
+        ctx, ws = uuid4(), uuid4()
+        request = RecallRequest(query="q", k=5)
+        plan = SimpleNamespace(
+            request=request,
+            effective_workspace_id=ws,
+            is_shared_context_read=False,
+            neural_enabled=False,
+            search_config=None,
+            search_context_id=str(ctx),
+        )
+        service._recall_check_agent_bindings = AsyncMock()
+        service._recall_prepare = AsyncMock(return_value=plan)
+        service._recall_resolve_cluster_filter = AsyncMock(return_value=None)
+        service.search_service = MagicMock()
+        service.search_service.hybrid_search = AsyncMock(return_value=search_results)
+        service._recall_hydrate_memories = AsyncMock(return_value=hydrated)
+        service._apply_supersede_shadowing = AsyncMock(return_value=({}, {}))
+        service._apply_supersede_fold = AsyncMock(return_value={})
+        service._maybe_reinforce_rerank = AsyncMock()
+        service._maybe_graph_boost = AsyncMock()
+        service._recall_build_responses = AsyncMock(return_value=[])
+        service._recall_record_access = AsyncMock()
+        with patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()):
+            return await service.recall(
+                request,
+                "u",
+                current_context_id=ctx,
+                current_workspace_id=ws,
+                capacity_gate=False,
+            )
+
+    async def test_the_pool_reads_high_while_every_hit_hydrates(self):
+        _rows, search_results, memories = self._pool()
+        response = await self._recall(search_results, memories)
+        assert response.confidence.level == "high"
+        assert response.confidence.result_count == 5
+
+    async def test_a_hit_that_does_not_hydrate_is_left_out(self):
+        rows, search_results, memories = self._pool()
+        del memories[str(rows[0].id)]  # the strong hit's row is gone
+
+        response = await self._recall(search_results, memories)
+
+        assert response.confidence.level != "high"
+        assert response.confidence.top_score == self.WEAK[0]
+        assert response.confidence.result_count == len(memories) == 4
+
+    async def test_a_hit_the_binding_hides_is_left_out(self):
+        rows, search_results, memories = self._pool()
+        strong = rows[0]
+
+        async def deny_strong(_db, candidates, *, operation, user_id):
+            kept = [m for m in candidates if m.id != strong.id]
+            return kept, len(candidates) - len(kept)
+
+        with patch("services.agent_binding_service.filter_memory_rows_by_binding", new=deny_strong):
+            response = await self._recall(search_results, memories)
+
+        assert response.confidence.level != "high"
+        assert response.confidence.top_score == self.WEAK[0]
+        assert response.confidence.result_count == 4
+
+    async def test_no_hit_hydrating_reads_none(self):
+        _rows, search_results, _memories = self._pool()
+        response = await self._recall(search_results, {})
+        assert response.confidence.level == "none"
+        assert response.confidence.result_count == 0
+        assert response.confidence.top_score is None
+
+
 class TestReinforceFactor:
     """Issue #1048: bounded, importance-weighted reinforce factor — the 2-population
     eval guard (adopted improves; rare-but-correct does not regress; popularity is
