@@ -515,6 +515,28 @@ async def test_a_refused_context_gate_fails_every_id_without_trying_one():
     assert mocks.log.await_args.args[4] == 403
 
 
+@pytest.mark.asyncio
+async def test_a_context_gate_that_outlasts_the_budget_leaves_every_id_not_attempted():
+    """No id was tried, so none can have been deleted: ``not_attempted``
+    (resend), not ``timeout`` (verify first, the delete may have landed)."""
+    a, b = uuid4(), uuid4()
+    never = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        await never.wait()
+
+    service = _forgetter({a: 1, b: 1})
+    service.forget_context_gate = AsyncMock(side_effect=stall)
+    with _budget(0.1):
+        body, service, mocks = await _call({"memory_ids": [str(a), str(b)]}, service)
+    assert body["error"] == "batch_failed"
+    assert [r["error"] for r in body["results"]] == ["not_attempted"] * 2
+    assert all("checking the context" in r["message"] for r in body["results"])
+    assert [r["memory_id"] for r in body["results"]] == [str(a), str(b)]
+    service.forget.assert_not_awaited()
+    assert mocks.log.await_args.args[4] == 500
+
+
 # ----------------------------------- #2480: the single form's point delete
 
 

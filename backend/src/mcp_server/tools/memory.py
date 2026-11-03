@@ -1657,6 +1657,10 @@ _FORGET_NOT_ATTEMPTED_SESSION = (
 _FORGET_NOT_ATTEMPTED_BUDGET = (
     "Not attempted: the call's time budget was spent on earlier ids. Retry it in a new call."
 )
+# #2480: the context check before the first id did not finish in the budget.
+_FORGET_NOT_ATTEMPTED_GATE = (
+    "Not attempted: the call's time budget was spent checking the context. Retry it in a new call."
+)
 # The least of the budget an id must still have to be tried: an id started
 # with a sliver left would only be cancelled mid-forget — rolled back and
 # reported ``error`` / ``timeout`` for the caller to verify. A tenth of the
@@ -1800,12 +1804,14 @@ async def _handle_forget_many(
     inside the budget, before the first id, and each id's forget reuses it:
     its checks are the caller's on the context, the same for every id. The
     per-memory checks still run per id. A gate that raises fails every id
-    with that error, none of them tried — what each would have answered.
+    with that error, none of them tried — what each would have answered. A
+    gate that outlasts the budget leaves every id ``not_attempted``: nothing
+    was tried, so nothing can have been deleted.
     """
     from types import SimpleNamespace
 
     from db.base import get_db
-    from mcp_server.tools._errors import describe_tool_exception
+    from mcp_server.tools._errors import CAUSE_TIMEOUT, describe_tool_exception
     from models.schemas import ForgetRequest
     from services.memory_service import MemoryService
 
@@ -1855,7 +1861,19 @@ async def _handle_forget_many(
                 )
             except Exception as exc:
                 failure = describe_tool_exception("forget", exc)
-                results = [_forget_error_row(memory_uuid, failure) for memory_uuid in memory_ids]
+                if failure.error == CAUSE_TIMEOUT:
+                    # The budget ran out before the first id: none was tried,
+                    # so none can have been deleted — not_attempted, as when
+                    # the budget is spent on earlier ids (#2191), not a timeout
+                    # whose delete may have landed.
+                    results = [
+                        _forget_not_attempted(memory_uuid, _FORGET_NOT_ATTEMPTED_GATE)
+                        for memory_uuid in memory_ids
+                    ]
+                else:
+                    results = [
+                        _forget_error_row(memory_uuid, failure) for memory_uuid in memory_ids
+                    ]
                 try:
                     await db.rollback()
                 except Exception:
