@@ -449,6 +449,12 @@ describe("UserDeleteDialog (#2420)", () => {
     // Its context goes with it: no row, no selection.
     expect(screen.queryByTestId(IDS.contextRow("ctx-solo"))).toBeNull();
     expect(submit.disabled).toBe(false);
+
+    // Un-ticked, the workspace is kept again and its context row is back.
+    fireEvent.click(screen.getByTestId(IDS.deleteWorkspace("ws-solo")));
+    expect(tick.getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId(IDS.contextRow("ctx-solo"))).toBeTruthy();
+    expect(submit.disabled).toBe(true);
   });
 
   it("sends the ticked workspace in delete_workspaces, not as a transfer", async () => {
