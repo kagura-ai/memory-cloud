@@ -115,17 +115,19 @@ def require_api_key_secrets() -> str:
     previous keys from the same place as the current one: a key set in the
     environment uses the environment's list (unset meaning none) and is never
     mixed with a container's; a key read from the running API container takes
-    that container's list too, exported for the settings built next.
+    that container's list too, exported for the settings built next. The
+    container's list replaces one the shell exported, and an empty string is
+    exported when the container has none (or its colors disagree), so neither
+    the shell nor a dotenv file can pair its own list with the container's key.
 
     Returns:
         The current ``API_KEY_SECRET``.
     """
     from_environment = bool(os.getenv("API_KEY_SECRET"))
     secret = require_api_key_secret()
-    if not from_environment and "API_KEY_SECRET_PREVIOUS" not in os.environ:
+    if not from_environment:
         previous = get_env_from_api_container("API_KEY_SECRET_PREVIOUS")
-        if previous:
-            os.environ["API_KEY_SECRET_PREVIOUS"] = previous
+        os.environ["API_KEY_SECRET_PREVIOUS"] = previous or ""
     return secret
 
 

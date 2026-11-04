@@ -423,9 +423,21 @@ class TestRequireApiKeySecrets:
         lookup.assert_not_called()
         assert "API_KEY_SECRET_PREVIOUS" not in os.environ
 
-    def test_the_container_supplies_both(self, monkeypatch) -> None:
+    # The shell's own API_KEY_SECRET_PREVIOUS: unset, exported empty, or a list.
+    _SHELL_LISTS = pytest.mark.parametrize(
+        "shell_previous", [None, "", "shell-old"], ids=["unset", "empty", "shell-list"]
+    )
+
+    @staticmethod
+    def _export(monkeypatch, shell_previous: str | None) -> None:
+        if shell_previous is not None:
+            monkeypatch.setenv("API_KEY_SECRET_PREVIOUS", shell_previous)
+
+    @_SHELL_LISTS
+    def test_the_container_supplies_both(self, monkeypatch, shell_previous) -> None:
         import os
 
+        self._export(monkeypatch, shell_previous)
         values = {"API_KEY_SECRET": "container-secret", "API_KEY_SECRET_PREVIOUS": "container-old"}
         monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
 
@@ -434,15 +446,21 @@ class TestRequireApiKeySecrets:
         assert os.environ["API_KEY_SECRET"] == "container-secret"
         assert os.environ["API_KEY_SECRET_PREVIOUS"] == "container-old"
 
-    def test_a_container_without_previous_keys_leaves_the_list_unset(self, monkeypatch) -> None:
+    @_SHELL_LISTS
+    def test_a_container_without_previous_keys_exports_an_empty_list(
+        self, monkeypatch, shell_previous
+    ) -> None:
+        # Empty, not unset: neither the shell's list nor a dotenv file's may
+        # pair with the container's key.
         import os
 
+        self._export(monkeypatch, shell_previous)
         values = {"API_KEY_SECRET": "container-secret"}
         monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
 
         assert _env_guard.require_api_key_secrets() == "container-secret"
 
-        assert "API_KEY_SECRET_PREVIOUS" not in os.environ
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == ""
 
     def test_no_key_anywhere_exits_1(self, monkeypatch, capsys) -> None:
         monkeypatch.setattr(_env_guard, "get_env_from_api_container", lambda key: None)
