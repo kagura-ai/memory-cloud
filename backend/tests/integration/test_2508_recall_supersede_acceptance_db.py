@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+import structlog
 from sqlalchemy import event, text, update
 
 import services.supersede_acceptance as supersede_acceptance
@@ -166,6 +167,70 @@ async def test_a_cross_context_page_evaluates_each_context(db_session):
 
 
 @pytest.mark.asyncio
+async def test_a_private_and_a_shared_context_on_one_page_keep_their_own_ownership(
+    db_session,
+):
+    """#2313 per context: a linked account's pair is the caller's own in the
+    caller's private context and not in a shared one, on the same page."""
+    from tests.integration.test_identity_link_writes_db import _shared_context
+
+    admin, oauth, ws, private, _ = await _seed(db_session, private=True, link=True)
+    shared = await _shared_context(db_session, ws, admin)
+    await db_session.commit()
+    linked_private, _ = await _pair(db_session, private, oauth, oauth)
+    linked_shared, _ = await _pair(db_session, shared, oauth, oauth)
+    own_shared, _ = await _pair(db_session, shared, admin, admin)
+
+    with _statements(db_session) as executed:
+        result = await _recall(
+            db_session,
+            admin,
+            ws,
+            private,
+            [linked_private, linked_shared, own_shared],
+            context_ids=[private.id, shared.id],
+        )
+
+    assert _acceptances(result) == {
+        linked_private: {"allowed": True},
+        linked_shared: {"allowed": False, "reason": "not_owner"},
+        own_shared: {"allowed": True},
+    }
+    assert len(_ownership_reads(executed)) == 2
+
+
+@pytest.mark.asyncio
+async def test_each_pair_on_a_page_meets_only_its_own_authors_edge(db_session):
+    """The one edge lookup holds every pair to its own carrier's author and
+    its own (carrier, target): an edge another account keeps on the pair, or
+    the author keeps from the carrier to another row's target, refuses
+    nothing. Each row matches the single read (``reference``)."""
+    admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
+    other = {"edge_type": "related_to", "weight": 1.0, "confidence": 1.0}
+    by_admin, by_admin_target = await _pair(db_session, ctx, admin, admin)
+    by_oauth, by_oauth_target = await _pair(db_session, ctx, oauth, oauth)
+    by_oauth_clean, by_oauth_clean_target = await _pair(db_session, ctx, oauth, oauth)
+    await _declare(db_session, oauth, ws, ctx, by_admin, by_admin_target, **other)
+    await _declare(db_session, admin, ws, ctx, by_admin, by_oauth_target, **other)
+    await _declare(db_session, oauth, ws, ctx, by_oauth, by_oauth_target, **other)
+    await _declare(db_session, admin, ws, ctx, by_oauth_clean, by_oauth_clean_target, **other)
+
+    result = await _recall(db_session, admin, ws, ctx, [by_admin, by_oauth, by_oauth_clean])
+
+    expected = {
+        by_admin: {"allowed": True},
+        by_oauth: {"allowed": False, "reason": "edge_exists"},
+        by_oauth_clean: {"allowed": True},
+    }
+    assert _acceptances(result) == expected
+    service = MemoryService(db_session)
+    for carrier, acceptance in expected.items():
+        referenced = (await service.reference(carrier, admin.user_id)).supersede_candidate
+        assert referenced is not None and referenced.acceptance is not None
+        assert referenced.acceptance.model_dump(exclude_none=True) == acceptance
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("role", "guarded"),
     [(None, {"allowed": False, "reason": "not_writable"}), (ContextRole.EDITOR, {"allowed": True})],
@@ -203,7 +268,8 @@ async def test_guardrail_rows_are_held_to_the_author_gate_once_per_page(db_sessi
 @pytest.mark.asyncio
 async def test_a_failing_evaluation_keeps_the_page_and_its_suggestions(db_session):
     """Fail-open: the edge lookup raises, the rows keep their suggestions
-    without ``acceptance``, the recall returns and the session stays usable."""
+    without ``acceptance``, one WARNING names them, the recall returns and the
+    session stays usable."""
     a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
     carrier, target = await _pair(db_session, ctx, a, a)
     other, _ = await _pair(db_session, ctx, a, a)
@@ -211,9 +277,15 @@ async def test_a_failing_evaluation_keeps_the_page_and_its_suggestions(db_sessio
     async def failing_lookup(self, keys):
         await self.db.execute(text("SELECT 1 / 0"))
 
-    with patch("repositories.neural_edge.NeuralEdgeRepository.list_pairs_edges", failing_lookup):
+    with (
+        patch("repositories.neural_edge.NeuralEdgeRepository.list_pairs_edges", failing_lookup),
+        structlog.testing.capture_logs() as logs,
+    ):
         result = await _recall(db_session, a, ws, ctx, [carrier, other])
 
+    failed = [e for e in logs if e["event"] == "supersede_acceptance_failed"]
+    assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+    assert set(failed[0]["memory_ids"]) == {str(carrier), str(other)}
     rows = {r.memory_id: r for r in result.results}
     assert rows[carrier].supersede_candidate is not None
     assert rows[carrier].supersede_candidate.memory_id == target
