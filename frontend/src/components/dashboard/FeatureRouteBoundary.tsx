@@ -46,7 +46,8 @@ function RestrictedRoute({ item, system, children }: {
   const required = item?.requiredWorkspaceRole;
   const flags = item?.requiredFeature ? [item.requiredFeature].flat() : [];
   const systemDenied = system && !hasRole(user, Role.ADMIN);
-  const missingRole = systemDenied ? "systemAdmin" : required && !hasWorkspaceRole(ws?.current_user_role, required) ? required : null;
+  if (systemDenied) return <Explanation title={t("accessDenied")}><RoleGuidance required="systemAdmin" /></Explanation>;
+  const missingRole = required && !hasWorkspaceRole(ws?.current_user_role, required) ? required : null;
   if ((!system && (loading || !ws)) || (flags.length > 0 && !info)) {
     return <SpinnerLoading message={common("loading")} />;
   }

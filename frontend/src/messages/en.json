@@ -1,5 +1,6 @@
 {
   "featureAccess": {
+    "accessDenied": "Access denied",
     "about": {
       "dashboard": "Review activity and memory statistics for this workspace.",
       "resources": "Inspect data ingested from external systems.",
@@ -1098,6 +1099,10 @@
     "failedToUpdateProfile": "Failed to update profile"
   },
   "workspace": {
+    "currentWorkspaceCaption": "Current workspace",
+    "ownedBadge": "Owned",
+    "sharedBadge": "Shared",
+    "loadingWorkspaces": "Loading workspaces…",
     "title": "Workspace",
     "settings": "Workspace Settings",
     "workspaceSettings": "Workspace Settings",

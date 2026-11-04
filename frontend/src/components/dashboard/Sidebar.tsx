@@ -31,6 +31,7 @@ import {
 } from "@/hooks/useWorkspaceObjectPresence";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
+  hasRole,
   hasWorkspaceRole,
   WorkspaceRole,
 } from "@/lib/auth/rbac";
@@ -368,6 +369,7 @@ export function Sidebar() {
         {navigationGroups.map((group) => {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
+            if (item.requiredRole && !hasRole(user, item.requiredRole)) return false;
             // Issue #1145: gate behind backend feature flag(s). Default-off:
             // hidden while features load (null) and unless EVERY listed flag
             // is true (#1571: the workspace cost entry needs byok AND
@@ -389,7 +391,7 @@ export function Sidebar() {
             ) {
               return false;
             }
-            // Plan and role govern the destination, not the presence of a link.
+            // Workspace roles and plan limits are explained at the destination.
             return true;
           });
 
